@@ -64,6 +64,7 @@ from app.settings import SettingsRepository
 from app.settings.models import StationSettings
 from app.safety.rigol_current import validate_rigol_frequency_sweep, validate_rigol_waveform
 from app.storage import Hdf5RunReader, RunDetail, StoredPoint
+from app.spectrum import apply_reference_operation, average_dbm_traces
 from app.ui.settings_page import SettingsPage
 from app.ui.run_worker import RunController
 from app.ui.workers import DeviceController
@@ -96,7 +97,7 @@ class LimitField(QWidget):
         self.maximum = QLabel()
         for label in (self.minimum, self.maximum):
             label.setObjectName("limitBadge")
-            label.setMinimumWidth(118)
+            label.setMinimumWidth(88)
             label.setAlignment(Qt.AlignmentFlag.AlignCenter)
         row.addWidget(self.minimum)
         row.addWidget(self.maximum)
@@ -1329,8 +1330,8 @@ class KeithleyPage(QWidget):
         for column, channel_name in enumerate(("A", "B")):
             channel_grid.addWidget(self._build_channel_card(channel_name), 0, column)
         layout.addLayout(channel_grid)
-        control_tabs = QTabWidget()
-        control_tabs.setObjectName("keithleyControlTabs")
+        self.control_tabs = QTabWidget()
+        self.control_tabs.setObjectName("keithleyControlTabs")
         source_tab = QWidget()
         source_layout = QVBoxLayout(source_tab)
         source_title = QLabel("Source and measurement configuration")
@@ -1357,33 +1358,37 @@ class KeithleyPage(QWidget):
         self.measure_current_autorange = QCheckBox("Measure I autorange")
         self.measure_current_autorange.setChecked(True)
         self.measure_current_range = _line("AUTO")
+        self.level_field = self._keithley_bounded("level", self.level)
+        self.compliance_field = self._keithley_bounded("compliance", self.compliance)
+        self.source_range_field = self._keithley_bounded("source_range", self.source_range)
         for label, widget in (
             ("Channel", self.channel),
             ("Source mode", self.mode),
-            ("Level", self._keithley_bounded("level", self.level)),
-            ("Compliance", self._keithley_bounded("compliance", self.compliance)),
+            ("Source current", self.level_field),
+            ("Voltage compliance (safety limit)", self.compliance_field),
             ("NPLC", self._keithley_bounded("nplc", self.nplc)),
             ("Settling time", self._keithley_bounded("settle", self.settle)),
             ("Sense mode", self.sense_mode),
             ("", self.source_autorange),
-            ("Source range (AUTO or value with unit)", self._keithley_bounded("source_range", self.source_range)),
+            ("Current source range (AUTO or value with unit)", self.source_range_field),
             ("", self.measure_voltage_autorange),
             ("Measure V range (AUTO or value with unit)", self._keithley_bounded("measure_voltage_range", self.measure_voltage_range)),
             ("", self.measure_current_autorange),
             ("Measure I range (AUTO or value with unit)", self._keithley_bounded("measure_current_range", self.measure_current_range)),
         ):
             form.addRow(label, widget)
+        self.keithley_form = form
         source_layout.addLayout(form)
         buttons = QHBoxLayout()
-        configure = QPushButton("Configure source while OUTPUT is OFF")
-        configure.setObjectName("primaryButton")
+        self.configure_button = QPushButton("Configure current source while OUTPUT is OFF")
+        self.configure_button.setObjectName("primaryButton")
         measure = QPushButton("Measure selected channel")
         arm = QPushButton("ARM (30 s)")
         on = QPushButton("OUTPUT ON")
         on.setObjectName("outputOnButton")
         off = QPushButton("Ramp to zero + OFF")
         off.setObjectName("outputOffButton")
-        for button in (configure, measure, arm, on, off):
+        for button in (self.configure_button, measure, arm, on, off):
             buttons.addWidget(button)
         source_layout.addLayout(buttons)
         live_bar = QHBoxLayout()
@@ -1401,9 +1406,9 @@ class KeithleyPage(QWidget):
         self.readout.setObjectName("readout")
         source_layout.addWidget(self.readout)
         source_layout.addStretch(1)
-        control_tabs.addTab(self._scroll_widget(source_tab), "Control & ranges")
-        layout.addWidget(control_tabs, 1)
-        configure.clicked.connect(self.configure)
+        self.control_tabs.addTab(self._scroll_widget(source_tab), "Control & ranges")
+        layout.addWidget(self.control_tabs, 1)
+        self.configure_button.clicked.connect(self.configure)
         measure.clicked.connect(self.request_measurement)
         arm.clicked.connect(self.arm_output)
         on.clicked.connect(self.request_output)
@@ -1412,10 +1417,25 @@ class KeithleyPage(QWidget):
         controller.result.connect(self._result)
         controller.error.connect(self._error)
         controller.state_changed.connect(self._device_state_changed)
-        self.channel.currentTextChanged.connect(self._refresh_keithley_limits)
-        self.mode.currentTextChanged.connect(self._refresh_keithley_limits)
+        self._active_channel = self.channel.currentText()
+        self._active_mode = self.mode.currentText()
+        self._source_value_cache: dict[tuple[str, str], tuple[str, str, str]] = {
+            (self._active_channel, self._active_mode): (
+                self.level.text(), self.compliance.text(), self.source_range.text()
+            )
+        }
+        self.channel.currentTextChanged.connect(self._channel_changed)
+        self.mode.currentTextChanged.connect(self._mode_changed)
         self.channel.currentTextChanged.connect(self._selected_channel_changed)
         self._selected_channel_changed(self.channel.currentText())
+        self._update_source_mode_ui()
+        self._install_keithley_help(
+            configure=self.configure_button,
+            measure=measure,
+            arm=arm,
+            output_on=on,
+            output_off=off,
+        )
 
     @staticmethod
     def _scroll_widget(content: QWidget) -> QScrollArea:
@@ -1481,9 +1501,70 @@ class KeithleyPage(QWidget):
             "led": led,
             "output": output,
             "compliance": compliance,
+            "select": select,
+            "measure": measure,
             **values,
         }
         return card
+
+    @staticmethod
+    def _set_help(widget: QWidget, title: str, text: str) -> None:
+        help_text = f"<b>{title}</b><br>{text}"
+        widget.setToolTip(help_text)
+        widget.setToolTipDuration(25_000)
+        widget.setWhatsThis(help_text)
+        widget.setAccessibleDescription(f"{title}. {text}")
+
+    def _install_keithley_help(
+        self,
+        *,
+        configure: QPushButton,
+        measure: QPushButton,
+        arm: QPushButton,
+        output_on: QPushButton,
+        output_off: QPushButton,
+    ) -> None:
+        help_items = {
+            self.channel: ("Channel", "Selects SMU channel A or B. Both channels are electrically independent and have separate source values, measurements and safety limits."),
+            self.mode: ("Source mode", "Current forces a programmed current and uses Voltage compliance as its protection. Voltage forces a programmed voltage and uses Current compliance. Measure only does not program or enable a source."),
+            self.level: ("Source value", "The quantity Keithley actively tries to force. In Current mode this is current; in Voltage mode this is voltage. MIN/MAX are the laboratory-approved range for this programmed value."),
+            self.compliance: ("Compliance safety limit", "The maximum allowed opposite quantity. Current mode limits voltage; Voltage mode limits current. Reaching compliance means the requested source value cannot be maintained safely."),
+            self.nplc: ("NPLC", "Number of power-line cycles integrated for one measurement. Higher values reduce noise but make readings slower. For 50 Hz mains, NPLC 1 integrates for approximately 20 ms."),
+            self.settle: ("Settling time", "Delay allowed after changing a source point before a measurement is taken. Longer settling can improve stability but increases sweep duration."),
+            self.sense_mode: ("Sense mode", "2-wire measures through the source leads and includes lead/contact resistance. 4-wire uses separate sense leads to remove most lead-voltage error; it requires correct Kelvin wiring."),
+            self.source_autorange: ("Source autorange", "Lets Keithley choose the source range automatically. Disable only when a qualified measurement procedure requires a fixed range."),
+            self.source_range: ("Manual source range", "Maximum magnitude supported by the selected fixed source range. AUTO uses autorange. A manual value does not set the output; it selects instrument resolution/headroom."),
+            self.measure_voltage_autorange: ("Voltage measurement autorange", "Automatically selects the voltage measurement range. Usually the safest default when the expected voltage is not precisely known."),
+            self.measure_voltage_range: ("Voltage measurement range", "Fixed voltage measurement range used only when voltage autorange is disabled. It is not Voltage compliance and does not energize the output."),
+            self.measure_current_autorange: ("Current measurement autorange", "Automatically selects the current measurement range. It changes measurement range, not the sourced current or compliance."),
+            self.measure_current_range: ("Current measurement range", "Fixed current measurement range used only when current autorange is disabled. It is not Current compliance."),
+            configure: ("Configure safely", "Validates source, compliance, ranges, NPLC and sensing, then programs the selected channel while OUTPUT is forced OFF."),
+            measure: ("Measure selected channel", "Reads voltage and current from the selected SMU channel. Power and resistance shown in the cards are calculated from those I/V readings."),
+            arm: ("ARM", "Creates a one-use 30-second permission window for OUTPUT ON. ARM itself does not energize the terminals."),
+            output_on: ("OUTPUT ON", "Energizes the selected channel using its validated source and compliance settings. Requires prior configuration, approved safety profile, ARM and confirmation."),
+            output_off: ("Ramp to zero and OFF", "Moves the programmed source toward zero using profile-limited steps, then disables the selected output. This is safer than an abrupt change for sensitive DUTs."),
+            self.live_measurements: ("Live readout", "Alternately requests I/V readings from enabled channels every second. It never enables an output, but it does generate continuous instrument traffic."),
+            self.device_led: ("Keithley connection state", "Grey means disconnected, green verified/output-safe, amber energized and red indicates compliance, fault or unknown state."),
+            self.device_state: ("Device state", "Connection and safety state reported by the Keithley adapter. This is separate from the individual A/B output indicators."),
+        }
+        for widget, (title, description) in help_items.items():
+            self._set_help(widget, title, description)
+
+        for channel, card in self.channel_cards.items():
+            self._set_help(card["card"], f"Channel {channel} overview", "Live overview of this channel. Voltage and current are direct readings; resistance and power are derived from the latest I/V pair.")
+            self._set_help(card["led"], f"Channel {channel} output LED", "Green is confirmed OUTPUT OFF, amber is OUTPUT ON, and grey means the output state is not known or the device is disconnected.")
+            self._set_help(card["output"], f"Channel {channel} output state", "Shows the last state confirmed by a successful connect, configure, enable, ramp-off or compliance-stop operation.")
+            self._set_help(card["voltage"], "Measured voltage", "Direct voltage reading returned by Keithley for this channel.")
+            self._set_help(card["current"], "Measured current", "Direct current reading returned by Keithley for this channel.")
+            self._set_help(card["resistance"], "Derived resistance", "Calculated as |V/I| from the latest reading. It is not a dedicated resistance measurement and becomes infinity when current is effectively zero.")
+            self._set_help(card["power"], "Derived power", "Calculated as V × I from the latest reading. Sign describes source/load direction; magnitude describes electrical power.")
+            self._set_help(card["compliance"], "Compliance indicator", "ACTIVE means the measured opposite quantity reached the programmed compliance threshold. The safety policy may immediately disable outputs.")
+            self._set_help(card["select"], f"Select channel {channel}", "Makes this channel active in the configuration form without changing its electrical output.")
+            self._set_help(card["measure"], f"Measure channel {channel}", "Requests one voltage/current reading for this channel without enabling its output.")
+        self.control_tabs.setTabToolTip(
+            0,
+            "Source mode, programmed source value, compliance protection, integration time, wiring and source/measurement ranges.",
+        )
 
     def _selected_channel_changed(self, selected: str) -> None:
         for channel, widgets in self.channel_cards.items():
@@ -1588,6 +1669,75 @@ class KeithleyPage(QWidget):
         next_index = (enabled.index(channel) + 1) % len(enabled)
         self._live_next_channel = enabled[next_index]
         self.request_measurement(channel)
+
+    def _remember_source_values(self) -> None:
+        self._source_value_cache[(self._active_channel, self._active_mode)] = (
+            self.level.text(),
+            self.compliance.text(),
+            self.source_range.text(),
+        )
+
+    def _default_source_values(self, channel: str, mode: str) -> tuple[str, str, str]:
+        channel_settings = self._station_settings.keithley.safety.channels[channel]
+        limits = channel_settings.lab_limits
+        defaults = channel_settings.defaults
+        if mode == "current":
+            return (
+                str(defaults.get("source_current", limits.source_current.min)),
+                str(defaults.get("voltage_compliance", limits.voltage_compliance.max)),
+                "AUTO",
+            )
+        if mode == "voltage":
+            return (
+                str(defaults.get("source_voltage", "0 V")),
+                str(defaults.get("current_compliance", limits.current_compliance.min)),
+                "AUTO",
+            )
+        return ("0 V", "0 A", "AUTO")
+
+    def _load_source_values(self) -> None:
+        values = self._source_value_cache.get(
+            (self._active_channel, self._active_mode),
+            self._default_source_values(self._active_channel, self._active_mode),
+        )
+        self.level.setText(values[0])
+        self.compliance.setText(values[1])
+        self.source_range.setText(values[2])
+        if self._active_mode != "measure_only":
+            self.level_field.validate_and_clamp()
+            self.compliance_field.validate_and_clamp()
+
+    def _channel_changed(self, channel: str) -> None:
+        self._remember_source_values()
+        self._active_channel = channel
+        self._refresh_keithley_limits()
+        self._load_source_values()
+        self._update_source_mode_ui()
+
+    def _mode_changed(self, mode: str) -> None:
+        self._remember_source_values()
+        self._active_mode = mode
+        self._refresh_keithley_limits()
+        self._load_source_values()
+        self._update_source_mode_ui()
+
+    def _update_source_mode_ui(self) -> None:
+        mode = self.mode.currentText()
+        source_visible = mode != "measure_only"
+        for widget in (self.level_field, self.compliance_field, self.source_autorange, self.source_range_field):
+            self.keithley_form.setRowVisible(widget, source_visible)
+        if mode == "current":
+            self.keithley_form.labelForField(self.level_field).setText("Source current")
+            self.keithley_form.labelForField(self.compliance_field).setText("Voltage compliance (safety limit)")
+            self.keithley_form.labelForField(self.source_range_field).setText("Current source range")
+            self.configure_button.setText("Configure current source while OUTPUT is OFF")
+        elif mode == "voltage":
+            self.keithley_form.labelForField(self.level_field).setText("Source voltage")
+            self.keithley_form.labelForField(self.compliance_field).setText("Current compliance (safety limit)")
+            self.keithley_form.labelForField(self.source_range_field).setText("Voltage source range")
+            self.configure_button.setText("Configure voltage source while OUTPUT is OFF")
+        else:
+            self.configure_button.setText("Configure measurement-only mode (OUTPUT OFF)")
 
     def _keithley_limit_values(self, key: str) -> tuple[object, object]:
         limits = self._station_settings.keithley.safety.channels[self.channel.currentText()].lab_limits
@@ -1745,6 +1895,11 @@ class AnritsuPage(QWidget):
         self._limit_fields: dict[str, LimitField] = {}
         self._single_sweep_configured = single_sweep_available
         self._fetch_pending = False
+        self._latest_trace: SpectrumTrace | None = None
+        self._averaged_trace: SpectrumTrace | None = None
+        self._reference_trace: SpectrumTrace | None = None
+        self._average_traces: list[tuple[float, ...]] = []
+        self._averaging_active = False
         self._timer = QTimer(self)
         self._timer.setInterval(500)
         self._timer.timeout.connect(self.fetch_live)
@@ -1752,7 +1907,23 @@ class AnritsuPage(QWidget):
         title = QLabel("Anritsu MS2830A — Spectrum / Live")
         title.setObjectName("pageTitle")
         layout.addWidget(title)
+        self.workspace_splitter = QSplitter(Qt.Orientation.Horizontal)
+        self.workspace_splitter.setObjectName("anritsuWorkspaceSplitter")
+        left_panel = QWidget()
+        left_panel.setObjectName("anritsuControlPanel")
+        left_layout = QVBoxLayout(left_panel)
+        left_layout.setContentsMargins(8, 8, 8, 8)
+        left_layout.setSpacing(10)
+        right_panel = QWidget()
+        right_layout = QVBoxLayout(right_panel)
+        right_layout.setContentsMargins(8, 8, 8, 8)
+        right_layout.setSpacing(6)
+        setup_title = QLabel("Acquisition setup")
+        setup_title.setObjectName("sectionTitle")
+        left_layout.addWidget(setup_title)
         form = QFormLayout()
+        form.setFieldGrowthPolicy(QFormLayout.FieldGrowthPolicy.AllNonFixedFieldsGrow)
+        form.setVerticalSpacing(7)
         self.start = _line("1 MHz")
         self.stop = _line("10 MHz")
         self.reference = _line("0 dBm")
@@ -1771,8 +1942,9 @@ class AnritsuPage(QWidget):
             ("Live refresh interval", self.refresh),
         ):
             form.addRow(label, widget)
-        layout.addLayout(form)
-        controls = QHBoxLayout()
+        left_layout.addLayout(form)
+        controls = QGridLayout()
+        controls.setSpacing(6)
         configure = QPushButton("Apply configuration")
         self.single = QPushButton("Single + Fetch")
         self.single.setEnabled(single_sweep_available)
@@ -1780,15 +1952,80 @@ class AnritsuPage(QWidget):
             self.single.setToolTip("Requires standard_scpi_opc qualification in Anritsu settings.")
         self.live = QPushButton("Start Live")
         abort = QPushButton("Abort")
-        controls.addWidget(configure)
-        controls.addWidget(self.single)
-        controls.addWidget(self.live)
-        controls.addWidget(abort)
-        layout.addLayout(controls)
+        configure.setObjectName("primaryButton")
+        abort.setObjectName("warningButton")
+        for button in (configure, self.single, self.live, abort):
+            button.setProperty("compact", True)
+        controls.addWidget(configure, 0, 0)
+        controls.addWidget(self.single, 0, 1)
+        controls.addWidget(self.live, 1, 0)
+        controls.addWidget(abort, 1, 1)
+        left_layout.addLayout(controls)
+        processing = QFrame()
+        processing.setObjectName("anritsuProcessingCard")
+        processing_layout = QGridLayout(processing)
+        processing_title = QLabel("Averaging and reference processing")
+        processing_title.setObjectName("sectionTitle")
+        processing_layout.setHorizontalSpacing(6)
+        processing_layout.setVerticalSpacing(7)
+        processing_layout.addWidget(processing_title, 0, 0, 1, 2)
+        self.average_count = QSpinBox()
+        self.average_count.setRange(1, 9999)
+        self.average_count.setValue(self._station_settings.anritsu.acquisition.application_average_count)
+        self.acquire_average = QPushButton("Acquire averaged spectrum")
+        self.cancel_average = QPushButton("Cancel averaging")
+        self.acquire_average.setProperty("compact", True)
+        self.cancel_average.setProperty("compact", True)
+        self.cancel_average.setEnabled(False)
+        self.average_progress = QProgressBar()
+        self.average_progress.setRange(0, 200)
+        self.average_progress.setValue(0)
+        processing_layout.addWidget(QLabel("Average count"), 1, 0)
+        processing_layout.addWidget(self.average_count, 1, 1)
+        processing_layout.addWidget(self.acquire_average, 2, 0)
+        processing_layout.addWidget(self.cancel_average, 2, 1)
+        processing_layout.addWidget(self.average_progress, 3, 0, 1, 2)
+        self.capture_reference = QPushButton("Capture current as reference")
+        self.clear_reference = QPushButton("Clear reference")
+        self.capture_reference.setProperty("compact", True)
+        self.clear_reference.setProperty("compact", True)
+        self.clear_reference.setEnabled(False)
+        self.reference_operation = QComboBox()
+        self.reference_operation.addItem("No processing", "none")
+        self.reference_operation.addItem("Signal − reference [dB]", "difference_db")
+        self.reference_operation.addItem("Signal ÷ reference [linear ratio]", "ratio_linear")
+        self.reference_operation.addItem("Signal + reference [linear power]", "add_power")
+        self.reference_operation.addItem("Signal − reference [linear power]", "subtract_power")
+        self.reference_operation.addItem("Signal × reference [linear mW²]", "multiply_linear")
+        processing_layout.addWidget(self.capture_reference, 4, 0)
+        processing_layout.addWidget(self.clear_reference, 4, 1)
+        processing_layout.addWidget(QLabel("Reference operation"), 5, 0)
+        processing_layout.addWidget(self.reference_operation, 5, 1)
+        self.show_raw = QCheckBox("Raw")
+        self.show_raw.setChecked(True)
+        self.show_average = QCheckBox("Averaged")
+        self.show_reference = QCheckBox("Reference")
+        self.show_processed = QCheckBox("Processed")
+        trace_toggles = QHBoxLayout()
+        trace_toggles.setSpacing(10)
+        for checkbox in (self.show_raw, self.show_average, self.show_reference, self.show_processed):
+            trace_toggles.addWidget(checkbox)
+        trace_toggles.addStretch(1)
+        processing_layout.addLayout(trace_toggles, 6, 0, 1, 2)
+        left_layout.addWidget(processing)
+        left_layout.addStretch(1)
         self.series = QLineSeries()
+        self.series.setName("Raw")
+        self.average_series = QLineSeries()
+        self.average_series.setName("Averaged")
+        self.reference_series = QLineSeries()
+        self.reference_series.setName("Reference")
+        self.processed_series = QLineSeries()
+        self.processed_series.setName("Processed")
         self.chart = QChart()
-        self.chart.addSeries(self.series)
-        self.chart.legend().hide()
+        for chart_series in (self.series, self.average_series, self.reference_series, self.processed_series):
+            self.chart.addSeries(chart_series)
+        self.chart.legend().setVisible(True)
         self.chart.setTitle("Current spectrum")
         self.axis_x = QValueAxis()
         self.axis_x.setTitleText("Frequency [MHz]")
@@ -1796,21 +2033,58 @@ class AnritsuPage(QWidget):
         self.axis_y.setTitleText("Power [dBm]")
         self.chart.addAxis(self.axis_x, Qt.AlignmentFlag.AlignBottom)
         self.chart.addAxis(self.axis_y, Qt.AlignmentFlag.AlignLeft)
-        self.series.attachAxis(self.axis_x)
-        self.series.attachAxis(self.axis_y)
+        for chart_series in (self.series, self.average_series, self.reference_series, self.processed_series):
+            chart_series.attachAxis(self.axis_x)
+            chart_series.attachAxis(self.axis_y)
         view = QChartView(self.chart)
+        self.chart_view = view
         view.setRenderHint(QPainter.RenderHint.Antialiasing)
         view.setMinimumHeight(300)
-        layout.addWidget(view, 1)
+        right_layout.addWidget(view, 1)
         self.info = QLabel("Live stopped. Each frame is a complete trace, not a push stream.")
         self.info.setObjectName("muted")
-        layout.addWidget(self.info)
+        right_layout.addWidget(self.info)
+        left_scroll = QScrollArea()
+        left_scroll.setObjectName("anritsuControlScroll")
+        left_scroll.setWidgetResizable(True)
+        left_scroll.setFrameShape(QFrame.Shape.NoFrame)
+        left_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        left_scroll.setWidget(left_panel)
+        left_scroll.setMinimumWidth(620)
+        self.workspace_splitter.addWidget(left_scroll)
+        self.workspace_splitter.addWidget(right_panel)
+        self.workspace_splitter.setStretchFactor(0, 0)
+        self.workspace_splitter.setStretchFactor(1, 1)
+        self.workspace_splitter.setSizes([680, 1100])
+        layout.addWidget(self.workspace_splitter, 1)
         configure.clicked.connect(self.configure)
         self.single.clicked.connect(lambda: self._controller.call("single_sweep", "TRAC1"))
         self.live.clicked.connect(self.toggle_live)
         abort.clicked.connect(lambda: self._controller.call("emergency_off"))
+        self.acquire_average.clicked.connect(self.start_averaging)
+        self.cancel_average.clicked.connect(self.cancel_averaging)
+        self.capture_reference.clicked.connect(self.capture_current_reference)
+        self.clear_reference.clicked.connect(self.remove_reference)
+        self.reference_operation.currentIndexChanged.connect(self._refresh_spectrum_display)
+        for checkbox in (self.show_raw, self.show_average, self.show_reference, self.show_processed):
+            checkbox.toggled.connect(self._refresh_spectrum_display)
         controller.result.connect(self._result)
         controller.error.connect(self._error)
+        help_items = {
+            self.average_count: "Number of complete spectra to average. 200 is common in the Thatec workflow. Averaging is performed in linear mW, not directly in dBm.",
+            self.acquire_average: "Acquire N complete traces sequentially and create a separate averaged spectrum. The latest raw trace is always retained.",
+            self.cancel_average: "Stop the averaging sequence. Already collected temporary frames are discarded; raw/reference data are unchanged.",
+            self.capture_reference: "Copy the latest raw spectrum into an immutable in-memory reference trace on the same frequency grid.",
+            self.clear_reference: "Remove the in-memory reference and all derived display results. It does not delete raw measurements from HDF5.",
+            self.reference_operation: "Choose point-wise reference mathematics. Difference in dB equals a power ratio expressed logarithmically; linear operations first convert dBm to mW.",
+            self.show_raw: "Show the latest untouched trace returned by Anritsu.",
+            self.show_average: "Show the application-side linear-power average.",
+            self.show_reference: "Overlay the captured reference spectrum.",
+            self.show_processed: "Show the selected reference operation result. Non-dBm results use their own Y-axis unit and hide incompatible overlays.",
+        }
+        for widget, description in help_items.items():
+            widget.setToolTip(description)
+            widget.setToolTipDuration(25_000)
 
     def _anritsu_limit_values(self, key: str) -> tuple[object, object]:
         safety = self._station_settings.anritsu.safety
@@ -1860,6 +2134,51 @@ class AnritsuPage(QWidget):
             self._fetch_pending = True
             self._controller.call("fetch_trace", "TRAC1")
 
+    def start_averaging(self) -> None:
+        if self._averaging_active:
+            return
+        if self._timer.isActive():
+            self.toggle_live()
+        target = self.average_count.value()
+        self._average_traces.clear()
+        self._averaging_active = True
+        self.average_progress.setRange(0, target)
+        self.average_progress.setValue(0)
+        self.average_count.setEnabled(False)
+        self.acquire_average.setEnabled(False)
+        self.cancel_average.setEnabled(True)
+        self.info.setText(f"Averaging 0 / {target} complete traces…")
+        self.fetch_live()
+
+    def cancel_averaging(self) -> None:
+        self._averaging_active = False
+        self._average_traces.clear()
+        self.acquire_average.setEnabled(True)
+        self.cancel_average.setEnabled(False)
+        self.average_count.setEnabled(True)
+        self.info.setText("Averaging cancelled; raw spectra were not modified.")
+
+    def capture_current_reference(self) -> None:
+        if self._latest_trace is None:
+            QMessageBox.information(self, "Reference spectrum", "Acquire a spectrum before capturing a reference.")
+            return
+        self._reference_trace = self._latest_trace
+        self.clear_reference.setEnabled(True)
+        self.show_reference.setChecked(True)
+        self._refresh_spectrum_display()
+        self.status.emit("Anritsu reference spectrum captured in memory")
+
+    def remove_reference(self) -> None:
+        self._reference_trace = None
+        self.reference_series.clear()
+        self.processed_series.clear()
+        self.clear_reference.setEnabled(False)
+        self.show_reference.setChecked(False)
+        self.show_processed.setChecked(False)
+        self.reference_operation.setCurrentIndex(0)
+        self._refresh_spectrum_display()
+        self.status.emit("Anritsu reference spectrum removed")
+
     def _result(self, operation: str, result: object) -> None:
         if operation == "configure":
             self.status.emit("Anritsu configured")
@@ -1869,23 +2188,105 @@ class AnritsuPage(QWidget):
             self.status.emit("Anritsu Live started")
         elif operation in {"fetch_trace", "single_sweep"} and isinstance(result, SpectrumTrace):
             self._fetch_pending = False
-            self._show_trace(result)
+            self._latest_trace = result
+            if self._averaging_active:
+                self._average_traces.append(result.powers_dbm)
+                completed = len(self._average_traces)
+                target = self.average_count.value()
+                self.average_progress.setValue(completed)
+                self.info.setText(f"Averaging {completed} / {target} complete traces…")
+                if completed >= target:
+                    averaged = average_dbm_traces(self._average_traces)
+                    self._averaged_trace = SpectrumTrace(
+                        frequencies_hz=result.frequencies_hz,
+                        powers_dbm=averaged,
+                        acquired_at_utc=result.acquired_at_utc,
+                        trace_name=f"{result.trace_name}_AVG{target}",
+                    )
+                    self._averaging_active = False
+                    self._average_traces.clear()
+                    self.acquire_average.setEnabled(True)
+                    self.cancel_average.setEnabled(False)
+                    self.average_count.setEnabled(True)
+                    self.show_average.setChecked(True)
+                    self.status.emit(f"Anritsu application-side averaging completed: {target} traces")
+                    self._refresh_spectrum_display()
+                else:
+                    QTimer.singleShot(0, self.fetch_live)
+            else:
+                self._show_trace(result)
 
     def _show_trace(self, trace: SpectrumTrace) -> None:
-        limit = 1_000
-        stride = max(1, len(trace.powers_dbm) // limit)
-        points = [QPointF(trace.frequencies_hz[index] / 1e6, trace.powers_dbm[index]) for index in range(0, len(trace.powers_dbm), stride)]
-        self.series.replace(points)
-        self.axis_x.setRange(points[0].x(), points[-1].x())
-        self.axis_y.setRange(min(point.y() for point in points) - 2, max(point.y() for point in points) + 2)
+        self._latest_trace = trace
+        self._refresh_spectrum_display()
         self.info.setText(
             f"{len(trace.powers_dbm)} points • {trace.acquired_at_utc.isoformat()} • "
             f"max {max(trace.powers_dbm):.4g} dBm"
         )
 
+    @staticmethod
+    def _chart_points(trace: SpectrumTrace, values: tuple[float, ...] | None = None) -> list[QPointF]:
+        powers = values or trace.powers_dbm
+        limit = 2_000
+        stride = max(1, len(powers) // limit)
+        return [
+            QPointF(trace.frequencies_hz[index] / 1e6, powers[index])
+            for index in range(0, len(powers), stride)
+        ]
+
+    def _refresh_spectrum_display(self, *_args: object) -> None:
+        traces: list[tuple[QLineSeries, SpectrumTrace, tuple[float, ...], str]] = []
+        if self._latest_trace is not None and self.show_raw.isChecked():
+            traces.append((self.series, self._latest_trace, self._latest_trace.powers_dbm, "dBm"))
+        if self._averaged_trace is not None and self.show_average.isChecked():
+            traces.append((self.average_series, self._averaged_trace, self._averaged_trace.powers_dbm, "dBm"))
+        if self._reference_trace is not None and self.show_reference.isChecked():
+            traces.append((self.reference_series, self._reference_trace, self._reference_trace.powers_dbm, "dBm"))
+
+        operation = str(self.reference_operation.currentData() or "none")
+        processed: tuple[float, ...] | None = None
+        processed_unit = "dBm"
+        signal = self._averaged_trace or self._latest_trace
+        if operation != "none" and signal is not None and self._reference_trace is not None:
+            try:
+                if signal.frequencies_hz != self._reference_trace.frequencies_hz:
+                    raise ValueError("Reference frequency grid differs from the current spectrum.")
+                processed, processed_unit = apply_reference_operation(
+                    signal.powers_dbm, self._reference_trace.powers_dbm, operation
+                )
+            except ValueError as exc:
+                self.info.setText(f"Reference processing unavailable: {exc}")
+            else:
+                self.show_processed.setChecked(True)
+                if self.show_processed.isChecked():
+                    traces.append((self.processed_series, signal, processed, processed_unit))
+
+        for series in (self.series, self.average_series, self.reference_series, self.processed_series):
+            series.clear()
+            series.setVisible(False)
+        if not traces:
+            return
+        if processed is not None and processed_unit != "dBm" and self.show_processed.isChecked():
+            traces = [item for item in traces if item[0] is self.processed_series]
+        all_points: list[QPointF] = []
+        for series, trace, values, _unit in traces:
+            points = self._chart_points(trace, values)
+            series.replace(points)
+            series.setVisible(True)
+            all_points.extend(points)
+        self.axis_x.setRange(min(point.x() for point in all_points), max(point.x() for point in all_points))
+        y_min = min(point.y() for point in all_points)
+        y_max = max(point.y() for point in all_points)
+        margin = max((y_max - y_min) * 0.05, 0.1)
+        self.axis_y.setRange(y_min - margin, y_max + margin)
+        active_unit = traces[-1][3]
+        self.axis_y.setTitleText(f"Amplitude [{active_unit}]")
+
     def _error(self, operation: str, error: str) -> None:
         if operation == "fetch_trace":
             self._fetch_pending = False
+            if self._averaging_active:
+                self.cancel_averaging()
         if operation in {"configure", "start_live", "fetch_trace", "single_sweep", "emergency_off"}:
             self._timer.stop()
             self.live.setText("Start Live")
@@ -2341,9 +2742,11 @@ class MainWindow(QMainWindow):
         self.log = QPlainTextEdit()
         self.log.setReadOnly(True)
         self.log.setMaximumBlockCount(500)
-        self.log.setFixedHeight(130)
+        self.log.setMinimumHeight(50)
         self.setStatusBar(self.statusBar())
-        self.addDockWidget(Qt.DockWidgetArea.BottomDockWidgetArea, self._log_dock())
+        self.event_log_dock = self._log_dock()
+        self.addDockWidget(Qt.DockWidgetArea.BottomDockWidgetArea, self.event_log_dock)
+        self.resizeDocks([self.event_log_dock], [120], Qt.Orientation.Vertical)
         self.dashboard.emergency_requested.connect(self._emergency_off_all)
         self.settings_page.settings_saved.connect(self._settings_saved)
         self.recipe_page.run_requested.connect(self._start_run)
@@ -2363,6 +2766,7 @@ class MainWindow(QMainWindow):
         self.theme_action.setToolTip("Switch between the light and dark application themes.")
         self.theme_action.toggled.connect(self._toggle_theme)
         menu.addAction(self.theme_action)
+        menu.addAction(self.event_log_dock.toggleViewAction())
         menu.addSeparator()
         quit_action = QAction("Safe shutdown", self)
         quit_action.triggered.connect(self.close)

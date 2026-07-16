@@ -24,7 +24,8 @@ QTreeWidget::item { color: #e8edf3; padding: 3px; }
 QTreeWidget::item:selected { background: #28577b; color: white; }
 QLineEdit:focus, QComboBox:focus, QSpinBox:focus { border: 1px solid #4ba3ff; }
 QLineEdit:disabled, QComboBox:disabled, QSpinBox:disabled { color: #607084; background: #141c26; border-color: #26384a; }
-QPushButton { background: #26384a; border: 0; border-radius: 4px; padding: 8px 12px; color: #e8edf3; font-weight: 600; }
+QPushButton { background: #26384a; border: 0; border-radius: 5px; padding: 6px 10px; color: #e8edf3; font-weight: 600; }
+QPushButton[compact="true"] { padding: 5px 8px; font-weight: 600; }
 QPushButton:hover { background: #34516a; }
 QPushButton:disabled { background: #1b2632; color: #58687a; }
 QPushButton#primaryButton { background: #1769aa; color: white; }
@@ -63,6 +64,9 @@ QLabel#keithleyMeterValue { color: #eaf5ff; font-family: Consolas; font-size: 18
 QLabel#keithleyComplianceClear { color: #38d996; background: #173227; border-radius: 6px; padding: 5px 8px; font-weight: 700; }
 QLabel#keithleyComplianceActive { color: #ff657a; background: #3a1b24; border-radius: 6px; padding: 5px 8px; font-weight: 700; }
 QTabWidget#keithleyControlTabs > QTabBar::tab { padding: 10px 15px; }
+QFrame#anritsuProcessingCard { background: #151f2b; border: 1px solid #30455b; border-radius: 10px; padding: 9px; }
+QWidget#anritsuControlPanel { background: #121a24; border-radius: 10px; }
+QSplitter#anritsuWorkspaceSplitter::handle { background: #26384a; width: 5px; margin: 4px 1px; border-radius: 2px; }
 QLabel#limitBadge { color: #9ecbff; background: #17283a; border: 1px solid #31506d; border-radius: 6px; padding: 6px; font-family: Consolas; font-size: 9pt; }
 QLabel#limitBadge[limitState="undefined"] { color: #ffcc66; background: #302817; border-color: #76561b; }
 QPushButton#limitEditButton { padding: 6px 8px; background: #30465a; }
@@ -90,7 +94,8 @@ QTreeWidget::item { color: #17212b; padding: 3px; }
 QTreeWidget::item:selected { background: #b8dcfa; color: #102a43; }
 QLineEdit:focus, QComboBox:focus, QSpinBox:focus { border: 1px solid #1976bd; }
 QLineEdit:disabled, QComboBox:disabled, QSpinBox:disabled { color: #8996a3; background: #edf1f5; border-color: #d4dce4; }
-QPushButton { background: #dce5ee; border: 0; border-radius: 4px; padding: 8px 12px; color: #17212b; font-weight: 600; }
+QPushButton { background: #dce5ee; border: 0; border-radius: 5px; padding: 6px 10px; color: #17212b; font-weight: 600; }
+QPushButton[compact="true"] { padding: 5px 8px; font-weight: 600; }
 QPushButton:hover { background: #c8d9e8; }
 QPushButton:disabled { background: #edf1f5; color: #9aa6b2; }
 QPushButton#primaryButton { background: #1769aa; color: white; }
@@ -127,6 +132,9 @@ QLabel#keithleyMeterValue { color: #12354f; font-family: Consolas; font-size: 18
 QLabel#keithleyComplianceClear { color: #087f5b; background: #dff5eb; border-radius: 6px; padding: 5px 8px; font-weight: 700; }
 QLabel#keithleyComplianceActive { color: #b4233a; background: #fde7eb; border-radius: 6px; padding: 5px 8px; font-weight: 700; }
 QTabWidget#keithleyControlTabs > QTabBar::tab { padding: 10px 15px; }
+QFrame#anritsuProcessingCard { background: #ffffff; border: 1px solid #c8d3df; border-radius: 10px; padding: 9px; }
+QWidget#anritsuControlPanel { background: #f8fafc; border-radius: 10px; }
+QSplitter#anritsuWorkspaceSplitter::handle { background: #c8d3df; width: 5px; margin: 4px 1px; border-radius: 2px; }
 QLabel#limitBadge { color: #174f7a; background: #e4f1fb; border: 1px solid #a9c9e2; border-radius: 6px; padding: 6px; font-family: Consolas; font-size: 9pt; }
 QLabel#limitBadge[limitState="undefined"] { color: #765500; background: #fff2c7; border-color: #e2c66f; }
 QPushButton#limitEditButton { padding: 6px 8px; background: #d6e3ee; }

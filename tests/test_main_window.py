@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+from datetime import datetime, timezone
 from pathlib import Path
 import tempfile
 import unittest
@@ -14,6 +15,7 @@ from PySide6.QtTest import QTest
 from PySide6.QtWidgets import QApplication, QMessageBox, QPushButton, QScrollArea, QTreeWidgetItemIterator
 
 from app.domain.models import DeviceCapabilities
+from app.devices.anritsu import SpectrumTrace
 from app.settings.repository import SettingsRepository
 from app.ui.main_window import LimitEditDialog, MainWindow
 
@@ -352,6 +354,105 @@ class MainWindowTests(unittest.TestCase):
             self.assertEqual(card["power"].text(), "67 µW")
             self.assertIn("ACTIVE", card["compliance"].text())
             self.assertEqual(card["output"].text(), "OUTPUT OFF")
+        finally:
+            window.close()
+            self.application.processEvents()
+
+    def test_keithley_source_fields_follow_current_voltage_and_measure_only_modes(self) -> None:
+        window = MainWindow(".config/settings.yml", simulation=True)
+        try:
+            keithley = window.keithley_page
+            self.assertEqual(keithley.keithley_form.labelForField(keithley.level_field).text(), "Source current")
+            self.assertIn("Voltage compliance", keithley.keithley_form.labelForField(keithley.compliance_field).text())
+            keithley.level.setText("2 mA")
+
+            keithley.mode.setCurrentText("voltage")
+            self.assertEqual(keithley.keithley_form.labelForField(keithley.level_field).text(), "Source voltage")
+            self.assertIn("Current compliance", keithley.keithley_form.labelForField(keithley.compliance_field).text())
+            self.assertTrue(keithley.level.text().endswith("V"))
+            self.assertTrue(keithley.compliance.text().endswith("A"))
+
+            keithley.mode.setCurrentText("measure_only")
+            self.assertFalse(keithley.keithley_form.isRowVisible(keithley.level_field))
+            self.assertFalse(keithley.keithley_form.isRowVisible(keithley.compliance_field))
+            self.assertIn("measurement-only", keithley.configure_button.text())
+
+            keithley.mode.setCurrentText("current")
+            self.assertEqual(keithley.level.text(), "2 mA")
+            self.assertTrue(keithley.keithley_form.isRowVisible(keithley.level_field))
+        finally:
+            window.close()
+            self.application.processEvents()
+
+    def test_every_keithley_setting_meter_and_action_has_context_help(self) -> None:
+        window = MainWindow(".config/settings.yml", simulation=True)
+        try:
+            keithley = window.keithley_page
+            controls = (
+                keithley.channel, keithley.mode, keithley.level, keithley.compliance,
+                keithley.nplc, keithley.settle, keithley.sense_mode,
+                keithley.source_autorange, keithley.source_range,
+                keithley.measure_voltage_autorange, keithley.measure_voltage_range,
+                keithley.measure_current_autorange, keithley.measure_current_range,
+                keithley.live_measurements, keithley.device_led, keithley.device_state,
+            )
+            self.assertTrue(all(widget.toolTip() for widget in controls))
+            for card in keithley.channel_cards.values():
+                self.assertTrue(all(widget.toolTip() for widget in card.values()))
+            action_labels = {
+                "Configure current source while OUTPUT is OFF",
+                "Measure selected channel",
+                "ARM (30 s)",
+                "OUTPUT ON",
+                "Ramp to zero + OFF",
+            }
+            actions = [button for button in keithley.findChildren(QPushButton) if button.text() in action_labels]
+            self.assertEqual(len(actions), len(action_labels))
+            self.assertTrue(all(button.toolTip() for button in actions))
+            self.assertTrue(keithley.control_tabs.tabToolTip(0))
+        finally:
+            window.close()
+            self.application.processEvents()
+
+    def test_anritsu_averaging_reference_and_processed_views_preserve_raw_trace(self) -> None:
+        window = MainWindow(".config/settings.yml", simulation=True)
+        try:
+            anritsu = window.anritsu_page
+            anritsu._controller.call = Mock()
+            anritsu.average_count.setValue(2)
+            trace_1 = SpectrumTrace((1e6, 2e6), (-10.0, -20.0), datetime.now(timezone.utc), "TRAC1")
+            trace_2 = SpectrumTrace((1e6, 2e6), (0.0, -20.0), datetime.now(timezone.utc), "TRAC1")
+            anritsu.start_averaging()
+            anritsu._result("fetch_trace", trace_1)
+            anritsu._result("fetch_trace", trace_2)
+            self.assertIs(anritsu._latest_trace, trace_2)
+            self.assertIsNotNone(anritsu._averaged_trace)
+            self.assertNotEqual(anritsu._averaged_trace.powers_dbm[0], -5.0)
+            anritsu.capture_current_reference()
+            self.assertIs(anritsu._reference_trace, trace_2)
+            anritsu.reference_operation.setCurrentIndex(1)
+            anritsu._refresh_spectrum_display()
+            self.assertGreater(anritsu.processed_series.count(), 0)
+            anritsu.remove_reference()
+            self.assertIsNone(anritsu._reference_trace)
+            self.assertIs(anritsu._latest_trace, trace_2)
+        finally:
+            window.close()
+            self.application.processEvents()
+
+    def test_anritsu_workspace_and_event_log_are_user_resizable(self) -> None:
+        window = MainWindow(".config/settings.yml", simulation=True)
+        try:
+            splitter = window.anritsu_page.workspace_splitter
+            self.assertEqual(splitter.orientation(), Qt.Orientation.Horizontal)
+            self.assertEqual(splitter.count(), 2)
+            self.assertGreater(splitter.widget(0).minimumWidth(), 0)
+            self.assertGreater(window.log.maximumHeight(), 10000)
+            self.assertTrue(
+                window.event_log_dock.features()
+                & window.event_log_dock.DockWidgetFeature.DockWidgetMovable
+            )
+            self.assertIsNotNone(window.event_log_dock.toggleViewAction())
         finally:
             window.close()
             self.application.processEvents()

@@ -5,3 +5,4 @@ __pycache__/gui.cpython-314.pyc
 measurements/
 *.h5
 .config/*.bak
+.config/settings.yml

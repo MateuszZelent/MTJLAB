@@ -351,6 +351,7 @@ devices:
       # receptury, aby nie zapisać starego trace jako nowego punktu.
       single_sweep_mode: "unverified"
       operation_complete_timeout: "30 s"
+      application_average_count: 200
     safety:
       acquisition_allowed: false
       require_rf_input_limit_definition: true

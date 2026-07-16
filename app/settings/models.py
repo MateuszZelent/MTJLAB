@@ -288,11 +288,14 @@ class AnritsuAcquisitionSettings(StrictModel):
 
     single_sweep_mode: Literal["unverified", "standard_scpi_opc"] = "unverified"
     operation_complete_timeout: str = "30 s"
+    application_average_count: int = 200
 
     @model_validator(mode="after")
     def validate_timeout(self) -> "AnritsuAcquisitionSettings":
         if parse_quantity(self.operation_complete_timeout, DIMENSION_TIME).si_value <= 0:
             raise ValueError("operation_complete_timeout musi być dodatni")
+        if not 1 <= self.application_average_count <= 9999:
+            raise ValueError("application_average_count musi być w zakresie 1..9999")
         return self
 
 
