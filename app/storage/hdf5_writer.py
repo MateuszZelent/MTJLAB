@@ -9,7 +9,7 @@ from pathlib import Path
 import csv
 import hashlib
 import json
-from typing import Any, TextIO
+from typing import TextIO
 
 from app.devices.anritsu.adapter import SpectrumTrace
 from app.domain.errors import ExecutionError

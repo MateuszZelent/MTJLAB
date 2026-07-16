@@ -6,7 +6,7 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 import threading
 import time
-from typing import Callable, Literal
+from typing import Callable
 
 from app.devices.anritsu.adapter import AnritsuAdapter, SpectrumTrace
 from app.devices.keithley.adapter import KeithleyAdapter

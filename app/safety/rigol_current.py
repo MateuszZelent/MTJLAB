@@ -4,7 +4,6 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 import math
-from typing import Literal
 
 from app.domain.errors import SafetyViolation
 from app.domain.quantities import (

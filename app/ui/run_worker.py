@@ -7,7 +7,7 @@ from io import StringIO
 from pathlib import Path
 import re
 
-from PySide6.QtCore import QObject, QThread, Qt, Signal, Slot
+from PySide6.QtCore import QObject, QThread, Signal, Slot
 from ruamel.yaml import YAML
 
 from app.devices.anritsu import AnritsuAdapter

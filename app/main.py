@@ -167,7 +167,9 @@ def main() -> int:
     app = QApplication(sys.argv)
     app.setApplicationName("Lab Control")
     window = MainWindow(Path(args.settings), simulation=args.simulate)
-    apply_theme = lambda theme: app.setStyleSheet(LIGHT_STYLE if theme == "light" else STYLE)
+    def apply_theme(theme: str) -> None:
+        app.setStyleSheet(LIGHT_STYLE if theme == "light" else STYLE)
+
     window.theme_changed.connect(apply_theme)
     window._set_theme_mode(str(window._settings.ui.get("theme", "system")), persist=False)
     app.styleHints().colorSchemeChanged.connect(lambda _scheme: window.refresh_system_theme())

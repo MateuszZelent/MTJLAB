@@ -6,8 +6,6 @@ QObject/QThread pair.  GUI code only emits queued operation requests.
 
 from __future__ import annotations
 
-from typing import Any
-
 from PySide6.QtCore import QEventLoop, QMetaObject, QObject, QThread, QTimer, Qt, Signal, Slot
 
 from app.devices.anritsu.adapter import AnritsuAdapter

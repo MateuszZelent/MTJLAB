@@ -64,7 +64,6 @@ def _require_string(value: object, where: str) -> str:
 
 def _parse_node(value: object, where: str) -> RecipeNode:
     raw = _require_mapping(value, where)
-    allowed = {"id", "type", "children"}
     node_id = _require_string(raw.pop("id", None), f"{where}.id")
     kind = _require_string(raw.pop("type", None), f"{where}.type").lower()
     if kind not in ACTION_TYPES:
