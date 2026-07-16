@@ -72,6 +72,7 @@ from app.recipes import parse_recipe_text
 from app.settings import SettingsRepository
 from app.settings.models import StationSettings
 from app.safety.rigol_current import validate_rigol_frequency_sweep, validate_rigol_waveform
+from app.safety.anritsu import ANRITSU_SWEEP_POINT_COUNTS
 from app.storage import Hdf5RunReader, RunDetail, StoredPoint
 from app.spectrum import (
     LinearPowerAverager,
@@ -2296,9 +2297,8 @@ class AnritsuPage(QWidget):
         self.start = _line("1 MHz")
         self.stop = _line("10 MHz")
         self.reference = _line("0 dBm")
-        self.points = QSpinBox()
-        self.points.setRange(101, 10001)
-        self.points.setValue(1001)
+        self.points = QComboBox()
+        self._refresh_point_choices(1001)
         self.refresh = QSpinBox()
         self.refresh.setRange(100, 5000)
         self.refresh.setValue(500)
@@ -2442,6 +2442,16 @@ class AnritsuPage(QWidget):
         value = getattr(safety, key)
         return value.min, value.max
 
+    def _refresh_point_choices(self, preferred: int | None = None) -> None:
+        minimum, maximum = self._anritsu_limit_values("sweep_points")
+        current = preferred if preferred is not None else self.points.currentData()
+        self.points.clear()
+        for value in ANRITSU_SWEEP_POINT_COUNTS:
+            if int(minimum) <= value <= int(maximum):
+                self.points.addItem(str(value), value)
+        index = self.points.findData(current)
+        self.points.setCurrentIndex(index if index >= 0 else 0)
+
     def _anritsu_bounded(self, key: str, editor: QWidget) -> LimitField:
         field = LimitField(editor, *self._anritsu_limit_values(key))
         self._limit_fields[key + str(len(self._limit_fields))] = field
@@ -2450,6 +2460,7 @@ class AnritsuPage(QWidget):
 
     def set_settings(self, settings: StationSettings) -> None:
         self._station_settings = settings
+        self._refresh_point_choices()
         for field in self._limit_fields.values():
             field.set_limits(*self._anritsu_limit_values(str(field.property("limitKey"))))
 
@@ -2463,7 +2474,7 @@ class AnritsuPage(QWidget):
                 start_hz=parse_quantity(self.start.text(), DIMENSION_FREQUENCY).si_value,
                 stop_hz=parse_quantity(self.stop.text(), DIMENSION_FREQUENCY).si_value,
                 reference_level_dbm=parse_quantity(self.reference.text(), DIMENSION_DBM).si_value,
-                points=self.points.value(),
+                points=int(self.points.currentData()),
             )
         except Exception as exc:
             self.banner.show_message(f"Invalid spectrum settings: {exc}")
@@ -2548,7 +2559,12 @@ class AnritsuPage(QWidget):
             self.start.setText(format_quantity_auto(result.start_hz, DIMENSION_FREQUENCY))
             self.stop.setText(format_quantity_auto(result.stop_hz, DIMENSION_FREQUENCY))
             self.reference.setText(f"{result.reference_level_dbm:.9g} dBm")
-            self.points.setValue(result.points)
+            point_index = self.points.findData(result.points)
+            if point_index < 0:
+                raise ValueError(
+                    f"Instrument returned {result.points} points outside the approved UI choices."
+                )
+            self.points.setCurrentIndex(point_index)
             self.banner.show_message(
                 f"Current analyser settings loaded into the form (mode: "
                 f"{result.instrument_mode or 'unknown'}). "
@@ -2556,8 +2572,9 @@ class AnritsuPage(QWidget):
                 severity="success",
             )
             self.status.emit("Anritsu current configuration read from instrument")
-        elif operation == "configure":
-            self.status.emit("Anritsu configured")
+        elif operation == "configure" and isinstance(result, AnritsuConfigurationSnapshot):
+            self._result("read_configuration", result)
+            self.status.emit("Anritsu configured and verified by SCPI readback")
         elif operation == "start_live":
             self._timer.start()
             self.live.setText("Stop Live")

@@ -182,6 +182,17 @@ class QuantityAndSafetyTests(unittest.TestCase):
                 points=101,
             )
 
+    def test_anritsu_rejects_point_counts_not_supported_by_hardware(self) -> None:
+        settings = simulation_settings()
+        with self.assertRaisesRegex(SafetyViolation, "must be one of"):
+            validate_anritsu_spectrum(
+                settings.anritsu.safety,
+                start_hz=1e6,
+                stop_hz=2e6,
+                reference_level_dbm=0,
+                points=999,
+            )
+
     def test_keithley_preflight_rejects_source_compliance_power(self) -> None:
         raw = deepcopy(SettingsRepository(SETTINGS_TEMPLATE).load().raw)
         limits = raw["devices"]["keithley"]["safety"]["channels"]["B"]["lab_limits"]

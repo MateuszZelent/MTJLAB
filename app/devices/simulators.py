@@ -366,10 +366,10 @@ class AnritsuSimulator(_BaseSimulator):
         self.reference_level = 0.0
 
     def _write(self, command: str) -> None:
-        match = re.match(r"^FREQ:(START|STOP)\s+([+-]?[\d.eE]+)HZ$", command, re.IGNORECASE)
+        match = re.match(r"^FREQ:(STAR|STOP)\s+([+-]?[\d.eE]+)HZ$", command, re.IGNORECASE)
         if match:
             value = float(match.group(2))
-            if match.group(1).upper() == "START":
+            if match.group(1).upper() == "STAR":
                 self.start_hz = value
             else:
                 self.stop_hz = value
@@ -387,12 +387,16 @@ class AnritsuSimulator(_BaseSimulator):
             return "ANRITSU,MS2830A,SIM000001,sim-1.0"
         if command == "*OPC?":
             return "1"
-        if command == "FREQ:START?":
+        if command == "INST?":
+            return "SPECT"
+        if command == "FREQ:STAR?":
             return f"{self.start_hz:.12g}"
         if command == "FREQ:STOP?":
             return f"{self.stop_hz:.12g}"
         if command == "SWE:POIN?":
             return str(self.points)
+        if command == "DISP:WIND:TRAC:Y:RLEV?":
+            return f"{self.reference_level:.12g}"
         if command.startswith("TRAC? "):
             center = (self.start_hz + self.stop_hz) / 2
             span = max(self.stop_hz - self.start_hz, 1.0)

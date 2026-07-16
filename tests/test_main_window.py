@@ -636,7 +636,11 @@ class MainWindowTests(unittest.TestCase):
             self.assertEqual(parse_quantity(anritsu.start.text(), DIMENSION_FREQUENCY).si_value, 2e6)
             self.assertEqual(parse_quantity(anritsu.stop.text(), DIMENSION_FREQUENCY).si_value, 3e9)
             self.assertEqual(parse_quantity(anritsu.reference.text(), DIMENSION_DBM).si_value, -15.5)
-            self.assertEqual(anritsu.points.value(), 2001)
+            self.assertEqual(anritsu.points.currentData(), 2001)
+            self.assertEqual(
+                [anritsu.points.itemData(index) for index in range(anritsu.points.count())],
+                [101, 201, 251, 401, 501, 1001, 2001, 5001, 10001],
+            )
         finally:
             window.close()
             self.application.processEvents()

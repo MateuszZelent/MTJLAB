@@ -9,6 +9,9 @@ from app.domain.quantities import DIMENSION_DBM, DIMENSION_FREQUENCY, parse_quan
 from app.settings.models import AnritsuSafety
 
 
+ANRITSU_SWEEP_POINT_COUNTS = (11, 21, 41, 51, 101, 201, 251, 401, 501, 1001, 2001, 5001, 10001)
+
+
 def validate_anritsu_trace_name(trace: str) -> str:
     """Accept only the explicitly qualified spectrum trace identifier."""
 
@@ -66,7 +69,13 @@ def validate_anritsu_spectrum(
             f"Reference level {reference_level_dbm:.9g} dBm is outside the approved range "
             f"of {reference_min:.9g}–{reference_max:.9g} dBm."
         )
-    if isinstance(points, bool) or not safety.sweep_points.min <= points <= safety.sweep_points.max:
+    if isinstance(points, bool) or points not in ANRITSU_SWEEP_POINT_COUNTS:
+        raise SafetyViolation(
+            "The Anritsu point count must be one of: "
+            + ", ".join(str(value) for value in ANRITSU_SWEEP_POINT_COUNTS)
+            + "."
+        )
+    if not safety.sweep_points.min <= points <= safety.sweep_points.max:
         raise SafetyViolation(
             f"The Anritsu point count must be between {safety.sweep_points.min} "
             f"and {safety.sweep_points.max}."

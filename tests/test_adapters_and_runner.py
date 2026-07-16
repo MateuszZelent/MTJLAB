@@ -199,8 +199,10 @@ class AdapterAndRunnerTests(unittest.TestCase):
         session = FakeVisaSession(
             responses={
                 "*IDN?": "ANRITSU,MS2830A,123456,1.0",
-                "FREQ:START?": "1000000",
+                "INST?": "SPECT",
+                "FREQ:STAR?": "1000000",
                 "FREQ:STOP?": "2000000",
+                "DISP:WIND:TRAC:Y:RLEV?": "0",
                 "SWE:POIN?": "101",
                 "TRAC? TRAC1": values,
                 "*OPC?": "1",
@@ -221,7 +223,7 @@ class AdapterAndRunnerTests(unittest.TestCase):
             responses={
                 "*IDN?": "ANRITSU,MS2830A,123456,1.0",
                 "INST?": "SPECT",
-                "FREQ:START?": "1000000",
+                "FREQ:STAR?": "1000000",
                 "FREQ:STOP?": "4000000000",
                 "DISP:WIND:TRAC:Y:RLEV?": "-10",
                 "SWE:POIN?": "1001",
@@ -243,7 +245,7 @@ class AdapterAndRunnerTests(unittest.TestCase):
             [
                 "*IDN?",
                 "INST?",
-                "FREQ:START?",
+                "FREQ:STAR?",
                 "FREQ:STOP?",
                 "DISP:WIND:TRAC:Y:RLEV?",
                 "SWE:POIN?",
@@ -434,8 +436,10 @@ class AdapterAndRunnerTests(unittest.TestCase):
         anritsu_session = FakeVisaSession(
             responses={
                 "*IDN?": "ANRITSU,MS2830A,123456,1.0",
-                "FREQ:START?": "1000000",
+                "INST?": "SPECT",
+                "FREQ:STAR?": "1000000",
                 "FREQ:STOP?": "2000000",
+                "DISP:WIND:TRAC:Y:RLEV?": "0",
                 "SWE:POIN?": "101",
                 "TRAC? TRAC1": values,
                 "*OPC?": "1",

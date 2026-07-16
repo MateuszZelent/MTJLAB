@@ -13,6 +13,7 @@ from app.domain.errors import ConnectionError, DeviceError, SafetyViolation
 from app.domain.models import DeviceCapabilities, DeviceIdentity, DeviceState
 from app.domain.quantities import DIMENSION_TIME, parse_quantity
 from app.safety.anritsu import (
+    ANRITSU_SWEEP_POINT_COUNTS,
     assert_anritsu_acquisition_allowed,
     validate_anritsu_spectrum,
     validate_anritsu_trace_name,
@@ -147,7 +148,7 @@ class AnritsuAdapter(DeviceAdapter):
         session = self._require_session()
         try:
             instrument_mode = session.query("INST?").strip()
-            start_hz = float(session.query("FREQ:START?"))
+            start_hz = float(session.query("FREQ:STAR?"))
             stop_hz = float(session.query("FREQ:STOP?"))
             reference_level_dbm = float(session.query("DISP:WIND:TRAC:Y:RLEV?"))
             points = int(float(session.query("SWE:POIN?")))
@@ -157,13 +158,13 @@ class AnritsuAdapter(DeviceAdapter):
             raise DeviceError("Anritsu returned a non-finite current-configuration value.")
         if start_hz <= 0 or stop_hz <= start_hz:
             raise DeviceError("Anritsu returned an invalid current frequency range.")
-        if points < 2:
-            raise DeviceError("Anritsu returned an invalid sweep point count.")
+        if points not in ANRITSU_SWEEP_POINT_COUNTS:
+            raise DeviceError(f"Anritsu returned unsupported sweep point count {points}.")
         return AnritsuConfigurationSnapshot(
             start_hz, stop_hz, reference_level_dbm, points, instrument_mode
         )
 
-    def configure_spectrum(self, config: SpectrumConfig) -> None:
+    def configure_spectrum(self, config: SpectrumConfig) -> AnritsuConfigurationSnapshot:
         validate_anritsu_trace_name(config.trace)
         validate_anritsu_spectrum(
             self._settings.safety,
@@ -174,10 +175,31 @@ class AnritsuAdapter(DeviceAdapter):
         )
         session = self._require_session()
         session.write("INST SPECT")
-        session.write(f"FREQ:START {config.start_hz:.12g}HZ")
+        session.write(f"FREQ:STAR {config.start_hz:.12g}HZ")
         session.write(f"FREQ:STOP {config.stop_hz:.12g}HZ")
         session.write(f"DISP:WIND:TRAC:Y:RLEV {config.reference_level_dbm:.12g}")
         session.write(f"SWE:POIN {config.points}")
+        actual = self.read_current_configuration()
+        mismatches: list[str] = []
+        if not math.isclose(actual.start_hz, config.start_hz, rel_tol=0.0, abs_tol=1.0):
+            mismatches.append(f"start requested={config.start_hz:g} Hz actual={actual.start_hz:g} Hz")
+        if not math.isclose(actual.stop_hz, config.stop_hz, rel_tol=0.0, abs_tol=1.0):
+            mismatches.append(f"stop requested={config.stop_hz:g} Hz actual={actual.stop_hz:g} Hz")
+        if not math.isclose(
+            actual.reference_level_dbm,
+            config.reference_level_dbm,
+            rel_tol=0.0,
+            abs_tol=0.01,
+        ):
+            mismatches.append(
+                "reference level requested="
+                f"{config.reference_level_dbm:g} dBm actual={actual.reference_level_dbm:g} dBm"
+            )
+        if actual.points != config.points:
+            mismatches.append(f"points requested={config.points} actual={actual.points}")
+        if mismatches:
+            raise DeviceError("Anritsu configuration readback mismatch: " + "; ".join(mismatches))
+        return actual
 
     def start_live(self) -> None:
         """Enable application-side live refresh; current instrument sweep mode is preserved."""
@@ -263,7 +285,7 @@ class AnritsuAdapter(DeviceAdapter):
         session = self._require_session()
         session.write("FORM ASC")
         try:
-            start = float(session.query("FREQ:START?"))
+            start = float(session.query("FREQ:STAR?"))
             stop = float(session.query("FREQ:STOP?"))
             points = int(float(session.query("SWE:POIN?")))
             raw = session.query(f"TRAC? {trace}")
