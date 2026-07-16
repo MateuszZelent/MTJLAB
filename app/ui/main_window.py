@@ -40,10 +40,12 @@ from PySide6.QtWidgets import (
 )
 
 from app.devices.anritsu import (
+    ANRITSU_PREAMPLIFIER_OPTIONS,
     AnritsuAdapter,
     AnritsuConfigurationSnapshot,
     SpectrumConfig,
     SpectrumTrace,
+    frequency_option_for,
 )
 from app.devices.discovery import DiscoveredInstrument
 from app.devices.keithley import KeithleyAdapter, KeithleySourceRequest
@@ -2318,6 +2320,30 @@ class AnritsuPage(QWidget):
         ):
             form.addRow(label, widget)
         left_layout.addLayout(form)
+        hardware_card = QFrame()
+        hardware_card.setObjectName("anritsuProcessingCard")
+        hardware_layout = QVBoxLayout(hardware_card)
+        hardware_layout.setContentsMargins(10, 8, 10, 8)
+        hardware_layout.setSpacing(4)
+        hardware_title = QLabel("Instrument limits & hardware")
+        hardware_title.setObjectName("sectionTitle")
+        hardware_layout.addWidget(hardware_title)
+        self.hardware_option_info = QLabel()
+        self.hardware_option_info.setWordWrap(True)
+        self.hardware_option_info.setTextInteractionFlags(
+            Qt.TextInteractionFlag.TextSelectableByMouse
+        )
+        self.hardware_option_info.setObjectName("muted")
+        hardware_layout.addWidget(self.hardware_option_info)
+        self.hardware_range_info = QLabel()
+        self.hardware_range_info.setWordWrap(True)
+        self.hardware_range_info.setTextInteractionFlags(
+            Qt.TextInteractionFlag.TextSelectableByMouse
+        )
+        self.hardware_range_info.setObjectName("muted")
+        hardware_layout.addWidget(self.hardware_range_info)
+        self._update_anritsu_hardware_limits(())
+        left_layout.addWidget(hardware_card)
         controls = QGridLayout()
         controls.setSpacing(6)
         self.read_configuration = QPushButton("Read from instrument")
@@ -2475,6 +2501,50 @@ class AnritsuPage(QWidget):
     def set_capabilities(self, capabilities: object) -> None:
         supports = getattr(capabilities, "supports", lambda _feature: False)
         self.single.setEnabled(bool(supports("spectrum_trace")))
+        options = tuple(getattr(capabilities, "hardware_options", ()) or ())
+        self._update_anritsu_hardware_limits(options)
+
+    def _update_anritsu_hardware_limits(self, options: tuple[str, ...]) -> None:
+        frequency_option = frequency_option_for(options)
+        if options:
+            option_text = ", ".join(options)
+            preamplifier = (
+                "installed option detected"
+                if ANRITSU_PREAMPLIFIER_OPTIONS.intersection(options)
+                else "no preamplifier option reported"
+            )
+            self.hardware_option_info.setText(
+                f"Auto-detected by *OPT?: {option_text} | Preamplifier: {preamplifier}."
+            )
+        else:
+            self.hardware_option_info.setText(
+                "Hardware options: waiting for connection, or *OPT? was not supported/reported."
+            )
+        if frequency_option is None:
+            frequency_text = (
+                "Frequency: option dependent (040: 3.7 GHz, 041: 6.1 GHz, "
+                "043: 13.6 GHz, 044: 26.6 GHz, 045: 43.1 GHz)."
+            )
+            default_sweep_text = "option-dependent"
+        else:
+            frequency_text = (
+                f"Frequency option {frequency_option.code}: documented displayed range "
+                f"-100 MHz to {frequency_option.maximum_stop_hz / 1e9:g} GHz."
+            )
+            default_sweep_text = f"{frequency_option.default_sweep_time_s * 1e3:g} ms"
+        self.hardware_range_info.setText(
+            f"{frequency_text}\n"
+            "Reference level: -120 to +50 dBm (0.01 dB resolution) | "
+            "RF attenuation: 0 to 60 dB (2 dB steps).\n"
+            "RBW: 1 Hz to 31.25 MHz | VBW: 1 Hz to 10 MHz or OFF | "
+            "Input impedance: 50 or 75 ohm.\n"
+            f"Sweep time: 1 ms to 1000 s in frequency mode; default for this option: "
+            f"{default_sweep_text}. Zero Span: 1 us to 1000 s.\n"
+            "Trace points: 11, 21, 41, 51, 101, 201, 251, 401, 501, 1001, 2001, "
+            "5001, 10001 | Device averaging: 2 to 9999.\n"
+            "Application polling: 100 ms to 5 s | Application averaging: 1 to 9999. "
+            "Approved safety badges above may intentionally be stricter."
+        )
 
     def configure(self) -> None:
         try:
@@ -3480,12 +3550,16 @@ class MainWindow(QMainWindow):
             card.set_testing(False)
             card.update_state("verified")
             features = ", ".join(str(item) for item in result.get("features", ())) or "basic VISA"
+            options = ", ".join(str(item) for item in result.get("hardware_options", ())) or "not reported"
             card.identity.setText(
                 f"TEST PASS: {result.get('vendor', '')} {result.get('model', '')} • "
                 f"SN {result.get('serial', '—')} • FW {result.get('firmware', '—')}\n"
-                f"Protocols/features: {features}"
+                f"Protocols/features: {features} • Options: {options}"
             )
-            self._log(f"Communication test passed: {result.get('idn', '')}; {features}")
+            self._log(
+                f"Communication test passed: {result.get('idn', '')}; "
+                f"features={features}; options={options}"
+            )
 
     def _device_error(self, device: str, operation: str, error: str) -> None:
         if operation == "replace_adapter":

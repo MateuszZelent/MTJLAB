@@ -91,6 +91,7 @@ class InstrumentWorker(QObject):
                     "serial": identity.serial,
                     "firmware": identity.firmware,
                     "features": tuple(capabilities.features),
+                    "hardware_options": capabilities.hardware_options,
                 }
             finally:
                 try:

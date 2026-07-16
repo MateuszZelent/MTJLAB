@@ -50,6 +50,7 @@ class DeviceCapabilities:
     firmware: str | None
     features: frozenset[str] = frozenset()
     unsupported_commands: frozenset[str] = frozenset()
+    hardware_options: tuple[str, ...] = ()
 
     def supports(self, feature: str) -> bool:
         return feature in self.features
@@ -63,4 +64,3 @@ class MeasurementPoint:
     status: str = "ok"
     timestamp_utc: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
     metadata: dict[str, Any] = field(default_factory=dict)
-

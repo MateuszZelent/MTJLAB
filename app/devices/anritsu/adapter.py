@@ -8,6 +8,7 @@ import math
 import time
 
 from app.devices.base import DeviceAdapter, InstrumentSession, SessionFactory, parse_identity, validate_identity
+from app.devices.anritsu.hardware import parse_anritsu_option_response
 from app.devices.visa import PyVisaSessionFactory
 from app.domain.errors import ConnectionError, DeviceError, SafetyViolation
 from app.domain.models import DeviceCapabilities, DeviceIdentity, DeviceState
@@ -60,6 +61,22 @@ class AnritsuAdapter(DeviceAdapter):
         self._session: InstrumentSession | None = None
         self._live = False
 
+    @staticmethod
+    def _read_hardware_options(session: InstrumentSession) -> tuple[str, ...]:
+        """Best-effort read of installed options without making connection depend on it."""
+
+        original_timeout = session.timeout
+        try:
+            # Some old firmware may not implement *OPT?. Do not make an
+            # otherwise valid instrument unusable, and do not wait for the
+            # normal 30-second acquisition timeout for this optional probe.
+            session.timeout = max(1, min(original_timeout, 2000))
+            return parse_anritsu_option_response(session.query("*OPT?"))
+        except DeviceError:
+            return ()
+        finally:
+            session.timeout = original_timeout
+
     def _require_session(self) -> InstrumentSession:
         if self._session is None:
             raise ConnectionError("Anritsu nie jest połączony.")
@@ -92,6 +109,7 @@ class AnritsuAdapter(DeviceAdapter):
                 expected_serial=self._settings.identity.expected_serial,
                 require_serial_match=self._settings.identity.require_serial_match,
             )
+            hardware_options = self._read_hardware_options(session)
             self._session = session
             self._identity = identity
             self._capabilities = DeviceCapabilities(
@@ -102,6 +120,7 @@ class AnritsuAdapter(DeviceAdapter):
                     {"spectrum_trace", "live_trace"}
                     | ({"synchronized_single_sweep"} if self._single_sweep_supported else set())
                 ),
+                hardware_options=hardware_options,
             )
             self._state = DeviceState.VERIFIED
             return identity

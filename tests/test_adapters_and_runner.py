@@ -245,6 +245,7 @@ class AdapterAndRunnerTests(unittest.TestCase):
             session.writes,
             [
                 "*IDN?",
+                "*OPT?",
                 "INST?",
                 "FREQ:STAR?",
                 "FREQ:STOP?",

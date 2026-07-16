@@ -6,5 +6,22 @@ from app.devices.anritsu.adapter import (
     SpectrumConfig,
     SpectrumTrace,
 )
+from app.devices.anritsu.hardware import (
+    ANRITSU_FREQUENCY_OPTIONS,
+    ANRITSU_PREAMPLIFIER_OPTIONS,
+    AnritsuFrequencyOption,
+    frequency_option_for,
+    parse_anritsu_option_response,
+)
 
-__all__ = ["AnritsuAdapter", "AnritsuConfigurationSnapshot", "SpectrumConfig", "SpectrumTrace"]
+__all__ = [
+    "ANRITSU_FREQUENCY_OPTIONS",
+    "ANRITSU_PREAMPLIFIER_OPTIONS",
+    "AnritsuAdapter",
+    "AnritsuConfigurationSnapshot",
+    "AnritsuFrequencyOption",
+    "SpectrumConfig",
+    "SpectrumTrace",
+    "frequency_option_for",
+    "parse_anritsu_option_response",
+]

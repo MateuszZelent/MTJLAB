@@ -385,6 +385,8 @@ class AnritsuSimulator(_BaseSimulator):
     def _query(self, command: str) -> str:
         if command == "*IDN?":
             return "ANRITSU,MS2830A,SIM000001,sim-1.0"
+        if command == "*OPT?":
+            return "041,008"
         if command == "*OPC?":
             return "1"
         if command == "FORM?":
