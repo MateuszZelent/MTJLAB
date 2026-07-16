@@ -752,17 +752,25 @@ class MainWindowTests(unittest.TestCase):
             window.close()
             self.application.processEvents()
 
-    def test_anritsu_live_requests_continuous_sweep_and_reports_frozen_frames(self) -> None:
+    def test_anritsu_live_uses_passive_polling_and_reports_frozen_frames(self) -> None:
         window = MainWindow(".config/settings.yml", simulation=True)
         try:
             anritsu = window.anritsu_page
             anritsu._controller.call = Mock()
+            self.assertEqual(anritsu.refresh.minimum(), 10)
 
             anritsu.toggle_live()
 
-            anritsu._controller.call.assert_called_once_with("start_live", True)
+            anritsu._controller.call.assert_called_once_with("start_live", False)
+            self.assertTrue(anritsu._live_transition_pending)
+            self.assertEqual(anritsu.live_indicator.property("liveState"), "starting")
+            anritsu.toggle_live()
+            anritsu._controller.call.assert_called_once_with("start_live", False)
             snapshot = AnritsuConfigurationSnapshot(1e6, 2e6, 0.0, 101, "SPECT")
             anritsu._result("start_live", snapshot)
+            self.assertFalse(anritsu._live_transition_pending)
+            self.assertFalse(anritsu.single.isEnabled())
+            self.assertEqual(anritsu.live_indicator.property("liveState"), "on")
             trace = SpectrumTrace(
                 (1e6, 2e6), (-50.0, -40.0), datetime.now(timezone.utc), "TRAC1"
             )
@@ -770,9 +778,18 @@ class MainWindowTests(unittest.TestCase):
                 anritsu._result("fetch_current_trace", trace)
 
             self.assertEqual(anritsu._live_frame_count, 4)
+            self.assertIn("FRAME 4", anritsu.live_indicator.text())
             self.assertEqual(anritsu._identical_live_frames, 3)
             self.assertIn("unchanged ×3", anritsu.info.text())
             self.assertFalse(anritsu.banner.isHidden())
+            anritsu._controller.call.reset_mock()
+            anritsu.toggle_live()
+            anritsu._controller.call.assert_called_once_with("stop_live")
+            self.assertEqual(anritsu.live_indicator.property("liveState"), "stopping")
+            anritsu._result("stop_live", None)
+            self.assertTrue(anritsu.single.isEnabled())
+            self.assertEqual(anritsu.live.text(), "Start Live")
+            self.assertEqual(anritsu.live_indicator.property("liveState"), "off")
         finally:
             window.close()
             self.application.processEvents()

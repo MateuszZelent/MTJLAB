@@ -239,12 +239,12 @@ class AnritsuAdapter(DeviceAdapter):
             )
         if ensure_continuous:
             session = self._require_session()
-            trace_mode = session.query("TRAC:TYPE?").strip().upper()
-            if not trace_mode.startswith("WRIT"):
-                raise DeviceError(
-                    f"Live requires Trace A Write mode, but TRAC:TYPE? returned "
-                    f"{trace_mode!r}. Select Write for Trace A on the instrument."
-                )
+            # Do not probe TRAC:TYPE? here. Although documented for Spectrum
+            # Analyzer mode, MS2830A firmware can leave the query unanswered
+            # in measurement applications where trace-type control is not
+            # available (for example SEM/Spurious contexts). Reading TRAC1
+            # does not require this query; repeated identical frames are
+            # detected by the UI and reported without breaking Live.
             continuous_response = session.query("INIT:CONT?").strip().upper()
             if continuous_response in {"1", "+1", "ON"}:
                 continuous = True

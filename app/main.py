@@ -95,6 +95,9 @@ QLabel#keithleyComplianceClear { color: #38d996; background: #173227; border-rad
 QLabel#keithleyComplianceActive { color: #ff657a; background: #3a1b24; border-radius: 6px; padding: 5px 8px; font-weight: 700; }
 QTabWidget#keithleyControlTabs > QTabBar::tab { padding: 10px 15px; }
 QFrame#anritsuProcessingCard { background: #151f2b; border: 1px solid #30455b; border-radius: 10px; padding: 9px; }
+QLabel#anritsuLiveIndicator { color: #91a0b2; background: #18212c; border: 1px solid #344659; border-radius: 10px; padding: 5px 10px; font-size: 9pt; font-weight: 700; }
+QLabel#anritsuLiveIndicator[liveState="on"] { color: #38d996; background: #173227; border-color: #28634d; }
+QLabel#anritsuLiveIndicator[liveState="starting"], QLabel#anritsuLiveIndicator[liveState="stopping"], QLabel#anritsuLiveIndicator[liveState="paused"] { color: #ffcc66; background: #302817; border-color: #76561b; }
 QWidget#anritsuControlPanel { background: #121a24; border-radius: 10px; }
 QSplitter#anritsuWorkspaceSplitter::handle { background: #26384a; width: 5px; margin: 4px 1px; border-radius: 2px; }
 QLabel#limitBadge { color: #9ecbff; background: #17283a; border: 1px solid #31506d; border-radius: 6px; padding: 6px; font-family: Consolas; font-size: 9pt; }
@@ -198,6 +201,9 @@ QLabel#keithleyComplianceClear { color: #087f5b; background: #dff5eb; border-rad
 QLabel#keithleyComplianceActive { color: #b4233a; background: #fde7eb; border-radius: 6px; padding: 5px 8px; font-weight: 700; }
 QTabWidget#keithleyControlTabs > QTabBar::tab { padding: 10px 15px; }
 QFrame#anritsuProcessingCard { background: #ffffff; border: 1px solid #c8d3df; border-radius: 10px; padding: 9px; }
+QLabel#anritsuLiveIndicator { color: #607284; background: #eef3f8; border: 1px solid #c8d3df; border-radius: 10px; padding: 5px 10px; font-size: 9pt; font-weight: 700; }
+QLabel#anritsuLiveIndicator[liveState="on"] { color: #087f5b; background: #dff5eb; border-color: #9bd8bf; }
+QLabel#anritsuLiveIndicator[liveState="starting"], QLabel#anritsuLiveIndicator[liveState="stopping"], QLabel#anritsuLiveIndicator[liveState="paused"] { color: #765500; background: #fff2c7; border-color: #e2c66f; }
 QWidget#anritsuControlPanel { background: #f8fafc; border-radius: 10px; }
 QSplitter#anritsuWorkspaceSplitter::handle { background: #c8d3df; width: 5px; margin: 4px 1px; border-radius: 2px; }
 QLabel#limitBadge { color: #174f7a; background: #e4f1fb; border: 1px solid #a9c9e2; border-radius: 6px; padding: 6px; font-family: Consolas; font-size: 9pt; }

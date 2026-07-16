@@ -295,7 +295,6 @@ class AdapterAndRunnerTests(unittest.TestCase):
                 "FREQ:STOP?": "2000000",
                 "DISP:WIND:TRAC:Y:RLEV?": "0",
                 "SWE:POIN?": "101",
-                "TRAC:TYPE?": "WRIT",
                 "INIT:CONT?": "0",
             }
         )
@@ -308,10 +307,11 @@ class AdapterAndRunnerTests(unittest.TestCase):
         adapter.start_live(ensure_continuous=True)
         adapter.stop_live()
 
+        self.assertNotIn("TRAC:TYPE?", session.writes)
         self.assertIn("INIT:CONT ON", session.writes)
         self.assertIn("INIT:CONT OFF", session.writes)
 
-    def test_anritsu_live_rejects_frozen_view_trace(self) -> None:
+    def test_anritsu_live_does_not_depend_on_trace_type_query(self) -> None:
         session = FakeVisaSession(
             responses={
                 "*IDN?": "ANRITSU,MS2830A,123456,1.0",
@@ -321,7 +321,7 @@ class AdapterAndRunnerTests(unittest.TestCase):
                 "FREQ:STOP?": "2000000",
                 "DISP:WIND:TRAC:Y:RLEV?": "0",
                 "SWE:POIN?": "101",
-                "TRAC:TYPE?": "VIEW",
+                "INIT:CONT?": "1",
             }
         )
         adapter = AnritsuAdapter(
@@ -330,9 +330,10 @@ class AdapterAndRunnerTests(unittest.TestCase):
         )
         adapter.connect()
 
-        with self.assertRaisesRegex(Exception, "Write mode"):
-            adapter.start_live(ensure_continuous=True)
+        adapter.start_live(ensure_continuous=True)
 
+        self.assertTrue(adapter.live)
+        self.assertNotIn("TRAC:TYPE?", session.writes)
         self.assertNotIn("INIT:CONT ON", session.writes)
 
     def test_anritsu_rejects_frequency_outside_the_approved_profile(self) -> None:

@@ -2569,6 +2569,7 @@ class AnritsuPage(QWidget):
         self._limit_fields: dict[str, LimitField] = {}
         self._single_sweep_configured = single_sweep_available
         self._fetch_pending = False
+        self._live_transition_pending = False
         self._latest_trace: SpectrumTrace | None = None
         self._averaged_trace: SpectrumTrace | None = None
         self._reference_trace: SpectrumTrace | None = None
@@ -2585,9 +2586,20 @@ class AnritsuPage(QWidget):
         layout = QVBoxLayout(self)
         self.banner = NotificationBanner()
         layout.addWidget(self.banner)
+        title_row = QHBoxLayout()
         title = QLabel("Anritsu MS2830A — Spectrum / Live")
         title.setObjectName("pageTitle")
-        layout.addWidget(title)
+        title_row.addWidget(title)
+        title_row.addStretch(1)
+        self.live_indicator = QLabel("●  LIVE OFF")
+        self.live_indicator.setObjectName("anritsuLiveIndicator")
+        self.live_indicator.setProperty("liveState", "off")
+        self.live_indicator.setToolTip(
+            "Confirmed Live acquisition state. The indicator changes to ON only after the "
+            "instrument accepts Live startup."
+        )
+        title_row.addWidget(self.live_indicator)
+        layout.addLayout(title_row)
         self.workspace_splitter = QSplitter(Qt.Orientation.Horizontal)
         self.workspace_splitter.setObjectName("anritsuWorkspaceSplitter")
         left_panel = QWidget()
@@ -2622,18 +2634,19 @@ class AnritsuPage(QWidget):
         self.points = QComboBox()
         self._refresh_point_choices(1001)
         self.refresh = QSpinBox()
-        self.refresh.setRange(100, 5000)
+        self.refresh.setRange(10, 5000)
         self.refresh.setValue(500)
         self.refresh.setSuffix(" ms")
-        self.ensure_continuous_live = QCheckBox("Temporarily ensure Continuous + Trace Write")
-        self.ensure_continuous_live.setChecked(True)
+        self.refresh.setToolTip(
+            "Requested Live polling interval: 10 ms to 5 s. The effective frame rate is "
+            "limited by the analyser sweep, VISA transfer and complete TRAC1 processing."
+        )
         for label, widget in (
             ("Start", self._anritsu_bounded("frequency", self.start)),
             ("Stop", self._anritsu_bounded("frequency", self.stop)),
             ("Reference level", self._anritsu_bounded("reference_level", self.reference)),
             ("Points", self.points),
             ("Live refresh interval", self.refresh),
-            ("Live acquisition", self.ensure_continuous_live),
         ):
             form.addRow(label, widget)
         left_layout.addLayout(form)
@@ -2755,7 +2768,6 @@ class AnritsuPage(QWidget):
         help_items = {
             self.read_configuration: "Read Start, Stop, Reference level, and Points from the connected analyser. This sends query commands only and never changes the instrument or approved safety limits.",
             self.single: "Read the currently displayed TRAC1 spectrum using SCPI queries only. This does not configure or trigger the analyser and does not require an approved safety profile.",
-            self.ensure_continuous_live: "When Start Live is pressed, verify Trace A is in Write mode and temporarily enable Continuous Sweep. If Continuous was initially OFF, Stop Live restores it to OFF.",
             self.average_count: "Number of complete spectra to average. 200 is common in the Thatec workflow. Averaging is performed in linear mW, not directly in dBm.",
             self.acquire_average: "Passively read N traces at the Live refresh interval and average power in linear mW. No analyser setting or trigger mode is changed.",
             self.cancel_average: "Stop temporal averaging. Already collected temporary frames are discarded; completed raw/reference data are unchanged.",
@@ -2842,7 +2854,7 @@ class AnritsuPage(QWidget):
             f"{default_sweep_text}. Zero Span: 1 us to 1000 s.\n"
             "Trace points: 11, 21, 41, 51, 101, 201, 251, 401, 501, 1001, 2001, "
             "5001, 10001 | Device averaging: 2 to 9999.\n"
-            "Application polling: 100 ms to 5 s | Application averaging: 1 to 9999. "
+            "Application polling: 10 ms to 5 s | Application averaging: 1 to 9999. "
             "Approved safety badges above may intentionally be stricter."
         )
         self._hardware_details_text = (
@@ -2877,14 +2889,42 @@ class AnritsuPage(QWidget):
         self._controller.call("read_configuration")
 
     def toggle_live(self) -> None:
+        if self._live_transition_pending:
+            return
         if self._timer.isActive():
             self._timer.stop()
+            self._live_transition_pending = True
+            self.live.setEnabled(False)
+            self.live.setText("Stopping…")
+            self._set_live_indicator("stopping")
             self._controller.call("stop_live")
-            self.live.setText("Start Live")
-            self.info.setText("Live stopped.")
             return
+        self._live_transition_pending = True
+        self.live.setEnabled(False)
+        self.single.setEnabled(False)
+        self.live.setText("Starting…")
+        self._set_live_indicator("starting")
         self._timer.setInterval(self.refresh.value())
-        self._controller.call("start_live", self.ensure_continuous_live.isChecked())
+        # Live is intentionally passive: do not alter sweep or trace modes.
+        # This is compatible with the same current-trace path used by the
+        # working one-shot read and avoids unsupported mode probes.
+        self._controller.call("start_live", False)
+
+    def _set_live_indicator(self, state: str, frame: int | None = None) -> None:
+        labels = {
+            "off": "●  LIVE OFF",
+            "starting": "●  LIVE STARTING…",
+            "on": "●  LIVE ON",
+            "paused": "●  LIVE PAUSED",
+            "stopping": "●  LIVE STOPPING…",
+        }
+        text = labels.get(state, labels["off"])
+        if state == "on" and frame is not None:
+            text += f"  •  FRAME {frame}"
+        self.live_indicator.setText(text)
+        self.live_indicator.setProperty("liveState", state)
+        self.live_indicator.style().unpolish(self.live_indicator)
+        self.live_indicator.style().polish(self.live_indicator)
 
     def fetch_live(self) -> None:
         if not self._fetch_pending:
@@ -2904,6 +2944,7 @@ class AnritsuPage(QWidget):
         self._resume_live_after_averaging = self._timer.isActive()
         if self._resume_live_after_averaging:
             self._timer.stop()
+            self._set_live_indicator("paused")
         self._averager.reset()
         self._averaging_active = True
         self._averaging_destination = destination
@@ -2932,7 +2973,8 @@ class AnritsuPage(QWidget):
         self.status.emit("Anritsu temporal averaging cancelled")
 
     def _finish_temporal_averaging(self, *, resume_live: bool) -> None:
-        should_resume_live = self._resume_live_after_averaging and resume_live
+        was_live = self._resume_live_after_averaging
+        should_resume_live = was_live and resume_live
         self._averaging_active = False
         self._averaging_destination = None
         self._resume_live_after_averaging = False
@@ -2946,6 +2988,11 @@ class AnritsuPage(QWidget):
             self._timer.setInterval(self.refresh.value())
             self._timer.start()
             self.live.setText("Stop Live")
+            self._set_live_indicator("on", self._live_frame_count)
+        elif was_live:
+            self.live.setText("Start Live")
+            self.single.setEnabled(True)
+            self._set_live_indicator("off")
 
     def _request_next_average_frame(self) -> None:
         if not self._averaging_active or self._fetch_pending:
@@ -2998,19 +3045,27 @@ class AnritsuPage(QWidget):
             self._result("read_configuration", result)
             self.status.emit("Anritsu configured and verified by SCPI readback")
         elif operation == "start_live" and isinstance(result, AnritsuConfigurationSnapshot):
+            self._live_transition_pending = False
             self._result("read_configuration", result)
             self._live_frame_count = 0
             self._identical_live_frames = 0
             self._last_live_signature = None
             self._timer.start()
+            self.live.setEnabled(True)
+            self.single.setEnabled(False)
             self.live.setText("Stop Live")
-            mode = (
-                "continuous sweep verified"
-                if self.ensure_continuous_live.isChecked()
-                else "passive current-trace polling"
-            )
+            self._set_live_indicator("on", 0)
+            mode = "passive current-trace polling"
             self.info.setText(f"Live started; {mode}. Waiting for first frame...")
             self.status.emit(f"Anritsu Live started: {mode}")
+        elif operation == "stop_live":
+            self._live_transition_pending = False
+            self.live.setEnabled(True)
+            self.single.setEnabled(True)
+            self.live.setText("Start Live")
+            self._set_live_indicator("off")
+            self.info.setText("Live stopped.")
+            self.status.emit("Anritsu Live stopped")
         elif operation in {"fetch_trace", "fetch_current_trace", "single_sweep"} and isinstance(result, SpectrumTrace):
             self._fetch_pending = False
             if self._averaging_active:
@@ -3069,6 +3124,7 @@ class AnritsuPage(QWidget):
         live_detail = ""
         if self._timer.isActive():
             self._live_frame_count += 1
+            self._set_live_indicator("on", self._live_frame_count)
             signature = hash(trace.powers_dbm)
             if signature == self._last_live_signature:
                 self._identical_live_frames += 1
@@ -3152,8 +3208,12 @@ class AnritsuPage(QWidget):
             "read_configuration", "configure", "start_live", "fetch_trace", "fetch_current_trace",
             "single_sweep", "emergency_off",
         }:
+            self._live_transition_pending = False
             self._timer.stop()
+            self.live.setEnabled(True)
+            self.single.setEnabled(True)
             self.live.setText("Start Live")
+            self._set_live_indicator("off")
             QMessageBox.warning(self, "Anritsu", error)
 
 
