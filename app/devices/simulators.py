@@ -364,6 +364,8 @@ class AnritsuSimulator(_BaseSimulator):
         self.stop_hz = 10e6
         self.points = 1001
         self.reference_level = 0.0
+        self.continuous_sweep = True
+        self.trace_frame = 0
 
     def _write(self, command: str) -> None:
         match = re.match(r"^FREQ:(STAR|STOP)\s+([+-]?[\d.eE]+)HZ$", command, re.IGNORECASE)
@@ -381,6 +383,10 @@ class AnritsuSimulator(_BaseSimulator):
         match = re.match(r"^DISP:WIND:TRAC:Y:RLEV\s+([+-]?[\d.eE]+)$", command, re.IGNORECASE)
         if match:
             self.reference_level = float(match.group(1))
+            return
+        match = re.match(r"^INIT:CONT\s+(ON|OFF|1|0)$", command, re.IGNORECASE)
+        if match:
+            self.continuous_sweep = match.group(1).upper() in {"ON", "1"}
 
     def _query(self, command: str) -> str:
         if command == "*IDN?":
@@ -393,6 +399,10 @@ class AnritsuSimulator(_BaseSimulator):
             return "ASC,0"
         if command == "INST?":
             return "SPECT"
+        if command == "TRAC:TYPE?":
+            return "WRIT"
+        if command == "INIT:CONT?":
+            return "1" if self.continuous_sweep else "0"
         if command == "FREQ:STAR?":
             return f"{self.start_hz:.12g}"
         if command == "FREQ:STOP?":
@@ -402,13 +412,15 @@ class AnritsuSimulator(_BaseSimulator):
         if command == "DISP:WIND:TRAC:Y:RLEV?":
             return f"{self.reference_level:.12g}"
         if command.startswith("TRAC? "):
+            if self.continuous_sweep:
+                self.trace_frame += 1
             center = (self.start_hz + self.stop_hz) / 2
             span = max(self.stop_hz - self.start_hz, 1.0)
             values = []
             for index in range(self.points):
                 frequency = self.start_hz + span * index / (self.points - 1)
                 peak = 35 * math.exp(-((frequency - center) / (span / 12)) ** 2)
-                ripple = 2 * math.sin(index / 25)
+                ripple = 2 * math.sin(index / 25 + self.trace_frame / 7)
                 values.append(f"{-80 + peak + ripple:.8g}")
             return ",".join(values)
         raise DeviceError(f"Anritsu simulator: nieobsługiwane zapytanie {command!r}.")

@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 import math
+import time
 from copy import deepcopy
+from dataclasses import astuple
 from pathlib import Path
 from typing import Any
 
@@ -1674,29 +1676,62 @@ class KeithleyPage(QWidget):
         self._limit_fields: dict[str, LimitField] = {}
         self._output_states = {"A": False, "B": False}
         self._pending_channels: dict[str, str] = {}
+        self._pending_config_modes: dict[str, str] = {}
+        self._configured_channels: set[str] = set()
+        self._auto_enable_channel: str | None = None
+        self._confirmed_output_settings: dict[str, tuple[object, ...]] = {}
+        self._pending_output_signature: tuple[object, ...] | None = None
         self._measure_pending = False
         self._live_next_channel = "A"
+        self._history_started_at = time.monotonic()
+        self._history_window_s = 30.0
+        self._measurement_history: dict[str, list[dict[str, float]]] = {"A": [], "B": []}
+        self.history_widgets: dict[str, dict[str, object]] = {}
+        self._armed_until_ui = 0.0
         self._live_timer = QTimer(self)
         self._live_timer.setInterval(1000)
         self._live_timer.timeout.connect(self._request_live_measurement)
+        self._arm_timer = QTimer(self)
+        self._arm_timer.setInterval(200)
+        self._arm_timer.timeout.connect(self._update_arm_status)
         layout = QVBoxLayout(self)
         self.banner = NotificationBanner()
         layout.addWidget(self.banner)
-        layout.setContentsMargins(16, 14, 16, 14)
-        layout.setSpacing(12)
+        layout.setContentsMargins(10, 8, 10, 8)
+        layout.setSpacing(8)
         hero = QFrame()
         hero.setObjectName("keithleyHero")
         hero_layout = QHBoxLayout(hero)
         title = QLabel("Keithley 2600 — Dual-channel SMU")
-        title.setObjectName("pageTitle")
+        title.setObjectName("keithleyPageTitle")
         hero_layout.addWidget(title)
         hero_layout.addStretch(1)
+        self.live_measurements = QCheckBox("Live A/B")
+        self.live_measurements.setToolTip(
+            "Alternately measures channels A and B. This never enables an output."
+        )
+        self.live_interval = QSpinBox()
+        self.live_interval.setRange(100, 60_000)
+        self.live_interval.setValue(1000)
+        self.live_interval.setSuffix(" ms")
+        self.live_interval.setFixedWidth(108)
+        self.live_interval.setToolTip(
+            "Interval between alternating A/B measurements. Each channel is sampled every "
+            "approximately two intervals when both are enabled."
+        )
+        self.last_update = QLabel("No measurements yet")
+        self.last_update.setObjectName("keithleyLastUpdate")
+        self.last_update.setMinimumWidth(150)
+        hero_layout.addWidget(self.live_measurements)
+        hero_layout.addWidget(self.live_interval)
+        hero_layout.addWidget(self.last_update)
         self.device_led = QLabel("●")
         self.device_led.setObjectName("keithleyLed")
         self.device_state = QLabel("DISCONNECTED")
         self.device_state.setObjectName("keithleyState")
         hero_layout.addWidget(self.device_led)
         hero_layout.addWidget(self.device_state)
+        hero.setMaximumHeight(60)
         layout.addWidget(hero)
         channel_grid = QGridLayout()
         channel_grid.setSpacing(12)
@@ -1704,14 +1739,16 @@ class KeithleyPage(QWidget):
         for column, channel_name in enumerate(("A", "B")):
             channel_grid.addWidget(self._build_channel_card(channel_name), 0, column)
         layout.addLayout(channel_grid)
-        self.control_tabs = QTabWidget()
-        self.control_tabs.setObjectName("keithleyControlTabs")
         source_tab = QWidget()
         source_layout = QVBoxLayout(source_tab)
+        source_layout.setContentsMargins(8, 6, 8, 6)
+        source_layout.setSpacing(6)
         source_title = QLabel("Source and measurement configuration")
         source_title.setObjectName("sectionTitle")
         source_layout.addWidget(source_title)
         form = QFormLayout()
+        form.setVerticalSpacing(4)
+        form.setHorizontalSpacing(8)
         self.channel = QComboBox()
         self.channel.addItems(["A", "B"])
         self.channel.setCurrentText("B")
@@ -1753,41 +1790,51 @@ class KeithleyPage(QWidget):
             form.addRow(label, widget)
         self.keithley_form = form
         source_layout.addLayout(form)
-        buttons = QHBoxLayout()
-        self.configure_button = QPushButton("Configure current source while OUTPUT is OFF")
-        self.configure_button.setObjectName("primaryButton")
-        measure = QPushButton("Measure selected channel")
-        arm = QPushButton("ARM (30 s)")
-        on = QPushButton("OUTPUT ON")
-        on.setObjectName("outputOnButton")
-        off = QPushButton("Ramp to zero + OFF")
-        off.setObjectName("outputOffButton")
-        for button in (self.configure_button, measure, arm, on, off):
-            buttons.addWidget(button)
-        source_layout.addLayout(buttons)
-        live_bar = QHBoxLayout()
-        self.live_measurements = QCheckBox("Live readout for channels A and B")
-        self.live_measurements.setToolTip(
-            "Alternately measures channels A and B every second. This never enables an output."
+        workflow = QFrame()
+        workflow.setObjectName("keithleyOutputWorkflow")
+        workflow_layout = QVBoxLayout(workflow)
+        workflow_layout.setContentsMargins(7, 5, 7, 5)
+        self.output_readiness = QLabel()
+        self.output_readiness.setWordWrap(True)
+        self.output_readiness.setObjectName("keithleyInterlockStatus")
+        self.output_readiness.setToolTip(
+            "OUTPUT interlock status. All checks must pass before a channel can be enabled."
         )
-        live_bar.addWidget(self.live_measurements)
-        live_bar.addStretch(1)
-        self.last_update = QLabel("No measurements yet")
-        self.last_update.setObjectName("muted")
-        live_bar.addWidget(self.last_update)
-        source_layout.addLayout(live_bar)
-        self.readout = QLabel("Select Measure or enable Live readout")
-        self.readout.setObjectName("readout")
-        source_layout.addWidget(self.readout)
+        workflow_layout.addWidget(self.output_readiness)
+        source_layout.addWidget(workflow)
+        buttons = QHBoxLayout()
+        measure = QPushButton("Measure selected channel")
+        self.output_toggle = QPushButton("OUTPUT OFF")
+        self.output_toggle.setCheckable(True)
+        self.output_toggle.setObjectName("outputOffButton")
+        self.output_toggle.setVisible(False)
+        buttons.addWidget(measure)
+        source_layout.addLayout(buttons)
+        self.readout = QLabel()
+        self.readout.hide()
         source_layout.addStretch(1)
-        self.control_tabs.addTab(self._scroll_widget(source_tab), "Control & ranges")
-        layout.addWidget(self.control_tabs, 1)
-        self.configure_button.clicked.connect(self.configure)
+        source_scroll = self._scroll_widget(source_tab)
+        source_scroll.setObjectName("keithleyControlPanel")
+        source_scroll.setMinimumWidth(610)
+        history_tab = QWidget()
+        history_layout = QHBoxLayout(history_tab)
+        history_layout.setContentsMargins(6, 0, 0, 0)
+        history_layout.setSpacing(8)
+        for channel_name in ("A", "B"):
+            history_layout.addWidget(self._build_keithley_history_panel(channel_name), 1)
+        self.workspace_splitter = QSplitter(Qt.Orientation.Horizontal)
+        self.workspace_splitter.setObjectName("keithleyWorkspace")
+        self.workspace_splitter.addWidget(source_scroll)
+        self.workspace_splitter.addWidget(history_tab)
+        self.workspace_splitter.setStretchFactor(0, 3)
+        self.workspace_splitter.setStretchFactor(1, 5)
+        self.workspace_splitter.setSizes([680, 1140])
+        self.workspace_splitter.setChildrenCollapsible(False)
+        layout.addWidget(self.workspace_splitter, 1)
         measure.clicked.connect(self.request_measurement)
-        arm.clicked.connect(self.arm_output)
-        on.clicked.connect(self.request_output)
-        off.clicked.connect(self.request_ramp_off)
+        self.output_toggle.toggled.connect(self._output_toggled)
         self.live_measurements.toggled.connect(self._toggle_live_measurements)
+        self.live_interval.valueChanged.connect(self._live_timer.setInterval)
         controller.result.connect(self._result)
         controller.error.connect(self._error)
         controller.state_changed.connect(self._device_state_changed)
@@ -1803,12 +1850,10 @@ class KeithleyPage(QWidget):
         self.channel.currentTextChanged.connect(self._selected_channel_changed)
         self._selected_channel_changed(self.channel.currentText())
         self._update_source_mode_ui()
+        self._update_output_readiness()
         self._install_keithley_help(
-            configure=self.configure_button,
             measure=measure,
-            arm=arm,
-            output_on=on,
-            output_off=off,
+            output_toggle=self.output_toggle,
         )
 
     @staticmethod
@@ -1819,14 +1864,83 @@ class KeithleyPage(QWidget):
         scroll.setWidget(content)
         return scroll
 
+    def _build_keithley_history_panel(self, channel: str) -> QFrame:
+        panel = QFrame()
+        panel.setObjectName("keithleyChannelCard")
+        panel_layout = QVBoxLayout(panel)
+        panel_layout.setContentsMargins(7, 6, 7, 6)
+        panel_layout.setSpacing(4)
+        header = QHBoxLayout()
+        title = QLabel(f"CHANNEL {channel} — rolling 30 s history")
+        title.setObjectName("keithleyHistoryTitle")
+        metric = QComboBox()
+        metric.addItem("DC resistance |V/I|", ("resistance", "Resistance", "Ω"))
+        metric.addItem("Voltage", ("voltage", "Voltage", "V"))
+        metric.addItem("Current", ("current", "Current", "A"))
+        metric.addItem("Power V×I", ("power", "Power", "W"))
+        clear = QPushButton("Clear history")
+        clear.setProperty("compact", True)
+        metric.setFixedHeight(28)
+        clear.setFixedHeight(28)
+        header.addWidget(title)
+        header.addStretch(1)
+        header.addWidget(metric)
+        header.addWidget(clear)
+        panel_layout.addLayout(header)
+        note = QLabel("ROLLING 30 s  •  DC resistance |V/I|  •  not complex impedance")
+        note.setObjectName("keithleyHistoryNote")
+        panel_layout.addWidget(note)
+        plot = SpectrumPlotWidget(legend=False, compact_toolbar=True)
+        plot.setMinimumHeight(220)
+        plot.set_title(f"Channel {channel} — DC resistance")
+        plot.set_labels(x="Elapsed time", x_unit="s", y="Resistance", y_unit="Ω")
+        plot.status_changed.connect(self.status.emit)
+        panel_layout.addWidget(plot, 1)
+        self.history_widgets[channel] = {"plot": plot, "metric": metric, "clear": clear}
+        metric.currentIndexChanged.connect(
+            lambda _index, selected=channel: self._refresh_keithley_history_plot(selected)
+        )
+        clear.clicked.connect(
+            lambda _checked=False, selected=channel: self._clear_keithley_history(selected)
+        )
+        return panel
+
+    def _refresh_keithley_history_plot(self, channel: str) -> None:
+        controls = self.history_widgets[channel]
+        plot = controls["plot"]
+        metric = controls["metric"]
+        if not isinstance(plot, SpectrumPlotWidget) or not isinstance(metric, QComboBox):
+            return
+        key, caption, unit = metric.currentData()
+        history = self._measurement_history[channel]
+        plot.set_title(f"Channel {channel} — {caption}")
+        plot.set_labels(x="Elapsed time", x_unit="s", y=caption, y_unit=unit)
+        plot.set_trace(
+            f"CH {channel} {caption}",
+            [point["elapsed_s"] for point in history],
+            [point[key] for point in history],
+            color="#00a67d" if channel == "A" else "#2196f3",
+            primary=True,
+        )
+
+    def _clear_keithley_history(self, channel: str) -> None:
+        self._measurement_history[channel].clear()
+        plot = self.history_widgets[channel]["plot"]
+        if isinstance(plot, SpectrumPlotWidget):
+            plot.clear()
+        self.status.emit(f"Keithley CH {channel} measurement history cleared")
+
     def _build_channel_card(self, channel: str) -> QFrame:
         card = QFrame()
         card.setObjectName("keithleyChannelCard")
         card.setProperty("selected", False)
+        card.setMaximumHeight(154)
         card_layout = QVBoxLayout(card)
+        card_layout.setContentsMargins(8, 6, 8, 6)
+        card_layout.setSpacing(4)
         header = QHBoxLayout()
         name = QLabel(f"CHANNEL {channel}")
-        name.setObjectName("cardTitle")
+        name.setObjectName("keithleyCardTitle")
         led = QLabel("●")
         led.setObjectName("keithleyOutputLed")
         output = QLabel("OUTPUT OFF")
@@ -1848,27 +1962,39 @@ class KeithleyPage(QWidget):
             tile = QFrame()
             tile.setObjectName("keithleyMeterTile")
             tile_layout = QVBoxLayout(tile)
-            tile_layout.setContentsMargins(10, 7, 10, 7)
+            tile_layout.setContentsMargins(7, 3, 7, 3)
+            tile_layout.setSpacing(1)
             caption_label = QLabel(caption)
             caption_label.setObjectName("muted")
             value = QLabel(f"— {unit}")
             value.setObjectName("keithleyMeterValue")
             tile_layout.addWidget(caption_label)
             tile_layout.addWidget(value)
-            meters.addWidget(tile, index // 2, index % 2)
+            meters.addWidget(tile, 0, index)
             values[key] = value
         card_layout.addLayout(meters)
         footer = QHBoxLayout()
         compliance = QLabel("COMPLIANCE: clear")
         compliance.setObjectName("keithleyComplianceClear")
         select = QPushButton(f"Select CH {channel}")
+        select.setProperty("compact", True)
         select.clicked.connect(lambda _checked=False, ch=channel: self.channel.setCurrentText(ch))
         measure = QPushButton(f"Measure CH {channel}")
+        measure.setProperty("compact", True)
         measure.clicked.connect(lambda _checked=False, ch=channel: self.request_measurement(ch))
+        output_action = QPushButton("OUTPUT OFF")
+        output_action.setProperty("compact", True)
+        output_action.setObjectName("outputOffButton")
+        output_action.clicked.connect(
+            lambda _checked=False, ch=channel: self._request_channel_output(ch)
+        )
         footer.addWidget(compliance)
         footer.addStretch(1)
         footer.addWidget(select)
         footer.addWidget(measure)
+        footer.addWidget(output_action)
+        for button in (select, measure, output_action):
+            button.setFixedHeight(28)
         card_layout.addLayout(footer)
         self.channel_cards[channel] = {
             "card": card,
@@ -1877,6 +2003,7 @@ class KeithleyPage(QWidget):
             "compliance": compliance,
             "select": select,
             "measure": measure,
+            "output_action": output_action,
             **values,
         }
         return card
@@ -1892,11 +2019,8 @@ class KeithleyPage(QWidget):
     def _install_keithley_help(
         self,
         *,
-        configure: QPushButton,
         measure: QPushButton,
-        arm: QPushButton,
-        output_on: QPushButton,
-        output_off: QPushButton,
+        output_toggle: QPushButton,
     ) -> None:
         help_items = {
             self.channel: ("Channel", "Selects SMU channel A or B. Both channels are electrically independent and have separate source values, measurements and safety limits."),
@@ -1912,11 +2036,8 @@ class KeithleyPage(QWidget):
             self.measure_voltage_range: ("Voltage measurement range", "Fixed voltage measurement range used only when voltage autorange is disabled. It is not Voltage compliance and does not energize the output."),
             self.measure_current_autorange: ("Current measurement autorange", "Automatically selects the current measurement range. It changes measurement range, not the sourced current or compliance."),
             self.measure_current_range: ("Current measurement range", "Fixed current measurement range used only when current autorange is disabled. It is not Current compliance."),
-            configure: ("Configure safely", "Validates source, compliance, ranges, NPLC and sensing, then programs the selected channel while OUTPUT is forced OFF."),
             measure: ("Measure selected channel", "Reads voltage and current from the selected SMU channel. Power and resistance shown in the cards are calculated from those I/V readings."),
-            arm: ("ARM", "Creates a one-use 30-second permission window for OUTPUT ON. ARM itself does not energize the terminals."),
-            output_on: ("OUTPUT ON", "Energizes the selected channel using its validated source and compliance settings. Requires prior configuration, approved safety profile, ARM and confirmation."),
-            output_off: ("Ramp to zero and OFF", "Moves the programmed source toward zero using profile-limited steps, then disables the selected output. This is safer than an abrupt change for sensitive DUTs."),
+            output_toggle: ("OUTPUT ON/OFF", "ON validates and confirms the visible source settings, configures the channel with OUTPUT OFF, performs the internal safety unlock and then energizes the terminals. OFF immediately starts the safe ramp-to-zero and disables the output."),
             self.live_measurements: ("Live readout", "Alternately requests I/V readings from enabled channels every second. It never enables an output, but it does generate continuous instrument traffic."),
             self.device_led: ("Keithley connection state", "Grey means disconnected, green verified/output-safe, amber energized and red indicates compliance, fault or unknown state."),
             self.device_state: ("Device state", "Connection and safety state reported by the Keithley adapter. This is separate from the individual A/B output indicators."),
@@ -1935,9 +2056,10 @@ class KeithleyPage(QWidget):
             self._set_help(card["compliance"], "Compliance indicator", "ACTIVE means the measured opposite quantity reached the programmed compliance threshold. The safety policy may immediately disable outputs.")
             self._set_help(card["select"], f"Select channel {channel}", "Makes this channel active in the configuration form without changing its electrical output.")
             self._set_help(card["measure"], f"Measure channel {channel}", "Requests one voltage/current reading for this channel without enabling its output.")
-        self.control_tabs.setTabToolTip(
-            0,
-            "Source mode, programmed source value, compliance protection, integration time, wiring and source/measurement ranges.",
+            self._set_help(card["output_action"], f"Channel {channel} OUTPUT", "Enables or disables this channel. Enabling validates and confirms the visible source settings before energizing the terminals; disabling ramps safely to zero.")
+        self.workspace_splitter.setToolTip(
+            "Source controls and independent A/B time histories remain visible together. "
+            "Resistance is derived as |V/I| and is not complex AC impedance."
         )
 
     def _selected_channel_changed(self, selected: str) -> None:
@@ -1946,6 +2068,48 @@ class KeithleyPage(QWidget):
             card.setProperty("selected", channel == selected)
             card.style().unpolish(card)
             card.style().polish(card)
+        self.output_toggle.blockSignals(True)
+        self.output_toggle.setChecked(self._output_states[selected])
+        self.output_toggle.blockSignals(False)
+        self._style_output_toggle(self._output_states[selected])
+        self._update_output_readiness()
+
+    def _output_prerequisites(self) -> tuple[bool, list[str]]:
+        channel = self.channel.currentText()
+        safety = self._station_settings.keithley.safety
+        checks = [
+            (not self._station_settings.outputs_locked, "profile approved"),
+            (safety.allow_output_enable, "Keithley output permission enabled"),
+            (safety.channels[channel].enabled, f"channel {channel} enabled"),
+            (self.device_state.text() != "DISCONNECTED", "device connected"),
+        ]
+        return all(value for value, _label in checks), [
+            f"{'✓' if value else '✕'} {label}" for value, label in checks
+        ]
+
+    def _update_output_readiness(self) -> None:
+        if not hasattr(self, "output_readiness"):
+            return
+        ready, checks = self._output_prerequisites()
+        self.output_readiness.setText("Output readiness: " + " • ".join(checks))
+        self.output_toggle.setEnabled(ready or self._output_states[self.channel.currentText()])
+        safety = self._station_settings.keithley.safety
+        common_ready = (
+            not self._station_settings.outputs_locked
+            and safety.allow_output_enable
+            and self.device_state.text() != "DISCONNECTED"
+        )
+        for channel, card in self.channel_cards.items():
+            card["output_action"].setEnabled(
+                self._output_states[channel] or (common_ready and safety.channels[channel].enabled)
+            )
+
+    def _update_arm_status(self) -> None:
+        remaining = self._armed_until_ui - time.monotonic()
+        if remaining <= 0:
+            self._armed_until_ui = 0.0
+            self._arm_timer.stop()
+        self._update_output_readiness()
 
     def _device_state_changed(self, state: str) -> None:
         normalized = state.upper()
@@ -1963,6 +2127,11 @@ class KeithleyPage(QWidget):
         if normalized == "DISCONNECTED":
             self._live_timer.stop()
             self.live_measurements.setChecked(False)
+            self._configured_channels.clear()
+            self._armed_until_ui = 0.0
+            self._arm_timer.stop()
+            self._output_states = {"A": False, "B": False}
+            self._reset_output_toggle()
             for channel in ("A", "B"):
                 widgets = self.channel_cards[channel]
                 widgets["output"].setText("OUTPUT UNKNOWN")
@@ -1971,6 +2140,7 @@ class KeithleyPage(QWidget):
             # Connection qualification explicitly forces and verifies both outputs OFF.
             self._set_channel_output("A", False)
             self._set_channel_output("B", False)
+        self._update_output_readiness()
 
     @staticmethod
     def _engineering(value: float, unit: str) -> str:
@@ -1986,7 +2156,7 @@ class KeithleyPage(QWidget):
         voltage = float(getattr(measurement, "voltage_v"))
         current = float(getattr(measurement, "current_a"))
         power = float(getattr(measurement, "power_w"))
-        resistance = voltage / current if abs(current) > 1e-15 else math.inf
+        resistance = abs(voltage / current) if abs(current) > 1e-15 else math.inf
         widgets = self.channel_cards[channel]
         widgets["voltage"].setText(self._engineering(voltage, "V"))
         widgets["current"].setText(self._engineering(current, "A"))
@@ -1999,13 +2169,42 @@ class KeithleyPage(QWidget):
         widgets["compliance"].style().polish(widgets["compliance"])
         if compliance:
             self._set_channel_output(channel, False)
-        self.last_update.setText(f"Last update: CH {channel}")
+        elapsed = time.monotonic() - self._history_started_at
+        history = self._measurement_history[channel]
+        history.append(
+            {
+                "elapsed_s": elapsed,
+                "voltage": voltage,
+                "current": current,
+                "resistance": resistance,
+                "power": power,
+            }
+        )
+        cutoff = elapsed - self._history_window_s
+        if cutoff > 0:
+            history[:] = [point for point in history if point["elapsed_s"] >= cutoff]
+        if len(history) > 2000:
+            del history[: len(history) - 2000]
+        self._refresh_keithley_history_plot(channel)
+        self.last_update.setText(
+            f"CH {channel}  •  {elapsed:.1f} s  •  {len(history)} pts"
+        )
 
     def _set_channel_output(self, channel: str, enabled: bool) -> None:
         self._output_states[channel] = enabled
         widgets = self.channel_cards[channel]
         widgets["output"].setText("OUTPUT ON" if enabled else "OUTPUT OFF")
         widgets["led"].setStyleSheet(f"color: {'#ffcc66' if enabled else '#38d996'};")
+        action = widgets["output_action"]
+        action.setText("OUTPUT ON" if enabled else "OUTPUT OFF")
+        action.setObjectName("outputOnButton" if enabled else "outputOffButton")
+        action.style().unpolish(action)
+        action.style().polish(action)
+        if channel == self.channel.currentText():
+            self.output_toggle.blockSignals(True)
+            self.output_toggle.setChecked(enabled)
+            self.output_toggle.blockSignals(False)
+            self._style_output_toggle(enabled)
 
     def request_measurement(self, channel: str | None = None) -> None:
         if self._measure_pending:
@@ -2015,13 +2214,24 @@ class KeithleyPage(QWidget):
         self._measure_pending = True
         self._controller.call("measure", selected)
 
+    def _request_channel_output(self, channel: str) -> None:
+        self.channel.setCurrentText(channel)
+        target_enabled = not self._output_states[channel]
+        action = self.channel_cards[channel]["output_action"]
+        action.setText("ENABLING…" if target_enabled else "DISABLING…")
+        action.setEnabled(False)
+        self._output_toggled(target_enabled)
+
     def request_ramp_off(self) -> None:
         channel = self.channel.currentText()
         self._pending_channels["ramp_to_zero"] = channel
+        self.output_toggle.setText("DISABLING…")
+        self.output_toggle.setEnabled(False)
         self._controller.call("ramp_to_zero", channel)
 
     def _toggle_live_measurements(self, enabled: bool) -> None:
         if enabled:
+            self._live_timer.setInterval(self.live_interval.value())
             self._request_live_measurement()
             self._live_timer.start()
         else:
@@ -2104,14 +2314,11 @@ class KeithleyPage(QWidget):
             self.keithley_form.labelForField(self.level_field).setText("Source current")
             self.keithley_form.labelForField(self.compliance_field).setText("Voltage compliance (safety limit)")
             self.keithley_form.labelForField(self.source_range_field).setText("Current source range")
-            self.configure_button.setText("Configure current source while OUTPUT is OFF")
         elif mode == "voltage":
             self.keithley_form.labelForField(self.level_field).setText("Source voltage")
             self.keithley_form.labelForField(self.compliance_field).setText("Current compliance (safety limit)")
             self.keithley_form.labelForField(self.source_range_field).setText("Voltage source range")
-            self.configure_button.setText("Configure voltage source while OUTPUT is OFF")
-        else:
-            self.configure_button.setText("Configure measurement-only mode (OUTPUT OFF)")
+        self._update_output_readiness()
 
     def _keithley_limit_values(self, key: str) -> tuple[object, object]:
         limits = self._station_settings.keithley.safety.channels[self.channel.currentText()].lab_limits
@@ -2142,6 +2349,11 @@ class KeithleyPage(QWidget):
     def _keithley_bounded(self, key: str, editor: QWidget) -> LimitField:
         field = LimitField(editor, *self._keithley_limit_values(key))
         field.setProperty("limitKey", key)
+        for badge in (field.minimum, field.maximum):
+            badge.setMinimumWidth(68)
+            badge.setProperty("keithleyCompact", True)
+        field.edit_button.setFixedSize(48, 28)
+        field.edit_button.setText("Edit")
         self._limit_fields[key] = field
         return field
 
@@ -2152,38 +2364,37 @@ class KeithleyPage(QWidget):
     def set_settings(self, settings: StationSettings) -> None:
         self._station_settings = settings
         self._refresh_keithley_limits()
+        self._update_output_readiness()
 
     def configure(self) -> None:
         try:
-            mode = self.mode.currentText()
-            level_dimension = DIMENSION_CURRENT if mode == "current" else DIMENSION_VOLTAGE
-            compliance_dimension = DIMENSION_VOLTAGE if mode == "current" else DIMENSION_CURRENT
-            request = KeithleySourceRequest(
-                channel=self.channel.currentText(),  # type: ignore[arg-type]
-                mode=mode,  # type: ignore[arg-type]
-                level_si=0.0 if mode == "measure_only" else parse_quantity(self.level.text(), level_dimension).si_value,
-                compliance_si=0.0 if mode == "measure_only" else parse_quantity(self.compliance.text(), compliance_dimension).si_value,
-                nplc=float(self.nplc.text().replace(",", ".")),
-                settle_time_s=parse_quantity(self.settle.text(), "time").si_value,
-                sense_mode=self.sense_mode.currentText(),  # type: ignore[arg-type]
-                source_autorange=self.source_autorange.isChecked(),
-                source_range_si=self._manual_range(
-                    self.source_range.text(), level_dimension, self.source_autorange.isChecked()
-                ),
-                measure_voltage_autorange=self.measure_voltage_autorange.isChecked(),
-                measure_voltage_range_si=self._manual_range(
-                    self.measure_voltage_range.text(), DIMENSION_VOLTAGE, self.measure_voltage_autorange.isChecked()
-                ),
-                measure_current_autorange=self.measure_current_autorange.isChecked(),
-                measure_current_range_si=self._manual_range(
-                    self.measure_current_range.text(), DIMENSION_CURRENT, self.measure_current_autorange.isChecked()
-                ),
-            )
+            request = self._source_request()
         except Exception as exc:
             self.banner.show_message(f"Invalid Keithley settings: {exc}")
             return
         self._pending_channels["configure"] = self.channel.currentText()
+        self._pending_config_modes[self.channel.currentText()] = request.mode
         self._controller.call("configure", request)
+
+    def _source_request(self) -> KeithleySourceRequest:
+        mode = self.mode.currentText()
+        level_dimension = DIMENSION_CURRENT if mode == "current" else DIMENSION_VOLTAGE
+        compliance_dimension = DIMENSION_VOLTAGE if mode == "current" else DIMENSION_CURRENT
+        return KeithleySourceRequest(
+            channel=self.channel.currentText(),  # type: ignore[arg-type]
+            mode=mode,  # type: ignore[arg-type]
+            level_si=0.0 if mode == "measure_only" else parse_quantity(self.level.text(), level_dimension).si_value,
+            compliance_si=0.0 if mode == "measure_only" else parse_quantity(self.compliance.text(), compliance_dimension).si_value,
+            nplc=float(self.nplc.text().replace(",", ".")),
+            settle_time_s=parse_quantity(self.settle.text(), "time").si_value,
+            sense_mode=self.sense_mode.currentText(),  # type: ignore[arg-type]
+            source_autorange=self.source_autorange.isChecked(),
+            source_range_si=self._manual_range(self.source_range.text(), level_dimension, self.source_autorange.isChecked()),
+            measure_voltage_autorange=self.measure_voltage_autorange.isChecked(),
+            measure_voltage_range_si=self._manual_range(self.measure_voltage_range.text(), DIMENSION_VOLTAGE, self.measure_voltage_autorange.isChecked()),
+            measure_current_autorange=self.measure_current_autorange.isChecked(),
+            measure_current_range_si=self._manual_range(self.measure_current_range.text(), DIMENSION_CURRENT, self.measure_current_autorange.isChecked()),
+        )
 
     @staticmethod
     def _manual_range(text: str, dimension: str, autorange: bool) -> float | None:
@@ -2194,30 +2405,71 @@ class KeithleyPage(QWidget):
             raise ValueError("Disable autorange before entering a manual range.")
         return parse_quantity(value, dimension).si_value
 
-    def arm_output(self) -> None:
+    def _output_toggled(self, enabled: bool) -> None:
         channel = self.channel.currentText()
-        answer = QMessageBox.question(
-            self,
-            "ARM Keithley",
-            f"Arm Keithley CH{channel} for 30 seconds? This does not enable the output yet.",
-            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.Cancel,
-        )
-        if answer == QMessageBox.StandardButton.Yes:
-            self._pending_channels["arm"] = channel
-            self._controller.call("arm", channel)
+        if not enabled:
+            self._style_output_toggle(False)
+            if self._output_states[channel]:
+                self.request_ramp_off()
+            return
+        ready, checks = self._output_prerequisites()
+        if not ready:
+            self.banner.show_message(
+                "OUTPUT cannot be enabled. Complete the missing readiness checks: "
+                + "; ".join(item for item in checks if item.startswith("✕")),
+                timeout_ms=15_000,
+            )
+            self._reset_output_toggle()
+            return
+        try:
+            request = self._source_request()
+        except Exception as exc:
+            self.banner.show_message(f"Invalid Keithley settings: {exc}")
+            self._reset_output_toggle()
+            return
+        if request.mode == "measure_only":
+            self.banner.show_message("Select Current or Voltage source mode before enabling OUTPUT.")
+            self._reset_output_toggle()
+            return
+        signature = astuple(request)
+        if self._confirmed_output_settings.get(channel) != signature:
+            source_name = "Current" if request.mode == "current" else "Voltage"
+            answer = QMessageBox.warning(
+                self, "Enable Keithley output",
+                f"Enable physical OUTPUT on channel {channel}?\n\n"
+                f"Mode: {source_name}\nSource: {self.level.text()}\n"
+                f"Compliance: {self.compliance.text()}\nSense: {self.sense_mode.currentText()}\n\n"
+                "The application will configure the channel safely and then energize the terminals.",
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.Cancel,
+                QMessageBox.StandardButton.Cancel,
+            )
+            if answer != QMessageBox.StandardButton.Yes:
+                self._reset_output_toggle()
+                return
+            self._pending_output_signature = signature
+        self._auto_enable_channel = channel
+        self._pending_channels["configure"] = channel
+        self._pending_config_modes[channel] = request.mode
+        self.output_toggle.setText("ENABLING…")
+        self.output_toggle.setEnabled(False)
+        self.status.emit(f"Keithley CH {channel}: validating and configuring before OUTPUT ON")
+        self._controller.call("configure", request)
 
-    def request_output(self) -> None:
+    def _reset_output_toggle(self) -> None:
+        self.output_toggle.blockSignals(True)
+        self.output_toggle.setChecked(False)
+        self.output_toggle.blockSignals(False)
+        self._style_output_toggle(False)
         channel = self.channel.currentText()
-        answer = QMessageBox.warning(
-            self,
-            "OUTPUT ON Keithley",
-            f"Enable the physical Keithley CH{channel} output? A valid ARM is required.",
-            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.Cancel,
-            QMessageBox.StandardButton.Cancel,
-        )
-        if answer == QMessageBox.StandardButton.Yes:
-            self._pending_channels["set_output"] = channel
-            self._controller.call("set_output", (channel, True))
+        if channel in self.channel_cards:
+            self._set_channel_output(channel, self._output_states[channel])
+            self._update_output_readiness()
+
+    def _style_output_toggle(self, enabled: bool) -> None:
+        self.output_toggle.setText("OUTPUT ON" if enabled else "OUTPUT OFF")
+        self.output_toggle.setObjectName("outputOnButton" if enabled else "outputOffButton")
+        self.output_toggle.style().unpolish(self.output_toggle)
+        self.output_toggle.style().polish(self.output_toggle)
 
     def _result(self, operation: str, result: object) -> None:
         if operation == "measure" and hasattr(result, "current_a"):
@@ -2232,22 +2484,70 @@ class KeithleyPage(QWidget):
             self.status.emit("Keithley measurement completed")
         elif operation == "configure":
             channel = self._pending_channels.pop("configure", self.channel.currentText())
+            mode = self._pending_config_modes.pop(channel, "measure_only")
+            if mode == "measure_only":
+                self._configured_channels.discard(channel)
+            else:
+                self._configured_channels.add(channel)
             self._set_channel_output(channel, False)
-            self.status.emit("Keithley configured while OUTPUT is OFF")
+            self._armed_until_ui = 0.0
+            self._update_arm_status()
+            self._update_output_readiness()
+            if self._auto_enable_channel == channel:
+                self._pending_channels["arm"] = channel
+                self.status.emit(f"Keithley CH {channel}: configuration accepted; applying safety unlock")
+                self._controller.call("arm", channel)
+            else:
+                self.status.emit(f"Keithley CH {channel} configured while OUTPUT is OFF")
         elif operation == "arm":
-            self.status.emit("Keithley armed for 30 seconds; OUTPUT ON requires separate confirmation")
+            self._armed_until_ui = float(result) if isinstance(result, (int, float)) else time.monotonic() + 30.0
+            self._arm_timer.start()
+            self._update_arm_status()
+            channel = self._pending_channels.pop("arm", self.channel.currentText())
+            if self._auto_enable_channel == channel:
+                self._pending_channels["set_output"] = channel
+                self.status.emit(f"Keithley CH {channel}: safety checks passed; enabling OUTPUT")
+                self._controller.call("set_output", (channel, True))
+            else:
+                self.status.emit("Keithley output unlocked internally; terminals remain OFF")
         elif operation == "set_output":
             channel = self._pending_channels.pop("set_output", self.channel.currentText())
             self._set_channel_output(channel, True)
+            if self._pending_output_signature is not None:
+                self._confirmed_output_settings[channel] = self._pending_output_signature
+            self._pending_output_signature = None
+            self._auto_enable_channel = None
+            self._armed_until_ui = 0.0
+            self._update_arm_status()
             self.status.emit(f"Keithley CH {channel} OUTPUT ON")
         elif operation == "ramp_to_zero":
             channel = self._pending_channels.pop("ramp_to_zero", self.channel.currentText())
             self._set_channel_output(channel, False)
+            self._auto_enable_channel = None
+            self._armed_until_ui = 0.0
+            self._update_arm_status()
             self.status.emit(f"Keithley CH {channel} ramped to zero; OUTPUT OFF")
 
     def _error(self, operation: str, error: str) -> None:
         if operation == "measure":
             self._measure_pending = False
+        if operation == "configure":
+            channel = self._pending_channels.pop("configure", self.channel.currentText())
+            self._pending_config_modes.pop(channel, None)
+        if operation in {"arm", "set_output"}:
+            self._armed_until_ui = 0.0
+            self._update_arm_status()
+        if operation in {"configure", "arm", "set_output", "ramp_to_zero"}:
+            self._auto_enable_channel = None
+            self._pending_output_signature = None
+            if operation == "ramp_to_zero" and self._output_states[self.channel.currentText()]:
+                self.output_toggle.blockSignals(True)
+                self.output_toggle.setChecked(True)
+                self.output_toggle.blockSignals(False)
+                self._style_output_toggle(True)
+            else:
+                self._reset_output_toggle()
+            self._update_output_readiness()
         if operation in {"configure", "measure", "set_output", "ramp_to_zero", "arm"}:
             QMessageBox.warning(self, "Keithley", error)
 
@@ -2276,6 +2576,9 @@ class AnritsuPage(QWidget):
         self._averaging_active = False
         self._averaging_destination: str | None = None
         self._resume_live_after_averaging = False
+        self._live_frame_count = 0
+        self._identical_live_frames = 0
+        self._last_live_signature: int | None = None
         self._timer = QTimer(self)
         self._timer.setInterval(500)
         self._timer.timeout.connect(self.fetch_live)
@@ -2311,12 +2614,15 @@ class AnritsuPage(QWidget):
         self.refresh.setRange(100, 5000)
         self.refresh.setValue(500)
         self.refresh.setSuffix(" ms")
+        self.ensure_continuous_live = QCheckBox("Temporarily ensure Continuous + Trace Write")
+        self.ensure_continuous_live.setChecked(True)
         for label, widget in (
             ("Start", self._anritsu_bounded("frequency", self.start)),
             ("Stop", self._anritsu_bounded("frequency", self.stop)),
             ("Reference level", self._anritsu_bounded("reference_level", self.reference)),
             ("Points", self._anritsu_bounded("sweep_points", self.points)),
             ("Live refresh interval", self.refresh),
+            ("Live acquisition", self.ensure_continuous_live),
         ):
             form.addRow(label, widget)
         left_layout.addLayout(form)
@@ -2456,6 +2762,7 @@ class AnritsuPage(QWidget):
         help_items = {
             self.read_configuration: "Read Start, Stop, Reference level, and Points from the connected analyser. This sends query commands only and never changes the instrument or approved safety limits.",
             self.single: "Read the currently displayed TRAC1 spectrum using SCPI queries only. This does not configure or trigger the analyser and does not require an approved safety profile.",
+            self.ensure_continuous_live: "When Start Live is pressed, verify Trace A is in Write mode and temporarily enable Continuous Sweep. If Continuous was initially OFF, Stop Live restores it to OFF.",
             self.average_count: "Number of complete spectra to average. 200 is common in the Thatec workflow. Averaging is performed in linear mW, not directly in dBm.",
             self.acquire_average: "Passively read N traces at the Live refresh interval and average power in linear mW. No analyser setting or trigger mode is changed.",
             self.cancel_average: "Stop temporal averaging. Already collected temporary frames are discarded; completed raw/reference data are unchanged.",
@@ -2571,7 +2878,7 @@ class AnritsuPage(QWidget):
             self.info.setText("Live stopped.")
             return
         self._timer.setInterval(self.refresh.value())
-        self._controller.call("start_live")
+        self._controller.call("start_live", self.ensure_continuous_live.isChecked())
 
     def fetch_live(self) -> None:
         if not self._fetch_pending:
@@ -2686,9 +2993,18 @@ class AnritsuPage(QWidget):
             self.status.emit("Anritsu configured and verified by SCPI readback")
         elif operation == "start_live" and isinstance(result, AnritsuConfigurationSnapshot):
             self._result("read_configuration", result)
+            self._live_frame_count = 0
+            self._identical_live_frames = 0
+            self._last_live_signature = None
             self._timer.start()
             self.live.setText("Stop Live")
-            self.status.emit("Anritsu Live started")
+            mode = (
+                "continuous sweep verified"
+                if self.ensure_continuous_live.isChecked()
+                else "passive current-trace polling"
+            )
+            self.info.setText(f"Live started; {mode}. Waiting for first frame...")
+            self.status.emit(f"Anritsu Live started: {mode}")
         elif operation in {"fetch_trace", "fetch_current_trace", "single_sweep"} and isinstance(result, SpectrumTrace):
             self._fetch_pending = False
             if self._averaging_active:
@@ -2744,9 +3060,28 @@ class AnritsuPage(QWidget):
     def _show_trace(self, trace: SpectrumTrace) -> None:
         self._latest_trace = trace
         self._refresh_spectrum_display()
+        live_detail = ""
+        if self._timer.isActive():
+            self._live_frame_count += 1
+            signature = hash(trace.powers_dbm)
+            if signature == self._last_live_signature:
+                self._identical_live_frames += 1
+                live_detail = f" • unchanged ×{self._identical_live_frames}"
+                if self._identical_live_frames == 3:
+                    self.banner.show_message(
+                        "Live received three identical traces. Verify that Trace A is in Write "
+                        "mode, Continuous Sweep is active, and the analyser sweep time is not "
+                        "longer than the observation interval.",
+                        timeout_ms=15_000,
+                    )
+            else:
+                self._identical_live_frames = 0
+                live_detail = " • new data"
+            self._last_live_signature = signature
+            live_detail = f" • Live frame {self._live_frame_count}{live_detail}"
         self.info.setText(
             f"{len(trace.powers_dbm)} points • {trace.acquired_at_utc.isoformat()} • "
-            f"max {max(trace.powers_dbm):.4g} dBm"
+            f"max {max(trace.powers_dbm):.4g} dBm{live_detail}"
         )
 
     def _refresh_spectrum_display(self, *_args: object) -> None:

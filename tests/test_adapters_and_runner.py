@@ -199,6 +199,7 @@ class AdapterAndRunnerTests(unittest.TestCase):
         session = FakeVisaSession(
             responses={
                 "*IDN?": "ANRITSU,MS2830A,123456,1.0",
+                "*OPT?": "041,008",
                 "INST?": "SPECT",
                 "FREQ:STAR?": "1000000",
                 "FREQ:STOP?": "2000000",
@@ -223,6 +224,7 @@ class AdapterAndRunnerTests(unittest.TestCase):
         session = FakeVisaSession(
             responses={
                 "*IDN?": "ANRITSU,MS2830A,123456,1.0",
+                "*OPT?": "041,008",
                 "INST?": "SPECT",
                 "FREQ:STAR?": "1000000",
                 "FREQ:STOP?": "4000000000",
@@ -241,6 +243,7 @@ class AdapterAndRunnerTests(unittest.TestCase):
         self.assertEqual(snapshot.reference_level_dbm, -10)
         self.assertEqual(snapshot.points, 1001)
         self.assertEqual(snapshot.instrument_mode, "SPECT")
+        self.assertEqual(adapter.capabilities.hardware_options, ("041", "008"))
         self.assertEqual(
             session.writes,
             [
@@ -281,6 +284,56 @@ class AdapterAndRunnerTests(unittest.TestCase):
         self.assertEqual(len(trace.powers_dbm), 101)
         self.assertTrue(adapter.live)
         self.assertTrue(all("?" in command for command in session.writes))
+
+    def test_anritsu_live_temporarily_enables_and_restores_continuous_sweep(self) -> None:
+        session = FakeVisaSession(
+            responses={
+                "*IDN?": "ANRITSU,MS2830A,123456,1.0",
+                "INST?": "SPECT",
+                "FORM?": "ASC,0",
+                "FREQ:STAR?": "1000000",
+                "FREQ:STOP?": "2000000",
+                "DISP:WIND:TRAC:Y:RLEV?": "0",
+                "SWE:POIN?": "101",
+                "TRAC:TYPE?": "WRIT",
+                "INIT:CONT?": "0",
+            }
+        )
+        adapter = AnritsuAdapter(
+            simulation_settings(anritsu_enabled=False),
+            session_factory=FakeVisaSessionFactory(session),
+        )
+        adapter.connect()
+
+        adapter.start_live(ensure_continuous=True)
+        adapter.stop_live()
+
+        self.assertIn("INIT:CONT ON", session.writes)
+        self.assertIn("INIT:CONT OFF", session.writes)
+
+    def test_anritsu_live_rejects_frozen_view_trace(self) -> None:
+        session = FakeVisaSession(
+            responses={
+                "*IDN?": "ANRITSU,MS2830A,123456,1.0",
+                "INST?": "SPECT",
+                "FORM?": "ASC,0",
+                "FREQ:STAR?": "1000000",
+                "FREQ:STOP?": "2000000",
+                "DISP:WIND:TRAC:Y:RLEV?": "0",
+                "SWE:POIN?": "101",
+                "TRAC:TYPE?": "VIEW",
+            }
+        )
+        adapter = AnritsuAdapter(
+            simulation_settings(anritsu_enabled=False),
+            session_factory=FakeVisaSessionFactory(session),
+        )
+        adapter.connect()
+
+        with self.assertRaisesRegex(Exception, "Write mode"):
+            adapter.start_live(ensure_continuous=True)
+
+        self.assertNotIn("INIT:CONT ON", session.writes)
 
     def test_anritsu_rejects_frequency_outside_the_approved_profile(self) -> None:
         session = FakeVisaSession(responses={"*IDN?": "ANRITSU,MS2830A,123456,1.0"})

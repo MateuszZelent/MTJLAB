@@ -57,6 +57,18 @@ class SimulatorTests(unittest.TestCase):
         anritsu.emergency_off()
         anritsu.disconnect()
 
+    def test_anritsu_simulated_live_produces_new_frames(self) -> None:
+        settings = simulated_station_settings(loaded_settings())
+        anritsu = AnritsuAdapter(settings, session_factory=SimulatedVisaFactory("anritsu"))
+        anritsu.connect()
+        anritsu.configure_spectrum(SpectrumConfig(1e6, 2e6, 0, 101))
+        anritsu.start_live(ensure_continuous=True)
+
+        first = anritsu.fetch_current_trace()
+        second = anritsu.fetch_current_trace()
+
+        self.assertNotEqual(first.powers_dbm, second.powers_dbm)
+
     def test_rigol_dc_uses_offset_without_minimum_ac_amplitude(self) -> None:
         settings = simulated_station_settings(loaded_settings())
         rigol = RigolAdapter(settings, session_factory=SimulatedVisaFactory("rigol"))

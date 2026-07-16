@@ -25,7 +25,9 @@ class SpectrumPlotWidget(QWidget):
 
     status_changed = Signal(str)
 
-    def __init__(self, parent: QWidget | None = None, *, legend: bool = True) -> None:
+    def __init__(
+        self, parent: QWidget | None = None, *, legend: bool = True, compact_toolbar: bool = False
+    ) -> None:
         super().__init__(parent)
         self.setObjectName("spectrumPlot")
         self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
@@ -35,13 +37,15 @@ class SpectrumPlotWidget(QWidget):
         self._max_hold: np.ndarray | None = None
         self._min_hold: np.ndarray | None = None
         self._marker_x: float | None = None
+        self._x_label = "Frequency"
+        self._x_unit = "MHz"
 
         root = QVBoxLayout(self)
         root.setContentsMargins(0, 0, 0, 0)
         root.setSpacing(4)
         toolbar = QHBoxLayout()
         toolbar.setSpacing(4)
-        for text, tooltip, callback in (
+        actions = (
             ("Reset", "Reset zoom and show all finite data", self.auto_range),
             ("Peak", "Move the primary marker to the highest visible point", self.peak_search),
             ("Δ marker", "Place a delta marker at the current crosshair position", self.place_delta_marker),
@@ -49,8 +53,12 @@ class SpectrumPlotWidget(QWidget):
             ("Min hold", "Toggle a minimum hold of the primary trace", self.toggle_min_hold),
             ("Clear hold", "Clear maximum and minimum hold traces", self.clear_holds),
             ("Export", "Export visible traces to CSV, PNG or SVG", self.export),
-        ):
+        )
+        if compact_toolbar:
+            actions = tuple(action for action in actions if action[0] in {"Reset", "Peak", "Export"})
+        for text, tooltip, callback in actions:
             button = QToolButton()
+            button.setObjectName("plotToolButton")
             button.setText(text)
             button.setToolTip(tooltip)
             button.setAccessibleName(text)
@@ -93,6 +101,8 @@ class SpectrumPlotWidget(QWidget):
         self.delta_marker.sigPositionChanged.connect(self._marker_changed)
 
     def set_labels(self, *, x: str = "Frequency", x_unit: str = "MHz", y: str = "Power", y_unit: str = "dBm") -> None:
+        self._x_label = x
+        self._x_unit = x_unit
         self.plot.setLabel("bottom", x, units=x_unit)
         self.plot.setLabel("left", y, units=y_unit)
 
@@ -172,7 +182,9 @@ class SpectrumPlotWidget(QWidget):
         self.marker.setPos(float(x_values[index]))
         self.marker.show()
         self._marker_x = float(x_values[index])
-        self.status_changed.emit(f"Peak: {x_values[index]:.9g} MHz, {y_values[index]:.6g}")
+        self.status_changed.emit(
+            f"Peak: {x_values[index]:.9g} {self._x_unit}, {y_values[index]:.6g}"
+        )
 
     def place_delta_marker(self) -> None:
         if self._last_mouse_x is None:
@@ -217,7 +229,10 @@ class SpectrumPlotWidget(QWidget):
         ]
         with path.open("x", newline="", encoding="utf-8") as handle:
             writer = csv.writer(handle)
-            writer.writerow(["trace", "frequency_MHz", "value"])
+            x_header = self._x_label.lower().replace(" ", "_")
+            if self._x_unit:
+                x_header += f"_{self._x_unit}"
+            writer.writerow(["trace", x_header, "value"])
             for name, x_values, y_values in visible:
                 writer.writerows(zip([name] * x_values.size, x_values, y_values, strict=True))
 

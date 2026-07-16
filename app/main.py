@@ -75,11 +75,22 @@ QLabel#rigolState { color: #e8edf3; font-weight: 700; }
 QLabel#rigolBadge { color: #72b7f2; background: #13283a; border-radius: 8px; padding: 5px 9px; }
 QLabel#rigolWarning { color: #ffcc66; background: #302817; border-radius: 6px; padding: 9px; }
 QFrame#keithleyHero, QFrame#keithleyChannelCard { background: #151f2b; border: 1px solid #30455b; border-radius: 10px; padding: 9px; }
+QLabel#keithleyPageTitle { font-size: 16pt; font-weight: 700; }
+QLabel#keithleyCardTitle { font-size: 11pt; font-weight: 700; }
+QLabel#keithleyHistoryTitle { font-size: 11pt; font-weight: 700; }
+QLabel#keithleyHistoryNote { color: #8293a6; font-size: 8pt; letter-spacing: 0.3px; }
+QLabel#keithleyInterlockStatus { color: #9fb0c2; font-size: 8pt; }
+QLabel#keithleyLastUpdate { color: #8293a6; font-size: 8pt; padding: 0 8px; }
+QScrollArea#keithleyControlPanel QWidget { font-size: 9pt; }
+QScrollArea#keithleyControlPanel QLineEdit, QScrollArea#keithleyControlPanel QComboBox, QScrollArea#keithleyControlPanel QSpinBox { padding: 4px 6px; }
+QSplitter#keithleyWorkspace::handle { background: #26384a; width: 5px; margin: 4px 1px; border-radius: 2px; }
+QToolButton#plotToolButton { background: transparent; color: #9fb0c2; border: 1px solid #30455b; border-radius: 4px; padding: 3px 7px; font-size: 8pt; }
+QToolButton#plotToolButton:hover { background: #213043; color: white; border-color: #4b6680; }
 QFrame#keithleyChannelCard[selected="true"] { border: 2px solid #4ba3ff; }
 QFrame#keithleyMeterTile { background: #182838; border: 1px solid #2d455b; border-radius: 8px; }
 QLabel#keithleyLed, QLabel#keithleyOutputLed { color: #91a0b2; font-size: 17pt; }
 QLabel#keithleyState, QLabel#keithleyOutputState { font-weight: 700; }
-QLabel#keithleyMeterValue { color: #eaf5ff; font-family: Consolas; font-size: 18pt; font-weight: 700; }
+QLabel#keithleyMeterValue { color: #eaf5ff; font-family: Consolas; font-size: 13pt; font-weight: 700; }
 QLabel#keithleyComplianceClear { color: #38d996; background: #173227; border-radius: 6px; padding: 5px 8px; font-weight: 700; }
 QLabel#keithleyComplianceActive { color: #ff657a; background: #3a1b24; border-radius: 6px; padding: 5px 8px; font-weight: 700; }
 QTabWidget#keithleyControlTabs > QTabBar::tab { padding: 10px 15px; }
@@ -88,6 +99,7 @@ QWidget#anritsuControlPanel { background: #121a24; border-radius: 10px; }
 QSplitter#anritsuWorkspaceSplitter::handle { background: #26384a; width: 5px; margin: 4px 1px; border-radius: 2px; }
 QLabel#limitBadge { color: #9ecbff; background: #17283a; border: 1px solid #31506d; border-radius: 6px; padding: 6px; font-family: Consolas; font-size: 9pt; }
 QLabel#limitBadge[limitState="undefined"] { color: #ffcc66; background: #302817; border-color: #76561b; }
+QLabel#limitBadge[keithleyCompact="true"] { padding: 4px; font-size: 8pt; }
 QPushButton#limitEditButton { padding: 6px 8px; background: #30465a; }
 QTabWidget#rigolControlTabs > QTabBar::tab { padding: 11px 16px; }
 QTabWidget#rigolAdvancedTabs > QTabBar::tab { padding: 8px 12px; }
@@ -164,11 +176,22 @@ QLabel#rigolState { color: #17212b; font-weight: 700; }
 QLabel#rigolBadge { color: #0b5da7; background: #e2f1fc; border-radius: 8px; padding: 5px 9px; }
 QLabel#rigolWarning { color: #765500; background: #fff2c7; border-radius: 6px; padding: 9px; }
 QFrame#keithleyHero, QFrame#keithleyChannelCard { background: #ffffff; border: 1px solid #c8d3df; border-radius: 10px; padding: 9px; }
+QLabel#keithleyPageTitle { font-size: 16pt; font-weight: 700; }
+QLabel#keithleyCardTitle { font-size: 11pt; font-weight: 700; }
+QLabel#keithleyHistoryTitle { font-size: 11pt; font-weight: 700; }
+QLabel#keithleyHistoryNote { color: #687b8e; font-size: 8pt; letter-spacing: 0.3px; }
+QLabel#keithleyInterlockStatus { color: #607284; font-size: 8pt; }
+QLabel#keithleyLastUpdate { color: #687b8e; font-size: 8pt; padding: 0 8px; }
+QScrollArea#keithleyControlPanel QWidget { font-size: 9pt; }
+QScrollArea#keithleyControlPanel QLineEdit, QScrollArea#keithleyControlPanel QComboBox, QScrollArea#keithleyControlPanel QSpinBox { padding: 4px 6px; }
+QSplitter#keithleyWorkspace::handle { background: #c8d3df; width: 5px; margin: 4px 1px; border-radius: 2px; }
+QToolButton#plotToolButton { background: transparent; color: #52677b; border: 1px solid #c5d2df; border-radius: 4px; padding: 3px 7px; font-size: 8pt; }
+QToolButton#plotToolButton:hover { background: #e7f0f8; color: #0b5da7; border-color: #9abbd5; }
 QFrame#keithleyChannelCard[selected="true"] { border: 2px solid #1976bd; }
 QFrame#keithleyMeterTile { background: #f3f8fc; border: 1px solid #d1dee9; border-radius: 8px; }
 QLabel#keithleyLed, QLabel#keithleyOutputLed { color: #6b7b8c; font-size: 17pt; }
 QLabel#keithleyState, QLabel#keithleyOutputState { font-weight: 700; }
-QLabel#keithleyMeterValue { color: #12354f; font-family: Consolas; font-size: 18pt; font-weight: 700; }
+QLabel#keithleyMeterValue { color: #12354f; font-family: Consolas; font-size: 13pt; font-weight: 700; }
 QLabel#keithleyComplianceClear { color: #087f5b; background: #dff5eb; border-radius: 6px; padding: 5px 8px; font-weight: 700; }
 QLabel#keithleyComplianceActive { color: #b4233a; background: #fde7eb; border-radius: 6px; padding: 5px 8px; font-weight: 700; }
 QTabWidget#keithleyControlTabs > QTabBar::tab { padding: 10px 15px; }
@@ -177,6 +200,7 @@ QWidget#anritsuControlPanel { background: #f8fafc; border-radius: 10px; }
 QSplitter#anritsuWorkspaceSplitter::handle { background: #c8d3df; width: 5px; margin: 4px 1px; border-radius: 2px; }
 QLabel#limitBadge { color: #174f7a; background: #e4f1fb; border: 1px solid #a9c9e2; border-radius: 6px; padding: 6px; font-family: Consolas; font-size: 9pt; }
 QLabel#limitBadge[limitState="undefined"] { color: #765500; background: #fff2c7; border-color: #e2c66f; }
+QLabel#limitBadge[keithleyCompact="true"] { padding: 4px; font-size: 8pt; }
 QPushButton#limitEditButton { padding: 6px 8px; background: #d6e3ee; }
 QTabWidget#rigolControlTabs > QTabBar::tab { padding: 11px 16px; }
 QTabWidget#rigolAdvancedTabs > QTabBar::tab { padding: 8px 12px; }

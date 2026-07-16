@@ -60,6 +60,7 @@ class AnritsuAdapter(DeviceAdapter):
         self._factory = session_factory or PyVisaSessionFactory()
         self._session: InstrumentSession | None = None
         self._live = False
+        self._restore_continuous_after_live = False
 
     @staticmethod
     def _read_hardware_options(session: InstrumentSession) -> tuple[str, ...]:
@@ -132,6 +133,7 @@ class AnritsuAdapter(DeviceAdapter):
     def disconnect(self) -> None:
         session, self._session = self._session, None
         self._live = False
+        self._restore_continuous_after_live = False
         if session is not None:
             try:
                 session.close()
@@ -220,8 +222,8 @@ class AnritsuAdapter(DeviceAdapter):
             raise DeviceError("Anritsu configuration readback mismatch: " + "; ".join(mismatches))
         return actual
 
-    def start_live(self) -> AnritsuConfigurationSnapshot:
-        """Start passive polling without changing analyser or safety settings."""
+    def start_live(self, ensure_continuous: bool = False) -> AnritsuConfigurationSnapshot:
+        """Start Live polling, optionally enabling continuous sweep temporarily."""
 
         snapshot = self.read_current_configuration()
         if "SPECT" not in snapshot.instrument_mode.upper():
@@ -235,10 +237,33 @@ class AnritsuAdapter(DeviceAdapter):
                 f"Read-only Live requires the current trace format to be ASCII; "
                 f"the instrument reports {data_format!r}."
             )
+        if ensure_continuous:
+            session = self._require_session()
+            trace_mode = session.query("TRAC:TYPE?").strip().upper()
+            if not trace_mode.startswith("WRIT"):
+                raise DeviceError(
+                    f"Live requires Trace A Write mode, but TRAC:TYPE? returned "
+                    f"{trace_mode!r}. Select Write for Trace A on the instrument."
+                )
+            continuous_response = session.query("INIT:CONT?").strip().upper()
+            if continuous_response in {"1", "+1", "ON"}:
+                continuous = True
+            elif continuous_response in {"0", "+0", "OFF"}:
+                continuous = False
+            else:
+                raise DeviceError(
+                    f"Anritsu returned invalid INIT:CONT? response {continuous_response!r}."
+                )
+            self._restore_continuous_after_live = not continuous
+            if not continuous:
+                session.write("INIT:CONT ON")
         self._live = True
         return snapshot
 
     def stop_live(self) -> None:
+        if self._restore_continuous_after_live and self._session is not None:
+            self._session.write("INIT:CONT OFF")
+        self._restore_continuous_after_live = False
         self._live = False
 
     @property

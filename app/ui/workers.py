@@ -148,7 +148,7 @@ class InstrumentWorker(QObject):
             if operation == "configure":
                 return self._adapter.configure_spectrum(payload)  # type: ignore[arg-type]
             if operation == "start_live":
-                return self._adapter.start_live()
+                return self._adapter.start_live(bool(payload))
             if operation == "stop_live":
                 return self._adapter.stop_live()
             if operation == "fetch_trace":

@@ -557,7 +557,7 @@ class MainWindowTests(unittest.TestCase):
             keithley.mode.setCurrentText("measure_only")
             self.assertFalse(keithley.keithley_form.isRowVisible(keithley.level_field))
             self.assertFalse(keithley.keithley_form.isRowVisible(keithley.compliance_field))
-            self.assertIn("measurement-only", keithley.configure_button.text())
+            self.assertEqual(keithley.output_toggle.text(), "OUTPUT OFF")
 
             keithley.mode.setCurrentText("current")
             self.assertEqual(keithley.level.text(), "2 mA")
@@ -581,17 +581,115 @@ class MainWindowTests(unittest.TestCase):
             self.assertTrue(all(widget.toolTip() for widget in controls))
             for card in keithley.channel_cards.values():
                 self.assertTrue(all(widget.toolTip() for widget in card.values()))
-            action_labels = {
-                "Configure current source while OUTPUT is OFF",
-                "Measure selected channel",
-                "ARM (30 s)",
-                "OUTPUT ON",
-                "Ramp to zero + OFF",
-            }
-            actions = [button for button in keithley.findChildren(QPushButton) if button.text() in action_labels]
-            self.assertEqual(len(actions), len(action_labels))
-            self.assertTrue(all(button.toolTip() for button in actions))
-            self.assertTrue(keithley.control_tabs.tabToolTip(0))
+            output_actions = [keithley.channel_cards[channel]["output_action"] for channel in ("A", "B")]
+            self.assertTrue(all(button.text() == "OUTPUT OFF" for button in output_actions))
+            self.assertTrue(all(button.toolTip() for button in output_actions))
+            self.assertTrue(keithley.workspace_splitter.toolTip())
+        finally:
+            window.close()
+            self.application.processEvents()
+
+    def test_keithley_keeps_independent_channel_histories_and_plots_dc_resistance(self) -> None:
+        window = MainWindow(".config/settings.yml", simulation=True)
+        try:
+            keithley = window.keithley_page
+            keithley._update_channel_measurement(
+                SimpleNamespace(
+                    channel="A", voltage_v=-2.0, current_a=0.5,
+                    power_w=-1.0, compliance_detected=False,
+                )
+            )
+            keithley._update_channel_measurement(
+                SimpleNamespace(
+                    channel="B", voltage_v=3.0, current_a=-0.25,
+                    power_w=-0.75, compliance_detected=False,
+                )
+            )
+
+            self.assertEqual(len(keithley._measurement_history["A"]), 1)
+            self.assertEqual(len(keithley._measurement_history["B"]), 1)
+            self.assertEqual(keithley._measurement_history["A"][0]["resistance"], 4.0)
+            self.assertEqual(keithley._measurement_history["B"][0]["resistance"], 12.0)
+            self.assertEqual(
+                keithley.history_widgets["A"]["plot"].trace_point_count("CH A Resistance"), 1
+            )
+            self.assertEqual(
+                keithley.history_widgets["B"]["plot"].trace_point_count("CH B Resistance"), 1
+            )
+
+            keithley._clear_keithley_history("A")
+            self.assertEqual(keithley._measurement_history["A"], [])
+            self.assertEqual(len(keithley._measurement_history["B"]), 1)
+        finally:
+            window.close()
+            self.application.processEvents()
+
+    def test_keithley_history_is_a_rolling_thirty_second_window(self) -> None:
+        window = MainWindow(".config/settings.yml", simulation=True)
+        try:
+            keithley = window.keithley_page
+            keithley._history_started_at = 100.0
+            measurement = SimpleNamespace(
+                channel="A", voltage_v=1.0, current_a=0.1,
+                power_w=0.1, compliance_detected=False,
+            )
+            with patch("app.ui.main_window.time.monotonic", side_effect=[110.0, 145.0]):
+                keithley._update_channel_measurement(measurement)
+                keithley._update_channel_measurement(measurement)
+
+            self.assertEqual(len(keithley._measurement_history["A"]), 1)
+            self.assertEqual(keithley._measurement_history["A"][0]["elapsed_s"], 45.0)
+            self.assertEqual(
+                keithley.history_widgets["A"]["plot"].trace_point_count("CH A Resistance"), 1
+            )
+        finally:
+            window.close()
+            self.application.processEvents()
+
+    def test_keithley_compact_workspace_keeps_controls_and_both_plots_visible(self) -> None:
+        window = MainWindow(".config/settings.yml", simulation=True)
+        try:
+            keithley = window.keithley_page
+            window.resize(1600, 900)
+            window.show()
+            self.application.processEvents()
+
+            self.assertEqual(keithley.workspace_splitter.count(), 2)
+            self.assertLessEqual(keithley.channel_cards["A"]["card"].maximumHeight(), 160)
+            self.assertLessEqual(keithley.channel_cards["B"]["card"].maximumHeight(), 160)
+            self.assertTrue(keithley.history_widgets["A"]["plot"].isVisible())
+            self.assertTrue(keithley.history_widgets["B"]["plot"].isVisible())
+            self.assertTrue(keithley.level.isVisible())
+            self.assertTrue(keithley.compliance.isVisible())
+        finally:
+            window.close()
+            self.application.processEvents()
+
+    def test_keithley_output_switch_runs_configure_unlock_and_enable_sequence(self) -> None:
+        window = MainWindow(".config/settings.yml", simulation=True)
+        try:
+            keithley = window.keithley_page
+            keithley._controller.call = Mock()
+            keithley._output_prerequisites = Mock(return_value=(True, ["✓ ready"]))
+
+            with patch.object(QMessageBox, "warning", return_value=QMessageBox.StandardButton.Yes):
+                keithley._output_toggled(True)
+            self.assertEqual(keithley._controller.call.call_args.args[0], "configure")
+
+            keithley._result("configure", None)
+            self.assertEqual(keithley._controller.call.call_args.args, ("arm", "B"))
+
+            keithley._result("arm", 123.0)
+            self.assertEqual(keithley._controller.call.call_args.args, ("set_output", ("B", True)))
+
+            keithley._result("set_output", None)
+            self.assertTrue(keithley._output_states["B"])
+            self.assertTrue(keithley.output_toggle.isChecked())
+            self.assertEqual(keithley.output_toggle.text(), "OUTPUT ON")
+            self.assertEqual(keithley.channel_cards["B"]["output_action"].text(), "OUTPUT ON")
+
+            keithley._request_channel_output("B")
+            self.assertEqual(keithley._controller.call.call_args.args, ("ramp_to_zero", "B"))
         finally:
             window.close()
             self.application.processEvents()
@@ -653,6 +751,31 @@ class MainWindowTests(unittest.TestCase):
             window.close()
             self.application.processEvents()
 
+    def test_anritsu_live_requests_continuous_sweep_and_reports_frozen_frames(self) -> None:
+        window = MainWindow(".config/settings.yml", simulation=True)
+        try:
+            anritsu = window.anritsu_page
+            anritsu._controller.call = Mock()
+
+            anritsu.toggle_live()
+
+            anritsu._controller.call.assert_called_once_with("start_live", True)
+            snapshot = AnritsuConfigurationSnapshot(1e6, 2e6, 0.0, 101, "SPECT")
+            anritsu._result("start_live", snapshot)
+            trace = SpectrumTrace(
+                (1e6, 2e6), (-50.0, -40.0), datetime.now(timezone.utc), "TRAC1"
+            )
+            for _ in range(4):
+                anritsu._result("fetch_current_trace", trace)
+
+            self.assertEqual(anritsu._live_frame_count, 4)
+            self.assertEqual(anritsu._identical_live_frames, 3)
+            self.assertIn("unchanged ×3", anritsu.info.text())
+            self.assertFalse(anritsu.banner.isHidden())
+        finally:
+            window.close()
+            self.application.processEvents()
+
     def test_anritsu_reference_is_temporally_averaged_before_display(self) -> None:
         window = MainWindow(".config/settings.yml", simulation=True)
         try:
@@ -698,6 +821,29 @@ class MainWindowTests(unittest.TestCase):
                 [anritsu.points.itemData(index) for index in range(anritsu.points.count())],
                 [101, 201, 251, 401, 501, 1001, 2001, 5001, 10001],
             )
+        finally:
+            window.close()
+            self.application.processEvents()
+
+    def test_anritsu_hardware_options_update_documented_limits_card(self) -> None:
+        window = MainWindow(".config/settings.yml", simulation=True)
+        try:
+            anritsu = window.anritsu_page
+            anritsu.set_capabilities(
+                DeviceCapabilities(
+                    device_name="anritsu",
+                    model="MS2830A",
+                    firmware="7.03",
+                    features=frozenset({"spectrum_trace", "live_trace"}),
+                    hardware_options=("041", "008"),
+                )
+            )
+
+            self.assertIn("041", anritsu.hardware_option_info.text())
+            self.assertIn("Preamplifier", anritsu.hardware_option_info.text())
+            self.assertIn("6.1 GHz", anritsu.hardware_range_info.text())
+            self.assertIn("2 ms", anritsu.hardware_range_info.text())
+            self.assertIn("RBW: 1 Hz to 31.25 MHz", anritsu.hardware_range_info.text())
         finally:
             window.close()
             self.application.processEvents()
