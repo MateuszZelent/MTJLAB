@@ -12,7 +12,7 @@ profile:
   state: "unverified"          # unverified | approved | revoked
   approved_by:
   approved_at:
-  approval_note: "Profile approval is required after settings changes."
+  approval_note: "Profil wymaga ponownego zatwierdzenia po zmianie ustawień."
   lock_outputs_when_unverified: true
 
 application:
@@ -21,7 +21,7 @@ application:
   service_console_enabled: false
   require_operator_confirmation_before_arming: true
   require_second_confirmation_for_limit_override: true
-  settings_autosave: false
+  settings_autosave: true
   restore_last_recipe: true
 
 units:
@@ -65,7 +65,7 @@ storage:
 
 ui:
   framework: "PySide6"
-  theme: "dark"
+  theme: "light"
   show_engineering_notation: true
   plot_max_visible_spectra: 20
   plot_downsample_threshold: 200000
@@ -113,8 +113,8 @@ devices:
           - "DC"
           lab_limits:
             frequency:
-              min: "1 Hz"
-              max: "1 MHz"
+              min: 1 Hz
+              max: 100 MHz
             high_level:
               min: "-100 mV"
               max: "100 mV"
@@ -122,8 +122,8 @@ devices:
               min: "-100 mV"
               max: "100 mV"
             amplitude_vpp:
-              min: "2 mV"
-              max: "200 mV"
+              min: 2 mV
+              max: 800 mV
             offset:
               min: "-100 mV"
               max: "100 mV"

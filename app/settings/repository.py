@@ -98,6 +98,10 @@ class SettingsRepository:
         if isinstance(profile, dict):
             for field in cls._APPROVAL_METADATA:
                 profile.pop(field, None)
+        # Presentation-only changes must not revoke a safety approval.
+        ui = comparable.get("ui")
+        if isinstance(ui, dict):
+            ui.pop("theme", None)
         return comparable
 
     def _atomic_dump(self, payload: dict[str, Any]) -> None:

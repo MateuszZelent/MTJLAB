@@ -160,3 +160,40 @@ def quantity_range(
         raise QuantityError("Minimalna wartość zakresu jest większa od maksymalnej.")
     return lower, upper
 
+
+_AUTO_DISPLAY_UNITS: Final[dict[str, tuple[str, ...]]] = {
+    DIMENSION_VOLTAGE: ("kV", "V", "mV", "uV"),
+    DIMENSION_CURRENT: ("A", "mA", "uA", "nA"),
+    DIMENSION_POWER: ("W", "mW", "uW"),
+    DIMENSION_FREQUENCY: ("GHz", "MHz", "kHz", "Hz"),
+    DIMENSION_RESISTANCE: ("Mohm", "kohm", "ohm"),
+    DIMENSION_TIME: ("s", "ms", "us", "ns"),
+    DIMENSION_DBM: ("dBm",),
+    DIMENSION_RATIO: ("%",),
+}
+
+
+def format_quantity_auto(value_si: float, dimension: str, precision: int = 9) -> str:
+    """Format an SI value using a readable engineering unit for its dimension."""
+
+    if not math.isfinite(value_si):
+        raise QuantityError("Wartość musi być skończona.")
+    try:
+        units = _AUTO_DISPLAY_UNITS[dimension]
+    except KeyError as exc:
+        raise QuantityError(f"Nieobsługiwany wymiar: {dimension}.") from exc
+    quantity = Quantity(value_si, dimension)
+    if dimension in {DIMENSION_DBM, DIMENSION_RATIO}:
+        return quantity.format(units[0], precision)
+    magnitude = abs(value_si)
+    if magnitude == 0:
+        base_unit = next((unit for unit in units if _unit_definition(unit).scale == 1.0), units[-1])
+        return quantity.format(base_unit, precision)
+    selected = units[-1]
+    for unit in units:
+        scale = _unit_definition(unit).scale
+        converted = magnitude / scale
+        if converted >= 1:
+            selected = unit
+            break
+    return quantity.format(selected, precision)

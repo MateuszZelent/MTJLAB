@@ -6,16 +6,38 @@ from pathlib import Path
 import tempfile
 
 from app.domain.errors import SafetyViolation
-from app.domain.quantities import DIMENSION_CURRENT, QuantityError, parse_quantity
+from app.domain.quantities import (
+    DIMENSION_CURRENT,
+    DIMENSION_FREQUENCY,
+    QuantityError,
+    format_quantity_auto,
+    parse_quantity,
+)
 from app.safety.anritsu import validate_anritsu_spectrum
 from app.safety.keithley import KeithleySourceRequest, validate_keithley_source
-from app.safety.rigol_current import validate_rigol_waveform
+from app.safety.rigol_current import validate_rigol_frequency_sweep, validate_rigol_waveform
 from app.settings import SettingsRepository
 from app.settings.models import StationSettings
 from tests.helpers import ROOT, loaded_settings, simulation_settings
 
 
 class QuantityAndSafetyTests(unittest.TestCase):
+    def test_scientific_notation_is_scaled_to_si_and_formatted_automatically(self) -> None:
+        self.assertEqual(parse_quantity("1e5 kHz", DIMENSION_FREQUENCY).si_value, 1e8)
+        self.assertEqual(parse_quantity("1e8", DIMENSION_FREQUENCY, require_unit=False).si_value, 1e8)
+        self.assertEqual(format_quantity_auto(1e8, DIMENSION_FREQUENCY), "100 MHz")
+
+    def test_rigol_frequency_sweep_checks_both_endpoints_and_steps(self) -> None:
+        channel = loaded_settings().rigol.safety.channels["1"]
+        with self.assertRaises(SafetyViolation):
+            validate_rigol_frequency_sweep(
+                channel=channel, start_hz=1e6, stop_hz=501e6, duration_s=1.0, steps=100
+            )
+        with self.assertRaises(SafetyViolation):
+            validate_rigol_frequency_sweep(
+                channel=channel, start_hz=1e6, stop_hz=2e6, duration_s=1.0, steps=10001
+            )
+
     def test_quantity_requires_explicit_unit(self) -> None:
         with self.assertRaises(QuantityError):
             parse_quantity("10", DIMENSION_CURRENT)
@@ -87,6 +109,27 @@ class QuantityAndSafetyTests(unittest.TestCase):
             self.assertIsNone(saved.profile.approved_by)
             self.assertTrue(saved.outputs_locked)
             self.assertEqual(repository.load().settings.profile.state, "unverified")
+
+    def test_theme_change_does_not_revoke_safety_approval(self) -> None:
+        source = (ROOT / ".config" / "settings.yml").read_text(encoding="utf-8")
+        with tempfile.TemporaryDirectory() as temporary:
+            path = Path(temporary) / "settings.yml"
+            path.write_text(source, encoding="utf-8")
+            repository = SettingsRepository(path)
+            approved = deepcopy(repository.load().raw)
+            approved["profile"].update(
+                {
+                    "state": "approved",
+                    "approved_by": "Operator Test",
+                    "approved_at": "2026-01-01T00:00:00+00:00",
+                    "approval_note": "Approved for test.",
+                }
+            )
+            repository.save_raw(approved)
+            changed = deepcopy(repository.load().raw)
+            changed["ui"]["theme"] = "light"
+            saved = repository.save_raw(changed)
+            self.assertEqual(saved.profile.state, "approved")
 
     def test_safety_boundaries_reject_nan_and_infinity(self) -> None:
         settings = loaded_settings()

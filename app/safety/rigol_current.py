@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+import math
 from typing import Literal
 
 from app.domain.errors import SafetyViolation
@@ -129,3 +130,36 @@ def validate_rigol_waveform(
             f"{estimate.peak_absolute_current_a:.9g} A przekracza limit {current_limit:.9g} A."
         )
     return estimate
+
+
+def validate_rigol_frequency_sweep(
+    *,
+    channel: RigolChannelSettings,
+    start_hz: float,
+    stop_hz: float,
+    duration_s: float,
+    steps: int,
+    start_hold_s: float = 0.0,
+    stop_hold_s: float = 0.0,
+    return_time_s: float = 0.0,
+) -> None:
+    """Validate all sweep values against the approved channel profile."""
+
+    numeric = (start_hz, stop_hz, duration_s, start_hold_s, stop_hold_s, return_time_s)
+    if not all(math.isfinite(value) for value in numeric):
+        raise SafetyViolation("Sweep values must be finite numbers.")
+    if start_hz <= 0 or stop_hz <= 0 or start_hz == stop_hz:
+        raise SafetyViolation("Sweep requires positive and different start/stop frequencies.")
+    if duration_s <= 0 or min(start_hold_s, stop_hold_s, return_time_s) < 0:
+        raise SafetyViolation("Sweep duration must be positive; hold and return times cannot be negative.")
+    if isinstance(steps, bool) or not isinstance(steps, int):
+        raise SafetyViolation("Sweep step count must be an integer.")
+
+    limits = channel.lab_limits
+    _enforce_range("sweep_start", start_hz, limits.frequency.min, limits.frequency.max, DIMENSION_FREQUENCY)
+    _enforce_range("sweep_stop", stop_hz, limits.frequency.min, limits.frequency.max, DIMENSION_FREQUENCY)
+    _enforce_range("sweep_duration", duration_s, limits.sweep_duration.min, limits.sweep_duration.max, "time")
+    if not limits.sweep_steps.min <= steps <= limits.sweep_steps.max:
+        raise SafetyViolation(
+            f"sweep_steps={steps} outside approved range [{limits.sweep_steps.min}, {limits.sweep_steps.max}]."
+        )

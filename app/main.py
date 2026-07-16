@@ -54,6 +54,18 @@ QLabel#rigolLed { color: #91a0b2; font-size: 18pt; }
 QLabel#rigolState { color: #e8edf3; font-weight: 700; }
 QLabel#rigolBadge { color: #72b7f2; background: #13283a; border-radius: 8px; padding: 5px 9px; }
 QLabel#rigolWarning { color: #ffcc66; background: #302817; border-radius: 6px; padding: 9px; }
+QFrame#keithleyHero, QFrame#keithleyChannelCard { background: #151f2b; border: 1px solid #30455b; border-radius: 10px; padding: 9px; }
+QFrame#keithleyChannelCard[selected="true"] { border: 2px solid #4ba3ff; }
+QFrame#keithleyMeterTile { background: #182838; border: 1px solid #2d455b; border-radius: 8px; }
+QLabel#keithleyLed, QLabel#keithleyOutputLed { color: #91a0b2; font-size: 17pt; }
+QLabel#keithleyState, QLabel#keithleyOutputState { font-weight: 700; }
+QLabel#keithleyMeterValue { color: #eaf5ff; font-family: Consolas; font-size: 18pt; font-weight: 700; }
+QLabel#keithleyComplianceClear { color: #38d996; background: #173227; border-radius: 6px; padding: 5px 8px; font-weight: 700; }
+QLabel#keithleyComplianceActive { color: #ff657a; background: #3a1b24; border-radius: 6px; padding: 5px 8px; font-weight: 700; }
+QTabWidget#keithleyControlTabs > QTabBar::tab { padding: 10px 15px; }
+QLabel#limitBadge { color: #9ecbff; background: #17283a; border: 1px solid #31506d; border-radius: 6px; padding: 6px; font-family: Consolas; font-size: 9pt; }
+QLabel#limitBadge[limitState="undefined"] { color: #ffcc66; background: #302817; border-color: #76561b; }
+QPushButton#limitEditButton { padding: 6px 8px; background: #30465a; }
 QTabWidget#rigolControlTabs > QTabBar::tab { padding: 11px 16px; }
 QTabWidget#rigolAdvancedTabs > QTabBar::tab { padding: 8px 12px; }
 QScrollArea { border: 0; }
@@ -106,6 +118,18 @@ QLabel#rigolLed { color: #6b7b8c; font-size: 18pt; }
 QLabel#rigolState { color: #17212b; font-weight: 700; }
 QLabel#rigolBadge { color: #0b5da7; background: #e2f1fc; border-radius: 8px; padding: 5px 9px; }
 QLabel#rigolWarning { color: #765500; background: #fff2c7; border-radius: 6px; padding: 9px; }
+QFrame#keithleyHero, QFrame#keithleyChannelCard { background: #ffffff; border: 1px solid #c8d3df; border-radius: 10px; padding: 9px; }
+QFrame#keithleyChannelCard[selected="true"] { border: 2px solid #1976bd; }
+QFrame#keithleyMeterTile { background: #f3f8fc; border: 1px solid #d1dee9; border-radius: 8px; }
+QLabel#keithleyLed, QLabel#keithleyOutputLed { color: #6b7b8c; font-size: 17pt; }
+QLabel#keithleyState, QLabel#keithleyOutputState { font-weight: 700; }
+QLabel#keithleyMeterValue { color: #12354f; font-family: Consolas; font-size: 18pt; font-weight: 700; }
+QLabel#keithleyComplianceClear { color: #087f5b; background: #dff5eb; border-radius: 6px; padding: 5px 8px; font-weight: 700; }
+QLabel#keithleyComplianceActive { color: #b4233a; background: #fde7eb; border-radius: 6px; padding: 5px 8px; font-weight: 700; }
+QTabWidget#keithleyControlTabs > QTabBar::tab { padding: 10px 15px; }
+QLabel#limitBadge { color: #174f7a; background: #e4f1fb; border: 1px solid #a9c9e2; border-radius: 6px; padding: 6px; font-family: Consolas; font-size: 9pt; }
+QLabel#limitBadge[limitState="undefined"] { color: #765500; background: #fff2c7; border-color: #e2c66f; }
+QPushButton#limitEditButton { padding: 6px 8px; background: #d6e3ee; }
 QTabWidget#rigolControlTabs > QTabBar::tab { padding: 11px 16px; }
 QTabWidget#rigolAdvancedTabs > QTabBar::tab { padding: 8px 12px; }
 QScrollArea { border: 0; }

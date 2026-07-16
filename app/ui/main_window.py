@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import math
+from copy import deepcopy
 from pathlib import Path
 from typing import Any
 
@@ -12,6 +13,8 @@ from PySide6.QtGui import QAction, QCloseEvent, QPainter
 from PySide6.QtWidgets import (
     QComboBox,
     QCheckBox,
+    QDialog,
+    QDialogButtonBox,
     QFormLayout,
     QFrame,
     QGridLayout,
@@ -43,6 +46,7 @@ from app.devices.rigol import (
     RigolModulationConfig,
     RigolOutputConfig,
 )
+from app.domain.errors import ConfigurationError
 from app.devices.simulators import SimulatedVisaFactory, simulated_station_settings
 from app.domain.quantities import (
     DIMENSION_CURRENT,
@@ -51,12 +55,14 @@ from app.domain.quantities import (
     DIMENSION_RESISTANCE,
     DIMENSION_TIME,
     DIMENSION_VOLTAGE,
+    format_quantity_auto,
     parse_quantity,
 )
 from app.engine.compiler import RecipeCompiler
 from app.recipes import parse_recipe_text
 from app.settings import SettingsRepository
 from app.settings.models import StationSettings
+from app.safety.rigol_current import validate_rigol_frequency_sweep, validate_rigol_waveform
 from app.storage import Hdf5RunReader, RunDetail, StoredPoint
 from app.ui.settings_page import SettingsPage
 from app.ui.run_worker import RunController
@@ -67,6 +73,201 @@ def _line(value: str, width: int = 14) -> QLineEdit:
     edit = QLineEdit(value)
     edit.setMinimumWidth(width * 8)
     return edit
+
+
+class LimitField(QWidget):
+    """A value editor with an always-visible approved MIN/MAX range."""
+
+    edit_requested = Signal()
+
+    def __init__(self, editor: QWidget, minimum: object = None, maximum: object = None) -> None:
+        super().__init__()
+        self.editor = editor
+        self._minimum_value = minimum
+        self._maximum_value = maximum
+        self._last_valid = editor.text() if isinstance(editor, QLineEdit) else None
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(3)
+        row = QHBoxLayout()
+        row.setSpacing(8)
+        row.addWidget(editor, 1)
+        self.minimum = QLabel()
+        self.maximum = QLabel()
+        for label in (self.minimum, self.maximum):
+            label.setObjectName("limitBadge")
+            label.setMinimumWidth(118)
+            label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        row.addWidget(self.minimum)
+        row.addWidget(self.maximum)
+        self.edit_button = QPushButton("Edit…")
+        self.edit_button.setObjectName("limitEditButton")
+        self.edit_button.setToolTip(
+            "Edit this safety range in a popup window. Saving revokes profile approval."
+        )
+        self.edit_button.clicked.connect(self.edit_requested)
+        row.addWidget(self.edit_button)
+        layout.addLayout(row)
+        self.validation_warning = QLabel()
+        self.validation_warning.setObjectName("inlineValidationWarning")
+        self.validation_warning.setStyleSheet("color: #d84343; font-weight: 600;")
+        self.validation_warning.setWordWrap(True)
+        self.validation_warning.hide()
+        layout.addWidget(self.validation_warning)
+        self.set_limits(minimum, maximum)
+        editing_finished = getattr(editor, "editingFinished", None)
+        if editing_finished is not None:
+            editing_finished.connect(self.validate_and_clamp)
+
+    def set_limits(self, minimum: object, maximum: object) -> None:
+        self._minimum_value = minimum
+        self._maximum_value = maximum
+        minimum_text = "NOT SET" if minimum is None else str(minimum)
+        maximum_text = "NOT SET" if maximum is None else str(maximum)
+        self.minimum.setText(f"MIN  {minimum_text}")
+        self.maximum.setText(f"MAX  {maximum_text}")
+        incomplete = minimum is None or maximum is None
+        state = "undefined" if incomplete else "defined"
+        self.setProperty("limitState", state)
+        for label in (self.minimum, self.maximum):
+            label.setProperty("limitState", state)
+            label.style().unpolish(label)
+            label.style().polish(label)
+        self.setToolTip(
+            "Approved laboratory range. The operation is rejected before SCPI is sent "
+            "when a value or sweep endpoint is outside this range."
+        )
+
+    def _show_validation_warning(self, message: str) -> None:
+        self.validation_warning.setText(f"Warning: {message}")
+        self.validation_warning.show()
+        self.editor.setStyleSheet("border: 2px solid #d84343;")
+
+    def _clear_validation_warning(self) -> None:
+        self.validation_warning.clear()
+        self.validation_warning.hide()
+        self.editor.setStyleSheet("")
+
+    def _quantity_values(self) -> tuple[float, float | None, float | None, str] | None:
+        if not isinstance(self.editor, QLineEdit):
+            return None
+        boundaries = [value for value in (self._minimum_value, self._maximum_value) if value is not None]
+        if not boundaries or any(not isinstance(value, str) for value in boundaries):
+            return None
+        dimensions = (
+            DIMENSION_VOLTAGE,
+            DIMENSION_CURRENT,
+            DIMENSION_FREQUENCY,
+            DIMENSION_RESISTANCE,
+            DIMENSION_TIME,
+            DIMENSION_DBM,
+        )
+        for dimension in dimensions:
+            try:
+                parsed_bounds = [parse_quantity(value, dimension).si_value for value in boundaries]
+                current = parse_quantity(self.editor.text(), dimension, require_unit=False).si_value
+            except Exception:
+                continue
+            minimum = parsed_bounds[0] if self._minimum_value is not None else None
+            maximum = parsed_bounds[-1] if self._maximum_value is not None else None
+            return current, minimum, maximum, dimension
+        return None
+
+    def validate_and_clamp(self) -> bool:
+        """Clamp a field on focus loss, while final safety validation remains authoritative."""
+
+        if isinstance(self.editor, QSpinBox):
+            minimum = self._minimum_value if isinstance(self._minimum_value, int) else None
+            maximum = self._maximum_value if isinstance(self._maximum_value, int) else None
+            value = self.editor.value()
+        else:
+            textual_bounds = [
+                str(value).lower()
+                for value in (self._minimum_value, self._maximum_value)
+                if value is not None
+            ]
+            if any(value.startswith(">") or "n/a" in value or "no profile" in value for value in textual_bounds):
+                return True
+            parsed = self._quantity_values()
+            if parsed is None:
+                if isinstance(self.editor, QLineEdit) and self._last_valid is not None:
+                    current = self.editor.text().strip()
+                    if current and current.upper() != "AUTO":
+                        self.editor.setText(self._last_valid)
+                        self._show_validation_warning(
+                            f"Invalid value or unit. Restored the previous value: {self._last_valid}."
+                        )
+                        return False
+                return True
+            value, minimum, maximum, dimension = parsed
+
+        if minimum is not None and value < minimum:
+            replacement = str(self._minimum_value)
+            self._set_editor_value(self._minimum_value)
+            self._show_validation_warning(f"Value was below MIN and has been changed to {replacement}.")
+            return False
+        if maximum is not None and value > maximum:
+            replacement = str(self._maximum_value)
+            self._set_editor_value(self._maximum_value)
+            self._show_validation_warning(f"Value exceeded MAX and has been changed to {replacement}.")
+            return False
+        if isinstance(self.editor, QLineEdit):
+            normalized = format_quantity_auto(value, dimension)
+            self.editor.setText(normalized)
+            self._last_valid = normalized
+        self._clear_validation_warning()
+        return True
+
+    def _set_editor_value(self, value: object) -> None:
+        if isinstance(self.editor, QSpinBox):
+            self.editor.setValue(int(value))
+        elif isinstance(self.editor, QLineEdit):
+            self.editor.setText(str(value))
+            self._last_valid = str(value)
+
+
+class LimitEditDialog(QDialog):
+    """Small focused editor for one safety range."""
+
+    def __init__(
+        self,
+        title: str,
+        minimum: object,
+        maximum: object,
+        *,
+        maximum_enabled: bool = True,
+        parent: QWidget | None = None,
+    ) -> None:
+        super().__init__(parent)
+        self.setWindowTitle(f"Edit limits — {title}")
+        self.setModal(True)
+        self.setMinimumWidth(430)
+        layout = QVBoxLayout(self)
+        heading = QLabel(title)
+        heading.setObjectName("pageTitle")
+        layout.addWidget(heading)
+        note = QLabel(
+            "Enter explicit units where applicable (for example: 10 mA, 67 mV, 1 MHz). "
+            "The complete configuration is validated before it is saved."
+        )
+        note.setWordWrap(True)
+        layout.addWidget(note)
+        form = QFormLayout()
+        self.minimum = QLineEdit("" if minimum is None else str(minimum))
+        self.maximum = QLineEdit("" if maximum is None else str(maximum))
+        self.maximum.setEnabled(maximum_enabled)
+        if not maximum_enabled:
+            self.maximum.setPlaceholderText("Not applicable")
+        form.addRow("Minimum", self.minimum)
+        form.addRow("Maximum", self.maximum)
+        layout.addLayout(form)
+        warning = QLabel("Saving a safety limit change sets the safety profile to UNVERIFIED.")
+        warning.setWordWrap(True)
+        layout.addWidget(warning)
+        buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Save | QDialogButtonBox.StandardButton.Cancel)
+        buttons.accepted.connect(self.accept)
+        buttons.rejected.connect(self.reject)
+        layout.addWidget(buttons)
 
 
 class DeviceCard(QFrame):
@@ -158,9 +359,11 @@ class DashboardPage(QWidget):
 class RigolPage(QWidget):
     status = Signal(str)
 
-    def __init__(self, controller: DeviceController, parent: QWidget | None = None) -> None:
+    def __init__(self, controller: DeviceController, settings: StationSettings, parent: QWidget | None = None) -> None:
         super().__init__(parent)
         self._controller = controller
+        self._station_settings = settings
+        self._limit_fields: dict[QWidget, LimitField] = {}
         layout = QVBoxLayout(self)
         layout.setContentsMargins(18, 18, 18, 18)
         layout.setSpacing(14)
@@ -243,14 +446,14 @@ class RigolPage(QWidget):
                 ("Channel", self.channel),
                 ("Waveform", self.waveform),
                 ("Time representation", self.time_mode),
-                ("Frequency", self.frequency),
+                ("Frequency", self._bounded(self.frequency, "frequency")),
                 ("Period", self.period),
                 ("Level representation", self.level_mode),
-                ("HighL", self.high_level),
-                ("LowL", self.low_level),
-                ("Amplitude (Vpp)", self.vpp),
-                ("Offset / DC level", self.offset),
-                ("Minimum DUT impedance", self.dut_impedance),
+                ("HighL", self._bounded(self.high_level, "high_level")),
+                ("LowL", self._bounded(self.low_level, "low_level")),
+                ("Amplitude (Vpp)", self._bounded(self.vpp, "amplitude_vpp")),
+                ("Offset / DC level", self._bounded(self.offset, "offset")),
+                ("Minimum DUT impedance", self._bounded(self.dut_impedance, "declared_dut_impedance")),
                 ("Phase [deg]", self.phase),
             ),
             (configure,),
@@ -382,6 +585,7 @@ class RigolPage(QWidget):
         self.time_mode.currentTextChanged.connect(self._update_dynamic_controls)
         self.waveform.currentTextChanged.connect(self._update_preview)
         self.channel.currentTextChanged.connect(self._update_preview)
+        self.channel.currentTextChanged.connect(self._refresh_rigol_limits)
         for field in (self.frequency, self.period, self.high_level, self.low_level, self.vpp, self.offset, self.duty, self.ramp_symmetry, self.pulse_width):
             field.textChanged.connect(self._update_preview)
         self._sync_vpp_offset_from_levels()
@@ -530,6 +734,32 @@ class RigolPage(QWidget):
         scroll.setWidget(content)
         return scroll
 
+    def _rigol_limit_values(self, key: str) -> tuple[object, object]:
+        limits = self._station_settings.rigol.safety.channels[self.channel.currentText()].lab_limits
+        value = getattr(limits, key)
+        if key == "declared_dut_impedance":
+            return value.min, "no profile maximum"
+        return value.min, value.max
+
+    def _bounded(self, editor: QWidget, limit_key: str) -> LimitField:
+        minimum, maximum = self._rigol_limit_values(limit_key)
+        field = LimitField(editor, minimum, maximum)
+        field.setProperty("limitKey", limit_key)
+        self._limit_fields[editor] = field
+        return field
+
+    def _row_widget(self, editor: QWidget) -> QWidget:
+        return self._limit_fields.get(editor, editor)
+
+    def _refresh_rigol_limits(self, *_args: object) -> None:
+        for field in self._limit_fields.values():
+            key = str(field.property("limitKey"))
+            field.set_limits(*self._rigol_limit_values(key))
+
+    def set_settings(self, settings: StationSettings) -> None:
+        self._station_settings = settings
+        self._refresh_rigol_limits()
+
     @staticmethod
     def _format_voltage(value_v: float) -> str:
         if 0 < abs(value_v) < 1:
@@ -583,7 +813,7 @@ class RigolPage(QWidget):
             self.phase: waveform not in {"DC", "NOIS"},
         }
         for widget, visible in visibility.items():
-            self.basic_form.setRowVisible(widget, visible)
+            self.basic_form.setRowVisible(self._row_widget(widget), visible)
 
         shape_visibility = {
             self.duty: waveform == "SQU",
@@ -766,11 +996,11 @@ class RigolPage(QWidget):
         self.mod_polarity.addItems(["POS", "NEG"])
         apply = QPushButton("Apply modulation while OUTPUT is OFF")
         for label, widget in (
-            ("Stan", self.mod_enabled),
+            ("State", self.mod_enabled),
             ("Typ", self.mod_type),
             ("Source", self.mod_source),
-            ("Rate / freq.", self.mod_rate),
-            ("Parametr typu", self.mod_parameter),
+                ("Rate / freq.", self._bounded(self.mod_rate, "modulation_rate")),
+            ("Type parameter", self.mod_parameter),
             ("Internal shape", self.mod_shape),
             ("Polarity", self.mod_polarity),
             ("", apply),
@@ -803,15 +1033,15 @@ class RigolPage(QWidget):
         apply = QPushButton("Apply sweep while OUTPUT is OFF")
         trigger = QPushButton("Trigger sweep")
         for label, widget in (
-            ("Stan", self.sweep_enabled),
-            ("Start", self.sweep_start),
-            ("Stop", self.sweep_stop),
-            ("Czas", self.sweep_duration),
+            ("State", self.sweep_enabled),
+            ("Start", self._bounded(self.sweep_start, "frequency")),
+            ("Stop", self._bounded(self.sweep_stop, "frequency")),
+            ("Time", self._bounded(self.sweep_duration, "sweep_duration")),
             ("Hold start", self.sweep_start_hold),
             ("Hold stop", self.sweep_stop_hold),
             ("Return time", self.sweep_return_time),
             ("Spacing", self.sweep_spacing),
-            ("Steps", self.sweep_steps),
+            ("Steps", self._bounded(self.sweep_steps, "sweep_steps")),
             ("Trigger source", self.sweep_trigger),
             ("Trigger slope", self.sweep_trigger_slope),
             ("", self.sweep_trigger_out),
@@ -849,11 +1079,11 @@ class RigolPage(QWidget):
         apply = QPushButton("Apply burst while OUTPUT is OFF")
         trigger = QPushButton("Trigger burst")
         for label, widget in (
-            ("Stan", self.burst_enabled),
+            ("State", self.burst_enabled),
             ("Mode", self.burst_mode),
-            ("Cycles", self.burst_cycles),
+            ("Cycles", self._bounded(self.burst_cycles, "burst_cycles")),
             ("Phase [deg]", self.burst_phase),
-            ("Period", self.burst_period),
+            ("Period", self._bounded(self.burst_period, "burst_period")),
             ("Delay", self.burst_delay),
             ("Trigger source", self.burst_trigger),
             ("Trigger slope", self.burst_trigger_slope),
@@ -901,6 +1131,16 @@ class RigolPage(QWidget):
                 pulse_leading_s=parse_quantity(self.pulse_leading.text(), DIMENSION_TIME).si_value if self.waveform.currentText() == "PULS" else None,
                 pulse_trailing_s=parse_quantity(self.pulse_trailing.text(), DIMENSION_TIME).si_value if self.waveform.currentText() == "PULS" else None,
                 dut_min_impedance_ohm=parse_quantity(self.dut_impedance.text(), DIMENSION_RESISTANCE).si_value,
+            )
+            validate_rigol_waveform(
+                channel=self._station_settings.rigol.safety.channels[self.channel.currentText()],
+                safety=self._station_settings.rigol.safety,
+                waveform=config.waveform,
+                frequency=config.frequency_hz,
+                high_level=config.high_level_v,
+                low_level=config.low_level_v,
+                output_load=config.output_load,
+                dut_min_impedance=config.dut_min_impedance_ohm,
             )
         except Exception as exc:
             QMessageBox.warning(self, "Invalid data", str(exc))
@@ -957,6 +1197,16 @@ class RigolPage(QWidget):
                 trigger_source=self.sweep_trigger.currentText(),  # type: ignore[arg-type]
                 trigger_slope=self.sweep_trigger_slope.currentText(),  # type: ignore[arg-type]
                 trigger_output=self.sweep_trigger_out.isChecked(),
+            )
+            validate_rigol_frequency_sweep(
+                channel=self._station_settings.rigol.safety.channels[self.channel.currentText()],
+                start_hz=config.start_hz,
+                stop_hz=config.stop_hz,
+                duration_s=config.duration_s,
+                steps=config.steps,
+                start_hold_s=config.start_hold_s,
+                stop_hold_s=config.stop_hold_s,
+                return_time_s=config.return_time_s,
             )
         except Exception as exc:
             QMessageBox.warning(self, "Sweep Rigol", str(exc))
@@ -1044,13 +1294,48 @@ class RigolPage(QWidget):
 class KeithleyPage(QWidget):
     status = Signal(str)
 
-    def __init__(self, controller: DeviceController, parent: QWidget | None = None) -> None:
+    def __init__(self, controller: DeviceController, settings: StationSettings, parent: QWidget | None = None) -> None:
         super().__init__(parent)
         self._controller = controller
+        self._station_settings = settings
+        self._limit_fields: dict[str, LimitField] = {}
+        self._output_states = {"A": False, "B": False}
+        self._pending_channels: dict[str, str] = {}
+        self._measure_pending = False
+        self._live_next_channel = "A"
+        self._live_timer = QTimer(self)
+        self._live_timer.setInterval(1000)
+        self._live_timer.timeout.connect(self._request_live_measurement)
         layout = QVBoxLayout(self)
-        title = QLabel("Keithley 2600 — SMU")
+        layout.setContentsMargins(16, 14, 16, 14)
+        layout.setSpacing(12)
+        hero = QFrame()
+        hero.setObjectName("keithleyHero")
+        hero_layout = QHBoxLayout(hero)
+        title = QLabel("Keithley 2600 — Dual-channel SMU")
         title.setObjectName("pageTitle")
-        layout.addWidget(title)
+        hero_layout.addWidget(title)
+        hero_layout.addStretch(1)
+        self.device_led = QLabel("●")
+        self.device_led.setObjectName("keithleyLed")
+        self.device_state = QLabel("DISCONNECTED")
+        self.device_state.setObjectName("keithleyState")
+        hero_layout.addWidget(self.device_led)
+        hero_layout.addWidget(self.device_state)
+        layout.addWidget(hero)
+        channel_grid = QGridLayout()
+        channel_grid.setSpacing(12)
+        self.channel_cards: dict[str, dict[str, QLabel | QFrame]] = {}
+        for column, channel_name in enumerate(("A", "B")):
+            channel_grid.addWidget(self._build_channel_card(channel_name), 0, column)
+        layout.addLayout(channel_grid)
+        control_tabs = QTabWidget()
+        control_tabs.setObjectName("keithleyControlTabs")
+        source_tab = QWidget()
+        source_layout = QVBoxLayout(source_tab)
+        source_title = QLabel("Source and measurement configuration")
+        source_title.setObjectName("sectionTitle")
+        source_layout.addWidget(source_title)
         form = QFormLayout()
         self.channel = QComboBox()
         self.channel.addItems(["A", "B"])
@@ -1075,40 +1360,274 @@ class KeithleyPage(QWidget):
         for label, widget in (
             ("Channel", self.channel),
             ("Source mode", self.mode),
-            ("Level", self.level),
-            ("Compliance", self.compliance),
-            ("NPLC", self.nplc),
-            ("Settling time", self.settle),
+            ("Level", self._keithley_bounded("level", self.level)),
+            ("Compliance", self._keithley_bounded("compliance", self.compliance)),
+            ("NPLC", self._keithley_bounded("nplc", self.nplc)),
+            ("Settling time", self._keithley_bounded("settle", self.settle)),
             ("Sense mode", self.sense_mode),
             ("", self.source_autorange),
-            ("Source range (AUTO or value with unit)", self.source_range),
+            ("Source range (AUTO or value with unit)", self._keithley_bounded("source_range", self.source_range)),
             ("", self.measure_voltage_autorange),
-            ("Measure V range (AUTO or value with unit)", self.measure_voltage_range),
+            ("Measure V range (AUTO or value with unit)", self._keithley_bounded("measure_voltage_range", self.measure_voltage_range)),
             ("", self.measure_current_autorange),
-            ("Measure I range (AUTO or value with unit)", self.measure_current_range),
+            ("Measure I range (AUTO or value with unit)", self._keithley_bounded("measure_current_range", self.measure_current_range)),
         ):
             form.addRow(label, widget)
-        layout.addLayout(form)
+        source_layout.addLayout(form)
         buttons = QHBoxLayout()
         configure = QPushButton("Configure source while OUTPUT is OFF")
-        measure = QPushButton("Measure I / V")
+        configure.setObjectName("primaryButton")
+        measure = QPushButton("Measure selected channel")
         arm = QPushButton("ARM (30 s)")
         on = QPushButton("OUTPUT ON")
+        on.setObjectName("outputOnButton")
         off = QPushButton("Ramp to zero + OFF")
+        off.setObjectName("outputOffButton")
         for button in (configure, measure, arm, on, off):
             buttons.addWidget(button)
-        layout.addLayout(buttons)
-        self.readout = QLabel("I: —   V: —   P: —")
+        source_layout.addLayout(buttons)
+        live_bar = QHBoxLayout()
+        self.live_measurements = QCheckBox("Live readout for channels A and B")
+        self.live_measurements.setToolTip(
+            "Alternately measures channels A and B every second. This never enables an output."
+        )
+        live_bar.addWidget(self.live_measurements)
+        live_bar.addStretch(1)
+        self.last_update = QLabel("No measurements yet")
+        self.last_update.setObjectName("muted")
+        live_bar.addWidget(self.last_update)
+        source_layout.addLayout(live_bar)
+        self.readout = QLabel("Select Measure or enable Live readout")
         self.readout.setObjectName("readout")
-        layout.addWidget(self.readout)
-        layout.addStretch(1)
+        source_layout.addWidget(self.readout)
+        source_layout.addStretch(1)
+        control_tabs.addTab(self._scroll_widget(source_tab), "Control & ranges")
+        layout.addWidget(control_tabs, 1)
         configure.clicked.connect(self.configure)
-        measure.clicked.connect(lambda: self._controller.call("measure", self.channel.currentText()))
+        measure.clicked.connect(self.request_measurement)
         arm.clicked.connect(self.arm_output)
         on.clicked.connect(self.request_output)
-        off.clicked.connect(lambda: self._controller.call("ramp_to_zero", self.channel.currentText()))
+        off.clicked.connect(self.request_ramp_off)
+        self.live_measurements.toggled.connect(self._toggle_live_measurements)
         controller.result.connect(self._result)
         controller.error.connect(self._error)
+        controller.state_changed.connect(self._device_state_changed)
+        self.channel.currentTextChanged.connect(self._refresh_keithley_limits)
+        self.mode.currentTextChanged.connect(self._refresh_keithley_limits)
+        self.channel.currentTextChanged.connect(self._selected_channel_changed)
+        self._selected_channel_changed(self.channel.currentText())
+
+    @staticmethod
+    def _scroll_widget(content: QWidget) -> QScrollArea:
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll.setFrameShape(QFrame.Shape.NoFrame)
+        scroll.setWidget(content)
+        return scroll
+
+    def _build_channel_card(self, channel: str) -> QFrame:
+        card = QFrame()
+        card.setObjectName("keithleyChannelCard")
+        card.setProperty("selected", False)
+        card_layout = QVBoxLayout(card)
+        header = QHBoxLayout()
+        name = QLabel(f"CHANNEL {channel}")
+        name.setObjectName("cardTitle")
+        led = QLabel("●")
+        led.setObjectName("keithleyOutputLed")
+        output = QLabel("OUTPUT OFF")
+        output.setObjectName("keithleyOutputState")
+        header.addWidget(name)
+        header.addStretch(1)
+        header.addWidget(led)
+        header.addWidget(output)
+        card_layout.addLayout(header)
+        meters = QGridLayout()
+        values: dict[str, QLabel] = {}
+        definitions = (
+            ("voltage", "VOLTAGE", "V"),
+            ("current", "CURRENT", "A"),
+            ("resistance", "RESISTANCE (derived V/I)", "Ω"),
+            ("power", "POWER (derived V×I)", "W"),
+        )
+        for index, (key, caption, unit) in enumerate(definitions):
+            tile = QFrame()
+            tile.setObjectName("keithleyMeterTile")
+            tile_layout = QVBoxLayout(tile)
+            tile_layout.setContentsMargins(10, 7, 10, 7)
+            caption_label = QLabel(caption)
+            caption_label.setObjectName("muted")
+            value = QLabel(f"— {unit}")
+            value.setObjectName("keithleyMeterValue")
+            tile_layout.addWidget(caption_label)
+            tile_layout.addWidget(value)
+            meters.addWidget(tile, index // 2, index % 2)
+            values[key] = value
+        card_layout.addLayout(meters)
+        footer = QHBoxLayout()
+        compliance = QLabel("COMPLIANCE: clear")
+        compliance.setObjectName("keithleyComplianceClear")
+        select = QPushButton(f"Select CH {channel}")
+        select.clicked.connect(lambda _checked=False, ch=channel: self.channel.setCurrentText(ch))
+        measure = QPushButton(f"Measure CH {channel}")
+        measure.clicked.connect(lambda _checked=False, ch=channel: self.request_measurement(ch))
+        footer.addWidget(compliance)
+        footer.addStretch(1)
+        footer.addWidget(select)
+        footer.addWidget(measure)
+        card_layout.addLayout(footer)
+        self.channel_cards[channel] = {
+            "card": card,
+            "led": led,
+            "output": output,
+            "compliance": compliance,
+            **values,
+        }
+        return card
+
+    def _selected_channel_changed(self, selected: str) -> None:
+        for channel, widgets in self.channel_cards.items():
+            card = widgets["card"]
+            card.setProperty("selected", channel == selected)
+            card.style().unpolish(card)
+            card.style().polish(card)
+
+    def _device_state_changed(self, state: str) -> None:
+        normalized = state.upper()
+        self.device_state.setText(normalized.replace("_", " "))
+        color = {
+            "DISCONNECTED": "#91a0b2",
+            "VERIFIED": "#38d996",
+            "OUTPUT_OFF": "#38d996",
+            "OUTPUT_ON": "#ffcc66",
+            "COMPLIANCE": "#ff657a",
+            "FAULT": "#ff657a",
+            "UNKNOWN": "#ff657a",
+        }.get(normalized, "#91a0b2")
+        self.device_led.setStyleSheet(f"color: {color};")
+        if normalized == "DISCONNECTED":
+            self._live_timer.stop()
+            self.live_measurements.setChecked(False)
+            for channel in ("A", "B"):
+                widgets = self.channel_cards[channel]
+                widgets["output"].setText("OUTPUT UNKNOWN")
+                widgets["led"].setStyleSheet("color: #91a0b2;")
+        elif normalized == "VERIFIED":
+            # Connection qualification explicitly forces and verifies both outputs OFF.
+            self._set_channel_output("A", False)
+            self._set_channel_output("B", False)
+
+    @staticmethod
+    def _engineering(value: float, unit: str) -> str:
+        magnitude = abs(value)
+        scales = ((1e9, "G"), (1e6, "M"), (1e3, "k"), (1.0, ""), (1e-3, "m"), (1e-6, "µ"), (1e-9, "n"), (1e-12, "p"))
+        for scale, prefix in scales:
+            if magnitude >= scale or scale == 1e-12:
+                return f"{value / scale:.7g} {prefix}{unit}"
+        return f"{value:.7g} {unit}"
+
+    def _update_channel_measurement(self, measurement: object) -> None:
+        channel = str(getattr(measurement, "channel"))
+        voltage = float(getattr(measurement, "voltage_v"))
+        current = float(getattr(measurement, "current_a"))
+        power = float(getattr(measurement, "power_w"))
+        resistance = abs(voltage / current) if abs(current) > 1e-15 else math.inf
+        widgets = self.channel_cards[channel]
+        widgets["voltage"].setText(self._engineering(voltage, "V"))
+        widgets["current"].setText(self._engineering(current, "A"))
+        widgets["power"].setText(self._engineering(power, "W"))
+        widgets["resistance"].setText("∞ Ω" if not math.isfinite(resistance) else self._engineering(resistance, "Ω"))
+        compliance = bool(getattr(measurement, "compliance_detected", False))
+        widgets["compliance"].setText("COMPLIANCE: ACTIVE" if compliance else "COMPLIANCE: clear")
+        widgets["compliance"].setObjectName("keithleyComplianceActive" if compliance else "keithleyComplianceClear")
+        widgets["compliance"].style().unpolish(widgets["compliance"])
+        widgets["compliance"].style().polish(widgets["compliance"])
+        if compliance:
+            self._set_channel_output(channel, False)
+        self.last_update.setText(f"Last update: CH {channel}")
+
+    def _set_channel_output(self, channel: str, enabled: bool) -> None:
+        self._output_states[channel] = enabled
+        widgets = self.channel_cards[channel]
+        widgets["output"].setText("OUTPUT ON" if enabled else "OUTPUT OFF")
+        widgets["led"].setStyleSheet(f"color: {'#ffcc66' if enabled else '#38d996'};")
+
+    def request_measurement(self, channel: str | None = None) -> None:
+        if self._measure_pending:
+            return
+        selected = channel or self.channel.currentText()
+        self._pending_channels["measure"] = selected
+        self._measure_pending = True
+        self._controller.call("measure", selected)
+
+    def request_ramp_off(self) -> None:
+        channel = self.channel.currentText()
+        self._pending_channels["ramp_to_zero"] = channel
+        self._controller.call("ramp_to_zero", channel)
+
+    def _toggle_live_measurements(self, enabled: bool) -> None:
+        if enabled:
+            self._request_live_measurement()
+            self._live_timer.start()
+        else:
+            self._live_timer.stop()
+
+    def _request_live_measurement(self) -> None:
+        if self._measure_pending:
+            return
+        enabled = [
+            channel
+            for channel in ("A", "B")
+            if self._station_settings.keithley.safety.channels[channel].enabled
+        ]
+        if not enabled:
+            self.live_measurements.setChecked(False)
+            self.status.emit("Keithley live readout stopped: no enabled channels")
+            return
+        channel = self._live_next_channel if self._live_next_channel in enabled else enabled[0]
+        next_index = (enabled.index(channel) + 1) % len(enabled)
+        self._live_next_channel = enabled[next_index]
+        self.request_measurement(channel)
+
+    def _keithley_limit_values(self, key: str) -> tuple[object, object]:
+        limits = self._station_settings.keithley.safety.channels[self.channel.currentText()].lab_limits
+        mode = self.mode.currentText()
+        if key == "nplc":
+            return 0.001, 25
+        if key == "settle":
+            return (limits.point_settle_time.min, limits.point_settle_time.max) if limits.point_settle_time else ("0 s", "no profile maximum")
+        if mode == "measure_only" and key in {"level", "compliance", "source_range"}:
+            return "N/A", "N/A"
+        if key == "level":
+            value = limits.source_current if mode == "current" else limits.source_voltage
+            return value.min, value.max
+        if key == "compliance":
+            value = limits.voltage_compliance if mode == "current" else limits.current_compliance
+            return value.min, value.max
+        if key == "source_range":
+            value = limits.source_current if mode == "current" else limits.source_voltage
+            return "> 0", value.max_abs or value.max
+        if key == "measure_voltage_range":
+            values = limits.measured_voltage_trip
+            return "> 0", values.max_abs or values.max
+        if key == "measure_current_range":
+            values = limits.measured_current_trip
+            return "> 0", values.max_abs or values.max
+        return "NOT SET", "NOT SET"
+
+    def _keithley_bounded(self, key: str, editor: QWidget) -> LimitField:
+        field = LimitField(editor, *self._keithley_limit_values(key))
+        field.setProperty("limitKey", key)
+        self._limit_fields[key] = field
+        return field
+
+    def _refresh_keithley_limits(self, *_args: object) -> None:
+        for key, field in self._limit_fields.items():
+            field.set_limits(*self._keithley_limit_values(key))
+
+    def set_settings(self, settings: StationSettings) -> None:
+        self._station_settings = settings
+        self._refresh_keithley_limits()
 
     def configure(self) -> None:
         try:
@@ -1139,6 +1658,7 @@ class KeithleyPage(QWidget):
         except Exception as exc:
             QMessageBox.warning(self, "Invalid data", str(exc))
             return
+        self._pending_channels["configure"] = self.channel.currentText()
         self._controller.call("configure", request)
 
     @staticmethod
@@ -1159,6 +1679,7 @@ class KeithleyPage(QWidget):
             QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.Cancel,
         )
         if answer is QMessageBox.StandardButton.Yes:
+            self._pending_channels["arm"] = channel
             self._controller.call("arm", channel)
 
     def request_output(self) -> None:
@@ -1171,11 +1692,14 @@ class KeithleyPage(QWidget):
             QMessageBox.StandardButton.Cancel,
         )
         if answer is QMessageBox.StandardButton.Yes:
+            self._pending_channels["set_output"] = channel
             self._controller.call("set_output", (channel, True))
 
     def _result(self, operation: str, result: object) -> None:
         if operation == "measure" and hasattr(result, "current_a"):
             measurement = result
+            self._measure_pending = False
+            self._update_channel_measurement(measurement)
             self.readout.setText(
                 f"I: {measurement.current_a * 1e3:.8g} mA   "
                 f"V: {measurement.voltage_v * 1e3:.8g} mV   P: {measurement.power_w * 1e6:.8g} µW"
@@ -1183,11 +1707,23 @@ class KeithleyPage(QWidget):
             )
             self.status.emit("Keithley measurement completed")
         elif operation == "configure":
+            channel = self._pending_channels.pop("configure", self.channel.currentText())
+            self._set_channel_output(channel, False)
             self.status.emit("Keithley configured while OUTPUT is OFF")
         elif operation == "arm":
             self.status.emit("Keithley armed for 30 seconds; OUTPUT ON requires separate confirmation")
+        elif operation == "set_output":
+            channel = self._pending_channels.pop("set_output", self.channel.currentText())
+            self._set_channel_output(channel, True)
+            self.status.emit(f"Keithley CH {channel} OUTPUT ON")
+        elif operation == "ramp_to_zero":
+            channel = self._pending_channels.pop("ramp_to_zero", self.channel.currentText())
+            self._set_channel_output(channel, False)
+            self.status.emit(f"Keithley CH {channel} ramped to zero; OUTPUT OFF")
 
     def _error(self, operation: str, error: str) -> None:
+        if operation == "measure":
+            self._measure_pending = False
         if operation in {"configure", "measure", "set_output", "ramp_to_zero", "arm"}:
             QMessageBox.warning(self, "Keithley", error)
 
@@ -1198,12 +1734,15 @@ class AnritsuPage(QWidget):
     def __init__(
         self,
         controller: DeviceController,
+        settings: StationSettings,
         *,
         single_sweep_available: bool,
         parent: QWidget | None = None,
     ) -> None:
         super().__init__(parent)
         self._controller = controller
+        self._station_settings = settings
+        self._limit_fields: dict[str, LimitField] = {}
         self._single_sweep_configured = single_sweep_available
         self._fetch_pending = False
         self._timer = QTimer(self)
@@ -1225,10 +1764,10 @@ class AnritsuPage(QWidget):
         self.refresh.setValue(500)
         self.refresh.setSuffix(" ms")
         for label, widget in (
-            ("Start", self.start),
-            ("Stop", self.stop),
-            ("Reference level", self.reference),
-            ("Points", self.points),
+            ("Start", self._anritsu_bounded("frequency", self.start)),
+            ("Stop", self._anritsu_bounded("frequency", self.stop)),
+            ("Reference level", self._anritsu_bounded("reference_level", self.reference)),
+            ("Points", self._anritsu_bounded("sweep_points", self.points)),
             ("Live refresh interval", self.refresh),
         ):
             form.addRow(label, widget)
@@ -1272,6 +1811,22 @@ class AnritsuPage(QWidget):
         abort.clicked.connect(lambda: self._controller.call("emergency_off"))
         controller.result.connect(self._result)
         controller.error.connect(self._error)
+
+    def _anritsu_limit_values(self, key: str) -> tuple[object, object]:
+        safety = self._station_settings.anritsu.safety
+        value = getattr(safety, key)
+        return value.min, value.max
+
+    def _anritsu_bounded(self, key: str, editor: QWidget) -> LimitField:
+        field = LimitField(editor, *self._anritsu_limit_values(key))
+        self._limit_fields[key + str(len(self._limit_fields))] = field
+        field.setProperty("limitKey", key)
+        return field
+
+    def set_settings(self, settings: StationSettings) -> None:
+        self._station_settings = settings
+        for field in self._limit_fields.values():
+            field.set_limits(*self._anritsu_limit_values(str(field.property("limitKey"))))
 
     def set_capabilities(self, capabilities: object) -> None:
         supports = getattr(capabilities, "supports", lambda _feature: False)
@@ -1748,16 +2303,30 @@ class MainWindow(QMainWindow):
         self.tabs = QTabWidget()
         self.setCentralWidget(self.tabs)
         self.dashboard = DashboardPage(self._settings)
-        self.rigol_page = RigolPage(self._controllers["rigol"])
-        self.keithley_page = KeithleyPage(self._controllers["keithley"])
+        self.rigol_page = RigolPage(self._controllers["rigol"], self._settings)
+        self.keithley_page = KeithleyPage(self._controllers["keithley"], self._settings)
         self.anritsu_page = AnritsuPage(
             self._controllers["anritsu"],
+            self._settings,
             single_sweep_available=self._settings.anritsu.acquisition.single_sweep_mode == "standard_scpi_opc",
         )
         self.recipe_page = RecipePage(self._settings)
         self.run_monitor = RunMonitorPage()
         self.results_page = ResultsPage(str(self._settings.storage.get("output_directory", "./measurements")))
         self.settings_page = SettingsPage(self._repository, read_only=self._simulation)
+        for field in self.rigol_page.findChildren(LimitField):
+            field.edit_button.setEnabled(not self._simulation)
+            field.edit_requested.connect(lambda field=field: self._edit_device_limit("rigol", field))
+        for field in self.keithley_page.findChildren(LimitField):
+            editable = not self._simulation and str(field.property("limitKey")) != "nplc"
+            field.edit_button.setEnabled(editable)
+            if editable:
+                field.edit_requested.connect(lambda field=field: self._edit_device_limit("keithley", field))
+            else:
+                field.edit_button.setToolTip("NPLC range is fixed by the instrument and is not a laboratory safety limit.")
+        for field in self.anritsu_page.findChildren(LimitField):
+            field.edit_button.setEnabled(not self._simulation)
+            field.edit_requested.connect(lambda field=field: self._edit_device_limit("anritsu", field))
         for widget, name in (
             (self.dashboard, "Dashboard"),
             (self.rigol_page, "Rigol"),
@@ -1799,6 +2368,86 @@ class MainWindow(QMainWindow):
         quit_action.triggered.connect(self.close)
         menu.addAction(quit_action)
 
+    @staticmethod
+    def _nested_value(payload: dict[str, Any], path: tuple[str, ...]) -> Any:
+        value: Any = payload
+        for part in path:
+            value = value[part]
+        return value
+
+    @staticmethod
+    def _coerce_limit_value(text: str, original: object) -> object:
+        stripped = text.strip()
+        if original is None:
+            return None if not stripped else stripped
+        if isinstance(original, int) and not isinstance(original, bool):
+            return int(stripped)
+        if isinstance(original, float):
+            return float(stripped)
+        return stripped
+
+    def _limit_edit_spec(self, device: str, field: LimitField) -> tuple[str, tuple[str, ...], bool]:
+        key = str(field.property("limitKey"))
+        if device == "rigol":
+            channel = self.rigol_page.channel.currentText()
+            path = ("devices", "rigol", "safety", "channels", channel, "lab_limits", key)
+            return f"Rigol CH{channel} — {key.replace('_', ' ')}", path, key != "declared_dut_impedance"
+        if device == "anritsu":
+            path = ("devices", "anritsu", "safety", key)
+            return f"Anritsu — {key.replace('_', ' ')}", path, True
+
+        channel = self.keithley_page.channel.currentText()
+        mode = self.keithley_page.mode.currentText()
+        if mode == "measure_only" and key in {"level", "compliance", "source_range"}:
+            raise ConfigurationError("Source limits are not applicable while Keithley is in measure-only mode.")
+        mappings = {
+            "level": "source_current" if mode == "current" else "source_voltage",
+            "compliance": "voltage_compliance" if mode == "current" else "current_compliance",
+            "source_range": "source_current" if mode == "current" else "source_voltage",
+            "measure_voltage_range": "measured_voltage_trip",
+            "measure_current_range": "measured_current_trip",
+            "settle": "point_settle_time",
+        }
+        mapped = mappings[key]
+        path = ("devices", "keithley", "safety", "channels", channel, "lab_limits", mapped)
+        return f"Keithley CH{channel} — {mapped.replace('_', ' ')}", path, True
+
+    def _edit_device_limit(self, device: str, field: LimitField) -> None:
+        try:
+            loaded = self._repository.load()
+            raw = deepcopy(loaded.raw)
+            title, path, maximum_enabled = self._limit_edit_spec(device, field)
+            range_data = self._nested_value(raw, path)
+            if range_data is None:
+                range_data = {"min": "", "max": ""}
+            minimum = range_data.get("min")
+            maximum = range_data.get("max") if maximum_enabled else None
+        except (ConfigurationError, KeyError, TypeError) as exc:
+            QMessageBox.critical(self, "Cannot edit limits", str(exc))
+            return
+
+        dialog = LimitEditDialog(title, minimum, maximum, maximum_enabled=maximum_enabled, parent=self)
+        if dialog.exec() != QDialog.DialogCode.Accepted:
+            return
+        try:
+            replacement = dict(range_data)
+            replacement["min"] = self._coerce_limit_value(dialog.minimum.text(), minimum)
+            if maximum_enabled:
+                replacement["max"] = self._coerce_limit_value(dialog.maximum.text(), maximum)
+            container: Any = raw
+            for part in path[:-1]:
+                container = container[part]
+            container[path[-1]] = replacement
+            settings = self._repository.save_raw(raw)
+        except (ConfigurationError, ValueError, KeyError, TypeError) as exc:
+            QMessageBox.critical(self, "Invalid safety limits", str(exc))
+            return
+
+        self.settings_page.reload()
+        self._settings_saved(settings)
+        self.statusBar().showMessage(f"Saved {title}; safety profile approval is now required.", 12_000)
+        self._log(f"Safety limits saved: {title}")
+
     def _toggle_theme(self, light: bool) -> None:
         theme = "light" if light else "dark"
         chart_theme = QChart.ChartTheme.ChartThemeLight if light else QChart.ChartTheme.ChartThemeDark
@@ -1807,7 +2456,23 @@ class MainWindow(QMainWindow):
             chart_view.chart().legend().hide()
             chart_view.chart().setBackgroundVisible(False)
         self.theme_changed.emit(theme)
-        self._log(f"Theme changed to {theme}")
+        self._persist_theme(theme)
+        self._log(f"Theme changed to {theme} and saved")
+
+    def _persist_theme(self, theme: str) -> None:
+        if self.settings_page._dirty:
+            self.settings_page._autosave_timer.stop()
+            if not self.settings_page.save_draft(silent=True):
+                self._log("Theme was applied but not saved because Settings contains invalid values")
+                return
+        try:
+            loaded = self._repository.load()
+            loaded.raw.setdefault("ui", {})["theme"] = theme
+            self._settings = self._repository.save_raw(loaded.raw)
+        except ConfigurationError as exc:
+            self._log(f"Theme was applied but could not be saved: {exc}")
+            return
+        self.settings_page.reload()
 
     def _log_dock(self):
         from PySide6.QtWidgets import QDockWidget
@@ -1915,6 +2580,9 @@ class MainWindow(QMainWindow):
     def _settings_saved(self, settings: StationSettings) -> None:
         self._settings = simulated_station_settings(settings) if self._simulation else settings
         self.dashboard.update_settings(self._settings)
+        self.rigol_page.set_settings(self._settings)
+        self.keithley_page.set_settings(self._settings)
+        self.anritsu_page.set_settings(self._settings)
         self.recipe_page.set_settings(self._settings)
         for name, controller in self._controllers.items():
             controller.reconfigure(self._make_adapter(name))

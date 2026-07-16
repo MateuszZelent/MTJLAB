@@ -7,7 +7,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-from PySide6.QtCore import Qt, Signal
+from PySide6.QtCore import QTimer, Qt, Signal
 from PySide6.QtWidgets import (
     QHBoxLayout,
     QInputDialog,
@@ -54,6 +54,10 @@ class SettingsPage(QWidget):
         self._settings: StationSettings | None = None
         self._changing = False
         self._dirty = False
+        self._autosave_timer = QTimer(self)
+        self._autosave_timer.setSingleShot(True)
+        self._autosave_timer.setInterval(750)
+        self._autosave_timer.timeout.connect(lambda: self.save_draft(silent=True))
         self._build()
         self.reload()
 
@@ -102,6 +106,7 @@ class SettingsPage(QWidget):
             self.approve_button.setEnabled(False)
 
     def reload(self) -> None:
+        self._autosave_timer.stop()
         try:
             loaded = self._repository.load()
         except ConfigurationError as exc:
@@ -193,6 +198,10 @@ class SettingsPage(QWidget):
     def _changed(self, item: QTreeWidgetItem, column: int) -> None:
         if not self._changing and column == 1 and item.data(0, Qt.ItemDataRole.UserRole) is not None:
             self._dirty = True
+            autosave = bool(self._raw.get("application", {}).get("settings_autosave", False))
+            if autosave and not self._read_only:
+                self._autosave_timer.start()
+                self.status.emit("Autosave pending…")
 
     def _apply_tree_values(self) -> dict[str, Any]:
         draft = deepcopy(self._raw)
@@ -250,7 +259,9 @@ class SettingsPage(QWidget):
         self.status.emit("Configuration validation passed")
         return settings
 
-    def save_draft(self) -> None:
+    def save_draft(self, *, silent: bool = False) -> bool:
+        if not self._dirty:
+            return True
         try:
             draft = self._apply_tree_values()
             # A limit edit invalidates a previous approval and retains the safe
@@ -261,15 +272,24 @@ class SettingsPage(QWidget):
             draft["profile"]["approval_note"] = "Profile approval is required after settings changes."
             settings = self._repository.save_raw(draft)
         except (ConfigurationError, ValueError) as exc:
-            QMessageBox.critical(self, "Changes not saved", str(exc))
-            return
+            if silent:
+                self.status.emit(f"Autosave rejected invalid settings: {exc}")
+            else:
+                QMessageBox.critical(self, "Changes not saved", str(exc))
+            return False
         self._raw = draft
         self._settings = settings
         self._dirty = False
-        self._populate()
+        if not silent:
+            self._populate()
         self._update_subtitle()
         self.settings_saved.emit(settings)
-        self.status.emit("Configuration saved; profile approval is required")
+        self.status.emit(
+            "Configuration autosaved; profile approval is required"
+            if silent
+            else "Configuration saved; profile approval is required"
+        )
+        return True
 
     def approve_profile(self) -> None:
         if self._dirty:

@@ -1,15 +1,21 @@
 from __future__ import annotations
 
 import os
+from pathlib import Path
+import tempfile
 import unittest
+from unittest.mock import Mock, patch
+from types import SimpleNamespace
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
-from PySide6.QtCore import Qt
-from PySide6.QtWidgets import QApplication, QPushButton, QScrollArea
+from PySide6.QtCore import QTimer, Qt
+from PySide6.QtTest import QTest
+from PySide6.QtWidgets import QApplication, QMessageBox, QPushButton, QScrollArea, QTreeWidgetItemIterator
 
 from app.domain.models import DeviceCapabilities
-from app.ui.main_window import MainWindow
+from app.settings.repository import SettingsRepository
+from app.ui.main_window import LimitEditDialog, MainWindow
 
 
 class MainWindowTests(unittest.TestCase):
@@ -80,7 +86,7 @@ class MainWindowTests(unittest.TestCase):
 
             rigol.waveform.setCurrentText("DC")
             self.application.processEvents()
-            self.assertTrue(rigol.basic_form.isRowVisible(rigol.offset))
+            self.assertTrue(rigol.basic_form.isRowVisible(rigol._row_widget(rigol.offset)))
             for hidden in (
                 rigol.time_mode,
                 rigol.frequency,
@@ -91,7 +97,7 @@ class MainWindowTests(unittest.TestCase):
                 rigol.vpp,
                 rigol.phase,
             ):
-                self.assertFalse(rigol.basic_form.isRowVisible(hidden))
+                self.assertFalse(rigol.basic_form.isRowVisible(rigol._row_widget(hidden)))
             self.assertFalse(rigol.control_tabs.isTabVisible(1))
             self.assertFalse(rigol.control_tabs.isTabVisible(3))
             rigol.offset.setText("7 mV")
@@ -101,14 +107,14 @@ class MainWindowTests(unittest.TestCase):
             rigol.level_mode.setCurrentText("Amplitude / Offset")
             rigol.vpp.setText("4 mV")
             rigol.offset.setText("1 mV")
-            self.assertFalse(rigol.basic_form.isRowVisible(rigol.high_level))
-            self.assertTrue(rigol.basic_form.isRowVisible(rigol.vpp))
+            self.assertFalse(rigol.basic_form.isRowVisible(rigol._row_widget(rigol.high_level)))
+            self.assertTrue(rigol.basic_form.isRowVisible(rigol._row_widget(rigol.vpp)))
             self.assertEqual(rigol._effective_levels(), (0.003, -0.001))
 
             rigol.time_mode.setCurrentText("Period")
             rigol.period.setText("2 ms")
             rigol._sync_frequency_from_period()
-            self.assertFalse(rigol.basic_form.isRowVisible(rigol.frequency))
+            self.assertFalse(rigol.basic_form.isRowVisible(rigol._row_widget(rigol.frequency)))
             self.assertTrue(rigol.basic_form.isRowVisible(rigol.period))
             self.assertEqual(rigol.frequency.text(), "500 Hz")
         finally:
@@ -162,19 +168,221 @@ class MainWindowTests(unittest.TestCase):
             self.application.processEvents()
 
     def test_theme_switch_emits_light_and_dark_and_updates_charts(self) -> None:
+        source = Path(".config/settings.yml").read_text(encoding="utf-8")
+        with tempfile.TemporaryDirectory() as temporary:
+            path = Path(temporary) / "settings.yml"
+            path.write_text(source, encoding="utf-8")
+            window = MainWindow(path, simulation=True)
+            themes: list[str] = []
+            window.theme_changed.connect(themes.append)
+            try:
+                initial_light = window.theme_action.isChecked()
+                first_theme = "dark" if initial_light else "light"
+                initial_theme = "light" if initial_light else "dark"
+                window.theme_action.setChecked(not initial_light)
+                self.application.processEvents()
+                self.assertEqual(SettingsRepository(path).load().raw["ui"]["theme"], first_theme)
+                window.theme_action.setChecked(initial_light)
+                self.application.processEvents()
+                self.assertEqual(SettingsRepository(path).load().raw["ui"]["theme"], initial_theme)
+                self.assertEqual(themes, [first_theme, initial_theme])
+            finally:
+                window.close()
+                self.application.processEvents()
+
+    def test_limit_edit_is_autosaved_after_short_idle_period(self) -> None:
+        source = Path(".config/settings.yml").read_text(encoding="utf-8")
+        with tempfile.TemporaryDirectory() as temporary:
+            path = Path(temporary) / "settings.yml"
+            path.write_text(source, encoding="utf-8")
+            window = MainWindow(path, simulation=False)
+            try:
+                tree = window.settings_page.trees["rigol"]
+                iterator = QTreeWidgetItemIterator(tree)
+                target_path = ("devices", "rigol", "safety", "channels", "1", "lab_limits", "frequency", "max")
+                target = None
+                while iterator.value() is not None:
+                    item = iterator.value()
+                    if item.data(0, Qt.ItemDataRole.UserRole) == target_path:
+                        target = item
+                        break
+                    iterator += 1
+                self.assertIsNotNone(target)
+                target.setText(1, "900 kHz")
+                QTest.qWait(900)
+                loaded = SettingsRepository(path).load()
+                self.assertEqual(
+                    loaded.raw["devices"]["rigol"]["safety"]["channels"]["1"]["lab_limits"]["frequency"]["max"],
+                    "900 kHz",
+                )
+                self.assertFalse(window.settings_page._dirty)
+            finally:
+                window.close()
+                self.application.processEvents()
+
+    def test_manual_waveform_above_amplitude_limit_is_not_queued(self) -> None:
         window = MainWindow(".config/settings.yml", simulation=True)
-        themes: list[str] = []
-        window.theme_changed.connect(themes.append)
         try:
-            self.assertFalse(window.theme_action.isChecked())
-            window.theme_action.setChecked(True)
-            self.application.processEvents()
-            window.theme_action.setChecked(False)
-            self.application.processEvents()
-            self.assertEqual(themes, ["light", "dark"])
+            rigol = window.rigol_page
+            rigol.channel.setCurrentText("1")
+            rigol.waveform.setCurrentText("SIN")
+            rigol.level_mode.setCurrentText("Amplitude / Offset")
+            rigol.vpp.setText("805 mV")
+            rigol.offset.setText("0 V")
+            rigol._controller.call = Mock()
+            with patch.object(QMessageBox, "warning") as warning:
+                rigol.configure()
+            rigol._controller.call.assert_not_called()
+            self.assertIn("poza zatwierdzonym zakresem", warning.call_args.args[2])
+
         finally:
             window.close()
             self.application.processEvents()
+
+    def test_limit_field_clamps_amplitude_on_focus_loss_and_shows_warning(self) -> None:
+        window = MainWindow(".config/settings.yml", simulation=True)
+        try:
+            rigol = window.rigol_page
+            rigol.channel.setCurrentText("1")
+            rigol.vpp.setText("802 mV")
+            rigol.vpp.editingFinished.emit()
+            field = rigol._limit_fields[rigol.vpp]
+            self.assertEqual(rigol.vpp.text(), "800 mV")
+            self.assertFalse(field.validation_warning.isHidden())
+            self.assertIn("exceeded MAX", field.validation_warning.text())
+        finally:
+            window.close()
+            self.application.processEvents()
+
+    def test_limit_field_clamps_sweep_endpoint_with_converted_units(self) -> None:
+        window = MainWindow(".config/settings.yml", simulation=True)
+        try:
+            rigol = window.rigol_page
+            rigol.channel.setCurrentText("1")
+            maximum = window._settings.rigol.safety.channels["1"].lab_limits.frequency.max
+            rigol.sweep_stop.setText("999 GHz")
+            rigol.sweep_stop.editingFinished.emit()
+            field = rigol._limit_fields[rigol.sweep_stop]
+            self.assertEqual(rigol.sweep_stop.text(), maximum)
+            self.assertFalse(field.validation_warning.isHidden())
+        finally:
+            window.close()
+            self.application.processEvents()
+
+    def test_limit_field_normalizes_units_and_scientific_notation(self) -> None:
+        window = MainWindow(".config/settings.yml", simulation=True)
+        try:
+            rigol = window.rigol_page
+            field = rigol._limit_fields[rigol.frequency]
+            rigol.frequency.setText("100000 kHz")
+            rigol.frequency.editingFinished.emit()
+            self.assertEqual(rigol.frequency.text(), "100 MHz")
+            self.assertTrue(field.validation_warning.isHidden())
+
+            rigol.frequency.setText("1e9")
+            rigol.frequency.editingFinished.emit()
+            maximum = window._settings.rigol.safety.channels["1"].lab_limits.frequency.max
+            self.assertEqual(rigol.frequency.text(), maximum)
+            self.assertIn("exceeded MAX", field.validation_warning.text())
+
+            rigol.frequency.setText("1000000000 kHZ")
+            rigol.frequency.editingFinished.emit()
+            self.assertEqual(rigol.frequency.text(), maximum)
+            self.assertIn("exceeded MAX", field.validation_warning.text())
+        finally:
+            window.close()
+            self.application.processEvents()
+
+    def test_frequency_sweep_endpoint_above_limit_is_not_queued(self) -> None:
+        window = MainWindow(".config/settings.yml", simulation=True)
+        try:
+            rigol = window.rigol_page
+            rigol.channel.setCurrentText("1")
+            rigol.sweep_start.setText("1 MHz")
+            rigol.sweep_stop.setText("501 MHz")
+            rigol._controller.call = Mock()
+            with patch.object(QMessageBox, "warning") as warning:
+                rigol.configure_sweep()
+            rigol._controller.call.assert_not_called()
+            self.assertIn("sweep_stop", warning.call_args.args[2])
+        finally:
+            window.close()
+            self.application.processEvents()
+
+    def test_device_fields_show_profile_limits_and_keithley_updates_them_by_mode(self) -> None:
+        window = MainWindow(".config/settings.yml", simulation=False)
+        try:
+            rigol = window.rigol_page
+            self.assertEqual(rigol._limit_fields[rigol.frequency].minimum.text(), "MIN  1 Hz")
+            expected_frequency_max = window._settings.rigol.safety.channels["1"].lab_limits.frequency.max
+            self.assertEqual(rigol._limit_fields[rigol.frequency].maximum.text(), f"MAX  {expected_frequency_max}")
+
+            keithley = window.keithley_page
+            self.assertEqual(keithley._limit_fields["level"].minimum.text(), "MIN  0 A")
+            self.assertEqual(keithley._limit_fields["level"].maximum.text(), "MAX  10 mA")
+            keithley.mode.setCurrentText("voltage")
+            self.application.processEvents()
+            self.assertEqual(keithley._limit_fields["level"].minimum.text(), "MIN  -67 mV")
+            self.assertEqual(keithley._limit_fields["compliance"].maximum.text(), "MAX  10 mA")
+
+            anritsu = window.anritsu_page
+            self.assertEqual(anritsu._limit_fields["frequency0"].minimum.text(), "MIN  NOT SET")
+            self.assertEqual(anritsu._limit_fields["sweep_points3"].maximum.text(), "MAX  10001")
+        finally:
+            window.close()
+            self.application.processEvents()
+
+    def test_keithley_dual_channel_dashboard_updates_ivrp_and_compliance(self) -> None:
+        window = MainWindow(".config/settings.yml", simulation=True)
+        try:
+            keithley = window.keithley_page
+            self.assertEqual(set(keithley.channel_cards), {"A", "B"})
+            measurement = SimpleNamespace(
+                channel="B",
+                voltage_v=0.067,
+                current_a=0.001,
+                power_w=0.000067,
+                compliance_detected=True,
+            )
+            keithley._result("measure", measurement)
+            card = keithley.channel_cards["B"]
+            self.assertEqual(card["voltage"].text(), "67 mV")
+            self.assertEqual(card["current"].text(), "1 mA")
+            self.assertEqual(card["resistance"].text(), "67 Ω")
+            self.assertEqual(card["power"].text(), "67 µW")
+            self.assertIn("ACTIVE", card["compliance"].text())
+            self.assertEqual(card["output"].text(), "OUTPUT OFF")
+        finally:
+            window.close()
+            self.application.processEvents()
+
+    def test_limit_edit_button_opens_popup_and_saves_the_range(self) -> None:
+        source = Path(".config/settings.yml").read_text(encoding="utf-8")
+        with tempfile.TemporaryDirectory() as temporary:
+            path = Path(temporary) / "settings.yml"
+            path.write_text(source, encoding="utf-8")
+            window = MainWindow(path, simulation=False)
+            try:
+                field = window.keithley_page._limit_fields["level"]
+                self.assertTrue(field.edit_button.isEnabled())
+
+                def complete_dialog() -> None:
+                    dialog = QApplication.activeModalWidget()
+                    self.assertIsInstance(dialog, LimitEditDialog)
+                    dialog.minimum.setText("0 A")
+                    dialog.maximum.setText("9 mA")
+                    dialog.accept()
+
+                QTimer.singleShot(0, complete_dialog)
+                field.edit_button.click()
+                loaded = SettingsRepository(path).load()
+                limits = loaded.raw["devices"]["keithley"]["safety"]["channels"]["B"]["lab_limits"]
+                self.assertEqual(limits["source_current"]["max"], "9 mA")
+                self.assertEqual(field.maximum.text(), "MAX  9 mA")
+                self.assertIsNot(window.tabs.currentWidget(), window.settings_page)
+            finally:
+                window.close()
+                self.application.processEvents()
 
 
 if __name__ == "__main__":
