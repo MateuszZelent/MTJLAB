@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+import math
+import re
 import time
 from typing import Literal
 
@@ -328,8 +330,15 @@ class KeithleyAdapter(DeviceAdapter):
         smu = self._smu(channel)
         session = self._require_session()
         try:
-            voltage = float(session.query(f"print({smu}.measure.v())"))
-            current = float(session.query(f"print({smu}.measure.i())"))
+            # One TSP acquisition keeps I and V from the same measurement
+            # instant. Keithley returns current first, then voltage.
+            response = session.query(f"print({smu}.measure.iv())").strip()
+            values = [item for item in re.split(r"[,;\t\s]+", response) if item]
+            if len(values) != 2:
+                raise ValueError(f"expected two IV values, received {len(values)}")
+            current, voltage = (float(item) for item in values)
+            if not (math.isfinite(current) and math.isfinite(voltage)):
+                raise ValueError("non-finite IV result")
         except (TypeError, ValueError) as exc:
             raise DeviceError("Keithley zwrócił nieprawidłowy wynik pomiaru I/V.") from exc
         request = self._last_request.get(channel)

@@ -69,7 +69,7 @@ class ThatecHdf5Writer:
             data=self._table(
                 (
                     ("device name", "Anritsu Spectrum Analyzer"),
-                    ("control name", "Power (dBm)"),
+                    ("control name", "Spectrum (dBm)"),
                     ("dimensions", "1"),
                     ("data type", "11"),
                     ("tree indent level", "0"),
@@ -81,7 +81,7 @@ class ThatecHdf5Writer:
         definition.create_dataset(
             "tree_view",
             data=self._np.asarray(
-                [["row   0", "indicator", "- Anritsu Spectrum Analyzer - Power (dBm)"]], dtype=object
+                [["row   0", "indicator", "- Anritsu Spectrum Analyzer - Spectrum (dBm)"]], dtype=object
             ),
             dtype=self._text,
         )

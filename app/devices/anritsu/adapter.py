@@ -193,15 +193,25 @@ class AnritsuAdapter(DeviceAdapter):
             raise SafetyViolation("Deadline oczekiwania Anritsu musi być dodatni.")
         session = self._require_session()
         deadline = time.monotonic() + timeout
-        while True:
-            response = session.query("*OPC?").strip()
-            if response in {"1", "+1"}:
-                self._state = DeviceState.VERIFIED
-                return
-            if time.monotonic() >= deadline:
-                self.emergency_off()
-                raise DeviceError("Timeout podczas oczekiwania Anritsu na zakończenie single sweep.")
-            time.sleep(0.05)
+        original_timeout_ms = session.timeout
+        try:
+            while True:
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    raise DeviceError("Timeout podczas oczekiwania Anritsu na zakończenie single sweep.")
+                # The VISA call itself must not outlive the application-level
+                # deadline. Some backends reject a zero-millisecond timeout.
+                session.timeout = max(1, min(original_timeout_ms, int(remaining * 1000)))
+                response = session.query("*OPC?").strip()
+                if response in {"1", "+1"}:
+                    self._state = DeviceState.VERIFIED
+                    return
+                time.sleep(min(0.05, max(0.0, deadline - time.monotonic())))
+        except Exception:
+            self.emergency_off()
+            raise
+        finally:
+            session.timeout = original_timeout_ms
 
     def acquire_single_sweep(self, trace: str = "TRAC1") -> SpectrumTrace:
         """Synchronise, then fetch one trace that belongs to this checkpoint."""

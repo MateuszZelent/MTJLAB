@@ -2,6 +2,8 @@ from __future__ import annotations
 
 from datetime import datetime, timezone
 from pathlib import Path
+from contextlib import redirect_stdout
+from io import StringIO
 import tempfile
 import unittest
 
@@ -47,6 +49,41 @@ class Hdf5WriterTests(unittest.TestCase):
                 self.assertEqual(file["events/name"].asstr()[0], "run_started")
                 self.assertEqual(tuple(file["spectra/0/frequency_hz"][:]), trace.frequencies_hz)
                 self.assertEqual(tuple(file["spectra/0/power_dbm"][:]), trace.powers_dbm)
+                self.assertEqual(int(file.attrs["measurement running"]), 0)
+                self.assertIn("scan_definition/row_00", file)
+                self.assertIn("measurement/row_00/data", file)
+
+    def test_generated_spectrum_round_trips_through_qualified_pythat(self) -> None:
+        from PyThat import MeasurementTree
+
+        with tempfile.TemporaryDirectory() as temporary:
+            path = Path(temporary) / "pythat.h5"
+            writer = Hdf5RunWriter(
+                path,
+                recipe_source="schema_version: 1\n",
+                settings_source="schema_version: 1\n",
+                plan_hash="abc",
+                device_idn={"anritsu": "ANRITSU,MS2830A,SIM,1.0"},
+            )
+            writer.append(
+                MeasurementPoint(index=0, setpoints={}, measurements={}),
+                SpectrumTrace(
+                    frequencies_hz=(1e6, 2e6, 3e6),
+                    powers_dbm=(-60.0, -50.0, -55.0),
+                    acquired_at_utc=datetime.now(timezone.utc),
+                    trace_name="TRAC1",
+                ),
+            )
+            writer.close("completed")
+            with redirect_stdout(StringIO()):
+                tree = MeasurementTree(path, index=True, override=True)
+            self.assertEqual(tuple(tree.dataset.sizes), ("Frequency",))
+            self.assertEqual(tree.dataset.sizes["Frequency"], 3)
+            self.assertIn("Spectrum", tree.dataset.data_vars)
+            self.assertEqual(tree.dataset["Frequency"].attrs["units"], "Hz")
+            # PyThat 0.2.14 strips indicator units while normalising control
+            # names; the source definition still carries "Spectrum (dBm)".
+            self.assertEqual(tree.definition["row_00"]["units"], "dBm")
 
     def test_reader_exposes_metadata_points_and_decimated_spectrum(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:

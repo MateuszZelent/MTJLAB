@@ -318,6 +318,10 @@ class KeithleySimulator(_BaseSimulator):
         output = re.match(r"^print\((smu[ab])\.source\.output\)$", command)
         if output:
             return "1" if self.output[output.group(1)] else "0"
+        measure_iv = re.match(r"^print\((smu[ab])\.measure\.iv\(\)\)$", command)
+        if measure_iv:
+            voltage, current = self._measured_iv(measure_iv.group(1))
+            return f"{current:.12g}\t{voltage:.12g}"
         measure = re.match(r"^print\((smu[ab])\.measure\.([vi])\(\)\)$", command)
         if measure:
             smu, quantity = measure.groups()

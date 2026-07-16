@@ -156,8 +156,7 @@ class AdapterAndRunnerTests(unittest.TestCase):
             responses={
                 "*IDN?": "KEITHLEY INSTRUMENTS,2602A,123456,1.0",
                 "print(errorqueue.count)": "0",
-                "print(smub.measure.v())": "0.2",
-                "print(smub.measure.i())": "0.001",
+                "print(smub.measure.iv())": "0.001\t0.2",
             }
         )
         adapter = KeithleyAdapter(settings, session_factory=FakeVisaSessionFactory(session))
@@ -224,6 +223,23 @@ class AdapterAndRunnerTests(unittest.TestCase):
         with self.assertRaises(SafetyViolation):
             adapter.configure_spectrum(SpectrumConfig(1e6, 101e9, 0, 101))
 
+    def test_anritsu_opc_query_uses_and_restores_hard_visa_deadline(self) -> None:
+        session = FakeVisaSession(
+            responses={"*IDN?": "ANRITSU,MS2830A,123456,1.0"},
+            timeout=10_000,
+        )
+
+        def opc(_command: str) -> str:
+            self.assertGreater(session.timeout, 0)
+            self.assertLessEqual(session.timeout, 50)
+            return "1"
+
+        session.responses["*OPC?"] = opc
+        adapter = AnritsuAdapter(self.settings, session_factory=FakeVisaSessionFactory(session))
+        adapter.connect()
+        adapter.wait_complete(deadline_s=0.05)
+        self.assertEqual(session.timeout, 10_000)
+
     def test_rigol_advanced_configuration_forces_output_off(self) -> None:
         session = FakeVisaSession(
             responses={
@@ -253,8 +269,7 @@ class AdapterAndRunnerTests(unittest.TestCase):
             responses={
                 "*IDN?": "KEITHLEY INSTRUMENTS,2602A,123456,1.0",
                 "print(errorqueue.count)": "0",
-                "print(smub.measure.v())": "0.067",
-                "print(smub.measure.i())": "0.001",
+                "print(smub.measure.iv())": "0.001\t0.067",
             }
         )
         keithley = KeithleyAdapter(self.settings, session_factory=FakeVisaSessionFactory(session))
@@ -378,8 +393,7 @@ class AdapterAndRunnerTests(unittest.TestCase):
             responses={
                 "*IDN?": "KEITHLEY INSTRUMENTS,2602A,123456,1.0",
                 "print(errorqueue.count)": "0",
-                "print(smub.measure.v())": "0.01",
-                "print(smub.measure.i())": "0.001",
+                "print(smub.measure.iv())": "0.001\t0.01",
             }
         )
         values = ",".join(str(-50 + index / 100) for index in range(101))
