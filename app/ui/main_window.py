@@ -27,7 +27,6 @@ from PySide6.QtWidgets import (
     QProgressBar,
     QPushButton,
     QScrollArea,
-    QSizePolicy,
     QSplitter,
     QSpinBox,
     QStyle,
@@ -3283,7 +3282,7 @@ class MainWindow(QMainWindow):
         self._device_states[device] = state
         label = self.toolbar_device_status.get(device)
         if label is not None:
-            label.setText(f"{device.title()}: {state.replace('_', ' ').upper()}")
+            label.setText(f"● {device.title()}: {state.replace('_', ' ').upper()}")
             label.setProperty("deviceState", state)
             label.style().unpolish(label)
             label.style().polish(label)
@@ -3422,6 +3421,7 @@ class MainWindow(QMainWindow):
     def _set_run_ui_locked(self, locked: bool) -> None:
         for index in (1, 2, 3, 4, 7):
             self.tabs.setTabEnabled(index, not locked)
+            self.ribbon_actions[index].setEnabled(not locked)
 
     def _log(self, message: str) -> None:
         self.log.appendPlainText(message)
