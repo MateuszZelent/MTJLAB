@@ -111,6 +111,49 @@ class Hdf5WriterTests(unittest.TestCase):
             self.assertEqual(rows[0]["point_index"], "0")
             self.assertEqual(rows[0]["measurements_json"], '{"current": 0.001}')
 
+    def test_writer_refuses_to_overwrite_an_existing_run(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            path = Path(temporary) / "run.h5"
+            first = Hdf5RunWriter(
+                path,
+                recipe_source="schema_version: 1\n",
+                settings_source="schema_version: 1\n",
+                plan_hash="abc",
+                device_idn={},
+            )
+            first.close("completed")
+            with self.assertRaisesRegex(Exception, "już istnieje"):
+                Hdf5RunWriter(
+                    path,
+                    recipe_source="schema_version: 1\n",
+                    settings_source="schema_version: 1\n",
+                    plan_hash="def",
+                    device_idn={},
+                )
+
+    def test_writer_rejects_non_finite_spectrum_without_partial_point(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            path = Path(temporary) / "run.h5"
+            writer = Hdf5RunWriter(
+                path,
+                recipe_source="schema_version: 1\n",
+                settings_source="schema_version: 1\n",
+                plan_hash="abc",
+                device_idn={},
+            )
+            trace = SpectrumTrace(
+                frequencies_hz=(1.0, 2.0),
+                powers_dbm=(-50.0, float("nan")),
+                acquired_at_utc=datetime.now(timezone.utc),
+                trace_name="TRAC1",
+            )
+            with self.assertRaisesRegex(Exception, "NaN"):
+                writer.append(MeasurementPoint(index=0, setpoints={}, measurements={}), trace)
+            writer.close("faulted")
+            with h5py.File(path, "r") as file:
+                self.assertEqual(len(file["points"]), 0)
+                self.assertEqual(len(file["_pending"]), 0)
+
 
 if __name__ == "__main__":
     unittest.main()

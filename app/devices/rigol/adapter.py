@@ -117,6 +117,7 @@ class RigolAdapter(DeviceAdapter):
         self._last_output_config: dict[int, RigolOutputConfig] = {}
         self._modulation_enabled: set[int] = set()
         self._armed_until: dict[int, float] = {}
+        self._output_states: dict[int, bool] = {1: False, 2: False}
 
     def _interlock(self) -> OutputInterlock:
         return OutputInterlock(
@@ -158,6 +159,10 @@ class RigolAdapter(DeviceAdapter):
             self._state = DeviceState.VERIFIED
             if self._settings.safety.outputs_off_on_connect:
                 self._write_all_outputs_off()
+                self._output_states = {1: False, 2: False}
+            else:
+                self._read_output_states()
+            self._update_aggregate_output_state()
             self._capabilities = self._probe_capabilities(identity)
             return identity
         except Exception:
@@ -236,6 +241,7 @@ class RigolAdapter(DeviceAdapter):
                 self._last_output_config.clear()
                 self._modulation_enabled.clear()
                 self._armed_until.clear()
+                self._output_states = {1: False, 2: False}
                 self._state = DeviceState.DISCONNECTED
 
     def _write_all_outputs_off(self) -> None:
@@ -252,7 +258,20 @@ class RigolAdapter(DeviceAdapter):
             self._state = DeviceState.UNKNOWN
         else:
             self._armed_until.clear()
+            self._output_states = {1: False, 2: False}
             self._state = DeviceState.OUTPUT_OFF
+
+    def _read_output_states(self) -> dict[int, bool]:
+        session = self._require_session()
+        states = {
+            channel: session.query(f":OUTP{channel}?").strip().upper() in {"1", "ON"}
+            for channel in (1, 2)
+        }
+        self._output_states.update(states)
+        return states
+
+    def _update_aggregate_output_state(self) -> None:
+        self._state = DeviceState.OUTPUT_ON if any(self._output_states.values()) else DeviceState.OUTPUT_OFF
 
     def _channel_settings(self, channel: int):
         try:
@@ -294,6 +313,7 @@ class RigolAdapter(DeviceAdapter):
         prefix = f":SOUR{config.channel}"
         waveform = config.waveform.upper()
         session.write(f":OUTP{config.channel} OFF")
+        self._output_states[config.channel] = False
         session.write(f":OUTP{config.channel}:LOAD {self._format_load(config.output_load)}")
         if waveform == "DC":
             session.write(f"{prefix}:APPL:DC DEF,DEF,{config.high_level_v:.12g}")
@@ -316,7 +336,7 @@ class RigolAdapter(DeviceAdapter):
         self._check_errors()
         self._verify_applied_configuration(config)
         self._last_config[config.channel] = config
-        self._state = DeviceState.OUTPUT_OFF
+        self._update_aggregate_output_state()
         return estimate
 
     def _verify_applied_configuration(self, expected: RigolChannelConfig) -> None:
@@ -410,7 +430,8 @@ class RigolAdapter(DeviceAdapter):
         active = session.query(f":OUTP{channel}?").strip().upper() in {"1", "ON"}
         if active != enabled:
             raise DeviceError("Rigol nie potwierdził żądanego stanu wyjścia.")
-        self._state = DeviceState.OUTPUT_ON if active else DeviceState.OUTPUT_OFF
+        self._output_states[channel] = active
+        self._update_aggregate_output_state()
         if not enabled:
             self._armed_until.pop(channel, None)
         return active
@@ -673,7 +694,8 @@ class RigolAdapter(DeviceAdapter):
         state = self._require_session().query(f":OUTP{channel}?").strip().upper()
         if state in {"1", "ON"}:
             raise DeviceError("Rigol włączył wyjście podczas konfiguracji zaawansowanej.")
-        self._state = DeviceState.OUTPUT_OFF
+        self._output_states[channel] = False
+        self._update_aggregate_output_state()
 
     def _verify_output_configuration(self, expected: RigolOutputConfig) -> None:
         session = self._require_session()

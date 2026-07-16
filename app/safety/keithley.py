@@ -80,6 +80,15 @@ def validate_keithley_source(channel: KeithleyChannelSettings, request: Keithley
             raise SafetyViolation("Tryb measure_only nie może wymuszać poziomu ani compliance.")
         if not request.source_autorange or request.source_range_si is not None:
             raise SafetyViolation("Tryb measure_only nie obsługuje zakresu źródła; ustaw source_autorange=true.")
+    if request.mode != "measure_only":
+        worst_case_power = abs(request.level_si * request.compliance_si)
+        max_power = parse_quantity(limits.max_abs_power, DIMENSION_POWER).si_value
+        tolerance = max(max_power, 1.0) * 1e-12
+        if worst_case_power > max_power + tolerance:
+            raise SafetyViolation(
+                "Najgorsza możliwa moc source × compliance "
+                f"{worst_case_power:.9g} W przekracza limit DUT {max_power:.9g} W."
+            )
     source_dimension = DIMENSION_CURRENT if request.mode == "current" else DIMENSION_VOLTAGE
     source_limits = limits.source_current if request.mode == "current" else limits.source_voltage
     source_required = abs(request.level_si)

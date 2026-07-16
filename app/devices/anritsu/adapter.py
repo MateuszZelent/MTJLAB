@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import datetime, timezone
+import math
 import time
 from typing import Iterable
 
@@ -231,6 +232,10 @@ class AnritsuAdapter(DeviceAdapter):
             )
         if points < 2:
             raise DeviceError("Anritsu zwrócił mniej niż dwa punkty trace.")
+        if not all(math.isfinite(value) for value in (start, stop, *values)):
+            raise DeviceError("Anritsu zwrócił NaN albo nieskończoność w trace.")
+        if stop <= start:
+            raise DeviceError("Anritsu zwrócił nieprawidłową oś częstotliwości trace.")
         step = (stop - start) / (points - 1)
         return SpectrumTrace(
             frequencies_hz=tuple(start + index * step for index in range(points)),

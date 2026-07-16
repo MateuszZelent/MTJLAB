@@ -111,6 +111,68 @@ class AdapterAndRunnerTests(unittest.TestCase):
         with self.assertRaisesRegex(Exception, "nie potwierdził"):
             adapter.set_output("B", True)
 
+    def test_device_state_remains_on_when_another_channel_is_disabled(self) -> None:
+        raw = deepcopy(simulation_settings(approved=True).model_dump(mode="python"))
+        raw["devices"]["keithley"]["safety"]["allow_output_enable"] = True
+        raw["devices"]["rigol"]["safety"]["allow_output_enable"] = True
+        settings = StationSettings.model_validate(raw)
+
+        keithley_session = FakeVisaSession(
+            responses={"*IDN?": "KEITHLEY INSTRUMENTS,2602A,123456,1.0", "print(errorqueue.count)": "0"}
+        )
+        keithley = KeithleyAdapter(settings, session_factory=FakeVisaSessionFactory(keithley_session))
+        keithley.connect()
+        keithley.configure_source(KeithleySourceRequest("B", "current", 0.001, 0.067))
+        keithley.arm_output("B")
+        keithley.set_output("B", True)
+        keithley.set_output("A", False)
+        self.assertEqual(keithley.state, DeviceState.OUTPUT_ON)
+
+        rigol_session = FakeVisaSession(
+            responses={
+                "*IDN?": "Rigol Technologies,DG1032Z,DG1ZA172902039,00.01.08",
+                ":SYST:ERR?": "0,No error",
+                ":SOUR1:VOLT:LOW?": "-0.001",
+                ":SOUR1:FUNC?": "SQU",
+                ":SOUR1:FREQ?": "1000",
+                ":SOUR1:VOLT:HIGH?": "0.001",
+                ":OUTP1?": lambda _command: "ON" if ":OUTP1 ON" in rigol_session.writes else "OFF",
+                ":OUTP2?": "OFF",
+            }
+        )
+        rigol = RigolAdapter(settings, session_factory=FakeVisaSessionFactory(rigol_session))
+        rigol.connect()
+        rigol.configure_channel(RigolChannelConfig(1, "SQU", 1000, 0.001, -0.001, dut_min_impedance_ohm=50))
+        rigol.arm_output(1)
+        rigol.set_output(1, True)
+        rigol.set_output(2, False)
+        self.assertEqual(rigol.state, DeviceState.OUTPUT_ON)
+
+    def test_keithley_measurement_trip_forces_all_outputs_off(self) -> None:
+        raw = deepcopy(simulation_settings(approved=True).model_dump(mode="python"))
+        raw["devices"]["keithley"]["safety"]["allow_output_enable"] = True
+        settings = StationSettings.model_validate(raw)
+        session = FakeVisaSession(
+            responses={
+                "*IDN?": "KEITHLEY INSTRUMENTS,2602A,123456,1.0",
+                "print(errorqueue.count)": "0",
+                "print(smub.measure.v())": "0.2",
+                "print(smub.measure.i())": "0.001",
+            }
+        )
+        adapter = KeithleyAdapter(settings, session_factory=FakeVisaSessionFactory(session))
+        adapter.connect()
+        adapter.configure_source(KeithleySourceRequest("B", "current", 0.001, 0.067))
+        adapter.arm_output("B")
+        adapter.set_output("B", True)
+
+        with self.assertRaises(SafetyViolation):
+            adapter.measure("B")
+
+        self.assertIn("smua.source.output = smua.OUTPUT_OFF", session.writes)
+        self.assertIn("smub.source.output = smub.OUTPUT_OFF", session.writes)
+        self.assertEqual(adapter.state, DeviceState.FAULT)
+
     def test_failed_emergency_shutdown_marks_each_device_state_unknown(self) -> None:
         rigol_session = FakeVisaSession(
             responses={"*IDN?": "Rigol Technologies,DG1032Z,DG1ZA172902039,00.01.08"}

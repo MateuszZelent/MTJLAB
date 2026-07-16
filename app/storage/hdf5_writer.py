@@ -14,6 +14,7 @@ from typing import Any, TextIO
 from app.devices.anritsu.adapter import SpectrumTrace
 from app.domain.errors import ExecutionError
 from app.domain.models import MeasurementPoint
+from app.storage.thatec_writer import ThatecHdf5Writer
 
 
 class Hdf5RunWriter:
@@ -42,9 +43,13 @@ class Hdf5RunWriter:
         self.csv_summary_path = Path(csv_summary_path) if csv_summary_path is not None else None
         self._csv_stream: TextIO | None = None
         self._csv_writer: csv.DictWriter[str] | None = None
-        self._file = h5py.File(self.path, "w", libver="latest")
+        try:
+            self._file = h5py.File(self.path, "x", libver="latest")
+        except (FileExistsError, OSError) as exc:
+            raise ExecutionError(f"Plik wyniku już istnieje albo nie może zostać utworzony: {self.path}") from exc
         self._points = self._file.create_group("points")
         self._spectra = self._file.create_group("spectra")
+        self._pending = self._file.create_group("_pending")
         events = self._file.create_group("events")
         string_dtype = h5py.string_dtype("utf-8")
         self._event_timestamps = events.create_dataset("timestamp", shape=(0,), maxshape=(None,), dtype=string_dtype)
@@ -68,6 +73,11 @@ class Hdf5RunWriter:
             "capabilities_json",
             data=json.dumps(self._serializable(capabilities), sort_keys=True),
             dtype=h5py.string_dtype("utf-8"),
+        )
+        self._thatec = ThatecHdf5Writer(
+            self._file,
+            device_idn=device_idn,
+            plan_hash=plan_hash,
         )
         self._point_count = 0
         self._closed = False
@@ -115,22 +125,68 @@ class Hdf5RunWriter:
         if self._closed:
             raise ExecutionError("Próba zapisu do zamkniętego pliku HDF5.")
         index = self._point_count
-        group = self._points.create_group(str(index))
-        group.attrs["timestamp_utc"] = point.timestamp_utc.isoformat()
-        group.attrs["status"] = point.status
-        group.create_dataset("setpoints_json", data=json.dumps(point.setpoints, sort_keys=True))
-        group.create_dataset("measurements_json", data=json.dumps(point.measurements, sort_keys=True))
-        group.create_dataset("metadata_json", data=json.dumps(point.metadata, sort_keys=True))
+        name = str(index)
         if trace is not None:
-            spectrum = self._spectra.create_group(str(index))
-            spectrum.attrs["trace_name"] = trace.trace_name
-            spectrum.attrs["acquired_at_utc"] = trace.acquired_at_utc.isoformat()
-            spectrum.create_dataset("frequency_hz", data=self._np.asarray(trace.frequencies_hz, dtype="f8"), compression="gzip")
-            spectrum.create_dataset("power_dbm", data=self._np.asarray(trace.powers_dbm, dtype="f8"), compression="gzip")
-        self._append_csv_summary(index, point, trace)
-        self._point_count += 1
-        self._file.flush()
+            self._validate_trace(trace)
+        try:
+            group = self._pending.create_group(name)
+            group.attrs["complete"] = False
+            group.attrs["timestamp_utc"] = point.timestamp_utc.isoformat()
+            group.attrs["status"] = point.status
+            group.create_dataset("setpoints_json", data=json.dumps(point.setpoints, sort_keys=True))
+            group.create_dataset("measurements_json", data=json.dumps(point.measurements, sort_keys=True))
+            group.create_dataset("metadata_json", data=json.dumps(point.metadata, sort_keys=True))
+            if trace is not None:
+                spectrum = group.create_group("spectrum")
+                spectrum.attrs["trace_name"] = trace.trace_name
+                spectrum.attrs["acquired_at_utc"] = trace.acquired_at_utc.isoformat()
+                spectrum.create_dataset(
+                    "frequency_hz", data=self._np.asarray(trace.frequencies_hz, dtype="f8"), compression="gzip"
+                )
+                spectrum.create_dataset(
+                    "power_dbm", data=self._np.asarray(trace.powers_dbm, dtype="f8"), compression="gzip"
+                )
+            # Flush a self-contained pending checkpoint before exposing it to
+            # readers.  Moving one HDF5 link is the commit boundary.
+            self._file.flush()
+            self._file.move(f"_pending/{name}", f"points/{name}")
+            committed = self._points[name]
+            if trace is not None:
+                self._spectra[name] = committed["spectrum"]
+                del committed["spectrum"]
+            self._thatec.append(point, trace)
+            committed.attrs["complete"] = True
+            self._point_count += 1
+            self._file.flush()
+        except Exception as exc:
+            self._thatec.rollback_last(trace is not None)
+            for container in (self._pending, self._spectra, self._points):
+                if name in container:
+                    del container[name]
+            self._file.flush()
+            raise ExecutionError(f"Nie udało się atomowo zapisać punktu {index}: {exc}") from exc
+        try:
+            self._append_csv_summary(index, point, trace)
+        except Exception as exc:
+            # HDF5 is the source of truth.  A secondary CSV failure must not
+            # roll back a durable measurement checkpoint.
+            self.append_event("csv_checkpoint_failed", {"point_index": index, "error": str(exc)}, severity="warning")
+            if self._csv_stream is not None:
+                self._csv_stream.close()
+            self._csv_stream = None
+            self._csv_writer = None
         return index
+
+    @staticmethod
+    def _validate_trace(trace: SpectrumTrace) -> None:
+        import math
+
+        if len(trace.frequencies_hz) != len(trace.powers_dbm) or len(trace.frequencies_hz) < 2:
+            raise ExecutionError("Widmo musi zawierać co najmniej dwa zgodne punkty osi i amplitudy.")
+        if not all(math.isfinite(value) for value in (*trace.frequencies_hz, *trace.powers_dbm)):
+            raise ExecutionError("Widmo zawiera NaN albo nieskończoność.")
+        if any(right <= left for left, right in zip(trace.frequencies_hz, trace.frequencies_hz[1:])):
+            raise ExecutionError("Oś częstotliwości widma musi być ściśle rosnąca.")
 
     def _append_csv_summary(self, index: int, point: MeasurementPoint, trace: SpectrumTrace | None) -> None:
         if self._csv_writer is None or self._csv_stream is None:
@@ -150,11 +206,11 @@ class Hdf5RunWriter:
         self._csv_stream.flush()
 
     def append_event(self, name: str, data: dict[str, object], *, severity: str = "info") -> None:
-        """Append an engine event without forcing an extra disk flush.
+        """Append and durably flush an engine event.
 
-        The following per-spectrum checkpoint (or ``close``) flushes it with
-        the rest of the run state.  Event messages are JSON so future fields
-        can be added without breaking older result readers.
+        Safety and operator events are deliberately flushed immediately: the
+        last event before a process or transport failure is often the most
+        important diagnostic record.
         """
 
         if self._closed:
@@ -170,11 +226,13 @@ class Hdf5RunWriter:
         ):
             dataset.resize((index + 1,))
             dataset[index] = value
+        self._file.flush()
 
     def close(self, status: str) -> None:
         if self._closed:
             return
         self._file["run"].attrs["status"] = status
+        self._thatec.close(status)
         self._file.flush()
         self._file.close()
         if self._csv_stream is not None:

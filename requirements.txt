@@ -1,0 +1,16 @@
+# Runtime dependencies for Lab Control.
+# Install with: python -m pip install -r requirements.txt
+h5py>=3.11
+numpy>=1.26
+pydantic>=2.7,<3
+PySide6>=6.7
+pyvisa>=1.14
+pyvisa-py>=0.7
+ruamel.yaml>=0.18
+
+# Qualified reader used to validate thaTEC:OS-compatible HDF5 output.
+PyThat==0.2.14
+
+# Development and verification tools.
+pytest>=8.0
+ruff>=0.6

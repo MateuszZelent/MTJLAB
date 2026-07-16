@@ -56,14 +56,15 @@ class RunWorker(QObject):
         )
         writer: Hdf5RunWriter | None = None
         try:
-            identities = {
-                "rigol": rigol.connect().idn,
-                "keithley": keithley.connect().idn,
-                "anritsu": anritsu.connect().idn,
-            }
+            devices = {"rigol": rigol, "keithley": keithley, "anritsu": anritsu}
+            required = self._required_devices()
+            identities = {name: devices[name].connect().idn for name in sorted(required)}
             output_dir = Path(str(self._settings.storage.get("output_directory", "./measurements")))
             safe_name = re.sub(r"[^A-Za-z0-9_.-]+", "_", self._plan.recipe_name).strip("_") or "run"
-            timestamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+            # Microseconds make accidental collisions across fast repeated
+            # runs practically impossible; the writer additionally refuses
+            # to overwrite an existing artefact.
+            timestamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S.%fZ")
             run_stem = f"{timestamp}_{safe_name}"
             writer = Hdf5RunWriter(
                 output_dir / f"{run_stem}.h5",
@@ -72,9 +73,7 @@ class RunWorker(QObject):
                 plan_hash=self._plan.sha256,
                 device_idn=identities,
                 device_capabilities={
-                    "rigol": rigol.capabilities,
-                    "keithley": keithley.capabilities,
-                    "anritsu": anritsu.capabilities,
+                    name: devices[name].capabilities for name in sorted(required)
                 },
                 csv_summary_path=output_dir / f"{run_stem}.csv" if self._settings.storage.get("write_csv_summary") else None,
             )
@@ -102,9 +101,24 @@ class RunWorker(QObject):
             for device in (keithley, rigol, anritsu):
                 try:
                     device.emergency_off()
+                except Exception:
+                    pass
+                try:
                     device.disconnect()
                 except Exception:
                     pass
+
+    def _required_devices(self) -> set[str]:
+        required: set[str] = set()
+        for action in self._plan.actions:
+            kind = action.kind
+            if "rigol" in kind:
+                required.add("rigol")
+            if "keithley" in kind:
+                required.add("keithley")
+            if "anritsu" in kind or kind == "acquire_spectrum":
+                required.add("anritsu")
+        return required
 
     def _settings_snapshot(self) -> str:
         if not self._simulation:

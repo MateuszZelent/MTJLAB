@@ -14,6 +14,7 @@ from pathlib import Path
 from typing import Any
 
 from app.domain.errors import ExecutionError
+from app.spectrum import peak_preserving_indices
 
 
 @dataclass(frozen=True, slots=True)
@@ -175,10 +176,7 @@ class Hdf5RunReader:
                 raise ExecutionError(f"Widmo {index} ma niezgodną lub pustą liczbę punktów.")
             source_count = len(frequencies)
             if max_points is not None and max_points > 0 and source_count > max_points:
-                stride = max(1, source_count // max_points)
-                selected = list(range(0, source_count, stride))
-                if selected[-1] != source_count - 1:
-                    selected.append(source_count - 1)
+                selected = peak_preserving_indices(powers, max_points)
                 frequencies = tuple(frequencies[item] for item in selected)
                 powers = tuple(powers[item] for item in selected)
             return StoredSpectrum(

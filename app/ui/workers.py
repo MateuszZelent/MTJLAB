@@ -8,7 +8,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from PySide6.QtCore import QMetaObject, QObject, QThread, Qt, Signal, Slot
+from PySide6.QtCore import QEventLoop, QMetaObject, QObject, QThread, QTimer, Qt, Signal, Slot
 
 from app.devices.anritsu.adapter import AnritsuAdapter
 from app.devices.base import DeviceAdapter
@@ -21,6 +21,7 @@ class InstrumentWorker(QObject):
     failed = Signal(str, str)
     state_changed = Signal(str)
     capabilities_changed = Signal(object)
+    shutdown_complete = Signal()
 
     def __init__(self, adapter: DeviceAdapter) -> None:
         super().__init__()
@@ -44,9 +45,13 @@ class InstrumentWorker(QObject):
     def shutdown(self) -> None:
         try:
             self._adapter.emergency_off()
+        except Exception:
+            pass
+        try:
             self._adapter.disconnect()
         except Exception:
             pass
+        self.shutdown_complete.emit()
 
     def _dispatch(self, operation: str, payload: object) -> object:
         if operation == "replace_adapter":
@@ -150,12 +155,17 @@ class DeviceController(QObject):
 
     def close(self) -> None:
         if self._thread.isRunning():
+            wait_loop = QEventLoop()
+            self._worker.shutdown_complete.connect(wait_loop.quit)
             QMetaObject.invokeMethod(
                 self._worker,
                 "shutdown",
-                Qt.ConnectionType.BlockingQueuedConnection,
+                Qt.ConnectionType.QueuedConnection,
             )
+            QTimer.singleShot(3_000, wait_loop.quit)
+            wait_loop.exec()
+            self._worker.shutdown_complete.disconnect(wait_loop.quit)
         self.request.disconnect(self._worker.execute)
         self._thread.finished.connect(self._worker.deleteLater)
         self._thread.quit()
-        self._thread.wait(3_000)
+        self._thread.wait(1_000)

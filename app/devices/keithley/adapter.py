@@ -43,6 +43,7 @@ class KeithleyAdapter(DeviceAdapter):
         self._session: InstrumentSession | None = None
         self._last_request: dict[str, KeithleySourceRequest] = {}
         self._armed_until: dict[str, float] = {}
+        self._output_states: dict[Literal["A", "B"], bool] = {"A": False, "B": False}
 
     def _interlock(self) -> OutputInterlock:
         return OutputInterlock(
@@ -96,8 +97,12 @@ class KeithleyAdapter(DeviceAdapter):
             self._state = DeviceState.VERIFIED
             if self._settings.safety.outputs_off_on_connect:
                 self._write_all_outputs_off()
-                if self._output_is_enabled("A") or self._output_is_enabled("B"):
+                states = self._read_output_states()
+                if any(states.values()):
                     raise DeviceError("Keithley nie potwierdził OUTPUT OFF po połączeniu.")
+            else:
+                self._read_output_states()
+            self._update_aggregate_output_state()
             self._clear_errors()
             return identity
         except Exception:
@@ -131,6 +136,7 @@ class KeithleyAdapter(DeviceAdapter):
                 self._capabilities = None
                 self._last_request.clear()
                 self._armed_until.clear()
+                self._output_states = {"A": False, "B": False}
                 self._state = DeviceState.DISCONNECTED
 
     def _write_all_outputs_off(self) -> None:
@@ -143,12 +149,14 @@ class KeithleyAdapter(DeviceAdapter):
             return
         try:
             self._write_all_outputs_off()
-            if self._output_is_enabled("A") or self._output_is_enabled("B"):
+            states = self._read_output_states()
+            if any(states.values()):
                 raise DeviceError("Keithley nie potwierdził OUTPUT OFF podczas E-STOP.")
         except Exception:
             self._state = DeviceState.UNKNOWN
         else:
             self._armed_until.clear()
+            self._output_states = {"A": False, "B": False}
             self._state = DeviceState.OUTPUT_OFF
 
     def _clear_errors(self) -> None:
@@ -183,12 +191,13 @@ class KeithleyAdapter(DeviceAdapter):
         smu = self._smu(request.channel)
         session = self._require_session()
         session.write(f"{smu}.source.output = {smu}.OUTPUT_OFF")
+        self._output_states[request.channel] = False
         if request.mode == "measure_only":
             self._configure_measurement_ranges_and_sense(session, smu, request)
             session.write(f"{smu}.measure.nplc = {request.nplc:.12g}")
             self._check_errors()
             self._last_request[request.channel] = request
-            self._state = DeviceState.OUTPUT_OFF
+            self._update_aggregate_output_state()
             return
         if request.mode == "current":
             session.write(f"{smu}.source.func = {smu}.OUTPUT_DCAMPS")
@@ -203,7 +212,7 @@ class KeithleyAdapter(DeviceAdapter):
         session.write(f"{smu}.measure.nplc = {request.nplc:.12g}")
         self._check_errors()
         self._last_request[request.channel] = request
-        self._state = DeviceState.OUTPUT_OFF
+        self._update_aggregate_output_state()
 
     @staticmethod
     def _configure_ranges_and_sense(
@@ -237,6 +246,14 @@ class KeithleyAdapter(DeviceAdapter):
         if value == 0:
             return False
         raise DeviceError(f"Keithley zwrócił nieznany stan source.output={response!r}.")
+
+    def _read_output_states(self) -> dict[Literal["A", "B"], bool]:
+        states = {channel: self._output_is_enabled(channel) for channel in ("A", "B")}
+        self._output_states.update(states)
+        return states
+
+    def _update_aggregate_output_state(self) -> None:
+        self._state = DeviceState.OUTPUT_ON if any(self._output_states.values()) else DeviceState.OUTPUT_OFF
 
     @staticmethod
     def _configure_measurement_ranges_and_sense(
@@ -272,7 +289,8 @@ class KeithleyAdapter(DeviceAdapter):
         active = self._output_is_enabled(channel)
         if active != enabled:
             raise DeviceError("Keithley nie potwierdził żądanego stanu wyjścia.")
-        self._state = DeviceState.OUTPUT_ON if active else DeviceState.OUTPUT_OFF
+        self._output_states[channel] = active
+        self._update_aggregate_output_state()
         if not enabled:
             self._armed_until.pop(channel, None)
 
@@ -321,7 +339,15 @@ class KeithleyAdapter(DeviceAdapter):
             self.emergency_off()
             self._state = DeviceState.COMPLIANCE
         result = KeithleyMeasurement(channel, voltage, current, voltage * current, compliance_detected, stop_required)
-        validate_keithley_measurement(self._channel_settings(channel), voltage, current)
+        try:
+            validate_keithley_measurement(self._channel_settings(channel), voltage, current)
+        except SafetyViolation:
+            # A manual read must be as fail-safe as a recipe checkpoint: trip
+            # limits are laboratory boundaries, so both outputs are disabled.
+            self.emergency_off()
+            if self._state is not DeviceState.UNKNOWN:
+                self._state = DeviceState.FAULT
+            raise
         self._check_errors()
         return result
 

@@ -8,7 +8,7 @@ from pathlib import Path
 from typing import Any
 
 from PySide6.QtCharts import QChart, QChartView, QLineSeries, QValueAxis
-from PySide6.QtCore import QPointF, QTimer, Qt, Signal
+from PySide6.QtCore import QPointF, QSettings, QTimer, Qt, Signal
 from PySide6.QtGui import QAction, QCloseEvent, QPainter
 from PySide6.QtWidgets import (
     QComboBox,
@@ -64,7 +64,12 @@ from app.settings import SettingsRepository
 from app.settings.models import StationSettings
 from app.safety.rigol_current import validate_rigol_frequency_sweep, validate_rigol_waveform
 from app.storage import Hdf5RunReader, RunDetail, StoredPoint
-from app.spectrum import apply_reference_operation, average_dbm_traces
+from app.spectrum import (
+    LinearPowerAverager,
+    apply_reference_operation,
+    frequency_grids_match,
+    peak_preserving_indices,
+)
 from app.ui.settings_page import SettingsPage
 from app.ui.run_worker import RunController
 from app.ui.workers import DeviceController
@@ -1612,7 +1617,7 @@ class KeithleyPage(QWidget):
         voltage = float(getattr(measurement, "voltage_v"))
         current = float(getattr(measurement, "current_a"))
         power = float(getattr(measurement, "power_w"))
-        resistance = abs(voltage / current) if abs(current) > 1e-15 else math.inf
+        resistance = voltage / current if abs(current) > 1e-15 else math.inf
         widgets = self.channel_cards[channel]
         widgets["voltage"].setText(self._engineering(voltage, "V"))
         widgets["current"].setText(self._engineering(current, "A"))
@@ -1898,7 +1903,7 @@ class AnritsuPage(QWidget):
         self._latest_trace: SpectrumTrace | None = None
         self._averaged_trace: SpectrumTrace | None = None
         self._reference_trace: SpectrumTrace | None = None
-        self._average_traces: list[tuple[float, ...]] = []
+        self._averager = LinearPowerAverager()
         self._averaging_active = False
         self._timer = QTimer(self)
         self._timer.setInterval(500)
@@ -2050,7 +2055,7 @@ class AnritsuPage(QWidget):
         left_scroll.setFrameShape(QFrame.Shape.NoFrame)
         left_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
         left_scroll.setWidget(left_panel)
-        left_scroll.setMinimumWidth(620)
+        left_scroll.setMinimumWidth(320)
         self.workspace_splitter.addWidget(left_scroll)
         self.workspace_splitter.addWidget(right_panel)
         self.workspace_splitter.setStretchFactor(0, 0)
@@ -2137,10 +2142,18 @@ class AnritsuPage(QWidget):
     def start_averaging(self) -> None:
         if self._averaging_active:
             return
+        if not self._single_sweep_configured:
+            QMessageBox.warning(
+                self,
+                "Averaging unavailable",
+                "Averaging requires a qualified synchronized single-sweep protocol. "
+                "This prevents counting the same analyser frame more than once.",
+            )
+            return
         if self._timer.isActive():
             self.toggle_live()
         target = self.average_count.value()
-        self._average_traces.clear()
+        self._averager.reset()
         self._averaging_active = True
         self.average_progress.setRange(0, target)
         self.average_progress.setValue(0)
@@ -2148,11 +2161,12 @@ class AnritsuPage(QWidget):
         self.acquire_average.setEnabled(False)
         self.cancel_average.setEnabled(True)
         self.info.setText(f"Averaging 0 / {target} complete traces…")
-        self.fetch_live()
+        self._fetch_pending = True
+        self._controller.call("single_sweep", "TRAC1")
 
     def cancel_averaging(self) -> None:
         self._averaging_active = False
-        self._average_traces.clear()
+        self._averager.reset()
         self.acquire_average.setEnabled(True)
         self.cancel_average.setEnabled(False)
         self.average_count.setEnabled(True)
@@ -2190,13 +2204,17 @@ class AnritsuPage(QWidget):
             self._fetch_pending = False
             self._latest_trace = result
             if self._averaging_active:
-                self._average_traces.append(result.powers_dbm)
-                completed = len(self._average_traces)
+                try:
+                    completed = self._averager.add(result.powers_dbm)
+                except ValueError as exc:
+                    self.cancel_averaging()
+                    self.info.setText(f"Averaging stopped: {exc}")
+                    return
                 target = self.average_count.value()
                 self.average_progress.setValue(completed)
                 self.info.setText(f"Averaging {completed} / {target} complete traces…")
                 if completed >= target:
-                    averaged = average_dbm_traces(self._average_traces)
+                    averaged = self._averager.result()
                     self._averaged_trace = SpectrumTrace(
                         frequencies_hz=result.frequencies_hz,
                         powers_dbm=averaged,
@@ -2204,7 +2222,7 @@ class AnritsuPage(QWidget):
                         trace_name=f"{result.trace_name}_AVG{target}",
                     )
                     self._averaging_active = False
-                    self._average_traces.clear()
+                    self._averager.reset()
                     self.acquire_average.setEnabled(True)
                     self.cancel_average.setEnabled(False)
                     self.average_count.setEnabled(True)
@@ -2212,7 +2230,8 @@ class AnritsuPage(QWidget):
                     self.status.emit(f"Anritsu application-side averaging completed: {target} traces")
                     self._refresh_spectrum_display()
                 else:
-                    QTimer.singleShot(0, self.fetch_live)
+                    self._fetch_pending = True
+                    QTimer.singleShot(0, lambda: self._controller.call("single_sweep", "TRAC1"))
             else:
                 self._show_trace(result)
 
@@ -2228,10 +2247,11 @@ class AnritsuPage(QWidget):
     def _chart_points(trace: SpectrumTrace, values: tuple[float, ...] | None = None) -> list[QPointF]:
         powers = values or trace.powers_dbm
         limit = 2_000
-        stride = max(1, len(powers) // limit)
+        indices = peak_preserving_indices(powers, limit)
         return [
             QPointF(trace.frequencies_hz[index] / 1e6, powers[index])
-            for index in range(0, len(powers), stride)
+            for index in indices
+            if math.isfinite(powers[index]) and math.isfinite(trace.frequencies_hz[index])
         ]
 
     def _refresh_spectrum_display(self, *_args: object) -> None:
@@ -2249,7 +2269,7 @@ class AnritsuPage(QWidget):
         signal = self._averaged_trace or self._latest_trace
         if operation != "none" and signal is not None and self._reference_trace is not None:
             try:
-                if signal.frequencies_hz != self._reference_trace.frequencies_hz:
+                if not frequency_grids_match(signal.frequencies_hz, self._reference_trace.frequencies_hz):
                     raise ValueError("Reference frequency grid differs from the current spectrum.")
                 processed, processed_unit = apply_reference_operation(
                     signal.powers_dbm, self._reference_trace.powers_dbm, operation
@@ -2271,9 +2291,14 @@ class AnritsuPage(QWidget):
         all_points: list[QPointF] = []
         for series, trace, values, _unit in traces:
             points = self._chart_points(trace, values)
+            if not points:
+                continue
             series.replace(points)
             series.setVisible(True)
             all_points.extend(points)
+        if not all_points:
+            self.info.setText("No finite spectrum points are available for display.")
+            return
         self.axis_x.setRange(min(point.x() for point in all_points), max(point.x() for point in all_points))
         y_min = min(point.y() for point in all_points)
         y_max = max(point.y() for point in all_points)
@@ -2283,7 +2308,7 @@ class AnritsuPage(QWidget):
         self.axis_y.setTitleText(f"Amplitude [{active_unit}]")
 
     def _error(self, operation: str, error: str) -> None:
-        if operation == "fetch_trace":
+        if operation in {"fetch_trace", "single_sweep"}:
             self._fetch_pending = False
             if self._averaging_active:
                 self.cancel_averaging()
@@ -2321,7 +2346,7 @@ class RecipePage(QWidget):
         splitter = QSplitter(Qt.Orientation.Horizontal)
         self.editor = QPlainTextEdit()
         self.editor.setPlaceholderText("Declarative YAML recipe — no Python code and no raw SCPI.")
-        self.editor.setMinimumWidth(520)
+        self.editor.setMinimumWidth(320)
         splitter.addWidget(self.editor)
         self.tree = QTreeWidget()
         self.tree.setHeaderLabels(["Node", "Type / details"])
@@ -2476,7 +2501,7 @@ class ResultsPage(QWidget):
         splitter = QSplitter(Qt.Orientation.Horizontal)
         self.runs = QTreeWidget()
         self.runs.setHeaderLabels(["File", "State", "Spectra", "Points"])
-        self.runs.setMinimumWidth(380)
+        self.runs.setMinimumWidth(240)
         self.runs.setColumnWidth(0, 220)
         splitter.addWidget(self.runs)
 
@@ -2491,7 +2516,6 @@ class ResultsPage(QWidget):
         self.details_tabs.addTab(self.metadata, "Metadata")
         self.details_tabs.addTab(self.recipe_snapshot, "Recipe")
         self.details_tabs.addTab(self.settings_snapshot, "Settings")
-        self.details_tabs.setMaximumHeight(250)
         right_layout.addWidget(self.details_tabs)
 
         self.points = QTreeWidget()
@@ -2690,6 +2714,7 @@ class MainWindow(QMainWindow):
         self._run_controller = RunController(self)
         self._build()
         self._connect_controllers()
+        self._restore_workspace()
 
     def _make_adapter(self, name: str):
         if name == "rigol":
@@ -2856,9 +2881,11 @@ class MainWindow(QMainWindow):
         theme = "light" if light else "dark"
         chart_theme = QChart.ChartTheme.ChartThemeLight if light else QChart.ChartTheme.ChartThemeDark
         for chart_view in self.findChildren(QChartView):
-            chart_view.chart().setTheme(chart_theme)
-            chart_view.chart().legend().hide()
-            chart_view.chart().setBackgroundVisible(False)
+            chart = chart_view.chart()
+            legend_visible = chart.legend().isVisible()
+            chart.setTheme(chart_theme)
+            chart.legend().setVisible(legend_visible)
+            chart.setBackgroundVisible(False)
         self.theme_changed.emit(theme)
         self._persist_theme(theme)
         self._log(f"Theme changed to {theme} and saved")
@@ -2882,8 +2909,29 @@ class MainWindow(QMainWindow):
         from PySide6.QtWidgets import QDockWidget
 
         dock = QDockWidget("Event log", self)
+        dock.setObjectName("eventLogDock")
         dock.setWidget(self.log)
         return dock
+
+    def _restore_workspace(self) -> None:
+        settings = QSettings("LabControl", "LabControl")
+        geometry = settings.value("main_window/geometry")
+        state = settings.value("main_window/state")
+        splitter = settings.value("anritsu/splitter")
+        if geometry is not None:
+            self.restoreGeometry(geometry)
+        if state is not None:
+            self.restoreState(state, 1)
+        if splitter is not None:
+            self.anritsu_page.workspace_splitter.restoreState(splitter)
+        self.tabs.setCurrentIndex(int(settings.value("main_window/current_tab", 0)))
+
+    def _save_workspace(self) -> None:
+        settings = QSettings("LabControl", "LabControl")
+        settings.setValue("main_window/geometry", self.saveGeometry())
+        settings.setValue("main_window/state", self.saveState(1))
+        settings.setValue("main_window/current_tab", self.tabs.currentIndex())
+        settings.setValue("anritsu/splitter", self.anritsu_page.workspace_splitter.saveState())
 
     def _connect_controllers(self) -> None:
         for name, controller in self._controllers.items():
@@ -3003,6 +3051,7 @@ class MainWindow(QMainWindow):
         self.statusBar().showMessage(message, 8_000)
 
     def closeEvent(self, event: QCloseEvent) -> None:
+        self._save_workspace()
         self.anritsu_page._timer.stop()
         self._run_controller.close()
         for controller in self._controllers.values():

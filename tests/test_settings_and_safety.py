@@ -148,6 +148,22 @@ class QuantityAndSafetyTests(unittest.TestCase):
                 points=101,
             )
 
+    def test_keithley_preflight_rejects_source_compliance_power(self) -> None:
+        raw = deepcopy(SettingsRepository(ROOT / ".config" / "settings.yml").load().raw)
+        limits = raw["devices"]["keithley"]["safety"]["channels"]["B"]["lab_limits"]
+        limits["source_current"] = {"min": "-1 A", "max": "1 A"}
+        limits["voltage_compliance"] = {"min": "1 mV", "max": "10 V"}
+        limits["measured_current_trip"] = {"min": "-1 A", "max": "1 A"}
+        limits["measured_voltage_trip"] = {"min": "-10 V", "max": "10 V"}
+        limits["max_abs_power"] = "10 mW"
+        settings = StationSettings.model_validate(raw)
+
+        with self.assertRaisesRegex(SafetyViolation, "source × compliance"):
+            validate_keithley_source(
+                settings.keithley.safety.channels["B"],
+                KeithleySourceRequest("B", "current", 0.1, 1.0),
+            )
+
 
 if __name__ == "__main__":
     unittest.main()
