@@ -2599,9 +2599,20 @@ class AnritsuPage(QWidget):
         right_layout = QVBoxLayout(right_panel)
         right_layout.setContentsMargins(8, 8, 8, 8)
         right_layout.setSpacing(6)
+        setup_header = QHBoxLayout()
         setup_title = QLabel("Acquisition setup")
         setup_title.setObjectName("sectionTitle")
-        left_layout.addWidget(setup_title)
+        setup_header.addWidget(setup_title)
+        setup_header.addStretch(1)
+        self.hardware_info_button = QPushButton("ⓘ")
+        self.hardware_info_button.setObjectName("infoButton")
+        self.hardware_info_button.setFixedSize(28, 28)
+        self.hardware_info_button.setToolTip(
+            "Show detected Anritsu hardware options and documented operating limits."
+        )
+        self.hardware_info_button.clicked.connect(self._show_anritsu_hardware_info)
+        setup_header.addWidget(self.hardware_info_button)
+        left_layout.addLayout(setup_header)
         form = QFormLayout()
         form.setFieldGrowthPolicy(QFormLayout.FieldGrowthPolicy.AllNonFixedFieldsGrow)
         form.setVerticalSpacing(7)
@@ -2620,36 +2631,18 @@ class AnritsuPage(QWidget):
             ("Start", self._anritsu_bounded("frequency", self.start)),
             ("Stop", self._anritsu_bounded("frequency", self.stop)),
             ("Reference level", self._anritsu_bounded("reference_level", self.reference)),
-            ("Points", self._anritsu_bounded("sweep_points", self.points)),
+            ("Points", self.points),
             ("Live refresh interval", self.refresh),
             ("Live acquisition", self.ensure_continuous_live),
         ):
             form.addRow(label, widget)
         left_layout.addLayout(form)
-        hardware_card = QFrame()
-        hardware_card.setObjectName("anritsuProcessingCard")
-        hardware_layout = QVBoxLayout(hardware_card)
-        hardware_layout.setContentsMargins(10, 8, 10, 8)
-        hardware_layout.setSpacing(4)
-        hardware_title = QLabel("Instrument limits & hardware")
-        hardware_title.setObjectName("sectionTitle")
-        hardware_layout.addWidget(hardware_title)
         self.hardware_option_info = QLabel()
-        self.hardware_option_info.setWordWrap(True)
-        self.hardware_option_info.setTextInteractionFlags(
-            Qt.TextInteractionFlag.TextSelectableByMouse
-        )
-        self.hardware_option_info.setObjectName("muted")
-        hardware_layout.addWidget(self.hardware_option_info)
         self.hardware_range_info = QLabel()
-        self.hardware_range_info.setWordWrap(True)
-        self.hardware_range_info.setTextInteractionFlags(
-            Qt.TextInteractionFlag.TextSelectableByMouse
-        )
-        self.hardware_range_info.setObjectName("muted")
-        hardware_layout.addWidget(self.hardware_range_info)
+        self.hardware_option_info.hide()
+        self.hardware_range_info.hide()
+        self._hardware_details_text = ""
         self._update_anritsu_hardware_limits(())
-        left_layout.addWidget(hardware_card)
         controls = QGridLayout()
         controls.setSpacing(6)
         self.read_configuration = QPushButton("Read from instrument")
@@ -2851,6 +2844,19 @@ class AnritsuPage(QWidget):
             "5001, 10001 | Device averaging: 2 to 9999.\n"
             "Application polling: 100 ms to 5 s | Application averaging: 1 to 9999. "
             "Approved safety badges above may intentionally be stricter."
+        )
+        self._hardware_details_text = (
+            "Detected hardware options\n"
+            f"{self.hardware_option_info.text()}\n\n"
+            "Documented instrument limits\n"
+            f"{self.hardware_range_info.text()}"
+        )
+
+    def _show_anritsu_hardware_info(self) -> None:
+        QMessageBox.information(
+            self,
+            "Anritsu hardware information",
+            self._hardware_details_text or "Hardware information is not available yet.",
         )
 
     def configure(self) -> None:

@@ -101,6 +101,8 @@ QLabel#limitBadge { color: #9ecbff; background: #17283a; border: 1px solid #3150
 QLabel#limitBadge[limitState="undefined"] { color: #ffcc66; background: #302817; border-color: #76561b; }
 QLabel#limitBadge[keithleyCompact="true"] { padding: 4px; font-size: 8pt; }
 QPushButton#limitEditButton { padding: 6px 8px; background: #30465a; }
+QPushButton#infoButton { background: #26384a; color: #9ecbff; border: 1px solid #3e5a73; border-radius: 14px; font-size: 13pt; font-weight: 700; padding: 0; }
+QPushButton#infoButton:hover { background: #34516a; color: white; }
 QTabWidget#rigolControlTabs > QTabBar::tab { padding: 11px 16px; }
 QTabWidget#rigolAdvancedTabs > QTabBar::tab { padding: 8px 12px; }
 QScrollArea { border: 0; }
@@ -202,6 +204,8 @@ QLabel#limitBadge { color: #174f7a; background: #e4f1fb; border: 1px solid #a9c9
 QLabel#limitBadge[limitState="undefined"] { color: #765500; background: #fff2c7; border-color: #e2c66f; }
 QLabel#limitBadge[keithleyCompact="true"] { padding: 4px; font-size: 8pt; }
 QPushButton#limitEditButton { padding: 6px 8px; background: #d6e3ee; }
+QPushButton#infoButton { background: #e2edf6; color: #1769aa; border: 1px solid #b5cadc; border-radius: 14px; font-size: 13pt; font-weight: 700; padding: 0; }
+QPushButton#infoButton:hover { background: #d3e5f4; color: #0b5da7; }
 QTabWidget#rigolControlTabs > QTabBar::tab { padding: 11px 16px; }
 QTabWidget#rigolAdvancedTabs > QTabBar::tab { padding: 8px 12px; }
 QScrollArea { border: 0; }

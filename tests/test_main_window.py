@@ -511,7 +511,8 @@ class MainWindowTests(unittest.TestCase):
 
             anritsu = window.anritsu_page
             self.assertEqual(anritsu._limit_fields["frequency0"].minimum.text(), "MIN  NOT SET")
-            self.assertEqual(anritsu._limit_fields["sweep_points3"].maximum.text(), "MAX  10001")
+            self.assertNotIn("sweep_points3", anritsu._limit_fields)
+            self.assertGreater(anritsu.points.count(), 1)
         finally:
             window.close()
             self.application.processEvents()
