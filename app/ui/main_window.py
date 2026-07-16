@@ -8,7 +8,7 @@ from pathlib import Path
 from typing import Any
 
 from PySide6.QtCore import QSize, QSettings, QTimer, Qt, Signal
-from PySide6.QtGui import QAction, QActionGroup, QCloseEvent, QKeySequence, QShortcut
+from PySide6.QtGui import QAction, QActionGroup, QCloseEvent, QIcon, QKeySequence, QShortcut
 from PySide6.QtWidgets import (
     QComboBox,
     QCheckBox,
@@ -29,7 +29,6 @@ from PySide6.QtWidgets import (
     QScrollArea,
     QSplitter,
     QSpinBox,
-    QStyle,
     QTabWidget,
     QToolBar,
     QTableWidget,
@@ -287,6 +286,7 @@ class DeviceCard(QFrame):
     connect_requested = Signal()
     disconnect_requested = Signal()
     test_requested = Signal()
+    assign_resource_requested = Signal(object)
 
     def __init__(self, title: str, resource: str | None, parent: QWidget | None = None) -> None:
         super().__init__(parent)
@@ -302,6 +302,17 @@ class DeviceCard(QFrame):
         self.identity = QLabel("IDN: not connected")
         self.identity.setWordWrap(True)
         self.identity.setObjectName("muted")
+        assignment_row = QHBoxLayout()
+        self.detected_resources = QComboBox()
+        self.detected_resources.setPlaceholderText("Scan VISA to select a detected instrument")
+        self.detected_resources.setEnabled(False)
+        self.detected_resources.setAccessibleName(f"Detected VISA resources for {title}")
+        self.assign_button = QPushButton("Assign VISA")
+        self.assign_button.setProperty("compact", True)
+        self.assign_button.setEnabled(False)
+        self.assign_button.setToolTip("Save the selected detected resource to this instrument card.")
+        assignment_row.addWidget(self.detected_resources, 1)
+        assignment_row.addWidget(self.assign_button)
         controls = QHBoxLayout()
         self.connect_button = QPushButton("Connect")
         self.disconnect_button = QPushButton("Disconnect")
@@ -317,10 +328,15 @@ class DeviceCard(QFrame):
         layout.addWidget(self.resource)
         layout.addWidget(self.identity)
         layout.addStretch(1)
+        layout.addLayout(assignment_row)
         layout.addLayout(controls)
         self.connect_button.clicked.connect(self.connect_requested)
         self.disconnect_button.clicked.connect(self.disconnect_requested)
         self.test_button.clicked.connect(self.test_requested)
+        self.assign_button.clicked.connect(self._request_assignment)
+        self.detected_resources.currentIndexChanged.connect(
+            lambda index: self.assign_button.setEnabled(index >= 0 and self.detected_resources.isEnabled())
+        )
         self.update_resource(resource)
 
     def update_state(self, state: str) -> None:
@@ -354,6 +370,43 @@ class DeviceCard(QFrame):
         if active:
             self.state.setText("TESTING COMMUNICATION…")
 
+    def set_discovered_resources(
+        self,
+        instruments: tuple[DiscoveredInstrument, ...],
+        *,
+        configured_resource: str | None,
+        configured_backend: str,
+    ) -> None:
+        self.detected_resources.clear()
+        assigned_index = -1
+        for result in instruments:
+            label = f"{result.resource}  •  {result.idn or 'no IDN'}"
+            payload = (result.resource, result.backend, result.idn)
+            self.detected_resources.addItem(label, payload)
+            if result.resource == configured_resource and result.backend == configured_backend:
+                assigned_index = self.detected_resources.count() - 1
+        if self.detected_resources.count() == 0:
+            self.detected_resources.setPlaceholderText("No matching instrument detected")
+            self.detected_resources.setCurrentIndex(-1)
+            self.detected_resources.setEnabled(False)
+            self.assign_button.setEnabled(False)
+            self.assign_button.setText("Assign VISA")
+        elif assigned_index >= 0:
+            self.detected_resources.setCurrentIndex(assigned_index)
+            self.detected_resources.setEnabled(False)
+            self.assign_button.setEnabled(False)
+            self.assign_button.setText("Assigned ✓")
+        else:
+            self.detected_resources.setCurrentIndex(0)
+            self.detected_resources.setEnabled(True)
+            self.assign_button.setText("Assign VISA")
+            self.assign_button.setEnabled(True)
+
+    def _request_assignment(self) -> None:
+        payload = self.detected_resources.currentData()
+        if isinstance(payload, tuple) and len(payload) == 3:
+            self.assign_resource_requested.emit(payload)
+
 
 class DashboardPage(QWidget):
     emergency_requested = Signal()
@@ -381,8 +434,11 @@ class DashboardPage(QWidget):
             "keithley": DeviceCard(settings.keithley.display_name, settings.keithley.connection.resource),
             "anritsu": DeviceCard(settings.anritsu.display_name, settings.anritsu.connection.resource),
         }
-        for column, card in enumerate(self.cards.values()):
+        for column, (device, card) in enumerate(self.cards.items()):
             grid.addWidget(card, 0, column)
+            card.assign_resource_requested.connect(
+                lambda payload, device=device: self._card_assignment_requested(device, payload)
+            )
         layout.addLayout(grid)
 
         discovery = QFrame()
@@ -461,6 +517,7 @@ class DashboardPage(QWidget):
             ("anritsu", settings.anritsu),
         ):
             self.cards[name].update_resource(device.connection.resource, device.connection.visa_backend)
+        self._refresh_card_resource_choices()
         profile = "✓ approved" if not settings.outputs_locked else "✕ unverified — outputs locked"
         rigol_serial = "✓" if settings.rigol.identity.require_serial_match else "✕"
         anritsu = "✓" if settings.anritsu.safety.acquisition_allowed else "✕ RF input limit required"
@@ -540,6 +597,7 @@ class DashboardPage(QWidget):
             f"Scan complete: {usable} responding instrument(s), {assignable} available for assignment."
         )
         self.status.emit(f"VISA discovery completed: {usable} instrument(s) responded to *IDN?")
+        self._refresh_card_resource_choices()
 
     def _scan_failed(self, error: str) -> None:
         self.discovery_info.setText(f"VISA scan failed: {error}")
@@ -573,6 +631,37 @@ class DashboardPage(QWidget):
         self.assignments_requested.emit(
             {str(device): (result.resource, result.backend, result.idn)}
         )
+
+    def _card_assignment_requested(self, device: str, payload: object) -> None:
+        if not isinstance(payload, tuple) or len(payload) != 3:
+            self.status.emit(f"VISA ASSIGN ERROR [{device}]: invalid resource payload from card")
+            return
+        resource, backend, idn = (str(value) for value in payload)
+        self.status.emit(
+            f"VISA ASSIGN CLICK [{device}]: resource={resource!r}, backend={backend!r}, IDN={idn!r}"
+        )
+        self.assignments_requested.emit({device: (resource, backend, idn)})
+
+    def _refresh_card_resource_choices(self) -> None:
+        if not hasattr(self, "cards"):
+            return
+        configured = {
+            "rigol": self._settings.rigol.connection,
+            "keithley": self._settings.keithley.connection,
+            "anritsu": self._settings.anritsu.connection,
+        }
+        for device, card in self.cards.items():
+            matches = tuple(
+                result
+                for result in self._discovery_results
+                if result.device == device and result.idn is not None and result.resource != "—"
+            )
+            connection = configured[device]
+            card.set_discovered_resources(
+                matches,
+                configured_resource=connection.resource,
+                configured_backend=connection.visa_backend,
+            )
 
     def mark_assignments_saved(self, assignments: dict[str, tuple[str, str, str]]) -> None:
         """Lock rows whose resource was successfully persisted by MainWindow."""
@@ -3022,21 +3111,16 @@ class MainWindow(QMainWindow):
         self.ribbon_group = QActionGroup(self)
         self.ribbon_group.setExclusive(True)
         self.ribbon_actions: list[QAction] = []
-        standard_icons = (
-            QStyle.StandardPixmap.SP_ComputerIcon,
-            QStyle.StandardPixmap.SP_DriveHDIcon,
-            QStyle.StandardPixmap.SP_DriveHDIcon,
-            QStyle.StandardPixmap.SP_DriveNetIcon,
-            QStyle.StandardPixmap.SP_FileDialogDetailedView,
-            QStyle.StandardPixmap.SP_MediaPlay,
-            QStyle.StandardPixmap.SP_DialogSaveButton,
-            QStyle.StandardPixmap.SP_FileDialogInfoView,
+        icon_dir = Path(__file__).resolve().parent / "assets" / "icons"
+        icon_files = (
+            "dashboard.svg", "rigol.svg", "keithley.svg", "anritsu.svg",
+            "recipes.svg", "execution.svg", "results.svg", "settings.svg",
         )
         labels = ("Dashboard", "Rigol", "Keithley", "Anritsu", "Recipes", "Execution", "Results", "Settings")
-        for index, (label, icon_kind) in enumerate(zip(labels, standard_icons, strict=True)):
+        for index, (label, icon_file) in enumerate(zip(labels, icon_files, strict=True)):
             if index in {4, 6}:
                 ribbon.addSeparator()
-            action = QAction(self.style().standardIcon(icon_kind), label, self)
+            action = QAction(QIcon(str(icon_dir / icon_file)), label, self)
             action.setCheckable(True)
             action.setChecked(index == self.tabs.currentIndex())
             action.setToolTip(f"Open {label}")
@@ -3257,6 +3341,7 @@ class MainWindow(QMainWindow):
             card.set_reconfiguring(False)
             card.update_state("disconnected")
             card.identity.setText("IDN: not connected")
+            self._log(f"VISA ADAPTER REPLACE COMPLETE: {card.resource.text()}")
         elif operation == "test_communication" and isinstance(result, dict):
             card.set_testing(False)
             card.update_state("verified")
@@ -3370,13 +3455,23 @@ class MainWindow(QMainWindow):
         self.profile_status.style().polish(self.profile_status)
         for name, controller in self._controllers.items():
             self.dashboard.cards[name].set_reconfiguring(True)
+            connection = getattr(self._settings, name).connection
+            self._log(
+                f"VISA ADAPTER REPLACE QUEUED [{name}]: resource={connection.resource!r}, "
+                f"backend={connection.visa_backend!r}"
+            )
             controller.reconfigure(self._make_adapter(name))
             self._device_states[name] = "disconnected"
             self.dashboard.cards[name].update_state("disconnected")
         self._log("Profile changed. VISA sessions were safely switched OFF and disconnected; new limits apply on the next connection.")
 
     def _save_discovered_assignments(self, payload: object) -> None:
-        if self._simulation or not isinstance(payload, dict):
+        self._log(f"VISA ASSIGN RECEIVED: payload={payload!r}")
+        if self._simulation:
+            self._log("VISA ASSIGN ERROR: assignment is disabled in simulation mode")
+            return
+        if not isinstance(payload, dict):
+            self._log(f"VISA ASSIGN ERROR: expected mapping, received {type(payload).__name__}")
             return
         assignments = {
             str(device): value
@@ -3386,7 +3481,12 @@ class MainWindow(QMainWindow):
             and len(value) == 3
         }
         if not assignments:
+            self._log("VISA ASSIGN ERROR: payload contains no supported device assignment")
             return
+        for device, (resource, backend, idn) in assignments.items():
+            self._log(
+                f"VISA ASSIGN VALIDATED [{device}]: resource={resource!r}, backend={backend!r}, IDN={idn!r}"
+            )
         summary = "\n".join(
             f"• {device.title()}: {value[0]} ({value[1]})\n  {value[2]}"
             for device, value in sorted(assignments.items())
@@ -3402,21 +3502,36 @@ class MainWindow(QMainWindow):
             QMessageBox.StandardButton.Cancel,
         )
         if answer is not QMessageBox.StandardButton.Yes:
+            self._log("VISA ASSIGN CANCELLED: operator did not confirm configuration change")
             return
+        self._log("VISA ASSIGN CONFIRMED: loading settings.yml for atomic update")
         try:
             loaded = self._repository.load()
             raw = deepcopy(loaded.raw)
             for device, (resource, backend, _idn) in assignments.items():
+                old = raw["devices"][device]["connection"]
+                self._log(
+                    f"VISA ASSIGN WRITE [{device}]: {old.get('resource')!r}/{old.get('visa_backend')!r} "
+                    f"-> {resource!r}/{backend!r}"
+                )
                 connection = raw["devices"][device]["connection"]
                 connection["resource"] = resource
                 connection["visa_backend"] = backend
             settings = self._repository.save_raw(raw)
         except Exception as exc:
+            self._log(f"VISA ASSIGN FAILED: {type(exc).__name__}: {exc}")
             QMessageBox.critical(self, "VISA assignments not saved", str(exc))
             return
+        self._log(
+            f"VISA ASSIGN SAVED: settings.yml updated atomically; profile state={settings.profile.state}"
+        )
         self.settings_page.reload()
         self._settings_saved(settings)
         self.dashboard.mark_assignments_saved(assignments)
+        for device, (resource, backend, _idn) in assignments.items():
+            self._log(
+                f"VISA ASSIGN SUCCESS [{device}]: card and worker now use {resource!r} via {backend!r}"
+            )
 
     def _set_run_ui_locked(self, locked: bool) -> None:
         for index in (1, 2, 3, 4, 7):

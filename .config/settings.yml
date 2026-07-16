@@ -65,7 +65,7 @@ storage:
 
 ui:
   framework: "PySide6"
-  theme: "light"
+  theme: "system"
   show_engineering_notation: true
   plot_max_visible_spectra: 20
   plot_downsample_threshold: 200000

@@ -217,6 +217,7 @@ class MainWindowTests(unittest.TestCase):
                 self.assertTrue(window.dashboard.cards["rigol"].connect_button.isEnabled())
                 worker_adapter = window._controllers["rigol"]._worker._adapter
                 self.assertEqual(worker_adapter._settings.connection.resource, resource)
+                self.assertIn("VISA ASSIGN SUCCESS [rigol]", window.log.toPlainText())
             finally:
                 window.close()
                 self.application.processEvents()
@@ -269,6 +270,33 @@ class MainWindowTests(unittest.TestCase):
             window.close()
             self.application.processEvents()
 
+    def test_anritsu_can_be_assigned_directly_from_top_card_after_scan(self) -> None:
+        window = MainWindow(".config/settings.yml", simulation=False)
+        try:
+            page = window.dashboard
+            page.assignments_requested.disconnect(window._save_discovered_assignments)
+            emitted: list[object] = []
+            page.assignments_requested.connect(emitted.append)
+            result = DiscoveredInstrument(
+                "GPIB0::23::INSTR",
+                "system",
+                "ANRITSU,MS2830A,6201514799,7.03.00",
+                "anritsu",
+            )
+            page._scan_completed((result,))
+            card = page.cards["anritsu"]
+            self.assertTrue(card.detected_resources.isEnabled())
+            self.assertIn("GPIB0::23::INSTR", card.detected_resources.currentText())
+            card.assign_button.click()
+            self.assertEqual(
+                emitted,
+                [{"anritsu": ("GPIB0::23::INSTR", "system", result.idn)}],
+            )
+            self.assertIn("VISA ASSIGN CLICK [anritsu]", window.log.toPlainText())
+        finally:
+            window.close()
+            self.application.processEvents()
+
     def test_device_card_communication_test_reports_protocol_and_disconnects(self) -> None:
         window = MainWindow(".config/settings.yml", simulation=True)
         try:
@@ -292,6 +320,7 @@ class MainWindowTests(unittest.TestCase):
             self.assertEqual([action.text() for action in window.ribbon_actions], [
                 "Dashboard", "Rigol", "Keithley", "Anritsu", "Recipes", "Execution", "Results", "Settings"
             ])
+            self.assertTrue(all(not action.icon().isNull() for action in window.ribbon_actions))
             window.ribbon_actions[2].trigger()
             self.application.processEvents()
             self.assertEqual(window.tabs.currentIndex(), 2)
