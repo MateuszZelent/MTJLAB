@@ -38,7 +38,7 @@ class SpectrumPlotWidget(QWidget):
         self._min_hold: np.ndarray | None = None
         self._marker_x: float | None = None
         self._x_label = "Frequency"
-        self._x_unit = "MHz"
+        self._x_unit = "Hz"
 
         root = QVBoxLayout(self)
         root.setContentsMargins(0, 0, 0, 0)
@@ -73,7 +73,7 @@ class SpectrumPlotWidget(QWidget):
         self.plot = pg.PlotWidget()
         self.plot.setBackground(None)
         self.plot.showGrid(x=True, y=True, alpha=0.18)
-        self.plot.setLabel("bottom", "Frequency", units="MHz")
+        self.plot.setLabel("bottom", "Frequency", units="Hz")
         self.plot.setLabel("left", "Power", units="dBm")
         self.plot.setMenuEnabled(True)
         self.plot.setMouseEnabled(x=True, y=True)
@@ -100,7 +100,14 @@ class SpectrumPlotWidget(QWidget):
         self.marker.sigPositionChanged.connect(self._marker_changed)
         self.delta_marker.sigPositionChanged.connect(self._marker_changed)
 
-    def set_labels(self, *, x: str = "Frequency", x_unit: str = "MHz", y: str = "Power", y_unit: str = "dBm") -> None:
+    def set_labels(
+        self,
+        *,
+        x: str = "Frequency",
+        x_unit: str = "Hz",
+        y: str = "Power",
+        y_unit: str = "dBm",
+    ) -> None:
         self._x_label = x
         self._x_unit = x_unit
         self.plot.setLabel("bottom", x, units=x_unit)
@@ -183,7 +190,7 @@ class SpectrumPlotWidget(QWidget):
         self.marker.show()
         self._marker_x = float(x_values[index])
         self.status_changed.emit(
-            f"Peak: {x_values[index]:.9g} {self._x_unit}, {y_values[index]:.6g}"
+            f"Peak: {self._format_x_value(float(x_values[index]))}, {y_values[index]:.6g}"
         )
 
     def place_delta_marker(self) -> None:
@@ -281,12 +288,38 @@ class SpectrumPlotWidget(QWidget):
         self._last_mouse_x = float(point.x())
         self.crosshair_x.setPos(point.x())
         self.crosshair_y.setPos(point.y())
-        self.readout.setText(f"X: {point.x():.9g}   Y: {point.y():.6g}")
+        self.readout.setText(f"X: {self._format_x_value(float(point.x()))}   Y: {point.y():.6g}")
 
     def _marker_changed(self) -> None:
         if not self.marker.isVisible():
             return
         delta = ""
         if self.delta_marker.isVisible():
-            delta = f"   ΔX: {self.delta_marker.value() - self.marker.value():.9g} MHz"
-        self.readout.setText(f"M1 X: {self.marker.value():.9g} MHz{delta}")
+            difference = float(self.delta_marker.value() - self.marker.value())
+            delta = f"   ΔX: {self._format_x_value(difference)}"
+        self.readout.setText(f"M1 X: {self._format_x_value(float(self.marker.value()))}{delta}")
+
+    def _format_x_value(self, value: float) -> str:
+        """Format an axis value with an appropriate engineering SI prefix."""
+
+        if not np.isfinite(value):
+            return str(value)
+        if not self._x_unit:
+            return f"{value:.9g}"
+        magnitude = abs(value)
+        if magnitude == 0:
+            return f"0 {self._x_unit}"
+        for scale, prefix in (
+            (1e12, "T"),
+            (1e9, "G"),
+            (1e6, "M"),
+            (1e3, "k"),
+            (1.0, ""),
+            (1e-3, "m"),
+            (1e-6, "µ"),
+            (1e-9, "n"),
+            (1e-12, "p"),
+        ):
+            if magnitude >= scale:
+                return f"{value / scale:.9g} {prefix}{self._x_unit}"
+        return f"{value:.9g} {self._x_unit}"

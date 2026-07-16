@@ -1,0 +1,4 @@
+interface:
+  display_name: "Safe Measurement Station"
+  short_description: "Build a safe, modern PySide6 measurement app"
+  default_prompt: "Use $build-safe-measurement-station to design and implement a production-safe PySide6 instrument-control feature with explicit physical units."

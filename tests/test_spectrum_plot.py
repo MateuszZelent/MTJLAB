@@ -44,6 +44,16 @@ class SpectrumPlotTests(unittest.TestCase):
         finally:
             plot.close()
 
+    def test_frequency_readouts_use_engineering_si_prefixes(self) -> None:
+        plot = SpectrumPlotWidget()
+        try:
+            plot.set_labels(x="Frequency", x_unit="Hz")
+            self.assertEqual(plot._format_x_value(10_000.0), "10 kHz")
+            self.assertEqual(plot._format_x_value(100_000_000.0), "100 MHz")
+            self.assertEqual(plot._format_x_value(6_000_000_000.0), "6 GHz")
+        finally:
+            plot.close()
+
     def test_csv_export_contains_each_visible_trace_and_refuses_overwrite(self) -> None:
         plot = SpectrumPlotWidget()
         try:

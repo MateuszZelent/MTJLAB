@@ -2730,6 +2730,9 @@ class AnritsuPage(QWidget):
         left_layout.addStretch(1)
         self.spectrum_plot = SpectrumPlotWidget(legend=True)
         self.spectrum_plot.set_title("Current spectrum")
+        self.spectrum_plot.set_labels(
+            x="Frequency", x_unit="Hz", y="Amplitude", y_unit="dBm"
+        )
         self.spectrum_plot.setMinimumHeight(300)
         self.spectrum_plot.status_changed.connect(self.status.emit)
         right_layout.addWidget(self.spectrum_plot, 1)
@@ -3183,7 +3186,7 @@ class AnritsuPage(QWidget):
         for name, trace, values, _unit, color in traces:
             self.spectrum_plot.set_trace(
                 name,
-                [frequency / 1e6 for frequency in trace.frequencies_hz],
+                trace.frequencies_hz,
                 values,
                 color=color,
                 primary=name in {"Processed", "Averaged", "Raw"},
@@ -3196,7 +3199,9 @@ class AnritsuPage(QWidget):
             self.info.setText("No finite spectrum points are available for display.")
             return
         active_unit = traces[-1][3]
-        self.spectrum_plot.set_labels(y="Amplitude", y_unit=active_unit)
+        self.spectrum_plot.set_labels(
+            x="Frequency", x_unit="Hz", y="Amplitude", y_unit=active_unit
+        )
 
     def _error(self, operation: str, error: str) -> None:
         if operation in {"fetch_trace", "fetch_current_trace", "single_sweep"}:
@@ -3548,7 +3553,7 @@ class ResultsPage(QWidget):
             return
         self.spectrum_plot.set_trace(
             "Stored spectrum",
-            [frequency / 1e6 for frequency in trace.frequencies_hz],
+            trace.frequencies_hz,
             trace.powers_dbm,
             primary=True,
         )

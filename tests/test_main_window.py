@@ -752,6 +752,25 @@ class MainWindowTests(unittest.TestCase):
             window.close()
             self.application.processEvents()
 
+    def test_anritsu_plot_keeps_frequency_data_in_hz_for_si_axis_scaling(self) -> None:
+        window = MainWindow(".config/settings.yml", simulation=True)
+        try:
+            anritsu = window.anritsu_page
+            trace = SpectrumTrace(
+                (100e6, 6e9), (-50.0, -40.0), datetime.now(timezone.utc), "TRAC1"
+            )
+
+            anritsu._latest_trace = trace
+            anritsu._refresh_spectrum_display()
+
+            self.assertEqual(anritsu.spectrum_plot._x_unit, "Hz")
+            self.assertEqual(
+                anritsu.spectrum_plot._traces["Raw"][0].tolist(), [100e6, 6e9]
+            )
+        finally:
+            window.close()
+            self.application.processEvents()
+
     def test_anritsu_live_uses_passive_polling_and_reports_frozen_frames(self) -> None:
         window = MainWindow(".config/settings.yml", simulation=True)
         try:
