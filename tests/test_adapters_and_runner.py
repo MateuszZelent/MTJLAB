@@ -226,7 +226,7 @@ class AdapterAndRunnerTests(unittest.TestCase):
                 "SWE:POIN?": "1001",
             }
         )
-        locked_settings = loaded_settings(anritsu_enabled=False)
+        locked_settings = simulation_settings(anritsu_enabled=False)
         adapter = AnritsuAdapter(locked_settings, session_factory=FakeVisaSessionFactory(session))
         adapter.connect()
 
@@ -236,7 +236,17 @@ class AdapterAndRunnerTests(unittest.TestCase):
         self.assertEqual(snapshot.stop_hz, 4e9)
         self.assertEqual(snapshot.reference_level_dbm, -10)
         self.assertEqual(snapshot.points, 1001)
-        self.assertEqual(session.writes, [])
+        self.assertEqual(
+            session.writes,
+            [
+                "*IDN?",
+                "FREQ:START?",
+                "FREQ:STOP?",
+                "DISP:WIND:TRAC:Y:RLEV?",
+                "SWE:POIN?",
+            ],
+        )
+        self.assertTrue(all(command.endswith("?") for command in session.writes))
 
     def test_anritsu_rejects_frequency_outside_the_approved_profile(self) -> None:
         session = FakeVisaSession(responses={"*IDN?": "ANRITSU,MS2830A,123456,1.0"})

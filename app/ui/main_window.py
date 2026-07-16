@@ -2550,7 +2550,7 @@ class AnritsuPage(QWidget):
             self.banner.show_message(
                 "Current analyser settings loaded into the form. "
                 "The instrument and safety limits were not changed.",
-                kind="success",
+                severity="success",
             )
             self.status.emit("Anritsu current configuration read from instrument")
         elif operation == "configure":

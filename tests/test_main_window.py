@@ -16,7 +16,8 @@ from PySide6.QtTest import QTest
 
 from app.domain.models import DeviceCapabilities
 from app.devices.discovery import DiscoveredInstrument
-from app.devices.anritsu import SpectrumTrace
+from app.devices.anritsu import AnritsuConfigurationSnapshot, SpectrumTrace
+from app.domain.quantities import DIMENSION_DBM, DIMENSION_FREQUENCY, parse_quantity
 from app.settings.repository import SettingsRepository
 from app.ui.main_window import LimitEditDialog, MainWindow
 
