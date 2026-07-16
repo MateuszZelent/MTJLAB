@@ -237,7 +237,7 @@ Stan `COMPLIANCE` powoduje zapis ostatniego punktu, natychmiastowe wyłączenie 
 
 ### 6.1. Charakter obecnej implementacji
 
-`submodules/accelerator-gui/AnritsuMS2830A.py` łączy się przez VISA z zasobem wpisanym na stałe `TCPIP::192.168.1.139::INSTR`. Konstruktor otwiera połączenie, metoda generatora automatycznie wykonuje `OUTP 1`, a pobranie trace nie wykonuje jawnego single sweep + `*OPC?`.
+Historyczna wersja `submodules/accelerator-gui/AnritsuMS2830A.py` łączyła się przez VISA z zasobem wpisanym na stałe. Hardcode został usunięty: moduł wymaga teraz jawnego `resource` albo `ANRITSU_VISA_RESOURCE`. Nadal nie wolno używać jego funkcji generatora bez produkcyjnej warstwy interlock, ponieważ pobranie trace nie realizuje kwalifikowanego single sweep + `*OPC?`.
 
 Z repozytorium warto zachować nazwy komend Anritsu i wiedzę o przełączaniu aplikacji. Monolityczny plik GUI PyQt5/EPICS nie powinien być bazą nowego interfejsu.
 
