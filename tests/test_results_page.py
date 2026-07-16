@@ -53,7 +53,7 @@ class ResultsPageTests(unittest.TestCase):
                 self.assertEqual(page.points.topLevelItemCount(), 1)
                 page.points.setCurrentItem(page.points.topLevelItem(0))
                 self.application.processEvents()
-                self.assertEqual(page.spectrum_series.count(), 3)
+                self.assertEqual(page.spectrum_plot.trace_point_count("Stored spectrum"), 3)
                 self.assertIn("3 points", page.spectrum_info.text())
             finally:
                 page.close()

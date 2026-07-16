@@ -99,6 +99,17 @@ class SpectrumPlotWidget(QWidget):
     def set_title(self, title: str) -> None:
         self.plot.setTitle(title)
 
+    def apply_theme(self, theme: str) -> None:
+        foreground = "#17212b" if theme == "light" else "#dce6ef"
+        grid = "#607d8b"
+        self.plot.setBackground(None)
+        for axis in ("left", "bottom"):
+            item = self.plot.getAxis(axis)
+            item.setPen(pg.mkPen(foreground))
+            item.setTextPen(pg.mkPen(foreground))
+        self.crosshair_x.setPen(pg.mkPen(grid, width=1))
+        self.crosshair_y.setPen(pg.mkPen(grid, width=1))
+
     def set_trace(
         self,
         name: str,
@@ -133,6 +144,12 @@ class SpectrumPlotWidget(QWidget):
         if name in self._curves:
             self._curves[name].clear()
             self._curves[name].hide()
+
+    def trace_point_count(self, name: str) -> int:
+        """Return the finite point count for GUI tests and status reporting."""
+
+        data = self._traces.get(name)
+        return 0 if data is None else int(data[0].size)
 
     def clear(self) -> None:
         for name in tuple(self._curves):
@@ -219,6 +236,10 @@ class SpectrumPlotWidget(QWidget):
         if data is None:
             self.status_changed.emit(f"{name} unavailable: no primary trace.")
             return
+        if name == "Max hold":
+            self._max_hold = data[1].copy()
+        else:
+            self._min_hold = data[1].copy()
         self.set_trace(name, *data, color=color, visible=True)
         self.status_changed.emit(f"{name} enabled")
 

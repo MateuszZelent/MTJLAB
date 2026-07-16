@@ -5,7 +5,6 @@ from __future__ import annotations
 from dataclasses import asdict, dataclass, is_dataclass
 import hashlib
 import json
-import math
 import re
 from typing import Any, Final
 

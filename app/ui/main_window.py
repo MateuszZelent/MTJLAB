@@ -7,9 +7,8 @@ from copy import deepcopy
 from pathlib import Path
 from typing import Any
 
-from PySide6.QtCharts import QChart, QChartView, QLineSeries, QValueAxis
-from PySide6.QtCore import QPointF, QSettings, QTimer, Qt, Signal
-from PySide6.QtGui import QAction, QCloseEvent, QPainter
+from PySide6.QtCore import QSettings, QTimer, Qt, Signal
+from PySide6.QtGui import QAction, QActionGroup, QCloseEvent, QKeySequence, QShortcut
 from PySide6.QtWidgets import (
     QComboBox,
     QCheckBox,
@@ -27,9 +26,11 @@ from PySide6.QtWidgets import (
     QProgressBar,
     QPushButton,
     QScrollArea,
+    QSizePolicy,
     QSplitter,
     QSpinBox,
     QTabWidget,
+    QToolBar,
     QTableWidget,
     QTableWidgetItem,
     QTreeWidget,
@@ -71,12 +72,13 @@ from app.spectrum import (
     LinearPowerAverager,
     apply_reference_operation,
     frequency_grids_match,
-    peak_preserving_indices,
 )
 from app.ui.settings_page import SettingsPage
 from app.ui.run_worker import RunController
 from app.ui.workers import DeviceController
 from app.ui.discovery_worker import VisaDiscoveryWorker
+from app.ui.design_system import effective_theme
+from app.ui.widgets import NotificationBanner, SpectrumPlotWidget
 
 
 def _line(value: str, width: int = 14) -> QLineEdit:
@@ -292,21 +294,26 @@ class DeviceCard(QFrame):
         name.setObjectName("cardTitle")
         self.state = QLabel("DISCONNECTED")
         self.state.setObjectName("stateDisconnected")
-        self.identity = QLabel(resource or "No VISA resource configured")
+        self.resource = QLabel()
+        self.resource.setWordWrap(True)
+        self.resource.setObjectName("muted")
+        self.identity = QLabel("IDN: not connected")
         self.identity.setWordWrap(True)
         self.identity.setObjectName("muted")
         controls = QHBoxLayout()
-        connect = QPushButton("Connect")
-        disconnect = QPushButton("Disconnect")
-        controls.addWidget(connect)
-        controls.addWidget(disconnect)
+        self.connect_button = QPushButton("Connect")
+        self.disconnect_button = QPushButton("Disconnect")
+        controls.addWidget(self.connect_button)
+        controls.addWidget(self.disconnect_button)
         layout.addWidget(name)
         layout.addWidget(self.state)
+        layout.addWidget(self.resource)
         layout.addWidget(self.identity)
         layout.addStretch(1)
         layout.addLayout(controls)
-        connect.clicked.connect(self.connect_requested)
-        disconnect.clicked.connect(self.disconnect_requested)
+        self.connect_button.clicked.connect(self.connect_requested)
+        self.disconnect_button.clicked.connect(self.disconnect_requested)
+        self.update_resource(resource)
 
     def update_state(self, state: str) -> None:
         self.state.setText(state.upper())
@@ -317,7 +324,18 @@ class DeviceCard(QFrame):
     def update_identity(self, value: object) -> None:
         idn = getattr(value, "idn", None)
         if idn:
-            self.identity.setText(str(idn))
+            self.identity.setText(f"IDN: {idn}")
+
+    def update_resource(self, resource: str | None, backend: str | None = None) -> None:
+        suffix = f"  •  backend: {backend}" if backend else ""
+        self.resource.setText(f"VISA: {resource}{suffix}" if resource else "No VISA resource configured")
+        self.resource.setToolTip(resource or "")
+
+    def set_reconfiguring(self, active: bool) -> None:
+        self.connect_button.setEnabled(not active)
+        self.disconnect_button.setEnabled(not active)
+        if active:
+            self.state.setText("APPLYING NEW VISA ADDRESS…")
 
 
 class DashboardPage(QWidget):
@@ -405,6 +423,12 @@ class DashboardPage(QWidget):
 
     def update_settings(self, settings: StationSettings) -> None:
         self._settings = settings
+        for name, device in (
+            ("rigol", settings.rigol),
+            ("keithley", settings.keithley),
+            ("anritsu", settings.anritsu),
+        ):
+            self.cards[name].update_resource(device.connection.resource, device.connection.visa_backend)
         profile = "✓ approved" if not settings.outputs_locked else "✕ unverified — outputs locked"
         rigol_serial = "✓" if settings.rigol.identity.require_serial_match else "✕"
         anritsu = "✓" if settings.anritsu.safety.acquisition_allowed else "✕ RF input limit required"
@@ -526,6 +550,8 @@ class RigolPage(QWidget):
         state_box.addWidget(self.capability_badge)
         header_layout.addLayout(state_box)
         layout.addWidget(header)
+        self.banner = NotificationBanner()
+        layout.addWidget(self.banner)
 
         self.channel = QComboBox()
         self.channel.addItems(["1", "2"])
@@ -652,28 +678,10 @@ class RigolPage(QWidget):
         preview_title = QLabel("Waveform preview")
         preview_title.setObjectName("sectionTitle")
         insight_layout.addWidget(preview_title)
-        self.preview_series = QLineSeries()
-        self.preview_chart = QChart()
-        self.preview_chart.addSeries(self.preview_series)
-        self.preview_chart.legend().hide()
-        self.preview_chart.setBackgroundVisible(False)
-        self.preview_chart.setPlotAreaBackgroundVisible(True)
-        self.preview_chart.setPlotAreaBackgroundBrush(Qt.GlobalColor.transparent)
-        self.preview_x_axis = QValueAxis()
-        self.preview_x_axis.setRange(0, 1)
-        self.preview_x_axis.setLabelFormat("%.1f")
-        self.preview_x_axis.setTitleText("period")
-        self.preview_y_axis = QValueAxis()
-        self.preview_y_axis.setLabelFormat("%.3g")
-        self.preview_y_axis.setTitleText("V")
-        self.preview_chart.addAxis(self.preview_x_axis, Qt.AlignmentFlag.AlignBottom)
-        self.preview_chart.addAxis(self.preview_y_axis, Qt.AlignmentFlag.AlignLeft)
-        self.preview_series.attachAxis(self.preview_x_axis)
-        self.preview_series.attachAxis(self.preview_y_axis)
-        self.preview_chart_view = QChartView(self.preview_chart)
-        self.preview_chart_view.setRenderHint(QPainter.RenderHint.Antialiasing)
-        self.preview_chart_view.setMinimumHeight(260)
-        insight_layout.addWidget(self.preview_chart_view, 1)
+        self.preview_plot = SpectrumPlotWidget(legend=False)
+        self.preview_plot.set_labels(x="Normalized period", x_unit="", y="Voltage", y_unit="V")
+        self.preview_plot.setMinimumHeight(260)
+        insight_layout.addWidget(self.preview_plot, 1)
 
         safety = QFrame()
         safety.setObjectName("rigolSafetyCard")
@@ -993,7 +1001,8 @@ class RigolPage(QWidget):
             pulse_duty = min(max(frequency * width, 0.001), 0.999)
         except Exception:
             pulse_duty = 0.2
-        points: list[QPointF] = []
+        x_values: list[float] = []
+        y_values: list[float] = []
         for index in range(241):
             x = index / 240
             if waveform == "SIN":
@@ -1014,15 +1023,14 @@ class RigolPage(QWidget):
                 value = high
             else:
                 value = center
-            points.append(QPointF(x, value))
-        self.preview_series.replace(points)
-        span = max(high - low, abs(high) * 0.1, 1e-6)
-        self.preview_y_axis.setRange(low - span * 0.12, high + span * 0.12)
+            x_values.append(x)
+            y_values.append(value)
+        self.preview_plot.set_trace("Waveform", x_values, y_values, color="#2196f3", primary=True)
         if waveform == "DC":
             title = f"CH{self.channel.currentText()} · DC · Offset {high:.6g} V"
         else:
             title = f"CH{self.channel.currentText()} · {waveform} · HighL {high:.6g} V · LowL {low:.6g} V"
-        self.preview_chart.setTitle(title)
+        self.preview_plot.set_title(title)
 
     @staticmethod
     def _bounded_number(text: str, fallback: float, minimum: float, maximum: float) -> float:
@@ -1275,7 +1283,7 @@ class RigolPage(QWidget):
                 dut_min_impedance=config.dut_min_impedance_ohm,
             )
         except Exception as exc:
-            QMessageBox.warning(self, "Invalid data", str(exc))
+            self.banner.show_message(f"Invalid waveform settings: {exc}")
             return
         self._controller.call("configure", config)
 
@@ -1395,6 +1403,7 @@ class RigolPage(QWidget):
             self.estimate.setText(
                 "Estimated load current (not measured): "
                 f"{estimate.peak_absolute_current_a * 1e3:.6g} mA; "
+                f"estimated DUT power: {estimate.peak_estimated_dut_power_w * 1e3:.6g} mW; "
                 f"Vth High/Low: {estimate.open_circuit_high_v:.6g} / {estimate.open_circuit_low_v:.6g} V"
             )
             self.status.emit("Rigol configured while OUTPUT is OFF")
@@ -1439,6 +1448,8 @@ class KeithleyPage(QWidget):
         self._live_timer.setInterval(1000)
         self._live_timer.timeout.connect(self._request_live_measurement)
         layout = QVBoxLayout(self)
+        self.banner = NotificationBanner()
+        layout.addWidget(self.banner)
         layout.setContentsMargins(16, 14, 16, 14)
         layout.setSpacing(12)
         hero = QFrame()
@@ -1937,7 +1948,7 @@ class KeithleyPage(QWidget):
                 ),
             )
         except Exception as exc:
-            QMessageBox.warning(self, "Invalid data", str(exc))
+            self.banner.show_message(f"Invalid Keithley settings: {exc}")
             return
         self._pending_channels["configure"] = self.channel.currentText()
         self._controller.call("configure", request)
@@ -2035,6 +2046,8 @@ class AnritsuPage(QWidget):
         self._timer.setInterval(500)
         self._timer.timeout.connect(self.fetch_live)
         layout = QVBoxLayout(self)
+        self.banner = NotificationBanner()
+        layout.addWidget(self.banner)
         title = QLabel("Anritsu MS2830A — Spectrum / Live")
         title.setObjectName("pageTitle")
         layout.addWidget(title)
@@ -2145,33 +2158,11 @@ class AnritsuPage(QWidget):
         processing_layout.addLayout(trace_toggles, 6, 0, 1, 2)
         left_layout.addWidget(processing)
         left_layout.addStretch(1)
-        self.series = QLineSeries()
-        self.series.setName("Raw")
-        self.average_series = QLineSeries()
-        self.average_series.setName("Averaged")
-        self.reference_series = QLineSeries()
-        self.reference_series.setName("Reference")
-        self.processed_series = QLineSeries()
-        self.processed_series.setName("Processed")
-        self.chart = QChart()
-        for chart_series in (self.series, self.average_series, self.reference_series, self.processed_series):
-            self.chart.addSeries(chart_series)
-        self.chart.legend().setVisible(True)
-        self.chart.setTitle("Current spectrum")
-        self.axis_x = QValueAxis()
-        self.axis_x.setTitleText("Frequency [MHz]")
-        self.axis_y = QValueAxis()
-        self.axis_y.setTitleText("Power [dBm]")
-        self.chart.addAxis(self.axis_x, Qt.AlignmentFlag.AlignBottom)
-        self.chart.addAxis(self.axis_y, Qt.AlignmentFlag.AlignLeft)
-        for chart_series in (self.series, self.average_series, self.reference_series, self.processed_series):
-            chart_series.attachAxis(self.axis_x)
-            chart_series.attachAxis(self.axis_y)
-        view = QChartView(self.chart)
-        self.chart_view = view
-        view.setRenderHint(QPainter.RenderHint.Antialiasing)
-        view.setMinimumHeight(300)
-        right_layout.addWidget(view, 1)
+        self.spectrum_plot = SpectrumPlotWidget(legend=True)
+        self.spectrum_plot.set_title("Current spectrum")
+        self.spectrum_plot.setMinimumHeight(300)
+        self.spectrum_plot.status_changed.connect(self.status.emit)
+        right_layout.addWidget(self.spectrum_plot, 1)
         self.info = QLabel("Live stopped. Each frame is a complete trace, not a push stream.")
         self.info.setObjectName("muted")
         right_layout.addWidget(self.info)
@@ -2246,7 +2237,7 @@ class AnritsuPage(QWidget):
                 points=self.points.value(),
             )
         except Exception as exc:
-            QMessageBox.warning(self, "Invalid data", str(exc))
+            self.banner.show_message(f"Invalid spectrum settings: {exc}")
             return
         self._controller.call("configure", config)
 
@@ -2310,8 +2301,8 @@ class AnritsuPage(QWidget):
 
     def remove_reference(self) -> None:
         self._reference_trace = None
-        self.reference_series.clear()
-        self.processed_series.clear()
+        self.spectrum_plot.clear_trace("Reference")
+        self.spectrum_plot.clear_trace("Processed")
         self.clear_reference.setEnabled(False)
         self.show_reference.setChecked(False)
         self.show_processed.setChecked(False)
@@ -2369,25 +2360,14 @@ class AnritsuPage(QWidget):
             f"max {max(trace.powers_dbm):.4g} dBm"
         )
 
-    @staticmethod
-    def _chart_points(trace: SpectrumTrace, values: tuple[float, ...] | None = None) -> list[QPointF]:
-        powers = values or trace.powers_dbm
-        limit = 2_000
-        indices = peak_preserving_indices(powers, limit)
-        return [
-            QPointF(trace.frequencies_hz[index] / 1e6, powers[index])
-            for index in indices
-            if math.isfinite(powers[index]) and math.isfinite(trace.frequencies_hz[index])
-        ]
-
     def _refresh_spectrum_display(self, *_args: object) -> None:
-        traces: list[tuple[QLineSeries, SpectrumTrace, tuple[float, ...], str]] = []
+        traces: list[tuple[str, SpectrumTrace, tuple[float, ...], str, str]] = []
         if self._latest_trace is not None and self.show_raw.isChecked():
-            traces.append((self.series, self._latest_trace, self._latest_trace.powers_dbm, "dBm"))
+            traces.append(("Raw", self._latest_trace, self._latest_trace.powers_dbm, "dBm", "#2196f3"))
         if self._averaged_trace is not None and self.show_average.isChecked():
-            traces.append((self.average_series, self._averaged_trace, self._averaged_trace.powers_dbm, "dBm"))
+            traces.append(("Averaged", self._averaged_trace, self._averaged_trace.powers_dbm, "dBm", "#00a67d"))
         if self._reference_trace is not None and self.show_reference.isChecked():
-            traces.append((self.reference_series, self._reference_trace, self._reference_trace.powers_dbm, "dBm"))
+            traces.append(("Reference", self._reference_trace, self._reference_trace.powers_dbm, "dBm", "#ffb300"))
 
         operation = str(self.reference_operation.currentData() or "none")
         processed: tuple[float, ...] | None = None
@@ -2405,33 +2385,32 @@ class AnritsuPage(QWidget):
             else:
                 self.show_processed.setChecked(True)
                 if self.show_processed.isChecked():
-                    traces.append((self.processed_series, signal, processed, processed_unit))
+                    traces.append(("Processed", signal, processed, processed_unit, "#ab47bc"))
 
-        for series in (self.series, self.average_series, self.reference_series, self.processed_series):
-            series.clear()
-            series.setVisible(False)
+        for name in ("Raw", "Averaged", "Reference", "Processed"):
+            self.spectrum_plot.clear_trace(name)
         if not traces:
             return
         if processed is not None and processed_unit != "dBm" and self.show_processed.isChecked():
-            traces = [item for item in traces if item[0] is self.processed_series]
-        all_points: list[QPointF] = []
-        for series, trace, values, _unit in traces:
-            points = self._chart_points(trace, values)
-            if not points:
-                continue
-            series.replace(points)
-            series.setVisible(True)
-            all_points.extend(points)
-        if not all_points:
+            traces = [item for item in traces if item[0] == "Processed"]
+        displayed = 0
+        for name, trace, values, _unit, color in traces:
+            self.spectrum_plot.set_trace(
+                name,
+                [frequency / 1e6 for frequency in trace.frequencies_hz],
+                values,
+                color=color,
+                primary=name in {"Processed", "Averaged", "Raw"},
+            )
+            displayed += sum(
+                math.isfinite(frequency) and math.isfinite(value)
+                for frequency, value in zip(trace.frequencies_hz, values, strict=True)
+            )
+        if displayed == 0:
             self.info.setText("No finite spectrum points are available for display.")
             return
-        self.axis_x.setRange(min(point.x() for point in all_points), max(point.x() for point in all_points))
-        y_min = min(point.y() for point in all_points)
-        y_max = max(point.y() for point in all_points)
-        margin = max((y_max - y_min) * 0.05, 0.1)
-        self.axis_y.setRange(y_min - margin, y_max + margin)
         active_unit = traces[-1][3]
-        self.axis_y.setTitleText(f"Amplitude [{active_unit}]")
+        self.spectrum_plot.set_labels(y="Amplitude", y_unit=active_unit)
 
     def _error(self, operation: str, error: str) -> None:
         if operation in {"fetch_trace", "single_sweep"}:
@@ -2652,25 +2631,10 @@ class ResultsPage(QWidget):
         self.points.setColumnWidth(2, 210)
         right_layout.addWidget(self.points)
 
-        self.spectrum_series = QLineSeries()
-        self.spectrum_chart = QChart()
-        self.spectrum_chart.addSeries(self.spectrum_series)
-        self.spectrum_chart.legend().hide()
-        self.spectrum_chart.setTitle("Select a point containing a stored spectrum")
-        self.spectrum_x = QValueAxis()
-        self.spectrum_x.setTitleText("Frequency [MHz]")
-        self.spectrum_y = QValueAxis()
-        self.spectrum_y.setTitleText("Power [dBm]")
-        self.spectrum_chart.addAxis(self.spectrum_x, Qt.AlignmentFlag.AlignBottom)
-        self.spectrum_chart.addAxis(self.spectrum_y, Qt.AlignmentFlag.AlignLeft)
-        self.spectrum_series.attachAxis(self.spectrum_x)
-        self.spectrum_series.attachAxis(self.spectrum_y)
-        self.spectrum_x.setRange(0.0, 1.0)
-        self.spectrum_y.setRange(-100.0, 0.0)
-        spectrum_view = QChartView(self.spectrum_chart)
-        spectrum_view.setRenderHint(QPainter.RenderHint.Antialiasing)
-        spectrum_view.setMinimumHeight(280)
-        right_layout.addWidget(spectrum_view, 1)
+        self.spectrum_plot = SpectrumPlotWidget(legend=False)
+        self.spectrum_plot.set_title("Select a point containing a stored spectrum")
+        self.spectrum_plot.setMinimumHeight(280)
+        right_layout.addWidget(self.spectrum_plot, 1)
         self.spectrum_info = QLabel("Spectra are read from HDF5 without contacting instruments.")
         self.spectrum_info.setObjectName("muted")
         right_layout.addWidget(self.spectrum_info)
@@ -2788,19 +2752,16 @@ class ResultsPage(QWidget):
         if trace is None:
             self.spectrum_info.setText("No spectrum for the selected checkpoint.")
             return
-        chart_points = [
-            QPointF(frequency / 1e6, power)
-            for frequency, power in zip(trace.frequencies_hz, trace.powers_dbm, strict=True)
-        ]
-        self.spectrum_series.replace(chart_points)
-        self.spectrum_x.setRange(chart_points[0].x(), chart_points[-1].x())
-        self.spectrum_y.setRange(
-            min(chart_item.y() for chart_item in chart_points) - 2,
-            max(chart_item.y() for chart_item in chart_points) + 2,
+        self.spectrum_plot.set_trace(
+            "Stored spectrum",
+            [frequency / 1e6 for frequency in trace.frequencies_hz],
+            trace.powers_dbm,
+            primary=True,
         )
-        self.spectrum_chart.setTitle(f"Spectrum at point {point.index} ({trace.trace_name})")
+        self.spectrum_plot.set_title(f"Spectrum at point {point.index} ({trace.trace_name})")
+        self.spectrum_plot.auto_range()
         self.spectrum_info.setText(
-            f"{trace.source_point_count} points in file; displayed {len(chart_points)} • "
+            f"{trace.source_point_count} points in file; interactive peak-preserving display • "
             f"{trace.acquired_at_utc or 'missing time'} • max {max(trace.powers_dbm):.4g} dBm"
         )
 
@@ -2816,8 +2777,8 @@ class ResultsPage(QWidget):
         self._clear_spectrum()
 
     def _clear_spectrum(self) -> None:
-        self.spectrum_series.clear()
-        self.spectrum_chart.setTitle("Select a point containing a stored spectrum")
+        self.spectrum_plot.clear()
+        self.spectrum_plot.set_title("Select a point containing a stored spectrum")
         self.spectrum_info.setText("Spectra are read from HDF5 without contacting instruments.")
 
 
@@ -2839,6 +2800,7 @@ class MainWindow(QMainWindow):
         self._device_states = {"rigol": "disconnected", "keithley": "disconnected", "anritsu": "disconnected"}
         self._run_controller = RunController(self)
         self._build()
+        self._apply_accessibility()
         self._connect_controllers()
         self._restore_workspace()
 
@@ -2853,6 +2815,8 @@ class MainWindow(QMainWindow):
 
     def _build(self) -> None:
         self.tabs = QTabWidget()
+        self.tabs.setTabPosition(QTabWidget.TabPosition.West)
+        self.tabs.setDocumentMode(True)
         self.setCentralWidget(self.tabs)
         self.dashboard = DashboardPage(self._settings, discovery_enabled=not self._simulation)
         self.rigol_page = RigolPage(self._controllers["rigol"], self._settings)
@@ -2898,6 +2862,7 @@ class MainWindow(QMainWindow):
         self.event_log_dock = self._log_dock()
         self.addDockWidget(Qt.DockWidgetArea.BottomDockWidgetArea, self.event_log_dock)
         self.resizeDocks([self.event_log_dock], [120], Qt.Orientation.Vertical)
+        self._build_safety_toolbar()
         self.dashboard.emergency_requested.connect(self._emergency_off_all)
         self.dashboard.assignments_requested.connect(self._save_discovered_assignments)
         self.dashboard.status.connect(self._log)
@@ -2913,17 +2878,76 @@ class MainWindow(QMainWindow):
         for page in (self.rigol_page, self.keithley_page, self.anritsu_page, self.recipe_page, self.settings_page):
             page.status.connect(self._log)
         menu = self.menuBar().addMenu("Application")
-        self.theme_action = QAction("Light theme", self)
-        self.theme_action.setCheckable(True)
-        self.theme_action.setChecked(str(self._settings.ui.get("theme", "dark")).lower() == "light")
-        self.theme_action.setToolTip("Switch between the light and dark application themes.")
-        self.theme_action.toggled.connect(self._toggle_theme)
-        menu.addAction(self.theme_action)
+        theme_menu = menu.addMenu("Theme")
+        self.theme_group = QActionGroup(self)
+        self.theme_group.setExclusive(True)
+        self.theme_actions: dict[str, QAction] = {}
+        configured_theme = str(self._settings.ui.get("theme", "system")).lower()
+        if configured_theme not in {"light", "dark", "system"}:
+            configured_theme = "system"
+        for mode, label in (("system", "System"), ("light", "Light"), ("dark", "Dark")):
+            action = QAction(label, self)
+            action.setCheckable(True)
+            action.setData(mode)
+            action.setChecked(mode == configured_theme)
+            action.triggered.connect(lambda checked=False, mode=mode: checked and self._set_theme_mode(mode))
+            self.theme_group.addAction(action)
+            theme_menu.addAction(action)
+            self.theme_actions[mode] = action
+        # Compatibility alias for integrations that used the former action.
+        self.theme_action = self.theme_actions["light"]
         menu.addAction(self.event_log_dock.toggleViewAction())
         menu.addSeparator()
         quit_action = QAction("Safe shutdown", self)
         quit_action.triggered.connect(self.close)
         menu.addAction(quit_action)
+        self.estop_shortcut = QShortcut(QKeySequence("Ctrl+Shift+E"), self)
+        self.estop_shortcut.setContext(Qt.ShortcutContext.ApplicationShortcut)
+        self.estop_shortcut.activated.connect(self._emergency_off_all)
+        self.scan_shortcut = QShortcut(QKeySequence("F5"), self)
+        self.scan_shortcut.activated.connect(self.dashboard._scan_visa)
+
+    def _build_safety_toolbar(self) -> None:
+        toolbar = QToolBar("Station safety status", self)
+        toolbar.setObjectName("stationSafetyToolbar")
+        toolbar.setMovable(False)
+        profile_state = "LOCKED" if self._settings.outputs_locked else "APPROVED"
+        self.profile_status = QLabel(f"Profile: {profile_state}")
+        self.profile_status.setObjectName("profileLocked" if self._settings.outputs_locked else "profileApproved")
+        toolbar.addWidget(self.profile_status)
+        toolbar.addSeparator()
+        self.toolbar_device_status: dict[str, QLabel] = {}
+        for device in ("rigol", "keithley", "anritsu"):
+            label = QLabel(f"{device.title()}: DISCONNECTED")
+            label.setAccessibleName(f"{device.title()} connection and output state")
+            toolbar.addWidget(label)
+            toolbar.addSeparator()
+            self.toolbar_device_status[device] = label
+        spacer = QWidget()
+        spacer.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred)
+        toolbar.addWidget(spacer)
+        stop = QPushButton("E-STOP  Ctrl+Shift+E")
+        stop.setObjectName("emergencyButton")
+        stop.setToolTip("Confirm and disable every output and abort acquisition.")
+        stop.clicked.connect(self._emergency_off_all)
+        toolbar.addWidget(stop)
+        self.addToolBar(Qt.ToolBarArea.TopToolBarArea, toolbar)
+        self.safety_toolbar = toolbar
+
+    def _apply_accessibility(self) -> None:
+        """Ensure controls expose text as well as colour and have screen-reader metadata."""
+
+        for button in self.findChildren(QPushButton):
+            if not button.accessibleName():
+                button.setAccessibleName(button.text().replace("&", ""))
+            if not button.accessibleDescription() and button.toolTip():
+                button.setAccessibleDescription(button.toolTip())
+        for editor in self.findChildren(QLineEdit):
+            if not editor.accessibleName():
+                editor.setAccessibleName(editor.placeholderText() or "Numeric or text parameter")
+        self.tabs.setAccessibleName("Application workspace")
+        self.log.setAccessibleName("Event log")
+        self.statusBar().setAccessibleName("Current application status")
 
     @staticmethod
     def _nested_value(payload: dict[str, Any], path: tuple[str, ...]) -> Any:
@@ -3005,18 +3029,18 @@ class MainWindow(QMainWindow):
         self.statusBar().showMessage(f"Saved {title}; safety profile approval is now required.", 12_000)
         self._log(f"Safety limits saved: {title}")
 
-    def _toggle_theme(self, light: bool) -> None:
-        theme = "light" if light else "dark"
-        chart_theme = QChart.ChartTheme.ChartThemeLight if light else QChart.ChartTheme.ChartThemeDark
-        for chart_view in self.findChildren(QChartView):
-            chart = chart_view.chart()
-            legend_visible = chart.legend().isVisible()
-            chart.setTheme(chart_theme)
-            chart.legend().setVisible(legend_visible)
-            chart.setBackgroundVisible(False)
+    def _set_theme_mode(self, mode: str, *, persist: bool = True) -> None:
+        theme = effective_theme(mode)
+        for plot in self.findChildren(SpectrumPlotWidget):
+            plot.apply_theme(theme)
         self.theme_changed.emit(theme)
-        self._persist_theme(theme)
-        self._log(f"Theme changed to {theme} and saved")
+        if persist:
+            self._persist_theme(mode)
+        self._log(f"Theme changed to {mode} ({theme})" + (" and saved" if persist else ""))
+
+    def refresh_system_theme(self) -> None:
+        if self.theme_actions["system"].isChecked():
+            self._set_theme_mode("system", persist=False)
 
     def _persist_theme(self, theme: str) -> None:
         if self.settings_page._dirty:
@@ -3081,12 +3105,24 @@ class MainWindow(QMainWindow):
             self._log(f"Connected: {getattr(result, 'idn', result)}")
         elif operation == "disconnect":
             self._log("Instrument disconnected")
+        elif operation == "replace_adapter":
+            card.set_reconfiguring(False)
+            card.update_state("disconnected")
+            card.identity.setText("IDN: not connected")
 
     def _device_error(self, device: str, operation: str, error: str) -> None:
+        if operation == "replace_adapter":
+            self.dashboard.cards[device].set_reconfiguring(False)
         self._log(f"{device}/{operation}: {error}")
 
     def _set_device_state(self, device: str, state: str) -> None:
         self._device_states[device] = state
+        label = self.toolbar_device_status.get(device)
+        if label is not None:
+            label.setText(f"{device.title()}: {state.replace('_', ' ').upper()}")
+            label.setProperty("deviceState", state)
+            label.style().unpolish(label)
+            label.style().polish(label)
 
     def _start_run(self, plan: object) -> None:
         if self._settings.outputs_locked:
@@ -3164,7 +3200,13 @@ class MainWindow(QMainWindow):
         self.keithley_page.set_settings(self._settings)
         self.anritsu_page.set_settings(self._settings)
         self.recipe_page.set_settings(self._settings)
+        profile_state = "LOCKED" if self._settings.outputs_locked else "APPROVED"
+        self.profile_status.setText(f"Profile: {profile_state}")
+        self.profile_status.setObjectName("profileLocked" if self._settings.outputs_locked else "profileApproved")
+        self.profile_status.style().unpolish(self.profile_status)
+        self.profile_status.style().polish(self.profile_status)
         for name, controller in self._controllers.items():
+            self.dashboard.cards[name].set_reconfiguring(True)
             controller.reconfigure(self._make_adapter(name))
             self._device_states[name] = "disconnected"
             self.dashboard.cards[name].update_state("disconnected")

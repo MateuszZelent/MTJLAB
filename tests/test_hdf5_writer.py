@@ -191,6 +191,27 @@ class Hdf5WriterTests(unittest.TestCase):
                 self.assertEqual(len(file["points"]), 0)
                 self.assertEqual(len(file["_pending"]), 0)
 
+    def test_checkpoint_failure_rolls_back_point_and_leaves_durable_event(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            path = Path(temporary) / "run.h5"
+            writer = Hdf5RunWriter(
+                path,
+                recipe_source="schema_version: 1\n",
+                settings_source="schema_version: 1\n",
+                plan_hash="abc",
+                device_idn={},
+            )
+            original = writer._thatec.append
+            writer._thatec.append = lambda *_args: (_ for _ in ()).throw(OSError("injected failure"))
+            with self.assertRaisesRegex(Exception, "injected failure"):
+                writer.append(MeasurementPoint(index=0, setpoints={"x": 1.0}, measurements={}))
+            writer._thatec.append = original
+            writer.close("faulted")
+
+            detail = Hdf5RunReader.detail(path)
+            self.assertEqual(Hdf5RunReader.points(path), ())
+            self.assertTrue(any(event.name == "checkpoint_write_failed" for event in detail.events))
+
 
 if __name__ == "__main__":
     unittest.main()

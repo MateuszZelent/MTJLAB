@@ -13,6 +13,7 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 from PySide6.QtCore import QTimer, Qt
 from PySide6.QtTest import QTest
 from PySide6.QtWidgets import QApplication, QMessageBox, QPushButton, QScrollArea, QTreeWidgetItemIterator
+from PySide6.QtTest import QTest
 
 from app.domain.models import DeviceCapabilities
 from app.devices.anritsu import SpectrumTrace
@@ -76,7 +77,7 @@ class MainWindowTests(unittest.TestCase):
                 self.assertIsInstance(page, QScrollArea)
                 self.assertEqual(page.horizontalScrollBarPolicy(), Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
             self.assertTrue(all(isinstance(rigol.advanced.widget(index), QScrollArea) for index in range(3)))
-            self.assertGreater(rigol.preview_series.count(), 200)
+            self.assertGreater(rigol.preview_plot.trace_point_count("Waveform"), 200)
         finally:
             window.close()
             self.application.processEvents()
@@ -169,7 +170,7 @@ class MainWindowTests(unittest.TestCase):
             window.close()
             self.application.processEvents()
 
-    def test_theme_switch_emits_light_and_dark_and_updates_charts(self) -> None:
+    def test_theme_switch_supports_light_dark_and_system_persistence(self) -> None:
         source = Path(".config/settings.yml").read_text(encoding="utf-8")
         with tempfile.TemporaryDirectory() as temporary:
             path = Path(temporary) / "settings.yml"
@@ -178,16 +179,44 @@ class MainWindowTests(unittest.TestCase):
             themes: list[str] = []
             window.theme_changed.connect(themes.append)
             try:
-                initial_light = window.theme_action.isChecked()
-                first_theme = "dark" if initial_light else "light"
-                initial_theme = "light" if initial_light else "dark"
-                window.theme_action.setChecked(not initial_light)
+                window.theme_actions["light"].trigger()
                 self.application.processEvents()
-                self.assertEqual(SettingsRepository(path).load().raw["ui"]["theme"], first_theme)
-                window.theme_action.setChecked(initial_light)
+                self.assertEqual(SettingsRepository(path).load().raw["ui"]["theme"], "light")
+                window.theme_actions["dark"].trigger()
                 self.application.processEvents()
-                self.assertEqual(SettingsRepository(path).load().raw["ui"]["theme"], initial_theme)
-                self.assertEqual(themes, [first_theme, initial_theme])
+                self.assertEqual(SettingsRepository(path).load().raw["ui"]["theme"], "dark")
+                window.theme_actions["system"].trigger()
+                self.application.processEvents()
+                self.assertEqual(SettingsRepository(path).load().raw["ui"]["theme"], "system")
+                self.assertEqual(themes[:2], ["light", "dark"])
+                self.assertIn(themes[-1], {"light", "dark"})
+            finally:
+                window.close()
+                self.application.processEvents()
+
+    def test_discovered_assignment_updates_card_and_worker_adapter_before_connect(self) -> None:
+        source = Path(".config/settings.yml").read_text(encoding="utf-8")
+        with tempfile.TemporaryDirectory() as temporary:
+            path = Path(temporary) / "settings.yml"
+            path.write_text(source, encoding="utf-8")
+            window = MainWindow(path, simulation=False)
+            try:
+                resource = "USB0::NEW_RIGOL::INSTR"
+                with patch.object(
+                    QMessageBox, "question", return_value=QMessageBox.StandardButton.Yes
+                ):
+                    window._save_discovered_assignments(
+                        {"rigol": (resource, "@py", "RIGOL TECHNOLOGIES,DG1032Z,NEW,1")}
+                    )
+                QTest.qWait(100)
+                self.application.processEvents()
+
+                loaded = SettingsRepository(path).load().settings
+                self.assertEqual(loaded.rigol.connection.resource, resource)
+                self.assertIn(resource, window.dashboard.cards["rigol"].resource.text())
+                self.assertTrue(window.dashboard.cards["rigol"].connect_button.isEnabled())
+                worker_adapter = window._controllers["rigol"]._worker._adapter
+                self.assertEqual(worker_adapter._settings.connection.resource, resource)
             finally:
                 window.close()
                 self.application.processEvents()
@@ -232,10 +261,10 @@ class MainWindowTests(unittest.TestCase):
             rigol.vpp.setText("805 mV")
             rigol.offset.setText("0 V")
             rigol._controller.call = Mock()
-            with patch.object(QMessageBox, "warning") as warning:
-                rigol.configure()
+            rigol.configure()
             rigol._controller.call.assert_not_called()
-            self.assertIn("poza zatwierdzonym zakresem", warning.call_args.args[2])
+            self.assertFalse(rigol.banner.isHidden())
+            self.assertIn("poza zatwierdzonym zakresem", rigol.banner.label.text())
 
         finally:
             window.close()
@@ -432,7 +461,7 @@ class MainWindowTests(unittest.TestCase):
             self.assertIs(anritsu._reference_trace, trace_2)
             anritsu.reference_operation.setCurrentIndex(1)
             anritsu._refresh_spectrum_display()
-            self.assertGreater(anritsu.processed_series.count(), 0)
+            self.assertGreater(anritsu.spectrum_plot.trace_point_count("Processed"), 0)
             anritsu.remove_reference()
             self.assertIsNone(anritsu._reference_trace)
             self.assertIs(anritsu._latest_trace, trace_2)

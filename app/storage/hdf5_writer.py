@@ -164,6 +164,18 @@ class Hdf5RunWriter:
                 if name in container:
                     del container[name]
             self._file.flush()
+            # The checkpoint is rolled back atomically, but the attempted
+            # index and failure remain durable for recovery diagnostics.
+            try:
+                self.append_event(
+                    "checkpoint_write_failed",
+                    {"point_index": index, "error": str(exc)},
+                    severity="error",
+                )
+            except Exception:
+                # A transport/filesystem failure may also prevent the event;
+                # never mask the original storage exception.
+                pass
             raise ExecutionError(f"Nie udało się atomowo zapisać punktu {index}: {exc}") from exc
         try:
             self._append_csv_summary(index, point, trace)

@@ -77,6 +77,8 @@ QScrollBar:vertical { background: #111923; width: 12px; margin: 2px; }
 QScrollBar::handle:vertical { background: #3b536b; border-radius: 5px; min-height: 30px; }
 QScrollBar::handle:vertical:hover { background: #4ba3ff; }
 QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical { height: 0; }
+QFrame#notificationBanner { background: #302817; border: 1px solid #76561b; border-radius: 6px; }
+QFrame#notificationBanner[severity="error"] { background: #3a1b24; border-color: #8f2638; }
 """
 
 LIGHT_STYLE = """
@@ -146,6 +148,8 @@ QScrollBar::handle:vertical { background: #a9bac9; border-radius: 5px; min-heigh
 QScrollBar::handle:vertical:hover { background: #3488c8; }
 QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical { height: 0; }
 QToolTip { background: #ffffff; color: #17212b; border: 1px solid #8ca0b3; padding: 6px; }
+QFrame#notificationBanner { background: #fff2c7; border: 1px solid #e2c66f; border-radius: 6px; }
+QFrame#notificationBanner[severity="error"] { background: #fde7eb; border-color: #d23b53; }
 """
 
 
@@ -165,7 +169,8 @@ def main() -> int:
     window = MainWindow(Path(args.settings), simulation=args.simulate)
     apply_theme = lambda theme: app.setStyleSheet(LIGHT_STYLE if theme == "light" else STYLE)
     window.theme_changed.connect(apply_theme)
-    apply_theme("light" if window.theme_action.isChecked() else "dark")
+    window._set_theme_mode(str(window._settings.ui.get("theme", "system")), persist=False)
+    app.styleHints().colorSchemeChanged.connect(lambda _scheme: window.refresh_system_theme())
     window.show()
     return app.exec()
 

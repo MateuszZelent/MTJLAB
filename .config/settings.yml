@@ -132,6 +132,10 @@ devices:
               max: "10 mA"
               max_abs: "10 mA"
               enforcement: "preflight_model_only"
+            estimated_load_power:
+              min: "0 W"
+              max: "5 mW"
+              max_abs: "5 mW"
             declared_dut_impedance:
               min: "50 ohm"
               nominal:
@@ -191,6 +195,10 @@ devices:
               max: "10 mA"
               max_abs: "10 mA"
               enforcement: "preflight_model_only"
+            estimated_load_power:
+              min: "0 W"
+              max: "5 mW"
+              max_abs: "5 mW"
             declared_dut_impedance:
               min: "50 ohm"
               nominal:

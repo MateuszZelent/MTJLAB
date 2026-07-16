@@ -115,6 +115,7 @@ class RigolChannelLimits(StrictModel):
     amplitude_vpp: RangeSettings
     offset: RangeSettings
     estimated_load_current: CurrentEstimateSettings
+    estimated_load_power: RangeSettings
     declared_dut_impedance: ImpedanceSettings
     settle_time: RangeSettings
     modulation_rate: RangeSettings
@@ -131,6 +132,7 @@ class RigolChannelLimits(StrictModel):
         self.amplitude_vpp.checked(DIMENSION_VOLTAGE)
         self.offset.checked(DIMENSION_VOLTAGE)
         self.estimated_load_current.checked(DIMENSION_CURRENT)
+        self.estimated_load_power.checked(DIMENSION_POWER)
         self.settle_time.checked(DIMENSION_TIME)
         self.modulation_rate.checked(DIMENSION_FREQUENCY)
         self.sweep_duration.checked(DIMENSION_TIME)

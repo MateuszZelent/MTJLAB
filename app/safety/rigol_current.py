@@ -10,6 +10,7 @@ from app.domain.errors import SafetyViolation
 from app.domain.quantities import (
     DIMENSION_CURRENT,
     DIMENSION_FREQUENCY,
+    DIMENSION_POWER,
     DIMENSION_RESISTANCE,
     DIMENSION_VOLTAGE,
     Quantity,
@@ -27,6 +28,7 @@ class RigolCurrentEstimate:
     current_high_a: float
     current_low_a: float
     peak_absolute_current_a: float
+    peak_estimated_dut_power_w: float
     source_resistance_ohm: float
     dut_min_resistance_ohm: float
 
@@ -66,6 +68,7 @@ def estimate_rigol_current(
         current_high_a=current_high,
         current_low_a=current_low,
         peak_absolute_current_a=max(abs(current_high), abs(current_low)),
+        peak_estimated_dut_power_w=max(current_high * current_high, current_low * current_low) * dut_ohm,
         source_resistance_ohm=source_ohm,
         dut_min_resistance_ohm=dut_ohm,
     )
@@ -128,6 +131,14 @@ def validate_rigol_waveform(
         raise SafetyViolation(
             "Szacowany prąd obciążenia Rigola "
             f"{estimate.peak_absolute_current_a:.9g} A przekracza limit {current_limit:.9g} A."
+        )
+    power_limit = parse_quantity(
+        limits.estimated_load_power.max_abs or limits.estimated_load_power.max, DIMENSION_POWER
+    ).si_value
+    if estimate.peak_estimated_dut_power_w > power_limit:
+        raise SafetyViolation(
+            "Szacowana moc na DUT dla Rigola "
+            f"{estimate.peak_estimated_dut_power_w:.9g} W przekracza limit {power_limit:.9g} W."
         )
     return estimate
 

@@ -6,7 +6,6 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 import math
 import time
-from typing import Iterable
 
 from app.devices.base import DeviceAdapter, InstrumentSession, SessionFactory, parse_identity, validate_identity
 from app.devices.visa import PyVisaSessionFactory

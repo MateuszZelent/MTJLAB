@@ -65,6 +65,7 @@ class QuantityAndSafetyTests(unittest.TestCase):
             dut_min_impedance="50 ohm",
         )
         self.assertAlmostEqual(estimate.peak_absolute_current_a, 10e-6)
+        self.assertAlmostEqual(estimate.peak_estimated_dut_power_w, 5e-9)
         raw = deepcopy(SettingsRepository(ROOT / ".config" / "settings.yml").load().raw)
         limits = raw["devices"]["rigol"]["safety"]["channels"]["1"]["lab_limits"]
         limits["high_level"] = {"min": "-1 V", "max": "1 V"}
@@ -82,6 +83,23 @@ class QuantityAndSafetyTests(unittest.TestCase):
                 low_level="-1 V",
                 output_load="HIGHZ",
                 dut_min_impedance="1 ohm",
+            )
+
+    def test_rigol_estimated_dut_power_limit_is_enforced_independently(self) -> None:
+        raw = deepcopy(SettingsRepository(ROOT / ".config" / "settings.yml").load().raw)
+        limits = raw["devices"]["rigol"]["safety"]["channels"]["1"]["lab_limits"]
+        limits["estimated_load_power"] = {"min": "0 W", "max": "1 uW", "max_abs": "1 uW"}
+        settings = StationSettings.model_validate(raw)
+        with self.assertRaisesRegex(SafetyViolation, "moc na DUT"):
+            validate_rigol_waveform(
+                channel=settings.rigol.safety.channels["1"],
+                safety=settings.rigol.safety,
+                waveform="SQU",
+                frequency="1 kHz",
+                high_level="100 mV",
+                low_level="-100 mV",
+                output_load="HIGHZ",
+                dut_min_impedance="50 ohm",
             )
 
     def test_repository_revokes_approval_for_any_configuration_change(self) -> None:
