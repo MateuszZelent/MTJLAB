@@ -11,10 +11,11 @@ from types import SimpleNamespace
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 from PySide6.QtCore import QTimer, Qt
-from PySide6.QtWidgets import QApplication, QMessageBox, QPushButton, QScrollArea, QTreeWidgetItemIterator
+from PySide6.QtWidgets import QApplication, QLabel, QMessageBox, QPushButton, QScrollArea, QTreeWidgetItemIterator
 from PySide6.QtTest import QTest
 
 from app.domain.models import DeviceCapabilities
+from app.devices.discovery import DiscoveredInstrument
 from app.devices.anritsu import SpectrumTrace
 from app.settings.repository import SettingsRepository
 from app.ui.main_window import LimitEditDialog, MainWindow
@@ -219,6 +220,70 @@ class MainWindowTests(unittest.TestCase):
             finally:
                 window.close()
                 self.application.processEvents()
+
+    def test_discovery_row_assign_button_emits_selected_resource_immediately(self) -> None:
+        window = MainWindow(".config/settings.yml", simulation=False)
+        try:
+            page = window.dashboard
+            result = DiscoveredInstrument(
+                "GPIB0::22::INSTR",
+                "system",
+                "Keithley Instruments Inc., Model 2602A, 1291342, 2.1.6",
+                "keithley",
+            )
+            emitted: list[object] = []
+            page.assignments_requested.disconnect(window._save_discovered_assignments)
+            page.assignments_requested.connect(emitted.append)
+            page._scan_completed((result,))
+            button = page.discovery_table.cellWidget(0, 1)
+            self.assertIsInstance(button, QPushButton)
+            button.click()
+            self.assertEqual(
+                emitted,
+                [{"keithley": ("GPIB0::22::INSTR", "system", result.idn)}],
+            )
+        finally:
+            window.close()
+            self.application.processEvents()
+
+    def test_discovery_marks_persisted_resource_assigned_and_disables_duplicate(self) -> None:
+        window = MainWindow(".config/settings.yml", simulation=False)
+        try:
+            configured = window._settings.rigol.connection
+            result = DiscoveredInstrument(
+                str(configured.resource),
+                configured.visa_backend,
+                "RIGOL TECHNOLOGIES,DG1032Z,DG1ZA172902039,1",
+                "rigol",
+            )
+            window.dashboard._scan_completed((result,))
+            badge = window.dashboard.discovery_table.cellWidget(0, 0)
+            button = window.dashboard.discovery_table.cellWidget(0, 1)
+            self.assertIsInstance(badge, QLabel)
+            self.assertIn("Assigned to Rigol", badge.text())
+            self.assertIsInstance(button, QPushButton)
+            self.assertFalse(button.isEnabled())
+            self.assertEqual(button.text(), "Assigned ✓")
+            self.assertFalse(window.dashboard.save_assignments.isEnabled())
+        finally:
+            window.close()
+            self.application.processEvents()
+
+    def test_device_card_communication_test_reports_protocol_and_disconnects(self) -> None:
+        window = MainWindow(".config/settings.yml", simulation=True)
+        try:
+            card = window.dashboard.cards["keithley"]
+            card.test_button.click()
+            QTest.qWait(150)
+            self.application.processEvents()
+            self.assertTrue(card.test_button.isEnabled())
+            self.assertEqual(card.test_button.text(), "Test")
+            self.assertIn("TEST PASS", card.identity.text())
+            self.assertIn("KEITHLEY", card.identity.text().upper())
+            self.assertEqual(window._controllers["keithley"]._worker._adapter.state.value, "disconnected")
+        finally:
+            window.close()
+            self.application.processEvents()
 
     def test_limit_edit_is_autosaved_after_short_idle_period(self) -> None:
         source = Path(".config/settings.yml").read_text(encoding="utf-8")

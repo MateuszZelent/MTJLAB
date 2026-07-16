@@ -68,6 +68,30 @@ class InstrumentWorker(QObject):
             if failure is not None:
                 raise failure
             return None
+        if operation == "test_communication":
+            if self._adapter.state.value != "disconnected":
+                raise ValueError("Communication test requires a disconnected instrument.")
+            identity = None
+            try:
+                identity = self._adapter.connect()
+                capabilities = self._adapter.capabilities
+                return {
+                    "idn": identity.idn,
+                    "vendor": identity.manufacturer,
+                    "model": identity.model,
+                    "serial": identity.serial,
+                    "firmware": identity.firmware,
+                    "features": tuple(capabilities.features),
+                }
+            finally:
+                try:
+                    self._adapter.emergency_off()
+                except Exception:
+                    pass
+                try:
+                    self._adapter.disconnect()
+                except Exception:
+                    pass
         if operation == "connect":
             return self._adapter.connect()
         if operation == "disconnect":

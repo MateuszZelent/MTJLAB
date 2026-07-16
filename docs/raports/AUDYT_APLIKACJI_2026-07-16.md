@@ -553,3 +553,32 @@ Najlepszym kierunkiem jest dalszy rozwój aplikacji jako lokalnego programu **Py
 
 Po wykonaniu P0 i P1 można bezpiecznie przejść do pełnego redesignu. Wtedy połączenie modularnego Qt Widgets, semantycznego design systemu oraz PyQtGraph zapewni profesjonalny, responsywny interfejs bez zwiększania ryzyka w warstwie sterowania urządzeniami.
 
+## 13. Stan realizacji zaleceń
+
+**Aktualizacja:** 2026-07-16
+
+Zrealizowano programowo:
+
+- fail-safe trip, power preflight oraz per-channel state Keithleya;
+- per-channel state i limit estymowanego prądu oraz mocy DUT Rigola;
+- atomową parę I/V przez `measure.iv()`;
+- timeout VISA obejmujący samo `*OPC?` Anritsu;
+- świeży single sweep dla każdej próbki averagingu i inkrementalne uśrednianie mocy;
+- walidację NaN/Inf, tolerancję osi, semantykę nieważnego residual power i peak-preserving display;
+- zapis Thatec/PyThat, ochronę przed nadpisaniem, transakcyjne checkpointy, trwałe zdarzenia awarii i test round-trip przez PyThat;
+- łączenie wyłącznie urządzeń wymaganych przez plan oraz ograniczony shutdown workerów;
+- PyQtGraph dla Rigola, Anritsu i Results: zoom, pan, crosshair, peak marker, delta marker, max/min hold oraz eksport CSV/PNG/SVG;
+- Light, Dark i reagujący na system tryb System;
+- boczną nawigację, stałą belkę profilu/urządzeń/E-STOP, responsywne splittery i zapis workspace;
+- inline notification banners dla rutynowych błędów formularzy, accessible names oraz skróty klawiaturowe;
+- bezpieczne wykrywanie VISA przez samo `*IDN?`, przypisywanie adresów i atomowy zapis konfiguracji;
+- pełny lint Ruff, kompilację modułów oraz rozszerzony zestaw testów automatycznych.
+
+Pozostają celowo niewdrożone bez kwalifikacji sprzętowej:
+
+- sprzętowy bit/rejestr compliance Keithley dla konkretnego modelu i firmware — działa konserwatywny fallback pomiarowy;
+- wymuszanie i readback attenuation/preamp Anritsu — oficjalny podręcznik potwierdza funkcje, lecz komendy muszą zostać zakwalifikowane na używanym trybie SCPI/Native i firmware;
+- testy Hardware-in-the-Loop, odłączenie kabla oraz pomiar z bezpiecznym obciążeniem wzorcowym;
+- zatwierdzenie laboratoryjne limitu `estimated_load_power` Rigola; profil pozostaje `unverified` do decyzji operatora.
+
+Powyższych punktów nie wolno uznać za zakończone wyłącznie na podstawie symulatora. Są kryteriami kwalifikacji stanowiska, nie brakującą implementacją możliwą do bezpiecznego odgadnięcia w kodzie.

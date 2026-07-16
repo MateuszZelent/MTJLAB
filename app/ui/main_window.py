@@ -7,7 +7,7 @@ from copy import deepcopy
 from pathlib import Path
 from typing import Any
 
-from PySide6.QtCore import QSettings, QTimer, Qt, Signal
+from PySide6.QtCore import QSize, QSettings, QTimer, Qt, Signal
 from PySide6.QtGui import QAction, QActionGroup, QCloseEvent, QKeySequence, QShortcut
 from PySide6.QtWidgets import (
     QComboBox,
@@ -18,6 +18,7 @@ from PySide6.QtWidgets import (
     QFrame,
     QGridLayout,
     QHBoxLayout,
+    QHeaderView,
     QLabel,
     QLineEdit,
     QMainWindow,
@@ -29,6 +30,7 @@ from PySide6.QtWidgets import (
     QSizePolicy,
     QSplitter,
     QSpinBox,
+    QStyle,
     QTabWidget,
     QToolBar,
     QTableWidget,
@@ -285,6 +287,7 @@ class LimitEditDialog(QDialog):
 class DeviceCard(QFrame):
     connect_requested = Signal()
     disconnect_requested = Signal()
+    test_requested = Signal()
 
     def __init__(self, title: str, resource: str | None, parent: QWidget | None = None) -> None:
         super().__init__(parent)
@@ -303,8 +306,13 @@ class DeviceCard(QFrame):
         controls = QHBoxLayout()
         self.connect_button = QPushButton("Connect")
         self.disconnect_button = QPushButton("Disconnect")
+        self.test_button = QPushButton("Test")
+        self.test_button.setToolTip(
+            "Open a temporary session, validate IDN/model/serial and protocol probes, force safe OFF, then disconnect."
+        )
         controls.addWidget(self.connect_button)
         controls.addWidget(self.disconnect_button)
+        controls.addWidget(self.test_button)
         layout.addWidget(name)
         layout.addWidget(self.state)
         layout.addWidget(self.resource)
@@ -313,6 +321,7 @@ class DeviceCard(QFrame):
         layout.addLayout(controls)
         self.connect_button.clicked.connect(self.connect_requested)
         self.disconnect_button.clicked.connect(self.disconnect_requested)
+        self.test_button.clicked.connect(self.test_requested)
         self.update_resource(resource)
 
     def update_state(self, state: str) -> None:
@@ -334,8 +343,17 @@ class DeviceCard(QFrame):
     def set_reconfiguring(self, active: bool) -> None:
         self.connect_button.setEnabled(not active)
         self.disconnect_button.setEnabled(not active)
+        self.test_button.setEnabled(not active)
         if active:
             self.state.setText("APPLYING NEW VISA ADDRESS…")
+
+    def set_testing(self, active: bool) -> None:
+        self.connect_button.setEnabled(not active)
+        self.disconnect_button.setEnabled(not active)
+        self.test_button.setEnabled(not active)
+        self.test_button.setText("Testing…" if active else "Test")
+        if active:
+            self.state.setText("TESTING COMMUNICATION…")
 
 
 class DashboardPage(QWidget):
@@ -395,13 +413,24 @@ class DashboardPage(QWidget):
         self.discovery_info.setObjectName("muted")
         self.discovery_info.setWordWrap(True)
         discovery_layout.addWidget(self.discovery_info)
-        self.discovery_table = QTableWidget(0, 5)
-        self.discovery_table.setHorizontalHeaderLabels(["Assignment", "Status", "VISA resource", "Backend", "Identity / error"])
+        self.discovery_table = QTableWidget(0, 6)
+        self.discovery_table.setHorizontalHeaderLabels(
+            ["Assignment", "Action", "Status", "VISA resource", "Backend", "Identity / error"]
+        )
         self.discovery_table.setAlternatingRowColors(True)
         self.discovery_table.setSelectionBehavior(QTableWidget.SelectionBehavior.SelectRows)
         self.discovery_table.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
-        self.discovery_table.horizontalHeader().setStretchLastSection(True)
-        self.discovery_table.setMinimumHeight(155)
+        self.discovery_table.setShowGrid(False)
+        self.discovery_table.verticalHeader().setVisible(False)
+        self.discovery_table.verticalHeader().setDefaultSectionSize(38)
+        header = self.discovery_table.horizontalHeader()
+        header.setSectionResizeMode(0, QHeaderView.ResizeMode.ResizeToContents)
+        header.setSectionResizeMode(1, QHeaderView.ResizeMode.ResizeToContents)
+        header.setSectionResizeMode(2, QHeaderView.ResizeMode.ResizeToContents)
+        header.setSectionResizeMode(3, QHeaderView.ResizeMode.Stretch)
+        header.setSectionResizeMode(4, QHeaderView.ResizeMode.ResizeToContents)
+        header.setSectionResizeMode(5, QHeaderView.ResizeMode.Stretch)
+        self.discovery_table.setMinimumHeight(190)
         discovery_layout.addWidget(self.discovery_table)
         layout.addWidget(discovery)
         self.checklist = QLabel()
@@ -410,8 +439,12 @@ class DashboardPage(QWidget):
         layout.addWidget(self.checklist)
         emergency = QPushButton("E-STOP — disable all outputs")
         emergency.setObjectName("emergencyButton")
-        emergency.setMinimumHeight(44)
-        layout.addWidget(emergency)
+        emergency.setProperty("compact", True)
+        emergency.setMaximumWidth(250)
+        emergency_row = QHBoxLayout()
+        emergency_row.addStretch(1)
+        emergency_row.addWidget(emergency)
+        layout.addLayout(emergency_row)
         layout.addStretch(1)
         emergency.clicked.connect(self.emergency_requested)
         self.scan_button.clicked.connect(self._scan_visa)
@@ -466,6 +499,7 @@ class DashboardPage(QWidget):
         self._discovery_results = tuple(payload) if isinstance(payload, tuple) else ()
         self.discovery_table.setRowCount(0)
         usable = 0
+        assignable = 0
         for result in self._discovery_results:
             row = self.discovery_table.rowCount()
             self.discovery_table.insertRow(row)
@@ -478,16 +512,33 @@ class DashboardPage(QWidget):
                 assignment.setCurrentIndex(assignment.findData(result.device))
             assignment.setEnabled(result.resource != "—" and result.idn is not None)
             self.discovery_table.setCellWidget(row, 0, assignment)
+            assign_button = QPushButton("Assign")
+            assign_button.setProperty("compact", True)
+            assign_button.setEnabled(result.resource != "—" and result.idn is not None)
+            assign_button.setToolTip(
+                "Assign this VISA resource to the device selected in the first column and save it immediately."
+            )
+            assign_button.clicked.connect(
+                lambda _checked=False, instrument=result, combo=assignment: self._emit_single_assignment(
+                    instrument, combo
+                )
+            )
+            self.discovery_table.setCellWidget(row, 1, assign_button)
             status = "Recognized" if result.device else ("Unknown" if result.idn else "Unavailable")
-            self.discovery_table.setItem(row, 1, QTableWidgetItem(status))
-            self.discovery_table.setItem(row, 2, QTableWidgetItem(result.resource))
-            self.discovery_table.setItem(row, 3, QTableWidgetItem(result.backend))
-            self.discovery_table.setItem(row, 4, QTableWidgetItem(result.idn or result.error or "No response"))
+            self.discovery_table.setItem(row, 2, QTableWidgetItem(status))
+            self.discovery_table.setItem(row, 3, QTableWidgetItem(result.resource))
+            self.discovery_table.setItem(row, 4, QTableWidgetItem(result.backend))
+            self.discovery_table.setItem(row, 5, QTableWidgetItem(result.idn or result.error or "No response"))
             if result.idn:
                 usable += 1
-        self.save_assignments.setEnabled(usable > 0)
+            assigned_device = self._configured_device_for(result)
+            if assigned_device is not None:
+                self._set_row_assigned(row, assigned_device)
+            elif result.idn:
+                assignable += 1
+        self.save_assignments.setEnabled(assignable > 0)
         self.discovery_info.setText(
-            f"Scan complete: {usable} responding instrument(s), {len(self._discovery_results)} result row(s)."
+            f"Scan complete: {usable} responding instrument(s), {assignable} available for assignment."
         )
         self.status.emit(f"VISA discovery completed: {usable} instrument(s) responded to *IDN?")
 
@@ -510,6 +561,59 @@ class DashboardPage(QWidget):
             self.discovery_info.setText("Select at least one responding instrument assignment.")
             return
         self.assignments_requested.emit(assignments)
+
+    def _emit_single_assignment(self, result: DiscoveredInstrument, combo: QComboBox) -> None:
+        device = combo.currentData()
+        if device is None:
+            self.discovery_info.setText("Select Rigol, Keithley or Anritsu before clicking Assign.")
+            combo.setFocus()
+            return
+        if result.idn is None or result.resource == "—":
+            self.discovery_info.setText("This VISA resource did not answer *IDN? and cannot be assigned.")
+            return
+        self.assignments_requested.emit(
+            {str(device): (result.resource, result.backend, result.idn)}
+        )
+
+    def mark_assignments_saved(self, assignments: dict[str, tuple[str, str, str]]) -> None:
+        """Lock rows whose resource was successfully persisted by MainWindow."""
+
+        for row, result in enumerate(self._discovery_results):
+            for device, (resource, backend, _idn) in assignments.items():
+                if result.resource == resource and result.backend == backend:
+                    self._set_row_assigned(row, device)
+        names = ", ".join(device.title() for device in sorted(assignments))
+        self.discovery_info.setText(
+            f"✓ Assignment saved for {names}. Connection cards above now use the selected VISA resources."
+        )
+
+    def _configured_device_for(self, result: DiscoveredInstrument) -> str | None:
+        for name, device in (
+            ("rigol", self._settings.rigol),
+            ("keithley", self._settings.keithley),
+            ("anritsu", self._settings.anritsu),
+        ):
+            if (
+                device.connection.resource == result.resource
+                and device.connection.visa_backend == result.backend
+            ):
+                return name
+        return None
+
+    def _set_row_assigned(self, row: int, device: str) -> None:
+        badge = QLabel(f"✓ Assigned to {device.title()}")
+        badge.setObjectName("assignmentConfirmed")
+        badge.setAccessibleName(f"Assigned to {device.title()}")
+        badge.setToolTip("This VISA resource is already saved. Change it in Settings or assign another resource.")
+        self.discovery_table.setCellWidget(row, 0, badge)
+        button = QPushButton("Assigned ✓")
+        button.setObjectName("assignmentCompleteButton")
+        button.setEnabled(False)
+        button.setToolTip(f"Already assigned to {device.title()}; duplicate assignment is disabled.")
+        self.discovery_table.setCellWidget(row, 1, button)
+        status_item = self.discovery_table.item(row, 2)
+        if status_item is not None:
+            status_item.setText("Assigned")
 
 
 class RigolPage(QWidget):
@@ -2815,7 +2919,6 @@ class MainWindow(QMainWindow):
 
     def _build(self) -> None:
         self.tabs = QTabWidget()
-        self.tabs.setTabPosition(QTabWidget.TabPosition.West)
         self.tabs.setDocumentMode(True)
         self.setCentralWidget(self.tabs)
         self.dashboard = DashboardPage(self._settings, discovery_enabled=not self._simulation)
@@ -2862,7 +2965,6 @@ class MainWindow(QMainWindow):
         self.event_log_dock = self._log_dock()
         self.addDockWidget(Qt.DockWidgetArea.BottomDockWidgetArea, self.event_log_dock)
         self.resizeDocks([self.event_log_dock], [120], Qt.Orientation.Vertical)
-        self._build_safety_toolbar()
         self.dashboard.emergency_requested.connect(self._emergency_off_all)
         self.dashboard.assignments_requested.connect(self._save_discovered_assignments)
         self.dashboard.status.connect(self._log)
@@ -2906,33 +3008,74 @@ class MainWindow(QMainWindow):
         self.estop_shortcut.activated.connect(self._emergency_off_all)
         self.scan_shortcut = QShortcut(QKeySequence("F5"), self)
         self.scan_shortcut.activated.connect(self.dashboard._scan_visa)
+        self._build_top_chrome()
 
-    def _build_safety_toolbar(self) -> None:
-        toolbar = QToolBar("Station safety status", self)
-        toolbar.setObjectName("stationSafetyToolbar")
-        toolbar.setMovable(False)
+    def _build_top_chrome(self) -> None:
+        """Build a compact menu status area and icon-based application ribbon."""
+
+        self.tabs.tabBar().hide()
+        ribbon = QToolBar("Application ribbon", self)
+        ribbon.setObjectName("applicationRibbon")
+        ribbon.setMovable(False)
+        ribbon.setFloatable(False)
+        ribbon.setIconSize(QSize(24, 24))
+        ribbon.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonTextUnderIcon)
+        self.ribbon_group = QActionGroup(self)
+        self.ribbon_group.setExclusive(True)
+        self.ribbon_actions: list[QAction] = []
+        standard_icons = (
+            QStyle.StandardPixmap.SP_ComputerIcon,
+            QStyle.StandardPixmap.SP_DriveHDIcon,
+            QStyle.StandardPixmap.SP_DriveHDIcon,
+            QStyle.StandardPixmap.SP_DriveNetIcon,
+            QStyle.StandardPixmap.SP_FileDialogDetailedView,
+            QStyle.StandardPixmap.SP_MediaPlay,
+            QStyle.StandardPixmap.SP_DialogSaveButton,
+            QStyle.StandardPixmap.SP_FileDialogInfoView,
+        )
+        labels = ("Dashboard", "Rigol", "Keithley", "Anritsu", "Recipes", "Execution", "Results", "Settings")
+        for index, (label, icon_kind) in enumerate(zip(labels, standard_icons, strict=True)):
+            if index in {4, 6}:
+                ribbon.addSeparator()
+            action = QAction(self.style().standardIcon(icon_kind), label, self)
+            action.setCheckable(True)
+            action.setChecked(index == self.tabs.currentIndex())
+            action.setToolTip(f"Open {label}")
+            action.triggered.connect(lambda checked=False, index=index: checked and self.tabs.setCurrentIndex(index))
+            self.ribbon_group.addAction(action)
+            ribbon.addAction(action)
+            self.ribbon_actions.append(action)
+        self.tabs.currentChanged.connect(
+            lambda index: 0 <= index < len(self.ribbon_actions) and self.ribbon_actions[index].setChecked(True)
+        )
+        self.addToolBar(Qt.ToolBarArea.TopToolBarArea, ribbon)
+        self.ribbon = ribbon
+
+        corner = QWidget()
+        corner.setObjectName("menuStatusArea")
+        status_layout = QHBoxLayout(corner)
+        status_layout.setContentsMargins(6, 1, 6, 1)
+        status_layout.setSpacing(8)
         profile_state = "LOCKED" if self._settings.outputs_locked else "APPROVED"
         self.profile_status = QLabel(f"Profile: {profile_state}")
         self.profile_status.setObjectName("profileLocked" if self._settings.outputs_locked else "profileApproved")
-        toolbar.addWidget(self.profile_status)
-        toolbar.addSeparator()
+        status_layout.addWidget(self.profile_status)
         self.toolbar_device_status: dict[str, QLabel] = {}
         for device in ("rigol", "keithley", "anritsu"):
-            label = QLabel(f"{device.title()}: DISCONNECTED")
+            label = QLabel(f"● {device.title()}: OFFLINE")
+            label.setObjectName("compactDeviceStatus")
             label.setAccessibleName(f"{device.title()} connection and output state")
-            toolbar.addWidget(label)
-            toolbar.addSeparator()
+            status_layout.addWidget(label)
             self.toolbar_device_status[device] = label
-        spacer = QWidget()
-        spacer.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred)
-        toolbar.addWidget(spacer)
-        stop = QPushButton("E-STOP  Ctrl+Shift+E")
-        stop.setObjectName("emergencyButton")
+        stop = QPushButton("E-STOP")
+        stop.setObjectName("compactEmergencyButton")
+        stop.setMaximumWidth(74)
+        stop.setMaximumHeight(24)
         stop.setToolTip("Confirm and disable every output and abort acquisition.")
         stop.clicked.connect(self._emergency_off_all)
-        toolbar.addWidget(stop)
-        self.addToolBar(Qt.ToolBarArea.TopToolBarArea, toolbar)
-        self.safety_toolbar = toolbar
+        status_layout.addWidget(stop)
+        self.menuBar().setCornerWidget(corner, Qt.Corner.TopRightCorner)
+        self.menu_status_area = corner
 
     def _apply_accessibility(self) -> None:
         """Ensure controls expose text as well as colour and have screen-reader metadata."""
@@ -3090,6 +3233,12 @@ class MainWindow(QMainWindow):
             card = self.dashboard.cards[name]
             card.connect_requested.connect(lambda current=controller: current.call("connect"))
             card.disconnect_requested.connect(lambda current=controller: current.call("disconnect"))
+            card.test_requested.connect(
+                lambda current=controller, current_card=card: (
+                    current_card.set_testing(True),
+                    current.call("test_communication"),
+                )
+            )
             controller.state_changed.connect(card.update_state)
             controller.state_changed.connect(lambda state, device=name: self._set_device_state(device, state))
             controller.result.connect(lambda operation, result, current=card: self._device_result(current, operation, result))
@@ -3109,10 +3258,25 @@ class MainWindow(QMainWindow):
             card.set_reconfiguring(False)
             card.update_state("disconnected")
             card.identity.setText("IDN: not connected")
+        elif operation == "test_communication" and isinstance(result, dict):
+            card.set_testing(False)
+            card.update_state("verified")
+            features = ", ".join(str(item) for item in result.get("features", ())) or "basic VISA"
+            card.identity.setText(
+                f"TEST PASS: {result.get('vendor', '')} {result.get('model', '')} • "
+                f"SN {result.get('serial', '—')} • FW {result.get('firmware', '—')}\n"
+                f"Protocols/features: {features}"
+            )
+            self._log(f"Communication test passed: {result.get('idn', '')}; {features}")
 
     def _device_error(self, device: str, operation: str, error: str) -> None:
         if operation == "replace_adapter":
             self.dashboard.cards[device].set_reconfiguring(False)
+        elif operation == "test_communication":
+            card = self.dashboard.cards[device]
+            card.set_testing(False)
+            card.update_state("fault")
+            card.identity.setText(f"TEST FAILED: {error}")
         self._log(f"{device}/{operation}: {error}")
 
     def _set_device_state(self, device: str, state: str) -> None:
@@ -3253,9 +3417,7 @@ class MainWindow(QMainWindow):
             return
         self.settings_page.reload()
         self._settings_saved(settings)
-        self.dashboard.discovery_info.setText(
-            "Assignments saved. The profile is now unverified; review identity and safety limits before approval."
-        )
+        self.dashboard.mark_assignments_saved(assignments)
 
     def _set_run_ui_locked(self, locked: bool) -> None:
         for index in (1, 2, 3, 4, 7):
