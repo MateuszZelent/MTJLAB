@@ -285,6 +285,25 @@ class MainWindowTests(unittest.TestCase):
             window.close()
             self.application.processEvents()
 
+    def test_top_ribbon_replaces_side_tabs_and_status_lives_in_menu_corner(self) -> None:
+        window = MainWindow(".config/settings.yml", simulation=True)
+        try:
+            self.assertTrue(window.tabs.tabBar().isHidden())
+            self.assertEqual([action.text() for action in window.ribbon_actions], [
+                "Dashboard", "Rigol", "Keithley", "Anritsu", "Recipes", "Execution", "Results", "Settings"
+            ])
+            window.ribbon_actions[2].trigger()
+            self.application.processEvents()
+            self.assertEqual(window.tabs.currentIndex(), 2)
+            self.assertTrue(window.ribbon_actions[2].isChecked())
+            self.assertIs(window.menuBar().cornerWidget(Qt.Corner.TopRightCorner), window.menu_status_area)
+            stop = window.menu_status_area.findChild(QPushButton, "compactEmergencyButton")
+            self.assertIsNotNone(stop)
+            self.assertLessEqual(stop.maximumWidth(), 74)
+        finally:
+            window.close()
+            self.application.processEvents()
+
     def test_limit_edit_is_autosaved_after_short_idle_period(self) -> None:
         source = Path(".config/settings.yml").read_text(encoding="utf-8")
         with tempfile.TemporaryDirectory() as temporary:

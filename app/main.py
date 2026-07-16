@@ -18,6 +18,20 @@ QTabWidget::pane { border: 1px solid #26384a; }
 QTabBar::tab { background: #18212c; color: #91a0b2; padding: 10px 18px; margin-right: 2px; }
 QTabBar::tab:selected { background: #26384a; color: #e8edf3; }
 QTabBar::tab:hover { color: #ffffff; background: #213043; }
+QToolBar#applicationRibbon { background: #151d27; border: 0; border-bottom: 1px solid #2c3d50; spacing: 3px; padding: 4px 8px; }
+QToolBar#applicationRibbon QToolButton { background: transparent; color: #aebccc; border: 0; border-radius: 7px; padding: 5px 13px; min-width: 62px; }
+QToolBar#applicationRibbon QToolButton:hover { background: #213043; color: white; }
+QToolBar#applicationRibbon QToolButton:checked { background: #244f70; color: white; }
+QToolBar#applicationRibbon::separator { background: #344659; width: 1px; margin: 7px 8px; }
+QWidget#menuStatusArea { background: transparent; }
+QLabel#compactDeviceStatus { color: #91a0b2; font-size: 9pt; }
+QLabel#compactDeviceStatus[deviceState="verified"], QLabel#compactDeviceStatus[deviceState="output_off"] { color: #38d996; }
+QLabel#compactDeviceStatus[deviceState="output_on"], QLabel#compactDeviceStatus[deviceState="compliance"] { color: #ffcc66; }
+QLabel#compactDeviceStatus[deviceState="fault"], QLabel#compactDeviceStatus[deviceState="unknown"] { color: #ff657a; }
+QLabel#profileLocked { color: #ffcc66; font-weight: 700; }
+QLabel#profileApproved { color: #38d996; font-weight: 700; }
+QPushButton#compactEmergencyButton { background: #7f2938; color: white; border-radius: 5px; padding: 3px 8px; font-size: 9pt; font-weight: 700; }
+QPushButton#compactEmergencyButton:hover { background: #a43548; }
 QLineEdit, QPlainTextEdit, QTreeWidget, QTableWidget, QComboBox, QSpinBox { background: #18212c; border: 1px solid #344659; border-radius: 6px; padding: 7px; color: #e8edf3; }
 QTreeWidget { alternate-background-color: #141c26; outline: 0; }
 QTreeWidget::item { color: #e8edf3; padding: 3px; }
@@ -94,6 +108,20 @@ QTabWidget::pane { border: 1px solid #c8d3df; }
 QTabBar::tab { background: #e8eef5; color: #526273; padding: 10px 18px; margin-right: 2px; }
 QTabBar::tab:selected { background: #ffffff; color: #17212b; }
 QTabBar::tab:hover { color: #0b5da7; background: #dce9f6; }
+QToolBar#applicationRibbon { background: #ffffff; border: 0; border-bottom: 1px solid #c8d3df; spacing: 3px; padding: 4px 8px; }
+QToolBar#applicationRibbon QToolButton { background: transparent; color: #526273; border: 0; border-radius: 7px; padding: 5px 13px; min-width: 62px; }
+QToolBar#applicationRibbon QToolButton:hover { background: #e8f1f9; color: #0b5da7; }
+QToolBar#applicationRibbon QToolButton:checked { background: #dbeafe; color: #0b5da7; }
+QToolBar#applicationRibbon::separator { background: #c8d3df; width: 1px; margin: 7px 8px; }
+QWidget#menuStatusArea { background: transparent; }
+QLabel#compactDeviceStatus { color: #607284; font-size: 9pt; }
+QLabel#compactDeviceStatus[deviceState="verified"], QLabel#compactDeviceStatus[deviceState="output_off"] { color: #087f5b; }
+QLabel#compactDeviceStatus[deviceState="output_on"], QLabel#compactDeviceStatus[deviceState="compliance"] { color: #9a6700; }
+QLabel#compactDeviceStatus[deviceState="fault"], QLabel#compactDeviceStatus[deviceState="unknown"] { color: #b4233a; }
+QLabel#profileLocked { color: #9a6700; font-weight: 700; }
+QLabel#profileApproved { color: #087f5b; font-weight: 700; }
+QPushButton#compactEmergencyButton { background: #a53345; color: white; border-radius: 5px; padding: 3px 8px; font-size: 9pt; font-weight: 700; }
+QPushButton#compactEmergencyButton:hover { background: #c43c52; }
 QLineEdit, QPlainTextEdit, QTreeWidget, QTableWidget, QComboBox, QSpinBox { background: #ffffff; border: 1px solid #b9c7d5; border-radius: 6px; padding: 7px; color: #17212b; }
 QTreeWidget { alternate-background-color: #eef3f8; outline: 0; }
 QTreeWidget::item { color: #17212b; padding: 3px; }
