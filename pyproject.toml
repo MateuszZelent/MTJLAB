@@ -12,6 +12,7 @@ dependencies = [
   "numpy>=1.26",
   "pydantic>=2.7,<3",
   "PySide6>=6.7",
+  "pyqtgraph>=0.13.7,<0.14",
   "pyvisa>=1.14",
   "pyvisa-py>=0.7",
   "ruamel.yaml>=0.18",
