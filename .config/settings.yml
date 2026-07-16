@@ -1,0 +1,369 @@
+# Konfiguracja stanowiska pomiarowego.
+#
+# UWAGA: profil startuje jako NIEZATWIERDZONY. Aplikacja nie może włączyć
+# żadnego wyjścia, dopóki osoba odpowiedzialna nie potwierdzi modelu urządzeń,
+# połączeń DUT i limitów laboratoryjnych.
+
+schema_version: 1
+
+profile:
+  id: "default-lab-profile"
+  name: "Domyślny profil stanowiska"
+  state: "unverified"          # unverified | approved | revoked
+  approved_by: null
+  approved_at: null
+  approval_note: "Uzupełnij modele, impedancje i limity przed pomiarem."
+  lock_outputs_when_unverified: true
+
+application:
+  locale: "pl_PL"
+  log_level: "INFO"
+  service_console_enabled: false
+  require_operator_confirmation_before_arming: true
+  require_second_confirmation_for_limit_override: true
+  settings_autosave: false
+  restore_last_recipe: true
+
+units:
+  internal_system: "SI"
+  require_explicit_unit_in_free_text: true
+  defaults:
+    voltage: "V"
+    current: "A"
+    power: "W"
+    frequency: "Hz"
+    resistance: "ohm"
+    time: "s"
+    rf_power: "dBm"
+
+execution:
+  default_settle_time: "100 ms"
+  command_timeout: "5 s"
+  connect_timeout: "3 s"
+  retry_count: 1
+  retry_backoff: "250 ms"
+  checkpoint_every_points: 1
+  stop_on_compliance: true
+  stop_on_device_error: true
+  stop_on_lost_connection: true
+  max_expanded_points: 100000
+  emergency_stop_order:
+    - "keithley.outputs_off"
+    - "rigol.outputs_off"
+    - "anritsu.abort_acquisition"
+    - "storage.flush_checkpoint"
+
+storage:
+  output_directory: "./measurements"
+  primary_format: "hdf5"
+  write_csv_summary: true
+  save_recipe_snapshot: true
+  save_settings_snapshot: true
+  flush_after_each_spectrum: true
+  compression: "gzip"
+  compression_level: 4
+
+ui:
+  framework: "PySide6"
+  theme: "dark"
+  show_engineering_notation: true
+  plot_max_visible_spectra: 20
+  plot_downsample_threshold: 200000
+  remember_window_layout: true
+  confirm_output_enable: true
+  show_raw_scpi_console: false
+
+devices:
+  rigol:
+    enabled: true
+    display_name: "Rigol DG1032Z"
+    connection:
+      resource: "USB0::0x1AB1::0x0642::DG1ZA172902039::INSTR"
+      visa_backend: "system"
+      timeout: "4 s"
+      read_termination: null
+      write_termination: null
+    identity:
+      expected_vendor_contains: "RIGOL"
+      expected_models:
+        - "DG1032Z"
+      require_serial_match: false
+      expected_serial: null
+    capabilities:
+      source: "query_and_model_database"
+      fail_on_unknown_firmware_command: true
+      probe_optional_commands_on_connect: true
+    safety:
+      allow_output_enable: false
+      outputs_off_on_connect: false
+      outputs_off_on_disconnect: true
+      require_declared_dut_impedance: true
+      require_external_current_sensor_for_runtime_trip: true
+      fixed_source_resistance: "50 ohm"
+      channels:
+        "1":
+          enabled: true
+          allowed_waveforms:
+            - "SIN"
+            - "SQU"
+            - "RAMP"
+            - "PULS"
+            - "NOIS"
+            - "USER"
+            - "DC"
+          lab_limits:
+            frequency:
+              min: "1 Hz"
+              max: "1 MHz"
+            high_level:
+              min: "-100 mV"
+              max: "100 mV"
+            low_level:
+              min: "-100 mV"
+              max: "100 mV"
+            amplitude_vpp:
+              min: "0 V"
+              max: "200 mV"
+            offset:
+              min: "-100 mV"
+              max: "100 mV"
+            estimated_load_current:
+              min: "-10 mA"
+              max: "10 mA"
+              max_abs: "10 mA"
+              enforcement: "preflight_model_only"
+            declared_dut_impedance:
+              min: "50 ohm"
+              nominal: null
+            settle_time:
+              min: "10 ms"
+              max: "10 s"
+          defaults:
+            waveform: "SQU"
+            frequency: "1 kHz"
+            high_level: "1 mV"
+            low_level: "0 V"
+            output_load_setting: "HIGHZ"
+            output_enabled: false
+        "2":
+          enabled: false
+          allowed_waveforms:
+            - "SIN"
+            - "SQU"
+            - "RAMP"
+            - "PULS"
+            - "NOIS"
+            - "USER"
+            - "DC"
+          lab_limits:
+            frequency:
+              min: "1 Hz"
+              max: "1 MHz"
+            high_level:
+              min: "-100 mV"
+              max: "100 mV"
+            low_level:
+              min: "-100 mV"
+              max: "100 mV"
+            amplitude_vpp:
+              min: "0 V"
+              max: "200 mV"
+            offset:
+              min: "-100 mV"
+              max: "100 mV"
+            estimated_load_current:
+              min: "-10 mA"
+              max: "10 mA"
+              max_abs: "10 mA"
+              enforcement: "preflight_model_only"
+            declared_dut_impedance:
+              min: "50 ohm"
+              nominal: null
+            settle_time:
+              min: "10 ms"
+              max: "10 s"
+          defaults:
+            waveform: "SIN"
+            frequency: "1 kHz"
+            high_level: "1 mV"
+            low_level: "-1 mV"
+            output_load_setting: "HIGHZ"
+            output_enabled: false
+
+  keithley:
+    enabled: true
+    display_name: "Keithley dual-channel SMU"
+    connection:
+      resource: null             # np. TCPIP0::192.168.1.120::INSTR
+      visa_backend: "system"
+      timeout: "10 s"
+      read_termination: "\n"
+      write_termination: null
+    identity:
+      expected_vendor_contains: "KEITHLEY"
+      expected_models:
+        - "2602A"               # potwierdzić przez *IDN?
+      require_serial_match: false
+      expected_serial: null
+    driver:
+      raise_keithley_errors: true
+      dynamic_tsp_discovery: true
+      raw_tsp_console_enabled: false
+    safety:
+      allow_output_enable: false
+      outputs_off_on_connect: false
+      outputs_off_on_disconnect: true
+      output_off_mode: "high_impedance"
+      stop_on_compliance: true
+      stop_on_overpower: true
+      channels:
+        A:
+          enabled: false
+          allowed_source_modes:
+            - "current"
+            - "voltage"
+            - "measure_only"
+          lab_limits:
+            source_current:
+              min: "-1 mA"
+              max: "1 mA"
+              max_abs: "1 mA"
+            source_voltage:
+              min: "-100 mV"
+              max: "100 mV"
+              max_abs: "100 mV"
+            current_compliance:
+              min: "100 nA"
+              max: "1 mA"
+            voltage_compliance:
+              min: "1 mV"
+              max: "100 mV"
+            measured_current_trip:
+              min: "-1.1 mA"
+              max: "1.1 mA"
+            measured_voltage_trip:
+              min: "-110 mV"
+              max: "110 mV"
+            max_abs_power: "100 uW"
+            ramp_current_step_max: "100 uA"
+            ramp_voltage_step_max: "10 mV"
+          defaults:
+            source_mode: "measure_only"
+            output_enabled: false
+            sense_mode: "2-wire"
+            nplc: 1.0
+            measure_delay: "auto"
+        B:
+          enabled: true
+          allowed_source_modes:
+            - "current"
+            - "voltage"
+            - "measure_only"
+          lab_limits:
+            # Limity robocze dla przykładu 1 mA ... 10 mA.
+            # Nie są to maksymalne możliwości modelu 2602A.
+            source_current:
+              min: "0 A"
+              max: "10 mA"
+              max_abs: "10 mA"
+            source_voltage:
+              min: "-67 mV"
+              max: "67 mV"
+              max_abs: "67 mV"
+            current_compliance:
+              min: "100 uA"
+              max: "10 mA"
+            voltage_compliance:
+              min: "1 mV"
+              max: "67 mV"
+            measured_current_trip:
+              min: "-0.5 mA"
+              max: "10.5 mA"
+            measured_voltage_trip:
+              min: "-70 mV"
+              max: "70 mV"
+            max_abs_power: "670 uW"
+            ramp_current_step_max: "100 uA"
+            ramp_voltage_step_max: "5 mV"
+            sweep_points_max: 1000
+            point_settle_time:
+              min: "1 ms"
+              max: "10 s"
+          defaults:
+            source_mode: "current"
+            source_current: "1 mA"
+            voltage_compliance: "67 mV"
+            output_enabled: false
+            sense_mode: "2-wire"
+            nplc: 1.0
+            measure_delay: "auto"
+
+  anritsu:
+    enabled: true
+    display_name: "Anritsu MS2830A"
+    connection:
+      resource: "TCPIP0::192.168.1.139::INSTR"
+      visa_backend: "@py"
+      timeout: "30 s"
+      read_termination: "\n"
+      write_termination: "\n"
+    identity:
+      expected_vendor_contains: "ANRITSU"
+      expected_models:
+        - "MS2830A"
+      require_serial_match: false
+      expected_serial: null
+      required_options: []
+    safety:
+      acquisition_allowed: false
+      require_rf_input_limit_definition: true
+      signal_generator_output_allowed: false
+      rf_input:
+        # Wartości muszą zostać uzupełnione na podstawie dokładnego wariantu,
+        # opcji, aktywnego preampu, tłumików i toru RF.
+        max_expected_power_at_connector: null
+        external_attenuation: "0 dB"
+        minimum_internal_attenuation: null
+        preamplifier_allowed: false
+        dc_input_allowed: false
+      frequency:
+        min: null
+        max: null
+      reference_level:
+        min: null
+        max: null
+      sweep_points:
+        min: 101
+        max: 10001
+      defaults:
+        application: "SPECT"
+        continuous_sweep: false
+        start_frequency: "1 MHz"
+        stop_frequency: "10 MHz"
+        center_frequency: "5.5 MHz"
+        span: "9 MHz"
+        rbw: "10 kHz"
+        vbw: "10 kHz"
+        reference_level: "0 dBm"
+        sweep_points: 1001
+        trace: "TRAC1"
+
+recipe_defaults:
+  example_nested_sweep:
+    keithley_channel: "B"
+    current:
+      start: "1 mA"
+      stop: "10 mA"
+      points: 100
+      spacing: "linear"
+    voltage_compliance: "67 mV"
+    rigol_channel: 1
+    rigol_waveform: "SQU"
+    rigol_high_level:
+      start: "1 mV"
+      stop: "3 mV"
+      points: 20
+      spacing: "linear"
+    rigol_low_level: "0 V"
+    analyzer_acquisition_per_point: true
+    expected_total_spectra: 2000

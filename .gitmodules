@@ -1,0 +1,6 @@
+[submodule "submodules/accelerator-gui"]
+	path = submodules/accelerator-gui
+	url = https://github.com/salvadorJMA/TFG-Design-and-implementation-of-a-GUI-to-manage-a-particle-accelerator-module
+[submodule "submodules/keithley2600"]
+	path = submodules/keithley2600
+	url = https://github.com/OE-FET/keithley2600
