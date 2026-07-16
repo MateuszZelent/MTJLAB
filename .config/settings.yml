@@ -87,15 +87,15 @@ devices:
       expected_vendor_contains: "RIGOL"
       expected_models:
         - "DG1032Z"
-      require_serial_match: false
-      expected_serial: null
+      require_serial_match: true
+      expected_serial: "DG1ZA172902039"
     capabilities:
       source: "query_and_model_database"
       fail_on_unknown_firmware_command: true
       probe_optional_commands_on_connect: true
     safety:
       allow_output_enable: false
-      outputs_off_on_connect: false
+      outputs_off_on_connect: true
       outputs_off_on_disconnect: true
       require_declared_dut_impedance: true
       require_external_current_sensor_for_runtime_trip: true
@@ -122,7 +122,7 @@ devices:
               min: "-100 mV"
               max: "100 mV"
             amplitude_vpp:
-              min: "0 V"
+              min: "2 mV"
               max: "200 mV"
             offset:
               min: "-100 mV"
@@ -142,7 +142,7 @@ devices:
             waveform: "SQU"
             frequency: "1 kHz"
             high_level: "1 mV"
-            low_level: "0 V"
+            low_level: "-1 mV"
             output_load_setting: "HIGHZ"
             output_enabled: false
         "2":
@@ -364,6 +364,6 @@ recipe_defaults:
       stop: "3 mV"
       points: 20
       spacing: "linear"
-    rigol_low_level: "0 V"
+    rigol_low_level: "-1 mV"
     analyzer_acquisition_per_point: true
     expected_total_spectra: 2000

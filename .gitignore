@@ -1,3 +1,6 @@
 __pycache__/dg1032z.cpython-314.pyc
 __pycache__/gui.cpython-314.pyc
 *.pyc
+*.egg-info/
+measurements/
+*.h5

@@ -1,0 +1,65 @@
+schema_version: 1
+name: "Keithley B current × Rigol CH1 high level × Anritsu spectrum"
+
+root:
+  id: sequence-main
+  type: sequence
+  children:
+    - id: anritsu-spectrum-setup
+      type: configure_anritsu
+      start_frequency: "1 MHz"
+      stop_frequency: "10 MHz"
+      reference_level: "0 dBm"
+      points: 1001
+    - id: keithley-current-sweep
+      type: sweep
+      target: "keithley.B.current"
+      start: "1 mA"
+      stop: "10 mA"
+      points: 100
+      spacing: linear
+      children:
+        - id: keithley-b-config
+          type: configure_keithley
+          channel: B
+          mode: current
+          level: "${keithley.B.current}"
+          compliance: "67 mV"
+          nplc: 1.0
+          settle_time: "100 ms"
+        - id: rigol-high-level-sweep
+          type: sweep
+          target: "rigol.1.high_level"
+          start: "1 mV"
+          stop: "3 mV"
+          points: 20
+          spacing: linear
+          children:
+            - id: rigol-ch1-config
+              type: configure_rigol
+              channel: 1
+              waveform: SQU
+              frequency: "1 kHz"
+              high_level: "${rigol.1.high_level}"
+              low_level: "-1 mV"
+              output_load: HIGHZ
+              dut_min_impedance: "50 ohm"
+            - id: wait-for-settle
+              type: wait
+              duration: "100 ms"
+            - id: measure-keithley-b
+              type: measure_keithley
+              channel: B
+            - id: acquire-spectrum
+              type: acquire_spectrum
+              trace: TRAC1
+
+finally:
+  - id: rigol-ch1-off
+    type: set_rigol_output
+    channel: 1
+    enabled: false
+  - id: keithley-b-off
+    type: set_keithley_output
+    channel: B
+    enabled: false
