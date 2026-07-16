@@ -30,6 +30,8 @@ from PySide6.QtWidgets import (
     QSplitter,
     QSpinBox,
     QTabWidget,
+    QTableWidget,
+    QTableWidgetItem,
     QTreeWidget,
     QTreeWidgetItem,
     QVBoxLayout,
@@ -37,6 +39,7 @@ from PySide6.QtWidgets import (
 )
 
 from app.devices.anritsu import AnritsuAdapter, SpectrumConfig, SpectrumTrace
+from app.devices.discovery import DiscoveredInstrument
 from app.devices.keithley import KeithleyAdapter, KeithleySourceRequest
 from app.devices.rigol import (
     RigolAdapter,
@@ -73,6 +76,7 @@ from app.spectrum import (
 from app.ui.settings_page import SettingsPage
 from app.ui.run_worker import RunController
 from app.ui.workers import DeviceController
+from app.ui.discovery_worker import VisaDiscoveryWorker
 
 
 def _line(value: str, width: int = 14) -> QLineEdit:
@@ -318,9 +322,17 @@ class DeviceCard(QFrame):
 
 class DashboardPage(QWidget):
     emergency_requested = Signal()
+    assignments_requested = Signal(object)
+    status = Signal(str)
 
-    def __init__(self, settings: StationSettings, parent: QWidget | None = None) -> None:
+    def __init__(
+        self, settings: StationSettings, parent: QWidget | None = None, *, discovery_enabled: bool = True
+    ) -> None:
         super().__init__(parent)
+        self._settings = settings
+        self._discovery_enabled = discovery_enabled
+        self._discovery_worker: VisaDiscoveryWorker | None = None
+        self._discovery_results: tuple[DiscoveredInstrument, ...] = ()
         layout = QVBoxLayout(self)
         title = QLabel("Measurement station")
         title.setObjectName("pageTitle")
@@ -337,6 +349,43 @@ class DashboardPage(QWidget):
         for column, card in enumerate(self.cards.values()):
             grid.addWidget(card, 0, column)
         layout.addLayout(grid)
+
+        discovery = QFrame()
+        discovery.setObjectName("discoveryCard")
+        discovery_layout = QVBoxLayout(discovery)
+        discovery_header = QHBoxLayout()
+        discovery_title = QLabel("VISA instrument discovery")
+        discovery_title.setObjectName("sectionTitle")
+        discovery_header.addWidget(discovery_title)
+        discovery_header.addStretch(1)
+        self.scan_button = QPushButton("Scan VISA")
+        self.scan_button.setToolTip(
+            "Enumerate VISA resources and send only *IDN? with a short timeout. No output is enabled."
+        )
+        self.scan_button.setAccessibleName("Scan VISA instruments")
+        self.save_assignments = QPushButton("Save assignments")
+        self.save_assignments.setEnabled(False)
+        self.save_assignments.setToolTip(
+            "Persist selected VISA addresses. This changes the safety profile and revokes its approval."
+        )
+        discovery_header.addWidget(self.scan_button)
+        discovery_header.addWidget(self.save_assignments)
+        discovery_layout.addLayout(discovery_header)
+        self.discovery_info = QLabel(
+            "No scan performed. USB/GPIB resources are normally discoverable; LAN discovery depends on the VISA backend."
+        )
+        self.discovery_info.setObjectName("muted")
+        self.discovery_info.setWordWrap(True)
+        discovery_layout.addWidget(self.discovery_info)
+        self.discovery_table = QTableWidget(0, 5)
+        self.discovery_table.setHorizontalHeaderLabels(["Assignment", "Status", "VISA resource", "Backend", "Identity / error"])
+        self.discovery_table.setAlternatingRowColors(True)
+        self.discovery_table.setSelectionBehavior(QTableWidget.SelectionBehavior.SelectRows)
+        self.discovery_table.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
+        self.discovery_table.horizontalHeader().setStretchLastSection(True)
+        self.discovery_table.setMinimumHeight(155)
+        discovery_layout.addWidget(self.discovery_table)
+        layout.addWidget(discovery)
         self.checklist = QLabel()
         self.checklist.setObjectName("checklist")
         self.checklist.setWordWrap(True)
@@ -347,9 +396,15 @@ class DashboardPage(QWidget):
         layout.addWidget(emergency)
         layout.addStretch(1)
         emergency.clicked.connect(self.emergency_requested)
+        self.scan_button.clicked.connect(self._scan_visa)
+        self.save_assignments.clicked.connect(self._emit_assignments)
+        if not discovery_enabled:
+            self.scan_button.setEnabled(False)
+            self.scan_button.setToolTip("VISA discovery is disabled in simulation mode.")
         self.update_settings(settings)
 
     def update_settings(self, settings: StationSettings) -> None:
+        self._settings = settings
         profile = "✓ approved" if not settings.outputs_locked else "✕ unverified — outputs locked"
         rigol_serial = "✓" if settings.rigol.identity.require_serial_match else "✕"
         anritsu = "✓" if settings.anritsu.safety.acquisition_allowed else "✕ RF input limit required"
@@ -360,6 +415,77 @@ class DashboardPage(QWidget):
             f"• Anritsu acquisition: {anritsu}\n"
             "• Declare the DUT and verify every limit before OUTPUT ON."
         )
+
+    def _scan_visa(self) -> None:
+        if self._discovery_worker is not None and self._discovery_worker.isRunning():
+            return
+        backends = tuple(
+            dict.fromkeys(
+                (
+                    self._settings.rigol.connection.visa_backend,
+                    self._settings.keithley.connection.visa_backend,
+                    self._settings.anritsu.connection.visa_backend,
+                    "system",
+                )
+            )
+        )
+        self.scan_button.setEnabled(False)
+        self.save_assignments.setEnabled(False)
+        self.discovery_info.setText("Scanning VISA resources… only *IDN? will be sent.")
+        self._discovery_worker = VisaDiscoveryWorker(backends, self)
+        self._discovery_worker.completed.connect(self._scan_completed)
+        self._discovery_worker.failed.connect(self._scan_failed)
+        self._discovery_worker.finished.connect(lambda: self.scan_button.setEnabled(self._discovery_enabled))
+        self._discovery_worker.start()
+
+    def _scan_completed(self, payload: object) -> None:
+        self._discovery_results = tuple(payload) if isinstance(payload, tuple) else ()
+        self.discovery_table.setRowCount(0)
+        usable = 0
+        for result in self._discovery_results:
+            row = self.discovery_table.rowCount()
+            self.discovery_table.insertRow(row)
+            assignment = QComboBox()
+            assignment.addItem("Do not assign", None)
+            assignment.addItem("Rigol", "rigol")
+            assignment.addItem("Keithley", "keithley")
+            assignment.addItem("Anritsu", "anritsu")
+            if result.device:
+                assignment.setCurrentIndex(assignment.findData(result.device))
+            assignment.setEnabled(result.resource != "—" and result.idn is not None)
+            self.discovery_table.setCellWidget(row, 0, assignment)
+            status = "Recognized" if result.device else ("Unknown" if result.idn else "Unavailable")
+            self.discovery_table.setItem(row, 1, QTableWidgetItem(status))
+            self.discovery_table.setItem(row, 2, QTableWidgetItem(result.resource))
+            self.discovery_table.setItem(row, 3, QTableWidgetItem(result.backend))
+            self.discovery_table.setItem(row, 4, QTableWidgetItem(result.idn or result.error or "No response"))
+            if result.idn:
+                usable += 1
+        self.save_assignments.setEnabled(usable > 0)
+        self.discovery_info.setText(
+            f"Scan complete: {usable} responding instrument(s), {len(self._discovery_results)} result row(s)."
+        )
+        self.status.emit(f"VISA discovery completed: {usable} instrument(s) responded to *IDN?")
+
+    def _scan_failed(self, error: str) -> None:
+        self.discovery_info.setText(f"VISA scan failed: {error}")
+        self.status.emit(f"VISA discovery failed: {error}")
+
+    def _emit_assignments(self) -> None:
+        assignments: dict[str, tuple[str, str, str]] = {}
+        for row, result in enumerate(self._discovery_results):
+            combo = self.discovery_table.cellWidget(row, 0)
+            if not isinstance(combo, QComboBox) or combo.currentData() is None or result.idn is None:
+                continue
+            device = str(combo.currentData())
+            if device in assignments:
+                self.discovery_info.setText(f"Cannot save: more than one resource is assigned to {device.title()}.")
+                return
+            assignments[device] = (result.resource, result.backend, result.idn)
+        if not assignments:
+            self.discovery_info.setText("Select at least one responding instrument assignment.")
+            return
+        self.assignments_requested.emit(assignments)
 
 
 class RigolPage(QWidget):
@@ -2728,7 +2854,7 @@ class MainWindow(QMainWindow):
     def _build(self) -> None:
         self.tabs = QTabWidget()
         self.setCentralWidget(self.tabs)
-        self.dashboard = DashboardPage(self._settings)
+        self.dashboard = DashboardPage(self._settings, discovery_enabled=not self._simulation)
         self.rigol_page = RigolPage(self._controllers["rigol"], self._settings)
         self.keithley_page = KeithleyPage(self._controllers["keithley"], self._settings)
         self.anritsu_page = AnritsuPage(
@@ -2773,6 +2899,8 @@ class MainWindow(QMainWindow):
         self.addDockWidget(Qt.DockWidgetArea.BottomDockWidgetArea, self.event_log_dock)
         self.resizeDocks([self.event_log_dock], [120], Qt.Orientation.Vertical)
         self.dashboard.emergency_requested.connect(self._emergency_off_all)
+        self.dashboard.assignments_requested.connect(self._save_discovered_assignments)
+        self.dashboard.status.connect(self._log)
         self.settings_page.settings_saved.connect(self._settings_saved)
         self.recipe_page.run_requested.connect(self._start_run)
         self.run_monitor.stop_requested.connect(self._run_controller.request_stop)
@@ -3041,6 +3169,51 @@ class MainWindow(QMainWindow):
             self._device_states[name] = "disconnected"
             self.dashboard.cards[name].update_state("disconnected")
         self._log("Profile changed. VISA sessions were safely switched OFF and disconnected; new limits apply on the next connection.")
+
+    def _save_discovered_assignments(self, payload: object) -> None:
+        if self._simulation or not isinstance(payload, dict):
+            return
+        assignments = {
+            str(device): value
+            for device, value in payload.items()
+            if device in {"rigol", "keithley", "anritsu"}
+            and isinstance(value, tuple)
+            and len(value) == 3
+        }
+        if not assignments:
+            return
+        summary = "\n".join(
+            f"• {device.title()}: {value[0]} ({value[1]})\n  {value[2]}"
+            for device, value in sorted(assignments.items())
+        )
+        answer = QMessageBox.question(
+            self,
+            "Save VISA assignments",
+            "Save these discovered resources?\n\n"
+            f"{summary}\n\n"
+            "Changing a connection revokes profile approval and safely disconnects current sessions. "
+            "Existing serial-number requirements are not changed automatically.",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.Cancel,
+            QMessageBox.StandardButton.Cancel,
+        )
+        if answer is not QMessageBox.StandardButton.Yes:
+            return
+        try:
+            loaded = self._repository.load()
+            raw = deepcopy(loaded.raw)
+            for device, (resource, backend, _idn) in assignments.items():
+                connection = raw["devices"][device]["connection"]
+                connection["resource"] = resource
+                connection["visa_backend"] = backend
+            settings = self._repository.save_raw(raw)
+        except Exception as exc:
+            QMessageBox.critical(self, "VISA assignments not saved", str(exc))
+            return
+        self.settings_page.reload()
+        self._settings_saved(settings)
+        self.dashboard.discovery_info.setText(
+            "Assignments saved. The profile is now unverified; review identity and safety limits before approval."
+        )
 
     def _set_run_ui_locked(self, locked: bool) -> None:
         for index in (1, 2, 3, 4, 7):
