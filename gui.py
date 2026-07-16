@@ -1125,6 +1125,8 @@ def main() -> None:
             "Do celow serwisowych wymagajacych prototypu podaj --unsafe-legacy."
         )
         return
+    if not args.address:
+        raise SystemExit("Podaj --address albo ustaw RIGOL_VISA_RESOURCE.")
     app = GeneratorApp(args.address)
     app.mainloop()
 

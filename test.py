@@ -3,11 +3,12 @@
 from __future__ import annotations
 
 import argparse
+import os
 
 import pyvisa
 
 
-DEFAULT_ADDRESS = "USB0::0x1AB1::0x0642::DG1ZA172902039::INSTR"
+DEFAULT_ADDRESS = os.environ.get("RIGOL_VISA_RESOURCE")
 WAVEFORMS = ("SIN", "SQU", "RAMP", "PULS")
 
 
@@ -99,6 +100,8 @@ def parse_args() -> argparse.Namespace:
         help="zezwol na zapis przez historyczny skrypt poza produkcyjnymi blokadami",
     )
     args = parser.parse_args()
+    if not args.address:
+        parser.error("podaj --address albo ustaw RIGOL_VISA_RESOURCE")
     if args.enable_output and not args.apply:
         parser.error("--enable-output wymaga rowniez --apply")
     if args.apply and not args.unsafe_legacy:

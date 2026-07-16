@@ -313,6 +313,10 @@ class DeviceCard(QFrame):
         self.assign_button.setToolTip("Save the selected detected resource to this instrument card.")
         assignment_row.addWidget(self.detected_resources, 1)
         assignment_row.addWidget(self.assign_button)
+        self.assignment_hint = QLabel()
+        self.assignment_hint.setObjectName("assignmentPendingHint")
+        self.assignment_hint.setWordWrap(True)
+        self.assignment_hint.hide()
         controls = QHBoxLayout()
         self.connect_button = QPushButton("Connect")
         self.disconnect_button = QPushButton("Disconnect")
@@ -329,14 +333,13 @@ class DeviceCard(QFrame):
         layout.addWidget(self.identity)
         layout.addStretch(1)
         layout.addLayout(assignment_row)
+        layout.addWidget(self.assignment_hint)
         layout.addLayout(controls)
         self.connect_button.clicked.connect(self.connect_requested)
         self.disconnect_button.clicked.connect(self.disconnect_requested)
         self.test_button.clicked.connect(self.test_requested)
         self.assign_button.clicked.connect(self._request_assignment)
-        self.detected_resources.currentIndexChanged.connect(
-            lambda index: self.assign_button.setEnabled(index >= 0 and self.detected_resources.isEnabled())
-        )
+        self.detected_resources.currentIndexChanged.connect(self._detected_selection_changed)
         self.update_resource(resource)
 
     def update_state(self, state: str) -> None:
@@ -391,21 +394,46 @@ class DeviceCard(QFrame):
             self.detected_resources.setEnabled(False)
             self.assign_button.setEnabled(False)
             self.assign_button.setText("Assign VISA")
+            self.assignment_hint.hide()
+            self.connect_button.setEnabled(True)
+            self.test_button.setEnabled(True)
         elif assigned_index >= 0:
             self.detected_resources.setCurrentIndex(assigned_index)
             self.detected_resources.setEnabled(False)
             self.assign_button.setEnabled(False)
             self.assign_button.setText("Assigned ✓")
+            self.assignment_hint.hide()
+            self.connect_button.setEnabled(True)
+            self.test_button.setEnabled(True)
         else:
             self.detected_resources.setCurrentIndex(0)
             self.detected_resources.setEnabled(True)
             self.assign_button.setText("Assign VISA")
             self.assign_button.setEnabled(True)
+            self._show_pending_assignment()
 
     def _request_assignment(self) -> None:
         payload = self.detected_resources.currentData()
         if isinstance(payload, tuple) and len(payload) == 3:
             self.assign_resource_requested.emit(payload)
+
+    def _detected_selection_changed(self, index: int) -> None:
+        pending = index >= 0 and self.detected_resources.isEnabled()
+        self.assign_button.setEnabled(pending)
+        if pending:
+            self._show_pending_assignment()
+
+    def _show_pending_assignment(self) -> None:
+        payload = self.detected_resources.currentData()
+        resource = payload[0] if isinstance(payload, tuple) and payload else "selected resource"
+        self.assignment_hint.setText(
+            f"⚠ {resource} is selected but not active. Click Assign VISA before Connect or Test."
+        )
+        self.assignment_hint.show()
+        self.connect_button.setEnabled(False)
+        self.test_button.setEnabled(False)
+        self.connect_button.setToolTip("Assign the selected VISA resource first; this prevents using the old address.")
+        self.test_button.setToolTip("Assign the selected VISA resource first; Test never uses an unconfirmed selection.")
 
 
 class DashboardPage(QWidget):

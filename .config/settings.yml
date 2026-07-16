@@ -340,7 +340,7 @@ devices:
     enabled: true
     display_name: "Anritsu MS2830A"
     connection:
-      resource: "TCPIP0::192.168.1.139::INSTR"
+      resource: ""
       visa_backend: "@py"
       timeout: "30 s"
       read_termination: ""

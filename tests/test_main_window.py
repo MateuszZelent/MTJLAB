@@ -287,6 +287,9 @@ class MainWindowTests(unittest.TestCase):
             card = page.cards["anritsu"]
             self.assertTrue(card.detected_resources.isEnabled())
             self.assertIn("GPIB0::23::INSTR", card.detected_resources.currentText())
+            self.assertFalse(card.test_button.isEnabled())
+            self.assertFalse(card.connect_button.isEnabled())
+            self.assertIn("not active", card.assignment_hint.text())
             card.assign_button.click()
             self.assertEqual(
                 emitted,
@@ -296,6 +299,42 @@ class MainWindowTests(unittest.TestCase):
         finally:
             window.close()
             self.application.processEvents()
+
+    def test_anritsu_test_unlocks_only_after_selected_resource_is_saved(self) -> None:
+        source = Path(".config/settings.yml").read_text(encoding="utf-8")
+        with tempfile.TemporaryDirectory() as temporary:
+            path = Path(temporary) / "settings.yml"
+            path.write_text(source, encoding="utf-8")
+            window = MainWindow(path, simulation=False)
+            try:
+                result = DiscoveredInstrument(
+                    "GPIB0::23::INSTR",
+                    "system",
+                    "ANRITSU,MS2830A,6201514799,7.03.00",
+                    "anritsu",
+                )
+                window.dashboard._scan_completed((result,))
+                card = window.dashboard.cards["anritsu"]
+                self.assertFalse(card.test_button.isEnabled())
+                with patch.object(
+                    QMessageBox, "question", return_value=QMessageBox.StandardButton.Yes
+                ):
+                    card.assign_button.click()
+                QTest.qWait(100)
+                self.application.processEvents()
+
+                self.assertIn("GPIB0::23::INSTR", card.resource.text())
+                self.assertFalse(card.detected_resources.isEnabled())
+                self.assertEqual(card.assign_button.text(), "Assigned ✓")
+                self.assertTrue(card.test_button.isEnabled())
+                self.assertEqual(
+                    SettingsRepository(path).load().settings.anritsu.connection.resource,
+                    "GPIB0::23::INSTR",
+                )
+                self.assertIn("VISA ASSIGN SUCCESS [anritsu]", window.log.toPlainText())
+            finally:
+                window.close()
+                self.application.processEvents()
 
     def test_device_card_communication_test_reports_protocol_and_disconnects(self) -> None:
         window = MainWindow(".config/settings.yml", simulation=True)

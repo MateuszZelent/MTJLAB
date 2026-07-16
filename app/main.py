@@ -39,6 +39,7 @@ QTreeWidget::item:selected { background: #28577b; color: white; }
 QTableWidget { alternate-background-color: #141c26; selection-background-color: #28577b; selection-color: white; }
 QTableWidget::item { padding: 6px; border-bottom: 1px solid #26384a; }
 QLabel#assignmentConfirmed { color: #38d996; font-weight: 700; padding: 5px 8px; }
+QLabel#assignmentPendingHint { color: #ffcc66; background: #302817; border-radius: 5px; padding: 5px 8px; }
 QPushButton#assignmentCompleteButton { background: #173227; color: #38d996; }
 QLineEdit:focus, QComboBox:focus, QSpinBox:focus { border: 1px solid #4ba3ff; }
 QLineEdit:disabled, QComboBox:disabled, QSpinBox:disabled { color: #607084; background: #141c26; border-color: #26384a; }
@@ -129,6 +130,7 @@ QTreeWidget::item:selected { background: #b8dcfa; color: #102a43; }
 QTableWidget { alternate-background-color: #eef3f8; selection-background-color: #b8dcfa; selection-color: #102a43; }
 QTableWidget::item { padding: 6px; border-bottom: 1px solid #d9e2ec; }
 QLabel#assignmentConfirmed { color: #087f5b; font-weight: 700; padding: 5px 8px; }
+QLabel#assignmentPendingHint { color: #765500; background: #fff2c7; border-radius: 5px; padding: 5px 8px; }
 QPushButton#assignmentCompleteButton { background: #dff5eb; color: #087f5b; }
 QLineEdit:focus, QComboBox:focus, QSpinBox:focus { border: 1px solid #1976bd; }
 QLineEdit:disabled, QComboBox:disabled, QSpinBox:disabled { color: #8996a3; background: #edf1f5; border-color: #d4dce4; }

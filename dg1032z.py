@@ -2,12 +2,13 @@
 
 from __future__ import annotations
 
+import os
 from typing import Any, Iterable
 
 import pyvisa
 
 
-DEFAULT_ADDRESS = "USB0::0x1AB1::0x0642::DG1ZA172902039::INSTR"
+DEFAULT_ADDRESS = os.environ.get("RIGOL_VISA_RESOURCE")
 WAVEFORMS = ("SIN", "SQU", "RAMP", "PULS", "NOIS", "USER", "DC")
 MODULATION_TYPES = ("AM", "FM", "PM", "ASK", "FSK", "PSK", "PWM")
 
@@ -78,8 +79,12 @@ class DG1032Z:
     def connected(self) -> bool:
         return self.instrument is not None
 
-    def connect(self, address: str = DEFAULT_ADDRESS) -> str:
+    def connect(self, address: str | None = DEFAULT_ADDRESS) -> str:
         self.disconnect()
+        if not address:
+            raise InstrumentError(
+                "Brak adresu Rigol VISA. Podaj address jawnie albo ustaw RIGOL_VISA_RESOURCE."
+            )
         try:
             self.resource_manager = pyvisa.ResourceManager()
             self.instrument = self.resource_manager.open_resource(
@@ -467,4 +472,3 @@ class DG1032Z:
 
     def reset(self) -> None:
         self.execute(("*RST",))
-
