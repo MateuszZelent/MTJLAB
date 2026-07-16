@@ -554,7 +554,11 @@ class DashboardPage(QWidget):
         self._refresh_card_resource_choices()
         profile = "✓ approved" if not settings.outputs_locked else "✕ unverified — outputs locked"
         rigol_serial = "✓" if settings.rigol.identity.require_serial_match else "✕"
-        anritsu = "✓" if settings.anritsu.safety.acquisition_allowed else "✕ RF input limit required"
+        anritsu = (
+            "✓ configured operations enabled"
+            if settings.anritsu.safety.acquisition_allowed
+            else "◐ passive spectrum read available; configuration locked"
+        )
         self.checklist.setText(
             "Readiness:\n"
             f"• Profile: {profile}\n"
@@ -2316,10 +2320,7 @@ class AnritsuPage(QWidget):
         controls.setSpacing(6)
         self.read_configuration = QPushButton("Read from instrument")
         configure = QPushButton("Apply configuration")
-        self.single = QPushButton("Single + Fetch")
-        self.single.setEnabled(single_sweep_available)
-        if not single_sweep_available:
-            self.single.setToolTip("Requires standard_scpi_opc qualification in Anritsu settings.")
+        self.single = QPushButton("Read current spectrum")
         self.live = QPushButton("Start Live")
         abort = QPushButton("Abort")
         configure.setObjectName("primaryButton")
@@ -2408,7 +2409,9 @@ class AnritsuPage(QWidget):
         layout.addWidget(self.workspace_splitter, 1)
         self.read_configuration.clicked.connect(self.read_configuration_from_instrument)
         configure.clicked.connect(self.configure)
-        self.single.clicked.connect(lambda: self._controller.call("single_sweep", "TRAC1"))
+        self.single.clicked.connect(
+            lambda: self._controller.call("fetch_current_trace", "TRAC1")
+        )
         self.live.clicked.connect(self.toggle_live)
         abort.clicked.connect(lambda: self._controller.call("emergency_off"))
         self.acquire_average.clicked.connect(self.start_averaging)
@@ -2422,6 +2425,7 @@ class AnritsuPage(QWidget):
         controller.error.connect(self._error)
         help_items = {
             self.read_configuration: "Read Start, Stop, Reference level, and Points from the connected analyser. This sends query commands only and never changes the instrument or approved safety limits.",
+            self.single: "Read the currently displayed TRAC1 spectrum using SCPI queries only. This does not configure or trigger the analyser and does not require an approved safety profile.",
             self.average_count: "Number of complete spectra to average. 200 is common in the Thatec workflow. Averaging is performed in linear mW, not directly in dBm.",
             self.acquire_average: "Acquire N complete traces sequentially and create a separate averaged spectrum. The latest raw trace is always retained.",
             self.cancel_average: "Stop the averaging sequence. Already collected temporary frames are discarded; raw/reference data are unchanged.",
@@ -2466,7 +2470,7 @@ class AnritsuPage(QWidget):
 
     def set_capabilities(self, capabilities: object) -> None:
         supports = getattr(capabilities, "supports", lambda _feature: False)
-        self.single.setEnabled(self._single_sweep_configured and bool(supports("synchronized_single_sweep")))
+        self.single.setEnabled(bool(supports("spectrum_trace")))
 
     def configure(self) -> None:
         try:
@@ -2498,7 +2502,7 @@ class AnritsuPage(QWidget):
     def fetch_live(self) -> None:
         if not self._fetch_pending:
             self._fetch_pending = True
-            self._controller.call("fetch_trace", "TRAC1")
+            self._controller.call("fetch_current_trace", "TRAC1")
 
     def start_averaging(self) -> None:
         if self._averaging_active:
@@ -2575,11 +2579,12 @@ class AnritsuPage(QWidget):
         elif operation == "configure" and isinstance(result, AnritsuConfigurationSnapshot):
             self._result("read_configuration", result)
             self.status.emit("Anritsu configured and verified by SCPI readback")
-        elif operation == "start_live":
+        elif operation == "start_live" and isinstance(result, AnritsuConfigurationSnapshot):
+            self._result("read_configuration", result)
             self._timer.start()
             self.live.setText("Stop Live")
             self.status.emit("Anritsu Live started")
-        elif operation in {"fetch_trace", "single_sweep"} and isinstance(result, SpectrumTrace):
+        elif operation in {"fetch_trace", "fetch_current_trace", "single_sweep"} and isinstance(result, SpectrumTrace):
             self._fetch_pending = False
             self._latest_trace = result
             if self._averaging_active:
@@ -2675,12 +2680,12 @@ class AnritsuPage(QWidget):
         self.spectrum_plot.set_labels(y="Amplitude", y_unit=active_unit)
 
     def _error(self, operation: str, error: str) -> None:
-        if operation in {"fetch_trace", "single_sweep"}:
+        if operation in {"fetch_trace", "fetch_current_trace", "single_sweep"}:
             self._fetch_pending = False
             if self._averaging_active:
                 self.cancel_averaging()
         if operation in {
-            "read_configuration", "configure", "start_live", "fetch_trace",
+            "read_configuration", "configure", "start_live", "fetch_trace", "fetch_current_trace",
             "single_sweep", "emergency_off",
         }:
             self._timer.stop()

@@ -201,12 +201,23 @@ class AnritsuAdapter(DeviceAdapter):
             raise DeviceError("Anritsu configuration readback mismatch: " + "; ".join(mismatches))
         return actual
 
-    def start_live(self) -> None:
-        """Enable application-side live refresh; current instrument sweep mode is preserved."""
+    def start_live(self) -> AnritsuConfigurationSnapshot:
+        """Start passive polling without changing analyser or safety settings."""
 
-        self._assert_acquisition_allowed()
-        self._require_session().write("INST SPECT")
+        snapshot = self.read_current_configuration()
+        if "SPECT" not in snapshot.instrument_mode.upper():
+            raise DeviceError(
+                f"Read-only Live requires Spectrum Analyzer mode; current mode is "
+                f"{snapshot.instrument_mode!r}. Select Spectrum Analyzer on the instrument."
+            )
+        data_format = self._require_session().query("FORM?").strip().upper()
+        if not data_format.startswith("ASC"):
+            raise DeviceError(
+                f"Read-only Live requires the current trace format to be ASCII; "
+                f"the instrument reports {data_format!r}."
+            )
         self._live = True
+        return snapshot
 
     def stop_live(self) -> None:
         self._live = False
@@ -278,12 +289,29 @@ class AnritsuAdapter(DeviceAdapter):
         return self.fetch_trace(trace)
 
     def fetch_trace(self, trace: str = "TRAC1") -> SpectrumTrace:
-        """Read one complete trace; callers schedule this repeatedly for Live mode."""
+        """Read one trace for a validated recipe/single-sweep workflow."""
 
         trace = validate_anritsu_trace_name(trace)
         self._assert_acquisition_allowed()
         session = self._require_session()
         session.write("FORM ASC")
+        return self._read_ascii_trace(session, trace)
+
+    def fetch_current_trace(self, trace: str = "TRAC1") -> SpectrumTrace:
+        """Read the currently displayed trace using query commands only."""
+
+        trace = validate_anritsu_trace_name(trace)
+        session = self._require_session()
+        data_format = session.query("FORM?").strip().upper()
+        if not data_format.startswith("ASC"):
+            raise DeviceError(
+                f"Cannot read the current trace without changing the instrument: "
+                f"FORM? returned {data_format!r}, not ASCII."
+            )
+        return self._read_ascii_trace(session, trace)
+
+    @staticmethod
+    def _read_ascii_trace(session: InstrumentSession, trace: str) -> SpectrumTrace:
         try:
             start = float(session.query("FREQ:STAR?"))
             stop = float(session.query("FREQ:STOP?"))

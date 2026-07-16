@@ -387,6 +387,8 @@ class AnritsuSimulator(_BaseSimulator):
             return "ANRITSU,MS2830A,SIM000001,sim-1.0"
         if command == "*OPC?":
             return "1"
+        if command == "FORM?":
+            return "ASC,0"
         if command == "INST?":
             return "SPECT"
         if command == "FREQ:STAR?":

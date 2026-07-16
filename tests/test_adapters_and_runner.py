@@ -205,6 +205,7 @@ class AdapterAndRunnerTests(unittest.TestCase):
                 "DISP:WIND:TRAC:Y:RLEV?": "0",
                 "SWE:POIN?": "101",
                 "TRAC? TRAC1": values,
+                "FORM?": "ASC,0",
                 "*OPC?": "1",
             }
         )
@@ -251,7 +252,34 @@ class AdapterAndRunnerTests(unittest.TestCase):
                 "SWE:POIN?",
             ],
         )
-        self.assertTrue(all(command.endswith("?") for command in session.writes))
+        self.assertTrue(all("?" in command for command in session.writes))
+
+    def test_anritsu_passive_live_reads_locked_profile_without_writes(self) -> None:
+        values = ",".join(str(-70 + index / 100) for index in range(101))
+        session = FakeVisaSession(
+            responses={
+                "*IDN?": "ANRITSU,MS2830A,123456,1.0",
+                "INST?": "SPECT",
+                "FORM?": "ASC,0",
+                "FREQ:STAR?": "1000000",
+                "FREQ:STOP?": "2000000",
+                "DISP:WIND:TRAC:Y:RLEV?": "0",
+                "SWE:POIN?": "101",
+                "TRAC? TRAC1": values,
+            }
+        )
+        adapter = AnritsuAdapter(
+            simulation_settings(anritsu_enabled=False),
+            session_factory=FakeVisaSessionFactory(session),
+        )
+        adapter.connect()
+
+        adapter.start_live()
+        trace = adapter.fetch_current_trace()
+
+        self.assertEqual(len(trace.powers_dbm), 101)
+        self.assertTrue(adapter.live)
+        self.assertTrue(all("?" in command for command in session.writes))
 
     def test_anritsu_rejects_frequency_outside_the_approved_profile(self) -> None:
         session = FakeVisaSession(responses={"*IDN?": "ANRITSU,MS2830A,123456,1.0"})

@@ -152,6 +152,8 @@ class InstrumentWorker(QObject):
                 return self._adapter.stop_live()
             if operation == "fetch_trace":
                 return self._adapter.fetch_trace(str(payload or "TRAC1"))
+            if operation == "fetch_current_trace":
+                return self._adapter.fetch_current_trace(str(payload or "TRAC1"))
             if operation == "single_sweep":
                 return self._adapter.acquire_single_sweep(str(payload or "TRAC1"))
         raise ValueError(f"Unsupported operation {operation!r}.")
