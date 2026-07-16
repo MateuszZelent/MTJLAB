@@ -353,10 +353,10 @@ devices:
       expected_serial:
       required_options: []
     acquisition:
-      # "standard_scpi_opc" wolno ustawić dopiero po kwalifikacji na
-      # konkretnym firmware: INIT:CONT OFF, INIT:IMM, *OPC? oraz ABORT.
-      # Tryb unverified pozwala na ręczny Live/Fetch, ale blokuje checkpoint
-      # receptury, aby nie zapisać starego trace jako nowego punktu.
+      # Enable "standard_scpi_opc" only after qualifying INIT:CONT OFF,
+      # INIT:IMM, *OPC?, and ABORT on the installed firmware.
+      # Unverified mode permits manual Live/Fetch but blocks recipe checkpoints
+      # so that an old trace cannot be stored as a new measurement point.
       single_sweep_mode: "unverified"
       operation_complete_timeout: "30 s"
       application_average_count: 200
@@ -365,8 +365,8 @@ devices:
       require_rf_input_limit_definition: true
       signal_generator_output_allowed: false
       rf_input:
-        # Wartości muszą zostać uzupełnione na podstawie dokładnego wariantu,
-        # opcji, aktywnego preampu, tłumików i toru RF.
+        # Set these values for the exact instrument variant, installed options,
+        # preamplifier state, attenuators, and the complete RF signal path.
         max_expected_power_at_connector:
         external_attenuation: "0 dB"
         minimum_internal_attenuation:

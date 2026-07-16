@@ -242,7 +242,7 @@ class OptionalRangeSettings(StrictModel):
 
     def checked_if_complete(self, dimension: str) -> "OptionalRangeSettings":
         if (self.min is None) != (self.max is None):
-            raise ConfigurationError("Zakres opcjonalny musi mieć oba końce albo żadnego.")
+            raise ConfigurationError("An optional range must define both limits or neither limit.")
         if self.min is not None and self.max is not None:
             RangeSettings(min=self.min, max=self.max).checked(dimension)
         return self
@@ -279,9 +279,13 @@ class AnritsuSafety(StrictModel):
         self.reference_level.checked_if_complete(DIMENSION_DBM)
         if self.acquisition_allowed:
             if self.frequency.min is None or self.reference_level.min is None:
-                raise ValueError("Akwizycja Anritsu wymaga kompletnych limitów częstotliwości i reference level.")
+                raise ValueError(
+                    "Anritsu acquisition requires complete frequency and reference-level limits."
+                )
             if self.require_rf_input_limit_definition and self.rf_input.max_expected_power_at_connector is None:
-                raise ValueError("Akwizycja Anritsu wymaga max_expected_power_at_connector.")
+                raise ValueError(
+                    "Anritsu acquisition requires max_expected_power_at_connector to be defined."
+                )
         return self
 
 

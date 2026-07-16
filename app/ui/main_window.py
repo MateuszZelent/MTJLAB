@@ -39,7 +39,12 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from app.devices.anritsu import AnritsuAdapter, SpectrumConfig, SpectrumTrace
+from app.devices.anritsu import (
+    AnritsuAdapter,
+    AnritsuConfigurationSnapshot,
+    SpectrumConfig,
+    SpectrumTrace,
+)
 from app.devices.discovery import DiscoveredInstrument
 from app.devices.keithley import KeithleyAdapter, KeithleySourceRequest
 from app.devices.rigol import (
@@ -2309,6 +2314,7 @@ class AnritsuPage(QWidget):
         left_layout.addLayout(form)
         controls = QGridLayout()
         controls.setSpacing(6)
+        self.read_configuration = QPushButton("Read from instrument")
         configure = QPushButton("Apply configuration")
         self.single = QPushButton("Single + Fetch")
         self.single.setEnabled(single_sweep_available)
@@ -2318,12 +2324,13 @@ class AnritsuPage(QWidget):
         abort = QPushButton("Abort")
         configure.setObjectName("primaryButton")
         abort.setObjectName("warningButton")
-        for button in (configure, self.single, self.live, abort):
+        for button in (self.read_configuration, configure, self.single, self.live, abort):
             button.setProperty("compact", True)
-        controls.addWidget(configure, 0, 0)
-        controls.addWidget(self.single, 0, 1)
-        controls.addWidget(self.live, 1, 0)
-        controls.addWidget(abort, 1, 1)
+        controls.addWidget(self.read_configuration, 0, 0, 1, 2)
+        controls.addWidget(configure, 1, 0)
+        controls.addWidget(self.single, 1, 1)
+        controls.addWidget(self.live, 2, 0)
+        controls.addWidget(abort, 2, 1)
         left_layout.addLayout(controls)
         processing = QFrame()
         processing.setObjectName("anritsuProcessingCard")
@@ -2399,6 +2406,9 @@ class AnritsuPage(QWidget):
         self.workspace_splitter.setStretchFactor(1, 1)
         self.workspace_splitter.setSizes([680, 1100])
         layout.addWidget(self.workspace_splitter, 1)
+        self.read_configuration.clicked.connect(
+            lambda: self._controller.call("read_configuration")
+        )
         configure.clicked.connect(self.configure)
         self.single.clicked.connect(lambda: self._controller.call("single_sweep", "TRAC1"))
         self.live.clicked.connect(self.toggle_live)
@@ -2413,6 +2423,7 @@ class AnritsuPage(QWidget):
         controller.result.connect(self._result)
         controller.error.connect(self._error)
         help_items = {
+            self.read_configuration: "Read Start, Stop, Reference level, and Points from the connected analyser. This sends query commands only and never changes the instrument or approved safety limits.",
             self.average_count: "Number of complete spectra to average. 200 is common in the Thatec workflow. Averaging is performed in linear mW, not directly in dBm.",
             self.acquire_average: "Acquire N complete traces sequentially and create a separate averaged spectrum. The latest raw trace is always retained.",
             self.cancel_average: "Stop the averaging sequence. Already collected temporary frames are discarded; raw/reference data are unchanged.",
@@ -2531,7 +2542,18 @@ class AnritsuPage(QWidget):
         self.status.emit("Anritsu reference spectrum removed")
 
     def _result(self, operation: str, result: object) -> None:
-        if operation == "configure":
+        if operation == "read_configuration" and isinstance(result, AnritsuConfigurationSnapshot):
+            self.start.setText(format_quantity_auto(result.start_hz, DIMENSION_FREQUENCY))
+            self.stop.setText(format_quantity_auto(result.stop_hz, DIMENSION_FREQUENCY))
+            self.reference.setText(f"{result.reference_level_dbm:.9g} dBm")
+            self.points.setValue(result.points)
+            self.banner.show_message(
+                "Current analyser settings loaded into the form. "
+                "The instrument and safety limits were not changed.",
+                kind="success",
+            )
+            self.status.emit("Anritsu current configuration read from instrument")
+        elif operation == "configure":
             self.status.emit("Anritsu configured")
         elif operation == "start_live":
             self._timer.start()
@@ -2637,7 +2659,10 @@ class AnritsuPage(QWidget):
             self._fetch_pending = False
             if self._averaging_active:
                 self.cancel_averaging()
-        if operation in {"configure", "start_live", "fetch_trace", "single_sweep", "emergency_off"}:
+        if operation in {
+            "read_configuration", "configure", "start_live", "fetch_trace",
+            "single_sweep", "emergency_off",
+        }:
             self._timer.stop()
             self.live.setText("Start Live")
             QMessageBox.warning(self, "Anritsu", error)

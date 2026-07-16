@@ -317,7 +317,7 @@ class MainWindowTests(unittest.TestCase):
                 card = window.dashboard.cards["anritsu"]
                 self.assertFalse(card.test_button.isEnabled())
                 with patch.object(
-                    QMessageBox, "question", return_value=QMessageBox.StandardButton.Yes
+                    QMessageBox, "question", return_value=int(QMessageBox.StandardButton.Yes)
                 ):
                     card.assign_button.click()
                 QTest.qWait(100)
@@ -616,6 +616,25 @@ class MainWindowTests(unittest.TestCase):
             anritsu.remove_reference()
             self.assertIsNone(anritsu._reference_trace)
             self.assertIs(anritsu._latest_trace, trace_2)
+        finally:
+            window.close()
+            self.application.processEvents()
+
+    def test_anritsu_read_configuration_populates_form_without_applying(self) -> None:
+        window = MainWindow(".config/settings.yml", simulation=True)
+        try:
+            anritsu = window.anritsu_page
+            anritsu._controller.call = Mock()
+            anritsu.read_configuration.click()
+            anritsu._controller.call.assert_called_once_with("read_configuration")
+
+            snapshot = AnritsuConfigurationSnapshot(2e6, 3e9, -15.5, 2001)
+            anritsu._result("read_configuration", snapshot)
+
+            self.assertEqual(parse_quantity(anritsu.start.text(), DIMENSION_FREQUENCY).si_value, 2e6)
+            self.assertEqual(parse_quantity(anritsu.stop.text(), DIMENSION_FREQUENCY).si_value, 3e9)
+            self.assertEqual(parse_quantity(anritsu.reference.text(), DIMENSION_DBM).si_value, -15.5)
+            self.assertEqual(anritsu.points.value(), 2001)
         finally:
             window.close()
             self.application.processEvents()

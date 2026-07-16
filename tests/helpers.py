@@ -20,6 +20,7 @@ def simulation_settings(*, approved: bool = False, anritsu_enabled: bool = True)
     raw = deepcopy(SettingsRepository(ROOT / ".config" / "settings.yml").load().raw)
     raw["profile"]["state"] = "approved" if approved else "unverified"
     raw["devices"]["keithley"]["connection"]["resource"] = "TCPIP0::fake-keithley::INSTR"
+    raw["devices"]["anritsu"]["connection"]["resource"] = "TCPIP0::fake-anritsu::INSTR"
     raw["devices"]["anritsu"]["safety"]["acquisition_allowed"] = anritsu_enabled
     raw["devices"]["anritsu"]["acquisition"]["single_sweep_mode"] = "standard_scpi_opc"
     raw["devices"]["anritsu"]["safety"]["rf_input"]["max_expected_power_at_connector"] = "-10 dBm"

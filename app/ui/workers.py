@@ -133,6 +133,8 @@ class InstrumentWorker(QObject):
             if operation == "ramp_to_zero":
                 return self._adapter.ramp_to_zero(payload)  # type: ignore[arg-type]
         if isinstance(self._adapter, AnritsuAdapter):
+            if operation == "read_configuration":
+                return self._adapter.read_current_configuration()
             if operation == "configure":
                 return self._adapter.configure_spectrum(payload)  # type: ignore[arg-type]
             if operation == "start_live":

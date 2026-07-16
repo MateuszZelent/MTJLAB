@@ -30,6 +30,16 @@ class SpectrumConfig:
 
 
 @dataclass(frozen=True, slots=True)
+class AnritsuConfigurationSnapshot:
+    """Read-only snapshot of the analyser's current spectrum settings."""
+
+    start_hz: float
+    stop_hz: float
+    reference_level_dbm: float
+    points: int
+
+
+@dataclass(frozen=True, slots=True)
 class SpectrumTrace:
     frequencies_hz: tuple[float, ...]
     powers_dbm: tuple[float, ...]
@@ -127,6 +137,25 @@ class AnritsuAdapter(DeviceAdapter):
 
     def _assert_acquisition_allowed(self) -> None:
         assert_anritsu_acquisition_allowed(self._settings.safety)
+
+    def read_current_configuration(self) -> AnritsuConfigurationSnapshot:
+        """Query current settings without changing the analyser or the safety profile."""
+
+        session = self._require_session()
+        try:
+            start_hz = float(session.query("FREQ:START?"))
+            stop_hz = float(session.query("FREQ:STOP?"))
+            reference_level_dbm = float(session.query("DISP:WIND:TRAC:Y:RLEV?"))
+            points = int(float(session.query("SWE:POIN?")))
+        except (TypeError, ValueError) as exc:
+            raise DeviceError("Anritsu returned an invalid current-configuration response.") from exc
+        if not all(math.isfinite(value) for value in (start_hz, stop_hz, reference_level_dbm)):
+            raise DeviceError("Anritsu returned a non-finite current-configuration value.")
+        if start_hz <= 0 or stop_hz <= start_hz:
+            raise DeviceError("Anritsu returned an invalid current frequency range.")
+        if points < 2:
+            raise DeviceError("Anritsu returned an invalid sweep point count.")
+        return AnritsuConfigurationSnapshot(start_hz, stop_hz, reference_level_dbm, points)
 
     def configure_spectrum(self, config: SpectrumConfig) -> None:
         validate_anritsu_trace_name(config.trace)
