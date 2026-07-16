@@ -73,7 +73,7 @@ class SimulatorTests(unittest.TestCase):
             settings,
             session_factory=SimulatedVisaFactory(
                 "anritsu",
-                fault=SimulatorFault(malformed_response_prefixes=frozenset({"SWE:POIN?"})),
+                fault=SimulatorFault(malformed_response_prefixes=frozenset({"TRAC?"})),
             ),
         )
         anritsu.connect()
