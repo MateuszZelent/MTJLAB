@@ -29,7 +29,7 @@ include = ["app*"]
 exclude = ["recipes*", "submodules*", "tests*"]
 
 [tool.setuptools.package-data]
-app = ["ui/assets/icons/*.svg"]
+app = ["ui/assets/icons/*.svg", "resources/*.yml"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

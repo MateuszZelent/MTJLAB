@@ -18,10 +18,25 @@ from app.safety.keithley import KeithleySourceRequest, validate_keithley_source
 from app.safety.rigol_current import validate_rigol_frequency_sweep, validate_rigol_waveform
 from app.settings import SettingsRepository
 from app.settings.models import StationSettings
-from tests.helpers import ROOT, loaded_settings, simulation_settings
+from tests.helpers import SETTINGS_TEMPLATE, loaded_settings, simulation_settings
 
 
 class QuantityAndSafetyTests(unittest.TestCase):
+    def test_missing_local_settings_are_created_from_safe_packaged_template(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            path = Path(temporary) / ".config" / "settings.yml"
+            repository = SettingsRepository(path)
+
+            loaded = repository.load()
+
+            self.assertTrue(path.is_file())
+            self.assertEqual(loaded.settings.profile.state, "unverified")
+            self.assertIsNone(loaded.settings.rigol.connection.resource)
+            self.assertIsNone(loaded.settings.rigol.identity.expected_serial)
+            original = path.read_bytes()
+            self.assertFalse(repository.ensure_exists())
+            self.assertEqual(path.read_bytes(), original)
+
     def test_scientific_notation_is_scaled_to_si_and_formatted_automatically(self) -> None:
         self.assertEqual(parse_quantity("1e5 kHz", DIMENSION_FREQUENCY).si_value, 1e8)
         self.assertEqual(parse_quantity("1e8", DIMENSION_FREQUENCY, require_unit=False).si_value, 1e8)
@@ -46,9 +61,10 @@ class QuantityAndSafetyTests(unittest.TestCase):
     def test_station_profile_is_loaded_and_outputs_locked(self) -> None:
         settings = loaded_settings()
         self.assertTrue(settings.outputs_locked)
-        self.assertTrue(settings.rigol.identity.require_serial_match)
-        self.assertEqual(settings.rigol.identity.expected_serial, "DG1ZA172902039")
-        raw = deepcopy(SettingsRepository(ROOT / ".config" / "settings.yml").load().raw)
+        self.assertFalse(settings.rigol.identity.require_serial_match)
+        self.assertIsNone(settings.rigol.identity.expected_serial)
+        self.assertIsNone(settings.rigol.connection.resource)
+        raw = deepcopy(SettingsRepository(SETTINGS_TEMPLATE).load().raw)
         raw["profile"]["lock_outputs_when_unverified"] = False
         self.assertTrue(StationSettings.model_validate(raw).outputs_locked)
 
@@ -66,7 +82,7 @@ class QuantityAndSafetyTests(unittest.TestCase):
         )
         self.assertAlmostEqual(estimate.peak_absolute_current_a, 10e-6)
         self.assertAlmostEqual(estimate.peak_estimated_dut_power_w, 5e-9)
-        raw = deepcopy(SettingsRepository(ROOT / ".config" / "settings.yml").load().raw)
+        raw = deepcopy(SettingsRepository(SETTINGS_TEMPLATE).load().raw)
         limits = raw["devices"]["rigol"]["safety"]["channels"]["1"]["lab_limits"]
         limits["high_level"] = {"min": "-1 V", "max": "1 V"}
         limits["low_level"] = {"min": "-1 V", "max": "1 V"}
@@ -86,7 +102,7 @@ class QuantityAndSafetyTests(unittest.TestCase):
             )
 
     def test_rigol_estimated_dut_power_limit_is_enforced_independently(self) -> None:
-        raw = deepcopy(SettingsRepository(ROOT / ".config" / "settings.yml").load().raw)
+        raw = deepcopy(SettingsRepository(SETTINGS_TEMPLATE).load().raw)
         limits = raw["devices"]["rigol"]["safety"]["channels"]["1"]["lab_limits"]
         limits["estimated_load_power"] = {"min": "0 W", "max": "1 uW", "max_abs": "1 uW"}
         settings = StationSettings.model_validate(raw)
@@ -103,7 +119,7 @@ class QuantityAndSafetyTests(unittest.TestCase):
             )
 
     def test_repository_revokes_approval_for_any_configuration_change(self) -> None:
-        source = (ROOT / ".config" / "settings.yml").read_text(encoding="utf-8")
+        source = SETTINGS_TEMPLATE.read_text(encoding="utf-8")
         with tempfile.TemporaryDirectory() as temporary:
             path = Path(temporary) / "settings.yml"
             path.write_text(source, encoding="utf-8")
@@ -129,7 +145,7 @@ class QuantityAndSafetyTests(unittest.TestCase):
             self.assertEqual(repository.load().settings.profile.state, "unverified")
 
     def test_theme_change_does_not_revoke_safety_approval(self) -> None:
-        source = (ROOT / ".config" / "settings.yml").read_text(encoding="utf-8")
+        source = SETTINGS_TEMPLATE.read_text(encoding="utf-8")
         with tempfile.TemporaryDirectory() as temporary:
             path = Path(temporary) / "settings.yml"
             path.write_text(source, encoding="utf-8")
@@ -157,7 +173,7 @@ class QuantityAndSafetyTests(unittest.TestCase):
                 KeithleySourceRequest("B", "current", float("nan"), 0.067),
             )
         simulated = simulation_settings()
-        with self.assertRaisesRegex(SafetyViolation, "skończonymi"):
+        with self.assertRaisesRegex(SafetyViolation, "finite numbers"):
             validate_anritsu_spectrum(
                 simulated.anritsu.safety,
                 start_hz=1e6,
@@ -167,7 +183,7 @@ class QuantityAndSafetyTests(unittest.TestCase):
             )
 
     def test_keithley_preflight_rejects_source_compliance_power(self) -> None:
-        raw = deepcopy(SettingsRepository(ROOT / ".config" / "settings.yml").load().raw)
+        raw = deepcopy(SettingsRepository(SETTINGS_TEMPLATE).load().raw)
         limits = raw["devices"]["keithley"]["safety"]["channels"]["B"]["lab_limits"]
         limits["source_current"] = {"min": "-1 A", "max": "1 A"}
         limits["voltage_compliance"] = {"min": "1 mV", "max": "10 V"}

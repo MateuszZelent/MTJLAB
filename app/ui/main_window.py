@@ -2406,9 +2406,7 @@ class AnritsuPage(QWidget):
         self.workspace_splitter.setStretchFactor(1, 1)
         self.workspace_splitter.setSizes([680, 1100])
         layout.addWidget(self.workspace_splitter, 1)
-        self.read_configuration.clicked.connect(
-            lambda: self._controller.call("read_configuration")
-        )
+        self.read_configuration.clicked.connect(self.read_configuration_from_instrument)
         configure.clicked.connect(self.configure)
         self.single.clicked.connect(lambda: self._controller.call("single_sweep", "TRAC1"))
         self.live.clicked.connect(self.toggle_live)
@@ -2471,6 +2469,10 @@ class AnritsuPage(QWidget):
             self.banner.show_message(f"Invalid spectrum settings: {exc}")
             return
         self._controller.call("configure", config)
+
+    def read_configuration_from_instrument(self) -> None:
+        self.status.emit("Anritsu current-configuration read requested")
+        self._controller.call("read_configuration")
 
     def toggle_live(self) -> None:
         if self._timer.isActive():
@@ -2548,7 +2550,8 @@ class AnritsuPage(QWidget):
             self.reference.setText(f"{result.reference_level_dbm:.9g} dBm")
             self.points.setValue(result.points)
             self.banner.show_message(
-                "Current analyser settings loaded into the form. "
+                f"Current analyser settings loaded into the form (mode: "
+                f"{result.instrument_mode or 'unknown'}). "
                 "The instrument and safety limits were not changed.",
                 severity="success",
             )
@@ -3379,6 +3382,9 @@ class MainWindow(QMainWindow):
             controller.state_changed.connect(lambda state, device=name: self._set_device_state(device, state))
             controller.result.connect(lambda operation, result, current=card: self._device_result(current, operation, result))
             controller.error.connect(lambda operation, error, device=name: self._device_error(device, operation, error))
+            controller.traffic.connect(
+                lambda message, device=name: self._log(f"{device.upper()} VISA {message}")
+            )
             if name == "rigol":
                 controller.capabilities_changed.connect(self.rigol_page.set_capabilities)
             elif name == "anritsu":

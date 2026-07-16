@@ -20,10 +20,18 @@ class InstrumentWorker(QObject):
     state_changed = Signal(str)
     capabilities_changed = Signal(object)
     shutdown_complete = Signal()
+    traffic = Signal(str)
 
     def __init__(self, adapter: DeviceAdapter) -> None:
         super().__init__()
         self._adapter = adapter
+        self._attach_traffic_logger()
+
+    def _attach_traffic_logger(self) -> None:
+        factory = getattr(self._adapter, "_factory", None)
+        setter = getattr(factory, "set_traffic_callback", None)
+        if callable(setter):
+            setter(self.traffic.emit)
 
     @Slot(str, object)
     def execute(self, operation: str, payload: object) -> None:
@@ -65,6 +73,7 @@ class InstrumentWorker(QObject):
             except Exception as exc:
                 failure = failure or exc
             self._adapter = payload
+            self._attach_traffic_logger()
             if failure is not None:
                 raise failure
             return None
@@ -156,6 +165,7 @@ class DeviceController(QObject):
     error = Signal(str, str)
     state_changed = Signal(str)
     capabilities_changed = Signal(object)
+    traffic = Signal(str)
 
     def __init__(self, adapter: DeviceAdapter, parent: QObject | None = None) -> None:
         super().__init__(parent)
@@ -167,6 +177,7 @@ class DeviceController(QObject):
         self._worker.failed.connect(self.error)
         self._worker.state_changed.connect(self.state_changed)
         self._worker.capabilities_changed.connect(self.capabilities_changed)
+        self._worker.traffic.connect(self.traffic)
         self._thread.start()
 
     def call(self, operation: str, payload: object = None) -> None:

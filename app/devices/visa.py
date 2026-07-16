@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 import re
+import time
 from typing import Callable
 
 import pyvisa
@@ -15,20 +16,50 @@ from app.domain.errors import ConnectionError, DeviceError
 class PyVisaSessionFactory:
     """Open a VISA resource using either the system backend or an explicit backend."""
 
+    def __init__(self) -> None:
+        self._traffic_callback: Callable[[str], None] | None = None
+
+    def set_traffic_callback(self, callback: Callable[[str], None] | None) -> None:
+        self._traffic_callback = callback
+
     def open(self, resource: str, backend: str, timeout_ms: int) -> InstrumentSession:
         try:
             manager = pyvisa.ResourceManager() if backend == "system" else pyvisa.ResourceManager(backend)
             session = manager.open_resource(resource, open_timeout=timeout_ms)
             session.timeout = timeout_ms
-            return _ManagedVisaSession(session=session, manager=manager)
+            if self._traffic_callback is not None:
+                self._traffic_callback(
+                    f"OPEN OK resource={resource!r}, backend={backend!r}, timeout={timeout_ms} ms, "
+                    f"read_termination={session.read_termination!r}, "
+                    f"write_termination={session.write_termination!r}"
+                )
+            return _ManagedVisaSession(session, manager, self._traffic_callback)
         except Exception as exc:
-            raise ConnectionError(f"Nie można otworzyć zasobu VISA {resource!r}: {exc}") from exc
+            if self._traffic_callback is not None:
+                self._traffic_callback(f"OPEN ERROR {resource!r}: {exc}")
+            raise ConnectionError(f"Could not open VISA resource {resource!r}: {exc}") from exc
 
 
 class _ManagedVisaSession:
-    def __init__(self, session: InstrumentSession, manager: object) -> None:
+    def __init__(
+        self,
+        session: InstrumentSession,
+        manager: object,
+        traffic_callback: Callable[[str], None] | None = None,
+    ) -> None:
         self._session = session
         self._manager = manager
+        self._traffic_callback = traffic_callback
+
+    def _emit(self, message: str) -> None:
+        if self._traffic_callback is not None:
+            self._traffic_callback(message)
+
+    @staticmethod
+    def _display_response(response: str) -> str:
+        if len(response) <= 1000:
+            return repr(response)
+        return f"{response[:1000]!r}... <{len(response)} characters total>"
 
     @property
     def timeout(self) -> int:
@@ -55,16 +86,27 @@ class _ManagedVisaSession:
         self._session.write_termination = value
 
     def write(self, command: str) -> object:
+        self._emit(f"TX WRITE {command!r}")
         try:
-            return self._session.write(command)
+            result = self._session.write(command)
         except Exception as exc:
-            raise DeviceError(f"VISA write {command!r} nie powiódł się: {exc}") from exc
+            self._emit(f"TX ERROR {command!r}: {exc}")
+            raise DeviceError(f"VISA write {command!r} failed: {exc}") from exc
+        self._emit(f"TX OK {command!r}")
+        return result
 
     def query(self, command: str) -> str:
+        started = time.perf_counter()
+        self._emit(f"TX QUERY {command!r}")
         try:
-            return self._session.query(command).strip()
+            response = self._session.query(command).strip()
         except Exception as exc:
-            raise DeviceError(f"VISA query {command!r} nie powiódł się: {exc}") from exc
+            elapsed_ms = (time.perf_counter() - started) * 1000
+            self._emit(f"RX ERROR {command!r} after {elapsed_ms:.1f} ms: {exc}")
+            raise DeviceError(f"VISA query {command!r} failed: {exc}") from exc
+        elapsed_ms = (time.perf_counter() - started) * 1000
+        self._emit(f"RX {command!r} after {elapsed_ms:.1f} ms: {self._display_response(response)}")
+        return response
 
     def close(self) -> None:
         errors: list[Exception] = []

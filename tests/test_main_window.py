@@ -20,6 +20,7 @@ from app.devices.anritsu import AnritsuConfigurationSnapshot, SpectrumTrace
 from app.domain.quantities import DIMENSION_DBM, DIMENSION_FREQUENCY, parse_quantity
 from app.settings.repository import SettingsRepository
 from app.ui.main_window import LimitEditDialog, MainWindow
+from tests.helpers import SETTINGS_TEMPLATE
 
 
 class MainWindowTests(unittest.TestCase):
@@ -172,7 +173,7 @@ class MainWindowTests(unittest.TestCase):
             self.application.processEvents()
 
     def test_theme_switch_supports_light_dark_and_system_persistence(self) -> None:
-        source = Path(".config/settings.yml").read_text(encoding="utf-8")
+        source = SETTINGS_TEMPLATE.read_text(encoding="utf-8")
         with tempfile.TemporaryDirectory() as temporary:
             path = Path(temporary) / "settings.yml"
             path.write_text(source, encoding="utf-8")
@@ -196,7 +197,7 @@ class MainWindowTests(unittest.TestCase):
                 self.application.processEvents()
 
     def test_discovered_assignment_updates_card_and_worker_adapter_before_connect(self) -> None:
-        source = Path(".config/settings.yml").read_text(encoding="utf-8")
+        source = SETTINGS_TEMPLATE.read_text(encoding="utf-8")
         with tempfile.TemporaryDirectory() as temporary:
             path = Path(temporary) / "settings.yml"
             path.write_text(source, encoding="utf-8")
@@ -302,7 +303,7 @@ class MainWindowTests(unittest.TestCase):
             self.application.processEvents()
 
     def test_anritsu_test_unlocks_only_after_selected_resource_is_saved(self) -> None:
-        source = Path(".config/settings.yml").read_text(encoding="utf-8")
+        source = SETTINGS_TEMPLATE.read_text(encoding="utf-8")
         with tempfile.TemporaryDirectory() as temporary:
             path = Path(temporary) / "settings.yml"
             path.write_text(source, encoding="utf-8")
@@ -374,7 +375,7 @@ class MainWindowTests(unittest.TestCase):
             self.application.processEvents()
 
     def test_limit_edit_is_autosaved_after_short_idle_period(self) -> None:
-        source = Path(".config/settings.yml").read_text(encoding="utf-8")
+        source = SETTINGS_TEMPLATE.read_text(encoding="utf-8")
         with tempfile.TemporaryDirectory() as temporary:
             path = Path(temporary) / "settings.yml"
             path.write_text(source, encoding="utf-8")
@@ -658,7 +659,7 @@ class MainWindowTests(unittest.TestCase):
             self.application.processEvents()
 
     def test_limit_edit_button_opens_popup_and_saves_the_range(self) -> None:
-        source = Path(".config/settings.yml").read_text(encoding="utf-8")
+        source = SETTINGS_TEMPLATE.read_text(encoding="utf-8")
         with tempfile.TemporaryDirectory() as temporary:
             path = Path(temporary) / "settings.yml"
             path.write_text(source, encoding="utf-8")

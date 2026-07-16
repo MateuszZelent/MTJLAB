@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from copy import deepcopy
 from dataclasses import dataclass
+from importlib.resources import files
 import os
 from pathlib import Path
 import tempfile
@@ -35,8 +36,9 @@ class SettingsRepository:
         self._yaml.default_flow_style = False
 
     def load(self) -> LoadedSettings:
+        self.ensure_exists()
         if not self.path.is_file():
-            raise ConfigurationError(f"Brak pliku konfiguracji: {self.path}")
+            raise ConfigurationError(f"Configuration file is missing: {self.path}")
         try:
             with self.path.open("r", encoding="utf-8") as stream:
                 raw = self._yaml.load(stream)
@@ -49,6 +51,32 @@ class SettingsRepository:
         except ValidationError as exc:
             raise ConfigurationError(f"Nieprawidłowy settings.yml:\n{exc}") from exc
         return LoadedSettings(settings=settings, raw=raw, source=self.path)
+
+    def ensure_exists(self) -> bool:
+        """Create an unverified local profile from the packaged template once."""
+
+        if self.path.exists():
+            return False
+        try:
+            template = files("app").joinpath("resources/settings.template.yml").read_bytes()
+        except (FileNotFoundError, ModuleNotFoundError) as exc:
+            raise ConfigurationError("The packaged settings template is missing.") from exc
+        self.path.parent.mkdir(parents=True, exist_ok=True)
+        fd, temp_name = tempfile.mkstemp(
+            prefix=f".{self.path.name}.", suffix=".tmp", dir=self.path.parent
+        )
+        temp_path = Path(temp_name)
+        try:
+            with os.fdopen(fd, "wb") as stream:
+                stream.write(template)
+                stream.flush()
+                os.fsync(stream.fileno())
+            if self.path.exists():
+                return False
+            os.replace(temp_path, self.path)
+            return True
+        finally:
+            temp_path.unlink(missing_ok=True)
 
     def save(self, settings: StationSettings) -> None:
         """Persist a typed profile, revoking approval after a configuration edit."""

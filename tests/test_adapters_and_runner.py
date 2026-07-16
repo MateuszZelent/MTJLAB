@@ -220,6 +220,7 @@ class AdapterAndRunnerTests(unittest.TestCase):
         session = FakeVisaSession(
             responses={
                 "*IDN?": "ANRITSU,MS2830A,123456,1.0",
+                "INST?": "SPECT",
                 "FREQ:START?": "1000000",
                 "FREQ:STOP?": "4000000000",
                 "DISP:WIND:TRAC:Y:RLEV?": "-10",
@@ -236,10 +237,12 @@ class AdapterAndRunnerTests(unittest.TestCase):
         self.assertEqual(snapshot.stop_hz, 4e9)
         self.assertEqual(snapshot.reference_level_dbm, -10)
         self.assertEqual(snapshot.points, 1001)
+        self.assertEqual(snapshot.instrument_mode, "SPECT")
         self.assertEqual(
             session.writes,
             [
                 "*IDN?",
+                "INST?",
                 "FREQ:START?",
                 "FREQ:STOP?",
                 "DISP:WIND:TRAC:Y:RLEV?",
@@ -386,8 +389,7 @@ class AdapterAndRunnerTests(unittest.TestCase):
             )
 
     def test_rigol_requires_one_shot_arm_before_enabling_output(self) -> None:
-        raw = deepcopy(loaded_settings().model_dump(mode="python"))
-        raw["profile"]["state"] = "approved"
+        raw = deepcopy(simulation_settings(approved=True).model_dump(mode="python"))
         raw["devices"]["rigol"]["safety"]["allow_output_enable"] = True
         settings = StationSettings.model_validate(raw)
         session = FakeVisaSession(

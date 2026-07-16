@@ -10,15 +10,17 @@ from app.settings.models import StationSettings
 
 
 ROOT = Path(__file__).resolve().parents[1]
+SETTINGS_TEMPLATE = ROOT / "app" / "resources" / "settings.template.yml"
 
 
 def loaded_settings() -> StationSettings:
-    return SettingsRepository(ROOT / ".config" / "settings.yml").load().settings
+    return SettingsRepository(SETTINGS_TEMPLATE).load().settings
 
 
 def simulation_settings(*, approved: bool = False, anritsu_enabled: bool = True) -> StationSettings:
-    raw = deepcopy(SettingsRepository(ROOT / ".config" / "settings.yml").load().raw)
+    raw = deepcopy(SettingsRepository(SETTINGS_TEMPLATE).load().raw)
     raw["profile"]["state"] = "approved" if approved else "unverified"
+    raw["devices"]["rigol"]["connection"]["resource"] = "USB0::fake-rigol::INSTR"
     raw["devices"]["keithley"]["connection"]["resource"] = "TCPIP0::fake-keithley::INSTR"
     raw["devices"]["anritsu"]["connection"]["resource"] = "TCPIP0::fake-anritsu::INSTR"
     raw["devices"]["anritsu"]["safety"]["acquisition_allowed"] = anritsu_enabled

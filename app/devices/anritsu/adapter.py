@@ -37,6 +37,7 @@ class AnritsuConfigurationSnapshot:
     stop_hz: float
     reference_level_dbm: float
     points: int
+    instrument_mode: str = ""
 
 
 @dataclass(frozen=True, slots=True)
@@ -76,9 +77,11 @@ class AnritsuAdapter(DeviceAdapter):
         timeout = int(parse_quantity(self._settings.connection.timeout, DIMENSION_TIME).si_value * 1000)
         session = self._factory.open(resource, self._settings.connection.visa_backend, timeout)
         try:
-            if self._settings.connection.read_termination is not None:
+            # Empty strings preserve the VISA backend defaults. Assigning an
+            # empty terminator can make MS2830A queries time out over GPIB.
+            if self._settings.connection.read_termination:
                 session.read_termination = self._settings.connection.read_termination
-            if self._settings.connection.write_termination is not None:
+            if self._settings.connection.write_termination:
                 session.write_termination = self._settings.connection.write_termination
             identity = parse_identity(resource, session.query("*IDN?"))
             validate_identity(
@@ -143,6 +146,7 @@ class AnritsuAdapter(DeviceAdapter):
 
         session = self._require_session()
         try:
+            instrument_mode = session.query("INST?").strip()
             start_hz = float(session.query("FREQ:START?"))
             stop_hz = float(session.query("FREQ:STOP?"))
             reference_level_dbm = float(session.query("DISP:WIND:TRAC:Y:RLEV?"))
@@ -155,7 +159,9 @@ class AnritsuAdapter(DeviceAdapter):
             raise DeviceError("Anritsu returned an invalid current frequency range.")
         if points < 2:
             raise DeviceError("Anritsu returned an invalid sweep point count.")
-        return AnritsuConfigurationSnapshot(start_hz, stop_hz, reference_level_dbm, points)
+        return AnritsuConfigurationSnapshot(
+            start_hz, stop_hz, reference_level_dbm, points, instrument_mode
+        )
 
     def configure_spectrum(self, config: SpectrumConfig) -> None:
         validate_anritsu_trace_name(config.trace)
