@@ -89,6 +89,7 @@ class DeviceAdapter(ABC):
     def __init__(self) -> None:
         self._state = DeviceState.DISCONNECTED
         self._identity: DeviceIdentity | None = None
+        self._capabilities = None
 
     @property
     def state(self) -> DeviceState:
@@ -97,6 +98,11 @@ class DeviceAdapter(ABC):
     @property
     def identity(self) -> DeviceIdentity | None:
         return self._identity
+
+    @property
+    def capabilities(self):
+        """Capabilities established for this session; safe to serialize into a run."""
+        return self._capabilities
 
     @property
     def connected(self) -> bool:
@@ -112,5 +118,9 @@ class DeviceAdapter(ABC):
 
     @abstractmethod
     def emergency_off(self) -> None:
-        """Best-effort, idempotent output shutdown.  Must not raise on disconnect."""
+        """Best-effort, idempotent shutdown.
 
+        A transport failure must leave the adapter in ``UNKNOWN`` rather than
+        falsely reporting an output-off state.  The method remains
+        non-throwing so all other devices still receive their shutdown action.
+        """

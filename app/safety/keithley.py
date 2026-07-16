@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+import math
 from typing import Literal
 
 from app.domain.errors import SafetyViolation
@@ -21,9 +22,17 @@ class KeithleySourceRequest:
     compliance_si: float
     nplc: float = 1.0
     settle_time_s: float = 0.0
+    sense_mode: Literal["2wire", "4wire"] = "2wire"
+    source_autorange: bool = True
+    source_range_si: float | None = None
+    measure_voltage_autorange: bool = True
+    measure_voltage_range_si: float | None = None
+    measure_current_autorange: bool = True
+    measure_current_range_si: float | None = None
 
 
 def _range_check(name: str, value: float, lower: str, upper: str, dimension: str) -> None:
+    _require_finite(name, value)
     minimum = parse_quantity(lower, dimension).si_value
     maximum = parse_quantity(upper, dimension).si_value
     # A sweep endpoint calculated with binary floats can differ from its exact
@@ -35,6 +44,20 @@ def _range_check(name: str, value: float, lower: str, upper: str, dimension: str
 
 
 def validate_keithley_source(channel: KeithleyChannelSettings, request: KeithleySourceRequest) -> None:
+    for name, value in (
+        ("source level", request.level_si),
+        ("compliance", request.compliance_si),
+        ("NPLC", request.nplc),
+        ("settle time", request.settle_time_s),
+    ):
+        _require_finite(name, value)
+    for name, value in (
+        ("source range", request.source_range_si),
+        ("measure voltage range", request.measure_voltage_range_si),
+        ("measure current range", request.measure_current_range_si),
+    ):
+        if value is not None:
+            _require_finite(name, value)
     if request.mode not in channel.allowed_source_modes:
         raise SafetyViolation(f"Tryb źródła {request.mode} nie jest dozwolony dla kanału Keithley.")
     if not channel.enabled:
@@ -43,6 +66,8 @@ def validate_keithley_source(channel: KeithleyChannelSettings, request: Keithley
         raise SafetyViolation("NPLC musi mieścić się w zakresie 0.001–25.")
     if request.settle_time_s < 0:
         raise SafetyViolation("Czas ustalania nie może być ujemny.")
+    if request.sense_mode not in {"2wire", "4wire"}:
+        raise SafetyViolation("Sense mode Keithley musi być 2wire albo 4wire.")
     limits = channel.lab_limits
     if request.mode == "current":
         _range_check("source current", request.level_si, limits.source_current.min, limits.source_current.max, DIMENSION_CURRENT)
@@ -53,6 +78,71 @@ def validate_keithley_source(channel: KeithleyChannelSettings, request: Keithley
     else:
         if request.level_si != 0 or request.compliance_si != 0:
             raise SafetyViolation("Tryb measure_only nie może wymuszać poziomu ani compliance.")
+        if not request.source_autorange or request.source_range_si is not None:
+            raise SafetyViolation("Tryb measure_only nie obsługuje zakresu źródła; ustaw source_autorange=true.")
+    source_dimension = DIMENSION_CURRENT if request.mode == "current" else DIMENSION_VOLTAGE
+    source_limits = limits.source_current if request.mode == "current" else limits.source_voltage
+    source_required = abs(request.level_si)
+    _validate_manual_range(
+        "source range",
+        request.source_autorange,
+        request.source_range_si,
+        source_required,
+        source_limits.min,
+        source_limits.max,
+        source_dimension,
+    )
+    voltage_required = abs(request.compliance_si if request.mode == "current" else request.level_si)
+    current_required = abs(request.level_si if request.mode == "current" else request.compliance_si)
+    _validate_manual_range(
+        "measure voltage range",
+        request.measure_voltage_autorange,
+        request.measure_voltage_range_si,
+        voltage_required,
+        limits.measured_voltage_trip.min,
+        limits.measured_voltage_trip.max,
+        DIMENSION_VOLTAGE,
+    )
+    _validate_manual_range(
+        "measure current range",
+        request.measure_current_autorange,
+        request.measure_current_range_si,
+        current_required,
+        limits.measured_current_trip.min,
+        limits.measured_current_trip.max,
+        DIMENSION_CURRENT,
+    )
+
+
+def _validate_manual_range(
+    name: str,
+    autorange: bool,
+    manual_range_si: float | None,
+    required_si: float,
+    lower: str,
+    upper: str,
+    dimension: str,
+) -> None:
+    if autorange:
+        if manual_range_si is not None:
+            raise SafetyViolation(f"{name}: ręczny zakres wymaga autorange=false.")
+        return
+    if manual_range_si is None or manual_range_si <= 0:
+        raise SafetyViolation(f"{name}: autorange=false wymaga dodatniego zakresu.")
+    maximum = max(
+        abs(parse_quantity(lower, dimension).si_value),
+        abs(parse_quantity(upper, dimension).si_value),
+    )
+    if manual_range_si < required_si or manual_range_si > maximum:
+        raise SafetyViolation(
+            f"{name}={manual_range_si:.9g} nie obejmuje wymaganej wartości {required_si:.9g} "
+            f"albo przekracza limit {maximum:.9g} SI."
+        )
+
+
+def _require_finite(name: str, value: float) -> None:
+    if not math.isfinite(value):
+        raise SafetyViolation(f"{name} musi być skończoną liczbą.")
 
 
 def validate_keithley_measurement(channel: KeithleyChannelSettings, voltage_v: float, current_a: float) -> None:

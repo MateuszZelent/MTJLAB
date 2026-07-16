@@ -21,6 +21,8 @@ def simulation_settings(*, approved: bool = False, anritsu_enabled: bool = True)
     raw["profile"]["state"] = "approved" if approved else "unverified"
     raw["devices"]["keithley"]["connection"]["resource"] = "TCPIP0::fake-keithley::INSTR"
     raw["devices"]["anritsu"]["safety"]["acquisition_allowed"] = anritsu_enabled
+    raw["devices"]["anritsu"]["acquisition"]["single_sweep_mode"] = "standard_scpi_opc"
     raw["devices"]["anritsu"]["safety"]["rf_input"]["max_expected_power_at_connector"] = "-10 dBm"
+    raw["devices"]["anritsu"]["safety"]["frequency"] = {"min": "1 Hz", "max": "100 GHz"}
+    raw["devices"]["anritsu"]["safety"]["reference_level"] = {"min": "-150 dBm", "max": "30 dBm"}
     return StationSettings.model_validate(raw)
-

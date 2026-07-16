@@ -4,3 +4,4 @@ __pycache__/gui.cpython-314.pyc
 *.egg-info/
 measurements/
 *.h5
+.config/*.bak

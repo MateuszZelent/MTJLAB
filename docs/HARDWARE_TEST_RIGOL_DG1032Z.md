@@ -85,3 +85,20 @@ CH1: SQU, 1 kHz, HighL = 1 mV, LowL = -1 mV, LOAD = HIGHZ
 ```
 
 Ten krok zmieni konfigurację generatora, ale nie dostarczy energii do DUT. Włączenie wyjścia wymaga osobnego zatwierdzenia profilu, deklaracji impedancji DUT oraz jawnej akcji ARM/Output ON.
+
+## Aktualna blokada transportu VISA
+
+Podczas późniejszej, pasywnej próby wykrycia w tym samym środowisku Windows
+backend systemowy VISA zwrócił `VI_ERROR_SYSTEM_ERROR (-1073807360)`, a
+`pyvisa-py` nie wykrył żadnego zasobu USB. Odczyt PnP został zablokowany przez
+uprawnienia systemowe. Nie wysłano w tej próbie żadnej komendy SCPI.
+
+`pyvisa-info` potwierdza obecność NI-VISA i backendu PyUSB/libusb1, jednak
+bezpośrednie otwarcie znanego zasobu przez `@py` zwraca `ValueError: No device
+found`. To wskazuje na problem widoczności/sterownika USB, a nie brak pakietu
+Python. Próba nie otworzyła sesji, więc również nie wysłała `*IDN?`.
+
+Przed następnym testem kwalifikacyjnym należy przywrócić działanie sterownika
+VISA/USB (np. przez ponowne podłączenie urządzenia, sprawdzenie NI-VISA/Rigol
+UltraSigma i zamknięcie aplikacji blokującej zasób). Dopiero po udanym,
+read-only `*IDN?` można kontynuować testy na sztucznym obciążeniu.

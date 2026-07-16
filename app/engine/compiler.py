@@ -24,6 +24,7 @@ from app.domain.quantities import (
 )
 from app.recipes.models import Recipe, RecipeNode
 from app.safety.keithley import KeithleySourceRequest, validate_keithley_source
+from app.safety.anritsu import validate_anritsu_spectrum, validate_anritsu_trace_name
 from app.safety.rigol_current import validate_rigol_waveform
 from app.settings.models import StationSettings
 
@@ -49,6 +50,7 @@ class PlanAction:
     kind: str
     payload: dict[str, Any]
     setpoints_si: dict[str, float]
+    is_finally: bool = False
 
 
 @dataclass(frozen=True, slots=True)
@@ -86,6 +88,7 @@ class RecipeCompiler:
                     "kind": item.kind,
                     "payload": self._canonicalize(item.payload),
                     "setpoints": item.setpoints_si,
+                    "is_finally": item.is_finally,
                 }
                 for item in actions
             ],
@@ -177,7 +180,7 @@ class RecipeCompiler:
         if node.type == "configure_rigol":
             payload = self._compile_rigol(data)
         elif node.type == "configure_keithley":
-            payload = self._compile_keithley(data)
+            payload = self._compile_keithley(data, node.id)
         elif node.type == "configure_anritsu":
             payload = self._compile_anritsu(data)
         elif node.type == "measure_keithley":
@@ -186,7 +189,11 @@ class RecipeCompiler:
                 raise ConfigurationError(f"{node.id}: measure_keithley wymaga channel A lub B.")
             payload = {"channel": channel}
         elif node.type == "acquire_spectrum":
-            payload = {"trace": str(data.get("trace", "TRAC1"))}
+            if self._settings.anritsu.acquisition.single_sweep_mode != "standard_scpi_opc":
+                raise SafetyViolation(
+                    "acquire_spectrum wymaga zatwierdzonego protokołu Anritsu standard_scpi_opc."
+                )
+            payload = {"trace": validate_anritsu_trace_name(str(data.get("trace", "TRAC1")))}
         elif node.type == "wait":
             duration = self._resolve_quantity(data.get("duration"), DIMENSION_TIME, context).si_value
             if duration < 0 or duration > 3600:
@@ -194,19 +201,67 @@ class RecipeCompiler:
             payload = {"duration_s": duration}
         elif node.type == "set_rigol_output":
             channel = int(data.get("channel", 0))
-            enabled = bool(data.get("enabled"))
+            if channel not in {1, 2}:
+                raise ConfigurationError("set_rigol_output wymaga channel 1 albo 2.")
+            enabled = self._require_boolean(data, "enabled", node.id)
             self._assert_output_action_allowed("rigol", enabled)
             payload = {"channel": channel, "enabled": enabled}
+        elif node.type == "arm_rigol_output":
+            channel = int(data.get("channel", 0))
+            if channel not in {1, 2}:
+                raise ConfigurationError("arm_rigol_output wymaga channel 1 albo 2.")
+            self._assert_output_action_allowed("rigol", True)
+            payload = {"channel": channel}
         elif node.type == "set_keithley_output":
             channel = str(data.get("channel", ""))
-            enabled = bool(data.get("enabled"))
+            if channel not in {"A", "B"}:
+                raise ConfigurationError("set_keithley_output wymaga channel A albo B.")
+            enabled = self._require_boolean(data, "enabled", node.id)
             self._assert_output_action_allowed("keithley", enabled)
             payload = {"channel": channel, "enabled": enabled}
+        elif node.type == "ramp_keithley_to_zero":
+            channel = str(data.get("channel", ""))
+            if channel not in {"A", "B"}:
+                raise ConfigurationError("ramp_keithley_to_zero wymaga channel A albo B.")
+            deadline = self._resolve_quantity(data.get("deadline", "10 s"), DIMENSION_TIME, context).si_value
+            if deadline <= 0 or deadline > 120:
+                raise SafetyViolation("Deadline rampy Keithley musi być w zakresie (0, 120] s.")
+            payload = {"channel": channel, "deadline_s": deadline}
+        elif node.type == "arm_keithley_output":
+            channel = str(data.get("channel", ""))
+            if channel not in {"A", "B"}:
+                raise ConfigurationError("arm_keithley_output wymaga channel A albo B.")
+            self._assert_output_action_allowed("keithley", True)
+            payload = {"channel": channel}
         else:
             raise ConfigurationError(f"{node.id}: nieobsługiwany typ akcji {node.type!r}.")
-        if is_finally and node.type in {"set_rigol_output", "set_keithley_output"} and payload["enabled"]:
-            raise SafetyViolation("Sekcja finally nie może włączać wyjść.")
-        return PlanAction(node.id, node.type, payload, setpoints)
+        if is_finally:
+            safe_finally_actions = {"ramp_keithley_to_zero", "set_rigol_output", "set_keithley_output"}
+            if node.type not in safe_finally_actions:
+                raise SafetyViolation("Sekcja finally może zawierać tylko rampę Keithley albo wyłączenie wyjścia.")
+            if node.type in {"set_rigol_output", "set_keithley_output"} and payload["enabled"]:
+                raise SafetyViolation("Sekcja finally nie może włączać wyjść.")
+        return PlanAction(node.id, node.type, payload, setpoints, is_finally=is_finally)
+
+    @staticmethod
+    def _require_boolean(data: dict[str, Any], key: str, node_id: str) -> bool:
+        value = data.get(key)
+        if not isinstance(value, bool):
+            raise ConfigurationError(f"{node_id}: {key} musi być wartością true albo false, nie tekstem.")
+        return value
+
+    @staticmethod
+    def _optional_boolean(data: dict[str, Any], key: str, default: bool, node_id: str) -> bool:
+        if key not in data:
+            return default
+        return RecipeCompiler._require_boolean(data, key, node_id)
+
+    @staticmethod
+    def _optional_quantity(data: dict[str, Any], key: str, dimension: str) -> float | None:
+        value = data.get(key)
+        if value is None or (isinstance(value, str) and value.strip().upper() == "AUTO"):
+            return None
+        return parse_quantity(value, dimension).si_value
 
     def _assert_output_action_allowed(self, device: str, enabled: bool) -> None:
         if not enabled:
@@ -250,7 +305,7 @@ class RecipeCompiler:
         )
         return {"config": config}
 
-    def _compile_keithley(self, data: dict[str, Any]) -> dict[str, Any]:
+    def _compile_keithley(self, data: dict[str, Any], node_id: str) -> dict[str, Any]:
         channel = str(data.get("channel", ""))
         mode = str(data.get("mode", ""))
         if channel not in {"A", "B"} or mode not in {"current", "voltage", "measure_only"}:
@@ -266,25 +321,31 @@ class RecipeCompiler:
             compliance_si=compliance,
             nplc=float(data.get("nplc", 1.0)),
             settle_time_s=self._resolve_quantity(data.get("settle_time", "0 s"), DIMENSION_TIME, {}).si_value,
+            sense_mode=str(data.get("sense_mode", "2wire")),  # type: ignore[arg-type]
+            source_autorange=self._optional_boolean(data, "source_autorange", True, node_id),
+            source_range_si=self._optional_quantity(data, "source_range", dimension),
+            measure_voltage_autorange=self._optional_boolean(data, "measure_voltage_autorange", True, node_id),
+            measure_voltage_range_si=self._optional_quantity(data, "measure_voltage_range", DIMENSION_VOLTAGE),
+            measure_current_autorange=self._optional_boolean(data, "measure_current_autorange", True, node_id),
+            measure_current_range_si=self._optional_quantity(data, "measure_current_range", DIMENSION_CURRENT),
         )
         validate_keithley_source(self._settings.keithley.safety.channels[channel], request)
         return {"request": request}
 
     def _compile_anritsu(self, data: dict[str, Any]) -> dict[str, Any]:
         safety = self._settings.anritsu.safety
-        if not safety.acquisition_allowed or (
-            safety.require_rf_input_limit_definition and safety.rf_input.get("max_expected_power_at_connector") is None
-        ):
-            raise SafetyViolation("configure_anritsu jest zablokowane do czasu zatwierdzenia limitów RF.")
         config = SpectrumConfig(
             start_hz=self._resolve_quantity(data["start_frequency"], DIMENSION_FREQUENCY, {}).si_value,
             stop_hz=self._resolve_quantity(data["stop_frequency"], DIMENSION_FREQUENCY, {}).si_value,
             reference_level_dbm=self._resolve_quantity(data["reference_level"], DIMENSION_DBM, {}).si_value,
             points=int(data["points"]),
-            trace=str(data.get("trace", "TRAC1")),
+            trace=validate_anritsu_trace_name(str(data.get("trace", "TRAC1"))),
         )
-        if config.start_hz <= 0 or config.stop_hz <= config.start_hz:
-            raise SafetyViolation("Anritsu: start_frequency musi być dodatnie i mniejsze od stop_frequency.")
-        if not safety.sweep_points.min <= config.points <= safety.sweep_points.max:
-            raise SafetyViolation("Anritsu: liczba punktów poza zatwierdzonym zakresem.")
+        validate_anritsu_spectrum(
+            safety,
+            start_hz=config.start_hz,
+            stop_hz=config.stop_hz,
+            reference_level_dbm=config.reference_level_dbm,
+            points=config.points,
+        )
         return {"config": config}

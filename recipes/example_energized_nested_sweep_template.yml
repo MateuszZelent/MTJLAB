@@ -1,5 +1,11 @@
 schema_version: 1
-name: "Keithley B current × Rigol CH1 high level × Anritsu spectrum"
+name: "TEMPLATE — Keithley B current × Rigol CH1 × Anritsu (energised)"
+
+# This 100 × 20 template reproduces the requested measurement topology.
+# It is intentionally blocked by the distributed station profile.  Before
+# compiling it for hardware, an authorised person must approve the profile,
+# enable both output permissions, qualify Anritsu standard_scpi_opc and test a
+# single point on a laboratory load.
 
 root:
   id: sequence-main
@@ -26,7 +32,13 @@ root:
           level: "${keithley.B.current}"
           compliance: "67 mV"
           nplc: 1.0
-          settle_time: "100 ms"
+        - id: keithley-b-arm
+          type: arm_keithley_output
+          channel: B
+        - id: keithley-b-on
+          type: set_keithley_output
+          channel: B
+          enabled: true
         - id: rigol-high-level-sweep
           type: sweep
           target: "rigol.1.high_level"
@@ -44,6 +56,13 @@ root:
               low_level: "-1 mV"
               output_load: HIGHZ
               dut_min_impedance: "50 ohm"
+            - id: rigol-ch1-arm
+              type: arm_rigol_output
+              channel: 1
+            - id: rigol-ch1-on
+              type: set_rigol_output
+              channel: 1
+              enabled: true
             - id: wait-for-settle
               type: wait
               duration: "100 ms"
@@ -53,17 +72,25 @@ root:
             - id: acquire-spectrum
               type: acquire_spectrum
               trace: TRAC1
+            - id: rigol-ch1-off
+              type: set_rigol_output
+              channel: 1
+              enabled: false
+        - id: keithley-b-ramp-zero
+          type: ramp_keithley_to_zero
+          channel: B
+          deadline: "10 s"
 
 finally:
-  - id: keithley-b-ramp-zero
-    type: ramp_keithley_to_zero
-    channel: B
-    deadline: "10 s"
-  - id: rigol-ch1-off
+  - id: rigol-ch1-off-finally
     type: set_rigol_output
     channel: 1
     enabled: false
-  - id: keithley-b-off
+  - id: keithley-b-ramp-zero-finally
+    type: ramp_keithley_to_zero
+    channel: B
+    deadline: "10 s"
+  - id: keithley-b-off-finally
     type: set_keithley_output
     channel: B
     enabled: false

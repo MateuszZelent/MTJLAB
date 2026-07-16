@@ -1,22 +1,22 @@
-# Konfiguracja stanowiska pomiarowego.
+# Measurement station configuration.
 #
-# UWAGA: profil startuje jako NIEZATWIERDZONY. Aplikacja nie może włączyć
-# żadnego wyjścia, dopóki osoba odpowiedzialna nie potwierdzi modelu urządzeń,
-# połączeń DUT i limitów laboratoryjnych.
+# WARNING: the profile starts as UNVERIFIED. The application cannot enable
+# any output until an authorized person confirms instrument models,
+# DUT connections and laboratory limits.
 
 schema_version: 1
 
 profile:
   id: "default-lab-profile"
-  name: "Domyślny profil stanowiska"
+  name: "Default station profile"
   state: "unverified"          # unverified | approved | revoked
-  approved_by: null
-  approved_at: null
-  approval_note: "Uzupełnij modele, impedancje i limity przed pomiarem."
+  approved_by:
+  approved_at:
+  approval_note: "Profile approval is required after settings changes."
   lock_outputs_when_unverified: true
 
 application:
-  locale: "pl_PL"
+  locale: "en_US"
   log_level: "INFO"
   service_console_enabled: false
   require_operator_confirmation_before_arming: true
@@ -48,10 +48,10 @@ execution:
   stop_on_lost_connection: true
   max_expanded_points: 100000
   emergency_stop_order:
-    - "keithley.outputs_off"
-    - "rigol.outputs_off"
-    - "anritsu.abort_acquisition"
-    - "storage.flush_checkpoint"
+  - "keithley.outputs_off"
+  - "rigol.outputs_off"
+  - "anritsu.abort_acquisition"
+  - "storage.flush_checkpoint"
 
 storage:
   output_directory: "./measurements"
@@ -81,12 +81,12 @@ devices:
       resource: "USB0::0x1AB1::0x0642::DG1ZA172902039::INSTR"
       visa_backend: "system"
       timeout: "4 s"
-      read_termination: null
-      write_termination: null
+      read_termination:
+      write_termination:
     identity:
       expected_vendor_contains: "RIGOL"
       expected_models:
-        - "DG1032Z"
+      - "DG1032Z"
       require_serial_match: true
       expected_serial: "DG1ZA172902039"
     capabilities:
@@ -104,13 +104,13 @@ devices:
         "1":
           enabled: true
           allowed_waveforms:
-            - "SIN"
-            - "SQU"
-            - "RAMP"
-            - "PULS"
-            - "NOIS"
-            - "USER"
-            - "DC"
+          - "SIN"
+          - "SQU"
+          - "RAMP"
+          - "PULS"
+          - "NOIS"
+          - "USER"
+          - "DC"
           lab_limits:
             frequency:
               min: "1 Hz"
@@ -134,12 +134,27 @@ devices:
               enforcement: "preflight_model_only"
             declared_dut_impedance:
               min: "50 ohm"
-              nominal: null
+              nominal:
             settle_time:
               min: "10 ms"
               max: "10 s"
+            modulation_rate:
+              min: "1 Hz"
+              max: "1 MHz"
+            sweep_duration:
+              min: "1 ms"
+              max: "100 s"
+            sweep_steps:
+              min: 2
+              max: 10000
+            burst_period:
+              min: "1 us"
+              max: "10 s"
+            burst_cycles:
+              min: 1
+              max: 1000000
           defaults:
-            waveform: "SQU"
+            waveform: "SIN"
             frequency: "1 kHz"
             high_level: "1 mV"
             low_level: "-1 mV"
@@ -148,13 +163,13 @@ devices:
         "2":
           enabled: false
           allowed_waveforms:
-            - "SIN"
-            - "SQU"
-            - "RAMP"
-            - "PULS"
-            - "NOIS"
-            - "USER"
-            - "DC"
+          - "SIN"
+          - "SQU"
+          - "RAMP"
+          - "PULS"
+          - "NOIS"
+          - "USER"
+          - "DC"
           lab_limits:
             frequency:
               min: "1 Hz"
@@ -178,10 +193,25 @@ devices:
               enforcement: "preflight_model_only"
             declared_dut_impedance:
               min: "50 ohm"
-              nominal: null
+              nominal:
             settle_time:
               min: "10 ms"
               max: "10 s"
+            modulation_rate:
+              min: "1 Hz"
+              max: "1 MHz"
+            sweep_duration:
+              min: "1 ms"
+              max: "100 s"
+            sweep_steps:
+              min: 2
+              max: 10000
+            burst_period:
+              min: "1 us"
+              max: "10 s"
+            burst_cycles:
+              min: 1
+              max: 1000000
           defaults:
             waveform: "SIN"
             frequency: "1 kHz"
@@ -194,24 +224,24 @@ devices:
     enabled: true
     display_name: "Keithley dual-channel SMU"
     connection:
-      resource: null             # np. TCPIP0::192.168.1.120::INSTR
+      resource:                  # e.g. TCPIP0::192.168.1.120::INSTR
       visa_backend: "system"
       timeout: "10 s"
-      read_termination: "\n"
-      write_termination: null
+      read_termination: ""
+      write_termination:
     identity:
       expected_vendor_contains: "KEITHLEY"
       expected_models:
-        - "2602A"               # potwierdzić przez *IDN?
+      - "2602A"                 # confirm with *IDN?
       require_serial_match: false
-      expected_serial: null
+      expected_serial:
     driver:
       raise_keithley_errors: true
       dynamic_tsp_discovery: true
       raw_tsp_console_enabled: false
     safety:
       allow_output_enable: false
-      outputs_off_on_connect: false
+      outputs_off_on_connect: true
       outputs_off_on_disconnect: true
       output_off_mode: "high_impedance"
       stop_on_compliance: true
@@ -220,9 +250,9 @@ devices:
         A:
           enabled: false
           allowed_source_modes:
-            - "current"
-            - "voltage"
-            - "measure_only"
+          - "current"
+          - "voltage"
+          - "measure_only"
           lab_limits:
             source_current:
               min: "-1 mA"
@@ -256,9 +286,9 @@ devices:
         B:
           enabled: true
           allowed_source_modes:
-            - "current"
-            - "voltage"
-            - "measure_only"
+          - "current"
+          - "voltage"
+          - "measure_only"
           lab_limits:
             # Limity robocze dla przykładu 1 mA ... 10 mA.
             # Nie są to maksymalne możliwości modelu 2602A.
@@ -305,15 +335,22 @@ devices:
       resource: "TCPIP0::192.168.1.139::INSTR"
       visa_backend: "@py"
       timeout: "30 s"
-      read_termination: "\n"
-      write_termination: "\n"
+      read_termination: ""
+      write_termination: ""
     identity:
       expected_vendor_contains: "ANRITSU"
       expected_models:
-        - "MS2830A"
+      - "MS2830A"
       require_serial_match: false
-      expected_serial: null
+      expected_serial:
       required_options: []
+    acquisition:
+      # "standard_scpi_opc" wolno ustawić dopiero po kwalifikacji na
+      # konkretnym firmware: INIT:CONT OFF, INIT:IMM, *OPC? oraz ABORT.
+      # Tryb unverified pozwala na ręczny Live/Fetch, ale blokuje checkpoint
+      # receptury, aby nie zapisać starego trace jako nowego punktu.
+      single_sweep_mode: "unverified"
+      operation_complete_timeout: "30 s"
     safety:
       acquisition_allowed: false
       require_rf_input_limit_definition: true
@@ -321,17 +358,17 @@ devices:
       rf_input:
         # Wartości muszą zostać uzupełnione na podstawie dokładnego wariantu,
         # opcji, aktywnego preampu, tłumików i toru RF.
-        max_expected_power_at_connector: null
+        max_expected_power_at_connector:
         external_attenuation: "0 dB"
-        minimum_internal_attenuation: null
+        minimum_internal_attenuation:
         preamplifier_allowed: false
         dc_input_allowed: false
       frequency:
-        min: null
-        max: null
+        min:
+        max:
       reference_level:
-        min: null
-        max: null
+        min:
+        max:
       sweep_points:
         min: 101
         max: 10001

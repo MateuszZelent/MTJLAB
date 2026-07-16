@@ -18,8 +18,11 @@ ACTION_TYPES: Final[frozenset[str]] = frozenset(
         "configure_rigol",
         "configure_keithley",
         "configure_anritsu",
+        "arm_rigol_output",
+        "arm_keithley_output",
         "set_rigol_output",
         "set_keithley_output",
+        "ramp_keithley_to_zero",
         "measure_keithley",
         "acquire_spectrum",
         "wait",
@@ -88,15 +91,13 @@ def _parse_node(value: object, where: str) -> RecipeNode:
     return RecipeNode(id=node_id, type=kind, data=raw, children=children)
 
 
-def load_recipe(path: str | Path) -> Recipe:
-    """Load a recipe from YAML and keep its exact source for run provenance."""
+def parse_recipe_text(source: str, *, origin: str = "<memory>") -> Recipe:
+    """Parse operator-edited YAML without granting it executable privileges."""
 
-    recipe_path = Path(path)
     try:
-        source = recipe_path.read_text(encoding="utf-8")
         raw = YAML(typ="safe").load(source)
     except Exception as exc:
-        raise ConfigurationError(f"Nie można odczytać receptury {recipe_path}: {exc}") from exc
+        raise ConfigurationError(f"Nie można odczytać receptury {origin}: {exc}") from exc
     root_raw = _require_mapping(raw, "receptura")
     allowed_top = {"schema_version", "name", "root", "finally"}
     unknown = set(root_raw) - allowed_top
@@ -111,5 +112,32 @@ def load_recipe(path: str | Path) -> Recipe:
     if not isinstance(finally_raw, list):
         raise ConfigurationError("receptura.finally musi być listą.")
     finally_nodes = tuple(_parse_node(item, f"receptura.finally[{index}]") for index, item in enumerate(finally_raw))
+    _assert_unique_node_ids((root, *finally_nodes))
     return Recipe(1, name, root, finally_nodes, source)
 
+
+def _assert_unique_node_ids(nodes: tuple[RecipeNode, ...]) -> None:
+    """Reject ambiguous node IDs before a recipe is compiled or persisted."""
+
+    seen: set[str] = set()
+
+    def visit(node: RecipeNode) -> None:
+        if node.id in seen:
+            raise ConfigurationError(f"Identyfikator węzła receptury nie jest unikalny: {node.id!r}.")
+        seen.add(node.id)
+        for child in node.children:
+            visit(child)
+
+    for node in nodes:
+        visit(node)
+
+
+def load_recipe(path: str | Path) -> Recipe:
+    """Load a recipe from YAML and keep its exact source for run provenance."""
+
+    recipe_path = Path(path)
+    try:
+        source = recipe_path.read_text(encoding="utf-8")
+    except Exception as exc:
+        raise ConfigurationError(f"Nie można odczytać receptury {recipe_path}: {exc}") from exc
+    return parse_recipe_text(source, origin=str(recipe_path))

@@ -321,6 +321,8 @@ Nie należy zgadywać dialektu SCPI. Poniższe funkcje są wymaganiami, a dokła
 
 Nowy adapter ma mieć osobne metody `configure_spectrum()`, `start_single_sweep()`, `wait_complete(deadline)`, `fetch_trace()` i `abort()`. Pobranie widma nie może przełączać aplikacji ani zmieniać ustawień w sposób ukryty.
 
+Implementacja rozróżnia dwa tryby. `Live` używa wyłącznie bezpiecznego polling `TRAC?`. Checkpoint receptury wymaga ustawienia `devices.anritsu.acquisition.single_sweep_mode: standard_scpi_opc`; wtedy adapter wykonuje jawnie `INIT:CONT OFF`, `INIT:IMM`, oczekiwanie `*OPC?` z deadline i dopiero `TRAC?`. Wartość domyślna pozostaje `unverified`, więc nie może przypadkiem zapisać starej klatki jako nowego punktu.
+
 ## 7. Audyt sterownika Rigol DG1032Z
 
 ### 7.1. Komendy systemowe
@@ -468,6 +470,10 @@ Dokładne warianty nagłówków zależne od typu modulacji należy potwierdzić 
 
 W testowanym wcześniej firmware `00.01.08` zapytanie `:SOUR1:BURS:PHAS?` kończyło się timeoutem mimo obecności w dokumentacji. Capability probe musi więc sprawdzać każdą funkcję opcjonalną i ukrywać niedostępne kontrolki.
 
+W kwalifikacji sprzętowej zasobu `USB0::0x1AB1::0x0642::DG1ZA172902039::INSTR` potwierdzono dodatkowo, że przy `HIGHZ` firmware `00.01.08` wymusza minimalne `2 mVpp`: żądane `HighL = 1 mV`, `LowL = 0 V` odczytano jako `HighL = 1 mV`, `LowL = -1 mV`. Każda transakcja produkcyjna musi odczytać ustawienia zwrotne; profil CH1 ma minimalne `amplitude_vpp = 2 mV`.
+
+Po `*IDN?` adapter sonduje read-only `MOD?`, `SWE:STAT?`, `BURS:STAT?` i `PHAS?`. Funkcje bez odpowiedzi nie są pokazywane jako dostępne, a przy domyślnym `fail_on_unknown_firmware_command` nie mogą wysłać komendy sterującej.
+
 ## 8. Zabezpieczenia prądowe Rigola
 
 Rigol DG1032Z jest generatorem napięciowym, a nie źródłem SMU. Nie oferuje prawdziwego programowalnego compliance ani pomiaru prądu DUT. Pole w GUI musi nazywać się **„szacowany prąd obciążenia”**, nigdy „zmierzony prąd”.
@@ -614,6 +620,8 @@ Zakładka analizatora:
 - `Single`, `Continuous`, `Abort`, `Fetch trace`;
 - wykres widma z markerami i metadanymi.
 
+Tryb `Live` oznacza odpytywanie przez aplikację kolejnych kompletnych trace w kontrolowanym interwale (domyślnie 500 ms), nie strumień push z analizatora. Interfejs pokazuje aktualną klatkę, nie zapisuje wszystkich klatek Live i pilnuje, aby nowe odpytywanie nie zostało zakolejkowane przed zakończeniem poprzedniego. Zapisywany punkt receptury zawsze pobiera osobny, opisany trace.
+
 Zakładka generatora RF jest widoczna tylko przy wykrytej opcji SG. Ma własny ARM i blokadę mocy. Przełączenie `INST SPECT` / `INST SG` jest jawne i nie może nastąpić jako efekt uboczny odczytu pola.
 
 ### 11.6. Recipe Builder
@@ -711,9 +719,92 @@ Kolejność pojedynczego punktu:
 
 ## 14. Dane i odtwarzalność
 
-Format główny: HDF5, a CSV wyłącznie jako indeks i wygodny eksport.
+Format główny: HDF5 zgodny strukturalnie z plikami thaTEC:OS i możliwy do bezpośredniego
+odczytu przez bibliotekę PyThat. CSV pozostaje wyłącznie indeksem i wygodnym eksportem.
 
-Proponowany układ:
+### 14.1. Obowiązkowa zgodność thaTEC:OS / PyThat
+
+Zgodność z PyThat jest wymaganiem akceptacyjnym, a nie opcjonalnym eksportem. Laboratorium
+posiada istniejący system inwentaryzacji i analizy oparty na plikach thaTEC:OS, dlatego każdy
+run wykonany przez aplikację musi tworzyć plik `.h5`, w którym zarówno metadane, parametry
+drzewa pomiarowego, wartości zadane i zmierzone, jak i kompletne widma zachowują organizację
+danych rozpoznawaną przez PyThat.
+
+Punktem odniesienia („golden file”) jest dołączony plik:
+
+```text
+05062026_YIG20CoFeB1_FMR_S12_S21_2A_-2A_10MHz_4GHz_Measurement_#3.h5
+```
+
+Plik referencyjny ma następujący kontrakt najwyższego poziomu:
+
+```text
+/
+  attrs:
+    measurement running
+    thaTEC:OS version
+    version information
+  devices/
+    <nazwa urządzenia>          # dwukolumnowa tabela nazwa parametru / wartość
+  labbook/
+    comments
+    metadata                   # dwukolumnowa tabela klucz / wartość
+    parameter
+  measurement/
+    log                        # czas / komunikat
+    row_XX/
+      data                     # wartości kontrolki albo pełna tablica wskaźnika
+      timestamp                # znacznik dla każdego zapisanego punktu
+      metadata                 # wymagane dla danych wielowymiarowych
+      scale                    # wymagane dla danych wielowymiarowych
+  scan_definition/
+    row_XX                     # definicja każdego węzła drzewa
+    tree_view                  # kolejność, typ i czytelna reprezentacja drzewa
+```
+
+Nie wolno zastępować tabel thaTEC JSON-em ani zapisywać samych datasetów `frequency_hz` i
+`power_dbm` w prywatnym układzie. Muszą zostać zachowane:
+
+- dokładne nazwy grup i datasetów, w tym numeracja `row_XX` zgodna pomiędzy
+  `/scan_definition` i `/measurement`;
+- dwukolumnowe tablice tekstowe w `/devices`, `/labbook`, `/scan_definition` i `metadata`;
+- pola definicji wiersza: `device name`, `control name`, `dimensions`, `data type`,
+  `tree indent level`, `function` oraz — zależnie od funkcji — `start`, `stop`, `steps`,
+  `equation`, `value` albo `waiting period (ms)`;
+- atrybuty datasetu `data`: `data type` i `dim of data` z typami zgodnymi z plikiem
+  referencyjnym;
+- kolejność wymiarów tablicy `data`, informacja o osiach w `metadata` (`name`, `unit`,
+  `offset`, `multiplier`) oraz odpowiadający im dataset `scale`;
+- pełna precyzja danych liczbowych, jednostki i wartości surowe; konwersja jednostek na
+  potrzeby GUI nie może zmieniać danych archiwalnych;
+- snapshot parametrów każdego urządzenia, identyfikatory VISA, log procesu, metadane
+  labbook oraz znaczniki czasu;
+- możliwość odczytu pliku częściowego po awarii; atrybut `measurement running` musi być
+  ustawiany przy rozpoczęciu i zerowany dopiero po kontrolowanym zamknięciu runu.
+
+Dla naszej stacji nazwy urządzeń w pliku będą stabilnymi identyfikatorami profilu, np.
+`Rigol DG1032Z`, `Keithley 2602A` i `Anritsu Spectrum Analyzer`. Receptura zostanie
+przetłumaczona na kolejne wiersze `scan_definition`: ustawienie urządzenia to `control`,
+opóźnienie to `internal`, a pomiar lub widmo to `indicator`. Poziom zagnieżdżenia pętli musi
+być zapisany jako `tree indent level`, ponieważ PyThat odtwarza z niego wymiary danych.
+
+Widmo Anritsu ma być jednym wskaźnikiem o jawnie opisanej osi częstotliwości i osi wartości
+(np. `Frequency [Hz]`, `Power [dBm]`). Dodatkowe kanały/trace są osobnym wymiarem albo
+osobnymi wskaźnikami — wybór zostanie zamrożony testem na reprezentatywnym pliku, tak aby
+PyThat zwracał poprawne `dims`, `coords`, nazwy, jednostki i wartości w obiekcie xarray.
+Analogicznie setpoint i odczyt Keithley oraz parametry HighL/LowL Rigola muszą występować w
+drzewie, a nie wyłącznie w prywatnych metadanych aplikacji.
+
+Implementacja powinna rozdzielać model domenowy od formatu przez `ThatecHdf5Writer` oraz
+`ThatecSchemaMapper`. Jeśli zachowamy obecny wewnętrzny schemat `/run`, `/points`,
+`/spectra`, może on istnieć wyłącznie jako dodatkowa przestrzeń nazw, o ile test PyThat
+potwierdzi, że nie zakłóca odczytu. Za kontrakt zewnętrzny odpowiada zawsze struktura
+thaTEC:OS.
+
+### 14.2. Dotychczasowy model logiczny aplikacji
+
+Poniższy układ opisuje model logiczny i może pozostać wewnętrznym indeksem aplikacji, ale
+nie zastępuje kontraktu z punktu 14.1:
 
 ```text
 /run/metadata
@@ -732,6 +823,29 @@ Proponowany układ:
 ```
 
 Każdy punkt zawiera UTC, czas monotoniczny, indeksy pętli, zadane i odczytane wartości, jednostki, compliance, błędy urządzeń oraz indeks trace. Plik jest flushowany po każdym widmie. Nieudany run pozostaje czytelny i ma status `aborted` lub `faulted`.
+
+Aktualny zapis przechowuje `/events/timestamp`, `/events/severity`, `/events/name` i `/events/message` (JSON) oraz opcjonalny, flushowany przy checkpointcie indeks CSV. Przeglądarka wyników odczytuje te dane bez otwierania sesji VISA.
+
+### 14.3. Walidacja kompatybilności
+
+Test kompatybilności nie może ograniczać się do sprawdzenia, że plik otwiera `h5py`.
+Pipeline testowy musi:
+
+1. zinwentaryzować golden file i utrzymywać wersjonowany manifest ścieżek, typów, atrybutów,
+   rang, wymiarów i obowiązkowych kluczy tabel;
+2. wygenerować minimalny run: setpoint Keithley → konfiguracja Rigol → widmo Anritsu;
+3. otworzyć wynik przy użyciu wspieranej wersji PyThat (wersję przypiąć w zależnościach
+   testowych po kwalifikacji; punktem startowym jest PyThat 0.2.14);
+4. odtworzyć drzewo pomiarowe i przekonwertować wszystkie poprawne wskaźniki do xarray;
+5. porównać `dims`, `coords`, jednostki, metadane, liczbę punktów i próbki wartości z
+   modelem wykonania aplikacji;
+6. sprawdzić run zakończony, przerwany i faulted oraz ponowne otwarcie po każdym flushu;
+7. wykonać round-trip przez aktualny system inwentaryzacji laboratorium, nie tylko przez
+   samą bibliotekę PyThat.
+
+PyThat jest niezależnym pakietem społecznościowym, dlatego jego zgodność należy traktować
+jako testowany kontrakt wersji. Aktualizacja PyThat, h5py, numpy lub zmiana mapowania HDF5
+wymaga ponownego uruchomienia całej macierzy golden-file.
 
 ## 15. Docelowa struktura projektu
 
@@ -769,6 +883,9 @@ app/
     emergency.py
   storage/
     hdf5_writer.py
+    thatec_hdf5_writer.py
+    thatec_schema_mapper.py
+    thatec_validator.py
     export_csv.py
   settings/
     models.py
@@ -800,6 +917,9 @@ docs/
 - kompilacja zagnieżdżonych sweepów i limit punktów;
 - cancel, timeout, compliance i utrata połączenia;
 - zapis częściowego HDF5 po każdym punkcie.
+- zgodność drzewa, metadanych, skal i tablic z manifestem referencyjnego pliku thaTEC;
+- bezpośredni odczyt wygenerowanego pliku przez PyThat i poprawna konwersja do xarray;
+- zgodność pliku zakończonego, przerwanego i faulted z systemem inwentaryzacji laboratorium.
 
 ### 16.2. Symulatory
 
@@ -860,7 +980,8 @@ Testy destrukcyjne wykonuje się wyłącznie na obciążeniu laboratoryjnym, nig
 ### Etap 5 — wykonanie i dane
 
 - state machine, workers, watchdog i anulowanie;
-- HDF5/checkpoint/CSV;
+- `ThatecSchemaMapper`, zapis HDF5 zgodny z thaTEC:OS/PyThat, checkpoint i CSV;
+- golden-file manifest, testy PyThat/xarray i round-trip przez system inwentaryzacji;
 - Run Monitor i Data Browser;
 - wznowienie wyłącznie od bezpiecznej granicy punktu.
 
@@ -884,6 +1005,9 @@ Wersja v1 jest gotowa, gdy:
 - receptura 100 × 20 tworzy dokładnie 2000 kompletnych rekordów albo czytelny plik częściowy;
 - timeout, compliance, rozłączenie i E-STOP kończą się zdefiniowanym stanem;
 - wynik zawiera recepturę, settings, IDN, capabilities, wersję aplikacji i log;
+- każdy wynik zachowuje strukturę thaTEC:OS i jest bez błędów odczytywany przez przypiętą
+  wersję PyThat, z poprawnymi wymiarami, współrzędnymi, metadanymi i kompletnymi widmami;
+- plik przechodzi round-trip w istniejącym systemie inwentaryzacji danych laboratorium;
 - zestaw testów symulacyjnych oraz kwalifikacja na sztucznym obciążeniu są udokumentowane.
 
 ## 19. Otwarte decyzje przed kodowaniem wyjść
@@ -895,5 +1019,9 @@ Wersja v1 jest gotowa, gdy:
 5. Czy generator RF Anritsu ma być sterowany w v1?
 6. Czy stanowisko ma fizyczny interlock/E-STOP, który aplikacja może obserwować?
 7. Czy po prawidłowym runie Keithley ma zawsze rampować do zera, czy do osobnej wartości bezpiecznej?
+8. Jakie dokładne nazwy urządzeń, kontrolek, wskaźników i jednostek oczekuje obecny system
+   inwentaryzacji oraz czy dopuszcza dodatkową prywatną grupę danych aplikacji?
+9. Czy wszystkie widma Anritsu mają być jednym wielowymiarowym wskaźnikiem PyThat, czy
+   osobnymi wierszami dla każdego trace/kanału?
 
 Do czasu odpowiedzi profil pozostaje niezaufany, a `allow_output_enable` jest ustawione na `false`.

@@ -17,14 +17,29 @@ QWidget { background: #10151d; color: #e8edf3; font-family: Segoe UI; font-size:
 QTabWidget::pane { border: 1px solid #26384a; }
 QTabBar::tab { background: #18212c; color: #91a0b2; padding: 10px 18px; margin-right: 2px; }
 QTabBar::tab:selected { background: #26384a; color: #e8edf3; }
-QLineEdit, QPlainTextEdit, QTreeWidget, QComboBox, QSpinBox { background: #18212c; border: 1px solid #344659; border-radius: 4px; padding: 6px; color: #e8edf3; }
+QTabBar::tab:hover { color: #ffffff; background: #213043; }
+QLineEdit, QPlainTextEdit, QTreeWidget, QComboBox, QSpinBox { background: #18212c; border: 1px solid #344659; border-radius: 6px; padding: 7px; color: #e8edf3; }
+QTreeWidget { alternate-background-color: #141c26; outline: 0; }
+QTreeWidget::item { color: #e8edf3; padding: 3px; }
+QTreeWidget::item:selected { background: #28577b; color: white; }
+QLineEdit:focus, QComboBox:focus, QSpinBox:focus { border: 1px solid #4ba3ff; }
+QLineEdit:disabled, QComboBox:disabled, QSpinBox:disabled { color: #607084; background: #141c26; border-color: #26384a; }
 QPushButton { background: #26384a; border: 0; border-radius: 4px; padding: 8px 12px; color: #e8edf3; font-weight: 600; }
 QPushButton:hover { background: #34516a; }
+QPushButton:disabled { background: #1b2632; color: #58687a; }
+QPushButton#primaryButton { background: #1769aa; color: white; }
+QPushButton#primaryButton:hover { background: #2385d1; }
+QPushButton#warningButton { background: #76561b; color: #ffe1a3; }
+QPushButton#outputOnButton { background: #8f2638; color: white; }
+QPushButton#outputOnButton:hover { background: #b7334b; }
+QPushButton#outputOffButton { background: #17684c; color: white; }
+QPushButton#outputOffButton:hover { background: #218967; }
 QPushButton#emergencyButton { background: #8f2638; color: white; }
 QPushButton#emergencyButton:hover { background: #b7334b; }
 QFrame#deviceCard { background: #18212c; border: 1px solid #344659; border-radius: 8px; padding: 10px; min-height: 170px; }
 QLabel#pageTitle { font-size: 20pt; font-weight: 700; }
 QLabel#cardTitle { font-size: 14pt; font-weight: 700; }
+QLabel#sectionTitle { font-size: 13pt; font-weight: 700; color: #f2f6fa; }
 QLabel#muted { color: #91a0b2; }
 QLabel#readout { font-family: Consolas; font-size: 13pt; padding: 10px; background: #18212c; }
 QLabel#stateDisconnected { color: #91a0b2; font-weight: 700; }
@@ -33,6 +48,72 @@ QLabel#stateOutputOn, QLabel#stateCompliance { color: #ffcc66; font-weight: 700;
 QLabel#stateFault, QLabel#stateUnknown { color: #ff657a; font-weight: 700; }
 QLabel#checklist { background: #18212c; border-radius: 8px; padding: 14px; }
 QHeaderView::section { background: #26384a; color: #e8edf3; padding: 6px; border: 0; }
+QFrame#rigolHero { background: #151f2b; border: 1px solid #30455b; border-radius: 10px; padding: 10px; }
+QFrame#rigolSafetyCard { background: #18212c; border: 1px solid #344659; border-radius: 10px; padding: 10px; }
+QLabel#rigolLed { color: #91a0b2; font-size: 18pt; }
+QLabel#rigolState { color: #e8edf3; font-weight: 700; }
+QLabel#rigolBadge { color: #72b7f2; background: #13283a; border-radius: 8px; padding: 5px 9px; }
+QLabel#rigolWarning { color: #ffcc66; background: #302817; border-radius: 6px; padding: 9px; }
+QTabWidget#rigolControlTabs > QTabBar::tab { padding: 11px 16px; }
+QTabWidget#rigolAdvancedTabs > QTabBar::tab { padding: 8px 12px; }
+QScrollArea { border: 0; }
+QScrollBar:vertical { background: #111923; width: 12px; margin: 2px; }
+QScrollBar::handle:vertical { background: #3b536b; border-radius: 5px; min-height: 30px; }
+QScrollBar::handle:vertical:hover { background: #4ba3ff; }
+QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical { height: 0; }
+"""
+
+LIGHT_STYLE = """
+QMainWindow { background: #f4f7fb; color: #17212b; }
+QWidget { background: #f4f7fb; color: #17212b; font-family: Segoe UI; font-size: 10pt; }
+QMenuBar, QMenu { background: #ffffff; color: #17212b; }
+QMenu::item:selected { background: #dbeafe; }
+QTabWidget::pane { border: 1px solid #c8d3df; }
+QTabBar::tab { background: #e8eef5; color: #526273; padding: 10px 18px; margin-right: 2px; }
+QTabBar::tab:selected { background: #ffffff; color: #17212b; }
+QTabBar::tab:hover { color: #0b5da7; background: #dce9f6; }
+QLineEdit, QPlainTextEdit, QTreeWidget, QComboBox, QSpinBox { background: #ffffff; border: 1px solid #b9c7d5; border-radius: 6px; padding: 7px; color: #17212b; }
+QTreeWidget { alternate-background-color: #eef3f8; outline: 0; }
+QTreeWidget::item { color: #17212b; padding: 3px; }
+QTreeWidget::item:selected { background: #b8dcfa; color: #102a43; }
+QLineEdit:focus, QComboBox:focus, QSpinBox:focus { border: 1px solid #1976bd; }
+QLineEdit:disabled, QComboBox:disabled, QSpinBox:disabled { color: #8996a3; background: #edf1f5; border-color: #d4dce4; }
+QPushButton { background: #dce5ee; border: 0; border-radius: 4px; padding: 8px 12px; color: #17212b; font-weight: 600; }
+QPushButton:hover { background: #c8d9e8; }
+QPushButton:disabled { background: #edf1f5; color: #9aa6b2; }
+QPushButton#primaryButton { background: #1769aa; color: white; }
+QPushButton#primaryButton:hover { background: #0f7bc9; }
+QPushButton#warningButton { background: #f4dca4; color: #664a0d; }
+QPushButton#outputOnButton, QPushButton#emergencyButton { background: #b52d43; color: white; }
+QPushButton#outputOnButton:hover, QPushButton#emergencyButton:hover { background: #d23b53; }
+QPushButton#outputOffButton { background: #19805c; color: white; }
+QPushButton#outputOffButton:hover { background: #209a70; }
+QFrame#deviceCard { background: #ffffff; border: 1px solid #c8d3df; border-radius: 8px; padding: 10px; min-height: 170px; }
+QLabel#pageTitle { font-size: 20pt; font-weight: 700; }
+QLabel#cardTitle { font-size: 14pt; font-weight: 700; }
+QLabel#sectionTitle { font-size: 13pt; font-weight: 700; color: #17212b; }
+QLabel#muted { color: #607284; }
+QLabel#readout { font-family: Consolas; font-size: 13pt; padding: 10px; background: #ffffff; }
+QLabel#stateDisconnected { color: #6b7b8c; font-weight: 700; }
+QLabel#stateVerified, QLabel#stateOutputOff { color: #087f5b; font-weight: 700; }
+QLabel#stateOutputOn, QLabel#stateCompliance { color: #9a6700; font-weight: 700; }
+QLabel#stateFault, QLabel#stateUnknown { color: #b4233a; font-weight: 700; }
+QLabel#checklist { background: #ffffff; border-radius: 8px; padding: 14px; }
+QHeaderView::section { background: #dce5ee; color: #17212b; padding: 6px; border: 0; }
+QFrame#rigolHero { background: #ffffff; border: 1px solid #c8d3df; border-radius: 10px; padding: 10px; }
+QFrame#rigolSafetyCard { background: #ffffff; border: 1px solid #c8d3df; border-radius: 10px; padding: 10px; }
+QLabel#rigolLed { color: #6b7b8c; font-size: 18pt; }
+QLabel#rigolState { color: #17212b; font-weight: 700; }
+QLabel#rigolBadge { color: #0b5da7; background: #e2f1fc; border-radius: 8px; padding: 5px 9px; }
+QLabel#rigolWarning { color: #765500; background: #fff2c7; border-radius: 6px; padding: 9px; }
+QTabWidget#rigolControlTabs > QTabBar::tab { padding: 11px 16px; }
+QTabWidget#rigolAdvancedTabs > QTabBar::tab { padding: 8px 12px; }
+QScrollArea { border: 0; }
+QScrollBar:vertical { background: #edf2f7; width: 12px; margin: 2px; }
+QScrollBar::handle:vertical { background: #a9bac9; border-radius: 5px; min-height: 30px; }
+QScrollBar::handle:vertical:hover { background: #3488c8; }
+QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical { height: 0; }
+QToolTip { background: #ffffff; color: #17212b; border: 1px solid #8ca0b3; padding: 6px; }
 """
 
 
@@ -41,6 +122,7 @@ def parse_args() -> argparse.Namespace:
     # expose a legacy CP1252 console where Polish glyphs make argparse fail.
     parser = argparse.ArgumentParser(description="Local measurement-station control GUI")
     parser.add_argument("--settings", default=".config/settings.yml", help="path to station profile YAML")
+    parser.add_argument("--simulate", action="store_true", help="use simulated VISA instruments; do not access hardware")
     return parser.parse_args()
 
 
@@ -48,8 +130,10 @@ def main() -> int:
     args = parse_args()
     app = QApplication(sys.argv)
     app.setApplicationName("Lab Control")
-    app.setStyleSheet(STYLE)
-    window = MainWindow(Path(args.settings))
+    window = MainWindow(Path(args.settings), simulation=args.simulate)
+    apply_theme = lambda theme: app.setStyleSheet(LIGHT_STYLE if theme == "light" else STYLE)
+    window.theme_changed.connect(apply_theme)
+    apply_theme("light" if window.theme_action.isChecked() else "dark")
     window.show()
     return app.exec()
 

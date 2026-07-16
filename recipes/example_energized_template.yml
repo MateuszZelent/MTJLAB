@@ -1,0 +1,71 @@
+schema_version: 1
+name: "TEMPLATE — energised single-point measurement"
+
+# This is deliberately a template rather than the default recipe.  It may be
+# compiled only after an authorised operator has approved the profile,
+# enabled the per-device output permission and verified the physical DUT path.
+# It demonstrates the required explicit ARM → OUTPUT ON transitions.
+
+root:
+  id: single-point
+  type: sequence
+  children:
+    - id: anritsu-spectrum-setup
+      type: configure_anritsu
+      start_frequency: "1 MHz"
+      stop_frequency: "10 MHz"
+      reference_level: "0 dBm"
+      points: 1001
+    - id: keithley-b-config
+      type: configure_keithley
+      channel: B
+      mode: current
+      level: "1 mA"
+      compliance: "67 mV"
+      nplc: 1.0
+    - id: rigol-ch1-config
+      type: configure_rigol
+      channel: 1
+      waveform: SQU
+      frequency: "1 kHz"
+      high_level: "1 mV"
+      low_level: "-1 mV"
+      output_load: HIGHZ
+      dut_min_impedance: "50 ohm"
+    - id: keithley-b-arm
+      type: arm_keithley_output
+      channel: B
+    - id: keithley-b-on
+      type: set_keithley_output
+      channel: B
+      enabled: true
+    - id: rigol-ch1-arm
+      type: arm_rigol_output
+      channel: 1
+    - id: rigol-ch1-on
+      type: set_rigol_output
+      channel: 1
+      enabled: true
+    - id: settle
+      type: wait
+      duration: "100 ms"
+    - id: measure-keithley-b
+      type: measure_keithley
+      channel: B
+    - id: acquire-spectrum
+      type: acquire_spectrum
+      trace: TRAC1
+
+finally:
+  - id: rigol-ch1-off
+    type: set_rigol_output
+    channel: 1
+    enabled: false
+  - id: keithley-b-ramp-zero
+    type: ramp_keithley_to_zero
+    channel: B
+    deadline: "10 s"
+  - id: keithley-b-off
+    type: set_keithley_output
+    channel: B
+    enabled: false

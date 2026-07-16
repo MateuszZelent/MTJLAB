@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from copy import deepcopy
 from dataclasses import dataclass
 import os
 from pathlib import Path
@@ -24,6 +25,8 @@ class LoadedSettings:
 
 class SettingsRepository:
     """Read/write station configuration without silently accepting invalid YAML."""
+
+    _APPROVAL_METADATA = frozenset({"state", "approved_by", "approved_at", "approval_note"})
 
     def __init__(self, path: str | Path) -> None:
         self.path = Path(path)
@@ -48,19 +51,54 @@ class SettingsRepository:
         return LoadedSettings(settings=settings, raw=raw, source=self.path)
 
     def save(self, settings: StationSettings) -> None:
-        """Atomically replace the profile and retain one last-known-good backup."""
+        """Persist a typed profile, revoking approval after a configuration edit."""
 
-        self._atomic_dump(settings.model_dump(mode="python"))
+        self.save_raw(settings.model_dump(mode="python"))
 
     def save_raw(self, raw: dict[str, Any]) -> StationSettings:
-        """Validate then atomically persist a UI-edited round-trip YAML document."""
+        """Validate then atomically persist a UI-edited round-trip YAML document.
+
+        Approval fields may change independently through the explicit approval
+        workflow.  Any other profile/device/configuration change revokes an
+        existing approval at the persistence boundary, so a future caller
+        cannot accidentally retain permission to energise a DUT.
+        """
+
+        payload = deepcopy(raw)
+        if self._configuration_changed(payload):
+            profile = payload.setdefault("profile", {})
+            profile["state"] = "unverified"
+            profile["approved_by"] = None
+            profile["approved_at"] = None
+            profile["approval_note"] = "Profil wymaga ponownego zatwierdzenia po zmianie ustawień."
 
         try:
-            settings = StationSettings.model_validate(raw)
+            settings = StationSettings.model_validate(payload)
         except ValidationError as exc:
             raise ConfigurationError(f"Nieprawidłowy settings.yml:\n{exc}") from exc
-        self._atomic_dump(raw)
+        self._atomic_dump(payload)
         return settings
+
+    def _configuration_changed(self, candidate: dict[str, Any]) -> bool:
+        """Compare a draft to the persisted profile excluding approval metadata."""
+
+        if not self.path.exists():
+            return True
+        try:
+            current = self.load().raw
+        except ConfigurationError:
+            # Refuse to inherit an approval from a malformed predecessor.
+            return True
+        return self._without_approval_metadata(current) != self._without_approval_metadata(candidate)
+
+    @classmethod
+    def _without_approval_metadata(cls, raw: dict[str, Any]) -> dict[str, Any]:
+        comparable = deepcopy(raw)
+        profile = comparable.get("profile")
+        if isinstance(profile, dict):
+            for field in cls._APPROVAL_METADATA:
+                profile.pop(field, None)
+        return comparable
 
     def _atomic_dump(self, payload: dict[str, Any]) -> None:
         """Replace the file only after a complete temporary YAML write succeeds."""

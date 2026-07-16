@@ -14,6 +14,7 @@ from PySide6.QtWidgets import (
     QLabel,
     QMessageBox,
     QPushButton,
+    QTabWidget,
     QTreeWidget,
     QTreeWidgetItem,
     QVBoxLayout,
@@ -43,9 +44,12 @@ class SettingsPage(QWidget):
         ("profile", "approved_at"),
     }
 
-    def __init__(self, repository: SettingsRepository, parent: QWidget | None = None) -> None:
+    def __init__(
+        self, repository: SettingsRepository, parent: QWidget | None = None, *, read_only: bool = False
+    ) -> None:
         super().__init__(parent)
         self._repository = repository
+        self._read_only = read_only
         self._raw: dict[str, Any] = {}
         self._settings: StationSettings | None = None
         self._changing = False
@@ -55,24 +59,35 @@ class SettingsPage(QWidget):
 
     def _build(self) -> None:
         layout = QVBoxLayout(self)
-        title = QLabel("Ustawienia stanowiska")
+        title = QLabel("Station settings")
         title.setObjectName("pageTitle")
         self._subtitle = QLabel()
         self._subtitle.setWordWrap(True)
         layout.addWidget(title)
         layout.addWidget(self._subtitle)
 
-        self.tree = QTreeWidget()
-        self.tree.setHeaderLabels(["Parametr", "Wartość"])
-        self.tree.setAlternatingRowColors(True)
-        self.tree.itemChanged.connect(self._changed)
-        layout.addWidget(self.tree, 1)
+        self.tabs = QTabWidget()
+        self.trees: dict[str, QTreeWidget] = {}
+        for key, label in (
+            ("general", "General"),
+            ("rigol", "Rigol"),
+            ("keithley", "Keithley"),
+            ("anritsu", "Anritsu"),
+        ):
+            tree = QTreeWidget()
+            tree.setHeaderLabels(["Parameter", "Value"])
+            tree.setAlternatingRowColors(True)
+            tree.itemChanged.connect(self._changed)
+            self.trees[key] = tree
+            self.tabs.addTab(tree, label)
+        self.tree = self.trees["general"]
+        layout.addWidget(self.tabs, 1)
 
         buttons = QHBoxLayout()
-        self.reload_button = QPushButton("Wczytaj ponownie")
-        self.validate_button = QPushButton("Waliduj")
-        self.save_button = QPushButton("Zapisz zmiany")
-        self.approve_button = QPushButton("Zatwierdź profil…")
+        self.reload_button = QPushButton("Reload")
+        self.validate_button = QPushButton("Validate")
+        self.save_button = QPushButton("Save changes")
+        self.approve_button = QPushButton("Approve profile…")
         for button in (self.reload_button, self.validate_button, self.save_button, self.approve_button):
             buttons.addWidget(button)
         buttons.addStretch(1)
@@ -81,69 +96,89 @@ class SettingsPage(QWidget):
         self.validate_button.clicked.connect(self.validate_draft)
         self.save_button.clicked.connect(self.save_draft)
         self.approve_button.clicked.connect(self.approve_profile)
+        if self._read_only:
+            self.validate_button.setEnabled(False)
+            self.save_button.setEnabled(False)
+            self.approve_button.setEnabled(False)
 
     def reload(self) -> None:
         try:
             loaded = self._repository.load()
         except ConfigurationError as exc:
-            QMessageBox.critical(self, "Błąd konfiguracji", str(exc))
+            QMessageBox.critical(self, "Configuration error", str(exc))
             return
         self._settings = loaded.settings
         self._raw = deepcopy(loaded.raw)
         self._dirty = False
         self._populate()
         self._update_subtitle()
-        self.status.emit("Wczytano settings.yml")
+        self.status.emit("settings.yml reloaded")
 
     def _update_subtitle(self) -> None:
         if self._settings is None:
             return
         state = self._settings.profile.state
-        locked = "WYJŚCIA ZABLOKOWANE" if self._settings.outputs_locked else "profil zatwierdzony"
+        locked = "OUTPUTS LOCKED" if self._settings.outputs_locked else "profile approved"
+        mode = " • SIMULATION: read-only settings" if self._read_only else ""
         self._subtitle.setText(
-            f"Plik: {self._repository.path}  •  Profil: {self._settings.profile.name}  •  "
-            f"Stan: {state}  •  {locked}"
+            f"File: {self._repository.path}  •  Profile: {self._settings.profile.name}  •  "
+            f"State: {state}  •  {locked}{mode}"
         )
 
     def _populate(self) -> None:
         self._changing = True
         try:
-            self.tree.clear()
-            self._add_items(None, self._raw, ())
-            self.tree.expandToDepth(2)
-            self.tree.resizeColumnToContents(0)
+            for tree in self.trees.values():
+                tree.clear()
+            general = {key: value for key, value in self._raw.items() if key != "devices"}
+            self._add_items(self.trees["general"], None, general, ())
+            devices = self._raw.get("devices", {})
+            for device in ("rigol", "keithley", "anritsu"):
+                self._add_items(
+                    self.trees[device],
+                    None,
+                    devices.get(device, {}),
+                    ("devices", device),
+                )
+            for tree in self.trees.values():
+                tree.expandToDepth(3)
+                tree.resizeColumnToContents(0)
         finally:
             self._changing = False
 
     def _add_items(
-        self, parent: QTreeWidgetItem | None, value: Any, path: tuple[str | int, ...]
+        self,
+        tree: QTreeWidget,
+        parent: QTreeWidgetItem | None,
+        value: Any,
+        path: tuple[str | int, ...],
     ) -> None:
         if isinstance(value, dict):
             for key, nested in value.items():
                 item = QTreeWidgetItem([str(key), ""])
                 if parent is None:
-                    self.tree.addTopLevelItem(item)
+                    tree.addTopLevelItem(item)
                 else:
                     parent.addChild(item)
-                self._add_items(item, nested, path + (str(key),))
+                self._add_items(tree, item, nested, path + (str(key),))
             return
         if isinstance(value, list):
             for index, nested in enumerate(value):
                 item = QTreeWidgetItem([f"[{index}]", ""])
                 if parent is None:
-                    self.tree.addTopLevelItem(item)
+                    tree.addTopLevelItem(item)
                 else:
                     parent.addChild(item)
-                self._add_items(item, nested, path + (index,))
+                self._add_items(tree, item, nested, path + (index,))
             return
-        item = QTreeWidgetItem(["wartość", self._format_scalar(value)])
+        item = QTreeWidgetItem(["value", self._format_scalar(value)])
         item.setData(0, Qt.ItemDataRole.UserRole, path)
-        if path not in self._PROTECTED_PATHS:
+        if not self._read_only and path not in self._PROTECTED_PATHS:
             item.setFlags(item.flags() | Qt.ItemFlag.ItemIsEditable)
         else:
-            item.setToolTip(1, "To pole jest zmieniane wyłącznie przez przycisk „Zatwierdź profil”.")
+            item.setToolTip(1, "This field can only be changed with the Approve profile button.")
         if parent is None:
-            self.tree.addTopLevelItem(item)
+            tree.addTopLevelItem(item)
         else:
             parent.addChild(item)
 
@@ -170,8 +205,9 @@ class SettingsPage(QWidget):
             for index in range(item.childCount()):
                 walk(item.child(index))
 
-        for index in range(self.tree.topLevelItemCount()):
-            walk(self.tree.topLevelItem(index))
+        for tree in self.trees.values():
+            for index in range(tree.topLevelItemCount()):
+                walk(tree.topLevelItem(index))
         return draft
 
     @staticmethod
@@ -195,7 +231,7 @@ class SettingsPage(QWidget):
             return None if value.lower() in {"", "null", "none"} else value
         if isinstance(original, bool):
             if value.lower() not in {"true", "false"}:
-                raise ConfigurationError("Wartość logiczna musi być true albo false.")
+                raise ConfigurationError("A Boolean value must be true or false.")
             return value.lower() == "true"
         if isinstance(original, int) and not isinstance(original, bool):
             return int(value)
@@ -208,10 +244,10 @@ class SettingsPage(QWidget):
             draft = self._apply_tree_values()
             settings = StationSettings.model_validate(draft)
         except (ConfigurationError, ValueError) as exc:
-            QMessageBox.critical(self, "Błąd walidacji", str(exc))
+            QMessageBox.critical(self, "Validation error", str(exc))
             return None
-        QMessageBox.information(self, "Walidacja", "Konfiguracja jest poprawna.")
-        self.status.emit("Konfiguracja przeszła walidację")
+        QMessageBox.information(self, "Validation", "The configuration is valid.")
+        self.status.emit("Configuration validation passed")
         return settings
 
     def save_draft(self) -> None:
@@ -222,10 +258,10 @@ class SettingsPage(QWidget):
             draft["profile"]["state"] = "unverified"
             draft["profile"]["approved_by"] = None
             draft["profile"]["approved_at"] = None
-            draft["profile"]["approval_note"] = "Profil wymaga ponownego zatwierdzenia po zmianie ustawień."
+            draft["profile"]["approval_note"] = "Profile approval is required after settings changes."
             settings = self._repository.save_raw(draft)
         except (ConfigurationError, ValueError) as exc:
-            QMessageBox.critical(self, "Nie zapisano", str(exc))
+            QMessageBox.critical(self, "Changes not saved", str(exc))
             return
         self._raw = draft
         self._settings = settings
@@ -233,14 +269,14 @@ class SettingsPage(QWidget):
         self._populate()
         self._update_subtitle()
         self.settings_saved.emit(settings)
-        self.status.emit("Zapisano konfigurację; profil wymaga zatwierdzenia")
+        self.status.emit("Configuration saved; profile approval is required")
 
     def approve_profile(self) -> None:
         if self._dirty:
             answer = QMessageBox.question(
                 self,
-                "Niezapisane zmiany",
-                "Najpierw zapisać zmiany? Zatwierdzenie będzie dotyczyło zapisanego profilu.",
+                "Unsaved changes",
+                "Save changes first? Approval will apply to the saved profile.",
                 QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.Cancel,
             )
             if answer is not QMessageBox.StandardButton.Yes:
@@ -250,32 +286,31 @@ class SettingsPage(QWidget):
                 return
         if self._settings is None:
             return
-        operator, ok = QInputDialog.getText(self, "Zatwierdź profil", "Imię i nazwisko osoby zatwierdzającej:")
+        operator, ok = QInputDialog.getText(self, "Approve profile", "Approver name:")
         if not ok or not operator.strip():
             return
         phrase = f"APPROVE {self._settings.profile.id}"
         confirmation, ok = QInputDialog.getText(
             self,
-            "Potwierdzenie",
-            f"Wpisz dokładnie: {phrase}",
+            "Confirmation",
+            f"Enter exactly: {phrase}",
         )
         if not ok or confirmation.strip() != phrase:
-            QMessageBox.warning(self, "Nie zatwierdzono", "Fraza potwierdzająca jest nieprawidłowa.")
+            QMessageBox.warning(self, "Not approved", "The confirmation phrase is incorrect.")
             return
         draft = deepcopy(self._raw)
         draft["profile"]["state"] = "approved"
         draft["profile"]["approved_by"] = operator.strip()
         draft["profile"]["approved_at"] = datetime.now(timezone.utc).isoformat()
-        draft["profile"]["approval_note"] = "Profil zatwierdzony w GUI przez operatora."
+        draft["profile"]["approval_note"] = "Profile approved by an operator in the GUI."
         try:
             settings = self._repository.save_raw(draft)
         except ConfigurationError as exc:
-            QMessageBox.critical(self, "Nie zatwierdzono", str(exc))
+            QMessageBox.critical(self, "Not approved", str(exc))
             return
         self._raw = draft
         self._settings = settings
         self._populate()
         self._update_subtitle()
         self.settings_saved.emit(settings)
-        self.status.emit("Profil został zatwierdzony")
-
+        self.status.emit("Profile approved")

@@ -84,6 +84,17 @@ class CurrentEstimateSettings(RangeSettings):
     enforcement: Literal["preflight_model_only"]
 
 
+class IntegerRangeSettings(StrictModel):
+    min: int
+    max: int
+
+    @model_validator(mode="after")
+    def validate_order(self) -> "IntegerRangeSettings":
+        if self.min > self.max or self.min < 1:
+            raise ValueError("Nieprawidłowy zakres całkowity")
+        return self
+
+
 class ImpedanceSettings(StrictModel):
     min: str
     nominal: str | None = None
@@ -106,6 +117,11 @@ class RigolChannelLimits(StrictModel):
     estimated_load_current: CurrentEstimateSettings
     declared_dut_impedance: ImpedanceSettings
     settle_time: RangeSettings
+    modulation_rate: RangeSettings
+    sweep_duration: RangeSettings
+    sweep_steps: IntegerRangeSettings
+    burst_period: RangeSettings
+    burst_cycles: IntegerRangeSettings
 
     @model_validator(mode="after")
     def validate_dimensions(self) -> "RigolChannelLimits":
@@ -116,6 +132,9 @@ class RigolChannelLimits(StrictModel):
         self.offset.checked(DIMENSION_VOLTAGE)
         self.estimated_load_current.checked(DIMENSION_CURRENT)
         self.settle_time.checked(DIMENSION_TIME)
+        self.modulation_rate.checked(DIMENSION_FREQUENCY)
+        self.sweep_duration.checked(DIMENSION_TIME)
+        self.burst_period.checked(DIMENSION_TIME)
         return self
 
 
@@ -227,14 +246,17 @@ class OptionalRangeSettings(StrictModel):
         return self
 
 
-class IntegerRangeSettings(StrictModel):
-    min: int
-    max: int
+class RfInputSettings(StrictModel):
+    max_expected_power_at_connector: str | None = None
+    external_attenuation: str
+    minimum_internal_attenuation: str | None = None
+    preamplifier_allowed: bool = False
+    dc_input_allowed: bool = False
 
     @model_validator(mode="after")
-    def validate_order(self) -> "IntegerRangeSettings":
-        if self.min > self.max or self.min < 1:
-            raise ValueError("Nieprawidłowy zakres całkowity")
+    def validate_expected_power(self) -> "RfInputSettings":
+        if self.max_expected_power_at_connector is not None:
+            parse_quantity(self.max_expected_power_at_connector, DIMENSION_DBM)
         return self
 
 
@@ -242,7 +264,7 @@ class AnritsuSafety(StrictModel):
     acquisition_allowed: bool = False
     require_rf_input_limit_definition: bool = True
     signal_generator_output_allowed: bool = False
-    rf_input: dict[str, Any]
+    rf_input: RfInputSettings
     frequency: OptionalRangeSettings
     reference_level: OptionalRangeSettings
     sweep_points: IntegerRangeSettings
@@ -253,6 +275,24 @@ class AnritsuSafety(StrictModel):
         # Null RF ranges intentionally lock acquisition until a lab owner fills them in.
         self.frequency.checked_if_complete(DIMENSION_FREQUENCY)
         self.reference_level.checked_if_complete(DIMENSION_DBM)
+        if self.acquisition_allowed:
+            if self.frequency.min is None or self.reference_level.min is None:
+                raise ValueError("Akwizycja Anritsu wymaga kompletnych limitów częstotliwości i reference level.")
+            if self.require_rf_input_limit_definition and self.rf_input.max_expected_power_at_connector is None:
+                raise ValueError("Akwizycja Anritsu wymaga max_expected_power_at_connector.")
+        return self
+
+
+class AnritsuAcquisitionSettings(StrictModel):
+    """Only a qualified protocol may be used for recipe checkpoints."""
+
+    single_sweep_mode: Literal["unverified", "standard_scpi_opc"] = "unverified"
+    operation_complete_timeout: str = "30 s"
+
+    @model_validator(mode="after")
+    def validate_timeout(self) -> "AnritsuAcquisitionSettings":
+        if parse_quantity(self.operation_complete_timeout, DIMENSION_TIME).si_value <= 0:
+            raise ValueError("operation_complete_timeout musi być dodatni")
         return self
 
 
@@ -262,6 +302,7 @@ class AnritsuSettings(StrictModel):
     connection: ConnectionSettings
     identity: IdentitySettings
     safety: AnritsuSafety
+    acquisition: AnritsuAcquisitionSettings = Field(default_factory=AnritsuAcquisitionSettings)
 
 
 class DevicesSettings(StrictModel):

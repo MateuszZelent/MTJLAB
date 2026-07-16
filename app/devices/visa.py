@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+import re
 from typing import Callable
 
 import pyvisa
@@ -102,6 +103,16 @@ class FakeVisaSession:
         self.writes.append(command)
         response = self.responses.get(command)
         if response is None:
+            output = re.match(r"^print\((smu[ab])\.source\.output\)$", command)
+            if output:
+                smu = output.group(1)
+                for write in reversed(self.writes[:-1]):
+                    state = re.match(
+                        rf"^{smu}\.source\.output\s*=\s*{smu}\.(OUTPUT_ON|OUTPUT_OFF)$", write
+                    )
+                    if state:
+                        return "1" if state.group(1) == "OUTPUT_ON" else "0"
+                return "0"
             raise DeviceError(f"Brak zaprogramowanej odpowiedzi fake VISA dla {command!r}.")
         return response(command) if callable(response) else response
 
@@ -117,4 +128,3 @@ class FakeVisaSessionFactory:
     def open(self, resource: str, backend: str, timeout_ms: int) -> FakeVisaSession:
         self.opened_resources.append((resource, backend, timeout_ms))
         return self.session
-

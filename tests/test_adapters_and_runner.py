@@ -1,21 +1,33 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from copy import deepcopy
+import threading
 import unittest
 
 from app.devices.anritsu import AnritsuAdapter, SpectrumConfig
 from app.devices.keithley import KeithleyAdapter, KeithleySourceRequest
-from app.devices.rigol import RigolAdapter, RigolChannelConfig
+from app.devices.rigol import (
+    RigolAdapter,
+    RigolBurstConfig,
+    RigolChannelConfig,
+    RigolFrequencySweepConfig,
+    RigolModulationConfig,
+)
 from app.devices.visa import FakeVisaSession, FakeVisaSessionFactory
 from app.domain.errors import SafetyViolation
+from app.domain.models import DeviceState
+from app.domain.models import ApplicationState
 from app.engine.compiler import ExecutionPlan, PlanAction
 from app.engine.runner import RecipeRunner
-from tests.helpers import simulation_settings
+from app.settings.models import StationSettings
+from tests.helpers import loaded_settings, simulation_settings
 
 
 @dataclass
 class MemoryWriter:
     points: list[object] = field(default_factory=list)
+    events: list[tuple[str, dict[str, object], str]] = field(default_factory=list)
     status: str | None = None
 
     def append(self, point: object, trace: object = None) -> int:
@@ -24,6 +36,9 @@ class MemoryWriter:
 
     def close(self, status: str) -> None:
         self.status = status
+
+    def append_event(self, name: str, data: dict[str, object], *, severity: str = "info") -> None:
+        self.events.append((name, data, severity))
 
 
 class AdapterAndRunnerTests(unittest.TestCase):
@@ -48,6 +63,76 @@ class AdapterAndRunnerTests(unittest.TestCase):
         with self.assertRaises(SafetyViolation):
             adapter.set_output(1, True)
 
+    def test_connect_forces_outputs_off_before_optional_probe_or_error_cleanup(self) -> None:
+        rigol_session = FakeVisaSession(
+            responses={
+                "*IDN?": "Rigol Technologies,DG1032Z,DG1ZA172902039,00.01.08",
+                ":SOUR1:MOD?": "OFF",
+                ":SOUR1:SWE:STAT?": "OFF",
+                ":SOUR1:BURS:STAT?": "OFF",
+                ":SOUR1:PHAS?": "0",
+            }
+        )
+        rigol = RigolAdapter(self.settings, session_factory=FakeVisaSessionFactory(rigol_session))
+        rigol.connect()
+        first_probe = rigol_session.writes.index(":SOUR1:MOD?")
+        self.assertLess(rigol_session.writes.index(":OUTP1 OFF"), first_probe)
+        self.assertLess(rigol_session.writes.index(":OUTP2 OFF"), first_probe)
+
+        keithley_session = FakeVisaSession(
+            responses={
+                "*IDN?": "KEITHLEY INSTRUMENTS,2602A,123456,1.0",
+                "print(errorqueue.count)": "0",
+            }
+        )
+        keithley = KeithleyAdapter(self.settings, session_factory=FakeVisaSessionFactory(keithley_session))
+        keithley.connect()
+        clear_errors = keithley_session.writes.index("errorqueue.clear()")
+        self.assertLess(keithley_session.writes.index("smua.source.output = smua.OUTPUT_OFF"), clear_errors)
+        self.assertLess(keithley_session.writes.index("smub.source.output = smub.OUTPUT_OFF"), clear_errors)
+
+    def test_keithley_rejects_unconfirmed_output_state(self) -> None:
+        raw = deepcopy(self.settings.model_dump(mode="python"))
+        raw["profile"]["state"] = "approved"
+        raw["devices"]["keithley"]["safety"]["allow_output_enable"] = True
+        settings = StationSettings.model_validate(raw)
+        session = FakeVisaSession(
+            responses={
+                "*IDN?": "KEITHLEY INSTRUMENTS,2602A,123456,1.0",
+                "print(errorqueue.count)": "0",
+                "print(smub.source.output)": "0",
+            }
+        )
+        adapter = KeithleyAdapter(settings, session_factory=FakeVisaSessionFactory(session))
+        adapter.connect()
+        adapter.configure_source(KeithleySourceRequest("B", "current", .001, .067))
+        adapter.arm_output("B")
+
+        with self.assertRaisesRegex(Exception, "nie potwierdził"):
+            adapter.set_output("B", True)
+
+    def test_failed_emergency_shutdown_marks_each_device_state_unknown(self) -> None:
+        rigol_session = FakeVisaSession(
+            responses={"*IDN?": "Rigol Technologies,DG1032Z,DG1ZA172902039,00.01.08"}
+        )
+        keithley_session = FakeVisaSession(
+            responses={
+                "*IDN?": "KEITHLEY INSTRUMENTS,2602A,123456,1.0",
+                "print(errorqueue.count)": "0",
+            }
+        )
+        anritsu_session = FakeVisaSession(responses={"*IDN?": "ANRITSU,MS2830A,123456,1.0"})
+        adapters = (
+            (RigolAdapter(self.settings, session_factory=FakeVisaSessionFactory(rigol_session)), rigol_session),
+            (KeithleyAdapter(self.settings, session_factory=FakeVisaSessionFactory(keithley_session)), keithley_session),
+            (AnritsuAdapter(self.settings, session_factory=FakeVisaSessionFactory(anritsu_session)), anritsu_session),
+        )
+        for adapter, session in adapters:
+            adapter.connect()
+            session.closed = True  # simulate a transport loss immediately before E-STOP
+            adapter.emergency_off()
+            self.assertEqual(adapter.state, DeviceState.UNKNOWN)
+
     def test_anritsu_live_trace_has_inclusive_frequency_axis(self) -> None:
         values = ",".join(str(-50 + index / 100) for index in range(101))
         session = FakeVisaSession(
@@ -57,6 +142,7 @@ class AdapterAndRunnerTests(unittest.TestCase):
                 "FREQ:STOP?": "2000000",
                 "SWE:POIN?": "101",
                 "TRAC? TRAC1": values,
+                "*OPC?": "1",
             }
         )
         adapter = AnritsuAdapter(self.settings, session_factory=FakeVisaSessionFactory(session))
@@ -68,6 +154,151 @@ class AdapterAndRunnerTests(unittest.TestCase):
         self.assertEqual(trace.frequencies_hz[0], 1e6)
         self.assertEqual(trace.frequencies_hz[-1], 2e6)
         self.assertEqual(len(trace.powers_dbm), 101)
+
+    def test_anritsu_rejects_frequency_outside_the_approved_profile(self) -> None:
+        session = FakeVisaSession(responses={"*IDN?": "ANRITSU,MS2830A,123456,1.0"})
+        adapter = AnritsuAdapter(self.settings, session_factory=FakeVisaSessionFactory(session))
+        adapter.connect()
+        with self.assertRaises(SafetyViolation):
+            adapter.configure_spectrum(SpectrumConfig(1e6, 101e9, 0, 101))
+
+    def test_rigol_advanced_configuration_forces_output_off(self) -> None:
+        session = FakeVisaSession(
+            responses={
+                "*IDN?": "Rigol Technologies,DG1032Z,DG1ZA172902039,00.01.08",
+                ":SYST:ERR?": "0,No error",
+                ":OUTP1?": "OFF",
+                ":SOUR1:MOD?": "OFF",
+                ":SOUR1:SWE:STAT?": "OFF",
+                ":SOUR1:BURS:STAT?": "OFF",
+                ":SOUR1:PHAS?": "0",
+            }
+        )
+        adapter = RigolAdapter(self.settings, session_factory=FakeVisaSessionFactory(session))
+        adapter.connect()
+        adapter.configure_modulation(RigolModulationConfig(1, True, "AM", rate_hz=1000, parameter=50))
+        adapter.configure_frequency_sweep(
+            RigolFrequencySweepConfig(1, True, 100, 1000, 1.0, steps=10)
+        )
+        adapter.configure_burst(RigolBurstConfig(1, True, cycles=3, period_s=0.01))
+        self.assertIn(":OUTP1 OFF", session.writes)
+        self.assertIn(":SOUR1:MOD:TYPE AM", session.writes)
+        self.assertIn(":SOUR1:SWE:STAT ON", session.writes)
+        self.assertIn(":SOUR1:BURS ON", session.writes)
+
+    def test_compliance_writes_a_partial_checkpoint_then_faults_safely(self) -> None:
+        session = FakeVisaSession(
+            responses={
+                "*IDN?": "KEITHLEY INSTRUMENTS,2602A,123456,1.0",
+                "print(errorqueue.count)": "0",
+                "print(smub.measure.v())": "0.067",
+                "print(smub.measure.i())": "0.001",
+            }
+        )
+        keithley = KeithleyAdapter(self.settings, session_factory=FakeVisaSessionFactory(session))
+        keithley.connect()
+        rigol = RigolAdapter(self.settings, session_factory=FakeVisaSessionFactory(FakeVisaSession()))
+        anritsu = AnritsuAdapter(self.settings, session_factory=FakeVisaSessionFactory(FakeVisaSession()))
+        plan = ExecutionPlan(
+            recipe_name="compliance",
+            actions=(
+                PlanAction("setup", "configure_keithley", {"request": KeithleySourceRequest("B", "current", .001, .067)}, {"keithley.B.current": .001}),
+                PlanAction("measure", "measure_keithley", {"channel": "B"}, {}),
+            ),
+            total_points=0,
+            sha256="compliance",
+            recipe_source="schema_version: 1\n",
+        )
+        writer = MemoryWriter()
+        result = RecipeRunner(rigol=rigol, keithley=keithley, anritsu=anritsu, writer=writer).run(plan)  # type: ignore[arg-type]
+        self.assertEqual(result.stored_points, 1)
+        self.assertIsNotNone(result.error)
+        self.assertEqual(writer.status, "faulted")
+        point, trace = writer.points[0]
+        self.assertEqual(point.status, "compliance")
+        self.assertIsNone(trace)
+        self.assertIn("smub.source.output = smub.OUTPUT_OFF", session.writes)
+
+    def test_keithley_whitelisted_sense_and_manual_ranges_are_validated_and_written(self) -> None:
+        session = FakeVisaSession(
+            responses={
+                "*IDN?": "KEITHLEY INSTRUMENTS,2602A,123456,1.0",
+                "print(errorqueue.count)": "0",
+            }
+        )
+        adapter = KeithleyAdapter(self.settings, session_factory=FakeVisaSessionFactory(session))
+        adapter.connect()
+        adapter.configure_source(
+            KeithleySourceRequest(
+                "B",
+                "current",
+                0.001,
+                0.067,
+                sense_mode="4wire",
+                source_autorange=False,
+                source_range_si=0.01,
+                measure_voltage_autorange=False,
+                measure_voltage_range_si=0.067,
+                measure_current_autorange=False,
+                measure_current_range_si=0.01,
+            )
+        )
+        self.assertIn("smub.source.autorangei = smub.AUTORANGE_OFF", session.writes)
+        self.assertIn("smub.source.rangei = 0.01", session.writes)
+        self.assertIn("smub.measure.rangev = 0.067", session.writes)
+        self.assertIn("smub.sense = smub.SENSE_4WIRE", session.writes)
+
+    def test_keithley_measure_only_configures_measurement_path_not_source_range(self) -> None:
+        session = FakeVisaSession(
+            responses={
+                "*IDN?": "KEITHLEY INSTRUMENTS,2602A,123456,1.0",
+                "print(errorqueue.count)": "0",
+            }
+        )
+        adapter = KeithleyAdapter(self.settings, session_factory=FakeVisaSessionFactory(session))
+        adapter.connect()
+        adapter.configure_source(
+            KeithleySourceRequest(
+                "B",
+                "measure_only",
+                0,
+                0,
+                sense_mode="4wire",
+                measure_voltage_autorange=False,
+                measure_voltage_range_si=0.067,
+            )
+        )
+        self.assertIn("smub.measure.rangev = 0.067", session.writes)
+        self.assertIn("smub.sense = smub.SENSE_4WIRE", session.writes)
+        self.assertNotIn("smub.source.rangev =", "\n".join(session.writes))
+        with self.assertRaises(SafetyViolation):
+            adapter.configure_source(
+                KeithleySourceRequest("B", "measure_only", 0, 0, source_autorange=False, source_range_si=0.01)
+            )
+
+    def test_rigol_requires_one_shot_arm_before_enabling_output(self) -> None:
+        raw = deepcopy(loaded_settings().model_dump(mode="python"))
+        raw["profile"]["state"] = "approved"
+        raw["devices"]["rigol"]["safety"]["allow_output_enable"] = True
+        settings = StationSettings.model_validate(raw)
+        session = FakeVisaSession(
+            responses={
+                "*IDN?": "Rigol Technologies,DG1032Z,DG1ZA172902039,00.01.08",
+                ":SOUR1:VOLT:LOW?": "-0.001",
+                ":SOUR1:FUNC?": "SQU",
+                ":SOUR1:FREQ?": "1000",
+                ":SOUR1:VOLT:HIGH?": "0.001",
+                ":SYST:ERR?": "0,No error",
+            }
+        )
+        session.responses[":OUTP1?"] = lambda _command: "ON" if ":OUTP1 ON" in session.writes else "OFF"
+        adapter = RigolAdapter(settings, session_factory=FakeVisaSessionFactory(session))
+        adapter.connect()
+        adapter.configure_channel(RigolChannelConfig(1, "SQU", 1000, .001, -.001, dut_min_impedance_ohm=50))
+        with self.assertRaises(SafetyViolation):
+            adapter.set_output(1, True)
+        adapter.arm_output(1)
+        self.assertTrue(adapter.set_output(1, True))
 
     def test_runner_stores_one_checkpoint_for_a_spectrum(self) -> None:
         rigol_session = FakeVisaSession(
@@ -97,6 +328,7 @@ class AdapterAndRunnerTests(unittest.TestCase):
                 "FREQ:STOP?": "2000000",
                 "SWE:POIN?": "101",
                 "TRAC? TRAC1": values,
+                "*OPC?": "1",
             }
         )
         rigol = RigolAdapter(self.settings, session_factory=FakeVisaSessionFactory(rigol_session))
@@ -113,6 +345,7 @@ class AdapterAndRunnerTests(unittest.TestCase):
                 PlanAction("rigol", "configure_rigol", {"config": RigolChannelConfig(1, "SQU", 1000, .001, -.001, dut_min_impedance_ohm=50)}, {"rigol.1.high_level": .001}),
                 PlanAction("measure", "measure_keithley", {"channel": "B"}, {}),
                 PlanAction("trace", "acquire_spectrum", {"trace": "TRAC1"}, {}),
+                PlanAction("ramp", "ramp_keithley_to_zero", {"channel": "B", "deadline_s": 1.0}, {}),
             ),
             total_points=1,
             sha256="test",
@@ -123,6 +356,53 @@ class AdapterAndRunnerTests(unittest.TestCase):
         self.assertEqual(result.stored_points, 1)
         self.assertEqual(writer.status, "completed")
         self.assertEqual(len(writer.points), 1)
+        self.assertEqual(writer.events[-1][0], "run_completed")
+        self.assertIn("INIT:IMM", anritsu_session.writes)
+
+    def test_operator_stop_runs_finally_ramp_and_closes_as_aborted(self) -> None:
+        from app.devices.simulators import SimulatedVisaFactory, simulated_station_settings
+
+        settings = simulated_station_settings(loaded_settings())
+        rigol = RigolAdapter(settings, session_factory=SimulatedVisaFactory("rigol"))
+        keithley = KeithleyAdapter(settings, session_factory=SimulatedVisaFactory("keithley"))
+        anritsu = AnritsuAdapter(settings, session_factory=SimulatedVisaFactory("anritsu"))
+        for device in (rigol, keithley, anritsu):
+            device.connect()
+        plan = ExecutionPlan(
+            recipe_name="operator-stop",
+            actions=(
+                PlanAction(
+                    "keithley-config",
+                    "configure_keithley",
+                    {"request": KeithleySourceRequest("B", "current", 0.001, 0.067)},
+                    {},
+                ),
+                PlanAction("wait", "wait", {"duration_s": 1.0}, {}),
+                PlanAction(
+                    "ramp",
+                    "ramp_keithley_to_zero",
+                    {"channel": "B", "deadline_s": 1.0},
+                    {},
+                    is_finally=True,
+                ),
+            ),
+            total_points=0,
+            sha256="operator-stop",
+            recipe_source="schema_version: 1\n",
+        )
+        writer = MemoryWriter()
+        runner = RecipeRunner(rigol=rigol, keithley=keithley, anritsu=anritsu, writer=writer)  # type: ignore[arg-type]
+        timer = threading.Timer(0.02, runner.request_stop)
+        timer.start()
+        try:
+            result = runner.run(plan)
+        finally:
+            timer.cancel()
+
+        self.assertEqual(result.state, ApplicationState.SAFE)
+        self.assertEqual(writer.status, "aborted")
+        self.assertEqual(keithley.state, DeviceState.OUTPUT_OFF)
+        self.assertIn("safe_finally_finished", tuple(event[0] for event in writer.events))
 
 
 if __name__ == "__main__":

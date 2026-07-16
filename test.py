@@ -93,9 +93,18 @@ def parse_args() -> argparse.Namespace:
         action="store_true",
         help="wlacz wyjscie CH1 po konfiguracji (wymaga --apply)",
     )
+    parser.add_argument(
+        "--unsafe-legacy",
+        action="store_true",
+        help="zezwol na zapis przez historyczny skrypt poza produkcyjnymi blokadami",
+    )
     args = parser.parse_args()
     if args.enable_output and not args.apply:
         parser.error("--enable-output wymaga rowniez --apply")
+    if args.apply and not args.unsafe_legacy:
+        parser.error(
+            "Zapis przez test.py wymaga --unsafe-legacy. Uzyj produkcyjnego polecenia lab-control."
+        )
     return args
 
 

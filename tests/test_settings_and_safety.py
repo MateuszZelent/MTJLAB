@@ -2,13 +2,17 @@ from __future__ import annotations
 
 import unittest
 from copy import deepcopy
+from pathlib import Path
+import tempfile
 
 from app.domain.errors import SafetyViolation
 from app.domain.quantities import DIMENSION_CURRENT, QuantityError, parse_quantity
+from app.safety.anritsu import validate_anritsu_spectrum
+from app.safety.keithley import KeithleySourceRequest, validate_keithley_source
 from app.safety.rigol_current import validate_rigol_waveform
 from app.settings import SettingsRepository
 from app.settings.models import StationSettings
-from tests.helpers import ROOT, loaded_settings
+from tests.helpers import ROOT, loaded_settings, simulation_settings
 
 
 class QuantityAndSafetyTests(unittest.TestCase):
@@ -56,6 +60,49 @@ class QuantityAndSafetyTests(unittest.TestCase):
                 low_level="-1 V",
                 output_load="HIGHZ",
                 dut_min_impedance="1 ohm",
+            )
+
+    def test_repository_revokes_approval_for_any_configuration_change(self) -> None:
+        source = (ROOT / ".config" / "settings.yml").read_text(encoding="utf-8")
+        with tempfile.TemporaryDirectory() as temporary:
+            path = Path(temporary) / "settings.yml"
+            path.write_text(source, encoding="utf-8")
+            repository = SettingsRepository(path)
+            approved = deepcopy(repository.load().raw)
+            approved["profile"].update(
+                {
+                    "state": "approved",
+                    "approved_by": "Operator Test",
+                    "approved_at": "2026-01-01T00:00:00+00:00",
+                    "approval_note": "Zatwierdzono testowo.",
+                }
+            )
+            self.assertEqual(repository.save_raw(approved).profile.state, "approved")
+
+            changed = deepcopy(repository.load().raw)
+            changed["devices"]["rigol"]["safety"]["channels"]["1"]["lab_limits"]["frequency"]["max"] = "900 kHz"
+            saved = repository.save_raw(changed)
+
+            self.assertEqual(saved.profile.state, "unverified")
+            self.assertIsNone(saved.profile.approved_by)
+            self.assertTrue(saved.outputs_locked)
+            self.assertEqual(repository.load().settings.profile.state, "unverified")
+
+    def test_safety_boundaries_reject_nan_and_infinity(self) -> None:
+        settings = loaded_settings()
+        with self.assertRaisesRegex(SafetyViolation, "skończoną"):
+            validate_keithley_source(
+                settings.keithley.safety.channels["B"],
+                KeithleySourceRequest("B", "current", float("nan"), 0.067),
+            )
+        simulated = simulation_settings()
+        with self.assertRaisesRegex(SafetyViolation, "skończonymi"):
+            validate_anritsu_spectrum(
+                simulated.anritsu.safety,
+                start_hz=1e6,
+                stop_hz=float("inf"),
+                reference_level_dbm=0,
+                points=101,
             )
 
 

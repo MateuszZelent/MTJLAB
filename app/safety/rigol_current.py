@@ -103,10 +103,12 @@ def validate_rigol_waveform(
         raise SafetyViolation("HighL musi być większy od LowL dla przebiegów zmiennych.")
 
     limits = channel.lab_limits
-    _enforce_range("frequency", freq_hz, limits.frequency.min, limits.frequency.max, DIMENSION_FREQUENCY)
+    if waveform_normalized not in {"DC", "NOIS"}:
+        _enforce_range("frequency", freq_hz, limits.frequency.min, limits.frequency.max, DIMENSION_FREQUENCY)
     _enforce_range("high_level", high_v, limits.high_level.min, limits.high_level.max, DIMENSION_VOLTAGE)
     _enforce_range("low_level", low_v, limits.low_level.min, limits.low_level.max, DIMENSION_VOLTAGE)
-    _enforce_range("amplitude_vpp", high_v - low_v, limits.amplitude_vpp.min, limits.amplitude_vpp.max, DIMENSION_VOLTAGE)
+    if waveform_normalized != "DC":
+        _enforce_range("amplitude_vpp", high_v - low_v, limits.amplitude_vpp.min, limits.amplitude_vpp.max, DIMENSION_VOLTAGE)
     _enforce_range("offset", (high_v + low_v) / 2.0, limits.offset.min, limits.offset.max, DIMENSION_VOLTAGE)
 
     if dut_min_impedance is None:

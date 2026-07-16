@@ -1108,11 +1108,23 @@ class GeneratorApp(tk.Tk):
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--address", default=DEFAULT_ADDRESS, help="adres zasobu VISA")
+    parser.add_argument(
+        "--unsafe-legacy",
+        action="store_true",
+        help="uruchom historyczny prototyp Tkinter bez produkcyjnych blokad bezpieczenstwa",
+    )
     return parser.parse_args()
 
 
 def main() -> None:
     args = parse_args()
+    if not args.unsafe_legacy:
+        print(
+            "Ten Tkinter GUI jest historycznym prototypem. "
+            "Uruchom produkcyjna aplikacje: lab-control. "
+            "Do celow serwisowych wymagajacych prototypu podaj --unsafe-legacy."
+        )
+        return
     app = GeneratorApp(args.address)
     app.mainloop()
 
