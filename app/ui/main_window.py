@@ -2272,6 +2272,8 @@ class AnritsuPage(QWidget):
         self._reference_trace: SpectrumTrace | None = None
         self._averager = LinearPowerAverager()
         self._averaging_active = False
+        self._averaging_destination: str | None = None
+        self._resume_live_after_averaging = False
         self._timer = QTimer(self)
         self._timer.setInterval(500)
         self._timer.timeout.connect(self.fetch_live)
@@ -2350,14 +2352,16 @@ class AnritsuPage(QWidget):
         self.cancel_average.setProperty("compact", True)
         self.cancel_average.setEnabled(False)
         self.average_progress = QProgressBar()
-        self.average_progress.setRange(0, 200)
+        initial_average_count = self.average_count.value()
+        self.average_progress.setRange(0, initial_average_count)
         self.average_progress.setValue(0)
+        self.average_progress.setFormat(f"0 / {initial_average_count}")
         processing_layout.addWidget(QLabel("Average count"), 1, 0)
         processing_layout.addWidget(self.average_count, 1, 1)
         processing_layout.addWidget(self.acquire_average, 2, 0)
         processing_layout.addWidget(self.cancel_average, 2, 1)
         processing_layout.addWidget(self.average_progress, 3, 0, 1, 2)
-        self.capture_reference = QPushButton("Capture current as reference")
+        self.capture_reference = QPushButton("Acquire averaged reference")
         self.clear_reference = QPushButton("Clear reference")
         self.capture_reference.setProperty("compact", True)
         self.clear_reference.setProperty("compact", True)
@@ -2416,7 +2420,7 @@ class AnritsuPage(QWidget):
         abort.clicked.connect(lambda: self._controller.call("emergency_off"))
         self.acquire_average.clicked.connect(self.start_averaging)
         self.cancel_average.clicked.connect(self.cancel_averaging)
-        self.capture_reference.clicked.connect(self.capture_current_reference)
+        self.capture_reference.clicked.connect(self.start_reference_averaging)
         self.clear_reference.clicked.connect(self.remove_reference)
         self.reference_operation.currentIndexChanged.connect(self._refresh_spectrum_display)
         for checkbox in (self.show_raw, self.show_average, self.show_reference, self.show_processed):
@@ -2427,9 +2431,9 @@ class AnritsuPage(QWidget):
             self.read_configuration: "Read Start, Stop, Reference level, and Points from the connected analyser. This sends query commands only and never changes the instrument or approved safety limits.",
             self.single: "Read the currently displayed TRAC1 spectrum using SCPI queries only. This does not configure or trigger the analyser and does not require an approved safety profile.",
             self.average_count: "Number of complete spectra to average. 200 is common in the Thatec workflow. Averaging is performed in linear mW, not directly in dBm.",
-            self.acquire_average: "Acquire N complete traces sequentially and create a separate averaged spectrum. The latest raw trace is always retained.",
-            self.cancel_average: "Stop the averaging sequence. Already collected temporary frames are discarded; raw/reference data are unchanged.",
-            self.capture_reference: "Copy the latest raw spectrum into an immutable in-memory reference trace on the same frequency grid.",
+            self.acquire_average: "Passively read N traces at the Live refresh interval and average power in linear mW. No analyser setting or trigger mode is changed.",
+            self.cancel_average: "Stop temporal averaging. Already collected temporary frames are discarded; completed raw/reference data are unchanged.",
+            self.capture_reference: "Passively acquire and average N traces, then store that completed average as the in-memory reference spectrum.",
             self.clear_reference: "Remove the in-memory reference and all derived display results. It does not delete raw measurements from HDF5.",
             self.reference_operation: "Choose point-wise reference mathematics. Difference in dB equals a power ratio expressed logarithmically; linear operations first convert dBm to mW.",
             self.show_raw: "Show the latest untouched trace returned by Anritsu.",
@@ -2505,39 +2509,70 @@ class AnritsuPage(QWidget):
             self._controller.call("fetch_current_trace", "TRAC1")
 
     def start_averaging(self) -> None:
+        self._start_temporal_averaging("spectrum")
+
+    def start_reference_averaging(self) -> None:
+        self._start_temporal_averaging("reference")
+
+    def _start_temporal_averaging(self, destination: str) -> None:
         if self._averaging_active:
             return
-        if not self._single_sweep_configured:
-            QMessageBox.warning(
-                self,
-                "Averaging unavailable",
-                "Averaging requires a qualified synchronized single-sweep protocol. "
-                "This prevents counting the same analyser frame more than once.",
-            )
-            return
-        if self._timer.isActive():
-            self.toggle_live()
         target = self.average_count.value()
+        self._resume_live_after_averaging = self._timer.isActive()
+        if self._resume_live_after_averaging:
+            self._timer.stop()
         self._averager.reset()
         self._averaging_active = True
+        self._averaging_destination = destination
         self.average_progress.setRange(0, target)
         self.average_progress.setValue(0)
+        self.average_progress.setFormat(f"0 / {target}")
         self.average_count.setEnabled(False)
         self.acquire_average.setEnabled(False)
+        self.capture_reference.setEnabled(False)
         self.cancel_average.setEnabled(True)
-        self.info.setText(f"Averaging 0 / {target} complete traces…")
-        self._fetch_pending = True
-        self._controller.call("single_sweep", "TRAC1")
+        self.live.setEnabled(False)
+        label = "reference" if destination == "reference" else "spectrum"
+        self.info.setText(f"Averaging {label}: 0 / {target} temporal frames...")
+        self.status.emit(
+            f"Anritsu passive temporal averaging started: {label}, 0 / {target}"
+        )
+        # Reuse an already pending Live frame instead of queuing a duplicate
+        # VISA query against the same session.
+        if not self._fetch_pending:
+            self._fetch_pending = True
+            self._controller.call("fetch_current_trace", "TRAC1")
 
     def cancel_averaging(self) -> None:
+        self._finish_temporal_averaging(resume_live=True)
+        self.info.setText("Averaging cancelled; completed spectra were not modified.")
+        self.status.emit("Anritsu temporal averaging cancelled")
+
+    def _finish_temporal_averaging(self, *, resume_live: bool) -> None:
+        should_resume_live = self._resume_live_after_averaging and resume_live
         self._averaging_active = False
+        self._averaging_destination = None
+        self._resume_live_after_averaging = False
         self._averager.reset()
         self.acquire_average.setEnabled(True)
+        self.capture_reference.setEnabled(True)
         self.cancel_average.setEnabled(False)
         self.average_count.setEnabled(True)
-        self.info.setText("Averaging cancelled; raw spectra were not modified.")
+        self.live.setEnabled(True)
+        if should_resume_live:
+            self._timer.setInterval(self.refresh.value())
+            self._timer.start()
+            self.live.setText("Stop Live")
+
+    def _request_next_average_frame(self) -> None:
+        if not self._averaging_active or self._fetch_pending:
+            return
+        self._fetch_pending = True
+        self._controller.call("fetch_current_trace", "TRAC1")
 
     def capture_current_reference(self) -> None:
+        """Use the latest single frame as a reference for API compatibility."""
+
         if self._latest_trace is None:
             QMessageBox.information(self, "Reference spectrum", "Acquire a spectrum before capturing a reference.")
             return
@@ -2586,36 +2621,53 @@ class AnritsuPage(QWidget):
             self.status.emit("Anritsu Live started")
         elif operation in {"fetch_trace", "fetch_current_trace", "single_sweep"} and isinstance(result, SpectrumTrace):
             self._fetch_pending = False
-            self._latest_trace = result
             if self._averaging_active:
                 try:
                     completed = self._averager.add(result.powers_dbm)
                 except ValueError as exc:
-                    self.cancel_averaging()
+                    self._finish_temporal_averaging(resume_live=False)
                     self.info.setText(f"Averaging stopped: {exc}")
                     return
                 target = self.average_count.value()
                 self.average_progress.setValue(completed)
-                self.info.setText(f"Averaging {completed} / {target} complete traces…")
+                self.average_progress.setFormat(f"{completed} / {target}")
+                label = (
+                    "reference" if self._averaging_destination == "reference" else "spectrum"
+                )
+                self.info.setText(
+                    f"Averaging {label}: {completed} / {target} temporal frames..."
+                )
+                self.status.emit(
+                    f"Anritsu temporal averaging progress: {label} {completed} / {target}"
+                )
                 if completed >= target:
                     averaged = self._averager.result()
-                    self._averaged_trace = SpectrumTrace(
+                    averaged_trace = SpectrumTrace(
                         frequencies_hz=result.frequencies_hz,
                         powers_dbm=averaged,
                         acquired_at_utc=result.acquired_at_utc,
-                        trace_name=f"{result.trace_name}_AVG{target}",
+                        trace_name=(
+                            f"{result.trace_name}_REFAVG{target}"
+                            if self._averaging_destination == "reference"
+                            else f"{result.trace_name}_AVG{target}"
+                        ),
                     )
-                    self._averaging_active = False
-                    self._averager.reset()
-                    self.acquire_average.setEnabled(True)
-                    self.cancel_average.setEnabled(False)
-                    self.average_count.setEnabled(True)
-                    self.show_average.setChecked(True)
-                    self.status.emit(f"Anritsu application-side averaging completed: {target} traces")
+                    self._latest_trace = result
+                    if self._averaging_destination == "reference":
+                        self._reference_trace = averaged_trace
+                        self.clear_reference.setEnabled(True)
+                        self.show_reference.setChecked(True)
+                        completion = f"Averaged reference completed: {target} / {target}"
+                    else:
+                        self._averaged_trace = averaged_trace
+                        self.show_average.setChecked(True)
+                        completion = f"Averaged spectrum completed: {target} / {target}"
+                    self._finish_temporal_averaging(resume_live=True)
+                    self.info.setText(completion)
+                    self.status.emit(f"Anritsu {completion.lower()}")
                     self._refresh_spectrum_display()
                 else:
-                    self._fetch_pending = True
-                    QTimer.singleShot(0, lambda: self._controller.call("single_sweep", "TRAC1"))
+                    QTimer.singleShot(self.refresh.value(), self._request_next_average_frame)
             else:
                 self._show_trace(result)
 
@@ -2683,7 +2735,8 @@ class AnritsuPage(QWidget):
         if operation in {"fetch_trace", "fetch_current_trace", "single_sweep"}:
             self._fetch_pending = False
             if self._averaging_active:
-                self.cancel_averaging()
+                self._finish_temporal_averaging(resume_live=False)
+                self.info.setText(f"Averaging stopped: {error}")
         if operation in {
             "read_configuration", "configure", "start_live", "fetch_trace", "fetch_current_trace",
             "single_sweep", "emergency_off",

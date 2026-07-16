@@ -622,6 +622,63 @@ class MainWindowTests(unittest.TestCase):
             window.close()
             self.application.processEvents()
 
+    def test_anritsu_temporal_average_uses_passive_reads_and_updates_at_target(self) -> None:
+        window = MainWindow(".config/settings.yml", simulation=True)
+        try:
+            anritsu = window.anritsu_page
+            anritsu._controller.call = Mock()
+            anritsu.average_count.setValue(2)
+            first = SpectrumTrace(
+                (1e6, 2e6), (-10.0, -20.0), datetime.now(timezone.utc), "TRAC1"
+            )
+            second = SpectrumTrace(
+                (1e6, 2e6), (0.0, -20.0), datetime.now(timezone.utc), "TRAC1"
+            )
+
+            anritsu.start_averaging()
+
+            anritsu._controller.call.assert_called_once_with("fetch_current_trace", "TRAC1")
+            self.assertEqual(anritsu.average_progress.format(), "0 / 2")
+            anritsu._result("fetch_current_trace", first)
+            self.assertEqual(anritsu.average_progress.value(), 1)
+            self.assertEqual(anritsu.average_progress.format(), "1 / 2")
+            self.assertIsNone(anritsu._averaged_trace)
+
+            anritsu._result("fetch_current_trace", second)
+            self.assertEqual(anritsu.average_progress.value(), 2)
+            self.assertEqual(anritsu.average_progress.format(), "2 / 2")
+            self.assertIsNotNone(anritsu._averaged_trace)
+            self.assertFalse(anritsu._averaging_active)
+        finally:
+            window.close()
+            self.application.processEvents()
+
+    def test_anritsu_reference_is_temporally_averaged_before_display(self) -> None:
+        window = MainWindow(".config/settings.yml", simulation=True)
+        try:
+            anritsu = window.anritsu_page
+            anritsu._controller.call = Mock()
+            anritsu.average_count.setValue(2)
+            first = SpectrumTrace(
+                (1e6, 2e6), (-10.0, -20.0), datetime.now(timezone.utc), "TRAC1"
+            )
+            second = SpectrumTrace(
+                (1e6, 2e6), (0.0, -20.0), datetime.now(timezone.utc), "TRAC1"
+            )
+
+            anritsu.start_reference_averaging()
+            anritsu._result("fetch_current_trace", first)
+            self.assertIsNone(anritsu._reference_trace)
+            anritsu._result("fetch_current_trace", second)
+
+            self.assertIsNotNone(anritsu._reference_trace)
+            self.assertTrue(anritsu.show_reference.isChecked())
+            self.assertTrue(anritsu.clear_reference.isEnabled())
+            self.assertIn("REFAVG2", anritsu._reference_trace.trace_name)
+        finally:
+            window.close()
+            self.application.processEvents()
+
     def test_anritsu_read_configuration_populates_form_without_applying(self) -> None:
         window = MainWindow(".config/settings.yml", simulation=True)
         try:

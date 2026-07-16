@@ -61,6 +61,28 @@ class _ManagedVisaSession:
             return repr(response)
         return f"{response[:1000]!r}... <{len(response)} characters total>"
 
+    @staticmethod
+    def _is_bulk_trace_query(command: str) -> bool:
+        """Return True for trace-data queries whose payload must not enter logs."""
+
+        normalized = " ".join(command.strip().lstrip(":").upper().split())
+        return bool(
+            re.match(r"^TRAC(?:E)?(?:\d+)?(?:\:DATA)?\?\s+", normalized)
+            or re.match(r"^TRAC(?:E)?\?\s+", normalized)
+        )
+
+    @staticmethod
+    def _trace_response_summary(response: str) -> str:
+        if not response:
+            return "<spectrum data suppressed; empty response>"
+        if response.startswith("#"):
+            return f"<binary spectrum data suppressed; {len(response)} characters received>"
+        points = response.count(",") + 1
+        return (
+            f"<spectrum data suppressed; {points} point(s), "
+            f"{len(response)} characters received>"
+        )
+
     @property
     def timeout(self) -> int:
         return self._session.timeout
@@ -105,7 +127,12 @@ class _ManagedVisaSession:
             self._emit(f"RX ERROR {command!r} after {elapsed_ms:.1f} ms: {exc}")
             raise DeviceError(f"VISA query {command!r} failed: {exc}") from exc
         elapsed_ms = (time.perf_counter() - started) * 1000
-        self._emit(f"RX {command!r} after {elapsed_ms:.1f} ms: {self._display_response(response)}")
+        displayed = (
+            self._trace_response_summary(response)
+            if self._is_bulk_trace_query(command)
+            else self._display_response(response)
+        )
+        self._emit(f"RX {command!r} after {elapsed_ms:.1f} ms: {displayed}")
         return response
 
     def close(self) -> None:
