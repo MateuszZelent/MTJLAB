@@ -298,7 +298,7 @@ class SettingsPage(QWidget):
                 "Save changes first? Approval will apply to the saved profile.",
                 QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.Cancel,
             )
-            if answer is not QMessageBox.StandardButton.Yes:
+            if answer != QMessageBox.StandardButton.Yes:
                 return
             self.save_draft()
             if self._dirty:

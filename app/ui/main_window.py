@@ -1602,7 +1602,7 @@ class RigolPage(QWidget):
             f"Arm Rigol CH{channel} for 30 seconds? This does not enable the output yet.",
             QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.Cancel,
         )
-        if answer is QMessageBox.StandardButton.Yes:
+        if answer == QMessageBox.StandardButton.Yes:
             self._controller.call("arm", int(channel))
 
     def request_output(self, enabled: bool) -> None:
@@ -1614,7 +1614,7 @@ class RigolPage(QWidget):
             QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.Cancel,
             QMessageBox.StandardButton.Cancel,
         )
-        if answer is QMessageBox.StandardButton.Yes:
+        if answer == QMessageBox.StandardButton.Yes:
             self._controller.call("set_output", (int(channel), enabled))
 
     def _result(self, operation: str, result: object) -> None:
@@ -2190,7 +2190,7 @@ class KeithleyPage(QWidget):
             f"Arm Keithley CH{channel} for 30 seconds? This does not enable the output yet.",
             QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.Cancel,
         )
-        if answer is QMessageBox.StandardButton.Yes:
+        if answer == QMessageBox.StandardButton.Yes:
             self._pending_channels["arm"] = channel
             self._controller.call("arm", channel)
 
@@ -2203,7 +2203,7 @@ class KeithleyPage(QWidget):
             QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.Cancel,
             QMessageBox.StandardButton.Cancel,
         )
-        if answer is QMessageBox.StandardButton.Yes:
+        if answer == QMessageBox.StandardButton.Yes:
             self._pending_channels["set_output"] = channel
             self._controller.call("set_output", (channel, True))
 
@@ -3462,7 +3462,7 @@ class MainWindow(QMainWindow):
             QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.Cancel,
             QMessageBox.StandardButton.Cancel,
         )
-        if answer is QMessageBox.StandardButton.Yes:
+        if answer == QMessageBox.StandardButton.Yes:
             if self._run_controller.running:
                 self._run_controller.request_emergency_stop(self._settings, simulation=self._simulation)
             for controller in self._controllers.values():
@@ -3529,7 +3529,7 @@ class MainWindow(QMainWindow):
             QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.Cancel,
             QMessageBox.StandardButton.Cancel,
         )
-        if answer is not QMessageBox.StandardButton.Yes:
+        if answer != QMessageBox.StandardButton.Yes:
             self._log("VISA ASSIGN CANCELLED: operator did not confirm configuration change")
             return
         self._log("VISA ASSIGN CONFIRMED: loading settings.yml for atomic update")
