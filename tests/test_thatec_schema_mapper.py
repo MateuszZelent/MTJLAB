@@ -68,6 +68,42 @@ root:
         ):
             self.assertAlmostEqual(actual, expected)
 
+    def test_piecewise_axis_keeps_exact_119_points_and_ignores_fixed_control(self) -> None:
+        schema = ThatecSchemaMapper.from_recipe_source(
+            """\
+schema_version: 1
+name: fixed-plus-piecewise
+root:
+  id: root
+  type: sequence
+  children:
+    - id: fixed-a
+      type: configure_keithley
+      channel: A
+      mode: current
+      level: 0.5 mA
+      compliance: 1 V
+    - id: current-sweep
+      type: sweep
+      target: keithley.B.current
+      segments:
+        - {start: 10 mA, stop: 100 mA, points: 100}
+        - {start: 100 mA, stop: 150 mA, points: 20}
+      children:
+        - id: spectrum
+          type: acquire_spectrum
+""",
+            expected_points=119,
+        )
+
+        self.assertEqual(schema.mode, "recipe_sweeps")
+        self.assertEqual(tuple(axis.target for axis in schema.axes), ("keithley.B.current",))
+        self.assertEqual(schema.axes[0].spacing, "piecewise")
+        self.assertEqual(schema.axes[0].points, 119)
+        self.assertEqual(schema.axes[0].values_si[0], 0.01)
+        self.assertEqual(schema.axes[0].values_si[99], 0.1)
+        self.assertEqual(schema.axes[0].values_si[-1], 0.15)
+
     def test_repeated_acquisitions_add_an_explicit_fast_axis(self) -> None:
         schema = ThatecSchemaMapper.from_recipe_source(
             """\
@@ -94,6 +130,28 @@ root:
             ("keithley.B.current", "measurement.acquisition"),
         )
         self.assertEqual(schema.axes[-1].values_si, (0.0, 1.0))
+
+    def test_anritsu_signal_generator_sweep_is_a_public_rf_axis(self) -> None:
+        schema = ThatecSchemaMapper.from_recipe_source(
+            """\
+schema_version: 1
+name: sg-axis
+root:
+  id: sg-sweep
+  type: sweep
+  target: anritsu.sg.frequency
+  segments:
+    - {start: 1 GHz, stop: 2 GHz, points: 3}
+  children:
+    - id: spectrum
+      type: acquire_spectrum
+""",
+            expected_points=3,
+        )
+        self.assertEqual(schema.mode, "recipe_sweeps")
+        self.assertEqual(schema.axes[0].target, "anritsu.sg.frequency")
+        self.assertEqual(schema.axes[0].values_si, (1e9, 1.5e9, 2e9))
+        self.assertEqual(schema.axes[0].unit, "Hz")
 
     def test_repeat_node_becomes_an_explicit_recipe_axis(self) -> None:
         schema = ThatecSchemaMapper.from_recipe_source(

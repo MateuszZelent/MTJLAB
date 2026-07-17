@@ -79,7 +79,11 @@ class RunWorker(QObject):
         writer: Hdf5RunWriter | None = None
         try:
             devices = {"rigol": rigol, "keithley": keithley, "anritsu": anritsu}
-            required = self._required_devices()
+            # A recipe owns the complete station for its lifetime. Connecting
+            # every configured device lets the final emergency-off sequence
+            # confirm that *all* outputs are disabled after success, stop or
+            # any fault, not just the devices named by the recipe.
+            required = set(devices)
             identities = {name: devices[name].connect().idn for name in sorted(required)}
             output_dir = Path(str(self._settings.storage.get("output_directory", "./measurements")))
             settings_source = self._settings_snapshot()

@@ -13,6 +13,7 @@ import csv
 
 from app.devices.anritsu import SpectrumTrace
 from app.domain.models import MeasurementPoint
+from app.recipes import generate_sweep_points
 from app.storage import Hdf5RunReader, Hdf5RunWriter
 
 
@@ -178,6 +179,88 @@ class Hdf5WriterTests(unittest.TestCase):
             self.assertEqual(setpoint_definition["units"], "A")
             self.assertEqual(measurement_definition["units"], "V")
             self.assertEqual(tree.dataset["Spectrum"].shape, (2, 3))
+
+    def test_piecewise_axis_writes_119_coordinates_and_fixed_control_without_axis(self) -> None:
+        recipe_source = """\
+schema_version: 1
+name: piecewise-storage
+root:
+  id: root
+  type: sequence
+  children:
+    - id: fixed-a
+      type: configure_keithley
+      channel: A
+      mode: current
+      level: 0.5 mA
+      compliance: 67 mV
+    - id: current-sweep
+      type: sweep
+      target: keithley.B.current
+      segments:
+        - {start: 10 mA, stop: 100 mA, points: 100}
+        - {start: 100 mA, stop: 150 mA, points: 20}
+      children:
+        - id: spectrum
+          type: acquire_spectrum
+"""
+        points = generate_sweep_points(
+            [
+                {"start": "10 mA", "stop": "100 mA", "points": 100},
+                {"start": "100 mA", "stop": "150 mA", "points": 20},
+            ],
+            "current",
+        )
+        self.assertEqual(len(points), 119)
+        with tempfile.TemporaryDirectory() as temporary:
+            path = Path(temporary) / "piecewise.h5"
+            writer = Hdf5RunWriter(
+                path,
+                recipe_source=recipe_source,
+                settings_source="schema_version: 1\n",
+                plan_hash="piecewise",
+                device_idn={"anritsu": "ANRITSU,MS2830A,SIM,1.0"},
+                expected_points=len(points),
+            )
+            trace = SpectrumTrace(
+                frequencies_hz=(1e6, 2e6),
+                powers_dbm=(-60.0, -50.0),
+                acquired_at_utc=datetime.now(timezone.utc),
+                trace_name="TRAC1",
+            )
+            for index, point in enumerate(points):
+                writer.append(
+                    MeasurementPoint(
+                        index=index,
+                        setpoints={
+                            "keithley.A.current": 0.0005,
+                            "keithley.B.current": point.si_value,
+                        },
+                        measurements={},
+                    ),
+                    trace,
+                )
+            writer.close("completed")
+            with h5py.File(path, "r") as file:
+                definitions = {
+                    name: dict(dataset.asstr()[()])
+                    for name, dataset in file["scan_definition"].items()
+                    if name.startswith("row_")
+                }
+                axis_row, axis = next(
+                    (name, item)
+                    for name, item in definitions.items()
+                    if item.get("control name") == "Keithley B current (A)"
+                )
+                fixed_row, fixed = next(
+                    (name, item)
+                    for name, item in definitions.items()
+                    if item.get("control name") == "Setpoint A current (A)"
+                )
+                self.assertEqual(tuple(file["measurement"][axis_row]["data"][:]), tuple(point.si_value for point in points))
+                self.assertNotIn("Keithley A current (A)", [item.get("control name") for item in definitions.values()])
+                self.assertEqual(fixed["lab control role"], "setpoint")
+                self.assertEqual(len(file["measurement"][fixed_row]["data"]), 119)
 
     def test_reader_exposes_metadata_points_and_decimated_spectrum(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:

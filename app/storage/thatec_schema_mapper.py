@@ -8,10 +8,12 @@ from typing import Final
 
 from app.domain.quantities import (
     DIMENSION_CURRENT,
+    DIMENSION_DBM,
+    DIMENSION_FREQUENCY,
     DIMENSION_VOLTAGE,
-    parse_quantity,
 )
 from app.recipes.models import RecipeNode, parse_recipe_text
+from app.recipes.sweep_points import generate_sweep_points
 
 
 @dataclass(frozen=True, slots=True)
@@ -90,6 +92,48 @@ _TARGETS: Final[dict[str, tuple[str, str, str, str]]] = {
         "Rigol DG1032Z",
         "Rigol CH2 low level",
         "V",
+    ),
+    "rigol.1.frequency": (
+        DIMENSION_FREQUENCY,
+        "Rigol DG1032Z",
+        "Rigol CH1 frequency",
+        "Hz",
+    ),
+    "rigol.2.frequency": (
+        DIMENSION_FREQUENCY,
+        "Rigol DG1032Z",
+        "Rigol CH2 frequency",
+        "Hz",
+    ),
+    "anritsu.spectrum.start_frequency": (
+        DIMENSION_FREQUENCY,
+        "Anritsu Spectrum Analyzer",
+        "Anritsu start frequency",
+        "Hz",
+    ),
+    "anritsu.spectrum.stop_frequency": (
+        DIMENSION_FREQUENCY,
+        "Anritsu Spectrum Analyzer",
+        "Anritsu stop frequency",
+        "Hz",
+    ),
+    "anritsu.spectrum.reference_level": (
+        DIMENSION_DBM,
+        "Anritsu Spectrum Analyzer",
+        "Anritsu reference level",
+        "dBm",
+    ),
+    "anritsu.sg.frequency": (
+        DIMENSION_FREQUENCY,
+        "Anritsu Signal Generator",
+        "Anritsu SG frequency",
+        "Hz",
+    ),
+    "anritsu.sg.power": (
+        DIMENSION_DBM,
+        "Anritsu Signal Generator",
+        "Anritsu SG power",
+        "dBm",
     ),
 }
 
@@ -176,19 +220,36 @@ class ThatecSchemaMapper:
     def _axis_from_node(node: RecipeNode) -> ThatecSweepAxis:
         target = str(node.data["target"])
         dimension, device, control, unit = _TARGETS[target]
-        start = parse_quantity(node.data["start"], dimension).si_value
-        stop = parse_quantity(node.data["stop"], dimension).si_value
-        points = int(node.data["points"])
-        spacing = str(node.data.get("spacing", "linear"))
-        if spacing == "linear":
-            step = (stop - start) / (points - 1)
-            values = tuple(start + index * step for index in range(points))
-        else:
-            if start <= 0 or stop <= 0:
-                raise ValueError("logarithmic sweep requires positive endpoints")
-            ratio = (stop / start) ** (1 / (points - 1))
-            values = tuple(start * ratio**index for index in range(points))
-        return ThatecSweepAxis(target, device, control, unit, values, spacing)
+        segments = node.data.get("segments")
+        if isinstance(segments, list):
+            generated = generate_sweep_points(segments, dimension)
+            return ThatecSweepAxis(
+                target,
+                device,
+                control,
+                unit,
+                tuple(point.si_value for point in generated),
+                "piecewise",
+            )
+        generated = generate_sweep_points(
+            [
+                {
+                    "start": node.data["start"],
+                    "stop": node.data["stop"],
+                    "points": node.data["points"],
+                    "spacing": node.data.get("spacing", "linear"),
+                }
+            ],
+            dimension,
+        )
+        return ThatecSweepAxis(
+            target,
+            device,
+            control,
+            unit,
+            tuple(point.si_value for point in generated),
+            str(node.data.get("spacing", "linear")),
+        )
 
     @staticmethod
     def _checkpoint_schema(points: int, detail: str) -> ThatecSchema:

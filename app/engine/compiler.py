@@ -30,6 +30,7 @@ from app.domain.quantities import (
     parse_quantity,
 )
 from app.recipes.models import Recipe, RecipeNode
+from app.recipes.sweep_points import generate_sweep_points
 from app.safety.keithley import (
     KeithleySafetyEnvelope,
     KeithleySourceRequest,
@@ -57,8 +58,13 @@ _SWEEP_DIMENSIONS: Final[dict[str, str]] = {
     "rigol.2.high_level": DIMENSION_VOLTAGE,
     "rigol.1.low_level": DIMENSION_VOLTAGE,
     "rigol.2.low_level": DIMENSION_VOLTAGE,
+    "rigol.1.frequency": DIMENSION_FREQUENCY,
+    "rigol.2.frequency": DIMENSION_FREQUENCY,
     "anritsu.sg.frequency": DIMENSION_FREQUENCY,
     "anritsu.sg.power": DIMENSION_DBM,
+    "anritsu.spectrum.start_frequency": DIMENSION_FREQUENCY,
+    "anritsu.spectrum.stop_frequency": DIMENSION_FREQUENCY,
+    "anritsu.spectrum.reference_level": DIMENSION_DBM,
 }
 
 
@@ -173,7 +179,9 @@ class RecipeCompiler:
             if action == "anritsu.abort_acquisition":
                 action = "anritsu.rf_off_and_abort"
             device = allowed[action]
-            if device == "storage" or device in required_devices:
+            if device == "storage":
+                continue
+            if device in required_devices:
                 if action not in result:
                     result.append(action)
         required_actions = {
@@ -181,12 +189,14 @@ class RecipeCompiler:
             "rigol": "rigol.outputs_off",
             "anritsu": "anritsu.rf_off_and_abort",
         }
+        # Every recipe ends with a station-wide output-off attempt. A sweep
+        # must never leave an unrelated manual source energized merely because
+        # it was not referenced by the compiled action list.
         for device in ("keithley", "rigol", "anritsu"):
             action = required_actions[device]
-            if device in required_devices and action not in result:
+            if action not in result:
                 result.append(action)
-        if "storage.flush_checkpoint" not in result:
-            result.append("storage.flush_checkpoint")
+        result.append("storage.flush_checkpoint")
         return tuple(result)
 
     @staticmethod
@@ -210,6 +220,12 @@ class RecipeCompiler:
         if len(actions) > self._max_actions:
             raise SafetyViolation("The expanded-action limit was exceeded.")
         if node.type == "sequence":
+            if node.data.get("operation") == "configure_selected_parameters":
+                raise ConfigurationError(
+                    f"{node.id}: DeviceNode provider compilation is not implemented yet. "
+                    "Execution is blocked so nested acquisitions cannot run once instead "
+                    "of once per sweep point."
+                )
             for child in node.children:
                 self._visit(child, context, actions, is_finally=is_finally)
             return
@@ -220,11 +236,7 @@ class RecipeCompiler:
             except KeyError as exc:
                 allowed = ", ".join(sorted(_SWEEP_DIMENSIONS))
                 raise ConfigurationError(f"Unsupported sweep target {target!r}; allowed: {allowed}.") from exc
-            start = self._resolve_quantity(node.data["start"], dimension, context)
-            stop = self._resolve_quantity(node.data["stop"], dimension, context)
-            points = int(node.data["points"])
-            spacing = str(node.data.get("spacing", "linear"))
-            for value in self._sweep_values(start, stop, points, spacing):
+            for value in self._node_sweep_values(node, dimension, context):
                 nested = dict(context)
                 nested[target] = value
                 for child in node.children:
@@ -246,6 +258,41 @@ class RecipeCompiler:
             return
         action = self._compile_action(node, context, is_finally=is_finally)
         actions.append(action)
+        if not is_finally:
+            self._remember_literal_configuration(action, context)
+
+    @staticmethod
+    def _remember_literal_configuration(
+        action: PlanAction, context: dict[str, Quantity],
+    ) -> None:
+        """Carry literal device state into following checkpoint provenance.
+
+        A fixed configuration is an operation, not a one-point sweep.  It must
+        therefore not add an axis, while every later checkpoint still needs to
+        state the fixed setpoint that was in force when its spectrum was made.
+        """
+
+        if action.kind == "configure_keithley":
+            request = action.payload["request"]
+            if request.mode in {"current", "voltage"}:
+                dimension = (
+                    DIMENSION_CURRENT if request.mode == "current" else DIMENSION_VOLTAGE
+                )
+                context[f"keithley.{request.channel}.{request.mode}"] = Quantity(
+                    request.level_si, dimension
+                )
+            return
+        if action.kind == "configure_rigol":
+            config = action.payload["config"]
+            prefix = f"rigol.{config.channel}"
+            context[f"{prefix}.frequency"] = Quantity(config.frequency_hz, DIMENSION_FREQUENCY)
+            context[f"{prefix}.high_level"] = Quantity(config.high_level_v, DIMENSION_VOLTAGE)
+            context[f"{prefix}.low_level"] = Quantity(config.low_level_v, DIMENSION_VOLTAGE)
+            return
+        if action.kind == "configure_anritsu_sg":
+            config = action.payload["config"]
+            context["anritsu.sg.frequency"] = Quantity(config.frequency_hz, DIMENSION_FREQUENCY)
+            context["anritsu.sg.power"] = Quantity(config.power_dbm, DIMENSION_DBM)
 
     @staticmethod
     def _sweep_values(start: Quantity, stop: Quantity, points: int, spacing: str) -> tuple[Quantity, ...]:
@@ -256,6 +303,37 @@ class RecipeCompiler:
             raise ConfigurationError("A logarithmic sweep requires positive start and stop values.")
         ratio = (stop.si_value / start.si_value) ** (1 / (points - 1))
         return tuple(Quantity(start.si_value * ratio**index, start.dimension) for index in range(points))
+
+    def _node_sweep_values(
+        self,
+        node: RecipeNode,
+        dimension: str,
+        context: dict[str, Quantity],
+    ) -> tuple[Quantity, ...]:
+        """Resolve legacy sweep fields or generator-produced segments."""
+
+        segments = node.data.get("segments")
+        if isinstance(segments, list):
+            resolved: list[dict[str, Any]] = []
+            for raw in segments:
+                if not isinstance(raw, dict):
+                    raise ConfigurationError(f"{node.id}: sweep segment must be a mapping.")
+                segment = dict(raw)
+                for key in ("start", "stop", "step"):
+                    if key in segment:
+                        value = self._resolve_value(segment[key], context)
+                        if isinstance(value, Quantity):
+                            segment[key] = value
+                resolved.append(segment)
+            return generate_sweep_points(resolved, dimension)
+        start = self._resolve_quantity(node.data["start"], dimension, context)
+        stop = self._resolve_quantity(node.data["stop"], dimension, context)
+        return self._sweep_values(
+            start,
+            stop,
+            int(node.data["points"]),
+            str(node.data.get("spacing", "linear")),
+        )
 
     def _resolve_value(self, value: Any, context: dict[str, Quantity]) -> Any:
         if isinstance(value, str):

@@ -116,14 +116,42 @@ def _parse_node(value: object, where: str) -> RecipeNode:
     if kind != "if" and else_children:
         raise ConfigurationError(f"{where}: only an if node can have an else branch.")
     if kind == "sweep":
-        for key in ("target", "start", "stop", "points"):
-            if key not in raw:
-                raise ConfigurationError(f"{where}: sweep requires field {key!r}.")
-        points = raw["points"]
-        if not isinstance(points, int) or points < 2:
-            raise ConfigurationError(f"{where}.points must be an integer >= 2.")
-        if raw.get("spacing", "linear") not in {"linear", "log"}:
-            raise ConfigurationError(f"{where}.spacing must be linear or log.")
+        if "target" not in raw:
+            raise ConfigurationError(f"{where}: sweep requires field 'target'.")
+        segments = raw.get("segments")
+        if segments is not None:
+            if not isinstance(segments, list) or not segments:
+                raise ConfigurationError(f"{where}.segments must be a non-empty list.")
+            for index, segment in enumerate(segments):
+                if not isinstance(segment, dict) or not {"start", "stop"}.issubset(segment):
+                    raise ConfigurationError(
+                        f"{where}.segments[{index}] requires start and stop."
+                    )
+                has_points = "points" in segment
+                has_step = "step" in segment
+                if has_points == has_step:
+                    raise ConfigurationError(
+                        f"{where}.segments[{index}] requires exactly one of points or step."
+                    )
+                if has_points and (
+                    not isinstance(segment["points"], int) or segment["points"] < 2
+                ):
+                    raise ConfigurationError(
+                        f"{where}.segments[{index}].points must be an integer >= 2."
+                    )
+                if segment.get("spacing", "linear") not in {"linear", "log"}:
+                    raise ConfigurationError(
+                        f"{where}.segments[{index}].spacing must be linear or log."
+                    )
+        else:
+            for key in ("start", "stop", "points"):
+                if key not in raw:
+                    raise ConfigurationError(f"{where}: sweep requires field {key!r}.")
+            points = raw["points"]
+            if not isinstance(points, int) or points < 2:
+                raise ConfigurationError(f"{where}.points must be an integer >= 2.")
+            if raw.get("spacing", "linear") not in {"linear", "log"}:
+                raise ConfigurationError(f"{where}.spacing must be linear or log.")
     if kind == "repeat":
         count = raw.get("count")
         if not isinstance(count, int) or isinstance(count, bool) or not 1 <= count <= 100_000:

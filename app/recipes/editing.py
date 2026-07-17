@@ -3,12 +3,91 @@
 from __future__ import annotations
 
 from io import StringIO
+from copy import deepcopy
 from typing import Any
 
 from ruamel.yaml import YAML
 
 from app.domain.errors import ConfigurationError
 from app.recipes.models import parse_recipe_text
+
+
+def add_recipe_node(
+    source: str,
+    *,
+    parent_id: str,
+    node: dict[str, Any],
+    branch: str = "children",
+    index: int | None = None,
+) -> str:
+    """Insert a new visual-builder node and validate the complete recipe."""
+
+    raw = _load(source)
+    if parent_id == "__finally__":
+        target = raw.setdefault("finally", [])
+    else:
+        parent = _find(raw["root"], parent_id)
+        if parent is None:
+            raise ConfigurationError(f"Recipe parent {parent_id!r} was not found.")
+        if branch not in {"children", "else"}:
+            raise ConfigurationError("Recipe node branch must be children or else.")
+        target = parent.setdefault(branch, [])
+    if not isinstance(target, list):
+        raise ConfigurationError("Recipe destination is not a list.")
+    target.insert(len(target) if index is None else max(0, min(index, len(target))), deepcopy(node))
+    return _dump_validated(raw, "tree-builder add")
+
+
+def delete_recipe_node(source: str, *, node_id: str) -> str:
+    """Delete one non-root node from the visual builder."""
+
+    raw = _load(source)
+    if raw["root"].get("id") == node_id:
+        raise ConfigurationError("The recipe root cannot be deleted.")
+    detached = _detach(raw["root"], node_id, section="root")
+    finally_nodes = raw.setdefault("finally", [])
+    if detached is None and isinstance(finally_nodes, list):
+        detached = _detach_list(finally_nodes, node_id, section="finally")
+    if detached is None:
+        raise ConfigurationError(f"Recipe node {node_id!r} was not found.")
+    return _dump_validated(raw, "tree-builder delete")
+
+
+def replace_recipe_node(source: str, *, node_id: str, node: dict[str, Any]) -> str:
+    """Atomically replace fields of one node while retaining its tree position."""
+
+    raw = _load(source)
+    target = _find(raw["root"], node_id)
+    if target is None:
+        for candidate in raw.get("finally", []):
+            if isinstance(candidate, dict):
+                target = _find(candidate, node_id)
+                if target is not None:
+                    break
+    if target is None:
+        raise ConfigurationError(f"Recipe node {node_id!r} was not found.")
+    replacement = deepcopy(node)
+    if replacement.get("id") != node_id:
+        raise ConfigurationError("A visual edit cannot change the recipe node identifier.")
+    target.clear()
+    target.update(replacement)
+    return _dump_validated(raw, "tree-builder edit")
+
+
+def _load(source: str) -> dict[str, Any]:
+    yaml = YAML()
+    raw = yaml.load(source)
+    if not isinstance(raw, dict) or not isinstance(raw.get("root"), dict):
+        raise ConfigurationError("The recipe must contain a mapping root node.")
+    return raw
+
+
+def _dump_validated(raw: dict[str, Any], origin: str) -> str:
+    stream = StringIO()
+    YAML().dump(raw, stream)
+    result = stream.getvalue()
+    parse_recipe_text(result, origin=origin)
+    return result
 
 
 def move_recipe_node(
@@ -28,9 +107,7 @@ def move_recipe_node(
     """
 
     yaml = YAML()
-    raw = yaml.load(source)
-    if not isinstance(raw, dict) or not isinstance(raw.get("root"), dict):
-        raise ConfigurationError("The recipe must contain a mapping root node.")
+    raw = _load(source)
     if raw["root"].get("id") == node_id:
         raise ConfigurationError("The recipe root cannot be moved.")
 

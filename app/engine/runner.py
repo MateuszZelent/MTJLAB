@@ -667,9 +667,7 @@ class RecipeRunner:
             "anritsu": "anritsu.rf_off_and_abort",
         }
         actions = self._safe_shutdown_actions or tuple(
-            default_actions[name]
-            for name in ("keithley", "rigol", "anritsu")
-            if name in self._required_devices
+            default_actions[name] for name in ("keithley", "rigol", "anritsu")
         ) + ("storage.flush_checkpoint",)
         attempted_devices: set[str] = set()
         for action in actions:
@@ -681,8 +679,6 @@ class RecipeRunner:
                         flush()
                 else:
                     name = action.split(".", 1)[0]
-                    if name not in self._required_devices:
-                        continue
                     device = devices[name]
                     attempted_devices.add(name)
                     device.emergency_off()
@@ -700,7 +696,7 @@ class RecipeRunner:
                 self._emit_after_fault("shutdown_action_finished", {"action": action})
         # A malformed manually-created plan must not be able to omit OFF for a
         # required device. Compiled plans already contain this fallback.
-        for name in sorted(self._required_devices - attempted_devices):
+        for name in sorted(set(devices) - attempted_devices):
             action = default_actions[name]
             try:
                 devices[name].emergency_off()

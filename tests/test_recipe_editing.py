@@ -3,7 +3,7 @@ from __future__ import annotations
 import unittest
 
 from app.domain.errors import ConfigurationError
-from app.recipes import move_recipe_node, parse_recipe_text
+from app.recipes import add_recipe_node, delete_recipe_node, move_recipe_node, parse_recipe_text
 
 
 SOURCE = """\
@@ -28,6 +28,16 @@ finally:
 
 
 class RecipeEditingTests(unittest.TestCase):
+    def test_builder_can_add_and_delete_leaf_nodes(self) -> None:
+        added = add_recipe_node(
+            SOURCE,
+            parent_id="root",
+            node={"id": "new-wait", "type": "wait", "duration": "2 ms"},
+        )
+        self.assertIn("new-wait", tuple(node.id for node in parse_recipe_text(added).root.children))
+        deleted = delete_recipe_node(added, node_id="new-wait")
+        self.assertNotIn("new-wait", tuple(node.id for node in parse_recipe_text(deleted).root.children))
+
     def test_reorders_siblings_and_preserves_valid_recipe(self) -> None:
         moved = move_recipe_node(
             SOURCE,

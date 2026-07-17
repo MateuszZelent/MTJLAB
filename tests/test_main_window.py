@@ -615,7 +615,7 @@ class MainWindowTests(unittest.TestCase):
         try:
             self.assertTrue(window.tabs.tabBar().isHidden())
             self.assertEqual([action.text() for action in window.ribbon_actions], [
-                "Dashboard", "Rigol", "Keithley", "Anritsu", "Recipes", "Execution", "Results", "Settings"
+                "Dashboard", "Rigol", "Keithley", "Anritsu", "Sweeps", "Execution", "Results", "Settings"
             ])
             self.assertTrue(all(not action.icon().isNull() for action in window.ribbon_actions))
             window.ribbon_actions[2].trigger()

@@ -30,6 +30,9 @@ root:
     stop_frequency: 10 MHz
     reference_level: 0 dBm
     points: 1001
+  - id: wait-ccea1446
+    type: wait
+    duration: 100 ms
 finally:
 - id: keithley-b-ramp-zero
   type: ramp_keithley_to_zero

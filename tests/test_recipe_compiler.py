@@ -11,6 +11,37 @@ from tests.helpers import ROOT, loaded_settings, simulation_settings
 
 
 class RecipeCompilerTests(unittest.TestCase):
+    def test_uncompiled_device_sweep_provider_is_blocked_instead_of_running_child_once(self) -> None:
+        source = """\
+schema_version: 1
+name: provider-required
+root:
+  id: root
+  type: sequence
+  children:
+    - id: keithley-axis
+      type: sequence
+      device_module: keithley
+      operation: configure_selected_parameters
+      channel: B
+      source_mode: current
+      parameter_actions:
+        - parameter_id: source.level
+          mode: sweep
+          value: 1 mA
+          segments:
+            - start: 0 A
+              stop: 1 mA
+              points: 3
+              spacing: linear
+      children:
+        - id: spectrum
+          type: acquire_spectrum
+          trace: TRAC1
+"""
+        with self.assertRaisesRegex(Exception, "provider compilation"):
+            RecipeCompiler(simulation_settings()).compile(parse_recipe_text(source))
+
     def test_rf_interlock_blocks_unapproved_recipe(self) -> None:
         recipe = load_recipe(ROOT / "recipes" / "example_nested_sweep.yml")
         with self.assertRaises(SafetyViolation):
@@ -85,6 +116,53 @@ root:
             [0.0, 1.0, 2.0],
         )
 
+    def test_fixed_keithley_a_is_executed_once_and_kept_in_sweep_checkpoints(self) -> None:
+        source = """\
+schema_version: 1
+name: fixed-a-provenance
+root:
+  id: root
+  type: sequence
+  children:
+    - id: fixed-a
+      type: configure_keithley
+      channel: A
+      mode: current
+      level: 0.5 mA
+      compliance: 67 mV
+    - id: current-sweep
+      type: sweep
+      target: keithley.B.current
+      start: 1 mA
+      stop: 2 mA
+      points: 2
+      children:
+        - id: configure-b
+          type: configure_keithley
+          channel: B
+          mode: current
+          level: "${keithley.B.current}"
+          compliance: 67 mV
+        - id: checkpoint
+          type: checkpoint
+"""
+        raw = deepcopy(simulation_settings().model_dump(mode="python"))
+        raw["devices"]["keithley"]["safety"]["channels"]["A"]["enabled"] = True
+        settings = StationSettings.model_validate(raw)
+        plan = RecipeCompiler(settings).compile(parse_recipe_text(source))
+        fixed_actions = [action for action in plan.actions if action.node_id == "fixed-a"]
+        checkpoints = [action for action in plan.actions if action.kind == "checkpoint"]
+        self.assertEqual(len(fixed_actions), 1)
+        self.assertEqual(len(checkpoints), 2)
+        self.assertEqual(
+            [action.setpoints_si["keithley.A.current"] for action in checkpoints],
+            [0.0005, 0.0005],
+        )
+        self.assertEqual(
+            [action.setpoints_si["keithley.B.current"] for action in checkpoints],
+            [0.001, 0.002],
+        )
+
     def test_conditional_branch_is_resolved_for_each_sweep_value(self) -> None:
         source = """\
 schema_version: 1
@@ -132,7 +210,12 @@ root:
         self.assertEqual(plan.required_devices, {"anritsu"})
         self.assertEqual(
             plan.safe_shutdown_actions,
-            ("anritsu.rf_off_and_abort", "storage.flush_checkpoint"),
+            (
+                "anritsu.rf_off_and_abort",
+                "keithley.outputs_off",
+                "rigol.outputs_off",
+                "storage.flush_checkpoint",
+            ),
         )
 
     def test_repeat_rejects_unbounded_or_excessive_count(self) -> None:

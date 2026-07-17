@@ -351,6 +351,60 @@ class AdapterAndRunnerTests(unittest.TestCase):
         self.assertEqual(writer.status, "faulted")
         self.assertTrue(any(name == "shutdown_error" for name, _data, _severity in writer.events))
 
+    def test_any_recipe_shutdown_attempts_all_station_outputs(self) -> None:
+        keithley = ShutdownProbe()
+        rigol = ShutdownProbe()
+        anritsu = ShutdownProbe()
+        writer = MemoryWriter()
+        plan = ExecutionPlan(
+            recipe_name="anritsu-only-station-off",
+            actions=(PlanAction("wait", "wait", {"duration_s": 0.0}, {}),),
+            total_points=0,
+            sha256="anritsu-only-station-off",
+            recipe_source="schema_version: 1\n",
+            required_devices=frozenset({"anritsu"}),
+            safe_shutdown_actions=(
+                "anritsu.rf_off_and_abort",
+                "keithley.outputs_off",
+                "rigol.outputs_off",
+                "storage.flush_checkpoint",
+            ),
+        )
+
+        result = RecipeRunner(
+            rigol=rigol,  # type: ignore[arg-type]
+            keithley=keithley,  # type: ignore[arg-type]
+            anritsu=anritsu,  # type: ignore[arg-type]
+            writer=writer,  # type: ignore[arg-type]
+        ).run(plan)
+
+        self.assertEqual(result.state, ApplicationState.SAFE)
+        self.assertEqual((keithley.calls, rigol.calls, anritsu.calls), (1, 1, 1))
+
+    def test_faulted_single_device_recipe_also_attempts_all_station_outputs(self) -> None:
+        keithley = ShutdownProbe()
+        rigol = ShutdownProbe()
+        anritsu = ShutdownProbe()
+        writer = MemoryWriter()
+        plan = ExecutionPlan(
+            recipe_name="faulted-anritsu-only-station-off",
+            actions=(PlanAction("broken", "not-supported", {}, {}),),
+            total_points=0,
+            sha256="faulted-anritsu-only-station-off",
+            recipe_source="schema_version: 1\n",
+            required_devices=frozenset({"anritsu"}),
+        )
+
+        result = RecipeRunner(
+            rigol=rigol,  # type: ignore[arg-type]
+            keithley=keithley,  # type: ignore[arg-type]
+            anritsu=anritsu,  # type: ignore[arg-type]
+            writer=writer,  # type: ignore[arg-type]
+        ).run(plan)
+
+        self.assertEqual(result.state, ApplicationState.FAULT)
+        self.assertEqual((keithley.calls, rigol.calls, anritsu.calls), (1, 1, 1))
+
     def test_runner_executes_hashed_shutdown_manifest_in_declared_order(self) -> None:
         keithley = ShutdownProbe()
         rigol = ShutdownProbe()
