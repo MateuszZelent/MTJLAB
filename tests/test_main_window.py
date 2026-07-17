@@ -16,11 +16,35 @@ from PySide6.QtTest import QTest
 
 from app.domain.models import DeviceCapabilities
 from app.devices.discovery import DiscoveredInstrument
-from app.devices.anritsu import AnritsuConfigurationSnapshot, SpectrumTrace
+from app.devices.anritsu import (
+    AdvancedSpectrumSnapshot,
+    AnritsuConfigurationSnapshot,
+    SpectrumTrace,
+)
 from app.domain.quantities import DIMENSION_DBM, DIMENSION_FREQUENCY, parse_quantity
 from app.settings.repository import SettingsRepository
-from app.ui.main_window import LimitEditDialog, MainWindow
+from app.ui.main_window import AnritsuPageState, LimitEditDialog, MainWindow
 from tests.helpers import SETTINGS_TEMPLATE
+
+
+TEST_ENGINEER = "LAB\\test-engineer"
+TEST_SERVICE = "LAB\\test-service"
+
+
+def write_engineer_settings(path: Path) -> None:
+    path.write_text(SETTINGS_TEMPLATE.read_text(encoding="utf-8"), encoding="utf-8")
+    repository = SettingsRepository(path)
+    raw = repository.load().raw
+    raw["access_control"]["user_roles"][TEST_ENGINEER] = ["engineer"]
+    repository.save_raw(raw)
+
+
+def write_service_settings(path: Path) -> None:
+    path.write_text(SETTINGS_TEMPLATE.read_text(encoding="utf-8"), encoding="utf-8")
+    repository = SettingsRepository(path)
+    raw = repository.load().raw
+    raw["access_control"]["user_roles"][TEST_SERVICE] = ["service"]
+    repository.save_raw(raw)
 
 
 class MainWindowTests(unittest.TestCase):
@@ -51,6 +75,52 @@ class MainWindowTests(unittest.TestCase):
             )
             self.assertTrue(rigol.sync_phases_button.isEnabled())
             self.assertTrue(all(rigol.advanced.isTabEnabled(index) for index in range(3)))
+        finally:
+            window.close()
+            self.application.processEvents()
+
+    def test_audit_failure_blocks_energy_but_never_output_off(self) -> None:
+        window = MainWindow(".config/settings.yml", simulation=True)
+        try:
+            window._audit_healthy = False
+            with self.assertRaisesRegex(Exception, "audit log is unavailable"):
+                window._guard_manual_operation("arm", 1)
+            with self.assertRaisesRegex(Exception, "audit log is unavailable"):
+                window._guard_manual_operation("set_output", (1, True))
+            with self.assertRaisesRegex(Exception, "audit log is unavailable"):
+                window._guard_manual_operation("ramp_to_level", object())
+            with self.assertRaisesRegex(Exception, "audit log is unavailable"):
+                window._guard_manual_operation("arm_signal_generator", None)
+            with self.assertRaisesRegex(Exception, "audit log is unavailable"):
+                window._guard_manual_operation("set_signal_generator_output", True)
+            window._guard_manual_operation("set_output", (1, False))
+            window._guard_manual_operation("set_signal_generator_output", False)
+            window._guard_manual_operation("emergency_off", None)
+        finally:
+            window.close()
+            self.application.processEvents()
+
+    def test_estop_uses_out_of_band_sessions_without_an_active_recipe(self) -> None:
+        window = MainWindow(".config/settings.yml", simulation=True)
+        try:
+            self.assertFalse(window._run_controller.running)
+            window._run_controller.request_emergency_stop = Mock()
+            for controller in window._controllers.values():
+                controller.call = Mock()
+
+            with patch.object(
+                QMessageBox,
+                "warning",
+                return_value=QMessageBox.StandardButton.Yes,
+            ):
+                window._emergency_off_all()
+
+            window._run_controller.request_emergency_stop.assert_called_once_with(
+                window._settings,
+                simulation=True,
+            )
+            for controller in window._controllers.values():
+                controller.call.assert_called_once_with("emergency_off")
         finally:
             window.close()
             self.application.processEvents()
@@ -130,16 +200,200 @@ class MainWindowTests(unittest.TestCase):
         window = MainWindow(".config/settings.yml", simulation=True)
         try:
             settings = window.settings_page
-            self.assertEqual(settings.tabs.count(), 4)
+            self.assertEqual(settings.tabs.count(), 7)
             self.assertEqual(
-                [settings.tabs.tabText(index) for index in range(4)],
-                ["General", "Rigol", "Keithley", "Anritsu"],
+                [settings.tabs.tabText(index) for index in range(7)],
+                [
+                    "General",
+                    "Rigol",
+                    "Keithley",
+                    "Anritsu",
+                    "Safety limits",
+                    "Access roles",
+                    "Diagnostics",
+                ],
             )
             for name in ("general", "rigol", "keithley", "anritsu"):
                 self.assertGreater(settings.trees[name].topLevelItemCount(), 0)
+            self.assertGreater(settings.limits_table.rowCount(), 10)
         finally:
             window.close()
             self.application.processEvents()
+
+    def test_run_monitor_shows_current_node_measurements_storage_and_spectrum(self) -> None:
+        window = MainWindow(".config/settings.yml", simulation=True)
+        try:
+            monitor = window.run_monitor
+            monitor.run_started(4, 2.0)
+            monitor.append_event(
+                "action_started",
+                {
+                    "node_id": "measure-b",
+                    "kind": "measure_keithley",
+                    "action_index": 1,
+                    "setpoints_si": {"keithley.B.current": 0.001},
+                },
+            )
+            monitor.append_event(
+                "point_stored",
+                {
+                    "stored_points": 1,
+                    "measurements_si": {"keithley.B.voltage_v": 0.067},
+                    "write_elapsed_s": 0.012,
+                    "average_write_rate_points_per_s": 2.5,
+                    "spectrum_points": 101,
+                },
+            )
+            monitor.update_spectrum_preview(
+                {
+                    "point_index": 0,
+                    "frequency_hz": (1e6, 2e6),
+                    "power_dbm": (-70.0, -71.0),
+                    "source_points": 101,
+                }
+            )
+            self.assertIn("measure-b", monitor.current_path.text())
+            self.assertIn("0.067", monitor.current_measurements.text())
+            self.assertIn("12.0 ms", monitor.storage_rate.text())
+            self.assertEqual(monitor.spectrum_preview.trace_point_count("Stored spectrum"), 2)
+        finally:
+            window.close()
+            self.application.processEvents()
+
+    def test_safety_limit_table_has_min_max_columns_and_syncs_with_settings_tree(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            path = Path(temporary) / "settings.yml"
+            write_engineer_settings(path)
+            window = MainWindow(
+                path, simulation=False, authenticated_username=TEST_ENGINEER
+            )
+            try:
+                settings = window.settings_page
+                target_row = next(
+                    row
+                    for row in range(settings.limits_table.rowCount())
+                    if "rigol" in settings.limits_table.item(row, 0).text().lower()
+                    and "1" in settings.limits_table.item(row, 0).text()
+                    and settings.limits_table.item(row, 1).text() == "frequency"
+                )
+                maximum = settings.limits_table.item(target_row, 3)
+                path = tuple(maximum.data(Qt.ItemDataRole.UserRole))
+                maximum.setText("99 MHz")
+                self.application.processEvents()
+                draft = settings._apply_tree_values()
+                self.assertEqual(settings._get_path(draft, path), "99 MHz")
+
+                iterator = QTreeWidgetItemIterator(settings.trees["rigol"])
+                matched = False
+                while iterator.value() is not None:
+                    item = iterator.value()
+                    if tuple(item.data(0, Qt.ItemDataRole.UserRole) or ()) == path:
+                        self.assertEqual(item.text(1), "99 MHz")
+                        matched = True
+                        break
+                    iterator += 1
+                self.assertTrue(matched)
+            finally:
+                window.settings_page._autosave_timer.stop()
+                window.close()
+                self.application.processEvents()
+
+    def test_operator_role_is_visible_and_cannot_edit_or_assign_station_configuration(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            settings_path = Path(temporary) / "settings.yml"
+            settings_path.write_text(
+                SETTINGS_TEMPLATE.read_text(encoding="utf-8"), encoding="utf-8"
+            )
+            window = MainWindow(
+                settings_path,
+                simulation=False,
+                authenticated_username="LAB\\operator",
+            )
+            try:
+                self.assertIn("LAB\\operator", window.identity_status.text())
+                self.assertIn("operator", window.identity_status.text())
+                self.assertFalse(window.settings_page.save_button.isEnabled())
+                self.assertFalse(window.settings_page.approve_button.isEnabled())
+                self.assertFalse(
+                    window.keithley_page._limit_fields["level"].edit_button.isEnabled()
+                )
+                self.assertFalse(window.dashboard.save_assignments.isEnabled())
+                with patch.object(QMessageBox, "warning") as warning:
+                    window._save_discovered_assignments(
+                        {
+                            "rigol": (
+                                "USB0::DENIED::INSTR",
+                                "system",
+                                "RIGOL TECHNOLOGIES,DG1032Z,DENIED,1",
+                            )
+                        }
+                    )
+                warning.assert_called_once()
+                self.assertIsNone(
+                    SettingsRepository(settings_path).load().settings.rigol.connection.resource
+                )
+                self.assertIn("VISA ASSIGN REJECTED", window.log.toPlainText())
+            finally:
+                window.close()
+                self.application.processEvents()
+
+    def test_engineer_approval_is_bound_to_authenticated_os_identity(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            settings_path = Path(temporary) / "settings.yml"
+            write_engineer_settings(settings_path)
+            window = MainWindow(
+                settings_path,
+                simulation=False,
+                authenticated_username=TEST_ENGINEER,
+            )
+            try:
+                self.assertTrue(window.settings_page.save_button.isEnabled())
+                self.assertTrue(window.settings_page.approve_button.isEnabled())
+                self.assertFalse(window.settings_page.add_role_button.isEnabled())
+                phrase = f"APPROVE {window._settings.profile.id}"
+                with patch(
+                    "app.ui.settings_page.QInputDialog.getText",
+                    return_value=(phrase, True),
+                ):
+                    window.settings_page.approve_profile()
+                loaded = SettingsRepository(settings_path).load().settings
+                self.assertEqual(loaded.profile.state, "approved")
+                self.assertEqual(loaded.profile.approved_by, TEST_ENGINEER)
+                self.assertIn("authenticated engineer", loaded.profile.approval_note)
+            finally:
+                window.close()
+                self.application.processEvents()
+
+    def test_service_role_can_manage_explicit_os_role_assignments(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            settings_path = Path(temporary) / "settings.yml"
+            write_service_settings(settings_path)
+            window = MainWindow(
+                settings_path,
+                simulation=False,
+                authenticated_username=TEST_SERVICE,
+            )
+            try:
+                page = window.settings_page
+                self.assertTrue(page.add_role_button.isEnabled())
+                with (
+                    patch(
+                        "app.ui.settings_page.QInputDialog.getText",
+                        return_value=("LAB\\new-engineer", True),
+                    ),
+                    patch(
+                        "app.ui.settings_page.QInputDialog.getItem",
+                        return_value=("engineer", True),
+                    ),
+                ):
+                    page._add_role_assignment()
+                self.assertTrue(page._dirty)
+                self.assertTrue(page.save_draft())
+                assignments = SettingsRepository(settings_path).load().settings.access_control.user_roles
+                self.assertEqual(assignments["LAB\\new-engineer"], ("engineer",))
+            finally:
+                window.close()
+                self.application.processEvents()
 
     def test_every_rigol_parameter_and_control_tab_has_context_help(self) -> None:
         window = MainWindow(".config/settings.yml", simulation=True)
@@ -197,11 +451,12 @@ class MainWindowTests(unittest.TestCase):
                 self.application.processEvents()
 
     def test_discovered_assignment_updates_card_and_worker_adapter_before_connect(self) -> None:
-        source = SETTINGS_TEMPLATE.read_text(encoding="utf-8")
         with tempfile.TemporaryDirectory() as temporary:
             path = Path(temporary) / "settings.yml"
-            path.write_text(source, encoding="utf-8")
-            window = MainWindow(path, simulation=False)
+            write_engineer_settings(path)
+            window = MainWindow(
+                path, simulation=False, authenticated_username=TEST_ENGINEER
+            )
             try:
                 resource = "USB0::NEW_RIGOL::INSTR"
                 with patch.object(
@@ -225,7 +480,7 @@ class MainWindowTests(unittest.TestCase):
                 self.application.processEvents()
 
     def test_discovery_row_assign_button_emits_selected_resource_immediately(self) -> None:
-        window = MainWindow(".config/settings.yml", simulation=False)
+        window = MainWindow(".config/settings.yml", simulation=True)
         try:
             page = window.dashboard
             result = DiscoveredInstrument(
@@ -250,7 +505,7 @@ class MainWindowTests(unittest.TestCase):
             self.application.processEvents()
 
     def test_discovery_marks_persisted_resource_assigned_and_disables_duplicate(self) -> None:
-        window = MainWindow(".config/settings.yml", simulation=False)
+        window = MainWindow(".config/settings.yml", simulation=True)
         try:
             configured = window._settings.rigol.connection
             result = DiscoveredInstrument(
@@ -273,7 +528,7 @@ class MainWindowTests(unittest.TestCase):
             self.application.processEvents()
 
     def test_anritsu_can_be_assigned_directly_from_top_card_after_scan(self) -> None:
-        window = MainWindow(".config/settings.yml", simulation=False)
+        window = MainWindow(".config/settings.yml", simulation=True)
         try:
             page = window.dashboard
             page.assignments_requested.disconnect(window._save_discovered_assignments)
@@ -303,11 +558,12 @@ class MainWindowTests(unittest.TestCase):
             self.application.processEvents()
 
     def test_anritsu_test_unlocks_only_after_selected_resource_is_saved(self) -> None:
-        source = SETTINGS_TEMPLATE.read_text(encoding="utf-8")
         with tempfile.TemporaryDirectory() as temporary:
             path = Path(temporary) / "settings.yml"
-            path.write_text(source, encoding="utf-8")
-            window = MainWindow(path, simulation=False)
+            write_engineer_settings(path)
+            window = MainWindow(
+                path, simulation=False, authenticated_username=TEST_ENGINEER
+            )
             try:
                 result = DiscoveredInstrument(
                     "GPIB0::23::INSTR",
@@ -375,11 +631,12 @@ class MainWindowTests(unittest.TestCase):
             self.application.processEvents()
 
     def test_limit_edit_is_autosaved_after_short_idle_period(self) -> None:
-        source = SETTINGS_TEMPLATE.read_text(encoding="utf-8")
         with tempfile.TemporaryDirectory() as temporary:
             path = Path(temporary) / "settings.yml"
-            path.write_text(source, encoding="utf-8")
-            window = MainWindow(path, simulation=False)
+            write_engineer_settings(path)
+            window = MainWindow(
+                path, simulation=False, authenticated_username=TEST_ENGINEER
+            )
             try:
                 tree = window.settings_page.trees["rigol"]
                 iterator = QTreeWidgetItemIterator(tree)
@@ -417,7 +674,7 @@ class MainWindowTests(unittest.TestCase):
             rigol.configure()
             rigol._controller.call.assert_not_called()
             self.assertFalse(rigol.banner.isHidden())
-            self.assertIn("poza zatwierdzonym zakresem", rigol.banner.label.text())
+            self.assertIn("outside the approved", rigol.banner.label.text())
 
         finally:
             window.close()
@@ -695,6 +952,56 @@ class MainWindowTests(unittest.TestCase):
             window.close()
             self.application.processEvents()
 
+    def test_keithley_manual_ramp_previews_then_dispatches_bounded_request(self) -> None:
+        window = MainWindow(".config/settings.yml", simulation=True)
+        try:
+            keithley = window.keithley_page
+            keithley._controller.call = Mock()
+            keithley.level.setText("1 mA")
+            keithley.ramp_target.setText("1.2 mA")
+            keithley.ramp_step.setText("100 uA")
+            keithley.ramp_settle.setText("1 ms")
+            keithley.ramp_deadline.setText("1 s")
+            keithley._preview_manual_ramp()
+            self.assertIn("point(s)", keithley.ramp_preview.text())
+            keithley._set_channel_output("B", True)
+
+            with patch.object(
+                QMessageBox,
+                "warning",
+                return_value=QMessageBox.StandardButton.Yes,
+            ):
+                keithley._execute_manual_ramp()
+
+            operation, request = keithley._controller.call.call_args.args
+            self.assertEqual(operation, "ramp_to_level")
+            self.assertAlmostEqual(request.target_si, 0.0012)
+            self.assertAlmostEqual(request.max_step_si, 0.0001)
+            self.assertTrue(keithley._ramp_pending)
+
+            measurement = SimpleNamespace(
+                channel="B",
+                voltage_v=0.012,
+                current_a=0.0012,
+                power_w=0.0000144,
+                compliance_detected=False,
+            )
+            keithley._result(
+                "ramp_to_level",
+                SimpleNamespace(
+                    final_measurement=measurement,
+                    levels_si=(0.0011, 0.0012),
+                    target_si=0.0012,
+                ),
+            )
+            self.assertFalse(keithley._ramp_pending)
+            self.assertTrue(keithley._output_states["B"])
+            self.assertEqual(keithley.level.text(), "1.2 mA")
+            self.assertIn("Ramp completed", keithley.ramp_preview.text())
+        finally:
+            window.close()
+            self.application.processEvents()
+
     def test_anritsu_averaging_reference_and_processed_views_preserve_raw_trace(self) -> None:
         window = MainWindow(".config/settings.yml", simulation=True)
         try:
@@ -717,6 +1024,197 @@ class MainWindowTests(unittest.TestCase):
             anritsu.remove_reference()
             self.assertIsNone(anritsu._reference_trace)
             self.assertIs(anritsu._latest_trace, trace_2)
+        finally:
+            window.close()
+            self.application.processEvents()
+
+    def test_anritsu_acquires_one_fresh_reference_with_provenance(self) -> None:
+        window = MainWindow(".config/settings.yml", simulation=True)
+        try:
+            anritsu = window.anritsu_page
+            anritsu._controller.call = Mock()
+            anritsu._device_idn = "ANRITSU,MS2830A,SERIAL,7.03"
+            anritsu.set_capabilities(
+                DeviceCapabilities(
+                    device_name="anritsu",
+                    model="MS2830A",
+                    firmware="7.03",
+                    features=frozenset({"spectrum_trace"}),
+                    hardware_options=("041",),
+                )
+            )
+            acquired = datetime.now(timezone.utc)
+            trace = SpectrumTrace((1e6, 2e6), (-40.0, -41.0), acquired, "TRAC1")
+
+            anritsu.acquire_reference_once()
+
+            anritsu._controller.call.assert_called_once_with("fetch_current_trace", "TRAC1")
+            self.assertEqual(anritsu._page_state, AnritsuPageState.ACQUIRING_REFERENCE)
+            self.assertFalse(anritsu.live.isEnabled())
+            anritsu._result("fetch_current_trace", trace)
+
+            reference = anritsu._reference_spectrum
+            self.assertIsNotNone(reference)
+            self.assertIs(reference.trace, trace)
+            self.assertEqual(reference.kind, "single")
+            self.assertEqual(reference.average_count, 1)
+            self.assertEqual(reference.source_device_idn, "ANRITSU,MS2830A,SERIAL,7.03")
+            self.assertEqual(reference.hardware_options, ("041",))
+            self.assertEqual(anritsu._page_state, AnritsuPageState.IDLE)
+            self.assertIn("single", anritsu.reference_status.text())
+            self.assertIn("2 points", anritsu.reference_status.text())
+        finally:
+            window.close()
+            self.application.processEvents()
+
+    def test_anritsu_use_current_is_local_and_cancelled_overwrite_preserves_reference(self) -> None:
+        window = MainWindow(".config/settings.yml", simulation=True)
+        try:
+            anritsu = window.anritsu_page
+            anritsu._controller.call = Mock()
+            first = SpectrumTrace(
+                (1e6, 2e6), (-50.0, -40.0), datetime.now(timezone.utc), "TRAC1"
+            )
+            second = SpectrumTrace(
+                (1e6, 2e6), (-30.0, -20.0), datetime.now(timezone.utc), "TRAC1"
+            )
+            anritsu._latest_trace = first
+            anritsu.capture_current_reference()
+            self.assertIs(anritsu._reference_trace, first)
+            anritsu._controller.call.assert_not_called()
+
+            anritsu._latest_trace = second
+            with patch.object(
+                QMessageBox,
+                "question",
+                return_value=QMessageBox.StandardButton.No,
+            ):
+                anritsu.capture_current_reference()
+
+            self.assertIs(anritsu._reference_trace, first)
+            anritsu._controller.call.assert_not_called()
+        finally:
+            window.close()
+            self.application.processEvents()
+
+    def test_anritsu_transport_error_is_non_modal_and_unlocks_retry_state(self) -> None:
+        window = MainWindow(".config/settings.yml", simulation=True)
+        try:
+            anritsu = window.anritsu_page
+            anritsu._timer.start()
+            anritsu._fetch_pending = True
+            with patch.object(QMessageBox, "warning") as modal_warning:
+                anritsu._error("fetch_current_trace", "VI_ERROR_TMO")
+
+            modal_warning.assert_not_called()
+            self.assertFalse(anritsu._timer.isActive())
+            self.assertFalse(anritsu._fetch_pending)
+            self.assertEqual(anritsu._page_state, AnritsuPageState.ERROR)
+            self.assertFalse(anritsu.banner.isHidden())
+            self.assertIn("VI_ERROR_TMO", anritsu.banner.label.text())
+            self.assertTrue(anritsu.single.isEnabled())
+        finally:
+            window.close()
+            self.application.processEvents()
+
+    def test_anritsu_reference_save_and_load_updates_visible_status(self) -> None:
+        window = MainWindow(".config/settings.yml", simulation=True)
+        try:
+            anritsu = window.anritsu_page
+            trace = SpectrumTrace(
+                (1e6, 2e6, 3e6),
+                (-60.0, -50.0, -55.0),
+                datetime.now(timezone.utc),
+                "TRAC1",
+            )
+            anritsu._latest_trace = trace
+            anritsu.capture_current_reference()
+            with tempfile.TemporaryDirectory() as temporary:
+                path = Path(temporary) / "reference.h5"
+                anritsu._save_reference_to(path)
+                self.assertTrue(anritsu._reference_spectrum.saved_to_file)
+                self.assertIn("saved", anritsu.reference_status.text())
+
+                anritsu.remove_reference()
+                anritsu._load_reference_from(path)
+
+                self.assertIsNotNone(anritsu._reference_spectrum)
+                self.assertEqual(anritsu._reference_spectrum.kind, "imported")
+                self.assertEqual(anritsu._reference_trace.powers_dbm, trace.powers_dbm)
+                self.assertIn("imported", anritsu.reference_status.text())
+                self.assertTrue(anritsu.show_reference.isChecked())
+        finally:
+            window.close()
+            self.application.processEvents()
+
+    def test_anritsu_reference_processing_rejects_known_reference_level_mismatch(self) -> None:
+        window = MainWindow(".config/settings.yml", simulation=True)
+        try:
+            anritsu = window.anritsu_page
+            trace = SpectrumTrace(
+                (1e6, 2e6), (-60.0, -50.0), datetime.now(timezone.utc), "TRAC1"
+            )
+            anritsu._last_configuration = AnritsuConfigurationSnapshot(
+                1e6, 2e6, -10.0, 2, "SPECT"
+            )
+            anritsu._latest_trace = trace
+            anritsu.capture_current_reference()
+            anritsu._last_configuration = AnritsuConfigurationSnapshot(
+                1e6, 2e6, 0.0, 2, "SPECT"
+            )
+            anritsu.reference_operation.setCurrentIndex(1)
+            anritsu._refresh_spectrum_display()
+
+            self.assertIn("Reference Level differs", anritsu.info.text())
+            self.assertEqual(anritsu.spectrum_plot.trace_point_count("Processed"), 0)
+        finally:
+            window.close()
+            self.application.processEvents()
+
+    def test_anritsu_reference_processing_rejects_advanced_configuration_mismatch(self) -> None:
+        window = MainWindow(".config/settings.yml", simulation=True)
+        try:
+            anritsu = window.anritsu_page
+            trace = SpectrumTrace(
+                (1e6, 2e6), (-60.0, -50.0), datetime.now(timezone.utc), "TRAC1"
+            )
+            anritsu._last_configuration = AnritsuConfigurationSnapshot(
+                1e6, 2e6, -10.0, 2, "SPECT"
+            )
+            anritsu._last_advanced_configuration = AdvancedSpectrumSnapshot(
+                rbw_auto=False,
+                rbw_hz=10e3,
+                vbw_mode="manual",
+                vbw_hz=3e3,
+                detector="RMS",
+                attenuation_auto=False,
+                attenuation_db=20.0,
+                preamplifier_enabled=False,
+                sweep_time_auto=False,
+                sweep_time_s=0.2,
+                instrument_mode="SPECT",
+            )
+            anritsu._latest_trace = trace
+            anritsu.capture_current_reference()
+            anritsu._last_advanced_configuration = AdvancedSpectrumSnapshot(
+                rbw_auto=False,
+                rbw_hz=100e3,
+                vbw_mode="manual",
+                vbw_hz=3e3,
+                detector="RMS",
+                attenuation_auto=False,
+                attenuation_db=20.0,
+                preamplifier_enabled=False,
+                sweep_time_auto=False,
+                sweep_time_s=0.2,
+                instrument_mode="SPECT",
+            )
+            anritsu.reference_operation.setCurrentIndex(1)
+            anritsu._refresh_spectrum_display()
+
+            self.assertIn("Acquisition settings differ", anritsu.info.text())
+            self.assertIn("RBW", anritsu.info.text())
+            self.assertEqual(anritsu.spectrum_plot.trace_point_count("Processed"), 0)
         finally:
             window.close()
             self.application.processEvents()
@@ -862,6 +1360,97 @@ class MainWindowTests(unittest.TestCase):
             window.close()
             self.application.processEvents()
 
+    def test_anritsu_center_span_round_trip_configures_effective_start_stop(self) -> None:
+        window = MainWindow(".config/settings.yml", simulation=True)
+        try:
+            anritsu = window.anritsu_page
+            anritsu._controller.call = Mock()
+            center_span = anritsu.frequency_representation.findData("center_span")
+            anritsu.frequency_representation.setCurrentIndex(center_span)
+
+            snapshot = AnritsuConfigurationSnapshot(100e6, 6e9, -10.0, 10001)
+            anritsu._result("read_configuration", snapshot)
+
+            self.assertEqual(anritsu.frequency_label_a.text(), "Center")
+            self.assertEqual(anritsu.frequency_label_b.text(), "Span")
+            self.assertEqual(
+                parse_quantity(anritsu.start.text(), DIMENSION_FREQUENCY).si_value,
+                3.05e9,
+            )
+            self.assertEqual(
+                parse_quantity(anritsu.stop.text(), DIMENSION_FREQUENCY).si_value,
+                5.9e9,
+            )
+
+            anritsu.configure()
+            operation, config = anritsu._controller.call.call_args.args
+            self.assertEqual(operation, "configure")
+            self.assertEqual(config.start_hz, 100e6)
+            self.assertEqual(config.stop_hz, 6e9)
+
+            start_stop = anritsu.frequency_representation.findData("start_stop")
+            anritsu.frequency_representation.setCurrentIndex(start_stop)
+            self.assertEqual(
+                parse_quantity(anritsu.start.text(), DIMENSION_FREQUENCY).si_value,
+                100e6,
+            )
+            self.assertEqual(
+                parse_quantity(anritsu.stop.text(), DIMENSION_FREQUENCY).si_value,
+                6e9,
+            )
+        finally:
+            window.close()
+            self.application.processEvents()
+
+    def test_anritsu_advanced_dialog_is_read_only_until_exact_firmware_is_qualified(self) -> None:
+        window = MainWindow(".config/settings.yml", simulation=True)
+        try:
+            anritsu = window.anritsu_page
+            anritsu._controller.call = Mock()
+            capabilities = DeviceCapabilities(
+                device_name="anritsu",
+                model="MS2830A",
+                firmware="sim-1.0",
+                features=frozenset({"spectrum_trace", "live_trace"}),
+                hardware_options=("041", "008"),
+            )
+            anritsu.set_capabilities(capabilities)
+            self.assertFalse(anritsu.advanced_apply_button.isEnabled())
+
+            anritsu.advanced_read_button.click()
+            anritsu._controller.call.assert_called_once_with("read_advanced_spectrum")
+            snapshot = AdvancedSpectrumSnapshot(
+                rbw_auto=False,
+                rbw_hz=3e3,
+                vbw_mode="off",
+                vbw_hz=None,
+                detector="POS",
+                attenuation_auto=False,
+                attenuation_db=20,
+                preamplifier_enabled=False,
+                sweep_time_auto=False,
+                sweep_time_s=0.2,
+                instrument_mode="SPECT",
+            )
+            anritsu._result("read_advanced_spectrum", snapshot)
+            self.assertEqual(anritsu.advanced_rbw_mode.currentData(), "manual")
+            self.assertEqual(anritsu.advanced_vbw_mode.currentData(), "off")
+            self.assertEqual(anritsu.advanced_detector.currentData(), "POS")
+            self.assertEqual(anritsu.advanced_attenuation.value(), 20)
+
+            raw = window._settings.model_dump(mode="python")
+            raw["devices"]["anritsu"]["advanced_spectrum"] = {
+                "control_protocol": "standard_scpi",
+                "qualified_firmware": ["sim-1.0"],
+            }
+            qualified = window._settings.__class__.model_validate(raw)
+            anritsu.set_settings(qualified)
+            anritsu.set_capabilities(capabilities)
+            self.assertTrue(anritsu.advanced_apply_button.isEnabled())
+        finally:
+            window.close()
+            self.application.processEvents()
+
     def test_anritsu_hardware_options_update_documented_limits_card(self) -> None:
         window = MainWindow(".config/settings.yml", simulation=True)
         try:
@@ -885,6 +1474,28 @@ class MainWindowTests(unittest.TestCase):
             window.close()
             self.application.processEvents()
 
+    def test_anritsu_signal_generator_tab_requires_detected_option_and_qualified_protocol(self) -> None:
+        window = MainWindow(".config/settings.yml", simulation=True)
+        try:
+            anritsu = window.anritsu_page
+            self.assertFalse(anritsu.mode_tabs.isTabVisible(anritsu.signal_generator_tab_index))
+            anritsu.set_capabilities(
+                DeviceCapabilities(
+                    device_name="anritsu",
+                    model="MS2830A",
+                    firmware="sim",
+                    features=frozenset({"spectrum_trace", "signal_generator"}),
+                    hardware_options=("041", "020"),
+                )
+            )
+            self.assertTrue(anritsu.mode_tabs.isTabVisible(anritsu.signal_generator_tab_index))
+            self.assertIn("Protocol: unverified", anritsu.sg_limits.text())
+            self.assertFalse(anritsu.sg_configure.isEnabled())
+            self.assertFalse(anritsu.sg_on.isEnabled())
+        finally:
+            window.close()
+            self.application.processEvents()
+
     def test_anritsu_workspace_and_event_log_are_user_resizable(self) -> None:
         window = MainWindow(".config/settings.yml", simulation=True)
         try:
@@ -903,11 +1514,12 @@ class MainWindowTests(unittest.TestCase):
             self.application.processEvents()
 
     def test_limit_edit_button_opens_popup_and_saves_the_range(self) -> None:
-        source = SETTINGS_TEMPLATE.read_text(encoding="utf-8")
         with tempfile.TemporaryDirectory() as temporary:
             path = Path(temporary) / "settings.yml"
-            path.write_text(source, encoding="utf-8")
-            window = MainWindow(path, simulation=False)
+            write_engineer_settings(path)
+            window = MainWindow(
+                path, simulation=False, authenticated_username=TEST_ENGINEER
+            )
             try:
                 field = window.keithley_page._limit_fields["level"]
                 self.assertTrue(field.edit_button.isEnabled())

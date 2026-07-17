@@ -1,0 +1,73 @@
+diff --git a/app/devices/anritsu/adapter.py b/app/devices/anritsu/adapter.py
+--- a/app/devices/anritsu/adapter.py
++++ b/app/devices/anritsu/adapter.py
+@@ -4,6 +4,7 @@
+ 
+ from dataclasses import dataclass
+ from datetime import datetime, timezone
++import hashlib
+ import math
+ import time
+ 
+@@ -49,6 +50,66 @@
+     acquired_at_utc: datetime
+     trace_name: str
+ 
++
++@dataclass(frozen=True, slots=True)
++class ReferenceSpectrum:
++    """A reproducible reference trace with acquisition provenance."""
++
++    trace: SpectrumTrace
++    kind: str
++    average_count: int
++    acquired_at_utc: datetime
++    source_device_idn: str = ""
++    firmware: str = ""
++    hardware_options: tuple[str, ...] = ()
++    reference_level_dbm: float | None = None
++    rbw_hz: float | None = None
++    vbw_hz: float | None = None
++    detector: str = ""
++    attenuation_db: float | None = None
++    source_file: str = ""
++    notes: str = ""
++    saved_to_file: bool = False
++    grid_hash: str = ""
++
++    def __post_init__(self) -> None:
++        if self.kind not in {"single", "averaged", "imported"}:
++            raise ValueError(f"Unsupported reference kind {self.kind!r}.")
++        if self.average_count < 1:
++            raise ValueError("Reference average_count must be positive.")
++        if len(self.trace.frequencies_hz) != len(self.trace.powers_dbm) or len(self.trace.frequencies_hz) < 2:
++            raise ValueError("Reference trace must contain matching frequency and power arrays.")
++        if not all(math.isfinite(value) for value in (*self.trace.frequencies_hz, *self.trace.powers_dbm)):
++            raise ValueError("Reference trace contains non-finite values.")
++        if any(right <= left for left, right in zip(self.trace.frequencies_hz, self.trace.frequencies_hz[1:])):
++            raise ValueError("Reference frequency grid must be strictly increasing.")
++        expected_hash = self.hash_grid(self.trace.frequencies_hz)
++        if self.grid_hash and self.grid_hash != expected_hash:
++            raise ValueError("Reference grid hash does not match its frequency data.")
++        if not self.grid_hash:
++            object.__setattr__(self, "grid_hash", expected_hash)
++
++    @staticmethod
++    def hash_grid(frequencies_hz: tuple[float, ...]) -> str:
++        payload = ",".join(format(value, ".17g") for value in frequencies_hz).encode("ascii")
++        return hashlib.sha256(payload).hexdigest()
++
++    @property
++    def start_hz(self) -> float:
++        return self.trace.frequencies_hz[0]
++
++    @property
++    def stop_hz(self) -> float:
++        return self.trace.frequencies_hz[-1]
++
++    @property
++    def points(self) -> int:
++        return len(self.trace.frequencies_hz)
++
+ 
+ class AnritsuAdapter(DeviceAdapter):

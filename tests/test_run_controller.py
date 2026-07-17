@@ -4,6 +4,7 @@ import os
 from pathlib import Path
 import tempfile
 import unittest
+from unittest.mock import patch
 
 # This module creates only QtCore objects, but offscreen avoids a platform
 # plugin dependency if the suite is executed on a headless CI worker.
@@ -112,6 +113,17 @@ root:
             self.assertEqual(completed, [()])
         finally:
             controller.close()
+
+    def test_watchdog_timeout_automatically_requests_out_of_band_estop_once(self) -> None:
+        controller = RunController()
+        settings = simulated_station_settings(loaded_settings())
+        controller._run_settings = settings
+        controller._run_simulation = True
+        with patch.object(controller, "request_emergency_stop") as emergency:
+            controller._worker_event("watchdog_timeout", {"node_id": "slow"})
+            controller._worker_event("watchdog_timeout", {"node_id": "slow"})
+
+        emergency.assert_called_once_with(settings, simulation=True)
 
 
 if __name__ == "__main__":

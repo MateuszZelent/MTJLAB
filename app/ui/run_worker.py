@@ -14,10 +14,28 @@ from app.devices.anritsu import AnritsuAdapter
 from app.devices.keithley import KeithleyAdapter
 from app.devices.rigol import RigolAdapter
 from app.devices.simulators import SimulatedVisaFactory
-from app.engine.compiler import ExecutionPlan
+from app.engine.compiler import ExecutionPlan, required_devices_for_actions
+from app.engine.policy import ExecutionPolicy
+from app.engine.recovery import RecoveryCheckpoint
 from app.engine.runner import RecipeRunner
 from app.settings.models import StationSettings
 from app.storage import Hdf5RunWriter
+
+
+def serialize_settings_snapshot(
+    settings: StationSettings,
+    settings_path: Path,
+    *,
+    simulation: bool,
+) -> str:
+    """Return the exact settings provenance used for new and resumed runs."""
+
+    if not simulation:
+        return settings_path.read_text(encoding="utf-8")
+    stream = StringIO()
+    stream.write("# In-memory simulation profile; not persisted to settings.yml.\n")
+    YAML().dump(settings.model_dump(mode="python"), stream)
+    return stream.getvalue()
 
 
 class RunWorker(QObject):
@@ -31,6 +49,8 @@ class RunWorker(QObject):
         settings_path: Path,
         plan: ExecutionPlan,
         simulation: bool = False,
+        recovery: RecoveryCheckpoint | None = None,
+        operator_context: dict[str, object] | None = None,
         parent: QObject | None = None,
     ) -> None:
         super().__init__(parent)
@@ -38,6 +58,8 @@ class RunWorker(QObject):
         self._settings_path = settings_path
         self._plan = plan
         self._simulation = simulation
+        self._recovery = recovery
+        self._operator_context = dict(operator_context or {})
         self._runner: RecipeRunner | None = None
 
     @Slot()
@@ -60,31 +82,63 @@ class RunWorker(QObject):
             required = self._required_devices()
             identities = {name: devices[name].connect().idn for name in sorted(required)}
             output_dir = Path(str(self._settings.storage.get("output_directory", "./measurements")))
-            safe_name = re.sub(r"[^A-Za-z0-9_.-]+", "_", self._plan.recipe_name).strip("_") or "run"
-            # Microseconds make accidental collisions across fast repeated
-            # runs practically impossible; the writer additionally refuses
-            # to overwrite an existing artefact.
-            timestamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S.%fZ")
-            run_stem = f"{timestamp}_{safe_name}"
-            writer = Hdf5RunWriter(
-                output_dir / f"{run_stem}.h5",
-                recipe_source=self._plan.recipe_source,
-                settings_source=self._settings_snapshot(),
-                plan_hash=self._plan.sha256,
-                device_idn=identities,
-                device_capabilities={
-                    name: devices[name].capabilities for name in sorted(required)
-                },
-                csv_summary_path=output_dir / f"{run_stem}.csv" if self._settings.storage.get("write_csv_summary") else None,
-            )
+            settings_source = self._settings_snapshot()
+            if self._recovery is None:
+                safe_name = re.sub(r"[^A-Za-z0-9_.-]+", "_", self._plan.recipe_name).strip("_") or "run"
+                # Microseconds make accidental collisions across fast repeated
+                # runs practically impossible; the writer additionally refuses
+                # to overwrite an existing artefact.
+                timestamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S.%fZ")
+                run_stem = f"{timestamp}_{safe_name}"
+                writer = Hdf5RunWriter(
+                    output_dir / f"{run_stem}.h5",
+                    recipe_source=self._plan.recipe_source,
+                    settings_source=settings_source,
+                    plan_hash=self._plan.sha256,
+                    device_idn=identities,
+                    device_capabilities={
+                        name: devices[name].capabilities for name in sorted(required)
+                    },
+                    expected_points=self._plan.total_points,
+                    operator_context=self._operator_context,
+                    csv_summary_path=output_dir / f"{run_stem}.csv" if self._settings.storage.get("write_csv_summary") else None,
+                )
+            else:
+                writer = Hdf5RunWriter.resume(
+                    self._recovery.path,
+                    recipe_source=self._plan.recipe_source,
+                    settings_source=settings_source,
+                    plan_hash=self._plan.sha256,
+                    checkpoint_count=self._recovery.stored_points,
+                    expected_points=self._plan.total_points,
+                    csv_summary_path=(
+                        self._recovery.path.with_suffix(".csv")
+                        if self._settings.storage.get("write_csv_summary")
+                        else None
+                    ),
+                    operator_context=self._operator_context,
+                )
             self._runner = RecipeRunner(
                 rigol=rigol,
                 keithley=keithley,
                 anritsu=anritsu,
                 writer=writer,
                 on_event=lambda name, data: self.event.emit(name, data),
+                on_telemetry=lambda name, data: self.event.emit(name, data),
+                policy=ExecutionPolicy.from_settings(self._settings),
             )
-            result = self._runner.run(self._plan)
+            result = self._runner.run(
+                self._plan,
+                start_action_index=(
+                    self._recovery.next_action_index if self._recovery is not None else 0
+                ),
+                stored_points=(
+                    self._recovery.stored_points if self._recovery is not None else 0
+                ),
+                recovery_prelude=(
+                    self._recovery.prelude_actions if self._recovery is not None else ()
+                ),
+            )
             self.finished.emit({"result": result, "path": str(writer.path)})
         except Exception as exc:
             if writer is not None:
@@ -109,24 +163,16 @@ class RunWorker(QObject):
                     pass
 
     def _required_devices(self) -> set[str]:
-        required: set[str] = set()
-        for action in self._plan.actions:
-            kind = action.kind
-            if "rigol" in kind:
-                required.add("rigol")
-            if "keithley" in kind:
-                required.add("keithley")
-            if "anritsu" in kind or kind == "acquire_spectrum":
-                required.add("anritsu")
-        return required
+        return set(
+            self._plan.required_devices or required_devices_for_actions(self._plan.actions)
+        )
 
     def _settings_snapshot(self) -> str:
-        if not self._simulation:
-            return self._settings_path.read_text(encoding="utf-8")
-        stream = StringIO()
-        stream.write("# In-memory simulation profile; not persisted to settings.yml.\n")
-        YAML().dump(self._settings.model_dump(mode="python"), stream)
-        return stream.getvalue()
+        return serialize_settings_snapshot(
+            self._settings,
+            self._settings_path,
+            simulation=self._simulation,
+        )
 
     # These methods intentionally only set thread-safe Event flags on
     # RecipeRunner; they are safe to call directly from the GUI thread while
@@ -207,25 +253,59 @@ class RunController(QObject):
         self._worker: RunWorker | None = None
         self._emergency_thread: QThread | None = None
         self._emergency_worker: EmergencyStopWorker | None = None
+        self._run_settings: StationSettings | None = None
+        self._run_simulation = False
+        self._watchdog_estop_started = False
 
     @property
     def running(self) -> bool:
         return self._thread is not None and self._thread.isRunning()
 
     def start(
-        self, settings: StationSettings, settings_path: Path, plan: ExecutionPlan, *, simulation: bool = False
+        self,
+        settings: StationSettings,
+        settings_path: Path,
+        plan: ExecutionPlan,
+        *,
+        simulation: bool = False,
+        recovery: RecoveryCheckpoint | None = None,
+        operator_context: dict[str, object] | None = None,
     ) -> None:
         if self.running:
             raise RuntimeError("A measurement is already running.")
+        self._run_settings = settings
+        self._run_simulation = simulation
+        self._watchdog_estop_started = False
         self._thread = QThread(self)
-        self._worker = RunWorker(settings, settings_path, plan, simulation)
+        self._worker = RunWorker(
+            settings,
+            settings_path,
+            plan,
+            simulation,
+            recovery,
+            operator_context=operator_context,
+        )
         self._worker.moveToThread(self._thread)
         self._thread.started.connect(self._worker.run)
-        self._worker.event.connect(self.event)
+        self._worker.event.connect(self._worker_event)
         self._worker.finished.connect(self._finished)
         self._worker.failed.connect(self._failed)
         self._thread.start()
         self.started.emit()
+
+    @Slot(str, object)
+    def _worker_event(self, name: str, data: object) -> None:
+        self.event.emit(name, data)
+        if (
+            name == "watchdog_timeout"
+            and not self._watchdog_estop_started
+            and self._run_settings is not None
+        ):
+            self._watchdog_estop_started = True
+            self.request_emergency_stop(
+                self._run_settings,
+                simulation=self._run_simulation,
+            )
 
     def request_stop(self) -> None:
         if self._worker is not None:
@@ -286,6 +366,7 @@ class RunController(QObject):
             self._thread.deleteLater()
         self._worker = None
         self._thread = None
+        self._run_settings = None
 
     def close(self) -> None:
         self.request_stop()

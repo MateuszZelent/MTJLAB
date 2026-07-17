@@ -12,12 +12,22 @@ profile:
   state: "unverified"          # unverified | approved | revoked
   approved_by:
   approved_at:
-  approval_note: "Profil wymaga ponownego zatwierdzenia po zmianie ustawień."
+  approval_note: "Profile approval is required after settings changes."
   lock_outputs_when_unverified: true
+
+# The operating-system login is the authentication boundary. Every local user
+# is an operator by default. Grant engineer/service only to exact OS account
+# names during station provisioning; never use a shared application password.
+access_control:
+  identity_provider: "operating_system"
+  default_roles:
+  - "operator"
+  user_roles: {}
 
 application:
   locale: "en_US"
   log_level: "INFO"
+  audit_log_directory: "logs"
   service_console_enabled: false
   require_operator_confirmation_before_arming: true
   require_second_confirmation_for_limit_override: true
@@ -42,6 +52,12 @@ execution:
   connect_timeout: "3 s"
   retry_count: 1
   retry_backoff: "250 ms"
+  heartbeat_interval: "1 s"
+  watchdog_grace: "500 ms"
+  estimated_command_overhead: "25 ms"
+  estimated_spectrum_base_time: "100 ms"
+  estimated_spectrum_transfer_rate_points_per_second: 100000
+  estimated_line_frequency: "50 Hz"
   checkpoint_every_points: 1
   stop_on_compliance: true
   stop_on_device_error: true
@@ -50,7 +66,7 @@ execution:
   emergency_stop_order:
   - "keithley.outputs_off"
   - "rigol.outputs_off"
-  - "anritsu.abort_acquisition"
+  - "anritsu.rf_off_and_abort"
   - "storage.flush_checkpoint"
 
 storage:
@@ -298,8 +314,8 @@ devices:
           - "voltage"
           - "measure_only"
           lab_limits:
-            # Limity robocze dla przykładu 1 mA ... 10 mA.
-            # Nie są to maksymalne możliwości modelu 2602A.
+            # Working limits for the 1 mA ... 10 mA example.
+            # These are not the maximum capabilities of the 2602A model.
             source_current:
               min: "0 A"
               max: "10 mA"
@@ -360,10 +376,27 @@ devices:
       single_sweep_mode: "unverified"
       operation_complete_timeout: "30 s"
       application_average_count: 200
+    signal_generator:
+      # The historical driver used INST SG, FREQ, POW and OUTP. Keep this
+      # unverified until the exact option and firmware pass HIL qualification.
+      control_protocol: "unverified"
+      frequency:
+        min:
+        max:
+      power:
+        min:
+        max:
+      arm_ttl: "30 s"
+    advanced_spectrum:
+      # Read-only queries can be used for diagnostics. Writes remain locked
+      # until this exact SCPI family passes HIL on a listed firmware version.
+      control_protocol: "unverified"
+      qualified_firmware: []
     safety:
       acquisition_allowed: false
       require_rf_input_limit_definition: true
       signal_generator_output_allowed: false
+      outputs_off_on_disconnect: true
       rf_input:
         # Set these values for the exact instrument variant, installed options,
         # preamplifier state, attenuators, and the complete RF signal path.

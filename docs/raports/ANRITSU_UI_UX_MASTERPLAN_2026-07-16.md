@@ -16,7 +16,7 @@ Najważniejsze problemy:
 3. operator nie widzi pełnego stanu ramki, referencji i efektywnej szybkości Live;
 4. referencja istnieje wyłącznie w pamięci i może zostać nadpisana bez śladu;
 5. podczas Live nie wszystkie konflikty operacji są blokowane przez jeden model stanu;
-6. zaawansowane możliwości analizatora, takie jak RBW, VBW, detektor, attenuation i preamplifier, nie są jeszcze dostępne;
+6. zaawansowane możliwości analizatora wymagają kwalifikacji dokładnego firmware przed odblokowaniem zapisu;
 7. interfejs nie rozróżnia wystarczająco jasno ustawień urządzenia od operacji wykonywanych lokalnie na danych.
 
 Najpierw należy ukończyć spójny przepływ akwizycyjny i referencyjny. Dopiero potem warto dodawać kolejne komendy SCPI.
@@ -460,3 +460,40 @@ Ten etap daje natychmiastową wartość operatorowi bez ryzyka wynikającego z d
 - rozdział 2.6 Trace: Trace A-F, Write/View/Blank, Storage Mode i Average Count;
 - rozdział 2.7 Sweep/Trigger/Gate: sweep time i trigger;
 - aktualne moduły `app/devices/anritsu/adapter.py`, `app/ui/main_window.py`, `app/spectrum/processing.py` oraz `app/storage/`.
+
+## 21. Stan realizacji — aktualizacja 2026-07-16
+
+Zrealizowano programowo pakiet P0 i część etapu P1:
+
+- dodano osobne akcje `Acquire 1× reference`, `Acquire N× reference` i `Use current trace`;
+- świeża pojedyncza referencja powstaje dopiero po poprawnym zakończeniu pasywnego odczytu
+  `TRAC1`; lokalna akcja nie wysyła żadnej komendy VISA;
+- `ReferenceSpectrum` przechowuje typ, liczbę ramek, czas, IDN, firmware, opcje sprzętowe,
+  Reference Level, hash siatki, źródło pliku i stan zapisu;
+- status referencji jest widoczny bez otwierania Event Log, a jej zastąpienie wymaga jawnego
+  potwierdzenia zawierającego parametry istniejącego obiektu;
+- centralny `AnritsuPageState` steruje konfiguracją, Live, pojedynczym odczytem, averagingiem,
+  referencjami i anulowaniem, eliminując równoległe konfliktujące akwizycje;
+- błędy odczytu zatrzymują Live, zachowują ostatnią poprawną ramkę i są prezentowane jako
+  trwały nieblokujący banner zamiast powtarzalnego modalnego okna;
+- nagłówek Live pokazuje numer ramki, efektywne FPS i czas VISA, a opis ramki rozróżnia czas
+  żądany/efektywny oraz liczbę sklejonych wywołań timera;
+- referencję można zapisać i wczytać jako niezmienny artefakt HDF5; publiczna część pliku
+  przechodzi rzeczywisty odczyt PyThat, a prywatne metadane zachowują pełną proweniencję;
+- matematyka referencyjna wymaga zgodnej osi częstotliwości, Reference Level oraz — gdy
+  konfiguracja jest znana — zgodnych RBW/VBW, detektora, tłumienia, przedwzmacniacza i czasu
+  przemiatania; pełna proweniencja przechodzi round-trip HDF5/PyThat;
+- formularz częstotliwości przełącza się między `Start/Stop` i `Center/Span`; jest to lokalna,
+  odwracalna reprezentacja, a adapter zawsze otrzymuje te same zwalidowane fizyczne granice
+  `start_hz/stop_hz`;
+- wykryta opcja generatora sygnałowego otrzymuje osobną kartę, konfigurację z wymuszonym RF OFF,
+  readback, jednorazowy ARM oraz ręczne i recepturowe RF ON/OFF. Funkcja pozostaje domyślnie
+  zablokowana przez `control_protocol: unverified` do czasu kwalifikacji HIL konkretnej opcji,
+  firmware, transportu i toru RF.
+
+Zaimplementowano odczyt oraz kontrolowany zapis RBW/VBW, detectora, attenuation/preamp i sweep
+time: adapter ma readback, walidację opcji sprzętowych, konserwatywny fallback, GUI Advanced,
+symulator i akcję receptury. Domyślnie zapis pozostaje zablokowany przez
+`control_protocol: unverified`; odblokowanie wymaga kwalifikacji HIL dokładnego firmware i wpisania
+go do `qualified_firmware`. Poza zakresem tej iteracji pozostają trigger i device-side
+hold/average.

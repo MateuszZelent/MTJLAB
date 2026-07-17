@@ -3,21 +3,25 @@
 from __future__ import annotations
 
 import math
+import json
 import time
 from copy import deepcopy
-from dataclasses import astuple
+from dataclasses import astuple, replace
+from enum import StrEnum
 from pathlib import Path
 from typing import Any
 
 from PySide6.QtCore import QSize, QSettings, QTimer, Qt, Signal
 from PySide6.QtGui import QAction, QActionGroup, QCloseEvent, QIcon, QKeySequence, QShortcut
 from PySide6.QtWidgets import (
+    QAbstractItemView,
     QComboBox,
     QCheckBox,
     QDialog,
     QDialogButtonBox,
     QFormLayout,
     QFrame,
+    QFileDialog,
     QGridLayout,
     QHBoxLayout,
     QHeaderView,
@@ -41,16 +45,27 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
+from app.audit import AuditLogger
 from app.devices.anritsu import (
     ANRITSU_PREAMPLIFIER_OPTIONS,
+    AdvancedSpectrumConfig,
+    AdvancedSpectrumSnapshot,
     AnritsuAdapter,
     AnritsuConfigurationSnapshot,
+    ReferenceSpectrum,
+    SignalGeneratorConfig,
+    SignalGeneratorSnapshot,
     SpectrumConfig,
     SpectrumTrace,
     frequency_option_for,
 )
 from app.devices.discovery import DiscoveredInstrument
-from app.devices.keithley import KeithleyAdapter, KeithleySourceRequest
+from app.devices.keithley import (
+    KeithleyAdapter,
+    KeithleyRampRequest,
+    KeithleySourceRequest,
+    build_keithley_ramp_levels,
+)
 from app.devices.rigol import (
     RigolAdapter,
     RigolBurstConfig,
@@ -59,7 +74,8 @@ from app.devices.rigol import (
     RigolModulationConfig,
     RigolOutputConfig,
 )
-from app.domain.errors import ConfigurationError
+from app.domain.errors import AuthorizationError, ConfigurationError
+from app.domain.readiness import ReadinessLevel, StationReadiness, evaluate_station_readiness
 from app.devices.simulators import SimulatedVisaFactory, simulated_station_settings
 from app.domain.quantities import (
     DIMENSION_CURRENT,
@@ -71,20 +87,24 @@ from app.domain.quantities import (
     format_quantity_auto,
     parse_quantity,
 )
-from app.engine.compiler import RecipeCompiler
-from app.recipes import parse_recipe_text
+from app.engine.compiler import ExecutionPlan, RecipeCompiler
+from app.engine.estimation import PlanEstimate, PlanEstimator
+from app.engine.recovery import RunRecoveryManager
+from app.recipes import RecipeNode, RecipeRepository, move_recipe_node, parse_recipe_text
 from app.settings import SettingsRepository
 from app.settings.models import StationSettings
+from app.security import AccessPolicy, Permission
 from app.safety.rigol_current import validate_rigol_frequency_sweep, validate_rigol_waveform
 from app.safety.anritsu import ANRITSU_SWEEP_POINT_COUNTS
-from app.storage import Hdf5RunReader, RunDetail, StoredPoint
+from app.safety.keithley import validate_keithley_source
+from app.storage import Hdf5RunReader, ReferenceHdf5Store, RunDetail, StoredPoint
 from app.spectrum import (
     LinearPowerAverager,
     apply_reference_operation,
     frequency_grids_match,
 )
 from app.ui.settings_page import SettingsPage
-from app.ui.run_worker import RunController
+from app.ui.run_worker import RunController, serialize_settings_snapshot
 from app.ui.workers import DeviceController
 from app.ui.discovery_worker import VisaDiscoveryWorker
 from app.ui.design_system import effective_theme
@@ -95,6 +115,25 @@ def _line(value: str, width: int = 14) -> QLineEdit:
     edit = QLineEdit(value)
     edit.setMinimumWidth(width * 8)
     return edit
+
+
+def _human_duration(seconds: float) -> str:
+    if seconds < 60:
+        return f"{seconds:.2f} s"
+    minutes, remaining = divmod(seconds, 60)
+    if minutes < 60:
+        return f"{int(minutes)} min {remaining:.0f} s"
+    hours, minutes = divmod(minutes, 60)
+    return f"{int(hours)} h {int(minutes)} min"
+
+
+def _human_bytes(size: int) -> str:
+    value = float(size)
+    for unit in ("B", "KiB", "MiB", "GiB", "TiB"):
+        if value < 1024 or unit == "TiB":
+            return f"{value:.2f} {unit}"
+        value /= 1024
+    return f"{value:.2f} TiB"
 
 
 class LimitField(QWidget):
@@ -300,6 +339,7 @@ class DeviceCard(QFrame):
 
     def __init__(self, title: str, resource: str | None, parent: QWidget | None = None) -> None:
         super().__init__(parent)
+        self._assignment_allowed = True
         self.setObjectName("deviceCard")
         layout = QVBoxLayout(self)
         name = QLabel(title)
@@ -419,8 +459,22 @@ class DeviceCard(QFrame):
             self.detected_resources.setCurrentIndex(0)
             self.detected_resources.setEnabled(True)
             self.assign_button.setText("Assign VISA")
-            self.assign_button.setEnabled(True)
+            self.assign_button.setEnabled(self._assignment_allowed)
             self._show_pending_assignment()
+
+    def set_assignment_allowed(self, allowed: bool) -> None:
+        self._assignment_allowed = allowed
+        if self.assign_button.text() != "Assigned ✓":
+            self.assign_button.setEnabled(
+                allowed
+                and self.detected_resources.isEnabled()
+                and self.detected_resources.currentIndex() >= 0
+            )
+        self.assign_button.setToolTip(
+            "Save the selected detected resource to this instrument card."
+            if allowed
+            else "An engineer or service role is required to change VISA assignments."
+        )
 
     def _request_assignment(self) -> None:
         payload = self.detected_resources.currentData()
@@ -429,7 +483,7 @@ class DeviceCard(QFrame):
 
     def _detected_selection_changed(self, index: int) -> None:
         pending = index >= 0 and self.detected_resources.isEnabled()
-        self.assign_button.setEnabled(pending)
+        self.assign_button.setEnabled(pending and self._assignment_allowed)
         if pending:
             self._show_pending_assignment()
 
@@ -459,6 +513,13 @@ class DashboardPage(QWidget):
         self._discovery_enabled = discovery_enabled
         self._discovery_worker: VisaDiscoveryWorker | None = None
         self._discovery_results: tuple[DiscoveredInstrument, ...] = ()
+        self._device_states = {name: "disconnected" for name in ("rigol", "keithley", "anritsu")}
+        self._verified_resources: dict[str, str] = {}
+        self._device_errors: dict[str, str] = {}
+        self._audit_healthy = True
+        self._assignment_allowed = True
+        self._compiled_plan = None
+        self._plan_estimate = None
         layout = QVBoxLayout(self)
         title = QLabel("Measurement station")
         title.setObjectName("pageTitle")
@@ -548,6 +609,10 @@ class DashboardPage(QWidget):
         self.update_settings(settings)
 
     def update_settings(self, settings: StationSettings) -> None:
+        previous_resources = {
+            name: getattr(self._settings, name).connection.resource
+            for name in ("rigol", "keithley", "anritsu")
+        }
         self._settings = settings
         for name, device in (
             ("rigol", settings.rigol),
@@ -555,20 +620,81 @@ class DashboardPage(QWidget):
             ("anritsu", settings.anritsu),
         ):
             self.cards[name].update_resource(device.connection.resource, device.connection.visa_backend)
+            if previous_resources.get(name) != device.connection.resource:
+                self._verified_resources.pop(name, None)
+                self._device_errors.pop(name, None)
         self._refresh_card_resource_choices()
-        profile = "✓ approved" if not settings.outputs_locked else "✕ unverified — outputs locked"
-        rigol_serial = "✓" if settings.rigol.identity.require_serial_match else "✕"
-        anritsu = (
-            "✓ configured operations enabled"
-            if settings.anritsu.safety.acquisition_allowed
-            else "◐ passive spectrum read available; configuration locked"
+        self._refresh_readiness()
+
+    def set_assignment_allowed(self, allowed: bool) -> None:
+        self._assignment_allowed = allowed
+        self.save_assignments.setToolTip(
+            "Persist selected VISA addresses. This changes the safety profile and revokes its approval."
+            if allowed
+            else "An engineer or service role is required to change VISA assignments."
         )
-        self.checklist.setText(
-            "Readiness:\n"
-            f"• Profile: {profile}\n"
-            f"• Rigol serial-number binding: {rigol_serial}\n"
-            f"• Anritsu acquisition: {anritsu}\n"
-            "• Declare the DUT and verify every limit before OUTPUT ON."
+        for card in self.cards.values():
+            card.set_assignment_allowed(allowed)
+        if not allowed:
+            self.save_assignments.setEnabled(False)
+
+    def update_device_state(self, device: str, state: str) -> None:
+        self._device_states[device] = state
+        if state not in {"fault", "unknown", "compliance"}:
+            self._device_errors.pop(device, None)
+        self._refresh_readiness()
+
+    def mark_identity_verified(self, device: str) -> None:
+        resource = getattr(self._settings, device).connection.resource
+        if resource:
+            self._verified_resources[device] = resource
+            self._device_errors.pop(device, None)
+        self._refresh_readiness()
+
+    def record_device_error(self, device: str, error: str) -> None:
+        self._device_errors[device] = error
+        self._refresh_readiness()
+
+    def update_audit_health(self, healthy: bool) -> None:
+        self._audit_healthy = healthy
+        self._refresh_readiness()
+
+    def update_plan_preflight(self, payload: object) -> None:
+        if isinstance(payload, tuple) and len(payload) == 2:
+            self._compiled_plan, self._plan_estimate = payload
+        else:
+            self._compiled_plan = None
+            self._plan_estimate = None
+        self._refresh_readiness()
+
+    def _refresh_readiness(self) -> None:
+        readiness = self.evaluate_readiness()
+        icon = {
+            ReadinessLevel.PASS: "✓",
+            ReadinessLevel.WARNING: "△",
+            ReadinessLevel.FAIL: "✕",
+            ReadinessLevel.INFO: "•",
+        }
+        state = "READY" if readiness.ready else "BLOCKED"
+        lines = [f"Station readiness — {state}"]
+        lines.extend(
+            f"{icon[item.level]} {item.label}: {item.detail}" for item in readiness.items
+        )
+        self.checklist.setText("\n".join(lines))
+
+    def evaluate_readiness(
+        self,
+        plan: ExecutionPlan | None = None,
+        estimate: PlanEstimate | None = None,
+    ) -> StationReadiness:
+        return evaluate_station_readiness(
+            self._settings,
+            device_states=self._device_states,
+            verified_resources=self._verified_resources,
+            audit_healthy=self._audit_healthy,
+            device_errors=self._device_errors,
+            plan=self._compiled_plan if plan is None else plan,
+            estimate=self._plan_estimate if estimate is None else estimate,
         )
 
     def _scan_visa(self) -> None:
@@ -608,11 +734,15 @@ class DashboardPage(QWidget):
             assignment.addItem("Anritsu", "anritsu")
             if result.device:
                 assignment.setCurrentIndex(assignment.findData(result.device))
-            assignment.setEnabled(result.resource != "—" and result.idn is not None)
+            assignment.setEnabled(
+                self._assignment_allowed and result.resource != "—" and result.idn is not None
+            )
             self.discovery_table.setCellWidget(row, 0, assignment)
             assign_button = QPushButton("Assign")
             assign_button.setProperty("compact", True)
-            assign_button.setEnabled(result.resource != "—" and result.idn is not None)
+            assign_button.setEnabled(
+                self._assignment_allowed and result.resource != "—" and result.idn is not None
+            )
             assign_button.setToolTip(
                 "Assign this VISA resource to the device selected in the first column and save it immediately."
             )
@@ -634,7 +764,7 @@ class DashboardPage(QWidget):
                 self._set_row_assigned(row, assigned_device)
             elif result.idn:
                 assignable += 1
-        self.save_assignments.setEnabled(assignable > 0)
+        self.save_assignments.setEnabled(self._assignment_allowed and assignable > 0)
         self.discovery_info.setText(
             f"Scan complete: {usable} responding instrument(s), {assignable} available for assignment."
         )
@@ -1682,6 +1812,7 @@ class KeithleyPage(QWidget):
         self._confirmed_output_settings: dict[str, tuple[object, ...]] = {}
         self._pending_output_signature: tuple[object, ...] | None = None
         self._measure_pending = False
+        self._ramp_pending = False
         self._live_next_channel = "A"
         self._history_started_at = time.monotonic()
         self._history_window_s = 30.0
@@ -1802,6 +1933,41 @@ class KeithleyPage(QWidget):
         )
         workflow_layout.addWidget(self.output_readiness)
         source_layout.addWidget(workflow)
+        ramp_panel = QFrame()
+        ramp_panel.setObjectName("keithleyRampPanel")
+        ramp_layout = QVBoxLayout(ramp_panel)
+        ramp_layout.setContentsMargins(7, 5, 7, 5)
+        ramp_title = QLabel("Manual source ramp — OUTPUT must already be ON")
+        ramp_title.setObjectName("sectionTitle")
+        ramp_layout.addWidget(ramp_title)
+        ramp_form = QGridLayout()
+        self.ramp_target = _line("1 mA")
+        self.ramp_step = _line("100 uA")
+        self.ramp_settle = _line("100 ms")
+        self.ramp_deadline = _line("10 s")
+        for column, (label, widget) in enumerate(
+            (
+                ("Target", self.ramp_target),
+                ("Maximum step", self.ramp_step),
+                ("Dwell / point", self.ramp_settle),
+                ("Deadline", self.ramp_deadline),
+            )
+        ):
+            ramp_form.addWidget(QLabel(label), 0, column)
+            ramp_form.addWidget(widget, 1, column)
+        ramp_layout.addLayout(ramp_form)
+        ramp_actions = QHBoxLayout()
+        self.ramp_preview_button = QPushButton("Preview ramp")
+        self.ramp_execute_button = QPushButton("Ramp to target")
+        self.ramp_execute_button.setObjectName("outputOnButton")
+        self.ramp_preview = QLabel("Preview the ramp before execution.")
+        self.ramp_preview.setWordWrap(True)
+        self.ramp_preview.setObjectName("muted")
+        ramp_actions.addWidget(self.ramp_preview_button)
+        ramp_actions.addWidget(self.ramp_execute_button)
+        ramp_actions.addWidget(self.ramp_preview, 1)
+        ramp_layout.addLayout(ramp_actions)
+        source_layout.addWidget(ramp_panel)
         buttons = QHBoxLayout()
         measure = QPushButton("Measure selected channel")
         self.output_toggle = QPushButton("OUTPUT OFF")
@@ -1833,6 +1999,8 @@ class KeithleyPage(QWidget):
         layout.addWidget(self.workspace_splitter, 1)
         measure.clicked.connect(self.request_measurement)
         self.output_toggle.toggled.connect(self._output_toggled)
+        self.ramp_preview_button.clicked.connect(self._preview_manual_ramp)
+        self.ramp_execute_button.clicked.connect(self._execute_manual_ramp)
         self.live_measurements.toggled.connect(self._toggle_live_measurements)
         self.live_interval.valueChanged.connect(self._live_timer.setInterval)
         controller.result.connect(self._result)
@@ -1851,6 +2019,7 @@ class KeithleyPage(QWidget):
         self._selected_channel_changed(self.channel.currentText())
         self._update_source_mode_ui()
         self._update_output_readiness()
+        self._update_ramp_defaults()
         self._install_keithley_help(
             measure=measure,
             output_toggle=self.output_toggle,
@@ -2041,6 +2210,12 @@ class KeithleyPage(QWidget):
             self.live_measurements: ("Live readout", "Alternately requests I/V readings from enabled channels every second. It never enables an output, but it does generate continuous instrument traffic."),
             self.device_led: ("Keithley connection state", "Grey means disconnected, green verified/output-safe, amber energized and red indicates compliance, fault or unknown state."),
             self.device_state: ("Device state", "Connection and safety state reported by the Keithley adapter. This is separate from the individual A/B output indicators."),
+            self.ramp_target: ("Ramp target", "Final Current or Voltage source level. It is validated against the channel laboratory limits and active DUT envelope before any command is sent."),
+            self.ramp_step: ("Maximum ramp step", "Largest allowed change between adjacent source points. The adapter rejects values above the approved ramp_current_step_max or ramp_voltage_step_max."),
+            self.ramp_settle: ("Ramp dwell", "Time allowed after every source step before the atomic I/V safety measurement."),
+            self.ramp_deadline: ("Ramp deadline", "Maximum wall-clock time for the complete operation. Timeout triggers a best-effort OFF of both SMU outputs."),
+            self.ramp_preview_button: ("Preview ramp", "Calculates the finite point sequence without contacting the instrument. Execution still queries the actual starting source level."),
+            self.ramp_execute_button: ("Ramp active output", "Changes an already enabled source through bounded points. It never turns an output on; every point measures I/V and trips OFF on failure."),
         }
         for widget, (title, description) in help_items.items():
             self._set_help(widget, title, description)
@@ -2205,6 +2380,7 @@ class KeithleyPage(QWidget):
             self.output_toggle.setChecked(enabled)
             self.output_toggle.blockSignals(False)
             self._style_output_toggle(enabled)
+        self._update_ramp_defaults()
 
     def request_measurement(self, channel: str | None = None) -> None:
         if self._measure_pending:
@@ -2238,7 +2414,7 @@ class KeithleyPage(QWidget):
             self._live_timer.stop()
 
     def _request_live_measurement(self) -> None:
-        if self._measure_pending:
+        if self._measure_pending or self._ramp_pending:
             return
         enabled = [
             channel
@@ -2319,6 +2495,107 @@ class KeithleyPage(QWidget):
             self.keithley_form.labelForField(self.compliance_field).setText("Current compliance (safety limit)")
             self.keithley_form.labelForField(self.source_range_field).setText("Voltage source range")
         self._update_output_readiness()
+        self._update_ramp_defaults(reset_values=True)
+
+    def _update_ramp_defaults(self, *, reset_values: bool = False) -> None:
+        mode = self.mode.currentText()
+        enabled = mode in {"current", "voltage"}
+        self.ramp_preview_button.setEnabled(enabled and not self._ramp_pending)
+        self.ramp_execute_button.setEnabled(
+            enabled and self._output_states[self.channel.currentText()] and not self._ramp_pending
+        )
+        if not enabled:
+            self.ramp_preview.setText("Manual ramp is unavailable in Measure only mode.")
+            return
+        limits = self._station_settings.keithley.safety.channels[
+            self.channel.currentText()
+        ].lab_limits
+        if reset_values:
+            self.ramp_target.setText(self.level.text())
+            self.ramp_step.setText(
+                limits.ramp_current_step_max
+                if mode == "current"
+                else limits.ramp_voltage_step_max
+            )
+            self.ramp_settle.setText(self.settle.text())
+            self.ramp_preview.setText(
+                "Preview uses the visible source level; execution reads the actual level from the SMU."
+            )
+
+    def _manual_ramp_request(self) -> tuple[KeithleyRampRequest, tuple[float, ...]]:
+        mode = self.mode.currentText()
+        if mode not in {"current", "voltage"}:
+            raise ValueError("Select Current or Voltage source mode.")
+        dimension = DIMENSION_CURRENT if mode == "current" else DIMENSION_VOLTAGE
+        target = parse_quantity(self.ramp_target.text(), dimension).si_value
+        step = parse_quantity(self.ramp_step.text(), dimension).si_value
+        settle = parse_quantity(self.ramp_settle.text(), DIMENSION_TIME).si_value
+        deadline = parse_quantity(self.ramp_deadline.text(), DIMENSION_TIME).si_value
+        source_request = replace(self._source_request(), level_si=target)
+        channel_settings = self._station_settings.keithley.safety.channels[
+            self.channel.currentText()
+        ]
+        validate_keithley_source(channel_settings, source_request)
+        start = parse_quantity(self.level.text(), dimension).si_value
+        levels = build_keithley_ramp_levels(
+            start,
+            target,
+            step,
+            max_points=channel_settings.lab_limits.sweep_points_max,
+        )
+        if len(levels) * settle > deadline:
+            raise ValueError("Ramp dwell time exceeds the configured deadline.")
+        request = KeithleyRampRequest(
+            self.channel.currentText(),  # type: ignore[arg-type]
+            target,
+            step,
+            settle,
+            deadline,
+        )
+        return request, levels
+
+    def _preview_manual_ramp(self) -> None:
+        try:
+            request, levels = self._manual_ramp_request()
+        except Exception as exc:
+            self.banner.show_message(f"Invalid ramp: {exc}")
+            return
+        preview = ", ".join(f"{value:.6g}" for value in levels[:8])
+        suffix = " …" if len(levels) > 8 else ""
+        self.ramp_preview.setText(
+            f"{len(levels)} point(s) • target {request.target_si:.6g} SI • "
+            f"estimated dwell {len(levels) * request.settle_time_s:.3g} s • "
+            f"levels: {preview}{suffix}"
+        )
+
+    def _execute_manual_ramp(self) -> None:
+        channel = self.channel.currentText()
+        if not self._output_states[channel]:
+            self.banner.show_message("Manual ramp requires the selected OUTPUT to be ON.")
+            return
+        try:
+            request, levels = self._manual_ramp_request()
+        except Exception as exc:
+            self.banner.show_message(f"Invalid ramp: {exc}")
+            return
+        answer = QMessageBox.warning(
+            self,
+            "Ramp active Keithley output",
+            f"Ramp channel {channel} through {len(levels)} point(s) to "
+            f"{self.ramp_target.text()}?\n\n"
+            "The output remains energized. Every point performs an I/V safety check; "
+            "any error attempts to disable both outputs.",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.Cancel,
+            QMessageBox.StandardButton.Cancel,
+        )
+        if answer != QMessageBox.StandardButton.Yes:
+            return
+        self._ramp_pending = True
+        self._pending_channels["ramp_to_level"] = channel
+        self.ramp_execute_button.setText("RAMPING…")
+        self._update_ramp_defaults()
+        self.status.emit(f"Keithley CH {channel}: manual ramp started ({len(levels)} points)")
+        self._controller.call("ramp_to_level", request)
 
     def _keithley_limit_values(self, key: str) -> tuple[object, object]:
         limits = self._station_settings.keithley.safety.channels[self.channel.currentText()].lab_limits
@@ -2365,6 +2642,7 @@ class KeithleyPage(QWidget):
         self._station_settings = settings
         self._refresh_keithley_limits()
         self._update_output_readiness()
+        self._update_ramp_defaults(reset_values=True)
 
     def configure(self) -> None:
         try:
@@ -2527,6 +2805,23 @@ class KeithleyPage(QWidget):
             self._armed_until_ui = 0.0
             self._update_arm_status()
             self.status.emit(f"Keithley CH {channel} ramped to zero; OUTPUT OFF")
+        elif operation == "ramp_to_level" and hasattr(result, "final_measurement"):
+            channel = self._pending_channels.pop("ramp_to_level", self.channel.currentText())
+            self._ramp_pending = False
+            self.ramp_execute_button.setText("Ramp to target")
+            self.level.setText(self.ramp_target.text())
+            self._source_value_cache[(channel, self.mode.currentText())] = (
+                self.level.text(),
+                self.compliance.text(),
+                self.source_range.text(),
+            )
+            self._update_channel_measurement(result.final_measurement)
+            self._set_channel_output(channel, True)
+            self.ramp_preview.setText(
+                f"Ramp completed: {len(result.levels_si)} point(s), target "
+                f"{result.target_si:.6g} SI."
+            )
+            self.status.emit(f"Keithley CH {channel}: manual ramp completed")
 
     def _error(self, operation: str, error: str) -> None:
         if operation == "measure":
@@ -2537,6 +2832,12 @@ class KeithleyPage(QWidget):
         if operation in {"arm", "set_output"}:
             self._armed_until_ui = 0.0
             self._update_arm_status()
+        if operation == "ramp_to_level":
+            channel = self._pending_channels.pop("ramp_to_level", self.channel.currentText())
+            self._ramp_pending = False
+            self.ramp_execute_button.setText("Ramp to target")
+            self._set_channel_output(channel, False)
+            self._update_ramp_defaults()
         if operation in {"configure", "arm", "set_output", "ramp_to_zero"}:
             self._auto_enable_channel = None
             self._pending_output_signature = None
@@ -2548,8 +2849,28 @@ class KeithleyPage(QWidget):
             else:
                 self._reset_output_toggle()
             self._update_output_readiness()
-        if operation in {"configure", "measure", "set_output", "ramp_to_zero", "arm"}:
+        if operation in {
+            "configure",
+            "measure",
+            "set_output",
+            "ramp_to_zero",
+            "ramp_to_level",
+            "arm",
+        }:
             QMessageBox.warning(self, "Keithley", error)
+
+
+class AnritsuPageState(StrEnum):
+    DISCONNECTED = "disconnected"
+    IDLE = "idle"
+    STARTING_LIVE = "starting_live"
+    LIVE = "live"
+    AVERAGING_SIGNAL = "averaging_signal"
+    AVERAGING_REFERENCE = "averaging_reference"
+    ACQUIRING_REFERENCE = "acquiring_reference"
+    CONFIGURING = "configuring"
+    STOPPING = "stopping"
+    ERROR = "error"
 
 
 class AnritsuPage(QWidget):
@@ -2568,18 +2889,36 @@ class AnritsuPage(QWidget):
         self._station_settings = settings
         self._limit_fields: dict[str, LimitField] = {}
         self._single_sweep_configured = single_sweep_available
+        self._trace_supported = True
         self._fetch_pending = False
         self._live_transition_pending = False
         self._latest_trace: SpectrumTrace | None = None
         self._averaged_trace: SpectrumTrace | None = None
         self._reference_trace: SpectrumTrace | None = None
+        self._reference_spectrum: ReferenceSpectrum | None = None
+        self._pending_reference_kind: str | None = None
+        self._device_idn = ""
+        self._last_configuration: AnritsuConfigurationSnapshot | None = None
+        self._last_advanced_configuration: AdvancedSpectrumSnapshot | None = None
+        self._page_state = AnritsuPageState.IDLE
+        self._capabilities: object | None = None
         self._averager = LinearPowerAverager()
         self._averaging_active = False
         self._averaging_destination: str | None = None
         self._resume_live_after_averaging = False
         self._live_frame_count = 0
+        self._fetch_started_monotonic: float | None = None
+        self._last_frame_monotonic: float | None = None
+        self._frame_intervals_s: list[float] = []
+        self._transfer_durations_s: list[float] = []
+        self._stale_frame_count = 0
+        self._coalesced_timer_ticks = 0
         self._identical_live_frames = 0
         self._last_live_signature: int | None = None
+        self._reconnect_pending = False
+        self._sg_supported = False
+        self._sg_output_enabled = False
+        self._sg_armed = False
         self._timer = QTimer(self)
         self._timer.setInterval(500)
         self._timer.timeout.connect(self.fetch_live)
@@ -2616,6 +2955,12 @@ class AnritsuPage(QWidget):
         setup_title.setObjectName("sectionTitle")
         setup_header.addWidget(setup_title)
         setup_header.addStretch(1)
+        self.advanced_spectrum_button = QPushButton("Advanced…")
+        self.advanced_spectrum_button.setToolTip(
+            "Open qualified RBW, VBW, detector, attenuation, preamplifier and sweep-time controls."
+        )
+        self.advanced_spectrum_button.clicked.connect(self._show_advanced_spectrum_dialog)
+        setup_header.addWidget(self.advanced_spectrum_button)
         self.hardware_info_button = QPushButton("ⓘ")
         self.hardware_info_button.setObjectName("infoButton")
         self.hardware_info_button.setFixedSize(28, 28)
@@ -2624,12 +2969,16 @@ class AnritsuPage(QWidget):
         )
         self.hardware_info_button.clicked.connect(self._show_anritsu_hardware_info)
         setup_header.addWidget(self.hardware_info_button)
+        self._advanced_dialog = self._build_advanced_spectrum_dialog()
         left_layout.addLayout(setup_header)
         form = QFormLayout()
         form.setFieldGrowthPolicy(QFormLayout.FieldGrowthPolicy.AllNonFixedFieldsGrow)
         form.setVerticalSpacing(7)
         self.start = _line("1 MHz")
         self.stop = _line("10 MHz")
+        self.frequency_representation = QComboBox()
+        self.frequency_representation.addItem("Start / Stop", "start_stop")
+        self.frequency_representation.addItem("Center / Span", "center_span")
         self.reference = _line("0 dBm")
         self.points = QComboBox()
         self._refresh_point_choices(1001)
@@ -2641,14 +2990,16 @@ class AnritsuPage(QWidget):
             "Requested Live polling interval: 10 ms to 5 s. The effective frame rate is "
             "limited by the analyser sweep, VISA transfer and complete TRAC1 processing."
         )
-        for label, widget in (
-            ("Start", self._anritsu_bounded("frequency", self.start)),
-            ("Stop", self._anritsu_bounded("frequency", self.stop)),
-            ("Reference level", self._anritsu_bounded("reference_level", self.reference)),
-            ("Points", self.points),
-            ("Live refresh interval", self.refresh),
-        ):
-            form.addRow(label, widget)
+        form.addRow("Frequency representation", self.frequency_representation)
+        self.frequency_label_a = QLabel("Start")
+        self.frequency_label_b = QLabel("Stop")
+        form.addRow(self.frequency_label_a, self._anritsu_bounded("frequency", self.start))
+        form.addRow(self.frequency_label_b, self._anritsu_bounded("frequency", self.stop))
+        form.addRow(
+            "Reference level", self._anritsu_bounded("reference_level", self.reference)
+        )
+        form.addRow("Points", self.points)
+        form.addRow("Live refresh interval", self.refresh)
         left_layout.addLayout(form)
         self.hardware_option_info = QLabel()
         self.hardware_range_info = QLabel()
@@ -2659,19 +3010,25 @@ class AnritsuPage(QWidget):
         controls = QGridLayout()
         controls.setSpacing(6)
         self.read_configuration = QPushButton("Read from instrument")
-        configure = QPushButton("Apply configuration")
+        self.configure_button = QPushButton("Apply configuration")
         self.single = QPushButton("Read current spectrum")
         self.live = QPushButton("Start Live")
-        abort = QPushButton("Abort")
-        configure.setObjectName("primaryButton")
-        abort.setObjectName("warningButton")
-        for button in (self.read_configuration, configure, self.single, self.live, abort):
+        self.abort_button = QPushButton("Abort acquisition")
+        self.configure_button.setObjectName("primaryButton")
+        self.abort_button.setObjectName("warningButton")
+        for button in (
+            self.read_configuration,
+            self.configure_button,
+            self.single,
+            self.live,
+            self.abort_button,
+        ):
             button.setProperty("compact", True)
         controls.addWidget(self.read_configuration, 0, 0, 1, 2)
-        controls.addWidget(configure, 1, 0)
+        controls.addWidget(self.configure_button, 1, 0)
         controls.addWidget(self.single, 1, 1)
         controls.addWidget(self.live, 2, 0)
-        controls.addWidget(abort, 2, 1)
+        controls.addWidget(self.abort_button, 2, 1)
         left_layout.addLayout(controls)
         processing = QFrame()
         processing.setObjectName("anritsuProcessingCard")
@@ -2699,10 +3056,29 @@ class AnritsuPage(QWidget):
         processing_layout.addWidget(self.acquire_average, 2, 0)
         processing_layout.addWidget(self.cancel_average, 2, 1)
         processing_layout.addWidget(self.average_progress, 3, 0, 1, 2)
-        self.capture_reference = QPushButton("Acquire averaged reference")
+        reference_title = QLabel("Reference")
+        reference_title.setObjectName("subsectionTitle")
+        processing_layout.addWidget(reference_title, 4, 0, 1, 2)
+        self.reference_status = QLabel("No reference")
+        self.reference_status.setObjectName("muted")
+        self.reference_status.setWordWrap(True)
+        processing_layout.addWidget(self.reference_status, 5, 0, 1, 2)
+        self.acquire_single_reference = QPushButton("Acquire 1× reference")
+        self.use_current_reference = QPushButton("Use current trace")
+        self.capture_reference = QPushButton("Acquire N× reference")
         self.clear_reference = QPushButton("Clear reference")
-        self.capture_reference.setProperty("compact", True)
-        self.clear_reference.setProperty("compact", True)
+        self.load_reference = QPushButton("Load reference…")
+        self.save_reference = QPushButton("Save reference…")
+        for button in (
+            self.acquire_single_reference,
+            self.use_current_reference,
+            self.capture_reference,
+            self.clear_reference,
+            self.load_reference,
+            self.save_reference,
+        ):
+            button.setProperty("compact", True)
+        self.use_current_reference.setEnabled(False)
         self.clear_reference.setEnabled(False)
         self.reference_operation = QComboBox()
         self.reference_operation.addItem("No processing", "none")
@@ -2711,10 +3087,14 @@ class AnritsuPage(QWidget):
         self.reference_operation.addItem("Signal + reference [linear power]", "add_power")
         self.reference_operation.addItem("Signal − reference [linear power]", "subtract_power")
         self.reference_operation.addItem("Signal × reference [linear mW²]", "multiply_linear")
-        processing_layout.addWidget(self.capture_reference, 4, 0)
-        processing_layout.addWidget(self.clear_reference, 4, 1)
-        processing_layout.addWidget(QLabel("Reference operation"), 5, 0)
-        processing_layout.addWidget(self.reference_operation, 5, 1)
+        processing_layout.addWidget(self.acquire_single_reference, 6, 0)
+        processing_layout.addWidget(self.use_current_reference, 6, 1)
+        processing_layout.addWidget(self.capture_reference, 7, 0)
+        processing_layout.addWidget(self.clear_reference, 7, 1)
+        processing_layout.addWidget(self.load_reference, 8, 0)
+        processing_layout.addWidget(self.save_reference, 8, 1)
+        processing_layout.addWidget(QLabel("Reference operation"), 9, 0)
+        processing_layout.addWidget(self.reference_operation, 9, 1)
         self.show_raw = QCheckBox("Raw")
         self.show_raw.setChecked(True)
         self.show_average = QCheckBox("Averaged")
@@ -2725,7 +3105,7 @@ class AnritsuPage(QWidget):
         for checkbox in (self.show_raw, self.show_average, self.show_reference, self.show_processed):
             trace_toggles.addWidget(checkbox)
         trace_toggles.addStretch(1)
-        processing_layout.addLayout(trace_toggles, 6, 0, 1, 2)
+        processing_layout.addLayout(trace_toggles, 10, 0, 1, 2)
         left_layout.addWidget(processing)
         left_layout.addStretch(1)
         self.spectrum_plot = SpectrumPlotWidget(legend=True)
@@ -2751,31 +3131,53 @@ class AnritsuPage(QWidget):
         self.workspace_splitter.setStretchFactor(0, 0)
         self.workspace_splitter.setStretchFactor(1, 1)
         self.workspace_splitter.setSizes([680, 1100])
-        layout.addWidget(self.workspace_splitter, 1)
-        self.read_configuration.clicked.connect(self.read_configuration_from_instrument)
-        configure.clicked.connect(self.configure)
-        self.single.clicked.connect(
-            lambda: self._controller.call("fetch_current_trace", "TRAC1")
+        self.mode_tabs = QTabWidget()
+        self.mode_tabs.setObjectName("anritsuModeTabs")
+        spectrum_tab = QWidget()
+        spectrum_tab_layout = QVBoxLayout(spectrum_tab)
+        spectrum_tab_layout.setContentsMargins(0, 0, 0, 0)
+        spectrum_tab_layout.addWidget(self.workspace_splitter)
+        self.mode_tabs.addTab(spectrum_tab, "Spectrum analyser")
+        self.signal_generator_tab = self._build_signal_generator_tab()
+        self.signal_generator_tab_index = self.mode_tabs.addTab(
+            self.signal_generator_tab, "Signal generator"
         )
+        self.mode_tabs.setTabVisible(self.signal_generator_tab_index, False)
+        layout.addWidget(self.mode_tabs, 1)
+        self.read_configuration.clicked.connect(self.read_configuration_from_instrument)
+        self.frequency_representation.currentIndexChanged.connect(
+            self._change_frequency_representation
+        )
+        self.configure_button.clicked.connect(self.configure)
+        self.single.clicked.connect(self.read_once)
         self.live.clicked.connect(self.toggle_live)
-        abort.clicked.connect(lambda: self._controller.call("emergency_off"))
+        self.abort_button.clicked.connect(lambda: self._controller.call("emergency_off"))
         self.acquire_average.clicked.connect(self.start_averaging)
         self.cancel_average.clicked.connect(self.cancel_averaging)
+        self.acquire_single_reference.clicked.connect(self.acquire_reference_once)
+        self.use_current_reference.clicked.connect(self.capture_current_reference)
         self.capture_reference.clicked.connect(self.start_reference_averaging)
         self.clear_reference.clicked.connect(self.remove_reference)
+        self.load_reference.clicked.connect(self.load_reference_file)
+        self.save_reference.clicked.connect(self.save_reference_file)
         self.reference_operation.currentIndexChanged.connect(self._refresh_spectrum_display)
         for checkbox in (self.show_raw, self.show_average, self.show_reference, self.show_processed):
             checkbox.toggled.connect(self._refresh_spectrum_display)
         controller.result.connect(self._result)
         controller.error.connect(self._error)
+        controller.state_changed.connect(self._device_state_changed)
         help_items = {
             self.read_configuration: "Read Start, Stop, Reference level, and Points from the connected analyser. This sends query commands only and never changes the instrument or approved safety limits.",
             self.single: "Read the currently displayed TRAC1 spectrum using SCPI queries only. This does not configure or trigger the analyser and does not require an approved safety profile.",
             self.average_count: "Number of complete spectra to average. 200 is common in the Thatec workflow. Averaging is performed in linear mW, not directly in dBm.",
             self.acquire_average: "Passively read N traces at the Live refresh interval and average power in linear mW. No analyser setting or trigger mode is changed.",
             self.cancel_average: "Stop temporal averaging. Already collected temporary frames are discarded; completed raw/reference data are unchanged.",
+            self.acquire_single_reference: "Passively fetch one new TRAC1 frame and store that completed frame as the reference. No analyser setting is changed.",
+            self.use_current_reference: "Use the latest already acquired trace as the reference without sending a VISA command.",
             self.capture_reference: "Passively acquire and average N traces, then store that completed average as the in-memory reference spectrum.",
             self.clear_reference: "Remove the in-memory reference and all derived display results. It does not delete raw measurements from HDF5.",
+            self.load_reference: "Load a Lab Control reference HDF5 artefact. The current analyser is not queried or configured.",
+            self.save_reference: "Save the complete reference trace and provenance as a thaTEC/PyThat-compatible HDF5 artefact.",
             self.reference_operation: "Choose point-wise reference mathematics. Difference in dB equals a power ratio expressed logarithmically; linear operations first convert dBm to mW.",
             self.show_raw: "Show the latest untouched trace returned by Anritsu.",
             self.show_average: "Show the application-side linear-power average.",
@@ -2785,11 +3187,399 @@ class AnritsuPage(QWidget):
         for widget, description in help_items.items():
             widget.setToolTip(description)
             widget.setToolTipDuration(25_000)
+        self._apply_page_state()
+
+    def _build_signal_generator_tab(self) -> QWidget:
+        tab = QWidget()
+        outer = QVBoxLayout(tab)
+        outer.setContentsMargins(18, 14, 18, 14)
+        heading = QLabel("Optional vector signal generator")
+        heading.setObjectName("sectionTitle")
+        outer.addWidget(heading)
+        explanation = QLabel(
+            "This panel is shown only when *OPT? reports option 020/120/021/121. "
+            "Configuration explicitly enters SG mode and proves RF OUTPUT OFF. "
+            "RF ON additionally requires a qualified protocol, approved limits, profile approval "
+            "and a fresh one-shot ARM."
+        )
+        explanation.setWordWrap(True)
+        explanation.setObjectName("muted")
+        outer.addWidget(explanation)
+
+        card = QFrame()
+        card.setObjectName("anritsuProcessingCard")
+        grid = QGridLayout(card)
+        grid.setHorizontalSpacing(10)
+        grid.setVerticalSpacing(9)
+        self.sg_status = QLabel("●  RF OUTPUT UNKNOWN")
+        self.sg_status.setObjectName("anritsuSgIndicator")
+        self.sg_status.setProperty("liveState", "off")
+        grid.addWidget(self.sg_status, 0, 0, 1, 4)
+        generator = self._station_settings.anritsu.signal_generator
+        default_frequency = generator.frequency.min or "1 GHz"
+        default_power = generator.power.min or "-30 dBm"
+        self.sg_frequency = QLineEdit(str(default_frequency))
+        self.sg_power = QLineEdit(str(default_power))
+        grid.addWidget(QLabel("Frequency"), 1, 0)
+        grid.addWidget(self.sg_frequency, 1, 1, 1, 3)
+        grid.addWidget(QLabel("RF power"), 2, 0)
+        grid.addWidget(self.sg_power, 2, 1, 1, 3)
+        self.sg_read = QPushButton("Read current SG state")
+        self.sg_configure = QPushButton("Configure while RF OFF")
+        self.sg_arm = QPushButton("ARM RF output")
+        self.sg_on = QPushButton("RF OUTPUT ON")
+        self.sg_off = QPushButton("RF OUTPUT OFF")
+        self.sg_configure.setObjectName("primaryButton")
+        self.sg_on.setObjectName("outputOnButton")
+        self.sg_off.setObjectName("outputOffButton")
+        for button in (
+            self.sg_read,
+            self.sg_configure,
+            self.sg_arm,
+            self.sg_on,
+            self.sg_off,
+        ):
+            button.setProperty("compact", True)
+        grid.addWidget(self.sg_read, 3, 0, 1, 2)
+        grid.addWidget(self.sg_configure, 3, 2, 1, 2)
+        grid.addWidget(self.sg_arm, 4, 0)
+        grid.addWidget(self.sg_on, 4, 1)
+        grid.addWidget(self.sg_off, 4, 2, 1, 2)
+        self.sg_limits = QLabel()
+        self.sg_limits.setWordWrap(True)
+        self.sg_limits.setObjectName("muted")
+        grid.addWidget(self.sg_limits, 5, 0, 1, 4)
+        outer.addWidget(card)
+        outer.addStretch(1)
+        self.sg_read.clicked.connect(
+            lambda: self._controller.call("read_signal_generator")
+        )
+        self.sg_configure.clicked.connect(self.configure_signal_generator)
+        self.sg_arm.clicked.connect(self.arm_signal_generator)
+        self.sg_on.clicked.connect(self.enable_signal_generator)
+        self.sg_off.clicked.connect(
+            lambda: self._controller.call("set_signal_generator_output", False)
+        )
+        self._update_signal_generator_limits()
+        return tab
+
+    def _build_advanced_spectrum_dialog(self) -> QDialog:
+        dialog = QDialog(self)
+        dialog.setWindowTitle("Anritsu advanced Spectrum settings")
+        dialog.setModal(False)
+        dialog.resize(620, 470)
+        layout = QVBoxLayout(dialog)
+        explanation = QLabel(
+            "These controls change bandwidth, detector and the RF input path. Readback is "
+            "always available as an explicit diagnostic action. Apply remains locked until "
+            "the exact firmware is qualified in the station profile."
+        )
+        explanation.setWordWrap(True)
+        layout.addWidget(explanation)
+        self.advanced_protocol_status = QLabel()
+        self.advanced_protocol_status.setWordWrap(True)
+        layout.addWidget(self.advanced_protocol_status)
+
+        form = QFormLayout()
+        form.setFieldGrowthPolicy(QFormLayout.FieldGrowthPolicy.AllNonFixedFieldsGrow)
+        self.advanced_rbw_mode = QComboBox()
+        self.advanced_rbw_mode.addItem("Automatic", "auto")
+        self.advanced_rbw_mode.addItem("Manual", "manual")
+        self.advanced_rbw = _line("1 kHz")
+        rbw_row = QWidget()
+        rbw_layout = QHBoxLayout(rbw_row)
+        rbw_layout.setContentsMargins(0, 0, 0, 0)
+        rbw_layout.addWidget(self.advanced_rbw_mode)
+        rbw_layout.addWidget(self.advanced_rbw, 1)
+        form.addRow("Resolution bandwidth (RBW)", rbw_row)
+
+        self.advanced_vbw_mode = QComboBox()
+        self.advanced_vbw_mode.addItem("Automatic", "auto")
+        self.advanced_vbw_mode.addItem("Manual", "manual")
+        self.advanced_vbw_mode.addItem("Off", "off")
+        self.advanced_vbw = _line("1 kHz")
+        vbw_row = QWidget()
+        vbw_layout = QHBoxLayout(vbw_row)
+        vbw_layout.setContentsMargins(0, 0, 0, 0)
+        vbw_layout.addWidget(self.advanced_vbw_mode)
+        vbw_layout.addWidget(self.advanced_vbw, 1)
+        form.addRow("Video bandwidth (VBW)", vbw_row)
+
+        self.advanced_detector = QComboBox()
+        self._refresh_advanced_detector_choices(())
+        form.addRow("Detector", self.advanced_detector)
+        self.advanced_attenuation_mode = QComboBox()
+        self.advanced_attenuation_mode.addItem("Automatic", "auto")
+        self.advanced_attenuation_mode.addItem("Manual", "manual")
+        self.advanced_attenuation = QSpinBox()
+        self.advanced_attenuation.setRange(0, 60)
+        self.advanced_attenuation.setSingleStep(2)
+        self.advanced_attenuation.setSuffix(" dB")
+        attenuation_row = QWidget()
+        attenuation_layout = QHBoxLayout(attenuation_row)
+        attenuation_layout.setContentsMargins(0, 0, 0, 0)
+        attenuation_layout.addWidget(self.advanced_attenuation_mode)
+        attenuation_layout.addWidget(self.advanced_attenuation, 1)
+        form.addRow("RF attenuation", attenuation_row)
+        self.advanced_preamplifier = QCheckBox("Enable preamplifier")
+        form.addRow("Input gain", self.advanced_preamplifier)
+        self.advanced_sweep_mode = QComboBox()
+        self.advanced_sweep_mode.addItem("Automatic", "auto")
+        self.advanced_sweep_mode.addItem("Manual", "manual")
+        self.advanced_sweep_time = _line("100 ms")
+        sweep_row = QWidget()
+        sweep_layout = QHBoxLayout(sweep_row)
+        sweep_layout.setContentsMargins(0, 0, 0, 0)
+        sweep_layout.addWidget(self.advanced_sweep_mode)
+        sweep_layout.addWidget(self.advanced_sweep_time, 1)
+        form.addRow("Sweep time", sweep_row)
+        layout.addLayout(form)
+
+        help_text = QLabel(
+            "Documented limits: RBW 1 Hz–31.25 MHz; VBW 1 Hz–10 MHz or Off; "
+            "attenuation 0–60 dB in 2 dB steps; frequency-domain sweep 1 ms–1000 s. "
+            "Automatic attenuation is blocked when the safety profile defines a minimum."
+        )
+        help_text.setWordWrap(True)
+        layout.addWidget(help_text)
+        actions = QHBoxLayout()
+        self.advanced_read_button = QPushButton("Read from instrument")
+        self.advanced_apply_button = QPushButton("Apply and verify")
+        self.advanced_apply_button.setObjectName("primaryButton")
+        close_button = QPushButton("Close")
+        actions.addWidget(self.advanced_read_button)
+        actions.addWidget(self.advanced_apply_button)
+        actions.addStretch(1)
+        actions.addWidget(close_button)
+        layout.addLayout(actions)
+        self.advanced_read_button.clicked.connect(self.read_advanced_spectrum)
+        self.advanced_apply_button.clicked.connect(self.configure_advanced_spectrum)
+        close_button.clicked.connect(dialog.hide)
+        self.advanced_rbw_mode.currentIndexChanged.connect(self._sync_advanced_editors)
+        self.advanced_vbw_mode.currentIndexChanged.connect(self._sync_advanced_editors)
+        self.advanced_attenuation_mode.currentIndexChanged.connect(
+            self._sync_advanced_editors
+        )
+        self.advanced_sweep_mode.currentIndexChanged.connect(self._sync_advanced_editors)
+        self._sync_advanced_editors()
+        self._update_advanced_availability()
+        return dialog
+
+    def _refresh_advanced_detector_choices(self, options: tuple[str, ...]) -> None:
+        current = self.advanced_detector.currentData() if hasattr(self, "advanced_detector") else None
+        detectors = [
+            ("Normal peak", "NORM"),
+            ("Positive peak", "POS"),
+            ("Sample", "SAMP"),
+            ("Negative peak", "NEG"),
+            ("RMS", "RMS"),
+        ]
+        if {"016", "116"}.intersection(options):
+            detectors.extend(
+                [("Quasi-peak", "QPE"), ("CISPR average", "CAV"), ("CISPR RMS", "CRMS")]
+            )
+        if not hasattr(self, "advanced_detector"):
+            return
+        self.advanced_detector.clear()
+        for label, value in detectors:
+            self.advanced_detector.addItem(label, value)
+        index = self.advanced_detector.findData(current or "NORM")
+        self.advanced_detector.setCurrentIndex(max(index, 0))
+
+    def _sync_advanced_editors(self) -> None:
+        self.advanced_rbw.setEnabled(self.advanced_rbw_mode.currentData() == "manual")
+        self.advanced_vbw.setEnabled(self.advanced_vbw_mode.currentData() == "manual")
+        self.advanced_attenuation.setEnabled(
+            self.advanced_attenuation_mode.currentData() == "manual"
+        )
+        self.advanced_sweep_time.setEnabled(
+            self.advanced_sweep_mode.currentData() == "manual"
+        )
+
+    def _advanced_firmware_qualified(self) -> bool:
+        protocol = self._station_settings.anritsu.advanced_spectrum
+        firmware = str(getattr(self._capabilities, "firmware", "") or "")
+        return (
+            protocol.control_protocol == "standard_scpi"
+            and firmware in protocol.qualified_firmware
+        )
+
+    def _update_advanced_availability(self) -> None:
+        if not hasattr(self, "advanced_protocol_status"):
+            return
+        protocol = self._station_settings.anritsu.advanced_spectrum
+        firmware = str(getattr(self._capabilities, "firmware", "") or "unknown")
+        qualified = self._advanced_firmware_qualified()
+        if qualified:
+            text = f"Qualified standard SCPI control for firmware {firmware}."
+        else:
+            versions = ", ".join(protocol.qualified_firmware) or "none"
+            text = (
+                f"WRITE LOCKED — protocol={protocol.control_protocol}, connected firmware={firmware}, "
+                f"qualified firmware={versions}. Read-only queries remain available."
+            )
+        self.advanced_protocol_status.setText(text)
+        connected = self._page_state != AnritsuPageState.DISCONNECTED
+        idle = self._page_state in {AnritsuPageState.IDLE, AnritsuPageState.ERROR}
+        self.advanced_read_button.setEnabled(connected and idle)
+        self.advanced_apply_button.setEnabled(connected and idle and qualified)
+
+    def _show_advanced_spectrum_dialog(self) -> None:
+        self._update_advanced_availability()
+        self._advanced_dialog.show()
+        self._advanced_dialog.raise_()
+        self._advanced_dialog.activateWindow()
+
+    def read_advanced_spectrum(self) -> None:
+        self._set_page_state(AnritsuPageState.CONFIGURING)
+        self.status.emit("Anritsu advanced Spectrum readback requested")
+        self._controller.call("read_advanced_spectrum")
+
+    def configure_advanced_spectrum(self) -> None:
+        try:
+            config = AdvancedSpectrumConfig(
+                rbw_auto=self.advanced_rbw_mode.currentData() == "auto",
+                rbw_hz=(
+                    parse_quantity(self.advanced_rbw.text(), DIMENSION_FREQUENCY).si_value
+                    if self.advanced_rbw_mode.currentData() == "manual"
+                    else None
+                ),
+                vbw_mode=str(self.advanced_vbw_mode.currentData()),
+                vbw_hz=(
+                    parse_quantity(self.advanced_vbw.text(), DIMENSION_FREQUENCY).si_value
+                    if self.advanced_vbw_mode.currentData() == "manual"
+                    else None
+                ),
+                detector=str(self.advanced_detector.currentData()),
+                attenuation_auto=self.advanced_attenuation_mode.currentData() == "auto",
+                attenuation_db=(
+                    float(self.advanced_attenuation.value())
+                    if self.advanced_attenuation_mode.currentData() == "manual"
+                    else None
+                ),
+                preamplifier_enabled=self.advanced_preamplifier.isChecked(),
+                sweep_time_auto=self.advanced_sweep_mode.currentData() == "auto",
+                sweep_time_s=(
+                    parse_quantity(self.advanced_sweep_time.text(), DIMENSION_TIME).si_value
+                    if self.advanced_sweep_mode.currentData() == "manual"
+                    else None
+                ),
+            )
+        except Exception as exc:
+            self.banner.show_message(f"Invalid advanced Spectrum settings: {exc}", severity="error")
+            return
+        if config.preamplifier_enabled:
+            answer = QMessageBox.warning(
+                self,
+                "Enable Anritsu preamplifier",
+                "The preamplifier changes the RF input path and may overload at high input power. "
+                "Confirm that the approved expected input and attenuation are correct.",
+                QMessageBox.StandardButton.Ok | QMessageBox.StandardButton.Cancel,
+                QMessageBox.StandardButton.Cancel,
+            )
+            if answer != QMessageBox.StandardButton.Ok:
+                return
+        self._set_page_state(AnritsuPageState.CONFIGURING)
+        self._controller.call("configure_advanced_spectrum", config)
+
+    def _show_advanced_snapshot(self, snapshot: AdvancedSpectrumSnapshot) -> None:
+        self._last_advanced_configuration = snapshot
+        self.advanced_rbw_mode.setCurrentIndex(
+            self.advanced_rbw_mode.findData("auto" if snapshot.rbw_auto else "manual")
+        )
+        self.advanced_rbw.setText(
+            format_quantity_auto(snapshot.rbw_hz, DIMENSION_FREQUENCY)
+        )
+        self.advanced_vbw_mode.setCurrentIndex(
+            self.advanced_vbw_mode.findData(snapshot.vbw_mode)
+        )
+        if snapshot.vbw_hz is not None:
+            self.advanced_vbw.setText(
+                format_quantity_auto(snapshot.vbw_hz, DIMENSION_FREQUENCY)
+            )
+        detector_index = self.advanced_detector.findData(snapshot.detector)
+        if detector_index >= 0:
+            self.advanced_detector.setCurrentIndex(detector_index)
+        self.advanced_attenuation_mode.setCurrentIndex(
+            self.advanced_attenuation_mode.findData(
+                "auto" if snapshot.attenuation_auto else "manual"
+            )
+        )
+        self.advanced_attenuation.setValue(round(snapshot.attenuation_db))
+        self.advanced_preamplifier.setChecked(snapshot.preamplifier_enabled)
+        self.advanced_sweep_mode.setCurrentIndex(
+            self.advanced_sweep_mode.findData(
+                "auto" if snapshot.sweep_time_auto else "manual"
+            )
+        )
+        self.advanced_sweep_time.setText(
+            format_quantity_auto(snapshot.sweep_time_s, DIMENSION_TIME)
+        )
+        self._sync_advanced_editors()
 
     def _anritsu_limit_values(self, key: str) -> tuple[object, object]:
         safety = self._station_settings.anritsu.safety
         value = getattr(safety, key)
         return value.min, value.max
+
+    def _spectrum_frequency_bounds(self) -> tuple[float, float]:
+        first = parse_quantity(self.start.text(), DIMENSION_FREQUENCY).si_value
+        second = parse_quantity(self.stop.text(), DIMENSION_FREQUENCY).si_value
+        if self.frequency_representation.currentData() == "center_span":
+            center, span = first, second
+            if not math.isfinite(span) or span <= 0:
+                raise ValueError("Frequency span must be finite and positive.")
+            return center - span / 2, center + span / 2
+        return first, second
+
+    def _set_frequency_bounds(self, start_hz: float, stop_hz: float) -> None:
+        if self.frequency_representation.currentData() == "center_span":
+            self.start.setText(
+                format_quantity_auto((start_hz + stop_hz) / 2, DIMENSION_FREQUENCY)
+            )
+            self.stop.setText(
+                format_quantity_auto(stop_hz - start_hz, DIMENSION_FREQUENCY)
+            )
+        else:
+            self.start.setText(format_quantity_auto(start_hz, DIMENSION_FREQUENCY))
+            self.stop.setText(format_quantity_auto(stop_hz, DIMENSION_FREQUENCY))
+
+    def _change_frequency_representation(self) -> None:
+        try:
+            if self.frequency_representation.currentData() == "center_span":
+                start_hz = parse_quantity(
+                    self.start.text(), DIMENSION_FREQUENCY
+                ).si_value
+                stop_hz = parse_quantity(
+                    self.stop.text(), DIMENSION_FREQUENCY
+                ).si_value
+                self.frequency_label_a.setText("Center")
+                self.frequency_label_b.setText("Span")
+                self.start.setText(
+                    format_quantity_auto((start_hz + stop_hz) / 2, DIMENSION_FREQUENCY)
+                )
+                self.stop.setText(
+                    format_quantity_auto(stop_hz - start_hz, DIMENSION_FREQUENCY)
+                )
+            else:
+                center_hz = parse_quantity(
+                    self.start.text(), DIMENSION_FREQUENCY
+                ).si_value
+                span_hz = parse_quantity(
+                    self.stop.text(), DIMENSION_FREQUENCY
+                ).si_value
+                self.frequency_label_a.setText("Start")
+                self.frequency_label_b.setText("Stop")
+                self.start.setText(
+                    format_quantity_auto(center_hz - span_hz / 2, DIMENSION_FREQUENCY)
+                )
+                self.stop.setText(
+                    format_quantity_auto(center_hz + span_hz / 2, DIMENSION_FREQUENCY)
+                )
+        except Exception as exc:
+            self.banner.show_message(
+                f"Cannot change frequency representation: {exc}", severity="error"
+            )
 
     def _refresh_point_choices(self, preferred: int | None = None) -> None:
         minimum, maximum = self._anritsu_limit_values("sweep_points")
@@ -2812,12 +3602,174 @@ class AnritsuPage(QWidget):
         self._refresh_point_choices()
         for field in self._limit_fields.values():
             field.set_limits(*self._anritsu_limit_values(str(field.property("limitKey"))))
+        self._update_signal_generator_limits()
+        self._update_advanced_availability()
+        self._apply_page_state()
 
     def set_capabilities(self, capabilities: object) -> None:
         supports = getattr(capabilities, "supports", lambda _feature: False)
-        self.single.setEnabled(bool(supports("spectrum_trace")))
+        self._capabilities = capabilities
+        self._trace_supported = bool(supports("spectrum_trace"))
+        self._sg_supported = bool(supports("signal_generator"))
         options = tuple(getattr(capabilities, "hardware_options", ()) or ())
         self._update_anritsu_hardware_limits(options)
+        self._refresh_advanced_detector_choices(options)
+        self.advanced_preamplifier.setEnabled(
+            bool(ANRITSU_PREAMPLIFIER_OPTIONS.intersection(options))
+        )
+        self.mode_tabs.setTabVisible(self.signal_generator_tab_index, self._sg_supported)
+        if not self._sg_supported and self.mode_tabs.currentIndex() == self.signal_generator_tab_index:
+            self.mode_tabs.setCurrentIndex(0)
+        self._update_advanced_availability()
+        self._apply_page_state()
+
+    def _device_state_changed(self, state: str) -> None:
+        if state == "disconnected":
+            self._sg_armed = False
+            self._sg_output_enabled = False
+            self._last_advanced_configuration = None
+            self.sg_status.setText("●  RF OUTPUT UNKNOWN")
+            self.sg_status.setProperty("liveState", "off")
+            self._set_page_state(AnritsuPageState.DISCONNECTED)
+        elif state in {"fault", "unknown"}:
+            self._set_page_state(AnritsuPageState.ERROR)
+        elif self._page_state in {
+            AnritsuPageState.DISCONNECTED,
+            AnritsuPageState.ERROR,
+        }:
+            self._set_page_state(AnritsuPageState.IDLE)
+
+    def _set_page_state(self, state: AnritsuPageState) -> None:
+        self._page_state = state
+        self._apply_page_state()
+
+    def _apply_page_state(self) -> None:
+        idle = self._page_state in {AnritsuPageState.IDLE, AnritsuPageState.ERROR}
+        live = self._page_state == AnritsuPageState.LIVE
+        averaging = self._page_state in {
+            AnritsuPageState.AVERAGING_SIGNAL,
+            AnritsuPageState.AVERAGING_REFERENCE,
+        }
+        connected = self._page_state != AnritsuPageState.DISCONNECTED
+        self.read_configuration.setEnabled(idle)
+        self.configure_button.setEnabled(idle)
+        self.single.setEnabled(idle and self._trace_supported)
+        self.live.setEnabled((idle or live) and connected and not self._live_transition_pending)
+        self.abort_button.setEnabled(connected)
+        self.advanced_spectrum_button.setEnabled(connected and idle)
+        self.average_count.setEnabled(idle and not averaging)
+        self.acquire_average.setEnabled(idle and self._trace_supported)
+        self.acquire_single_reference.setEnabled(idle and self._trace_supported)
+        self.use_current_reference.setEnabled(idle and self._latest_trace is not None)
+        self.capture_reference.setEnabled(idle and self._trace_supported)
+        self.load_reference.setEnabled(idle)
+        self.save_reference.setEnabled(idle and self._reference_spectrum is not None)
+        self.cancel_average.setEnabled(averaging)
+        self.clear_reference.setEnabled(
+            self._reference_spectrum is not None
+            and self._page_state not in {
+                AnritsuPageState.STARTING_LIVE,
+                AnritsuPageState.STOPPING,
+                AnritsuPageState.ACQUIRING_REFERENCE,
+            }
+        )
+        protocol_qualified = (
+            self._station_settings.anritsu.signal_generator.control_protocol
+            == "basic_scpi"
+        )
+        self.sg_read.setEnabled(connected and idle and self._sg_supported)
+        self.sg_configure.setEnabled(
+            connected and idle and self._sg_supported and protocol_qualified
+        )
+        self.sg_arm.setEnabled(
+            connected
+            and idle
+            and self._sg_supported
+            and protocol_qualified
+            and not self._sg_output_enabled
+        )
+        self.sg_on.setEnabled(
+            connected
+            and idle
+            and self._sg_supported
+            and protocol_qualified
+            and self._sg_armed
+            and not self._sg_output_enabled
+        )
+        self.sg_off.setEnabled(connected and self._sg_supported)
+        self._update_advanced_availability()
+
+    def _update_signal_generator_limits(self) -> None:
+        generator = self._station_settings.anritsu.signal_generator
+        protocol = generator.control_protocol
+        frequency = (
+            f"{generator.frequency.min} … {generator.frequency.max}"
+            if generator.frequency.min is not None
+            else "not defined"
+        )
+        power = (
+            f"{generator.power.min} … {generator.power.max}"
+            if generator.power.min is not None
+            else "not defined"
+        )
+        permission = self._station_settings.anritsu.safety.signal_generator_output_allowed
+        self.sg_limits.setText(
+            f"Protocol: {protocol} | Approved frequency: {frequency} | Approved RF power: "
+            f"{power} | RF output permission: {'enabled' if permission else 'disabled'}"
+        )
+
+    def configure_signal_generator(self) -> None:
+        try:
+            config = SignalGeneratorConfig(
+                frequency_hz=parse_quantity(
+                    self.sg_frequency.text(), DIMENSION_FREQUENCY
+                ).si_value,
+                power_dbm=parse_quantity(self.sg_power.text(), DIMENSION_DBM).si_value,
+            )
+        except Exception as exc:
+            self.banner.show_message(f"Invalid signal-generator settings: {exc}")
+            return
+        self._sg_armed = False
+        self._controller.call("configure_signal_generator", config)
+
+    def arm_signal_generator(self) -> None:
+        answer = QMessageBox.warning(
+            self,
+            "ARM Anritsu RF output",
+            "ARM permits one RF OUTPUT ON action for a short time. Confirm the RF cable, "
+            "dummy load/DUT power rating, attenuation and emergency stop before continuing.",
+            QMessageBox.StandardButton.Ok | QMessageBox.StandardButton.Cancel,
+            QMessageBox.StandardButton.Cancel,
+        )
+        if answer == QMessageBox.StandardButton.Ok:
+            self._controller.call("arm_signal_generator")
+
+    def enable_signal_generator(self) -> None:
+        answer = QMessageBox.warning(
+            self,
+            "Enable Anritsu RF output?",
+            f"Enable RF at {self.sg_frequency.text()} and {self.sg_power.text()}?",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.Cancel,
+            QMessageBox.StandardButton.Cancel,
+        )
+        if answer == QMessageBox.StandardButton.Yes:
+            self._controller.call("set_signal_generator_output", True)
+
+    def _show_signal_generator_snapshot(self, result: SignalGeneratorSnapshot) -> None:
+        self.sg_frequency.setText(
+            format_quantity_auto(result.frequency_hz, DIMENSION_FREQUENCY)
+        )
+        self.sg_power.setText(f"{result.power_dbm:.9g} dBm")
+        self._sg_output_enabled = result.output_enabled
+        self._sg_armed = False
+        state = "on" if result.output_enabled else "off"
+        self.sg_status.setText(
+            "●  RF OUTPUT ON" if result.output_enabled else "●  RF OUTPUT OFF"
+        )
+        self.sg_status.setProperty("liveState", state)
+        self.sg_status.style().unpolish(self.sg_status)
+        self.sg_status.style().polish(self.sg_status)
+        self._apply_page_state()
 
     def _update_anritsu_hardware_limits(self, options: tuple[str, ...]) -> None:
         frequency_option = frequency_option_for(options)
@@ -2876,9 +3828,10 @@ class AnritsuPage(QWidget):
 
     def configure(self) -> None:
         try:
+            start_hz, stop_hz = self._spectrum_frequency_bounds()
             config = SpectrumConfig(
-                start_hz=parse_quantity(self.start.text(), DIMENSION_FREQUENCY).si_value,
-                stop_hz=parse_quantity(self.stop.text(), DIMENSION_FREQUENCY).si_value,
+                start_hz=start_hz,
+                stop_hz=stop_hz,
                 reference_level_dbm=parse_quantity(self.reference.text(), DIMENSION_DBM).si_value,
                 points=int(self.points.currentData()),
             )
@@ -2891,22 +3844,35 @@ class AnritsuPage(QWidget):
         self.status.emit("Anritsu current-configuration read requested")
         self._controller.call("read_configuration")
 
+    def read_once(self) -> None:
+        if self._page_state not in {AnritsuPageState.IDLE, AnritsuPageState.ERROR}:
+            return
+        self._request_trace()
+
+    def _request_trace(self) -> bool:
+        if self._fetch_pending:
+            self._coalesced_timer_ticks += 1
+            return False
+        self._fetch_pending = True
+        self._fetch_started_monotonic = time.monotonic()
+        self._controller.call("fetch_current_trace", "TRAC1")
+        return True
+
     def toggle_live(self) -> None:
         if self._live_transition_pending:
             return
         if self._timer.isActive():
             self._timer.stop()
             self._live_transition_pending = True
-            self.live.setEnabled(False)
             self.live.setText("Stopping…")
             self._set_live_indicator("stopping")
+            self._set_page_state(AnritsuPageState.STOPPING)
             self._controller.call("stop_live")
             return
         self._live_transition_pending = True
-        self.live.setEnabled(False)
-        self.single.setEnabled(False)
         self.live.setText("Starting…")
         self._set_live_indicator("starting")
+        self._set_page_state(AnritsuPageState.STARTING_LIVE)
         self._timer.setInterval(self.refresh.value())
         # Live is intentionally passive: do not alter sweep or trace modes.
         # This is compatible with the same current-trace path used by the
@@ -2924,20 +3890,28 @@ class AnritsuPage(QWidget):
         text = labels.get(state, labels["off"])
         if state == "on" and frame is not None:
             text += f"  •  FRAME {frame}"
+            if self._frame_intervals_s:
+                mean_interval = sum(self._frame_intervals_s[-20:]) / len(
+                    self._frame_intervals_s[-20:]
+                )
+                if mean_interval > 0:
+                    text += f"  •  {1.0 / mean_interval:.2f} FPS"
+            if self._transfer_durations_s:
+                text += f"  •  {self._transfer_durations_s[-1] * 1e3:.0f} ms VISA"
         self.live_indicator.setText(text)
         self.live_indicator.setProperty("liveState", state)
         self.live_indicator.style().unpolish(self.live_indicator)
         self.live_indicator.style().polish(self.live_indicator)
 
     def fetch_live(self) -> None:
-        if not self._fetch_pending:
-            self._fetch_pending = True
-            self._controller.call("fetch_current_trace", "TRAC1")
+        self._request_trace()
 
     def start_averaging(self) -> None:
         self._start_temporal_averaging("spectrum")
 
     def start_reference_averaging(self) -> None:
+        if not self._confirm_reference_replacement("averaged"):
+            return
         self._start_temporal_averaging("reference")
 
     def _start_temporal_averaging(self, destination: str) -> None:
@@ -2951,14 +3925,14 @@ class AnritsuPage(QWidget):
         self._averager.reset()
         self._averaging_active = True
         self._averaging_destination = destination
+        self._set_page_state(
+            AnritsuPageState.AVERAGING_REFERENCE
+            if destination == "reference"
+            else AnritsuPageState.AVERAGING_SIGNAL
+        )
         self.average_progress.setRange(0, target)
         self.average_progress.setValue(0)
         self.average_progress.setFormat(f"0 / {target}")
-        self.average_count.setEnabled(False)
-        self.acquire_average.setEnabled(False)
-        self.capture_reference.setEnabled(False)
-        self.cancel_average.setEnabled(True)
-        self.live.setEnabled(False)
         label = "reference" if destination == "reference" else "spectrum"
         self.info.setText(f"Averaging {label}: 0 / {target} temporal frames...")
         self.status.emit(
@@ -2966,9 +3940,7 @@ class AnritsuPage(QWidget):
         )
         # Reuse an already pending Live frame instead of queuing a duplicate
         # VISA query against the same session.
-        if not self._fetch_pending:
-            self._fetch_pending = True
-            self._controller.call("fetch_current_trace", "TRAC1")
+        self._request_trace()
 
     def cancel_averaging(self) -> None:
         self._finish_temporal_averaging(resume_live=True)
@@ -2982,54 +3954,265 @@ class AnritsuPage(QWidget):
         self._averaging_destination = None
         self._resume_live_after_averaging = False
         self._averager.reset()
-        self.acquire_average.setEnabled(True)
-        self.capture_reference.setEnabled(True)
-        self.cancel_average.setEnabled(False)
-        self.average_count.setEnabled(True)
-        self.live.setEnabled(True)
         if should_resume_live:
             self._timer.setInterval(self.refresh.value())
             self._timer.start()
             self.live.setText("Stop Live")
             self._set_live_indicator("on", self._live_frame_count)
+            self._set_page_state(AnritsuPageState.LIVE)
         elif was_live:
             self.live.setText("Start Live")
             self.single.setEnabled(True)
             self._set_live_indicator("off")
+            self._set_page_state(AnritsuPageState.IDLE)
+        else:
+            self._set_page_state(AnritsuPageState.IDLE)
 
     def _request_next_average_frame(self) -> None:
         if not self._averaging_active or self._fetch_pending:
             return
-        self._fetch_pending = True
-        self._controller.call("fetch_current_trace", "TRAC1")
+        self._request_trace()
 
     def capture_current_reference(self) -> None:
-        """Use the latest single frame as a reference for API compatibility."""
+        """Use the latest completed frame locally without issuing a VISA query."""
 
         if self._latest_trace is None:
             QMessageBox.information(self, "Reference spectrum", "Acquire a spectrum before capturing a reference.")
             return
-        self._reference_trace = self._latest_trace
-        self.clear_reference.setEnabled(True)
+        if not self._confirm_reference_replacement("single"):
+            return
+        self._set_reference(self._build_reference(self._latest_trace, kind="single", count=1))
+        self.status.emit("Anritsu current trace stored as a single reference")
+
+    def acquire_reference_once(self) -> None:
+        """Passively fetch one fresh trace and commit it only after success."""
+
+        if self._page_state not in {AnritsuPageState.IDLE, AnritsuPageState.ERROR}:
+            return
+        if not self._confirm_reference_replacement("single"):
+            return
+        self._pending_reference_kind = "single"
+        self._set_page_state(AnritsuPageState.ACQUIRING_REFERENCE)
+        self.info.setText("Acquiring one fresh reference frame…")
+        self.status.emit("Anritsu single-reference acquisition started")
+        if not self._request_trace():
+            self._pending_reference_kind = None
+            self._set_page_state(AnritsuPageState.IDLE)
+
+    def _confirm_reference_replacement(self, new_kind: str) -> bool:
+        current = self._reference_spectrum
+        if current is None:
+            return True
+        existing = (
+            f"{current.kind}, {current.average_count} frame(s), "
+            f"{current.acquired_at_utc.isoformat()}, {current.points} points"
+        )
+        answer = QMessageBox.question(
+            self,
+            "Replace reference?",
+            f"Existing reference: {existing}.\n\nReplace it with a new {new_kind} reference?",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.No,
+        )
+        return answer == QMessageBox.StandardButton.Yes
+
+    def _build_reference(
+        self,
+        trace: SpectrumTrace,
+        *,
+        kind: str,
+        count: int,
+    ) -> ReferenceSpectrum:
+        capabilities = self._capabilities
+        firmware = str(getattr(capabilities, "firmware", "") or "")
+        options = tuple(getattr(capabilities, "hardware_options", ()) or ())
+        reference_level: float | None = None
+        if self._last_configuration is not None:
+            reference_level = self._last_configuration.reference_level_dbm
+        else:
+            try:
+                reference_level = parse_quantity(self.reference.text(), DIMENSION_DBM).si_value
+            except Exception:
+                pass
+        advanced = self._last_advanced_configuration
+        return ReferenceSpectrum(
+            trace=trace,
+            kind=kind,
+            average_count=count,
+            acquired_at_utc=trace.acquired_at_utc,
+            source_device_idn=self._device_idn,
+            firmware=firmware,
+            hardware_options=options,
+            reference_level_dbm=reference_level,
+            advanced_configuration_known=advanced is not None,
+            rbw_auto=advanced.rbw_auto if advanced is not None else None,
+            rbw_hz=advanced.rbw_hz if advanced is not None else None,
+            vbw_mode=advanced.vbw_mode if advanced is not None else "",
+            vbw_hz=advanced.vbw_hz if advanced is not None else None,
+            detector=advanced.detector if advanced is not None else "",
+            attenuation_auto=advanced.attenuation_auto if advanced is not None else None,
+            attenuation_db=advanced.attenuation_db if advanced is not None else None,
+            preamplifier_enabled=(
+                advanced.preamplifier_enabled if advanced is not None else None
+            ),
+            sweep_time_auto=advanced.sweep_time_auto if advanced is not None else None,
+            sweep_time_s=advanced.sweep_time_s if advanced is not None else None,
+        )
+
+    def _validate_reference_acquisition_compatibility(
+        self, reference: ReferenceSpectrum
+    ) -> None:
+        """Reject processing when known acquisition conditions are not equivalent."""
+
+        current = self._last_advanced_configuration
+        if reference.advanced_configuration_known != (current is not None):
+            raise ValueError(
+                "Advanced acquisition configuration is known for only one spectrum. "
+                "Read the instrument settings and acquire a new reference."
+            )
+        if not reference.advanced_configuration_known or current is None:
+            return
+        mismatches: list[str] = []
+        if reference.rbw_auto != current.rbw_auto or not math.isclose(
+            float(reference.rbw_hz), current.rbw_hz, rel_tol=1e-6, abs_tol=1.0
+        ):
+            mismatches.append("RBW")
+        if reference.vbw_mode != current.vbw_mode:
+            mismatches.append("VBW mode")
+        elif reference.vbw_mode != "off" and (
+            reference.vbw_hz is None
+            or current.vbw_hz is None
+            or not math.isclose(reference.vbw_hz, current.vbw_hz, rel_tol=1e-6, abs_tol=1.0)
+        ):
+            mismatches.append("VBW")
+        if reference.detector != current.detector:
+            mismatches.append("detector")
+        if reference.attenuation_auto != current.attenuation_auto or not math.isclose(
+            float(reference.attenuation_db),
+            current.attenuation_db,
+            rel_tol=0.0,
+            abs_tol=0.01,
+        ):
+            mismatches.append("input attenuation")
+        if reference.preamplifier_enabled != current.preamplifier_enabled:
+            mismatches.append("preamplifier")
+        if reference.sweep_time_auto != current.sweep_time_auto or not math.isclose(
+            float(reference.sweep_time_s),
+            current.sweep_time_s,
+            rel_tol=1e-6,
+            abs_tol=1e-6,
+        ):
+            mismatches.append("sweep time")
+        if mismatches:
+            raise ValueError(
+                "Acquisition settings differ from the reference: " + ", ".join(mismatches) + "."
+            )
+
+    def _set_reference(self, reference: ReferenceSpectrum) -> None:
+        self._reference_spectrum = reference
+        self._reference_trace = reference.trace
         self.show_reference.setChecked(True)
+        self._update_reference_status()
+        self._apply_page_state()
         self._refresh_spectrum_display()
-        self.status.emit("Anritsu reference spectrum captured in memory")
+
+    def _update_reference_status(self) -> None:
+        reference = self._reference_spectrum
+        if reference is None:
+            self.reference_status.setText("No reference")
+            return
+        kind = "averaged" if reference.kind == "averaged" else reference.kind
+        start = format_quantity_auto(reference.start_hz, DIMENSION_FREQUENCY)
+        stop = format_quantity_auto(reference.stop_hz, DIMENSION_FREQUENCY)
+        stored = "saved" if reference.saved_to_file else "memory only"
+        self.reference_status.setText(
+            f"{kind} · {reference.average_count} frame(s) · {reference.points} points · "
+            f"{start}–{stop} · {reference.acquired_at_utc.isoformat()} · {stored}"
+        )
 
     def remove_reference(self) -> None:
         self._reference_trace = None
+        self._reference_spectrum = None
+        self._pending_reference_kind = None
         self.spectrum_plot.clear_trace("Reference")
         self.spectrum_plot.clear_trace("Processed")
-        self.clear_reference.setEnabled(False)
         self.show_reference.setChecked(False)
         self.show_processed.setChecked(False)
         self.reference_operation.setCurrentIndex(0)
+        self._update_reference_status()
+        self._apply_page_state()
         self._refresh_spectrum_display()
         self.status.emit("Anritsu reference spectrum removed")
 
+    def save_reference_file(self) -> None:
+        reference = self._reference_spectrum
+        if reference is None:
+            self.banner.show_message("There is no reference spectrum to save.")
+            return
+        directory = str(self._station_settings.storage.get("output_directory", "./measurements"))
+        selected, _filter = QFileDialog.getSaveFileName(
+            self,
+            "Save Anritsu reference",
+            str(Path(directory) / "anritsu_reference.h5"),
+            "HDF5 measurement (*.h5)",
+        )
+        if not selected:
+            return
+        self._save_reference_to(Path(selected))
+
+    def _save_reference_to(self, path: Path) -> None:
+        reference = self._reference_spectrum
+        if reference is None:
+            raise ValueError("There is no reference spectrum to save.")
+        try:
+            saved = ReferenceHdf5Store.save(path, reference)
+        except Exception as exc:
+            self.banner.show_message(f"Reference save failed: {exc}", severity="error", timeout_ms=0)
+            self.status.emit(f"Anritsu reference save failed: {exc}")
+            return
+        self._set_reference(saved)
+        self.banner.show_message(
+            f"Reference saved to {path.name} and verified as a completed HDF5 artefact.",
+            severity="success",
+        )
+        self.status.emit(f"Anritsu reference saved: {path}")
+
+    def load_reference_file(self) -> None:
+        directory = str(self._station_settings.storage.get("output_directory", "./measurements"))
+        selected, _filter = QFileDialog.getOpenFileName(
+            self,
+            "Load Anritsu reference",
+            directory,
+            "HDF5 measurement (*.h5)",
+        )
+        if not selected:
+            return
+        self._load_reference_from(Path(selected))
+
+    def _load_reference_from(self, path: Path) -> None:
+        try:
+            loaded = ReferenceHdf5Store.load(path)
+        except Exception as exc:
+            self.banner.show_message(f"Reference load failed: {exc}", severity="error", timeout_ms=0)
+            self.status.emit(f"Anritsu reference load failed: {exc}")
+            return
+        if not self._confirm_reference_replacement("imported"):
+            return
+        imported = replace(loaded, kind="imported")
+        self._set_reference(imported)
+        self.banner.show_message(
+            f"Reference loaded from {path.name}; the analyser configuration was not changed.",
+            severity="success",
+        )
+        self.status.emit(f"Anritsu reference loaded: {path}")
+
     def _result(self, operation: str, result: object) -> None:
+        if operation == "connect":
+            self._device_idn = str(getattr(result, "idn", "") or "")
+            self._set_page_state(AnritsuPageState.IDLE)
         if operation == "read_configuration" and isinstance(result, AnritsuConfigurationSnapshot):
-            self.start.setText(format_quantity_auto(result.start_hz, DIMENSION_FREQUENCY))
-            self.stop.setText(format_quantity_auto(result.stop_hz, DIMENSION_FREQUENCY))
+            self._last_configuration = result
+            self._set_frequency_bounds(result.start_hz, result.stop_hz)
             self.reference.setText(f"{result.reference_level_dbm:.9g} dBm")
             point_index = self.points.findData(result.points)
             if point_index < 0:
@@ -3044,6 +4227,51 @@ class AnritsuPage(QWidget):
                 severity="success",
             )
             self.status.emit("Anritsu current configuration read from instrument")
+        elif operation in {
+            "read_advanced_spectrum",
+            "configure_advanced_spectrum",
+        } and isinstance(result, AdvancedSpectrumSnapshot):
+            self._show_advanced_snapshot(result)
+            self._set_page_state(AnritsuPageState.IDLE)
+            verb = (
+                "configured and verified"
+                if operation == "configure_advanced_spectrum"
+                else "read without changing the instrument"
+            )
+            self.banner.show_message(
+                f"Advanced Spectrum settings {verb}.", severity="success"
+            )
+            self.status.emit(f"Anritsu advanced Spectrum settings {verb}")
+        elif operation in {
+            "read_signal_generator",
+            "configure_signal_generator",
+        } and isinstance(result, SignalGeneratorSnapshot):
+            self._show_signal_generator_snapshot(result)
+            verb = "configured and verified" if operation == "configure_signal_generator" else "read"
+            self.status.emit(f"Anritsu signal generator {verb}; RF state confirmed")
+        elif operation == "arm_signal_generator":
+            self._sg_armed = True
+            self.sg_status.setText("●  RF ARMED — one enable permitted")
+            self.sg_status.setProperty("liveState", "starting")
+            self.sg_status.style().unpolish(self.sg_status)
+            self.sg_status.style().polish(self.sg_status)
+            self._apply_page_state()
+            self.status.emit("Anritsu signal generator armed for one RF enable")
+        elif operation == "set_signal_generator_output":
+            self._sg_output_enabled = bool(result)
+            self._sg_armed = False
+            state = "on" if self._sg_output_enabled else "off"
+            self.sg_status.setText(
+                "●  RF OUTPUT ON" if self._sg_output_enabled else "●  RF OUTPUT OFF"
+            )
+            self.sg_status.setProperty("liveState", state)
+            self.sg_status.style().unpolish(self.sg_status)
+            self.sg_status.style().polish(self.sg_status)
+            self._apply_page_state()
+            self.status.emit(
+                "Anritsu signal generator RF OUTPUT "
+                + ("ON" if self._sg_output_enabled else "OFF")
+            )
         elif operation == "configure" and isinstance(result, AnritsuConfigurationSnapshot):
             self._result("read_configuration", result)
             self.status.emit("Anritsu configured and verified by SCPI readback")
@@ -3053,24 +4281,43 @@ class AnritsuPage(QWidget):
             self._live_frame_count = 0
             self._identical_live_frames = 0
             self._last_live_signature = None
+            self._last_frame_monotonic = None
+            self._frame_intervals_s.clear()
+            self._transfer_durations_s.clear()
+            self._stale_frame_count = 0
+            self._coalesced_timer_ticks = 0
             self._timer.start()
-            self.live.setEnabled(True)
-            self.single.setEnabled(False)
             self.live.setText("Stop Live")
             self._set_live_indicator("on", 0)
+            self._set_page_state(AnritsuPageState.LIVE)
             mode = "passive current-trace polling"
             self.info.setText(f"Live started; {mode}. Waiting for first frame...")
             self.status.emit(f"Anritsu Live started: {mode}")
         elif operation == "stop_live":
             self._live_transition_pending = False
-            self.live.setEnabled(True)
-            self.single.setEnabled(True)
             self.live.setText("Start Live")
             self._set_live_indicator("off")
+            self._set_page_state(AnritsuPageState.IDLE)
             self.info.setText("Live stopped.")
             self.status.emit("Anritsu Live stopped")
         elif operation in {"fetch_trace", "fetch_current_trace", "single_sweep"} and isinstance(result, SpectrumTrace):
             self._fetch_pending = False
+            finished = time.monotonic()
+            if self._fetch_started_monotonic is not None:
+                self._transfer_durations_s.append(finished - self._fetch_started_monotonic)
+                self._transfer_durations_s = self._transfer_durations_s[-100:]
+            self._fetch_started_monotonic = None
+            if self._pending_reference_kind == "single":
+                self._pending_reference_kind = None
+                self._latest_trace = result
+                self._set_reference(self._build_reference(result, kind="single", count=1))
+                self._set_page_state(AnritsuPageState.IDLE)
+                self.info.setText(
+                    f"Single reference acquired: {len(result.powers_dbm)} points · "
+                    f"{result.acquired_at_utc.isoformat()}"
+                )
+                self.status.emit("Anritsu single-reference acquisition completed")
+                return
             if self._averaging_active:
                 try:
                     completed = self._averager.add(result.powers_dbm)
@@ -3104,9 +4351,13 @@ class AnritsuPage(QWidget):
                     )
                     self._latest_trace = result
                     if self._averaging_destination == "reference":
-                        self._reference_trace = averaged_trace
-                        self.clear_reference.setEnabled(True)
-                        self.show_reference.setChecked(True)
+                        self._set_reference(
+                            self._build_reference(
+                                averaged_trace,
+                                kind="averaged",
+                                count=target,
+                            )
+                        )
                         completion = f"Averaged reference completed: {target} / {target}"
                     else:
                         self._averaged_trace = averaged_trace
@@ -3123,14 +4374,20 @@ class AnritsuPage(QWidget):
 
     def _show_trace(self, trace: SpectrumTrace) -> None:
         self._latest_trace = trace
+        self._apply_page_state()
         self._refresh_spectrum_display()
         live_detail = ""
         if self._timer.isActive():
+            now = time.monotonic()
+            if self._last_frame_monotonic is not None:
+                self._frame_intervals_s.append(now - self._last_frame_monotonic)
+                self._frame_intervals_s = self._frame_intervals_s[-100:]
+            self._last_frame_monotonic = now
             self._live_frame_count += 1
-            self._set_live_indicator("on", self._live_frame_count)
             signature = hash(trace.powers_dbm)
             if signature == self._last_live_signature:
                 self._identical_live_frames += 1
+                self._stale_frame_count += 1
                 live_detail = f" • unchanged ×{self._identical_live_frames}"
                 if self._identical_live_frames == 3:
                     self.banner.show_message(
@@ -3141,9 +4398,22 @@ class AnritsuPage(QWidget):
                     )
             else:
                 self._identical_live_frames = 0
+                self._stale_frame_count = 0
                 live_detail = " • new data"
             self._last_live_signature = signature
+            self._set_live_indicator("on", self._live_frame_count)
             live_detail = f" • Live frame {self._live_frame_count}{live_detail}"
+            if self._frame_intervals_s:
+                effective_ms = (
+                    sum(self._frame_intervals_s[-20:])
+                    / len(self._frame_intervals_s[-20:])
+                    * 1e3
+                )
+                live_detail += (
+                    f" • requested {self.refresh.value()} ms"
+                    f" • effective {effective_ms:.0f} ms"
+                    f" • coalesced {self._coalesced_timer_ticks}"
+                )
         self.info.setText(
             f"{len(trace.powers_dbm)} points • {trace.acquired_at_utc.isoformat()} • "
             f"max {max(trace.powers_dbm):.4g} dBm{live_detail}"
@@ -3166,6 +4436,29 @@ class AnritsuPage(QWidget):
             try:
                 if not frequency_grids_match(signal.frequencies_hz, self._reference_trace.frequencies_hz):
                     raise ValueError("Reference frequency grid differs from the current spectrum.")
+                reference_level = (
+                    self._reference_spectrum.reference_level_dbm
+                    if self._reference_spectrum is not None
+                    else None
+                )
+                current_level = (
+                    self._last_configuration.reference_level_dbm
+                    if self._last_configuration is not None
+                    else None
+                )
+                if (
+                    reference_level is not None
+                    and current_level is not None
+                    and not math.isclose(reference_level, current_level, abs_tol=0.005)
+                ):
+                    raise ValueError(
+                        "Reference Level differs from the reference acquisition "
+                        f"({current_level:g} dBm current, {reference_level:g} dBm reference)."
+                    )
+                if self._reference_spectrum is not None:
+                    self._validate_reference_acquisition_compatibility(
+                        self._reference_spectrum
+                    )
                 processed, processed_unit = apply_reference_operation(
                     signal.powers_dbm, self._reference_trace.powers_dbm, operation
                 )
@@ -3204,6 +4497,33 @@ class AnritsuPage(QWidget):
         )
 
     def _error(self, operation: str, error: str) -> None:
+        if operation in {"read_advanced_spectrum", "configure_advanced_spectrum"}:
+            self._set_page_state(AnritsuPageState.ERROR)
+            self.banner.show_message(
+                f"Anritsu advanced Spectrum operation failed: {error}",
+                severity="error",
+                timeout_ms=0,
+            )
+            self.status.emit(f"Anritsu {operation} failed: {error}")
+            return
+        if operation in {
+            "read_signal_generator",
+            "configure_signal_generator",
+            "arm_signal_generator",
+            "set_signal_generator_output",
+        }:
+            self._sg_armed = False
+            if operation == "set_signal_generator_output":
+                self.sg_status.setText("●  RF OUTPUT UNKNOWN — use RF OFF or E-STOP")
+                self.sg_status.setProperty("liveState", "off")
+            self._apply_page_state()
+            self.banner.show_message(
+                f"Anritsu signal-generator operation {operation!r} failed: {error}",
+                severity="error",
+                timeout_ms=0,
+            )
+            self.status.emit(f"Anritsu {operation} failed: {error}")
+            return
         if operation in {"fetch_trace", "fetch_current_trace", "single_sweep"}:
             self._fetch_pending = False
             if self._averaging_active:
@@ -3215,21 +4535,94 @@ class AnritsuPage(QWidget):
         }:
             self._live_transition_pending = False
             self._timer.stop()
-            self.live.setEnabled(True)
-            self.single.setEnabled(True)
             self.live.setText("Start Live")
             self._set_live_indicator("off")
-            QMessageBox.warning(self, "Anritsu", error)
+            self._pending_reference_kind = None
+            self._set_page_state(AnritsuPageState.ERROR)
+            self.banner.show_message(
+                f"Anritsu operation {operation!r} failed: {error}. "
+                "The last valid spectrum remains visible; retry when communication is stable.",
+                severity="error",
+                timeout_ms=0,
+            )
+            self.status.emit(f"Anritsu {operation} failed: {error}")
+
+
+class RecipeTreeWidget(QTreeWidget):
+    """Tree that requests a validated YAML move instead of mutating Qt items."""
+
+    move_requested = Signal(str, str, str, int)
+
+    def __init__(self, parent: QWidget | None = None) -> None:
+        super().__init__(parent)
+        self.setDragEnabled(True)
+        self.setAcceptDrops(True)
+        self.setDropIndicatorShown(True)
+        self.setDragDropMode(QAbstractItemView.DragDropMode.InternalMove)
+        self.setDefaultDropAction(Qt.DropAction.MoveAction)
+
+    def dropEvent(self, event: Any) -> None:
+        source = self.currentItem()
+        target = self.itemAt(event.position().toPoint())
+        if source is None or target is None:
+            event.ignore()
+            return
+        source_node = source.data(0, Qt.ItemDataRole.UserRole)
+        if not isinstance(source_node, RecipeNode):
+            event.ignore()
+            return
+        destination = self._drop_destination(target)
+        if destination is None:
+            event.ignore()
+            return
+        parent_id, branch, index = destination
+        self.move_requested.emit(source_node.id, parent_id, branch, index)
+        event.accept()
+
+    def _drop_destination(self, target: QTreeWidgetItem) -> tuple[str, str, int] | None:
+        indicator = self.dropIndicatorPosition()
+        target_node = target.data(0, Qt.ItemDataRole.UserRole)
+        if (
+            indicator is QAbstractItemView.DropIndicatorPosition.OnItem
+            and isinstance(target_node, RecipeNode)
+            and target_node.type in {"sequence", "sweep", "repeat", "if"}
+        ):
+            return target_node.id, "children", target.childCount()
+        if target.text(0) == "else" and target.parent() is not None:
+            parent_node = target.parent().data(0, Qt.ItemDataRole.UserRole)
+            if isinstance(parent_node, RecipeNode) and parent_node.type == "if":
+                return parent_node.id, "else", target.childCount()
+
+        parent = target.parent()
+        if parent is None:
+            return None
+        index = parent.indexOfChild(target)
+        if indicator is QAbstractItemView.DropIndicatorPosition.BelowItem:
+            index += 1
+        if parent.text(0) == "finally":
+            return "__finally__", "children", index
+        if parent.text(0) == "else" and parent.parent() is not None:
+            owner = parent.parent().data(0, Qt.ItemDataRole.UserRole)
+            return (owner.id, "else", index) if isinstance(owner, RecipeNode) else None
+        owner = parent.data(0, Qt.ItemDataRole.UserRole)
+        return (owner.id, "children", index) if isinstance(owner, RecipeNode) else None
 
 
 class RecipePage(QWidget):
     status = Signal(str)
     run_requested = Signal(object)
+    plan_preflight_changed = Signal(object)
 
     def __init__(self, settings: StationSettings, parent: QWidget | None = None) -> None:
         super().__init__(parent)
         self._settings = settings
         self._plan = None
+        self._repository = RecipeRepository()
+        self._loading_source = False
+        self._autosave_timer = QTimer(self)
+        self._autosave_timer.setSingleShot(True)
+        self._autosave_timer.setInterval(750)
+        self._autosave_timer.timeout.connect(self._autosave)
         layout = QVBoxLayout(self)
         title = QLabel("Measurement recipes")
         title.setObjectName("pageTitle")
@@ -3237,14 +4630,17 @@ class RecipePage(QWidget):
         path_line = QHBoxLayout()
         self.path = _line("recipes/example_nested_sweep.yml", 42)
         load_button = QPushButton("Load into editor")
-        save_button = QPushButton("Save YAML")
+        save_button = QPushButton("Save version")
         compile_button = QPushButton("Compile")
+        self.restore_button = QPushButton("Restore autosave")
+        self.restore_button.setEnabled(False)
         self.run_button = QPushButton("Run plan")
         self.run_button.setEnabled(False)
         path_line.addWidget(self.path, 1)
         path_line.addWidget(load_button)
         path_line.addWidget(save_button)
         path_line.addWidget(compile_button)
+        path_line.addWidget(self.restore_button)
         path_line.addWidget(self.run_button)
         layout.addLayout(path_line)
         splitter = QSplitter(Qt.Orientation.Horizontal)
@@ -3252,31 +4648,59 @@ class RecipePage(QWidget):
         self.editor.setPlaceholderText("Declarative YAML recipe — no Python code and no raw SCPI.")
         self.editor.setMinimumWidth(320)
         splitter.addWidget(self.editor)
-        self.tree = QTreeWidget()
-        self.tree.setHeaderLabels(["Node", "Type / details"])
+        self.tree = RecipeTreeWidget()
+        self.tree.setHeaderLabels(["Recipe node", "Type / expansion"])
+        self.tree.setToolTip(
+            "Drag a non-root node to reorder it or place it inside Sequence, Sweep, Repeat or If. "
+            "The YAML is re-parsed immediately; nodes cannot cross the finally boundary."
+        )
         splitter.addWidget(self.tree)
+        inspector_panel = QWidget()
+        inspector_layout = QVBoxLayout(inspector_panel)
+        inspector_layout.setContentsMargins(0, 0, 0, 0)
+        inspector_title = QLabel("Node inspector")
+        inspector_title.setObjectName("sectionTitle")
+        self.inspector = QPlainTextEdit()
+        self.inspector.setReadOnly(True)
+        self.inspector.setPlaceholderText("Select a recipe node to inspect its fields and expansion.")
+        inspector_layout.addWidget(inspector_title)
+        inspector_layout.addWidget(self.inspector, 1)
+        splitter.addWidget(inspector_panel)
         splitter.setStretchFactor(0, 1)
         splitter.setStretchFactor(1, 1)
+        splitter.setStretchFactor(2, 1)
         layout.addWidget(splitter, 1)
+        self.version_label = QLabel("No saved version history.")
+        self.version_label.setObjectName("muted")
+        layout.addWidget(self.version_label)
         self.summary = QLabel("The recipe has not been compiled.")
         self.summary.setWordWrap(True)
         layout.addWidget(self.summary)
         load_button.clicked.connect(self.load_editor)
         save_button.clicked.connect(self.save_recipe)
         compile_button.clicked.connect(self.compile_recipe)
+        self.restore_button.clicked.connect(self.restore_autosave)
         self.run_button.clicked.connect(self.request_run)
         self.editor.textChanged.connect(self._source_changed)
+        self.tree.currentItemChanged.connect(self._node_selected)
+        self.tree.move_requested.connect(self._move_recipe_node)
+        self.path.editingFinished.connect(self._update_repository_state)
         self.load_editor(show_error=False)
 
     def set_settings(self, settings: StationSettings) -> None:
         self._settings = settings
         self._plan = None
         self.run_button.setEnabled(False)
+        self.plan_preflight_changed.emit(None)
 
     def _source_changed(self) -> None:
+        if self._loading_source:
+            return
         self._plan = None
         self.run_button.setEnabled(False)
+        self.plan_preflight_changed.emit(None)
         self.summary.setText("YAML changed; compile it again before running.")
+        self._autosave_timer.start()
 
     def load_editor(self, *, show_error: bool = True) -> None:
         try:
@@ -3287,40 +4711,207 @@ class RecipePage(QWidget):
             else:
                 self.summary.setText(f"Example not loaded: {exc}")
             return
+        self._loading_source = True
         self.editor.setPlainText(source)
+        self._loading_source = False
+        self._plan = None
+        self.run_button.setEnabled(False)
+        self.plan_preflight_changed.emit(None)
+        try:
+            recipe = parse_recipe_text(source, origin=self.path.text())
+            self._populate_recipe_tree(recipe.root, recipe.finally_nodes, None)
+            self.summary.setText("Recipe loaded. Compile it before running.")
+        except Exception:
+            self.tree.clear()
+            self.inspector.clear()
+        self._update_repository_state()
         self.status.emit("Recipe loaded into the editor")
 
     def save_recipe(self) -> None:
         source = self.editor.toPlainText()
         try:
-            parse_recipe_text(source, origin=self.path.text())
-            path = Path(self.path.text())
-            path.parent.mkdir(parents=True, exist_ok=True)
-            path.write_text(source, encoding="utf-8")
+            result = self._repository.save(self.path.text(), source)
         except Exception as exc:
             QMessageBox.warning(self, "Recipe", f"YAML was not saved: {exc}")
             return
-        self.status.emit(f"Recipe saved: {self.path.text()}")
+        self.restore_button.setEnabled(False)
+        self._update_repository_state()
+        suffix = f"; previous version: {result.backup_path}" if result.backup_path else ""
+        self.status.emit(f"Recipe saved atomically: {result.path}{suffix}")
+
+    def restore_autosave(self) -> None:
+        source = self._repository.load_recovery(self.path.text())
+        if source is None:
+            self.restore_button.setEnabled(False)
+            return
+        self.editor.setPlainText(source)
+        self.restore_button.setEnabled(False)
+        self.status.emit("Unsaved recipe recovery restored into the editor")
+
+    def _autosave(self) -> None:
+        source = self.editor.toPlainText()
+        if not source.strip() or not self.path.text().strip():
+            return
+        try:
+            recovery = self._repository.autosave(self.path.text(), source)
+        except Exception as exc:
+            self.status.emit(f"Recipe autosave failed: {exc}")
+            return
+        self.restore_button.setEnabled(True)
+        self.restore_button.setToolTip(f"Unsaved editor recovery: {recovery}")
+
+    def _update_repository_state(self) -> None:
+        versions = self._repository.versions(self.path.text())
+        recovery = self._repository.has_newer_recovery(self.path.text())
+        self.restore_button.setEnabled(recovery)
+        self.version_label.setText(
+            f"Immutable previous versions: {len(versions)}"
+            + (" • newer autosave recovery available" if recovery else "")
+        )
 
     def compile_recipe(self) -> None:
         try:
             recipe = parse_recipe_text(self.editor.toPlainText(), origin=self.path.text())
             plan = RecipeCompiler(self._settings).compile(recipe)
+            estimate = PlanEstimator(self._settings).estimate(plan)
         except Exception as exc:
             QMessageBox.warning(self, "Recipe", str(exc))
             return
         self.tree.clear()
         self._plan = plan
         self.run_button.setEnabled(True)
-        for action in plan.actions:
-            item = QTreeWidgetItem([action.node_id, action.kind])
-            item.setToolTip(1, str(action.setpoints_si))
-            self.tree.addTopLevelItem(item)
+        self._populate_recipe_tree(recipe.root, recipe.finally_nodes, plan)
         self.summary.setText(
-            f"Plan: {len(plan.actions)} actions • {plan.total_points} spectra • hash {plan.sha256}\n"
-            "Compilation sends no instrument commands. Execution requires an approved profile and Run Engine."
+            f"Plan: {len(plan.actions)} actions • {plan.total_points} checkpoints • "
+            f"{plan.total_spectra} spectra • hash {plan.sha256}\n"
+            f"Estimated nominal duration: {_human_duration(estimate.nominal_duration_s)} • "
+            f"retry upper model: {_human_duration(estimate.retry_upper_duration_s)}\n"
+            f"Uncompressed data upper estimate: {_human_bytes(estimate.total_upper_bytes)} • "
+            f"spectrum values: {estimate.spectrum_values:,}\n"
+            + (
+                "Warnings: " + " | ".join(estimate.warnings) + "\n"
+                if estimate.warnings
+                else "Warnings: none from static preflight\n"
+            )
+            + "Compilation sends no instrument commands. Execution requires an approved profile and Run Engine."
         )
         self.status.emit("Recipe compiled")
+        self.plan_preflight_changed.emit((plan, estimate))
+
+    def _populate_recipe_tree(
+        self,
+        root: RecipeNode,
+        finally_nodes: tuple[RecipeNode, ...],
+        plan: object | None,
+    ) -> None:
+        self.tree.clear()
+        occurrences: dict[str, int] = {}
+        if plan is not None:
+            for action in plan.actions:  # type: ignore[union-attr]
+                occurrences[action.node_id] = occurrences.get(action.node_id, 0) + 1
+
+        def add_node(node: RecipeNode, parent: QTreeWidgetItem | None = None) -> None:
+            count = occurrences.get(node.id, 0)
+            detail = node.type + (f" • {count} action(s)" if plan is not None else "")
+            item = QTreeWidgetItem([node.id, detail])
+            item.setData(0, Qt.ItemDataRole.UserRole, node)
+            if parent is None:
+                self.tree.addTopLevelItem(item)
+            else:
+                parent.addChild(item)
+            for child in node.children:
+                add_node(child, item)
+            if node.else_children:
+                else_item = QTreeWidgetItem(["else", "Conditional alternative"])
+                item.addChild(else_item)
+                for child in node.else_children:
+                    add_node(child, else_item)
+
+        add_node(root)
+        if finally_nodes:
+            cleanup = QTreeWidgetItem(["finally", "Guaranteed safe cleanup"])
+            cleanup.setData(0, Qt.ItemDataRole.UserRole, None)
+            self.tree.addTopLevelItem(cleanup)
+            for node in finally_nodes:
+                add_node(node, cleanup)
+        self.tree.expandAll()
+        if self.tree.topLevelItemCount():
+            self.tree.setCurrentItem(self.tree.topLevelItem(0))
+
+    def _node_selected(
+        self,
+        item: QTreeWidgetItem | None,
+        _previous: QTreeWidgetItem | None,
+    ) -> None:
+        if item is None:
+            self.inspector.clear()
+            return
+        node = item.data(0, Qt.ItemDataRole.UserRole)
+        if not isinstance(node, RecipeNode):
+            self.inspector.setPlainText(
+                "Finally actions run during normal completion, operator stop and fault cleanup. "
+                "They may only ramp Keithley to zero or disable outputs."
+            )
+            return
+        actions = (
+            tuple(action for action in self._plan.actions if action.node_id == node.id)
+            if self._plan is not None
+            else ()
+        )
+        setpoints: dict[str, tuple[float, float]] = {}
+        for action in actions:
+            for name, value in action.setpoints_si.items():
+                previous = setpoints.get(name, (value, value))
+                setpoints[name] = (min(previous[0], value), max(previous[1], value))
+        lines = [
+            f"ID: {node.id}",
+            f"Type: {node.type}",
+            f"Children: {len(node.children)}",
+            f"Else children: {len(node.else_children)}",
+            f"Expanded actions: {len(actions)}",
+            "",
+            "Fields:",
+            json.dumps(node.data, ensure_ascii=False, indent=2, default=str),
+        ]
+        if setpoints:
+            lines.extend(("", "Expanded setpoint ranges:"))
+            lines.extend(
+                f"  {name}: {minimum:.12g} .. {maximum:.12g} SI"
+                for name, (minimum, maximum) in sorted(setpoints.items())
+            )
+        self.inspector.setPlainText("\n".join(lines))
+
+    def _move_recipe_node(
+        self,
+        node_id: str,
+        destination_parent_id: str,
+        destination_branch: str,
+        destination_index: int,
+    ) -> None:
+        try:
+            moved_source = move_recipe_node(
+                self.editor.toPlainText(),
+                node_id=node_id,
+                destination_parent_id=destination_parent_id,
+                destination_branch=destination_branch,
+                destination_index=destination_index,
+            )
+            recipe = parse_recipe_text(moved_source, origin=self.path.text())
+        except Exception as exc:
+            QMessageBox.warning(self, "Recipe move rejected", str(exc))
+            return
+        self._loading_source = True
+        self.editor.setPlainText(moved_source)
+        self._loading_source = False
+        self._plan = None
+        self.run_button.setEnabled(False)
+        self.plan_preflight_changed.emit(None)
+        self._populate_recipe_tree(recipe.root, recipe.finally_nodes, None)
+        self.summary.setText("Recipe tree changed; compile it again before running.")
+        self._autosave_timer.start()
+        self.status.emit(
+            f"Recipe node {node_id} moved to {destination_parent_id}.{destination_branch}"
+        )
 
     def request_run(self) -> None:
         if self._plan is not None:
@@ -3339,6 +4930,23 @@ class RunMonitorPage(QWidget):
         title.setObjectName("pageTitle")
         self.state = QLabel("IDLE")
         self.state.setObjectName("readout")
+        self.heartbeat = QLabel("Heartbeat: —")
+        self.heartbeat.setObjectName("muted")
+        self.eta = QLabel("ETA: —")
+        self.eta.setObjectName("muted")
+        telemetry = QGridLayout()
+        self.current_path = QLabel("Current node: —")
+        self.current_path.setWordWrap(True)
+        self.current_setpoints = QLabel("Setpoints (SI): —")
+        self.current_setpoints.setWordWrap(True)
+        self.current_measurements = QLabel("Measurements (SI): —")
+        self.current_measurements.setWordWrap(True)
+        self.storage_rate = QLabel("Storage: —")
+        self.storage_rate.setWordWrap(True)
+        telemetry.addWidget(self.current_path, 0, 0)
+        telemetry.addWidget(self.storage_rate, 0, 1)
+        telemetry.addWidget(self.current_setpoints, 1, 0)
+        telemetry.addWidget(self.current_measurements, 1, 1)
         self.progress = QProgressBar()
         self.progress.setRange(0, 100)
         self.progress.setValue(0)
@@ -3351,42 +4959,162 @@ class RunMonitorPage(QWidget):
         controls.addWidget(stop)
         self.events = QPlainTextEdit()
         self.events.setReadOnly(True)
+        self.warnings = QPlainTextEdit()
+        self.warnings.setReadOnly(True)
+        self.warnings.setMaximumHeight(95)
+        self.warnings.setPlaceholderText("No run warnings.")
+        self.spectrum_preview = SpectrumPlotWidget(legend=False)
+        self.spectrum_preview.set_labels(
+            x="Frequency",
+            x_unit="Hz",
+            y="Amplitude",
+            y_unit="dBm",
+        )
+        self.spectrum_preview.set_title("Latest stored spectrum checkpoint")
+        monitor_splitter = QSplitter(Qt.Orientation.Horizontal)
+        monitor_splitter.addWidget(self.events)
+        monitor_splitter.addWidget(self.spectrum_preview)
+        monitor_splitter.setStretchFactor(0, 1)
+        monitor_splitter.setStretchFactor(1, 2)
         layout.addWidget(title)
         layout.addWidget(self.state)
+        layout.addWidget(self.heartbeat)
+        layout.addWidget(self.eta)
+        layout.addLayout(telemetry)
         layout.addWidget(self.progress)
         layout.addLayout(controls)
-        layout.addWidget(self.events, 1)
+        layout.addWidget(self.warnings)
+        layout.addWidget(monitor_splitter, 1)
         pause.clicked.connect(self.pause_requested)
         resume.clicked.connect(self.resume_requested)
         stop.clicked.connect(self.stop_requested)
+        self._eta_started = 0.0
+        self._model_duration_s = 0.0
+        self._eta_timer = QTimer(self)
+        self._eta_timer.setInterval(1000)
+        self._eta_timer.timeout.connect(self._update_eta)
 
-    def run_started(self, actions: int) -> None:
+    def run_started(self, actions: int, estimated_duration_s: float = 0.0) -> None:
         self.state.setText("RUNNING")
         self.progress.setRange(0, max(actions, 1))
         self.progress.setValue(0)
         self.events.clear()
+        self.warnings.clear()
+        self.spectrum_preview.clear()
+        self.current_path.setText("Current node: waiting for first action")
+        self.current_setpoints.setText("Setpoints (SI): —")
+        self.current_measurements.setText("Measurements (SI): —")
+        self.storage_rate.setText("Storage: waiting for first checkpoint")
+        self.heartbeat.setText("Heartbeat: waiting for first operation")
+        self._eta_started = time.monotonic()
+        self._model_duration_s = max(0.0, estimated_duration_s)
+        self._eta_timer.start()
+        self._update_eta()
+
+    def _update_eta(self) -> None:
+        if not self._eta_started:
+            self.eta.setText("ETA: —")
+            return
+        elapsed = max(0.0, time.monotonic() - self._eta_started)
+        completed = self.progress.value()
+        total = max(1, self.progress.maximum())
+        empirical_remaining = (
+            elapsed / completed * max(0, total - completed)
+            if completed
+            else self._model_duration_s
+        )
+        model_remaining = max(0.0, self._model_duration_s - elapsed)
+        remaining = max(empirical_remaining, model_remaining)
+        self.eta.setText(
+            f"Elapsed: {_human_duration(elapsed)} • "
+            f"estimated remaining: {_human_duration(remaining)}"
+        )
+
+    def update_heartbeat(self, data: dict[str, object]) -> None:
+        self.heartbeat.setText(
+            "Heartbeat: "
+            f"{data.get('kind', 'operation')} • attempt {data.get('attempt', '—')} • "
+            f"elapsed {float(data.get('elapsed_s', 0.0)):.2f} s • "
+            f"remaining {float(data.get('remaining_s', 0.0)):.2f} s"
+        )
 
     def append_event(self, name: str, data: dict[str, object]) -> None:
         if name == "action_finished":
             self.progress.setValue(min(self.progress.value() + 1, self.progress.maximum()))
+        elif name == "action_started":
+            self.current_path.setText(
+                f"Current node: {data.get('node_id', '—')} • {data.get('kind', '—')} • "
+                f"action {int(data.get('action_index', 0)) + 1}/{self.progress.maximum()}"
+            )
+            self.current_setpoints.setText(
+                "Setpoints (SI): " + self._format_scalars(data.get("setpoints_si"))
+            )
+        elif name == "point_stored":
+            self.current_measurements.setText(
+                "Measurements (SI): " + self._format_scalars(data.get("measurements_si"))
+            )
+            self.storage_rate.setText(
+                f"Storage: point {data.get('stored_points', '—')} • "
+                f"write {float(data.get('write_elapsed_s', 0.0)) * 1000:.1f} ms • "
+                f"average {float(data.get('average_write_rate_points_per_s', 0.0)):.2f} point/s • "
+                f"spectrum {data.get('spectrum_points', 0)} values"
+            )
         if name == "pause_pending":
             self.state.setText("PAUSED")
         elif name == "run_fault":
             self.state.setText("FAULT")
+        elif name == "watchdog_timeout":
+            self.state.setText("FAULT • WATCHDOG TIMEOUT")
+        if name in {
+            "action_retry",
+            "compliance_detected",
+            "run_fault",
+            "watchdog_timeout",
+            "safe_finally_error",
+        }:
+            self.warnings.appendPlainText(f"{name}: {data}")
         self.events.appendPlainText(f"{name}: {data}")
 
+    def update_spectrum_preview(self, data: dict[str, object]) -> None:
+        frequencies = data.get("frequency_hz")
+        powers = data.get("power_dbm")
+        if not isinstance(frequencies, (tuple, list)) or not isinstance(powers, (tuple, list)):
+            return
+        self.spectrum_preview.set_trace(
+            "Stored spectrum",
+            frequencies,
+            powers,
+            primary=True,
+        )
+        self.spectrum_preview.set_title(
+            f"Stored point {data.get('point_index', '—')} • "
+            f"{data.get('source_points', len(powers))} source values"
+        )
+
+    @staticmethod
+    def _format_scalars(value: object) -> str:
+        if not isinstance(value, dict) or not value:
+            return "—"
+        return " • ".join(
+            f"{key}={float(number):.6g}" for key, number in sorted(value.items())
+        )
+
     def complete(self, result: object) -> None:
+        self._eta_timer.stop()
         run_result = result["result"]
         self.state.setText(f"{run_result.state.value.upper()} • {run_result.stored_points} points")
         self.events.appendPlainText(f"File: {result['path']}")
 
     def failed(self, error: str) -> None:
+        self._eta_timer.stop()
         self.state.setText("FAULT")
         self.events.appendPlainText(error)
 
 
 class ResultsPage(QWidget):
     """Browse immutable run files without opening an instrument session."""
+
+    resume_requested = Signal(object)
 
     def __init__(self, output_dir: str, parent: QWidget | None = None) -> None:
         super().__init__(parent)
@@ -3399,8 +5127,17 @@ class ResultsPage(QWidget):
         self.location = QLabel()
         self.location.setObjectName("muted")
         layout.addWidget(self.location)
+        actions = QHBoxLayout()
         refresh = QPushButton("Refresh file list")
-        layout.addWidget(refresh)
+        self.resume_button = QPushButton("Resume from safe checkpoint")
+        self.resume_button.setEnabled(False)
+        self.resume_button.setToolTip(
+            "Available only for interrupted runs containing a confirmed safe boundary."
+        )
+        actions.addWidget(refresh)
+        actions.addWidget(self.resume_button)
+        actions.addStretch(1)
+        layout.addLayout(actions)
 
         splitter = QSplitter(Qt.Orientation.Horizontal)
         self.runs = QTreeWidget()
@@ -3442,12 +5179,14 @@ class ResultsPage(QWidget):
         layout.addWidget(splitter, 1)
 
         refresh.clicked.connect(self.refresh)
+        self.resume_button.clicked.connect(self._request_resume)
         self.runs.currentItemChanged.connect(self._run_selected)
         self.points.currentItemChanged.connect(self._point_selected)
         self.refresh()
 
     def refresh(self) -> None:
         self.location.setText(f"Directory: {self._output_dir.resolve()}")
+        self.resume_button.setEnabled(False)
         self.runs.clear()
         self.points.clear()
         self._clear_details()
@@ -3476,6 +5215,7 @@ class ResultsPage(QWidget):
         self.points.clear()
         self._clear_spectrum()
         if item is None:
+            self.resume_button.setEnabled(False)
             return
         path = Path(str(item.data(0, Qt.ItemDataRole.UserRole)))
         self._selected_path = path
@@ -3483,10 +5223,12 @@ class ResultsPage(QWidget):
             detail = Hdf5RunReader.detail(path)
             points = Hdf5RunReader.points(path)
         except Exception as exc:
+            self.resume_button.setEnabled(False)
             self.metadata.setPlainText(f"Cannot read result:\n{exc}")
             self.recipe_snapshot.clear()
             self.settings_snapshot.clear()
             return
+        self.resume_button.setEnabled(detail.summary.status in {"aborted", "faulted", "incomplete"})
         self._show_detail(detail)
         for point in points:
             fields = {**point.setpoints, **point.measurements}
@@ -3503,6 +5245,10 @@ class ResultsPage(QWidget):
             point_item.setToolTip(3, self._point_tooltip(point))
             self.points.addTopLevelItem(point_item)
 
+    def _request_resume(self) -> None:
+        if self._selected_path is not None and self.resume_button.isEnabled():
+            self.resume_requested.emit(self._selected_path)
+
     def _show_detail(self, detail: RunDetail) -> None:
         summary = detail.summary
         lines = [
@@ -3516,6 +5262,7 @@ class ResultsPage(QWidget):
             "Instrument identities:",
         ]
         lines.extend(f"  {name}: {idn}" for name, idn in sorted(detail.device_idn.items()))
+        lines.extend(("", "Authenticated operator:", self._format_json(detail.operator_context)))
         lines.extend(("", "Capabilities (snapshot):", self._format_json(detail.capabilities)))
         if detail.events:
             lines.extend(("", f"Recent events ({len(detail.events)}):"))
@@ -3586,22 +5333,54 @@ class MainWindow(QMainWindow):
 
     theme_changed = Signal(str)
 
-    def __init__(self, settings_path: str | Path = ".config/settings.yml", *, simulation: bool = False) -> None:
+    def __init__(
+        self,
+        settings_path: str | Path = ".config/settings.yml",
+        *,
+        simulation: bool = False,
+        authenticated_username: str | None = None,
+    ) -> None:
         super().__init__()
         self._repository = SettingsRepository(settings_path)
         self._simulation = simulation
         persisted = self._repository.load().settings
         self._settings = simulated_station_settings(persisted) if simulation else persisted
+        self._access = AccessPolicy.from_settings(
+            persisted,
+            username=authenticated_username,
+            simulation=simulation,
+        )
+        configured_audit_directory = persisted.application.get("audit_log_directory", "logs")
+        audit_directory = Path(str(configured_audit_directory))
+        if not audit_directory.is_absolute():
+            audit_directory = self._repository.path.parent / audit_directory
+        self._audit = AuditLogger(
+            audit_directory,
+            profile_id=persisted.profile.id,
+            simulation=simulation,
+            actor=self._access.identity.username,
+            actor_roles=tuple(sorted(role.value for role in self._access.identity.roles)),
+        )
+        self._audit_healthy = True
+        self._run_correlation_id: str | None = None
         suffix = " — SIMULATION" if simulation else ""
         self.setWindowTitle("Lab Control — Rigol · Keithley · Anritsu" + suffix)
         self.resize(1360, 880)
         self._controllers = {name: DeviceController(self._make_adapter(name), self) for name in ("rigol", "keithley", "anritsu")}
+        for controller in self._controllers.values():
+            controller.set_operation_guard(self._guard_manual_operation)
         self._device_states = {"rigol": "disconnected", "keithley": "disconnected", "anritsu": "disconnected"}
         self._run_controller = RunController(self)
         self._build()
         self._apply_accessibility()
         self._connect_controllers()
         self._restore_workspace()
+        self._audit.record(
+            "Main window initialized",
+            category="application",
+            event_type="ui_ready",
+            context={"settings_path": str(self._repository.path)},
+        )
 
     def _make_adapter(self, name: str):
         if name == "rigol":
@@ -3627,19 +5406,34 @@ class MainWindow(QMainWindow):
         self.recipe_page = RecipePage(self._settings)
         self.run_monitor = RunMonitorPage()
         self.results_page = ResultsPage(str(self._settings.storage.get("output_directory", "./measurements")))
-        self.settings_page = SettingsPage(self._repository, read_only=self._simulation)
+        self.settings_page = SettingsPage(
+            self._repository,
+            read_only=self._simulation,
+            access_policy=self._access,
+        )
+        self.dashboard.set_assignment_allowed(
+            self._access.allows(Permission.ASSIGN_VISA)
+        )
         for field in self.rigol_page.findChildren(LimitField):
-            field.edit_button.setEnabled(not self._simulation)
+            field.edit_button.setEnabled(
+                not self._simulation and self._access.allows(Permission.EDIT_SETTINGS)
+            )
             field.edit_requested.connect(lambda field=field: self._edit_device_limit("rigol", field))
         for field in self.keithley_page.findChildren(LimitField):
-            editable = not self._simulation and str(field.property("limitKey")) != "nplc"
+            editable = (
+                not self._simulation
+                and self._access.allows(Permission.EDIT_SETTINGS)
+                and str(field.property("limitKey")) != "nplc"
+            )
             field.edit_button.setEnabled(editable)
             if editable:
                 field.edit_requested.connect(lambda field=field: self._edit_device_limit("keithley", field))
             else:
                 field.edit_button.setToolTip("NPLC range is fixed by the instrument and is not a laboratory safety limit.")
         for field in self.anritsu_page.findChildren(LimitField):
-            field.edit_button.setEnabled(not self._simulation)
+            field.edit_button.setEnabled(
+                not self._simulation and self._access.allows(Permission.EDIT_SETTINGS)
+            )
             field.edit_requested.connect(lambda field=field: self._edit_device_limit("anritsu", field))
         for widget, name in (
             (self.dashboard, "Dashboard"),
@@ -3665,6 +5459,8 @@ class MainWindow(QMainWindow):
         self.dashboard.status.connect(self._log)
         self.settings_page.settings_saved.connect(self._settings_saved)
         self.recipe_page.run_requested.connect(self._start_run)
+        self.recipe_page.plan_preflight_changed.connect(self.dashboard.update_plan_preflight)
+        self.results_page.resume_requested.connect(self._resume_run)
         self.run_monitor.stop_requested.connect(self._run_controller.request_stop)
         self.run_monitor.pause_requested.connect(self._run_controller.request_pause)
         self.run_monitor.resume_requested.connect(self._run_controller.request_resume)
@@ -3750,6 +5546,12 @@ class MainWindow(QMainWindow):
         self.profile_status = QLabel(f"Profile: {profile_state}")
         self.profile_status.setObjectName("profileLocked" if self._settings.outputs_locked else "profileApproved")
         status_layout.addWidget(self.profile_status)
+        self.identity_status = QLabel(f"User: {self._access.identity.display_name}")
+        self.identity_status.setObjectName("compactIdentityStatus")
+        self.identity_status.setToolTip(
+            "Authenticated operating-system identity and effective Lab Control role(s)."
+        )
+        status_layout.addWidget(self.identity_status)
         self.toolbar_device_status: dict[str, QLabel] = {}
         for device in ("rigol", "keithley", "anritsu"):
             label = QLabel(f"● {device.title()}: OFFLINE")
@@ -3827,6 +5629,15 @@ class MainWindow(QMainWindow):
         return f"Keithley CH{channel} — {mapped.replace('_', ' ')}", path, True
 
     def _edit_device_limit(self, device: str, field: LimitField) -> None:
+        try:
+            self._require_permission(
+                Permission.EDIT_SETTINGS,
+                f"editing {device} safety limits",
+                audit=True,
+            )
+        except AuthorizationError as exc:
+            QMessageBox.warning(self, "Access denied", str(exc))
+            return
         try:
             loaded = self._repository.load()
             raw = deepcopy(loaded.raw)
@@ -3931,7 +5742,11 @@ class MainWindow(QMainWindow):
             )
             controller.state_changed.connect(card.update_state)
             controller.state_changed.connect(lambda state, device=name: self._set_device_state(device, state))
-            controller.result.connect(lambda operation, result, current=card: self._device_result(current, operation, result))
+            controller.result.connect(
+                lambda operation, result, device=name, current=card: self._device_result(
+                    device, current, operation, result
+                )
+            )
             controller.error.connect(lambda operation, error, device=name: self._device_error(device, operation, error))
             controller.traffic.connect(
                 lambda message, device=name: self._log(f"{device.upper()} VISA {message}")
@@ -3941,9 +5756,10 @@ class MainWindow(QMainWindow):
             elif name == "anritsu":
                 controller.capabilities_changed.connect(self.anritsu_page.set_capabilities)
 
-    def _device_result(self, card: DeviceCard, operation: str, result: object) -> None:
+    def _device_result(self, device: str, card: DeviceCard, operation: str, result: object) -> None:
         if operation == "connect":
             card.update_identity(result)
+            self.dashboard.mark_identity_verified(device)
             self._log(f"Connected: {getattr(result, 'idn', result)}")
         elif operation == "disconnect":
             self._log("Instrument disconnected")
@@ -3962,6 +5778,7 @@ class MainWindow(QMainWindow):
                 f"SN {result.get('serial', '—')} • FW {result.get('firmware', '—')}\n"
                 f"Protocols/features: {features} • Options: {options}"
             )
+            self.dashboard.mark_identity_verified(device)
             self._log(
                 f"Communication test passed: {result.get('idn', '')}; "
                 f"features={features}; options={options}"
@@ -3976,9 +5793,11 @@ class MainWindow(QMainWindow):
             card.update_state("fault")
             card.identity.setText(f"TEST FAILED: {error}")
         self._log(f"{device}/{operation}: {error}")
+        self.dashboard.record_device_error(device, error)
 
     def _set_device_state(self, device: str, state: str) -> None:
         self._device_states[device] = state
+        self.dashboard.update_device_state(device, state)
         label = self.toolbar_device_status.get(device)
         if label is not None:
             label.setText(f"● {device.title()}: {state.replace('_', ' ').upper()}")
@@ -3986,7 +5805,93 @@ class MainWindow(QMainWindow):
             label.style().unpolish(label)
             label.style().polish(label)
 
+    def _guard_manual_operation(self, operation: str, payload: object) -> None:
+        """Fail closed for new energy-producing operations after audit I/O failure."""
+
+        # De-energising and disconnecting are never blocked by RBAC or audit
+        # health. This invariant is stronger than any normal user permission.
+        if operation in {"emergency_off", "ramp_to_zero", "stop_live", "disconnect"}:
+            return
+        if operation == "set_signal_generator_output" and not bool(payload):
+            return
+        if operation == "set_output":
+            try:
+                _channel, enabled = payload  # type: ignore[misc]
+            except (TypeError, ValueError):
+                enabled = True
+            if not bool(enabled):
+                return
+        energizing_operations = {
+            "arm",
+            "configure",
+            "configure_output",
+            "configure_modulation",
+            "configure_sweep",
+            "configure_burst",
+            "synchronize_phases",
+            "set_output",
+            "trigger_sweep",
+            "trigger_burst",
+            "ramp_to_level",
+            "configure_signal_generator",
+            "configure_advanced_spectrum",
+            "arm_signal_generator",
+            "set_signal_generator_output",
+        }
+        permission = (
+            Permission.OPERATE_OUTPUT
+            if operation in energizing_operations
+            else Permission.CONNECT
+            if operation in {"connect", "test_communication", "replace_adapter"}
+            else Permission.PASSIVE_MEASURE
+        )
+        self._require_permission(
+            permission,
+            f"manual instrument operation {operation}",
+            audit=operation in energizing_operations,
+        )
+
+        if self._audit_healthy:
+            return
+        energizing = operation in {
+            "arm",
+            "arm_signal_generator",
+            "trigger_sweep",
+            "trigger_burst",
+            "ramp_to_level",
+        }
+        if operation == "set_output":
+            try:
+                _channel, enabled = payload  # type: ignore[misc]
+            except (TypeError, ValueError):
+                energizing = True
+            else:
+                energizing = bool(enabled)
+        if operation == "set_signal_generator_output":
+            energizing = bool(payload)
+        if energizing:
+            raise ConfigurationError(
+                "The durable audit log is unavailable. ARM and OUTPUT ON are locked; "
+                "OUTPUT OFF and E-STOP remain available."
+            )
+
+    def _assert_audit_ready_for_run(self) -> None:
+        if not self._audit_healthy:
+            raise ConfigurationError(
+                "The durable audit log is unavailable. A measurement run cannot start."
+            )
+
     def _start_run(self, plan: object) -> None:
+        try:
+            self._require_permission(
+                Permission.RUN_RECIPE,
+                "starting a measurement run",
+                audit=True,
+            )
+            self._assert_audit_ready_for_run()
+        except (AuthorizationError, ConfigurationError) as exc:
+            QMessageBox.critical(self, "Run not started", str(exc))
+            return
         if self._settings.outputs_locked:
             QMessageBox.warning(
                 self,
@@ -4003,24 +5908,157 @@ class MainWindow(QMainWindow):
             )
             return
         try:
+            estimate = PlanEstimator(self._settings).estimate(plan)  # type: ignore[arg-type]
+            readiness = self.dashboard.evaluate_readiness(plan, estimate)
+            if readiness.blocking_items:
+                details = "\n".join(
+                    f"• {item.label}: {item.detail}" for item in readiness.blocking_items
+                )
+                raise ConfigurationError("Station preflight is blocked:\n" + details)
             self._run_controller.start(
                 self._settings,
                 self._repository.path,
                 plan,  # type: ignore[arg-type]
                 simulation=self._simulation,
+                operator_context=self._access.identity.as_context(),
             )
         except Exception as exc:
             QMessageBox.critical(self, "Run not started", str(exc))
             return
-        self.run_monitor.run_started(plan.actions)  # type: ignore[union-attr]
-        for index in (1, 2, 3, 4, 7):
-            self.tabs.setTabEnabled(index, False)
+        self.run_monitor.run_started(
+            len(plan.actions),  # type: ignore[union-attr]
+            estimate.nominal_duration_s,
+        )
+        self._set_run_ui_locked(True)
         self.tabs.setCurrentWidget(self.run_monitor)
         self._log("Run Engine started")
 
+    def _resume_run(self, selected: object) -> None:
+        try:
+            self._require_permission(
+                Permission.RUN_RECIPE,
+                "resuming a measurement run",
+                audit=True,
+            )
+            self._assert_audit_ready_for_run()
+        except (AuthorizationError, ConfigurationError) as exc:
+            QMessageBox.critical(self, "Resume not started", str(exc))
+            return
+        path = Path(selected) if isinstance(selected, (str, Path)) else None
+        if path is None:
+            QMessageBox.warning(self, "Resume run", "No valid run file was selected.")
+            return
+        if self._settings.outputs_locked:
+            QMessageBox.warning(
+                self,
+                "Unverified profile",
+                "Approve the current safety profile before resuming a run.",
+            )
+            return
+        connected = [
+            name for name, state in self._device_states.items() if state != "disconnected"
+        ]
+        if connected:
+            QMessageBox.warning(
+                self,
+                "Disconnect manual control",
+                "Run Engine opens its own VISA sessions. Disconnect first: "
+                + ", ".join(connected)
+                + ".",
+            )
+            return
+        try:
+            detail = Hdf5RunReader.detail(path)
+            current_settings_source = serialize_settings_snapshot(
+                self._settings,
+                self._repository.path,
+                simulation=self._simulation,
+            )
+            if current_settings_source != detail.settings_yaml:
+                raise ConfigurationError(
+                    "The current settings differ from the immutable run snapshot. "
+                    "Restore and approve the exact profile before resuming."
+                )
+            recipe = parse_recipe_text(detail.recipe_yaml, origin=str(path))
+            plan = RecipeCompiler(self._settings).compile(recipe)
+            checkpoint = RunRecoveryManager().inspect(path, plan)
+            if (
+                checkpoint.stored_points >= plan.total_points
+                and checkpoint.next_action_index >= len(plan.actions)
+            ):
+                raise ConfigurationError("The selected run has no remaining actions.")
+        except Exception as exc:
+            QMessageBox.warning(self, "Resume unavailable", str(exc))
+            self._log(f"RUN RECOVERY REJECTED: {exc}")
+            return
+        discarded = checkpoint.committed_points_found - checkpoint.stored_points
+        answer = QMessageBox.question(
+            self,
+            "Resume measurement",
+            "Resume only from the last confirmed safe boundary?\n\n"
+            f"Preserved checkpoints: {checkpoint.stored_points}\n"
+            f"Unsafe tail to discard and remeasure: {discarded}\n"
+            f"Remaining action index: {checkpoint.next_action_index}/{len(plan.actions)}\n"
+            f"Configuration prelude actions: {len(checkpoint.prelude_actions)}\n\n"
+            "All required instruments will connect with outputs OFF. The stored recipe, "
+            "plan hash and exact settings snapshot have been verified.",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.Cancel,
+            QMessageBox.StandardButton.Cancel,
+        )
+        if answer != QMessageBox.StandardButton.Yes:
+            return
+        try:
+            estimate = PlanEstimator(self._settings).estimate(plan)  # type: ignore[arg-type]
+            self._run_controller.start(
+                self._settings,
+                self._repository.path,
+                plan,
+                simulation=self._simulation,
+                recovery=checkpoint,
+                operator_context=self._access.identity.as_context(),
+            )
+        except Exception as exc:
+            QMessageBox.critical(self, "Resume not started", str(exc))
+            return
+        remaining = len(plan.actions) - checkpoint.next_action_index
+        remaining_fraction = remaining / max(1, len(plan.actions))
+        self.run_monitor.run_started(
+            remaining + len(checkpoint.prelude_actions),
+            estimate.nominal_duration_s * remaining_fraction,
+        )
+        self._set_run_ui_locked(True)
+        self.tabs.setCurrentWidget(self.run_monitor)
+        self._log(
+            f"Run recovery started at safe checkpoint {checkpoint.stored_points}; "
+            f"discarding {discarded} unsafe tail point(s)"
+        )
+
     def _run_event(self, name: str, data: object) -> None:
         payload = data if isinstance(data, dict) else {"data": data}
-        self.run_monitor.append_event(name, payload)
+        if name == "run_started":
+            value = payload.get("correlation_id") or payload.get("hash")
+            self._run_correlation_id = str(value) if value else None
+        severity = "error" if name in {"run_fault", "shutdown_error", "watchdog_timeout"} else (
+            "warning" if name in {"compliance_detected", "run_aborted", "safe_finally_error"} else "info"
+        )
+        if name != "spectrum_preview":
+            self._audit_record(
+                name.replace("_", " "),
+                severity=severity,
+                category="run",
+                event_type=name,
+                context=payload,
+                correlation_id=self._run_correlation_id,
+                critical=severity in {"error", "warning"},
+            )
+        if name == "runner_heartbeat":
+            self.run_monitor.update_heartbeat(payload)
+        elif name == "spectrum_preview":
+            self.run_monitor.update_spectrum_preview(payload)
+        else:
+            self.run_monitor.append_event(name, payload)
+        if name in {"run_completed", "run_aborted", "run_fault"}:
+            self._run_correlation_id = None
 
     def _run_finished(self, result: object) -> None:
         self._set_run_ui_locked(False)
@@ -4049,11 +6087,19 @@ class MainWindow(QMainWindow):
             QMessageBox.StandardButton.Cancel,
         )
         if answer == QMessageBox.StandardButton.Yes:
-            if self._run_controller.running:
-                self._run_controller.request_emergency_stop(self._settings, simulation=self._simulation)
+            # Always use independent short-lived VISA sessions. A manual
+            # instrument worker can be blocked just as a recipe worker can;
+            # queueing OFF behind that operation is not an emergency path.
+            self._run_controller.request_emergency_stop(
+                self._settings,
+                simulation=self._simulation,
+            )
             for controller in self._controllers.values():
                 controller.call("emergency_off")
-            self._log("E-STOP sent to all instruments")
+            self._log(
+                "E-STOP sent through independent emergency sessions and "
+                "queued on all instrument workers"
+            )
 
     def _settings_saved(self, settings: StationSettings) -> None:
         self._settings = simulated_station_settings(settings) if self._simulation else settings
@@ -4081,6 +6127,16 @@ class MainWindow(QMainWindow):
 
     def _save_discovered_assignments(self, payload: object) -> None:
         self._log(f"VISA ASSIGN RECEIVED: payload={payload!r}")
+        try:
+            self._require_permission(
+                Permission.ASSIGN_VISA,
+                "changing VISA assignments",
+                audit=True,
+            )
+        except AuthorizationError as exc:
+            self._log(f"VISA ASSIGN REJECTED: {exc}")
+            QMessageBox.warning(self, "Access denied", str(exc))
+            return
         if self._simulation:
             self._log("VISA ASSIGN ERROR: assignment is disabled in simulation mode")
             return
@@ -4152,14 +6208,115 @@ class MainWindow(QMainWindow):
             self.tabs.setTabEnabled(index, not locked)
             self.ribbon_actions[index].setEnabled(not locked)
 
+    def _require_permission(
+        self,
+        permission: Permission,
+        action: str,
+        *,
+        audit: bool,
+    ) -> None:
+        try:
+            self._access.require(permission, action=action)
+        except AuthorizationError as exc:
+            if audit:
+                self._audit_record(
+                    str(exc),
+                    severity="warning",
+                    category="authorization",
+                    event_type="access_denied",
+                    context={
+                        **self._access.identity.as_context(),
+                        "permission": permission.value,
+                        "action": action,
+                    },
+                    critical=True,
+                )
+            raise
+        if audit:
+            self._audit_record(
+                f"Access granted for {action}",
+                category="authorization",
+                event_type="access_granted",
+                context={
+                    **self._access.identity.as_context(),
+                    "permission": permission.value,
+                    "action": action,
+                },
+            )
+
+    def _audit_record(
+        self,
+        message: str,
+        *,
+        severity: str = "info",
+        category: str = "ui",
+        event_type: str = "message",
+        context: dict[str, object] | None = None,
+        correlation_id: str | None = None,
+        critical: bool = False,
+    ) -> None:
+        try:
+            self._audit.record(
+                message,
+                severity=severity,
+                category=category,
+                event_type=event_type,
+                context=context,
+                correlation_id=correlation_id,
+                critical=critical,
+            )
+        except (OSError, RuntimeError) as exc:
+            first_failure = self._audit_healthy
+            self._audit_healthy = False
+            if hasattr(self, "dashboard"):
+                self.dashboard.update_audit_health(False)
+            if first_failure and hasattr(self, "log"):
+                self.log.appendPlainText(
+                    "CRITICAL: durable audit logging failed; ARM, OUTPUT ON and new runs are locked: "
+                    + str(exc)
+                )
+
+    @staticmethod
+    def _log_classification(message: str) -> tuple[str, str, bool]:
+        upper = message.upper()
+        if "E-STOP" in upper or "COMPLIANCE" in upper:
+            return "safety", "critical", True
+        if any(marker in upper for marker in ("FAILED", "FAULT", " ERROR", "REJECTED")):
+            return "application", "error", True
+        if "VISA" in upper or "CONNECTED" in upper or "DISCONNECTED" in upper:
+            return "visa", "info", False
+        if "PROFILE" in upper or "SETTINGS" in upper or "LIMIT" in upper:
+            return "configuration", "info", False
+        if "RUN " in upper or upper.startswith("RUN"):
+            return "run", "info", False
+        return "ui", "info", False
+
     def _log(self, message: str) -> None:
+        category, severity, critical = self._log_classification(message)
+        self._audit_record(
+            message,
+            severity=severity,
+            category=category,
+            critical=critical,
+            correlation_id=self._run_correlation_id,
+        )
         self.log.appendPlainText(message)
         self.statusBar().showMessage(message, 8_000)
 
     def closeEvent(self, event: QCloseEvent) -> None:
+        self._audit_record(
+            "Application safe shutdown started",
+            category="application",
+            event_type="shutdown_started",
+            critical=True,
+        )
         self._save_workspace()
         self.anritsu_page._timer.stop()
         self._run_controller.close()
         for controller in self._controllers.values():
             controller.close()
+        try:
+            self._audit.close()
+        except (OSError, RuntimeError):
+            self._audit_healthy = False
         event.accept()

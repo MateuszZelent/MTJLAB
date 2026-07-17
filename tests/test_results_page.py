@@ -49,12 +49,39 @@ class ResultsPageTests(unittest.TestCase):
                 page.runs.setCurrentItem(page.runs.topLevelItem(0))
                 self.application.processEvents()
                 self.assertIn("State: completed", page.metadata.toPlainText())
+                self.assertFalse(page.resume_button.isEnabled())
                 self.assertIn("browser-test", page.recipe_snapshot.toPlainText())
                 self.assertEqual(page.points.topLevelItemCount(), 1)
                 page.points.setCurrentItem(page.points.topLevelItem(0))
                 self.application.processEvents()
                 self.assertEqual(page.spectrum_plot.trace_point_count("Stored spectrum"), 3)
                 self.assertIn("3 points", page.spectrum_info.text())
+            finally:
+                page.close()
+
+    def test_resume_action_is_exposed_only_for_interrupted_selected_run(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            output_dir = Path(temporary)
+            path = output_dir / "faulted.h5"
+            writer = Hdf5RunWriter(
+                path,
+                recipe_source="schema_version: 1\nname: interrupted\n",
+                settings_source="profile:\n  state: approved\n",
+                plan_hash="b" * 64,
+                device_idn={},
+            )
+            writer.close("faulted")
+
+            page = ResultsPage(str(output_dir))
+            requested: list[Path] = []
+            page.resume_requested.connect(requested.append)
+            try:
+                page.runs.setCurrentItem(page.runs.topLevelItem(0))
+                self.application.processEvents()
+                self.assertTrue(page.resume_button.isEnabled())
+                page.resume_button.click()
+                self.application.processEvents()
+                self.assertEqual(requested, [path])
             finally:
                 page.close()
 

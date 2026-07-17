@@ -30,12 +30,16 @@ class Hdf5RunWriter:
         device_idn: dict[str, str],
         device_capabilities: dict[str, object] | None = None,
         csv_summary_path: str | Path | None = None,
+        expected_points: int | None = None,
+        operator_context: dict[str, object] | None = None,
     ) -> None:
         try:
             import h5py
             import numpy as np
         except ImportError as exc:
-            raise ExecutionError("Zapis HDF5 wymaga h5py i numpy; zainstaluj zależności projektu.") from exc
+            raise ExecutionError(
+                "Writing HDF5 requires h5py and numpy; install the project dependencies."
+            ) from exc
         self._h5py = h5py
         self._np = np
         self.path = Path(path)
@@ -46,7 +50,9 @@ class Hdf5RunWriter:
         try:
             self._file = h5py.File(self.path, "x", libver="latest")
         except (FileExistsError, OSError) as exc:
-            raise ExecutionError(f"Plik wyniku już istnieje albo nie może zostać utworzony: {self.path}") from exc
+            raise ExecutionError(
+                f"The result file already exists or cannot be created: {self.path}"
+            ) from exc
         self._points = self._file.create_group("points")
         self._spectra = self._file.create_group("spectra")
         self._pending = self._file.create_group("_pending")
@@ -67,6 +73,13 @@ class Hdf5RunWriter:
             run.attrs["application_version"] = "0.1.0+source"
         run.create_dataset("recipe_yaml", data=recipe_source, dtype=h5py.string_dtype("utf-8"))
         run.create_dataset("settings_yaml", data=settings_source, dtype=h5py.string_dtype("utf-8"))
+        dut_limits = self._extract_dut_limits(recipe_source)
+        dut_limits_json = json.dumps(dut_limits, sort_keys=True)
+        run.create_dataset(
+            "dut_limits_json",
+            data=dut_limits_json,
+            dtype=h5py.string_dtype("utf-8"),
+        )
         run.create_dataset("device_idn_json", data=json.dumps(device_idn, sort_keys=True), dtype=h5py.string_dtype("utf-8"))
         capabilities = device_capabilities or {}
         run.create_dataset(
@@ -74,16 +87,194 @@ class Hdf5RunWriter:
             data=json.dumps(self._serializable(capabilities), sort_keys=True),
             dtype=h5py.string_dtype("utf-8"),
         )
+        run.create_dataset(
+            "operator_context_json",
+            data=json.dumps(self._serializable(operator_context or {}), sort_keys=True),
+            dtype=h5py.string_dtype("utf-8"),
+        )
         self._thatec = ThatecHdf5Writer(
             self._file,
             device_idn=device_idn,
             plan_hash=plan_hash,
+            expected_points=expected_points,
+            recipe_source=recipe_source,
+            dut_limits_json=dut_limits_json,
         )
         self._point_count = 0
         self._closed = False
         if self.csv_summary_path is not None:
             self._open_csv_summary()
         self._file.flush()
+
+    @classmethod
+    def resume(
+        cls,
+        path: str | Path,
+        *,
+        recipe_source: str,
+        settings_source: str,
+        plan_hash: str,
+        checkpoint_count: int,
+        expected_points: int | None = None,
+        csv_summary_path: str | Path | None = None,
+        operator_context: dict[str, object] | None = None,
+    ) -> "Hdf5RunWriter":
+        """Resume an existing run only after an externally verified safe boundary."""
+
+        try:
+            import h5py
+            import numpy as np
+        except ImportError as exc:
+            raise ExecutionError(
+                "Writing HDF5 requires h5py and numpy; install the project dependencies."
+            ) from exc
+        target = Path(path)
+        self = cls.__new__(cls)
+        self._h5py = h5py
+        self._np = np
+        self.path = target
+        self.csv_summary_path = Path(csv_summary_path) if csv_summary_path is not None else None
+        self._csv_stream = None
+        self._csv_writer = None
+        try:
+            self._file = h5py.File(target, "r+", libver="latest")
+        except OSError as exc:
+            raise ExecutionError(f"Cannot open the run file for resumption: {target}") from exc
+        try:
+            self._validate_resume_identity(recipe_source, settings_source, plan_hash)
+            self._points = self._file["points"]
+            self._spectra = self._file["spectra"]
+            self._pending = self._file["_pending"]
+            events = self._file["events"]
+            self._event_timestamps = events["timestamp"]
+            self._event_severities = events["severity"]
+            self._event_names = events["name"]
+            self._event_messages = events["message"]
+            self._truncate_to_checkpoint(checkpoint_count)
+            self._thatec = ThatecHdf5Writer.resume(
+                self._file,
+                checkpoint_count=checkpoint_count,
+                expected_points=expected_points,
+                recipe_source=recipe_source,
+            )
+            self._point_count = checkpoint_count
+            self._closed = False
+            run = self._file["run"]
+            previous_status = str(run.attrs.get("status", "incomplete"))
+            run.attrs["status"] = "running"
+            run.attrs["resumed_at_utc"] = datetime.now(timezone.utc).isoformat()
+            run.attrs["resume_count"] = int(run.attrs.get("resume_count", 0)) + 1
+            if "storage_validation_error" in run.attrs:
+                del run.attrs["storage_validation_error"]
+            if self.csv_summary_path is not None:
+                self._open_csv_summary()
+                self._rebuild_csv_summary_from_committed_points()
+            self.append_event(
+                "run_resumed",
+                {
+                    "checkpoint_count": checkpoint_count,
+                    "previous_status": previous_status,
+                    "operator_context": self._serializable(operator_context or {}),
+                },
+            )
+            self._file.flush()
+            return self
+        except Exception:
+            self._file.close()
+            raise
+
+    def _validate_resume_identity(
+        self,
+        recipe_source: str,
+        settings_source: str,
+        plan_hash: str,
+    ) -> None:
+        run = self._file.get("run")
+        if run is None:
+            raise ExecutionError("Run recovery requires the private /run metadata group.")
+        expected = {
+            "plan_sha256": plan_hash,
+            "recipe_source_sha256": hashlib.sha256(recipe_source.encode("utf-8")).hexdigest(),
+            "settings_sha256": hashlib.sha256(settings_source.encode("utf-8")).hexdigest(),
+        }
+        for attribute, value in expected.items():
+            if str(run.attrs.get(attribute, "")) != value:
+                raise ExecutionError(f"Run recovery rejected: {attribute} does not match.")
+        status = str(run.attrs.get("status", "incomplete"))
+        if status == "completed":
+            raise ExecutionError("A completed run cannot be resumed.")
+
+    def _truncate_to_checkpoint(self, checkpoint_count: int) -> None:
+        if checkpoint_count < 0:
+            raise ExecutionError("Recovery checkpoint count cannot be negative.")
+        committed = sorted(
+            (int(name), name) for name in self._points if str(name).isdigit()
+        )
+        if committed and [number for number, _name in committed] != list(
+            range(committed[-1][0] + 1)
+        ):
+            raise ExecutionError("Committed private checkpoints are not contiguous.")
+        if checkpoint_count > len(committed):
+            raise ExecutionError("Recovery checkpoint exceeds committed point count.")
+        for _number, name in committed:
+            if not bool(self._points[name].attrs.get("complete", False)):
+                raise ExecutionError(f"Private checkpoint {name} is not marked complete.")
+        for _number, name in reversed(committed[checkpoint_count:]):
+            if name in self._spectra:
+                del self._spectra[name]
+            del self._points[name]
+        for name in tuple(self._pending):
+            del self._pending[name]
+        self._truncate_public_thatec(checkpoint_count)
+
+    def _truncate_public_thatec(self, checkpoint_count: int) -> None:
+        definition = self._file["scan_definition"]
+        measurement = self._file["measurement"]
+        resumable_rows = 0
+        for row_name in sorted(name for name in definition if name.startswith("row_")):
+            values = dict(definition[row_name].asstr()[()])
+            role = values.get("lab control role")
+            if role not in {"setpoint", "measurement", "spectrum"}:
+                continue
+            resumable_rows += 1
+            if row_name not in measurement:
+                raise ExecutionError(f"Recovery row {row_name} has no measurement group.")
+            row = measurement[row_name]
+            if role == "spectrum":
+                if len(row["data"].shape) != 2:
+                    raise ExecutionError("Recovery spectrum is not rank 2.")
+                row["data"].resize((checkpoint_count, row["data"].shape[1]))
+                row["timestamp"].resize((checkpoint_count,))
+                dimensions = int(row["data"].attrs["dim of data"])
+                row["scale"].resize((checkpoint_count * 2 * (dimensions + 1),))
+            else:
+                row["data"].resize((checkpoint_count,))
+                row["timestamp"].resize((checkpoint_count,))
+        if checkpoint_count and not resumable_rows:
+            raise ExecutionError(
+                "This file predates resumable row metadata and cannot be resumed safely."
+            )
+
+    def _rebuild_csv_summary_from_committed_points(self) -> None:
+        if self._csv_writer is None or self._csv_stream is None:
+            return
+        for index in range(self._point_count):
+            group = self._points[str(index)]
+            spectrum = self._spectra.get(str(index))
+            powers = spectrum["power_dbm"][:] if spectrum is not None else ()
+            self._csv_writer.writerow(
+                {
+                    "point_index": index,
+                    "timestamp_utc": str(group.attrs["timestamp_utc"]),
+                    "status": str(group.attrs["status"]),
+                    "setpoints_json": group["setpoints_json"].asstr()[()],
+                    "measurements_json": group["measurements_json"].asstr()[()],
+                    "trace_name": spectrum.attrs["trace_name"] if spectrum is not None else "",
+                    "trace_points": len(powers),
+                    "trace_peak_dbm": max(powers) if len(powers) else "",
+                }
+            )
+        self._csv_stream.flush()
 
     def _open_csv_summary(self) -> None:
         assert self.csv_summary_path is not None
@@ -109,7 +300,7 @@ class Hdf5RunWriter:
             self._csv_writer = writer
         except Exception as exc:
             self._file.close()
-            raise ExecutionError(f"Nie można utworzyć indeksu CSV: {exc}") from exc
+            raise ExecutionError(f"Cannot create the CSV index: {exc}") from exc
 
     @staticmethod
     def _serializable(value: object) -> object:
@@ -121,11 +312,32 @@ class Hdf5RunWriter:
             return [Hdf5RunWriter._serializable(item) for item in value]
         return value
 
+    @staticmethod
+    def _extract_dut_limits(recipe_source: str) -> object:
+        """Return the declared DUT envelope for explicit result provenance.
+
+        Recipe compilation remains the authority for validation.  Metadata
+        extraction is deliberately best-effort so that writer diagnostics can
+        still be created for legacy or partially recovered recipe sources.
+        """
+
+        try:
+            from ruamel.yaml import YAML
+
+            source = YAML(typ="safe").load(recipe_source)
+        except Exception:
+            return {}
+        if not isinstance(source, dict):
+            return {}
+        limits = source.get("dut_limits", {})
+        return Hdf5RunWriter._serializable(limits) if isinstance(limits, dict) else {}
+
     def append(self, point: MeasurementPoint, trace: SpectrumTrace | None = None) -> int:
         if self._closed:
-            raise ExecutionError("Próba zapisu do zamkniętego pliku HDF5.")
+            raise ExecutionError("Attempted to write to a closed HDF5 file.")
         index = self._point_count
         name = str(index)
+        self._validate_point(point)
         if trace is not None:
             self._validate_trace(trace)
         try:
@@ -176,7 +388,7 @@ class Hdf5RunWriter:
                 # A transport/filesystem failure may also prevent the event;
                 # never mask the original storage exception.
                 pass
-            raise ExecutionError(f"Nie udało się atomowo zapisać punktu {index}: {exc}") from exc
+            raise ExecutionError(f"Could not atomically write point {index}: {exc}") from exc
         try:
             self._append_csv_summary(index, point, trace)
         except Exception as exc:
@@ -190,15 +402,29 @@ class Hdf5RunWriter:
         return index
 
     @staticmethod
+    def _validate_point(point: MeasurementPoint) -> None:
+        import math
+
+        for group_name, values in (
+            ("setpoint", point.setpoints),
+            ("measurement", point.measurements),
+        ):
+            for name, value in values.items():
+                if not isinstance(value, (int, float)) or not math.isfinite(float(value)):
+                    raise ExecutionError(
+                        f"Point contains invalid {group_name} {name!r}: {value!r}."
+                    )
+
+    @staticmethod
     def _validate_trace(trace: SpectrumTrace) -> None:
         import math
 
         if len(trace.frequencies_hz) != len(trace.powers_dbm) or len(trace.frequencies_hz) < 2:
-            raise ExecutionError("Widmo musi zawierać co najmniej dwa zgodne punkty osi i amplitudy.")
+            raise ExecutionError("A spectrum requires at least two matching axis and amplitude points.")
         if not all(math.isfinite(value) for value in (*trace.frequencies_hz, *trace.powers_dbm)):
-            raise ExecutionError("Widmo zawiera NaN albo nieskończoność.")
+            raise ExecutionError("The spectrum contains NaN or infinity.")
         if any(right <= left for left, right in zip(trace.frequencies_hz, trace.frequencies_hz[1:])):
-            raise ExecutionError("Oś częstotliwości widma musi być ściśle rosnąca.")
+            raise ExecutionError("The spectrum frequency axis must be strictly increasing.")
 
     def _append_csv_summary(self, index: int, point: MeasurementPoint, trace: SpectrumTrace | None) -> None:
         if self._csv_writer is None or self._csv_stream is None:
@@ -217,6 +443,13 @@ class Hdf5RunWriter:
         )
         self._csv_stream.flush()
 
+    def flush_checkpoint(self) -> None:
+        """Durably flush the latest committed state without closing the run."""
+
+        self._file.flush()
+        if self._csv_stream is not None:
+            self._csv_stream.flush()
+
     def append_event(self, name: str, data: dict[str, object], *, severity: str = "info") -> None:
         """Append and durably flush an engine event.
 
@@ -226,7 +459,7 @@ class Hdf5RunWriter:
         """
 
         if self._closed:
-            raise ExecutionError("Próba zapisu zdarzenia do zamkniętego pliku HDF5.")
+            raise ExecutionError("Attempted to write an event to a closed HDF5 file.")
         timestamp = str(data.get("timestamp_utc") or datetime.now(timezone.utc).isoformat())
         message = json.dumps(self._serializable(data), sort_keys=True)
         index = len(self._event_names)
@@ -253,3 +486,19 @@ class Hdf5RunWriter:
             self._csv_stream = None
             self._csv_writer = None
         self._closed = True
+        from app.storage.thatec_validator import ThatecCompatibilityValidator
+
+        report = ThatecCompatibilityValidator().validate(self.path)
+        if not report.valid:
+            detail = "; ".join(
+                f"{issue.path}: {issue.message}" for issue in report.errors
+            )
+            try:
+                with self._h5py.File(self.path, "r+") as recovered:
+                    recovered["run"].attrs["status"] = "faulted"
+                    recovered["run"].attrs["storage_validation_error"] = detail
+                    recovered.attrs["measurement running"] = self._np.uint8(0)
+                    recovered.flush()
+            except Exception:
+                pass
+            raise ExecutionError(f"Final HDF5 contract validation failed: {detail}")

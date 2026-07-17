@@ -35,6 +35,7 @@ class RunDetail:
     settings_yaml: str
     device_idn: dict[str, str]
     capabilities: dict[str, Any]
+    operator_context: dict[str, Any]
     events: tuple["StoredEvent", ...]
 
 
@@ -120,6 +121,7 @@ class Hdf5RunReader:
                 settings_yaml=Hdf5RunReader._dataset_text(run, "settings_yaml"),
                 device_idn=Hdf5RunReader._dataset_json(run, "device_idn_json"),
                 capabilities=Hdf5RunReader._dataset_json(run, "capabilities_json"),
+                operator_context=Hdf5RunReader._dataset_json(run, "operator_context_json"),
                 events=Hdf5RunReader._events(file),
             )
 
@@ -161,7 +163,7 @@ class Hdf5RunReader:
     @staticmethod
     def spectrum(path: str | Path, index: int, *, max_points: int | None = None) -> StoredSpectrum | None:
         if index < 0:
-            raise ExecutionError("Indeks widma nie może być ujemny.")
+            raise ExecutionError("Spectrum index cannot be negative.")
         with Hdf5RunReader._open(path) as file:
             spectra = file.get("spectra")
             if spectra is None or str(index) not in spectra:
@@ -171,9 +173,9 @@ class Hdf5RunReader:
                 frequencies = tuple(float(value) for value in group["frequency_hz"][:])
                 powers = tuple(float(value) for value in group["power_dbm"][:])
             except KeyError as exc:
-                raise ExecutionError(f"Widmo {index} nie zawiera kompletnej osi danych.") from exc
+                raise ExecutionError(f"Spectrum {index} does not contain a complete data axis.") from exc
             if len(frequencies) != len(powers) or not frequencies:
-                raise ExecutionError(f"Widmo {index} ma niezgodną lub pustą liczbę punktów.")
+                raise ExecutionError(f"Spectrum {index} has a mismatched or empty point count.")
             source_count = len(frequencies)
             if max_points is not None and max_points > 0 and source_count > max_points:
                 selected = peak_preserving_indices(powers, max_points)
@@ -199,15 +201,15 @@ class Hdf5RunReader:
         messages = Hdf5RunReader._dataset_texts(group, "message")
         lengths = {len(timestamp), len(severity), len(names), len(messages)}
         if len(lengths) != 1:
-            raise ExecutionError("Dziennik zdarzeń HDF5 ma niespójne długości kolumn.")
+            raise ExecutionError("HDF5 event-log columns have inconsistent lengths.")
         events: list[StoredEvent] = []
         for time, level, name, message in zip(timestamp, severity, names, messages, strict=True):
             try:
                 payload = json.loads(message)
             except json.JSONDecodeError as exc:
-                raise ExecutionError("Dziennik zdarzeń zawiera nieprawidłowy JSON.") from exc
+                raise ExecutionError("The event log contains invalid JSON.") from exc
             if not isinstance(payload, dict):
-                raise ExecutionError("Wiadomość dziennika zdarzeń musi być obiektem JSON.")
+                raise ExecutionError("An event-log message must be a JSON object.")
             events.append(StoredEvent(time, level, name, payload))
         return tuple(events)
 
@@ -216,17 +218,17 @@ class Hdf5RunReader:
         try:
             import h5py
         except ImportError as exc:
-            raise ExecutionError("Odczyt wyników HDF5 wymaga pakietu h5py.") from exc
+            raise ExecutionError("Reading HDF5 results requires the h5py package.") from exc
         try:
             return h5py.File(Path(path), "r")
         except OSError as exc:
-            raise ExecutionError(f"Nie można odczytać pliku HDF5 {Path(path).name}: {exc}") from exc
+            raise ExecutionError(f"Cannot read HDF5 file {Path(path).name}: {exc}") from exc
 
     @staticmethod
     def _require_group(file: Any, name: str) -> Any:
         group = file.get(name)
         if group is None:
-            raise ExecutionError(f"Plik HDF5 nie zawiera wymaganej grupy /{name}.")
+            raise ExecutionError(f"The HDF5 file does not contain required group /{name}.")
         return group
 
     @staticmethod
@@ -247,9 +249,9 @@ class Hdf5RunReader:
         try:
             decoded = json.loads(source)
         except json.JSONDecodeError as exc:
-            raise ExecutionError(f"Nieprawidłowy JSON w {name}.") from exc
+            raise ExecutionError(f"Invalid JSON in {name}.") from exc
         if not isinstance(decoded, dict):
-            raise ExecutionError(f"{name} musi zawierać obiekt JSON.")
+            raise ExecutionError(f"{name} must contain a JSON object.")
         return decoded
 
     @staticmethod

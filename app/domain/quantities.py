@@ -24,6 +24,7 @@ DIMENSION_FREQUENCY: Final = "frequency"
 DIMENSION_RESISTANCE: Final = "resistance"
 DIMENSION_TIME: Final = "time"
 DIMENSION_DBM: Final = "dbm"
+DIMENSION_DB: Final = "db"
 DIMENSION_RATIO: Final = "ratio"
 
 
@@ -48,6 +49,7 @@ _UNITS: Final[dict[str, UnitDefinition]] = {
     "w": UnitDefinition(DIMENSION_POWER, 1.0, "W"),
     "mw": UnitDefinition(DIMENSION_POWER, 1e-3, "mW"),
     "uw": UnitDefinition(DIMENSION_POWER, 1e-6, "uW"),
+    "nw": UnitDefinition(DIMENSION_POWER, 1e-9, "nW"),
     "µw": UnitDefinition(DIMENSION_POWER, 1e-6, "uW"),
     "hz": UnitDefinition(DIMENSION_FREQUENCY, 1.0, "Hz"),
     "khz": UnitDefinition(DIMENSION_FREQUENCY, 1e3, "kHz"),
@@ -65,6 +67,7 @@ _UNITS: Final[dict[str, UnitDefinition]] = {
     "µs": UnitDefinition(DIMENSION_TIME, 1e-6, "us"),
     "ns": UnitDefinition(DIMENSION_TIME, 1e-9, "ns"),
     "dbm": UnitDefinition(DIMENSION_DBM, 1.0, "dBm"),
+    "db": UnitDefinition(DIMENSION_DB, 1.0, "dB"),
     "%": UnitDefinition(DIMENSION_RATIO, 0.01, "%"),
 }
 
@@ -83,7 +86,7 @@ class Quantity:
     def require_dimension(self, expected: str) -> "Quantity":
         if self.dimension != expected:
             raise QuantityError(
-                f"Oczekiwano jednostki {expected}, otrzymano {self.dimension}."
+                f"Expected dimension {expected}, received {self.dimension}."
             )
         return self
 
@@ -91,7 +94,7 @@ class Quantity:
         definition = _unit_definition(unit)
         if definition.dimension != self.dimension:
             raise QuantityError(
-                f"Nie można przeliczyć {self.dimension} na {definition.dimension}."
+                f"Cannot convert {self.dimension} to {definition.dimension}."
             )
         return self.si_value / definition.scale
 
@@ -107,7 +110,7 @@ def _unit_definition(unit: str) -> UnitDefinition:
         return _UNITS[normalized]
     except KeyError as exc:
         allowed = ", ".join(sorted({item.display for item in _UNITS.values()}))
-        raise QuantityError(f"Nieznana jednostka „{unit}”. Dozwolone: {allowed}.") from exc
+        raise QuantityError(f"Unknown unit {unit!r}. Allowed units: {allowed}.") from exc
 
 
 def parse_quantity(
@@ -122,26 +125,26 @@ def parse_quantity(
         result = value
     elif isinstance(value, (int, float)) and not isinstance(value, bool):
         if require_unit:
-            raise QuantityError("Wartość musi zawierać jawną jednostkę.")
+            raise QuantityError("The value must include an explicit unit.")
         result = Quantity(float(value), expected_dimension or DIMENSION_RATIO)
     elif isinstance(value, str):
         match = _QUANTITY_RE.match(value)
         if match is None:
-            raise QuantityError(f"Nieprawidłowa wartość z jednostką: {value!r}.")
+            raise QuantityError(f"Invalid quantity: {value!r}.")
         numeric_text, unit = match.groups()
         if unit is None:
             if require_unit:
-                raise QuantityError(f"Brakuje jednostki w wartości {value!r}.")
+                raise QuantityError(f"Missing unit in value {value!r}.")
             result = Quantity(float(numeric_text.replace(",", ".")), expected_dimension or DIMENSION_RATIO)
         else:
             numeric = float(numeric_text.replace(",", "."))
             definition = _unit_definition(unit)
             result = Quantity(numeric * definition.scale, definition.dimension)
     else:
-        raise QuantityError(f"Nieobsługiwany typ wartości: {type(value).__name__}.")
+        raise QuantityError(f"Unsupported value type: {type(value).__name__}.")
 
     if not math.isfinite(result.si_value):
-        raise QuantityError("Wartość musi być skończona.")
+        raise QuantityError("The value must be finite.")
     if expected_dimension is not None:
         result.require_dimension(expected_dimension)
     return result
@@ -157,18 +160,19 @@ def quantity_range(
     lower = parse_quantity(minimum, expected_dimension)
     upper = parse_quantity(maximum, expected_dimension)
     if lower.si_value > upper.si_value:
-        raise QuantityError("Minimalna wartość zakresu jest większa od maksymalnej.")
+        raise QuantityError("The minimum range value is greater than the maximum.")
     return lower, upper
 
 
 _AUTO_DISPLAY_UNITS: Final[dict[str, tuple[str, ...]]] = {
     DIMENSION_VOLTAGE: ("kV", "V", "mV", "uV"),
     DIMENSION_CURRENT: ("A", "mA", "uA", "nA"),
-    DIMENSION_POWER: ("W", "mW", "uW"),
+    DIMENSION_POWER: ("W", "mW", "uW", "nW"),
     DIMENSION_FREQUENCY: ("GHz", "MHz", "kHz", "Hz"),
     DIMENSION_RESISTANCE: ("Mohm", "kohm", "ohm"),
     DIMENSION_TIME: ("s", "ms", "us", "ns"),
     DIMENSION_DBM: ("dBm",),
+    DIMENSION_DB: ("dB",),
     DIMENSION_RATIO: ("%",),
 }
 
@@ -177,13 +181,13 @@ def format_quantity_auto(value_si: float, dimension: str, precision: int = 9) ->
     """Format an SI value using a readable engineering unit for its dimension."""
 
     if not math.isfinite(value_si):
-        raise QuantityError("Wartość musi być skończona.")
+        raise QuantityError("The value must be finite.")
     try:
         units = _AUTO_DISPLAY_UNITS[dimension]
     except KeyError as exc:
-        raise QuantityError(f"Nieobsługiwany wymiar: {dimension}.") from exc
+        raise QuantityError(f"Unsupported dimension: {dimension}.") from exc
     quantity = Quantity(value_si, dimension)
-    if dimension in {DIMENSION_DBM, DIMENSION_RATIO}:
+    if dimension in {DIMENSION_DBM, DIMENSION_DB, DIMENSION_RATIO}:
         return quantity.format(units[0], precision)
     magnitude = abs(value_si)
     if magnitude == 0:

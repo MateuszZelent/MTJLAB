@@ -9,6 +9,10 @@ class ConfigurationError(LabControlError):
     """The local station profile is invalid or cannot be trusted."""
 
 
+class AuthorizationError(ConfigurationError):
+    """The authenticated local identity lacks a required permission."""
+
+
 class SafetyViolation(LabControlError):
     """A requested operation violates an effective station or DUT limit."""
 
@@ -23,4 +27,3 @@ class ConnectionError(DeviceError):
 
 class ExecutionError(LabControlError):
     """A compiled measurement plan cannot continue safely."""
-

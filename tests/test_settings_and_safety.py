@@ -9,6 +9,7 @@ from app.domain.errors import SafetyViolation
 from app.domain.quantities import (
     DIMENSION_CURRENT,
     DIMENSION_FREQUENCY,
+    DIMENSION_POWER,
     QuantityError,
     format_quantity_auto,
     parse_quantity,
@@ -57,6 +58,7 @@ class QuantityAndSafetyTests(unittest.TestCase):
         with self.assertRaises(QuantityError):
             parse_quantity("10", DIMENSION_CURRENT)
         self.assertAlmostEqual(parse_quantity("10 mA", DIMENSION_CURRENT).si_value, 0.01)
+        self.assertAlmostEqual(parse_quantity("100 nW", DIMENSION_POWER).si_value, 1e-7)
 
     def test_station_profile_is_loaded_and_outputs_locked(self) -> None:
         settings = loaded_settings()
@@ -106,7 +108,7 @@ class QuantityAndSafetyTests(unittest.TestCase):
         limits = raw["devices"]["rigol"]["safety"]["channels"]["1"]["lab_limits"]
         limits["estimated_load_power"] = {"min": "0 W", "max": "1 uW", "max_abs": "1 uW"}
         settings = StationSettings.model_validate(raw)
-        with self.assertRaisesRegex(SafetyViolation, "moc na DUT"):
+        with self.assertRaisesRegex(SafetyViolation, "Rigol DUT power"):
             validate_rigol_waveform(
                 channel=settings.rigol.safety.channels["1"],
                 safety=settings.rigol.safety,
@@ -167,7 +169,7 @@ class QuantityAndSafetyTests(unittest.TestCase):
 
     def test_safety_boundaries_reject_nan_and_infinity(self) -> None:
         settings = loaded_settings()
-        with self.assertRaisesRegex(SafetyViolation, "skończoną"):
+        with self.assertRaisesRegex(SafetyViolation, "must be finite"):
             validate_keithley_source(
                 settings.keithley.safety.channels["B"],
                 KeithleySourceRequest("B", "current", float("nan"), 0.067),

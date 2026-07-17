@@ -7,6 +7,20 @@ name: "TEMPLATE — Keithley B current × Rigol CH1 × Anritsu (energised)"
 # enable both output permissions, qualify Anritsu standard_scpi_opc and test a
 # single point on a laboratory load.
 
+dut_limits:
+  keithley:
+    B:
+      current: {min: "0 A", max: "10 mA"}
+      voltage: {min: "-67 mV", max: "67 mV"}
+      max_abs_power: "670 uW"
+  rigol:
+    1:
+      minimum_impedance: "50 ohm"
+      max_abs_current: "50 uA"
+      max_abs_power: "100 nW"
+  anritsu:
+    max_expected_input: "-10 dBm"
+
 root:
   id: sequence-main
   type: sequence
@@ -80,6 +94,10 @@ root:
           type: ramp_keithley_to_zero
           channel: B
           deadline: "10 s"
+        - id: keithley-b-off
+          type: set_keithley_output
+          channel: B
+          enabled: false
 
 finally:
   - id: rigol-ch1-off-finally

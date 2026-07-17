@@ -49,3 +49,7 @@ Szczegóły pierwszego testu Rigola: [HARDWARE_TEST_RIGOL_DG1032Z.md](HARDWARE_T
 
 Po zakończeniu wypełnioną macierz należy zapisać obok danych stanowiska i
 dopiero wtedy zatwierdzić profil w GUI.
+
+Wykonywalny harness, bramki trybu energetycznego i format dowodów opisuje
+[`HIL_QUALIFICATION.md`](HIL_QUALIFICATION.md). Samo uruchomienie harnessu w symulacji albo
+wygenerowanie raportu `incomplete` nie zmienia statusu żadnego wiersza tej macierzy.

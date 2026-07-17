@@ -1,0 +1,44 @@
+{
+  "manifest_version": 1,
+  "contract": "thaTEC:OS / PyThat HDF5",
+  "qualified_pythat_version": "0.2.14",
+  "golden_reference": {
+    "filename": "05062026_YIG20CoFeB1_FMR_S12_S21_2A_-2A_10MHz_4GHz_Measurement_#3.h5",
+    "sha256": "2397954ab86080f30a6c55894f0839bb4d8ce952ef6a5116ed6b1ee497e7e668",
+    "minimum_scan_rows": 28
+  },
+  "required_root_attributes": {
+    "measurement running": {"kind": "integer", "allowed": [0, 1]},
+    "thaTEC:OS version": {"kind": "string"},
+    "version information": {"kind": "string"}
+  },
+  "required_groups": [
+    "devices",
+    "labbook",
+    "measurement",
+    "scan_definition"
+  ],
+  "required_tables": {
+    "labbook/comments": {"columns": [0, 2]},
+    "labbook/metadata": {"columns": [2]},
+    "labbook/parameter": {"columns": [0, 2]},
+    "measurement/log": {"columns": [2]},
+    "scan_definition/tree_view": {"columns": [3]}
+  },
+  "scan_definition": {
+    "row_pattern": "^row_[0-9]+$",
+    "base_keys": ["tree indent level", "function"],
+    "device_row_keys": [
+      "device name",
+      "control name",
+      "dimensions",
+      "data type"
+    ],
+    "indicator_function": "indicator"
+  },
+  "measurement_row": {
+    "required_datasets": ["data", "timestamp"],
+    "data_attributes": ["data type", "dim of data"],
+    "multidimensional_datasets": ["metadata", "scale"]
+  }
+}

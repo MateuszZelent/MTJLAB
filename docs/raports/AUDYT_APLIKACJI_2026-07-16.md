@@ -573,11 +573,122 @@ Zrealizowano programowo:
 - inline notification banners dla rutynowych błędów formularzy, accessible names oraz skróty klawiaturowe;
 - bezpieczne wykrywanie VISA przez samo `*IDN?`, przypisywanie adresów i atomowy zapis konfiguracji;
 - pełny lint Ruff, kompilację modułów oraz rozszerzony zestaw testów automatycznych.
+- `ExecutionPlan.required_devices` jest teraz wyliczany raz przez kompilator i używany zarówno
+  do otwierania sesji, jak i bezpiecznego shutdownu; receptura Anritsu-only nie kończy się już
+  fałszywym `FAULT` przez próbę wyłączenia niepodłączonych Rigola i Keithleya;
+- `Pause after point` jest realizowane wyłącznie po trwałym zapisie checkpointu, a nie pomiędzy
+  konfiguracją źródła, pomiarem i pobraniem widma; zatrzymanie nadal pozostaje aktywne podczas
+  oczekiwania i zostało pokryte testem współbieżnym.
+
+Aktualizacja warstwy danych po audycie kontraktu wielopunktowego:
+
+- publiczny schemat thaTEC otrzymał nadrzędny wymiar `Checkpoint`, którego deklarowana
+  liczba kroków pochodzi bezpośrednio z `ExecutionPlan.total_points`;
+- wszystkie setpointy SI i odczyty skalarne są zapisywane jako osobne wiersze
+  `scan_definition`/`measurement`, z jednostką, timestampem i wyrównaniem do checkpointów;
+- wiele widm jednego runu jest zapisywane jako tablica
+  `Checkpoint × Frequency`, zamiast struktury działającej w PyThat tylko dla jednej klatki;
+- rollback checkpointu obejmuje teraz także publiczne wiersze thaTEC, a NaN/Inf w setpointach
+  i pomiarach jest odrzucane przed rozpoczęciem transakcji;
+- test integracyjny wykonuje recepturę 2×2 na trzech symulatorach i potwierdza przez PyThat
+  cztery setpointy obu osi, cztery kompletne widma oraz ich kolejność kartezjańską.
+
+Dodano następnie `ThatecSchemaMapper`, który odtwarza kolejność zagnieżdżonych sweepów z YAML,
+przelicza ich wartości do SI i zapisuje każdy poziom jako osobny wiersz kontrolny thaTEC.
+Test pełnej ścieżki potwierdza obecnie w PyThat wymiary
+`Keithley B current × Rigol CH1 high level × Frequency`, jednostki współrzędnych oraz właściwy
+kształt danych. Sweep logarytmiczny zapisuje jawne wartości osi, dlatego nie jest błędnie
+odtwarzany przez `linspace`. Receptury z niejednoznacznymi, różnymi gałęziami akwizycji są
+oznaczane w metadanych i bez utraty punktów przechodzą na bezpieczny wymiar `Checkpoint`;
+rozszerzenie pełnego mapowania takich wielogałęziowych drzew pozostaje dalszym zadaniem.
+
+Aktualizacja warstwy limitów DUT:
+
+- receptura obsługuje ścisły blok `dut_limits` dla obu kanałów Keithleya i Rigola oraz
+  maksymalnego oczekiwanego poziomu wejściowego Anritsu;
+- ARM i `OUTPUT ON` w recepturze wymagają kompletnego profilu DUT dla konkretnego kanału;
+- limity DUT są przecinane z profilem stanowiska podczas preflightu i walidowane ponownie
+  w adapterze bezpośrednio przed podaniem energii;
+- odczyt Keithleya przekraczający zakres I, V lub P DUT wywołuje fail-safe trip, wyłącza
+  wszystkie wyjścia i ustawia stan `FAULT`;
+- jawna deklaracja DUT jest utrwalana w prywatnych metadanych runu oraz w publicznym
+  `labbook/metadata` kompatybilnym z thaTEC/PyThat;
+- każdy checkpoint zawiera migawkę aktywnego kontekstu bezpieczeństwa: tryb, source,
+  compliance, zakresy I/V/P Keithleya, impedancję i limity I/P Rigola oraz zakres i
+  oczekiwany poziom wejściowy Anritsu;
+- parser jednostek obsługuje nanowaty, a porównania graniczne tolerują jedynie błąd
+  reprezentacji IEEE-754, bez pomiarowo istotnego poszerzania limitu.
+- testy P0 osobno potwierdzają fail-safe OFF dla przekroczenia I, V i P Keithleya oraz
+  próbę wyłączenia wszystkich wymaganych urządzeń mimo błędu pierwszego E-STOP.
+
+Aktualizacja integralności, recovery i edytora receptur:
+
+- dodano wersjonowany manifest zgodności thaTEC z hashem dostarczonego golden-file oraz
+  walidator drzewa, tabel, typów, wymiarów, timestampów i spójności `scan_definition` z
+  `measurement`;
+- pliki generowane jako `completed`, `aborted` i `faulted` przechodzą ten sam kontrakt oraz
+  próbę odczytu przez przypięty PyThat 0.2.14;
+- zamknięcie writera jest bramką jakości: niespójny wynik jest oznaczany jako `faulted` i
+  otrzymuje trwały `storage_validation_error`;
+- dodano bezpieczne wznowienie od ostatniej trwałej granicy z potwierdzonym OUTPUT OFF,
+  walidacją hashy, odcięciem niebezpiecznego ogona i pasywnym replay konfiguracji;
+- Data Browser udostępnia Resume tylko dla przerwanych wyników, po sprawdzeniu bieżącego
+  profilu i jawnej akceptacji operatora;
+- Recipe Builder otrzymał rzeczywiste drzewo kroków, inspector, wartości sweepów, atomowy
+  zapis, niezmienną historię wersji i autosave/recovery niepoprawnej treści roboczej;
+- kontrakt symulatorów pokrywa dla każdej rodziny normalną odpowiedź, timeout, malformed
+  response, błąd urządzenia, rozłączenie i kolejkę błędów; model DUT Keithleya ma compliance,
+  ograniczenie oraz opcjonalny deterministyczny szum.
+
+Aktualizacja wykonania, audytu i operacyjnego UI:
+
+- każda sesja aplikacji zapisuje osobny append-only JSONL z numerem sekwencji, czasem UTC i
+  monotonicznym, correlation ID runu, redakcją sekretów oraz `fsync` dla alarmów; awaria audytu
+  blokuje nowe runy, ARM i OUTPUT ON, ale nigdy OUTPUT OFF/E-STOP;
+- `ExecutionPolicy` narzuca deadline i limit VISA, heartbeat, watchdog i retry wyłącznie dla
+  operacji idempotentnych/pasywnych; niejednoznacznie zakończony OUTPUT ON nie jest powtarzany;
+- watchdog uruchamia niezależny best-effort E-STOP przez krótkotrwałe sesje, jeżeli worker
+  pomiarowy pozostaje zablokowany;
+- język receptur ma skończone `Repeat`, kontrolowane `If/else`, jawne `Connect`, skalarne
+  `Checkpoint` i `Comment`; nieskończona pętla nie może przejść parsera;
+- statyczny `PlanEstimator` podaje czas nominalny i model retry, liczbę checkpointów/widm,
+  liczbę wartości oraz konserwatywny rozmiar HDF5/CSV przed uruchomieniem;
+- Dashboard ma wykonywalny model preflightu obejmujący profil, audyt, aktualne stany i błędy
+  urządzeń, zgodność adresu z ostatnim testem IDN, zapisywalność katalogu, plan, DUT i estymaty;
+- Run Monitor prezentuje bieżący węzeł, indeks, setpointy, pomiary, ETA, heartbeat, szybkość
+  zapisu, kolejkę ostrzeżeń i próbkowany podgląd ostatniego zapisanego widma;
+- Settings ma strukturalny diff draftu, jawne odrzucenie zmian, SHA-256/backup diagnostics i
+  eksport konfiguracji z rekurencyjną redakcją danych uwierzytelniających; dedykowana tabela
+  Safety limits pokazuje osobne kolumny scope, parametr, min, max, unit, default i source oraz
+  jest dwukierunkowo zsynchronizowana z pełnym drzewem;
+- Recipe Builder obsługuje bezpieczne DnD przez zachowujący komentarze round-trip YAML;
+  każdy ruch przechodzi ponowny ścisły parse, a root, cykle i przekraczanie granicy `finally`
+  są odrzucane;
+- ręczny panel Keithleya ma kwalifikowaną rampę aktywnego źródła: odczytuje rzeczywisty poziom
+  początkowy, ogranicza krok, dwell i deadline, pokazuje preview oraz wykonuje atomowy pomiar I/V
+  w każdym punkcie; błąd transportu, compliance, limitu albo deadline wymusza OFF obu kanałów;
+- skompilowany `ExecutionPlan` zawiera hashowany manifest bezpiecznego wyłączenia w kolejności
+  wynikającej z profilu: OFF Keithleya/Rigola, abort Anritsu i trwały flush checkpointu; każdy
+  krok ma jawne zdarzenia start/finish/error, a runner zachowuje konserwatywny fallback;
+- Anritsu ma osobne ścieżki pojedynczej, uśrednionej i lokalnej referencji, centralny model
+  blokowania konfliktujących akcji, widoczne metadane i ochronę przed nadpisaniem; referencję
+  można zapisać i wczytać jako zweryfikowany artefakt HDF5 otwierany przez PyThat, a matematyka
+  jest blokowana przy niezgodnej siatce, Reference Level albo znanych innych RBW/VBW, detektorze,
+  attenuation, preamp lub sweep time;
+- aplikacja wiąże sesję z kontem systemu operacyjnego i egzekwuje role operator/inżynier/serwis
+  w backendowych punktach mutacji; tylko serwis zarządza rolami, inżynier zatwierdza profil i
+  limity, a operator steruje zatwierdzonym pomiarem; OFF, disconnect i E-STOP pozostają zawsze
+  dostępne, zaś actor/roles trafiają do audytu i HDF5;
+- pełna regresja kończy się wynikiem **221 passed, 34 subtests passed**; obejmuje pełny run
+  symulacyjny 100 × 20, dokładnie 2000 kompletnych widm oraz round-trip przez PyThat. Ruff przechodzi dla
+  kodu aplikacji, testów i entrypointów. Obce submoduły zawierają historyczne problemy lint i
+  zgodnie z polityką projektu nie są modyfikowane.
 
 Pozostają celowo niewdrożone bez kwalifikacji sprzętowej:
 
 - sprzętowy bit/rejestr compliance Keithley dla konkretnego modelu i firmware — działa konserwatywny fallback pomiarowy;
-- wymuszanie i readback attenuation/preamp Anritsu — oficjalny podręcznik potwierdza funkcje, lecz komendy muszą zostać zakwalifikowane na używanym trybie SCPI/Native i firmware;
+- fizyczna kwalifikacja zapisu RBW/VBW/detector/attenuation/preamp/sweep time Anritsu — ścieżka
+  programowa, readback, GUI, receptury i fail-closed bramka dokładnego firmware są wdrożone;
 - testy Hardware-in-the-Loop, odłączenie kabla oraz pomiar z bezpiecznym obciążeniem wzorcowym;
 - zatwierdzenie laboratoryjne limitu `estimated_load_power` Rigola; profil pozostaje `unverified` do decyzji operatora.
 

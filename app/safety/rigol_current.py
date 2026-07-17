@@ -32,12 +32,19 @@ class RigolCurrentEstimate:
     dut_min_resistance_ohm: float
 
 
+@dataclass(frozen=True, slots=True)
+class RigolSafetyEnvelope:
+    minimum_impedance_ohm: float | None = None
+    max_abs_current_a: float | None = None
+    max_abs_power_w: float | None = None
+
+
 def _open_circuit_voltage(displayed_v: float, output_load: str | float, source_ohm: float) -> float:
     if isinstance(output_load, str) and output_load.strip().upper() in {"HIGHZ", "INF", "INFINITY"}:
         return displayed_v
     load_ohm = float(output_load)
     if load_ohm <= 0:
-        raise SafetyViolation("Ustawienie obciążenia Rigola musi być dodatnie albo HIGHZ.")
+        raise SafetyViolation("Rigol output load must be positive or HIGHZ.")
     return displayed_v * (source_ohm + load_ohm) / load_ohm
 
 
@@ -56,7 +63,7 @@ def estimate_rigol_current(
     source_ohm = parse_quantity(source_resistance, DIMENSION_RESISTANCE, require_unit=not isinstance(source_resistance, (int, float))).si_value
     dut_ohm = parse_quantity(dut_min_impedance, DIMENSION_RESISTANCE, require_unit=not isinstance(dut_min_impedance, (int, float))).si_value
     if source_ohm <= 0 or dut_ohm <= 0:
-        raise SafetyViolation("Impedancje źródła i DUT muszą być dodatnie.")
+        raise SafetyViolation("Source and DUT impedances must be positive.")
     open_high = _open_circuit_voltage(high_v, output_load, source_ohm)
     open_low = _open_circuit_voltage(low_v, output_load, source_ohm)
     current_high = open_high / (source_ohm + dut_ohm)
@@ -79,7 +86,7 @@ def _enforce_range(name: str, value: float, minimum: str, maximum: str, dimensio
     tolerance = max(abs(lower), abs(upper), 1.0) * 1e-12
     if value < lower - tolerance or value > upper + tolerance:
         raise SafetyViolation(
-            f"{name}={value:.9g} poza zatwierdzonym zakresem [{lower:.9g}, {upper:.9g}] SI."
+            f"{name}={value:.9g} is outside the approved [{lower:.9g}, {upper:.9g}] SI range."
         )
 
 
@@ -93,17 +100,18 @@ def validate_rigol_waveform(
     low_level: str | float | Quantity,
     output_load: str | float,
     dut_min_impedance: str | float | Quantity | None,
+    dut_envelope: RigolSafetyEnvelope | None = None,
 ) -> RigolCurrentEstimate:
     """Validate a complete output configuration before a SCPI write is allowed."""
 
     waveform_normalized = waveform.strip().upper()
     if waveform_normalized not in channel.allowed_waveforms:
-        raise SafetyViolation(f"Przebieg {waveform_normalized} nie jest dozwolony dla kanału.")
+        raise SafetyViolation(f"Waveform {waveform_normalized} is not allowed for this channel.")
     freq_hz = parse_quantity(frequency, DIMENSION_FREQUENCY, require_unit=not isinstance(frequency, (int, float))).si_value
     high_v = parse_quantity(high_level, DIMENSION_VOLTAGE, require_unit=not isinstance(high_level, (int, float))).si_value
     low_v = parse_quantity(low_level, DIMENSION_VOLTAGE, require_unit=not isinstance(low_level, (int, float))).si_value
     if waveform_normalized != "DC" and high_v <= low_v:
-        raise SafetyViolation("HighL musi być większy od LowL dla przebiegów zmiennych.")
+        raise SafetyViolation("HighL must be greater than LowL for non-DC waveforms.")
 
     limits = channel.lab_limits
     if waveform_normalized not in {"DC", "NOIS"}:
@@ -115,9 +123,32 @@ def validate_rigol_waveform(
     _enforce_range("offset", (high_v + low_v) / 2.0, limits.offset.min, limits.offset.max, DIMENSION_VOLTAGE)
 
     if dut_min_impedance is None:
-        if safety.require_declared_dut_impedance:
-            raise SafetyViolation("Przed włączeniem Rigola trzeba zadeklarować minimalną impedancję DUT.")
-        dut_min_impedance = limits.declared_dut_impedance.min
+        if dut_envelope is not None and dut_envelope.minimum_impedance_ohm is not None:
+            dut_min_impedance = dut_envelope.minimum_impedance_ohm
+        elif safety.require_declared_dut_impedance:
+            raise SafetyViolation("Declare the minimum DUT impedance before enabling Rigol output.")
+        else:
+            dut_min_impedance = limits.declared_dut_impedance.min
+    if dut_envelope is not None:
+        for name, value in (
+            ("minimum impedance", dut_envelope.minimum_impedance_ohm),
+            ("maximum current", dut_envelope.max_abs_current_a),
+            ("maximum power", dut_envelope.max_abs_power_w),
+        ):
+            if value is not None and (not math.isfinite(value) or value <= 0):
+                raise SafetyViolation(f"Rigol DUT {name} must be finite and positive.")
+        declared_impedance = parse_quantity(
+            dut_min_impedance,
+            DIMENSION_RESISTANCE,
+            require_unit=not isinstance(dut_min_impedance, (int, float)),
+        ).si_value
+        if (
+            dut_envelope.minimum_impedance_ohm is not None
+            and declared_impedance > dut_envelope.minimum_impedance_ohm
+        ):
+            raise SafetyViolation(
+                "Declared Rigol DUT impedance is less conservative than the recipe DUT minimum."
+            )
     estimate = estimate_rigol_current(
         high_level=high_v,
         low_level=low_v,
@@ -126,18 +157,22 @@ def validate_rigol_waveform(
         source_resistance=safety.fixed_source_resistance,
     )
     current_limit = parse_quantity(limits.estimated_load_current.max_abs or limits.estimated_load_current.max, DIMENSION_CURRENT).si_value
+    if dut_envelope is not None and dut_envelope.max_abs_current_a is not None:
+        current_limit = min(current_limit, dut_envelope.max_abs_current_a)
     if estimate.peak_absolute_current_a > current_limit:
         raise SafetyViolation(
-            "Szacowany prąd obciążenia Rigola "
-            f"{estimate.peak_absolute_current_a:.9g} A przekracza limit {current_limit:.9g} A."
+            "Estimated Rigol load current "
+            f"{estimate.peak_absolute_current_a:.9g} A exceeds the {current_limit:.9g} A limit."
         )
     power_limit = parse_quantity(
         limits.estimated_load_power.max_abs or limits.estimated_load_power.max, DIMENSION_POWER
     ).si_value
+    if dut_envelope is not None and dut_envelope.max_abs_power_w is not None:
+        power_limit = min(power_limit, dut_envelope.max_abs_power_w)
     if estimate.peak_estimated_dut_power_w > power_limit:
         raise SafetyViolation(
-            "Szacowana moc na DUT dla Rigola "
-            f"{estimate.peak_estimated_dut_power_w:.9g} W przekracza limit {power_limit:.9g} W."
+            "Estimated Rigol DUT power "
+            f"{estimate.peak_estimated_dut_power_w:.9g} W exceeds the {power_limit:.9g} W limit."
         )
     return estimate
 

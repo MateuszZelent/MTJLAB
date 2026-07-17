@@ -60,6 +60,33 @@ Efektywny limit to zawsze najwęższe przecięcie tych czterech warstw. Ogranicz
 
 Żaden przycisk „Override” nie zmienia limitów w pamięci bez śladu. Zmiana wymaga trybu inżyniera, powodu, ponownego zatwierdzenia profilu i zapisu do audytu. Konsola raw SCPI/TSP jest domyślnie wyłączona i dostępna wyłącznie w trybie serwisowym.
 
+### 3.1. Deklaracja limitów DUT w recepturze
+
+Każda receptura, która uzbraja albo włącza wyjście Keithleya lub Rigola, musi zawierać
+kompletną deklarację `dut_limits` dla używanego kanału. Brak choć jednego wymaganego limitu
+blokuje kompilację jeszcze przed otwarciem sesji VISA. Przykład:
+
+```yaml
+dut_limits:
+  keithley:
+    B:
+      current: {min: "0 A", max: "10 mA"}
+      voltage: {min: "-67 mV", max: "67 mV"}
+      max_abs_power: "670 uW"
+  rigol:
+    1:
+      minimum_impedance: "50 ohm"
+      max_abs_current: "50 uA"
+      max_abs_power: "100 nW"
+  anritsu:
+    max_expected_input: "-10 dBm"
+```
+
+Wymagane są jawne jednostki, również w notacji naukowej. Wartości są przeliczane do SI,
+a następnie przecinane z profilem stanowiska. Walidacja jest ponawiana przy konfiguracji,
+ARM, bezpośrednio przed `OUTPUT ON` oraz po odczycie Keithleya. Deklaracja i jej postać JSON
+są zapisywane w HDF5 w `/run/dut_limits_json` oraz w `labbook/metadata`.
+
 ## 4. Audyt submodułu Keithley
 
 ### 4.1. Charakter sterownika
@@ -1010,13 +1037,14 @@ Wersja v1 jest gotowa, gdy:
 - plik przechodzi round-trip w istniejącym systemie inwentaryzacji danych laboratorium;
 - zestaw testów symulacyjnych oraz kwalifikacja na sztucznym obciążeniu są udokumentowane.
 
-## 19. Otwarte decyzje przed kodowaniem wyjść
+## 19. Otwarte decyzje przed kwalifikacją wyjść
 
 1. Jaki jest dokładny wynik `*IDN?` Keithley i Anritsu?
 2. Jakie są zatwierdzone maksymalne I, V i P dla DUT na obu kanałach Keithley?
 3. Jaka jest minimalna impedancja DUT widziana przez oba kanały Rigola?
 4. Jaki jest bezpieczny maksymalny poziom wejściowy Anritsu dla użytej ścieżki i tłumika?
-5. Czy generator RF Anritsu ma być sterowany w v1?
+5. Jakie zatwierdzone zakresy częstotliwości i mocy oraz która opcja/wersja firmware mają zostać
+   zakwalifikowane dla generatora RF Anritsu w v1?
 6. Czy stanowisko ma fizyczny interlock/E-STOP, który aplikacja może obserwować?
 7. Czy po prawidłowym runie Keithley ma zawsze rampować do zera, czy do osobnej wartości bezpiecznej?
 8. Jakie dokładne nazwy urządzeń, kontrolek, wskaźników i jednostek oczekuje obecny system
@@ -1025,3 +1053,73 @@ Wersja v1 jest gotowa, gdy:
    osobnymi wierszami dla każdego trace/kanału?
 
 Do czasu odpowiedzi profil pozostaje niezaufany, a `allow_output_enable` jest ustawione na `false`.
+
+## 20. Stan implementacji — 2026-07-16
+
+Zakończono programowo etapy 1–5 w zakresie możliwym do zweryfikowania bez podłączania
+energii do DUT. W szczególności:
+
+- wynik jest sprawdzany przez wersjonowany manifest thaTEC oraz przypięty PyThat 0.2.14;
+- manifest zawiera SHA-256 dostarczonego pliku referencyjnego, a test golden-file sprawdza
+  jego drzewo, tabele, typy, skale i round-trip do xarray;
+- kontrakt jest walidowany również dla wyników `completed`, `aborted` i `faulted`, a błąd
+  walidacji przy zamykaniu zmienia run na `faulted` zamiast pozostawiać pozornie poprawny plik;
+- wznowienie jest możliwe wyłącznie od trwałego zdarzenia `safe_resume_boundary`, po
+  potwierdzonym OUTPUT OFF Rigola i Keithleya; niezapisany lub energetyzowany ogon jest odcinany;
+- wznowienie wymaga identycznych hashy planu, receptury i settings oraz odtwarza wyłącznie
+  pasywną konfigurację potrzebną przed kolejnym checkpointem;
+- Recipe Builder ma hierarchiczne drzewo, inspektor, podgląd wartości sweepu, atomowy zapis,
+  historię wersji i autosave recovery, także dla chwilowo niepoprawnego YAML;
+- symulatory wszystkich trzech urządzeń mają deterministyczne scenariusze normalne, timeout,
+  malformed response, device error, rozłączenie i kolejkę błędów; model Keithleya obsługuje
+  compliance, rezystancyjny DUT oraz opcjonalny powtarzalny szum odczytu;
+- pełny zestaw regresji po tych zmianach przechodzi bez błędów.
+
+Dalsza realizacja etapów 1–5 objęła również:
+
+- trwały, sekwencyjny audit JSONL z redakcją i fail-closed blokadą energii po błędzie zapisu;
+- politykę deadline/retry/heartbeat/watchdog, bez retry dla OUTPUT ON i z niezależnym E-STOP;
+- typy receptur `Repeat`, `If/else`, `Connect`, `Checkpoint` i `Comment` oraz model estymacji
+  czasu, retry i rozmiaru danych przed ARM;
+- dynamiczny Dashboard/preflight obejmujący profil, urządzenia, błędy, stany wyjść, katalog
+  wyników, DUT i skompilowany plan;
+- rozszerzony Run Monitor: aktualny node, setpointy/readback, ETA, heartbeat, write rate,
+  ostrzeżenia i ostatnie widmo checkpointu;
+- diagnostykę Settings z diffem, odrzuceniem draftu, SHA-256, statusem backupu i redacted export;
+- dedykowaną tabelę Safety limits z kolumnami scope, parametr, minimum, maksimum, jednostka,
+  wartość domyślna i źródło oraz synchronizacją z pełnym drzewem ustawień;
+- bezpieczny DnD drzewa receptury z zachowaniem komentarzy, ponownym parserem i blokadą
+  cykli, ruchu root oraz przekraczania granicy `finally`;
+- ręczną rampę Keithleya od rzeczywistego poziomu źródła do celu, z limitem kroku, czasu
+  ustalania i deadline, podglądem punktów, pomiarem I/V w każdym kroku oraz fail-safe OFF;
+- hashowany manifest bezpiecznego wyłączenia w `ExecutionPlan`, wykonywany w jawnej kolejności
+  z rejestrowaniem każdego kroku oraz trwałym flush checkpointu;
+- produkcyjny przepływ referencji Anritsu: świeża 1×, uśredniona N×, lokalne użycie bieżącego
+  śladu, metadane, ochrona nadpisania, HDF5 save/load przez PyThat oraz kontrola zgodności;
+- lokalne uwierzytelnienie kontem systemu operacyjnego i role operator/inżynier/serwis,
+  egzekwowane w backendzie oraz widoczne w UI, audycie i HDF5; provisioning opisuje
+  `docs/ACCESS_CONTROL.md`;
+- regresję **221 testów i 34 podtestów**, w tym pełne wykonanie symulacyjne 100 × 20 z dokładnie
+  2000 kompletnych widm i ponownym otwarciem przez PyThat, Ruff dla kodu własnego i compileall;
+- wykonywalny, service-only harness `app/qualification` dla etapów passive/OFF oraz receptur HIL,
+  z wielokrotną bramką trybu energized, atomowym raportem JSON+SHA-256, audytem i wynikiem HDF5;
+  procedura użycia znajduje się w `docs/HIL_QUALIFICATION.md`.
+- dwukierunkową reprezentację częstotliwości Anritsu `Start/Stop` i `Center/Span`, która przed
+  wywołaniem adaptera zawsze wraca do zwalidowanych granic fizycznych;
+- bezpieczną ścieżkę opcjonalnego generatora Anritsu: detekcję opcji 020/120/021/121, jawny tryb
+  SG, konfigurację wyłącznie przy RF OFF, readback, jednorazowy ARM, limity stacji i DUT,
+  receptury, symulator oraz RF OFF w E-STOP. Domyślny protokół `unverified` blokuje aktywację do
+  czasu kwalifikacji opisanej w `docs/HIL_QUALIFICATION.md`.
+- kwalifikowalną ścieżkę zaawansowanego Spectrum Analyzer: query-only odczyt oraz fail-closed zapis
+  RBW/VBW, detektora, attenuation/preamp i sweep time, pełny readback, bramkę dokładnego firmware,
+  GUI, receptury i symulator; referencje HDF5 zachowują te parametry i blokują matematykę widm przy
+  niezgodnej konfiguracji.
+
+Źródłem tożsamości jest uwierzytelniona sesja systemu operacyjnego; aplikacja nie przechowuje
+własnych haseł i nie udostępnia pozornego przełącznika roli. Pierwsze konto serwisowe wymaga
+kontrolowanego provisioningu lokalnego profilu. Komendy zależne od firmware oraz kwalifikacja
+HIL pozostają etapem 6.
+
+Etap 6 pozostaje otwarty. Wymaga fizycznego stanowiska, zatwierdzonych obciążeń, limitów DUT,
+okablowania oraz decyzji osoby odpowiedzialnej za bezpieczeństwo. Wyników z symulatorów nie
+wolno traktować jako kwalifikacji sprzętowej.

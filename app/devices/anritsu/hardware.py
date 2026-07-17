@@ -23,6 +23,8 @@ ANRITSU_FREQUENCY_OPTIONS: dict[str, AnritsuFrequencyOption] = {
 }
 
 ANRITSU_PREAMPLIFIER_OPTIONS = frozenset({"008", "108", "068", "168"})
+# MS2830A remote manual, option notes on pages 272-273 and 698-700.
+ANRITSU_SIGNAL_GENERATOR_OPTIONS = frozenset({"020", "120", "021", "121"})
 
 
 def parse_anritsu_option_response(response: str) -> tuple[str, ...]:
@@ -48,4 +50,3 @@ def frequency_option_for(options: tuple[str, ...]) -> AnritsuFrequencyOption | N
 
     installed = [ANRITSU_FREQUENCY_OPTIONS[code] for code in options if code in ANRITSU_FREQUENCY_OPTIONS]
     return max(installed, key=lambda option: option.maximum_stop_hz, default=None)
-

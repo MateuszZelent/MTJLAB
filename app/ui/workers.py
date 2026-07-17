@@ -6,6 +6,8 @@ QObject/QThread pair.  GUI code only emits queued operation requests.
 
 from __future__ import annotations
 
+from collections.abc import Callable
+
 from PySide6.QtCore import QEventLoop, QMetaObject, QObject, QThread, QTimer, Qt, Signal, Slot
 
 from app.devices.anritsu.adapter import AnritsuAdapter
@@ -142,9 +144,15 @@ class InstrumentWorker(QObject):
                 return self._adapter.measure(payload)  # type: ignore[arg-type]
             if operation == "ramp_to_zero":
                 return self._adapter.ramp_to_zero(payload)  # type: ignore[arg-type]
+            if operation == "ramp_to_level":
+                return self._adapter.ramp_to_level(payload)  # type: ignore[arg-type]
         if isinstance(self._adapter, AnritsuAdapter):
             if operation == "read_configuration":
                 return self._adapter.read_current_configuration()
+            if operation == "read_advanced_spectrum":
+                return self._adapter.read_advanced_spectrum_configuration()
+            if operation == "configure_advanced_spectrum":
+                return self._adapter.configure_advanced_spectrum(payload)  # type: ignore[arg-type]
             if operation == "configure":
                 return self._adapter.configure_spectrum(payload)  # type: ignore[arg-type]
             if operation == "start_live":
@@ -157,6 +165,14 @@ class InstrumentWorker(QObject):
                 return self._adapter.fetch_current_trace(str(payload or "TRAC1"))
             if operation == "single_sweep":
                 return self._adapter.acquire_single_sweep(str(payload or "TRAC1"))
+            if operation == "read_signal_generator":
+                return self._adapter.read_signal_generator_configuration()
+            if operation == "configure_signal_generator":
+                return self._adapter.configure_signal_generator(payload)  # type: ignore[arg-type]
+            if operation == "arm_signal_generator":
+                return self._adapter.arm_signal_generator_output()
+            if operation == "set_signal_generator_output":
+                return self._adapter.set_signal_generator_output(bool(payload))
         raise ValueError(f"Unsupported operation {operation!r}.")
 
 
@@ -172,6 +188,7 @@ class DeviceController(QObject):
 
     def __init__(self, adapter: DeviceAdapter, parent: QObject | None = None) -> None:
         super().__init__(parent)
+        self._operation_guard: Callable[[str, object], None] | None = None
         self._thread = QThread(self)
         self._worker = InstrumentWorker(adapter)
         self._worker.moveToThread(self._thread)
@@ -184,7 +201,18 @@ class DeviceController(QObject):
         self._thread.start()
 
     def call(self, operation: str, payload: object = None) -> None:
+        if self._operation_guard is not None:
+            try:
+                self._operation_guard(operation, payload)
+            except Exception as exc:
+                self.error.emit(operation, str(exc))
+                return
         self.request.emit(operation, payload)
+
+    def set_operation_guard(self, guard: Callable[[str, object], None] | None) -> None:
+        """Install a GUI-thread interlock evaluated before a command is queued."""
+
+        self._operation_guard = guard
 
     def reconfigure(self, adapter: DeviceAdapter) -> None:
         """Safely discard the session before applying a newly saved profile."""

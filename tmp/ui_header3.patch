@@ -1,0 +1,16 @@
+diff --git a/app/ui/main_window.py b/app/ui/main_window.py
+--- a/app/ui/main_window.py
++++ b/app/ui/main_window.py
+@@ -2619,1 +2619,11 @@
+-        title_row.addStretch(1)
++        title_row.addStretch(1)
++        self.connection_indicator = QLabel("(!) OFFLINE")
++        self.connection_indicator.setObjectName("anritsuConnectionIndicator")
++        title_row.addWidget(self.connection_indicator)
++        self.reconnect = QPushButton("Reconnect")
++        self.reconnect.setProperty("compact", True)
++        self.reconnect.setToolTip("Close the failed VISA session and verify a fresh connection.")
++        self.reconnect.hide()
++        title_row.addWidget(self.reconnect)
++
++

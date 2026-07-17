@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
+from contextlib import contextmanager
 from dataclasses import dataclass
+import math
 from typing import Protocol, runtime_checkable
 
 from app.domain.errors import ConnectionError, SafetyViolation
@@ -40,18 +42,18 @@ class OutputInterlock:
     def assert_can_enable(self, *, device_name: str, device_allows_output: bool) -> None:
         if self.profile_locks_outputs and not self.profile_approved:
             raise SafetyViolation(
-                f"Wyjście {device_name} jest zablokowane: profil stanowiska nie jest zatwierdzony."
+                f"{device_name} output is locked because the station profile is not approved."
             )
         if not device_allows_output:
             raise SafetyViolation(
-                f"Wyjście {device_name} jest zablokowane w settings.yml (allow_output_enable=false)."
+                f"{device_name} output is locked in settings.yml (allow_output_enable=false)."
             )
 
 
 def parse_identity(resource: str, response: str) -> DeviceIdentity:
     parts = [part.strip() for part in response.strip().split(",")]
     if not response.strip():
-        raise ConnectionError("Urządzenie zwróciło pustą odpowiedź na *IDN?.")
+        raise ConnectionError("The instrument returned an empty response to *IDN?.")
     return DeviceIdentity(
         resource=resource,
         idn=response.strip(),
@@ -72,14 +74,14 @@ def validate_identity(
 ) -> None:
     idn_upper = identity.idn.upper()
     if vendor_contains.upper() not in idn_upper:
-        raise ConnectionError(f"Nieoczekiwany producent urządzenia: {identity.idn}")
+        raise ConnectionError(f"Unexpected instrument vendor: {identity.idn}")
     if expected_models and not any(model.upper() in idn_upper for model in expected_models):
         raise ConnectionError(
-            f"Nieoczekiwany model urządzenia: {identity.idn}; oczekiwano {', '.join(expected_models)}."
+            f"Unexpected instrument model: {identity.idn}; expected {', '.join(expected_models)}."
         )
     if require_serial_match and identity.serial != expected_serial:
         raise ConnectionError(
-            f"Numer seryjny urządzenia różni się od zatwierdzonego: {identity.serial!r}."
+            f"Instrument serial number differs from the approved value: {identity.serial!r}."
         )
 
 
@@ -107,6 +109,30 @@ class DeviceAdapter(ABC):
     @property
     def connected(self) -> bool:
         return self._state is not DeviceState.DISCONNECTED
+
+    @contextmanager
+    def io_timeout(self, timeout_s: float):
+        """Temporarily cap VISA I/O latency for one high-level operation.
+
+        Concrete adapters deliberately keep their sessions private. They all
+        use the same ``_session`` ownership convention, allowing the execution
+        engine to impose a stricter deadline without exposing raw VISA to UI or
+        recipes. A shorter device-profile timeout is never widened.
+        """
+
+        if not math.isfinite(timeout_s) or timeout_s <= 0:
+            raise ValueError("Operation I/O timeout must be finite and positive.")
+        session = getattr(self, "_session", None)
+        if session is None:
+            raise ConnectionError("Cannot set an operation timeout without an active session.")
+        previous = int(session.timeout)
+        requested = max(1, math.ceil(timeout_s * 1000))
+        session.timeout = min(previous, requested)
+        try:
+            yield
+        finally:
+            if getattr(self, "_session", None) is session:
+                session.timeout = previous
 
     @abstractmethod
     def connect(self) -> DeviceIdentity:

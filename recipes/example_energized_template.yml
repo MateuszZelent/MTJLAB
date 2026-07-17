@@ -6,6 +6,20 @@ name: "TEMPLATE — energised single-point measurement"
 # enabled the per-device output permission and verified the physical DUT path.
 # It demonstrates the required explicit ARM → OUTPUT ON transitions.
 
+dut_limits:
+  keithley:
+    B:
+      current: {min: "0 A", max: "10 mA"}
+      voltage: {min: "-67 mV", max: "67 mV"}
+      max_abs_power: "670 uW"
+  rigol:
+    1:
+      minimum_impedance: "50 ohm"
+      max_abs_current: "50 uA"
+      max_abs_power: "100 nW"
+  anritsu:
+    max_expected_input: "-10 dBm"
+
 root:
   id: single-point
   type: sequence

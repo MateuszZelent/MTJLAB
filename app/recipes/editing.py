@@ -1,0 +1,122 @@
+"""Safe structural recipe edits with comment-preserving YAML round trips."""
+
+from __future__ import annotations
+
+from io import StringIO
+from typing import Any
+
+from ruamel.yaml import YAML
+
+from app.domain.errors import ConfigurationError
+from app.recipes.models import parse_recipe_text
+
+
+def move_recipe_node(
+    source: str,
+    *,
+    node_id: str,
+    destination_parent_id: str,
+    destination_branch: str,
+    destination_index: int,
+) -> str:
+    """Move one non-root node, then re-parse the entire recipe contract.
+
+    Nodes cannot cross between the normal tree and ``finally``.  This keeps a
+    drag operation from silently changing when a cleanup action is executed.
+    The strict parser remains the final authority for container and branch
+    semantics.
+    """
+
+    yaml = YAML()
+    raw = yaml.load(source)
+    if not isinstance(raw, dict) or not isinstance(raw.get("root"), dict):
+        raise ConfigurationError("The recipe must contain a mapping root node.")
+    if raw["root"].get("id") == node_id:
+        raise ConfigurationError("The recipe root cannot be moved.")
+
+    detached = _detach(raw["root"], node_id, section="root")
+    finally_nodes = raw.setdefault("finally", [])
+    if not isinstance(finally_nodes, list):
+        raise ConfigurationError("recipe.finally must be a list.")
+    if detached is None:
+        detached = _detach_list(finally_nodes, node_id, section="finally")
+    if detached is None:
+        raise ConfigurationError(f"Recipe node {node_id!r} was not found.")
+    moved, source_section = detached
+
+    if destination_parent_id == "__finally__":
+        target = finally_nodes
+        destination_section = "finally"
+    else:
+        parent = _find(raw["root"], destination_parent_id)
+        destination_section = "root"
+        if parent is None:
+            for candidate in finally_nodes:
+                if isinstance(candidate, dict):
+                    parent = _find(candidate, destination_parent_id)
+                    if parent is not None:
+                        destination_section = "finally"
+                        break
+        if parent is None:
+            raise ConfigurationError(
+                "The destination is inside the moved node or no longer exists. "
+                "A node cannot be moved into its own descendant."
+            )
+        if destination_branch not in {"children", "else"}:
+            raise ConfigurationError("Destination branch must be children or else.")
+        target = parent.setdefault(destination_branch, [])
+        if not isinstance(target, list):
+            raise ConfigurationError(f"Destination {destination_branch} is not a list.")
+
+    if source_section != destination_section:
+        raise ConfigurationError("Drag-and-drop cannot move nodes into or out of finally.")
+    index = max(0, min(int(destination_index), len(target)))
+    target.insert(index, moved)
+
+    stream = StringIO()
+    yaml.dump(raw, stream)
+    result = stream.getvalue()
+    parse_recipe_text(result, origin="drag-and-drop")
+    return result
+
+
+def _detach(node: dict[str, Any], node_id: str, *, section: str) -> tuple[dict[str, Any], str] | None:
+    for branch in ("children", "else"):
+        nested = node.get(branch, [])
+        if isinstance(nested, list):
+            found = _detach_list(nested, node_id, section=section)
+            if found is not None:
+                return found
+    return None
+
+
+def _detach_list(
+    nodes: list[Any],
+    node_id: str,
+    *,
+    section: str,
+) -> tuple[dict[str, Any], str] | None:
+    for index, candidate in enumerate(tuple(nodes)):
+        if not isinstance(candidate, dict):
+            continue
+        if candidate.get("id") == node_id:
+            return nodes.pop(index), section
+        found = _detach(candidate, node_id, section=section)
+        if found is not None:
+            return found
+    return None
+
+
+def _find(node: dict[str, Any], node_id: str) -> dict[str, Any] | None:
+    if node.get("id") == node_id:
+        return node
+    for branch in ("children", "else"):
+        nested = node.get(branch, [])
+        if not isinstance(nested, list):
+            continue
+        for candidate in nested:
+            if isinstance(candidate, dict):
+                found = _find(candidate, node_id)
+                if found is not None:
+                    return found
+    return None

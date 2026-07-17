@@ -3,6 +3,9 @@ __pycache__/gui.cpython-314.pyc
 *.pyc
 *.egg-info/
 measurements/
+qualification/
+qualification-sim*/
 *.h5
 .config/*.bak
 .config/settings.yml
+.config/logs/

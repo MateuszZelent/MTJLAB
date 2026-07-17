@@ -1,0 +1,17 @@
+diff --git a/app/ui/main_window.py b/app/ui/main_window.py
+--- a/app/ui/main_window.py
++++ b/app/ui/main_window.py
+@@ -2617,3 +2617,11 @@
+-        title.setObjectName("pageTitle")
+-        title_row.addWidget(title)
+-        title_row.addStretch(1)
++        title.setObjectName("pageTitle")
++        title_row.addWidget(title)
++        title_row.addStretch(1)
++        self.connection_indicator = QLabel("(!) OFFLINE")
++        self.connection_indicator.setObjectName("anritsuConnectionIndicator")
++        title_row.addWidget(self.connection_indicator)
++        self.reconnect = QPushButton("Reconnect")
++        self.reconnect.setProperty("compact", True)
++        self.reconnect.hide()
++        title_row.addWidget(self.reconnect)

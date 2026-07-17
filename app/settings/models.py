@@ -6,6 +6,7 @@ them through :mod:`app.domain.quantities`, requiring a dimension every time.
 
 from __future__ import annotations
 
+import math
 from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
@@ -13,6 +14,7 @@ from pydantic import BaseModel, ConfigDict, Field, model_validator
 from app.domain.errors import ConfigurationError
 from app.domain.quantities import (
     DIMENSION_CURRENT,
+    DIMENSION_DB,
     DIMENSION_DBM,
     DIMENSION_FREQUENCY,
     DIMENSION_POWER,
@@ -37,6 +39,35 @@ class ProfileSettings(StrictModel):
     lock_outputs_when_unverified: bool = True
 
 
+RoleName = Literal["operator", "engineer", "service"]
+
+
+class AccessControlSettings(StrictModel):
+    """Local RBAC bound to the authenticated operating-system account."""
+
+    identity_provider: Literal["operating_system"] = "operating_system"
+    default_roles: tuple[RoleName, ...] = ("operator",)
+    user_roles: dict[str, tuple[RoleName, ...]] = Field(default_factory=dict)
+
+    @model_validator(mode="after")
+    def validate_assignments(self) -> "AccessControlSettings":
+        if not self.default_roles:
+            raise ValueError("access_control.default_roles cannot be empty")
+        normalized_users: set[str] = set()
+        for username, roles in self.user_roles.items():
+            if not username.strip():
+                raise ValueError("access_control.user_roles contains an empty username")
+            normalized = username.strip().replace("/", "\\").casefold()
+            if normalized in normalized_users:
+                raise ValueError(
+                    "access_control.user_roles contains duplicate OS identities after normalization"
+                )
+            normalized_users.add(normalized)
+            if not roles:
+                raise ValueError(f"access_control.user_roles[{username!r}] cannot be empty")
+        return self
+
+
 class ConnectionSettings(StrictModel):
     resource: str | None
     visa_backend: str = "system"
@@ -47,7 +78,7 @@ class ConnectionSettings(StrictModel):
     @model_validator(mode="after")
     def validate_timeout(self) -> "ConnectionSettings":
         if parse_quantity(self.timeout, DIMENSION_TIME).si_value <= 0:
-            raise ValueError("timeout musi być dodatni")
+            raise ValueError("timeout must be positive")
         return self
 
 
@@ -61,7 +92,7 @@ class IdentitySettings(StrictModel):
     @model_validator(mode="after")
     def serial_rule_is_complete(self) -> "IdentitySettings":
         if self.require_serial_match and not self.expected_serial:
-            raise ValueError("expected_serial jest wymagany przy require_serial_match")
+            raise ValueError("expected_serial is required when require_serial_match is enabled")
         return self
 
 
@@ -74,9 +105,9 @@ class RangeSettings(StrictModel):
         lower = parse_quantity(self.min, dimension)
         upper = parse_quantity(self.max, dimension)
         if lower.si_value > upper.si_value:
-            raise ConfigurationError("minimalna wartość zakresu jest większa od maksymalnej")
+            raise ConfigurationError("the minimum range value is greater than the maximum")
         if self.max_abs is not None and parse_quantity(self.max_abs, dimension).si_value < 0:
-            raise ConfigurationError("max_abs nie może być ujemne")
+            raise ConfigurationError("max_abs cannot be negative")
         return self
 
 
@@ -91,7 +122,7 @@ class IntegerRangeSettings(StrictModel):
     @model_validator(mode="after")
     def validate_order(self) -> "IntegerRangeSettings":
         if self.min > self.max or self.min < 1:
-            raise ValueError("Nieprawidłowy zakres całkowity")
+            raise ValueError("Invalid integer range")
         return self
 
 
@@ -102,9 +133,9 @@ class ImpedanceSettings(StrictModel):
     @model_validator(mode="after")
     def validate_impedance(self) -> "ImpedanceSettings":
         if parse_quantity(self.min, DIMENSION_RESISTANCE).si_value <= 0:
-            raise ValueError("minimalna impedancja DUT musi być dodatnia")
+            raise ValueError("minimum DUT impedance must be positive")
         if self.nominal is not None and parse_quantity(self.nominal, DIMENSION_RESISTANCE).si_value <= 0:
-            raise ValueError("nominalna impedancja DUT musi być dodatnia")
+            raise ValueError("nominal DUT impedance must be positive")
         return self
 
 
@@ -159,9 +190,9 @@ class RigolSafety(StrictModel):
     @model_validator(mode="after")
     def validate_source_resistance(self) -> "RigolSafety":
         if parse_quantity(self.fixed_source_resistance, DIMENSION_RESISTANCE).si_value <= 0:
-            raise ValueError("fixed_source_resistance musi być dodatnia")
+            raise ValueError("fixed_source_resistance must be positive")
         if set(self.channels) - {"1", "2"} or not self.channels:
-            raise ValueError("Rigol musi mieć kanały 1 i/lub 2")
+            raise ValueError("Rigol must define channel 1 and/or 2")
         return self
 
 
@@ -196,13 +227,13 @@ class KeithleyChannelLimits(StrictModel):
         self.measured_current_trip.checked(DIMENSION_CURRENT)
         self.measured_voltage_trip.checked(DIMENSION_VOLTAGE)
         if parse_quantity(self.max_abs_power, DIMENSION_POWER).si_value <= 0:
-            raise ValueError("max_abs_power musi być dodatnie")
+            raise ValueError("max_abs_power must be positive")
         if parse_quantity(self.ramp_current_step_max, DIMENSION_CURRENT).si_value <= 0:
-            raise ValueError("ramp_current_step_max musi być dodatnie")
+            raise ValueError("ramp_current_step_max must be positive")
         if parse_quantity(self.ramp_voltage_step_max, DIMENSION_VOLTAGE).si_value <= 0:
-            raise ValueError("ramp_voltage_step_max musi być dodatnie")
+            raise ValueError("ramp_voltage_step_max must be positive")
         if self.sweep_points_max < 2:
-            raise ValueError("sweep_points_max musi wynosić co najmniej 2")
+            raise ValueError("sweep_points_max must be at least 2")
         if self.point_settle_time is not None:
             self.point_settle_time.checked(DIMENSION_TIME)
         return self
@@ -259,6 +290,17 @@ class RfInputSettings(StrictModel):
     def validate_expected_power(self) -> "RfInputSettings":
         if self.max_expected_power_at_connector is not None:
             parse_quantity(self.max_expected_power_at_connector, DIMENSION_DBM)
+        external = parse_quantity(self.external_attenuation, DIMENSION_DB).si_value
+        if external < 0:
+            raise ValueError("Anritsu external_attenuation cannot be negative")
+        if self.minimum_internal_attenuation is not None:
+            internal = parse_quantity(
+                self.minimum_internal_attenuation, DIMENSION_DB
+            ).si_value
+            if not 0 <= internal <= 60 or not math.isclose(internal % 2, 0.0, abs_tol=1e-9):
+                raise ValueError(
+                    "Anritsu minimum_internal_attenuation must be 0..60 dB in 2 dB steps"
+                )
         return self
 
 
@@ -266,6 +308,7 @@ class AnritsuSafety(StrictModel):
     acquisition_allowed: bool = False
     require_rf_input_limit_definition: bool = True
     signal_generator_output_allowed: bool = False
+    outputs_off_on_disconnect: bool = True
     rf_input: RfInputSettings
     frequency: OptionalRangeSettings
     reference_level: OptionalRangeSettings
@@ -299,9 +342,50 @@ class AnritsuAcquisitionSettings(StrictModel):
     @model_validator(mode="after")
     def validate_timeout(self) -> "AnritsuAcquisitionSettings":
         if parse_quantity(self.operation_complete_timeout, DIMENSION_TIME).si_value <= 0:
-            raise ValueError("operation_complete_timeout musi być dodatni")
+            raise ValueError("operation_complete_timeout must be positive")
         if not 1 <= self.application_average_count <= 9999:
-            raise ValueError("application_average_count musi być w zakresie 1..9999")
+            raise ValueError("application_average_count must be in the range 1..9999")
+        return self
+
+
+class AnritsuSignalGeneratorSettings(StrictModel):
+    """Fail-closed contract for the optional MS2830A vector signal generator."""
+
+    control_protocol: Literal["unverified", "basic_scpi"] = "unverified"
+    frequency: OptionalRangeSettings = Field(
+        default_factory=lambda: OptionalRangeSettings(min=None, max=None)
+    )
+    power: OptionalRangeSettings = Field(
+        default_factory=lambda: OptionalRangeSettings(min=None, max=None)
+    )
+    arm_ttl: str = "30 s"
+
+    @model_validator(mode="after")
+    def validate_contract(self) -> "AnritsuSignalGeneratorSettings":
+        self.frequency.checked_if_complete(DIMENSION_FREQUENCY)
+        self.power.checked_if_complete(DIMENSION_DBM)
+        if parse_quantity(self.arm_ttl, DIMENSION_TIME).si_value <= 0:
+            raise ValueError("Anritsu SG arm_ttl must be positive")
+        return self
+
+
+class AnritsuAdvancedSpectrumSettings(StrictModel):
+    """Qualification gate for input-path and bandwidth SCPI controls."""
+
+    control_protocol: Literal["unverified", "standard_scpi"] = "unverified"
+    qualified_firmware: tuple[str, ...] = ()
+
+    @model_validator(mode="after")
+    def validate_contract(self) -> "AnritsuAdvancedSpectrumSettings":
+        normalized = tuple(value.strip() for value in self.qualified_firmware)
+        if any(not value for value in normalized):
+            raise ValueError("qualified_firmware entries cannot be empty")
+        if len(set(normalized)) != len(normalized):
+            raise ValueError("qualified_firmware entries must be unique")
+        if self.control_protocol == "standard_scpi" and not normalized:
+            raise ValueError(
+                "Qualified Anritsu advanced control requires at least one firmware version"
+            )
         return self
 
 
@@ -312,6 +396,28 @@ class AnritsuSettings(StrictModel):
     identity: IdentitySettings
     safety: AnritsuSafety
     acquisition: AnritsuAcquisitionSettings = Field(default_factory=AnritsuAcquisitionSettings)
+    signal_generator: AnritsuSignalGeneratorSettings = Field(
+        default_factory=AnritsuSignalGeneratorSettings
+    )
+    advanced_spectrum: AnritsuAdvancedSpectrumSettings = Field(
+        default_factory=AnritsuAdvancedSpectrumSettings
+    )
+
+    @model_validator(mode="after")
+    def validate_signal_generator_permission(self) -> "AnritsuSettings":
+        if self.safety.signal_generator_output_allowed:
+            if self.signal_generator.control_protocol != "basic_scpi":
+                raise ValueError(
+                    "Anritsu SG output permission requires a qualified basic_scpi protocol."
+                )
+            if (
+                self.signal_generator.frequency.min is None
+                or self.signal_generator.power.min is None
+            ):
+                raise ValueError(
+                    "Anritsu SG output permission requires complete frequency and power limits."
+                )
+        return self
 
 
 class DevicesSettings(StrictModel):
@@ -323,6 +429,7 @@ class DevicesSettings(StrictModel):
 class StationSettings(StrictModel):
     schema_version: Literal[1]
     profile: ProfileSettings
+    access_control: AccessControlSettings = Field(default_factory=AccessControlSettings)
     application: dict[str, Any]
     units: dict[str, Any]
     execution: dict[str, Any]

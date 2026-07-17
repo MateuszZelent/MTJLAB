@@ -43,13 +43,23 @@ class SettingsRepository:
             with self.path.open("r", encoding="utf-8") as stream:
                 raw = self._yaml.load(stream)
         except Exception as exc:
-            raise ConfigurationError(f"Nie można odczytać YAML: {exc}") from exc
+            raise ConfigurationError(f"Cannot read YAML: {exc}") from exc
         if not isinstance(raw, dict):
-            raise ConfigurationError("Główny element settings.yml musi być mapą.")
+            raise ConfigurationError("The root settings.yml element must be a mapping.")
+        # Version-1 profiles created before RBAC are upgraded in memory to a
+        # safe operator-only policy. The next explicit save persists it.
+        raw.setdefault(
+            "access_control",
+            {
+                "identity_provider": "operating_system",
+                "default_roles": ["operator"],
+                "user_roles": {},
+            },
+        )
         try:
             settings = StationSettings.model_validate(raw)
         except ValidationError as exc:
-            raise ConfigurationError(f"Nieprawidłowy settings.yml:\n{exc}") from exc
+            raise ConfigurationError(f"Invalid settings.yml:\n{exc}") from exc
         return LoadedSettings(settings=settings, raw=raw, source=self.path)
 
     def ensure_exists(self) -> bool:
@@ -98,12 +108,12 @@ class SettingsRepository:
             profile["state"] = "unverified"
             profile["approved_by"] = None
             profile["approved_at"] = None
-            profile["approval_note"] = "Profil wymaga ponownego zatwierdzenia po zmianie ustawień."
+            profile["approval_note"] = "Profile approval is required after settings changes."
 
         try:
             settings = StationSettings.model_validate(payload)
         except ValidationError as exc:
-            raise ConfigurationError(f"Nieprawidłowy settings.yml:\n{exc}") from exc
+            raise ConfigurationError(f"Invalid settings.yml:\n{exc}") from exc
         self._atomic_dump(payload)
         return settings
 

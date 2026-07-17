@@ -147,7 +147,7 @@ class _ManagedVisaSession:
         except Exception as exc:  # best effort cleanup
             errors.append(exc)
         if errors:
-            raise DeviceError(f"Nie można zamknąć VISA: {errors[0]}") from errors[0]
+            raise DeviceError(f"Could not close VISA: {errors[0]}") from errors[0]
 
 
 @dataclass
@@ -163,12 +163,12 @@ class FakeVisaSession:
 
     def write(self, command: str) -> None:
         if self.closed:
-            raise DeviceError("Sesja testowa jest zamknięta.")
+            raise DeviceError("The fake VISA session is closed.")
         self.writes.append(command)
 
     def query(self, command: str) -> str:
         if self.closed:
-            raise DeviceError("Sesja testowa jest zamknięta.")
+            raise DeviceError("The fake VISA session is closed.")
         self.writes.append(command)
         response = self.responses.get(command)
         if response is None:
@@ -182,7 +182,7 @@ class FakeVisaSession:
                     if state:
                         return "1" if state.group(1) == "OUTPUT_ON" else "0"
                 return "0"
-            raise DeviceError(f"Brak zaprogramowanej odpowiedzi fake VISA dla {command!r}.")
+            raise DeviceError(f"No fake VISA response is configured for {command!r}.")
         return response(command) if callable(response) else response
 
     def close(self) -> None:

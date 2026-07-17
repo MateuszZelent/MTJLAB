@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 import math
 import re
 import time
@@ -34,6 +34,53 @@ class KeithleyMeasurement:
     compliance_stop_required: bool = False
 
 
+@dataclass(frozen=True, slots=True)
+class KeithleyRampRequest:
+    channel: Literal["A", "B"]
+    target_si: float
+    max_step_si: float
+    settle_time_s: float
+    deadline_s: float = 10.0
+
+    def __post_init__(self) -> None:
+        values = (self.target_si, self.max_step_si, self.settle_time_s, self.deadline_s)
+        if not all(math.isfinite(value) for value in values):
+            raise ValueError("Keithley ramp values must be finite.")
+        if self.max_step_si <= 0 or self.settle_time_s < 0 or self.deadline_s <= 0:
+            raise ValueError("Ramp step/deadline must be positive and settling time non-negative.")
+
+
+@dataclass(frozen=True, slots=True)
+class KeithleyRampResult:
+    channel: Literal["A", "B"]
+    start_si: float
+    target_si: float
+    levels_si: tuple[float, ...]
+    final_measurement: KeithleyMeasurement
+
+
+def build_keithley_ramp_levels(
+    start_si: float,
+    target_si: float,
+    max_step_si: float,
+    *,
+    max_points: int,
+) -> tuple[float, ...]:
+    """Return finite inclusive target levels with no step above ``max_step_si``."""
+
+    if not all(math.isfinite(value) for value in (start_si, target_si, max_step_si)):
+        raise SafetyViolation("Keithley ramp boundaries and step must be finite.")
+    if max_step_si <= 0 or max_points < 1:
+        raise SafetyViolation("Keithley ramp step and point limit must be positive.")
+    steps = max(1, math.ceil(abs(target_si - start_si) / max_step_si))
+    if steps > max_points:
+        raise SafetyViolation(
+            f"Keithley ramp requires {steps} points; approved maximum is {max_points}."
+        )
+    delta = target_si - start_si
+    return tuple(target_si if index == steps else start_si + delta * index / steps for index in range(1, steps + 1))
+
+
 class KeithleyAdapter(DeviceAdapter):
     """Safe subset of TSP; raw Lua and dynamic namespace objects are never exposed."""
 
@@ -55,7 +102,7 @@ class KeithleyAdapter(DeviceAdapter):
 
     def _require_session(self) -> InstrumentSession:
         if self._session is None:
-            raise ConnectionError("Keithley nie jest połączony.")
+            raise ConnectionError("Keithley is not connected.")
         return self._session
 
     @staticmethod
@@ -69,10 +116,10 @@ class KeithleyAdapter(DeviceAdapter):
         if self._session is not None:
             return self._identity_or_raise()
         if not self._settings.enabled:
-            raise SafetyViolation("Keithley jest wyłączony w profilu stanowiska.")
+            raise SafetyViolation("Keithley is disabled in the station profile.")
         resource = self._settings.connection.resource
         if not resource:
-            raise ConnectionError("Brak zasobu VISA dla Keithley w settings.yml.")
+            raise ConnectionError("No Keithley VISA resource is configured in settings.yml.")
         timeout = int(parse_quantity(self._settings.connection.timeout, DIMENSION_TIME).si_value * 1000)
         session = self._factory.open(resource, self._settings.connection.visa_backend, timeout)
         try:
@@ -94,14 +141,16 @@ class KeithleyAdapter(DeviceAdapter):
                 device_name="keithley",
                 model=identity.model or "2600",
                 firmware=identity.firmware,
-                features=frozenset({"source_current", "source_voltage", "measure_iv", "ramp_to_zero"}),
+                features=frozenset(
+                    {"source_current", "source_voltage", "measure_iv", "ramp_to_zero", "ramp_to_level"}
+                ),
             )
             self._state = DeviceState.VERIFIED
             if self._settings.safety.outputs_off_on_connect:
                 self._write_all_outputs_off()
                 states = self._read_output_states()
                 if any(states.values()):
-                    raise DeviceError("Keithley nie potwierdził OUTPUT OFF po połączeniu.")
+                    raise DeviceError("Keithley did not confirm OUTPUT OFF after connection.")
             else:
                 self._read_output_states()
             self._update_aggregate_output_state()
@@ -119,7 +168,7 @@ class KeithleyAdapter(DeviceAdapter):
 
     def _identity_or_raise(self) -> DeviceIdentity:
         if self._identity is None:
-            raise ConnectionError("Keithley ma sesję bez zweryfikowanej tożsamości.")
+            raise ConnectionError("Keithley has a session without a verified identity.")
         return self._identity
 
     def disconnect(self) -> None:
@@ -153,7 +202,7 @@ class KeithleyAdapter(DeviceAdapter):
             self._write_all_outputs_off()
             states = self._read_output_states()
             if any(states.values()):
-                raise DeviceError("Keithley nie potwierdził OUTPUT OFF podczas E-STOP.")
+                raise DeviceError("Keithley did not confirm OUTPUT OFF during E-STOP.")
         except Exception:
             self._state = DeviceState.UNKNOWN
         else:
@@ -171,23 +220,23 @@ class KeithleyAdapter(DeviceAdapter):
             try:
                 count = int(float(session.query("print(errorqueue.count)")))
             except (TypeError, ValueError) as exc:
-                raise DeviceError("Keithley zwrócił nieprawidłowy stan errorqueue.count.") from exc
+                raise DeviceError("Keithley returned an invalid errorqueue.count value.") from exc
             if count <= 0:
                 return errors
             errors.append(session.query("print(errorqueue.next())"))
-        errors.append("Kolejka błędów Keithley nie została opróżniona.")
+        errors.append("Keithley error queue did not drain.")
         return errors
 
     def _check_errors(self) -> None:
         errors = self.read_errors()
         if errors:
-            raise DeviceError("Keithley zgłosił błąd: " + "; ".join(errors))
+            raise DeviceError("Keithley reported an error: " + "; ".join(errors))
 
     def configure_source(self, request: KeithleySourceRequest) -> None:
         """Set function, range-safe level and compliance while output is guaranteed OFF."""
 
         if request.channel not in {"A", "B"}:
-            raise SafetyViolation("Kanał Keithley musi wynosić A albo B.")
+            raise SafetyViolation("Keithley channel must be A or B.")
         channel = self._channel_settings(request.channel)
         validate_keithley_source(channel, request)
         smu = self._smu(request.channel)
@@ -242,12 +291,12 @@ class KeithleyAdapter(DeviceAdapter):
         try:
             value = float(response)
         except ValueError as exc:
-            raise DeviceError("Keithley zwrócił nieprawidłowy stan source.output.") from exc
+            raise DeviceError("Keithley returned an invalid source.output state.") from exc
         if value == 1:
             return True
         if value == 0:
             return False
-        raise DeviceError(f"Keithley zwrócił nieznany stan source.output={response!r}.")
+        raise DeviceError(f"Keithley returned unknown source.output state {response!r}.")
 
     def _read_output_states(self) -> dict[Literal["A", "B"], bool]:
         states = {channel: self._output_is_enabled(channel) for channel in ("A", "B")}
@@ -279,9 +328,13 @@ class KeithleyAdapter(DeviceAdapter):
 
     def set_output(self, channel: Literal["A", "B"], enabled: bool) -> None:
         if channel not in {"A", "B"}:
-            raise SafetyViolation("Kanał Keithley musi wynosić A albo B.")
+            raise SafetyViolation("Keithley channel must be A or B.")
         settings = self._channel_settings(channel)
         if enabled:
+            request = self._last_request.get(channel)
+            if request is None:
+                raise SafetyViolation("Configure a safe Keithley source before enabling OUTPUT.")
+            validate_keithley_source(settings, request)
             self._assert_armed(channel, settings.enabled)
         smu = self._smu(channel)
         self._require_session().write(
@@ -290,7 +343,7 @@ class KeithleyAdapter(DeviceAdapter):
         self._check_errors()
         active = self._output_is_enabled(channel)
         if active != enabled:
-            raise DeviceError("Keithley nie potwierdził żądanego stanu wyjścia.")
+            raise DeviceError("Keithley did not confirm the requested output state.")
         self._output_states[channel] = active
         self._update_aggregate_output_state()
         if not enabled:
@@ -298,7 +351,7 @@ class KeithleyAdapter(DeviceAdapter):
 
     def arm_output(self, channel: Literal["A", "B"], *, ttl_s: float = 30.0) -> float:
         if channel not in {"A", "B"}:
-            raise SafetyViolation("Kanał Keithley musi wynosić A albo B.")
+            raise SafetyViolation("Keithley channel must be A or B.")
         settings = self._channel_settings(channel)
         self._interlock().assert_can_enable(
             device_name=f"Keithley CH{channel}",
@@ -306,9 +359,10 @@ class KeithleyAdapter(DeviceAdapter):
         )
         request = self._last_request.get(channel)
         if request is None or request.mode == "measure_only":
-            raise SafetyViolation("Najpierw skonfiguruj bezpieczne źródło Keithley.")
+            raise SafetyViolation("Configure a safe Keithley source first.")
+        validate_keithley_source(settings, request)
         if ttl_s <= 0 or ttl_s > 120:
-            raise SafetyViolation("Czas ARM Keithley musi być w zakresie (0, 120] s.")
+            raise SafetyViolation("Keithley ARM duration must be in the range (0, 120] s.")
         expires = time.monotonic() + ttl_s
         self._armed_until[channel] = expires
         return expires
@@ -320,13 +374,13 @@ class KeithleyAdapter(DeviceAdapter):
         )
         expiry = self._armed_until.pop(channel, None)
         if expiry is None:
-            raise SafetyViolation("Najpierw uzbrój kanał Keithley przez ARM.")
+            raise SafetyViolation("ARM the Keithley channel first.")
         if time.monotonic() > expiry:
-            raise SafetyViolation("Okno ARM Keithley wygasło; uzbrój kanał ponownie.")
+            raise SafetyViolation("Keithley ARM window expired; ARM the channel again.")
 
     def measure(self, channel: Literal["A", "B"]) -> KeithleyMeasurement:
         if channel not in {"A", "B"}:
-            raise SafetyViolation("Kanał Keithley musi wynosić A albo B.")
+            raise SafetyViolation("Keithley channel must be A or B.")
         smu = self._smu(channel)
         session = self._require_session()
         try:
@@ -340,7 +394,7 @@ class KeithleyAdapter(DeviceAdapter):
             if not (math.isfinite(current) and math.isfinite(voltage)):
                 raise ValueError("non-finite IV result")
         except (TypeError, ValueError) as exc:
-            raise DeviceError("Keithley zwrócił nieprawidłowy wynik pomiaru I/V.") from exc
+            raise DeviceError("Keithley returned an invalid I/V measurement.") from exc
         request = self._last_request.get(channel)
         compliance_detected = self._at_compliance_limit(request, voltage=voltage, current=current)
         stop_required = compliance_detected and self._settings.safety.stop_on_compliance
@@ -349,7 +403,12 @@ class KeithleyAdapter(DeviceAdapter):
             self._state = DeviceState.COMPLIANCE
         result = KeithleyMeasurement(channel, voltage, current, voltage * current, compliance_detected, stop_required)
         try:
-            validate_keithley_measurement(self._channel_settings(channel), voltage, current)
+            validate_keithley_measurement(
+                self._channel_settings(channel),
+                voltage,
+                current,
+                request.dut_envelope if request is not None else None,
+            )
         except SafetyViolation:
             # A manual read must be as fail-safe as a recipe checkpoint: trip
             # limits are laboratory boundaries, so both outputs are disabled.
@@ -395,7 +454,7 @@ class KeithleyAdapter(DeviceAdapter):
         while abs(level) > step:
             if time.monotonic() - started > deadline_s:
                 self.emergency_off()
-                raise DeviceError("Timeout podczas rampy Keithley do zera.")
+                raise DeviceError("Keithley ramp-to-zero timed out.")
             level -= step if level > 0 else -step
             field = "leveli" if request.mode == "current" else "levelv"
             session.write(f"{smu}.source.{field} = {level:.12g}")
@@ -404,3 +463,113 @@ class KeithleyAdapter(DeviceAdapter):
         field = "leveli" if request.mode == "current" else "levelv"
         session.write(f"{smu}.source.{field} = 0")
         self.set_output(channel, False)
+
+    def ramp_to_level(self, request: KeithleyRampRequest) -> KeithleyRampResult:
+        """Ramp an already active source without ever enabling an output.
+
+        The actual starting level is queried from the instrument. Every point
+        is checked against the approved source/DUT envelope and followed by an
+        atomic I/V measurement. Any transport, compliance or limit failure
+        attempts to turn both SMU outputs off.
+        """
+
+        channel = request.channel
+        current_request = self._last_request.get(channel)
+        if current_request is None or current_request.mode == "measure_only":
+            raise SafetyViolation("Configure a Current or Voltage source before using a ramp.")
+        try:
+            output_enabled = self._output_is_enabled(channel)
+        except Exception:
+            self.emergency_off()
+            raise
+        if not output_enabled:
+            self._output_states[channel] = False
+            self._update_aggregate_output_state()
+            raise SafetyViolation("Manual ramp requires the selected Keithley OUTPUT to be ON.")
+        channel_settings = self._channel_settings(channel)
+        limits = channel_settings.lab_limits
+        dimension = "current" if current_request.mode == "current" else "voltage"
+        approved_step = parse_quantity(
+            limits.ramp_current_step_max
+            if current_request.mode == "current"
+            else limits.ramp_voltage_step_max,
+            dimension,
+        ).si_value
+        step_tolerance = max(abs(approved_step), 1.0) * 1e-12
+        if request.max_step_si > approved_step + step_tolerance:
+            raise SafetyViolation(
+                f"Requested ramp step {request.max_step_si:.12g} SI exceeds approved "
+                f"maximum {approved_step:.12g} SI."
+            )
+        if limits.point_settle_time is not None:
+            minimum_settle = parse_quantity(limits.point_settle_time.min, DIMENSION_TIME).si_value
+            maximum_settle = parse_quantity(limits.point_settle_time.max, DIMENSION_TIME).si_value
+            if not minimum_settle <= request.settle_time_s <= maximum_settle:
+                raise SafetyViolation(
+                    f"Ramp settling time must be within {minimum_settle:.12g}.."
+                    f"{maximum_settle:.12g} s."
+                )
+        target_request = replace(current_request, level_si=request.target_si)
+        validate_keithley_source(channel_settings, target_request)
+        smu = self._smu(channel)
+        field = "leveli" if current_request.mode == "current" else "levelv"
+        session = self._require_session()
+        try:
+            response = session.query(f"print({smu}.source.{field})")
+            start_si = float(response.strip())
+        except (TypeError, ValueError) as exc:
+            self.emergency_off()
+            raise DeviceError("Keithley returned an invalid source level before ramping.") from exc
+        if not math.isfinite(start_si):
+            self.emergency_off()
+            raise DeviceError("Keithley returned a non-finite source level before ramping.")
+        start_request = replace(current_request, level_si=start_si)
+        try:
+            validate_keithley_source(channel_settings, start_request)
+        except Exception:
+            self.emergency_off()
+            if self._state is not DeviceState.UNKNOWN:
+                self._state = DeviceState.FAULT
+            raise
+        levels = build_keithley_ramp_levels(
+            start_si,
+            request.target_si,
+            request.max_step_si,
+            max_points=limits.sweep_points_max,
+        )
+        predicted_s = len(levels) * request.settle_time_s
+        if predicted_s > request.deadline_s:
+            raise SafetyViolation(
+                f"Ramp dwell alone requires {predicted_s:.3g} s, exceeding the "
+                f"{request.deadline_s:.3g} s deadline."
+            )
+        started = time.monotonic()
+        final_measurement: KeithleyMeasurement | None = None
+        try:
+            for level in levels:
+                if time.monotonic() - started > request.deadline_s:
+                    raise DeviceError("Keithley manual ramp exceeded its deadline.")
+                step_request = replace(current_request, level_si=level)
+                validate_keithley_source(channel_settings, step_request)
+                session.write(f"{smu}.source.{field} = {level:.12g}")
+                self._last_request[channel] = step_request
+                if request.settle_time_s:
+                    time.sleep(request.settle_time_s)
+                if time.monotonic() - started > request.deadline_s:
+                    raise DeviceError("Keithley manual ramp exceeded its deadline.")
+                final_measurement = self.measure(channel)
+                if final_measurement.compliance_stop_required:
+                    raise SafetyViolation("Keithley reached compliance during the manual ramp.")
+            if final_measurement is None:
+                raise DeviceError("Keithley ramp produced no measurement checkpoint.")
+            if not self._output_is_enabled(channel):
+                raise DeviceError("Keithley OUTPUT switched off unexpectedly during the ramp.")
+        except Exception:
+            self.emergency_off()
+            if self._state not in {DeviceState.UNKNOWN, DeviceState.COMPLIANCE}:
+                self._state = DeviceState.FAULT
+            raise
+        self._last_request[channel] = target_request
+        self._output_states[channel] = True
+        self._update_aggregate_output_state()
+        return KeithleyRampResult(channel, start_si, request.target_si, levels, final_measurement)

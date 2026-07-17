@@ -9,7 +9,7 @@ from app.devices.anritsu import AnritsuAdapter, SpectrumConfig
 from app.devices.keithley import KeithleyAdapter, KeithleySourceRequest
 from app.devices.rigol import RigolAdapter, RigolChannelConfig, RigolOutputConfig
 from app.devices.simulators import SimulatorFault, SimulatedVisaFactory, simulated_station_settings
-from app.domain.errors import DeviceError, SafetyViolation
+from app.domain.errors import ConnectionError, DeviceError, SafetyViolation
 from app.domain.models import DeviceState
 from app.engine.compiler import ExecutionPlan, PlanAction
 from app.engine.runner import RecipeRunner
@@ -19,6 +19,81 @@ from tests.helpers import loaded_settings
 
 
 class SimulatorTests(unittest.TestCase):
+    def test_every_simulator_exposes_deterministic_transport_faults(self) -> None:
+        for device in ("rigol", "keithley", "anritsu"):
+            with self.subTest(device=device, fault="normal"):
+                session = SimulatedVisaFactory(device).open("SIM", "sim", 1234)
+                self.assertIn("SIM000001", session.query("*IDN?"))
+                self.assertEqual(session.timeout, 1234)
+            with self.subTest(device=device, fault="timeout"):
+                session = SimulatedVisaFactory(
+                    device,
+                    fault=SimulatorFault(timeout_prefixes=frozenset({"*IDN?"})),
+                ).open("SIM", "sim", 1234)
+                with self.assertRaisesRegex(DeviceError, "timeout"):
+                    session.query("*IDN?")
+            with self.subTest(device=device, fault="malformed"):
+                session = SimulatedVisaFactory(
+                    device,
+                    fault=SimulatorFault(malformed_response_prefixes=frozenset({"*IDN?"})),
+                ).open("SIM", "sim", 1234)
+                self.assertEqual(session.query("*IDN?"), "MALFORMED_RESPONSE")
+            with self.subTest(device=device, fault="device_error"):
+                session = SimulatedVisaFactory(
+                    device,
+                    fault=SimulatorFault(device_error_prefixes=frozenset({"*IDN?"})),
+                ).open("SIM", "sim", 1234)
+                with self.assertRaisesRegex(DeviceError, "device error"):
+                    session.query("*IDN?")
+            with self.subTest(device=device, fault="disconnect"):
+                session = SimulatedVisaFactory(
+                    device,
+                    fault=SimulatorFault(disconnect_prefixes=frozenset({"*IDN?"})),
+                ).open("SIM", "sim", 1234)
+                with self.assertRaisesRegex(ConnectionError, "disconnected"):
+                    session.query("*IDN?")
+
+    def test_every_simulator_has_a_deterministic_error_queue(self) -> None:
+        commands = {
+            "rigol": ":SOUR1:FREQ 1000",
+            "keithley": "smub.source.leveli = 0.001",
+            "anritsu": "FREQ:STAR 1000000HZ",
+        }
+        queue_queries = {
+            "rigol": ":SYST:ERR?",
+            "keithley": "print(errorqueue.next())",
+            "anritsu": "SYST:ERR?",
+        }
+        for device, command in commands.items():
+            with self.subTest(device=device):
+                session = SimulatedVisaFactory(
+                    device,
+                    command_errors={command: "901,simulated command error"},
+                ).open("SIM", "sim", 1000)
+                session.write(command)
+                self.assertEqual(session.query(queue_queries[device]), "901,simulated command error")
+
+    def test_keithley_noise_model_is_repeatable_and_non_constant(self) -> None:
+        def readings() -> list[str]:
+            session = SimulatedVisaFactory(
+                "keithley",
+                keithley_resistance_ohm=100.0,
+                keithley_noise_fraction=0.01,
+            ).open("SIM", "sim", 1000)
+            session.write("smub.source.func = smub.OUTPUT_DCAMPS")
+            session.write("smub.source.leveli = 0.001")
+            session.write("smub.source.output = smub.OUTPUT_ON")
+            return [session.query("print(smub.measure.iv())") for _ in range(3)]
+
+        first = readings()
+        self.assertEqual(first, readings())
+        self.assertEqual(len(set(first)), 3)
+
+    def test_keithley_noise_model_rejects_invalid_scale(self) -> None:
+        for invalid in (-0.1, float("nan"), float("inf")):
+            with self.subTest(invalid=invalid), self.assertRaises(ValueError):
+                SimulatedVisaFactory("keithley", keithley_noise_fraction=invalid)
+
     def test_all_simulated_instruments_support_safe_core_operations(self) -> None:
         settings = simulated_station_settings(loaded_settings())
         self.assertFalse(settings.outputs_locked)
@@ -91,7 +166,7 @@ class SimulatorTests(unittest.TestCase):
         anritsu.connect()
         anritsu.configure_spectrum(SpectrumConfig(1e6, 2e6, 0, 101))
 
-        with self.assertRaisesRegex(DeviceError, "nieprawidłową odpowiedź"):
+        with self.assertRaisesRegex(DeviceError, "invalid trace response"):
             anritsu.fetch_trace()
 
     def test_keithley_compliance_turns_output_off_in_simulation(self) -> None:
@@ -160,7 +235,7 @@ class SimulatorTests(unittest.TestCase):
             KeithleyAdapter(settings, session_factory=SimulatedVisaFactory("keithley")),
             AnritsuAdapter(settings, session_factory=SimulatedVisaFactory("anritsu")),
         ):
-            with self.assertRaisesRegex(SafetyViolation, "wyłączony w profilu"):
+            with self.assertRaisesRegex(SafetyViolation, "disabled in the station profile"):
                 adapter.connect()
 
     def test_rigol_rejects_non_finite_manual_configuration(self) -> None:

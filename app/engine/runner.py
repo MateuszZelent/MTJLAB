@@ -7,17 +7,20 @@ from datetime import datetime, timezone
 import threading
 import time
 from typing import Callable
+from uuid import uuid4
 
 from app.devices.anritsu.adapter import AnritsuAdapter, SpectrumTrace
 from app.devices.keithley.adapter import KeithleyAdapter
 from app.devices.rigol.adapter import RigolAdapter
-from app.domain.errors import ExecutionError
+from app.domain.errors import DeviceError, ExecutionError
 from app.domain.models import ApplicationState, DeviceState, MeasurementPoint
-from app.engine.compiler import ExecutionPlan, PlanAction
+from app.engine.compiler import ExecutionPlan, PlanAction, required_devices_for_actions
+from app.engine.policy import ExecutionPolicy
 from app.storage.hdf5_writer import Hdf5RunWriter
 
 
 EventCallback = Callable[[str, dict[str, object]], None]
+TelemetryCallback = Callable[[str, dict[str, object]], None]
 
 
 @dataclass(frozen=True, slots=True)
@@ -39,17 +42,37 @@ class RecipeRunner:
         anritsu: AnritsuAdapter,
         writer: Hdf5RunWriter,
         on_event: EventCallback | None = None,
+        on_telemetry: TelemetryCallback | None = None,
+        policy: ExecutionPolicy | None = None,
     ) -> None:
         self._rigol = rigol
         self._keithley = keithley
         self._anritsu = anritsu
         self._writer = writer
         self._on_event = on_event or (lambda _name, _data: None)
+        self._on_telemetry = on_telemetry or (lambda _name, _data: None)
+        self._policy = policy or ExecutionPolicy()
         self._stop_requested = threading.Event()
         self._pause_requested = threading.Event()
         self._resume_requested = threading.Event()
         self._resume_requested.set()
         self._state = ApplicationState.SAFE
+        self._required_devices: frozenset[str] = frozenset()
+        self._safe_shutdown_actions: tuple[str, ...] = ()
+        self._active_safety_context: dict[str, dict[str, object]] = {}
+        self._rigol_output_active = {1: False, 2: False}
+        self._keithley_output_active = {"A": False, "B": False}
+        self._keithley_zeroed = {"A": True, "B": True}
+        self._anritsu_sg_output_active = False
+        self._last_safe_boundary_points = 0
+        self._watchdog_lock = threading.Lock()
+        self._watchdog_stop = threading.Event()
+        self._watchdog_timed_out = threading.Event()
+        self._watchdog_thread: threading.Thread | None = None
+        self._watchdog_action: dict[str, object] | None = None
+        self._watchdog_deadline_monotonic = 0.0
+        self._watchdog_started_monotonic = 0.0
+        self._correlation_id = ""
 
     @property
     def state(self) -> ApplicationState:
@@ -65,21 +88,85 @@ class RecipeRunner:
         self._pause_requested.clear()
         self._resume_requested.set()
 
-    def run(self, plan: ExecutionPlan) -> RunResult:
-        completed = 0
-        stored = 0
+    def run(
+        self,
+        plan: ExecutionPlan,
+        *,
+        start_action_index: int = 0,
+        stored_points: int = 0,
+        recovery_prelude: tuple[PlanAction, ...] = (),
+    ) -> RunResult:
+        if start_action_index < 0 or start_action_index > len(plan.actions):
+            raise ExecutionError("Invalid recovery action index.")
+        if stored_points < 0 or stored_points > plan.total_points:
+            raise ExecutionError("Invalid recovered point count.")
+        completed = start_action_index
+        stored = stored_points
         point_measurements: dict[str, float] = {}
         point_setpoints: dict[str, float] = {}
+        run_started_monotonic = time.monotonic()
+        self._required_devices = (
+            plan.required_devices or required_devices_for_actions(plan.actions)
+        )
+        self._safe_shutdown_actions = plan.safe_shutdown_actions
+        self._active_safety_context = {}
+        self._rigol_output_active = {1: False, 2: False}
+        self._keithley_output_active = {"A": False, "B": False}
+        self._keithley_zeroed = {"A": True, "B": True}
+        self._anritsu_sg_output_active = False
+        self._last_safe_boundary_points = stored_points
+        self._watchdog_timed_out.clear()
+        self._correlation_id = str(uuid4())
+        self._start_watchdog()
         self._state = ApplicationState.RUNNING
         try:
-            self._emit("run_started", {"recipe": plan.recipe_name, "actions": len(plan.actions), "hash": plan.sha256})
-            for action in plan.actions:
+            self._emit(
+                "run_started",
+                {
+                    "recipe": plan.recipe_name,
+                    "actions": len(plan.actions),
+                    "hash": plan.sha256,
+                    "start_action_index": start_action_index,
+                    "stored_points": stored_points,
+                },
+            )
+            for action in recovery_prelude:
+                if action.kind not in {
+                    "configure_rigol",
+                    "configure_keithley",
+                    "configure_anritsu",
+                    "configure_anritsu_advanced",
+                }:
+                    raise ExecutionError(
+                        f"Unsafe recovery prelude action: {action.kind!r}."
+                    )
+                self._emit(
+                    "recovery_prelude_started",
+                    {"node_id": action.node_id, "kind": action.kind},
+                )
+                self._execute_with_policy(action, point_measurements)
+                self._emit(
+                    "recovery_prelude_finished",
+                    {"node_id": action.node_id, "kind": action.kind},
+                )
+            for action_index, action in enumerate(
+                plan.actions[start_action_index:], start=start_action_index
+            ):
                 self._raise_if_stop_requested()
-                self._wait_if_paused()
-                self._emit("action_started", {"node_id": action.node_id, "kind": action.kind})
-                trace = self._execute(action, point_measurements)
+                self._emit(
+                    "action_started",
+                    {
+                        "node_id": action.node_id,
+                        "kind": action.kind,
+                        "action_index": action_index,
+                        "setpoints_si": dict(action.setpoints_si),
+                        "deadline_s": self._policy.deadline_for(action),
+                        "cancellation_requested": self._stop_requested.is_set(),
+                    },
+                )
+                trace = self._execute_with_policy(action, point_measurements)
                 point_setpoints.update(action.setpoints_si)
-                completed += 1
+                completed = action_index + 1
                 compliance_channels = self._compliance_channels(point_measurements)
                 if compliance_channels:
                     point = MeasurementPoint(
@@ -91,33 +178,64 @@ class RecipeRunner:
                             "plan_node": action.node_id,
                             "monotonic_s": time.monotonic(),
                             "compliance_channels": compliance_channels,
+                            "safety_context": self._safety_context_snapshot(),
                         },
                     )
+                    write_started = time.monotonic()
                     self._writer.append(point)
+                    write_elapsed = time.monotonic() - write_started
                     stored += 1
+                    self._emit_point_stored(
+                        point,
+                        stored=stored,
+                        run_started_monotonic=run_started_monotonic,
+                        write_elapsed_s=write_elapsed,
+                        spectrum_points=0,
+                    )
                     point_measurements.clear()
                     self._emit("compliance_detected", {"channels": compliance_channels, "point_index": stored - 1})
-                    raise ExecutionError("Keithley osiągnął compliance; zapisano ostatni checkpoint i wyłączono wyjście.")
-                if trace is not None:
+                    raise ExecutionError("Keithley reached compliance; the final checkpoint was saved and output was disabled.")
+                if trace is not None or action.kind == "checkpoint":
                     point = MeasurementPoint(
                         index=stored,
                         setpoints=dict(point_setpoints),
                         measurements=dict(point_measurements),
-                        metadata={"plan_node": action.node_id, "monotonic_s": time.monotonic()},
+                        metadata={
+                            "plan_node": action.node_id,
+                            "checkpoint_label": action.payload.get("label", action.node_id),
+                            "monotonic_s": time.monotonic(),
+                            "safety_context": self._safety_context_snapshot(),
+                        },
                     )
+                    write_started = time.monotonic()
                     self._writer.append(point, trace)
+                    write_elapsed = time.monotonic() - write_started
                     stored += 1
+                    self._emit_point_stored(
+                        point,
+                        stored=stored,
+                        run_started_monotonic=run_started_monotonic,
+                        write_elapsed_s=write_elapsed,
+                        spectrum_points=(len(trace.powers_dbm) if trace is not None else 0),
+                    )
+                    if trace is not None:
+                        self._emit_spectrum_preview(trace, point.index)
                     point_measurements.clear()
                     self._pause_at_point_if_requested()
                 self._emit("action_finished", {"node_id": action.node_id, "kind": action.kind})
+                self._record_safe_boundary_if_advanced(
+                    stored_points=stored,
+                    next_action_index=completed,
+                    plan_hash=plan.sha256,
+                )
             if not self._safe_shutdown():
-                raise ExecutionError("Nie potwierdzono bezpiecznego shutdownu wszystkich urządzeń.")
+                raise ExecutionError("Safe shutdown was not confirmed for every instrument.")
             self._state = ApplicationState.SAFE
             self._emit("run_completed", {"completed_actions": completed, "stored_points": stored})
             self._writer.close("completed")
             return RunResult(self._state, completed, stored)
         except Exception as exc:
-            if self._stop_requested.is_set():
+            if self._stop_requested.is_set() and not self._watchdog_timed_out.is_set():
                 return self._abort_safely(plan, completed, stored, point_measurements, str(exc))
             self._state = ApplicationState.FAULT
             self._emit_after_fault("run_fault", {"error": str(exc)})
@@ -125,6 +243,224 @@ class RecipeRunner:
             self._state = ApplicationState.FAULT
             self._writer.close("faulted")
             return RunResult(self._state, completed, stored, str(exc))
+        finally:
+            self._stop_watchdog()
+
+    def _execute_with_policy(
+        self,
+        action: PlanAction,
+        measurements: dict[str, float],
+    ) -> SpectrumTrace | None:
+        retries = self._policy.retry_count if self._can_retry(action) else 0
+        for attempt in range(retries + 1):
+            deadline_s = self._policy.deadline_for(action)
+            self._arm_watchdog(action, attempt=attempt + 1, deadline_s=deadline_s)
+            started = time.monotonic()
+            try:
+                adapter = self._adapter_for_action(action)
+                if adapter is None:
+                    result = self._execute(action, measurements)
+                else:
+                    with adapter.io_timeout(self._policy.command_timeout_s):
+                        result = self._execute(action, measurements)
+                elapsed = time.monotonic() - started
+                if elapsed > deadline_s:
+                    self._flag_watchdog_timeout(action, attempt + 1, elapsed, deadline_s)
+                    raise ExecutionError(
+                        f"Action {action.node_id!r} exceeded its {deadline_s:.3g} s deadline."
+                    )
+                return result
+            except DeviceError as exc:
+                if self._watchdog_timed_out.is_set() or attempt >= retries:
+                    raise
+                self._emit(
+                    "action_retry",
+                    {
+                        "node_id": action.node_id,
+                        "kind": action.kind,
+                        "attempt": attempt + 2,
+                        "maximum_attempts": retries + 1,
+                        "error": str(exc),
+                        "backoff_s": self._policy.retry_backoff_s,
+                    },
+                )
+                self._interruptible_wait(self._policy.retry_backoff_s)
+            finally:
+                self._disarm_watchdog()
+        raise ExecutionError(f"Action {action.node_id!r} exhausted its retry policy.")
+
+    def _can_retry(self, action: PlanAction) -> bool:
+        """Retry only operations that cannot create a second energizing transition."""
+
+        if action.kind == "configure_rigol":
+            return not self._rigol_output_active[action.payload["config"].channel]
+        if action.kind == "configure_keithley":
+            return not self._keithley_output_active[action.payload["request"].channel]
+        if action.kind == "set_rigol_output":
+            return not bool(action.payload["enabled"])
+        if action.kind == "set_keithley_output":
+            return not bool(action.payload["enabled"])
+        if action.kind == "set_anritsu_sg_output":
+            return not bool(action.payload["enabled"])
+        return action.kind in {
+            "configure_anritsu",
+            "configure_anritsu_advanced",
+            "configure_anritsu_sg",
+            "measure_keithley",
+            "acquire_spectrum",
+            "ramp_keithley_to_zero",
+        }
+
+    def _adapter_for_action(self, action: PlanAction):
+        if action.kind == "verify_connection":
+            return {
+                "rigol": self._rigol,
+                "keithley": self._keithley,
+                "anritsu": self._anritsu,
+            }[str(action.payload["device"])]
+        if "rigol" in action.kind:
+            return self._rigol
+        if "keithley" in action.kind:
+            return self._keithley
+        if "anritsu" in action.kind or action.kind == "acquire_spectrum":
+            return self._anritsu
+        return None
+
+    def _start_watchdog(self) -> None:
+        self._watchdog_stop.clear()
+        self._watchdog_thread = threading.Thread(
+            target=self._watchdog_loop,
+            name="recipe-run-watchdog",
+            daemon=True,
+        )
+        self._watchdog_thread.start()
+
+    def _stop_watchdog(self) -> None:
+        self._watchdog_stop.set()
+        thread, self._watchdog_thread = self._watchdog_thread, None
+        if thread is not None and thread is not threading.current_thread():
+            thread.join(timeout=max(0.1, self._policy.heartbeat_interval_s * 2))
+        self._disarm_watchdog()
+
+    def _arm_watchdog(self, action: PlanAction, *, attempt: int, deadline_s: float) -> None:
+        now = time.monotonic()
+        with self._watchdog_lock:
+            self._watchdog_action = {
+                "node_id": action.node_id,
+                "kind": action.kind,
+                "attempt": attempt,
+                "deadline_s": deadline_s,
+            }
+            self._watchdog_started_monotonic = now
+            self._watchdog_deadline_monotonic = now + deadline_s
+
+    def _disarm_watchdog(self) -> None:
+        with self._watchdog_lock:
+            self._watchdog_action = None
+            self._watchdog_deadline_monotonic = 0.0
+            self._watchdog_started_monotonic = 0.0
+
+    def _watchdog_loop(self) -> None:
+        interval = self._policy.heartbeat_interval_s
+        while not self._watchdog_stop.wait(interval):
+            with self._watchdog_lock:
+                action = dict(self._watchdog_action) if self._watchdog_action else None
+                deadline = self._watchdog_deadline_monotonic
+                started = self._watchdog_started_monotonic
+            if action is None:
+                continue
+            now = time.monotonic()
+            elapsed = max(0.0, now - started)
+            self._emit_telemetry(
+                "runner_heartbeat",
+                {
+                    **action,
+                    "elapsed_s": elapsed,
+                    "remaining_s": max(0.0, deadline - now),
+                },
+            )
+            if now >= deadline:
+                self._flag_watchdog_timeout(
+                    PlanAction(
+                        node_id=str(action["node_id"]),
+                        kind=str(action["kind"]),
+                        payload={},
+                        setpoints_si={},
+                    ),
+                    int(action["attempt"]),
+                    elapsed,
+                    float(action["deadline_s"]),
+                )
+
+    def _flag_watchdog_timeout(
+        self,
+        action: PlanAction,
+        attempt: int,
+        elapsed_s: float,
+        deadline_s: float,
+    ) -> None:
+        if self._watchdog_timed_out.is_set():
+            return
+        self._watchdog_timed_out.set()
+        self._stop_requested.set()
+        self._emit_telemetry(
+            "watchdog_timeout",
+            {
+                "node_id": action.node_id,
+                "kind": action.kind,
+                "attempt": attempt,
+                "elapsed_s": elapsed_s,
+                "deadline_s": deadline_s,
+            },
+        )
+
+    def _emit_telemetry(self, name: str, data: dict[str, object]) -> None:
+        payload = {"timestamp_utc": datetime.now(timezone.utc).isoformat(), **data}
+        try:
+            self._on_telemetry(name, payload)
+        except Exception:
+            pass
+
+    def _emit_point_stored(
+        self,
+        point: MeasurementPoint,
+        *,
+        stored: int,
+        run_started_monotonic: float,
+        write_elapsed_s: float,
+        spectrum_points: int,
+    ) -> None:
+        elapsed = max(time.monotonic() - run_started_monotonic, 1e-12)
+        self._emit(
+            "point_stored",
+            {
+                "point_index": point.index,
+                "stored_points": stored,
+                "status": point.status,
+                "setpoints_si": dict(point.setpoints),
+                "measurements_si": dict(point.measurements),
+                "spectrum_points": spectrum_points,
+                "write_elapsed_s": write_elapsed_s,
+                "average_write_rate_points_per_s": stored / elapsed,
+            },
+        )
+
+    def _emit_spectrum_preview(self, trace: SpectrumTrace, point_index: int) -> None:
+        maximum_preview_points = 1_000
+        step = max(
+            1,
+            (len(trace.powers_dbm) + maximum_preview_points - 1) // maximum_preview_points,
+        )
+        self._emit_telemetry(
+            "spectrum_preview",
+            {
+                "point_index": point_index,
+                "trace_name": trace.trace_name,
+                "frequency_hz": trace.frequencies_hz[::step],
+                "power_dbm": trace.powers_dbm[::step],
+                "source_points": len(trace.powers_dbm),
+            },
+        )
 
     def _abort_safely(
         self,
@@ -157,28 +493,100 @@ class RecipeRunner:
             self._writer.close("aborted")
             return RunResult(self._state, completed, stored, reason)
         self._state = ApplicationState.FAULT
-        self._emit_after_fault("run_fault", {"error": "Nie potwierdzono bezpiecznego zatrzymania: " + reason})
+        self._emit_after_fault("run_fault", {"error": "Safe stop was not confirmed: " + reason})
         self._writer.close("faulted")
         return RunResult(self._state, completed, stored, reason)
 
     def _execute(self, action: PlanAction, measurements: dict[str, float]) -> SpectrumTrace | None:
         payload = action.payload
         if action.kind == "configure_rigol":
-            self._rigol.configure_channel(payload["config"])
+            config = payload["config"]
+            self._rigol.configure_channel(config)
+            self._rigol_output_active[config.channel] = False
+            envelope = config.dut_envelope
+            self._active_safety_context[f"rigol.{config.channel}"] = {
+                "minimum_impedance_ohm": (
+                    envelope.minimum_impedance_ohm
+                    if envelope is not None
+                    else config.dut_min_impedance_ohm
+                ),
+                "max_abs_current_a": (
+                    envelope.max_abs_current_a if envelope is not None else None
+                ),
+                "max_abs_power_w": (
+                    envelope.max_abs_power_w if envelope is not None else None
+                ),
+                "high_level_v": config.high_level_v,
+                "low_level_v": config.low_level_v,
+                "output_load": config.output_load,
+            }
         elif action.kind == "configure_keithley":
-            self._keithley.configure_source(payload["request"])
+            request = payload["request"]
+            self._keithley.configure_source(request)
+            self._keithley_output_active[request.channel] = False
+            self._keithley_zeroed[request.channel] = abs(request.level_si) <= 1e-15
+            envelope = request.dut_envelope
+            self._active_safety_context[f"keithley.{request.channel}"] = {
+                "mode": request.mode,
+                "source_level_si": request.level_si,
+                "compliance_si": request.compliance_si,
+                "current_min_a": envelope.current_min_a if envelope is not None else None,
+                "current_max_a": envelope.current_max_a if envelope is not None else None,
+                "voltage_min_v": envelope.voltage_min_v if envelope is not None else None,
+                "voltage_max_v": envelope.voltage_max_v if envelope is not None else None,
+                "max_abs_power_w": envelope.max_abs_power_w if envelope is not None else None,
+            }
         elif action.kind == "configure_anritsu":
-            self._anritsu.configure_spectrum(payload["config"])
+            config = payload["config"]
+            self._anritsu.configure_spectrum(config)
+            self._active_safety_context["anritsu"] = {
+                "start_hz": config.start_hz,
+                "stop_hz": config.stop_hz,
+                "reference_level_dbm": config.reference_level_dbm,
+                "points": config.points,
+                "max_expected_input_dbm": config.dut_max_expected_input_dbm,
+            }
+        elif action.kind == "configure_anritsu_advanced":
+            config = payload["config"]
+            actual = self._anritsu.configure_advanced_spectrum(config)
+            self._active_safety_context["anritsu.advanced"] = {
+                "rbw_auto": actual.rbw_auto,
+                "rbw_hz": actual.rbw_hz,
+                "vbw_mode": actual.vbw_mode,
+                "vbw_hz": actual.vbw_hz,
+                "detector": actual.detector,
+                "attenuation_auto": actual.attenuation_auto,
+                "attenuation_db": actual.attenuation_db,
+                "preamplifier_enabled": actual.preamplifier_enabled,
+                "sweep_time_auto": actual.sweep_time_auto,
+                "sweep_time_s": actual.sweep_time_s,
+            }
+        elif action.kind == "configure_anritsu_sg":
+            config = payload["config"]
+            self._anritsu.configure_signal_generator(config)
+            self._anritsu_sg_output_active = False
+            self._active_safety_context["anritsu.sg"] = {
+                "frequency_hz": config.frequency_hz,
+                "power_dbm": config.power_dbm,
+            }
         elif action.kind == "set_rigol_output":
             self._rigol.set_output(payload["channel"], payload["enabled"])
+            self._rigol_output_active[payload["channel"]] = bool(payload["enabled"])
         elif action.kind == "arm_rigol_output":
             self._rigol.arm_output(payload["channel"])
         elif action.kind == "set_keithley_output":
             self._keithley.set_output(payload["channel"], payload["enabled"])
+            self._keithley_output_active[payload["channel"]] = bool(payload["enabled"])
         elif action.kind == "arm_keithley_output":
             self._keithley.arm_output(payload["channel"])
+        elif action.kind == "arm_anritsu_sg_output":
+            self._anritsu.arm_signal_generator_output()
+        elif action.kind == "set_anritsu_sg_output":
+            self._anritsu.set_signal_generator_output(payload["enabled"])
+            self._anritsu_sg_output_active = bool(payload["enabled"])
         elif action.kind == "ramp_keithley_to_zero":
             self._keithley.ramp_to_zero(payload["channel"], deadline_s=payload["deadline_s"])
+            self._keithley_zeroed[payload["channel"]] = True
         elif action.kind == "measure_keithley":
             result = self._keithley.measure(payload["channel"])
             prefix = f"keithley.{payload['channel']}"
@@ -188,11 +596,31 @@ class RecipeRunner:
             measurements[f"{prefix}.compliance_detected"] = float(result.compliance_detected)
             measurements[f"{prefix}.compliance_stop_required"] = float(result.compliance_stop_required)
         elif action.kind == "acquire_spectrum":
-            return self._anritsu.acquire_single_sweep(payload["trace"])
+            return self._anritsu.acquire_single_sweep(
+                payload["trace"], payload.get("dut_max_expected_input_dbm")
+            )
+        elif action.kind == "checkpoint":
+            pass
+        elif action.kind == "verify_connection":
+            device_name = str(payload["device"])
+            device = {
+                "rigol": self._rigol,
+                "keithley": self._keithley,
+                "anritsu": self._anritsu,
+            }[device_name]
+            if device.state in {
+                DeviceState.DISCONNECTED,
+                DeviceState.UNKNOWN,
+                DeviceState.FAULT,
+            }:
+                raise ExecutionError(
+                    f"Recipe connection verification failed for {device_name}: "
+                    f"{device.state.value}."
+                )
         elif action.kind == "wait":
             self._interruptible_wait(payload["duration_s"])
         else:
-            raise ExecutionError(f"Runner nie obsługuje akcji {action.kind!r}.")
+            raise ExecutionError(f"The runner does not support action {action.kind!r}.")
         return None
 
     def _interruptible_wait(self, duration_s: float) -> None:
@@ -206,7 +634,7 @@ class RecipeRunner:
 
     def _raise_if_stop_requested(self) -> None:
         if self._stop_requested.is_set():
-            raise ExecutionError("Operator zatrzymał pomiar.")
+            raise ExecutionError("The operator stopped the measurement.")
 
     def _wait_if_paused(self) -> None:
         while self._pause_requested.is_set():
@@ -228,21 +656,64 @@ class RecipeRunner:
 
         self._state = ApplicationState.STOPPING
         confirmed = True
-        for device in (self._keithley, self._rigol, self._anritsu):
+        devices = {
+            "keithley": self._keithley,
+            "rigol": self._rigol,
+            "anritsu": self._anritsu,
+        }
+        default_actions = {
+            "keithley": "keithley.outputs_off",
+            "rigol": "rigol.outputs_off",
+            "anritsu": "anritsu.rf_off_and_abort",
+        }
+        actions = self._safe_shutdown_actions or tuple(
+            default_actions[name]
+            for name in ("keithley", "rigol", "anritsu")
+            if name in self._required_devices
+        ) + ("storage.flush_checkpoint",)
+        attempted_devices: set[str] = set()
+        for action in actions:
+            self._emit_after_fault("shutdown_action_started", {"action": action})
             try:
-                device.emergency_off()
-                if device.state is DeviceState.UNKNOWN:
-                    confirmed = False
-                    self._emit_after_fault(
-                        "shutdown_error",
-                        {
-                            "device": type(device).__name__,
-                            "error": "Brak potwierdzenia bezpiecznego stanu urządzenia.",
-                        },
+                if action == "storage.flush_checkpoint":
+                    flush = getattr(self._writer, "flush_checkpoint", None)
+                    if callable(flush):
+                        flush()
+                else:
+                    name = action.split(".", 1)[0]
+                    if name not in self._required_devices:
+                        continue
+                    device = devices[name]
+                    attempted_devices.add(name)
+                    device.emergency_off()
+                    if device.state is DeviceState.UNKNOWN:
+                        raise ExecutionError(
+                            "The instrument did not confirm a safe state."
+                        )
+            except Exception as exc:
+                confirmed = False
+                self._emit_after_fault(
+                    "shutdown_error",
+                    {"action": action, "error": str(exc)},
+                )
+            else:
+                self._emit_after_fault("shutdown_action_finished", {"action": action})
+        # A malformed manually-created plan must not be able to omit OFF for a
+        # required device. Compiled plans already contain this fallback.
+        for name in sorted(self._required_devices - attempted_devices):
+            action = default_actions[name]
+            try:
+                devices[name].emergency_off()
+                if devices[name].state is DeviceState.UNKNOWN:
+                    raise ExecutionError(
+                        "The instrument did not confirm a safe state."
                     )
             except Exception as exc:
                 confirmed = False
-                self._emit_after_fault("shutdown_error", {"device": type(device).__name__, "error": str(exc)})
+                self._emit_after_fault(
+                    "shutdown_error",
+                    {"action": action, "error": str(exc), "fallback": True},
+                )
         return confirmed
 
     @staticmethod
@@ -253,8 +724,61 @@ class RecipeRunner:
                 channels.append(key.removesuffix(".compliance_stop_required"))
         return tuple(channels)
 
+    def _safety_context_snapshot(self) -> dict[str, dict[str, object]]:
+        """Copy the active, JSON-safe physical envelope into a checkpoint."""
+
+        return {name: dict(values) for name, values in self._active_safety_context.items()}
+
+    def _runtime_state_snapshot(self) -> dict[str, object]:
+        """Return a query-free state snapshot safe to attach to every audit event."""
+
+        return {
+            "application": self._state.value,
+            "devices": {
+                "rigol": self._rigol.state.value,
+                "keithley": self._keithley.state.value,
+                "anritsu": self._anritsu.state.value,
+            },
+            "rigol_outputs": dict(self._rigol_output_active),
+            "keithley_outputs": dict(self._keithley_output_active),
+            "anritsu_sg_output": self._anritsu_sg_output_active,
+        }
+
+    def _record_safe_boundary_if_advanced(
+        self,
+        *,
+        stored_points: int,
+        next_action_index: int,
+        plan_hash: str,
+    ) -> None:
+        if stored_points <= self._last_safe_boundary_points:
+            return
+        rigol_safe = not any(self._rigol_output_active.values())
+        keithley_safe = not any(self._keithley_output_active.values())
+        if not (rigol_safe and keithley_safe):
+            return
+        self._emit(
+            "safe_resume_boundary",
+            {
+                "stored_points": stored_points,
+                "next_action_index": next_action_index,
+                "plan_sha256": plan_hash,
+                "rigol_outputs": dict(self._rigol_output_active),
+                "keithley_outputs": dict(self._keithley_output_active),
+                "keithley_zeroed": dict(self._keithley_zeroed),
+            },
+        )
+        self._last_safe_boundary_points = stored_points
+
     def _emit(self, name: str, data: dict[str, object]) -> None:
-        payload = {"timestamp_utc": datetime.now(timezone.utc).isoformat(), **data}
+        payload = {
+            "timestamp_utc": datetime.now(timezone.utc).isoformat(),
+            **data,
+            "correlation_id": self._correlation_id,
+            "cancellation_token_id": self._correlation_id,
+            "cancellation_requested": self._stop_requested.is_set(),
+            "state_snapshot": self._runtime_state_snapshot(),
+        }
         severity = "error" if name in {"run_fault", "shutdown_error"} else "info"
         self._writer.append_event(name, payload, severity=severity)
         self._on_event(name, payload)

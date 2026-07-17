@@ -1,0 +1,78 @@
+{
+  "cases": [
+    {
+      "case_id": "profile.validated",
+      "duration_s": 0.00017929999739862978,
+      "error": null,
+      "evidence": {
+        "audit_path": "C:\\Users\\mateuszz\\git\\pyDG1022-master\\tmp\\qualification-smoke\\audit\\lab-control_20260716T224623.790601Z_00f759ce.jsonl",
+        "profile_state": "unverified",
+        "schema_version": 1
+      },
+      "finished_at_utc": "2026-07-16T22:46:23.792938+00:00",
+      "risk": "passive",
+      "started_at_utc": "2026-07-16T22:46:23.792747+00:00",
+      "status": "passed",
+      "title": "Validate profile and evidence destination"
+    },
+    {
+      "case_id": "rigol.connect",
+      "duration_s": 0.0,
+      "error": null,
+      "evidence": {
+        "reason": "device disabled or VISA resource not configured"
+      },
+      "finished_at_utc": "2026-07-16T22:46:23.793285+00:00",
+      "risk": "safe_state_write",
+      "started_at_utc": "2026-07-16T22:46:23.793279+00:00",
+      "status": "skipped",
+      "title": "Connect and identify rigol"
+    },
+    {
+      "case_id": "keithley.connect",
+      "duration_s": 0.0,
+      "error": null,
+      "evidence": {
+        "reason": "device disabled or VISA resource not configured"
+      },
+      "finished_at_utc": "2026-07-16T22:46:23.793579+00:00",
+      "risk": "safe_state_write",
+      "started_at_utc": "2026-07-16T22:46:23.793574+00:00",
+      "status": "skipped",
+      "title": "Connect and identify keithley"
+    },
+    {
+      "case_id": "anritsu.connect",
+      "duration_s": 0.0,
+      "error": null,
+      "evidence": {
+        "reason": "device disabled or VISA resource not configured"
+      },
+      "finished_at_utc": "2026-07-16T22:46:23.793829+00:00",
+      "risk": "safe_state_write",
+      "started_at_utc": "2026-07-16T22:46:23.793825+00:00",
+      "status": "skipped",
+      "title": "Connect and identify anritsu"
+    }
+  ],
+  "evidence_sha256": "8b7b5b511e417cad82fc1f7cbb5a9cebb22afe68084ab8119fbde375804fd27e",
+  "finished_at_utc": "2026-07-16T22:46:23.794068+00:00",
+  "operator": {
+    "host": "mzelentrptu",
+    "provider": "simulation",
+    "roles": [
+      "engineer",
+      "operator",
+      "service"
+    ],
+    "username": "SIMULATION"
+  },
+  "overall_status": "simulation_passed",
+  "profile_id": "default-lab-profile",
+  "profile_state": "unverified",
+  "qualification_id": "HIL-20260716T224623.789192Z-20a297d0",
+  "settings_path": "C:\\Users\\mateuszz\\git\\pyDG1022-master\\app\\resources\\settings.template.yml",
+  "settings_sha256": "c74134809e5a5850984c2b7091c19825d1e1172ea4092eb18f25fd2efb3c2289",
+  "simulation": true,
+  "started_at_utc": "2026-07-16T22:46:23.789243+00:00"
+}

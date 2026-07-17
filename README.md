@@ -8,6 +8,9 @@ Lokalna aplikacja PySide6 do bezpiecznego sterowania stanowiskiem z:
 
 Architektura, limity oraz procedury kwalifikacji są opisane w [masterplanie](docs/PLAN_WDROZENIA.md). Bieżąca [procedura operatora](docs/PROCEDURA_OPERATORA.md) opisuje bezpieczne uruchomienie i awarię. Wynik pierwszej kwalifikacji komunikacji z podłączonym Rigolem jest w [raporcie sprzętowym](docs/HARDWARE_TEST_RIGOL_DG1032Z.md), a wymagane bramki dla trzech urządzeń w [macierzy kwalifikacji](docs/MACIERZ_KWALIFIKACJI_SPRZETOWEJ.md).
 
+Kontrolowaną kwalifikację uruchamia `lab-control-qualify`; tryby, wielokrotne bramki dla testów
+energetycznych i weryfikację raportów opisuje [procedura HIL](docs/HIL_QUALIFICATION.md).
+
 ## Uruchomienie
 
 ```powershell

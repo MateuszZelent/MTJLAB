@@ -8,7 +8,7 @@ import re
 from typing import Literal
 
 from app.devices.base import InstrumentSession
-from app.domain.errors import DeviceError
+from app.domain.errors import ConnectionError, DeviceError
 from app.settings.models import StationSettings
 
 
@@ -64,11 +64,11 @@ class _FaultInjectingSession:
     def _inject(self, command: str) -> None:
         if self._matches(command, self._fault.disconnect_prefixes):
             self._session.close()
-            raise DeviceError(f"Symulator: rozłączenie podczas {command!r}.")
+            raise ConnectionError(f"Simulator disconnected while executing {command!r}.")
         if self._matches(command, self._fault.timeout_prefixes):
-            raise DeviceError(f"Symulator: timeout podczas {command!r}.")
+            raise DeviceError(f"Simulator timeout while executing {command!r}.")
         if self._matches(command, self._fault.device_error_prefixes):
-            raise DeviceError(f"Symulator: błąd urządzenia podczas {command!r}.")
+            raise DeviceError(f"Simulator device error while executing {command!r}.")
 
     def write(self, command: str) -> object:
         self._inject(command)
@@ -92,20 +92,33 @@ class _BaseSimulator:
     def __init__(self) -> None:
         self.closed = False
         self.commands: list[str] = []
+        self.error_queue: list[str] = []
+        self.command_errors: dict[str, str] = {}
 
     def _assert_open(self) -> None:
         if self.closed:
-            raise DeviceError("Symulowana sesja VISA jest zamknięta.")
+            raise DeviceError("The simulated VISA session is closed.")
 
     def write(self, command: str) -> None:
         self._assert_open()
         self.commands.append(command)
-        self._write(command.strip())
+        normalized = command.strip()
+        if normalized.upper() == "*CLS":
+            self.error_queue.clear()
+        else:
+            for prefix, message in self.command_errors.items():
+                if normalized.upper().startswith(prefix.upper()):
+                    self.error_queue.append(message)
+                    break
+        self._write(normalized)
 
     def query(self, command: str) -> str:
         self._assert_open()
         self.commands.append(command)
-        return self._query(command.strip())
+        normalized = command.strip()
+        if normalized.upper().lstrip(":") == "SYST:ERR?":
+            return self.error_queue.pop(0) if self.error_queue else "0,No error"
+        return self._query(normalized)
 
     def close(self) -> None:
         self.closed = True
@@ -114,7 +127,7 @@ class _BaseSimulator:
         del command
 
     def _query(self, command: str) -> str:
-        raise DeviceError(f"Symulator nie obsługuje zapytania {command!r}.")
+        raise DeviceError(f"The simulator does not support query {command!r}.")
 
 
 class RigolSimulator(_BaseSimulator):
@@ -263,7 +276,7 @@ class RigolSimulator(_BaseSimulator):
         if match:
             values = self.high if match.group(2).upper() == "HIGH" else self.low
             return f"{values[int(match.group(1))]:.12g}"
-        raise DeviceError(f"Rigol simulator: nieobsługiwane zapytanie {command!r}.")
+        raise DeviceError(f"Rigol simulator: unsupported query {command!r}.")
 
 
 class KeithleySimulator(_BaseSimulator):
@@ -275,17 +288,13 @@ class KeithleySimulator(_BaseSimulator):
         self.resistance_ohm = {"smua": 10.0, "smub": 10.0}
         self.limit_voltage = {"smua": float("inf"), "smub": float("inf")}
         self.limit_current = {"smua": float("inf"), "smub": float("inf")}
-        self.error_queue: list[str] = []
-        self.command_errors: dict[str, str] = {}
+        self.noise_fraction = 0.0
+        self._measurement_index = {"smua": 0, "smub": 0}
 
     def _write(self, command: str) -> None:
         if command == "errorqueue.clear()":
             self.error_queue.clear()
             return
-        for prefix, message in self.command_errors.items():
-            if command.upper().startswith(prefix.upper()):
-                self.error_queue.append(message)
-                break
         mode = re.match(r"^(smu[ab])\.source\.func\s*=\s*\1\.(OUTPUT_DCAMPS|OUTPUT_DCVOLTS)$", command)
         if mode:
             self.mode[mode.group(1)] = "current" if mode.group(2) == "OUTPUT_DCAMPS" else "voltage"
@@ -313,7 +322,7 @@ class KeithleySimulator(_BaseSimulator):
             return str(len(self.error_queue))
         if command == "print(errorqueue.next())":
             if not self.error_queue:
-                raise DeviceError("Keithley simulator: errorqueue.next() przy pustej kolejce.")
+                raise DeviceError("Keithley simulator: errorqueue.next() called on an empty queue.")
             return self.error_queue.pop(0)
         output = re.match(r"^print\((smu[ab])\.source\.output\)$", command)
         if output:
@@ -327,7 +336,7 @@ class KeithleySimulator(_BaseSimulator):
             smu, quantity = measure.groups()
             voltage, current = self._measured_iv(smu)
             return f"{voltage if quantity == 'v' else current:.12g}"
-        raise DeviceError(f"Keithley simulator: nieobsługiwane zapytanie {command!r}.")
+        raise DeviceError(f"Keithley simulator: unsupported query {command!r}.")
 
     def _measured_iv(self, smu: str) -> tuple[float, float]:
         """Return a deterministic resistive-DUT measurement with compliance.
@@ -340,7 +349,7 @@ class KeithleySimulator(_BaseSimulator):
             return 0.0, 0.0
         resistance = self.resistance_ohm[smu]
         if resistance <= 0:
-            raise DeviceError("Keithley simulator: rezystancja DUT musi być dodatnia.")
+            raise DeviceError("Keithley simulator: DUT resistance must be positive.")
         level = self.level[smu]
         if self.mode[smu] == "current":
             current = level
@@ -348,12 +357,21 @@ class KeithleySimulator(_BaseSimulator):
             if abs(voltage) > self.limit_voltage[smu]:
                 voltage = math.copysign(self.limit_voltage[smu], voltage)
                 current = voltage / resistance
-            return voltage, current
-        voltage = level
-        current = voltage / resistance
-        if abs(current) > self.limit_current[smu]:
-            current = math.copysign(self.limit_current[smu], current)
-            voltage = current * resistance
+        else:
+            voltage = level
+            current = voltage / resistance
+            if abs(current) > self.limit_current[smu]:
+                current = math.copysign(self.limit_current[smu], current)
+                voltage = current * resistance
+
+        # Optional repeatable readback noise makes long-running UI and recipe
+        # tests realistic without introducing randomness into failures. The
+        # independent phases make derived resistance vary like a real reading.
+        index = self._measurement_index[smu]
+        self._measurement_index[smu] += 1
+        if self.noise_fraction:
+            voltage *= 1.0 + self.noise_fraction * math.sin(index * 0.73 + 0.31)
+            current *= 1.0 + self.noise_fraction * math.sin(index * 0.91 + 1.17)
         return voltage, current
 
 
@@ -366,8 +384,104 @@ class AnritsuSimulator(_BaseSimulator):
         self.reference_level = 0.0
         self.continuous_sweep = True
         self.trace_frame = 0
+        self.instrument_mode = "SPECT"
+        self.sg_frequency_hz = 1e9
+        self.sg_power_dbm = -30.0
+        self.sg_output = False
+        self.rbw_auto = True
+        self.rbw_hz = 1e3
+        self.vbw_auto = True
+        self.vbw_hz: float | None = 1e3
+        self.detector = "NORM"
+        self.attenuation_auto = True
+        self.attenuation_db = 10.0
+        self.preamplifier_enabled = False
+        self.sweep_time_auto = True
+        self.sweep_time_s = 0.1
 
     def _write(self, command: str) -> None:
+        mode = re.match(r"^INST\s+(SPECT|SG)$", command, re.IGNORECASE)
+        if mode:
+            self.instrument_mode = mode.group(1).upper()
+            return
+        output = re.match(r"^OUTP\s+(ON|OFF|1|0)$", command, re.IGNORECASE)
+        if output:
+            if self.instrument_mode != "SG":
+                raise DeviceError("Anritsu simulator: OUTP is available only in SG mode.")
+            self.sg_output = output.group(1).upper() in {"ON", "1"}
+            return
+        sg_frequency = re.match(r"^FREQ\s+([+-]?[\d.eE]+)HZ$", command, re.IGNORECASE)
+        if sg_frequency:
+            if self.instrument_mode != "SG":
+                raise DeviceError("Anritsu simulator: SG FREQ requires SG mode.")
+            self.sg_frequency_hz = float(sg_frequency.group(1))
+            return
+        sg_power = re.match(r"^POW\s+([+-]?[\d.eE]+)$", command, re.IGNORECASE)
+        if sg_power:
+            if self.instrument_mode != "SG":
+                raise DeviceError("Anritsu simulator: SG POW requires SG mode.")
+            self.sg_power_dbm = float(sg_power.group(1))
+            return
+        if command.upper() == "UNIT:POW DBM":
+            if self.instrument_mode != "SG":
+                raise DeviceError("Anritsu simulator: UNIT:POW requires SG mode.")
+            return
+        switch_commands = {
+            "BAND:AUTO": "rbw_auto",
+            "BAND:VID:AUTO": "vbw_auto",
+            "POW:ATT:AUTO": "attenuation_auto",
+            "POW:GAIN": "preamplifier_enabled",
+            "SWE:TIME:AUTO": "sweep_time_auto",
+        }
+        switch = re.match(
+            r"^(BAND:AUTO|BAND:VID:AUTO|POW:ATT:AUTO|POW:GAIN|SWE:TIME:AUTO)\s+"
+            r"(ON|OFF|1|0)$",
+            command,
+            re.IGNORECASE,
+        )
+        if switch:
+            setattr(
+                self,
+                switch_commands[switch.group(1).upper()],
+                switch.group(2).upper() in {"ON", "1"},
+            )
+            return
+        rbw = re.match(r"^BAND\s+([+-]?[\d.eE]+)HZ$", command, re.IGNORECASE)
+        if rbw:
+            self.rbw_auto = False
+            self.rbw_hz = float(rbw.group(1))
+            return
+        vbw = re.match(r"^BAND:VID\s+([+-]?[\d.eE]+)HZ$", command, re.IGNORECASE)
+        if vbw:
+            self.vbw_auto = False
+            self.vbw_hz = float(vbw.group(1))
+            return
+        if command.upper() == "BAND:VID OFF":
+            self.vbw_auto = False
+            self.vbw_hz = None
+            return
+        detector = re.match(
+            r"^DET\s+(NORM|POS|SAMP|NEG|RMS|QPE|CAV|CRMS)$",
+            command,
+            re.IGNORECASE,
+        )
+        if detector:
+            self.detector = detector.group(1).upper()
+            return
+        attenuation = re.match(
+            r"^POW:ATT\s+([+-]?[\d.eE]+)(?:DB)?$", command, re.IGNORECASE
+        )
+        if attenuation:
+            self.attenuation_auto = False
+            self.attenuation_db = float(attenuation.group(1))
+            return
+        sweep_time = re.match(
+            r"^SWE:TIME\s+([+-]?[\d.eE]+)S$", command, re.IGNORECASE
+        )
+        if sweep_time:
+            self.sweep_time_auto = False
+            self.sweep_time_s = float(sweep_time.group(1))
+            return
         match = re.match(r"^FREQ:(STAR|STOP)\s+([+-]?[\d.eE]+)HZ$", command, re.IGNORECASE)
         if match:
             value = float(match.group(2))
@@ -392,13 +506,44 @@ class AnritsuSimulator(_BaseSimulator):
         if command == "*IDN?":
             return "ANRITSU,MS2830A,SIM000001,sim-1.0"
         if command == "*OPT?":
-            return "041,008"
+            return "041,008,020"
         if command == "*OPC?":
             return "1"
         if command == "FORM?":
             return "ASC,0"
         if command == "INST?":
-            return "SPECT"
+            return self.instrument_mode
+        if command == "FREQ?":
+            if self.instrument_mode != "SG":
+                raise DeviceError("Anritsu simulator: SG FREQ? requires SG mode.")
+            return f"{self.sg_frequency_hz:.12g}"
+        if command == "POW?":
+            if self.instrument_mode != "SG":
+                raise DeviceError("Anritsu simulator: SG POW? requires SG mode.")
+            return f"{self.sg_power_dbm:.12g}"
+        if command == "OUTP?":
+            if self.instrument_mode != "SG":
+                raise DeviceError("Anritsu simulator: OUTP? requires SG mode.")
+            return "1" if self.sg_output else "0"
+        switch_queries = {
+            "BAND:AUTO?": self.rbw_auto,
+            "BAND:VID:AUTO?": self.vbw_auto,
+            "POW:ATT:AUTO?": self.attenuation_auto,
+            "POW:GAIN?": self.preamplifier_enabled,
+            "SWE:TIME:AUTO?": self.sweep_time_auto,
+        }
+        if command in switch_queries:
+            return "1" if switch_queries[command] else "0"
+        if command == "BAND?":
+            return f"{self.rbw_hz:.12g}"
+        if command == "BAND:VID?":
+            return "OFF" if self.vbw_hz is None else f"{self.vbw_hz:.12g}"
+        if command == "DET?":
+            return self.detector
+        if command == "POW:ATT?":
+            return f"{self.attenuation_db:.12g}"
+        if command == "SWE:TIME?":
+            return f"{self.sweep_time_s:.12g}"
         if command == "TRAC:TYPE?":
             return "WRIT"
         if command == "INIT:CONT?":
@@ -423,7 +568,7 @@ class AnritsuSimulator(_BaseSimulator):
                 ripple = 2 * math.sin(index / 25 + self.trace_frame / 7)
                 values.append(f"{-80 + peak + ripple:.8g}")
             return ",".join(values)
-        raise DeviceError(f"Anritsu simulator: nieobsługiwane zapytanie {command!r}.")
+        raise DeviceError(f"Anritsu simulator: unsupported query {command!r}.")
 
 
 class SimulatedVisaFactory:
@@ -435,12 +580,20 @@ class SimulatedVisaFactory:
         *,
         fault: SimulatorFault | None = None,
         keithley_resistance_ohm: float = 10.0,
+        keithley_noise_fraction: float = 0.0,
+        queued_errors: tuple[str, ...] = (),
+        command_errors: dict[str, str] | None = None,
         keithley_error_queue: tuple[str, ...] = (),
         keithley_command_errors: dict[str, str] | None = None,
     ) -> None:
         self.device = device
         self.fault = fault
         self.keithley_resistance_ohm = keithley_resistance_ohm
+        if not math.isfinite(keithley_noise_fraction) or keithley_noise_fraction < 0:
+            raise ValueError("keithley_noise_fraction must be finite and non-negative.")
+        self.keithley_noise_fraction = keithley_noise_fraction
+        self.queued_errors = queued_errors
+        self.command_errors = command_errors or {}
         self.keithley_error_queue = keithley_error_queue
         self.keithley_command_errors = keithley_command_errors or {}
 
@@ -452,10 +605,14 @@ class SimulatedVisaFactory:
         elif self.device == "keithley":
             session = KeithleySimulator()
             session.resistance_ohm = {"smua": self.keithley_resistance_ohm, "smub": self.keithley_resistance_ohm}
-            session.error_queue = list(self.keithley_error_queue)
-            session.command_errors = dict(self.keithley_command_errors)
+            session.noise_fraction = self.keithley_noise_fraction
         else:
             session = AnritsuSimulator()
+        session.error_queue = list(self.queued_errors)
+        session.error_queue.extend(self.keithley_error_queue if self.device == "keithley" else ())
+        session.command_errors = dict(self.command_errors)
+        if self.device == "keithley":
+            session.command_errors.update(self.keithley_command_errors)
         session.timeout = timeout_ms
         return _FaultInjectingSession(session, self.fault) if self.fault is not None else session
 
@@ -472,7 +629,7 @@ def simulated_station_settings(settings: StationSettings) -> StationSettings:
     raw["profile"]["state"] = "approved"
     raw["profile"]["approved_by"] = "SIMULATION"
     raw["profile"]["approved_at"] = "in-memory"
-    raw["profile"]["approval_note"] = "Profil syntetyczny; nie zapisano do settings.yml."
+    raw["profile"]["approval_note"] = "Synthetic profile; not persisted to settings.yml."
     raw["devices"]["rigol"]["connection"]["resource"] = "SIM::RIGOL::INSTR"
     raw["devices"]["rigol"]["identity"]["require_serial_match"] = False
     raw["devices"]["rigol"]["identity"]["expected_serial"] = None

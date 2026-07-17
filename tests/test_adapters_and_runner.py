@@ -3,10 +3,21 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from copy import deepcopy
 import threading
+import time
 import unittest
 
-from app.devices.anritsu import AnritsuAdapter, SpectrumConfig
-from app.devices.keithley import KeithleyAdapter, KeithleySourceRequest
+from app.devices.anritsu import (
+    AdvancedSpectrumConfig,
+    AnritsuAdapter,
+    SignalGeneratorConfig,
+    SpectrumConfig,
+)
+from app.devices.keithley import (
+    KeithleyAdapter,
+    KeithleyRampRequest,
+    KeithleySourceRequest,
+    build_keithley_ramp_levels,
+)
 from app.devices.rigol import (
     RigolAdapter,
     RigolBurstConfig,
@@ -15,11 +26,13 @@ from app.devices.rigol import (
     RigolModulationConfig,
 )
 from app.devices.visa import FakeVisaSession, FakeVisaSessionFactory
-from app.domain.errors import SafetyViolation
+from app.domain.errors import DeviceError, SafetyViolation
 from app.domain.models import DeviceState
 from app.domain.models import ApplicationState
-from app.engine.compiler import ExecutionPlan, PlanAction
+from app.engine.compiler import ExecutionPlan, PlanAction, RecipeCompiler
 from app.engine.runner import RecipeRunner
+from app.recipes import parse_recipe_text
+from app.safety.keithley import KeithleySafetyEnvelope
 from app.settings.models import StationSettings
 from tests.helpers import loaded_settings, simulation_settings
 
@@ -39,6 +52,20 @@ class MemoryWriter:
 
     def append_event(self, name: str, data: dict[str, object], *, severity: str = "info") -> None:
         self.events.append((name, data, severity))
+
+
+@dataclass
+class ShutdownProbe:
+    fail: bool = False
+    calls: int = 0
+    state: DeviceState = DeviceState.OUTPUT_OFF
+
+    def emergency_off(self) -> None:
+        self.calls += 1
+        if self.fail:
+            self.state = DeviceState.UNKNOWN
+            raise OSError("injected shutdown failure")
+        self.state = DeviceState.OUTPUT_OFF
 
 
 class AdapterAndRunnerTests(unittest.TestCase):
@@ -108,7 +135,7 @@ class AdapterAndRunnerTests(unittest.TestCase):
         adapter.configure_source(KeithleySourceRequest("B", "current", .001, .067))
         adapter.arm_output("B")
 
-        with self.assertRaisesRegex(Exception, "nie potwierdził"):
+        with self.assertRaisesRegex(Exception, "did not confirm"):
             adapter.set_output("B", True)
 
     def test_device_state_remains_on_when_another_channel_is_disabled(self) -> None:
@@ -172,6 +199,110 @@ class AdapterAndRunnerTests(unittest.TestCase):
         self.assertIn("smub.source.output = smub.OUTPUT_OFF", session.writes)
         self.assertEqual(adapter.state, DeviceState.FAULT)
 
+    def test_keithley_manual_ramp_queries_actual_level_and_measures_each_step(self) -> None:
+        raw = deepcopy(simulation_settings(approved=True).model_dump(mode="python"))
+        raw["devices"]["keithley"]["safety"]["allow_output_enable"] = True
+        settings = StationSettings.model_validate(raw)
+        session = FakeVisaSession(
+            responses={
+                "*IDN?": "KEITHLEY INSTRUMENTS,2602A,123456,1.0",
+                "print(errorqueue.count)": "0",
+                "print(smub.source.leveli)": "0.001",
+                "print(smub.measure.iv())": "0.0011\t0.01",
+            }
+        )
+        adapter = KeithleyAdapter(settings, session_factory=FakeVisaSessionFactory(session))
+        adapter.connect()
+        adapter.configure_source(KeithleySourceRequest("B", "current", 0.001, 0.067))
+        adapter.arm_output("B")
+        adapter.set_output("B", True)
+
+        result = adapter.ramp_to_level(
+            KeithleyRampRequest("B", 0.0012, 0.0001, 0.001, 1.0)
+        )
+
+        self.assertAlmostEqual(result.start_si, 0.001)
+        self.assertAlmostEqual(result.levels_si[-1], 0.0012)
+        self.assertEqual(
+            session.writes.count("print(smub.measure.iv())"),
+            len(result.levels_si),
+        )
+        self.assertEqual(adapter.state, DeviceState.OUTPUT_ON)
+        self.assertAlmostEqual(result.final_measurement.voltage_v, 0.01)
+
+    def test_keithley_manual_ramp_failure_forces_both_outputs_off(self) -> None:
+        raw = deepcopy(simulation_settings(approved=True).model_dump(mode="python"))
+        raw["devices"]["keithley"]["safety"]["allow_output_enable"] = True
+        settings = StationSettings.model_validate(raw)
+        session = FakeVisaSession(
+            responses={
+                "*IDN?": "KEITHLEY INSTRUMENTS,2602A,123456,1.0",
+                "print(errorqueue.count)": "0",
+                "print(smub.source.leveli)": "0.001",
+            }
+        )
+        adapter = KeithleyAdapter(settings, session_factory=FakeVisaSessionFactory(session))
+        adapter.connect()
+        adapter.configure_source(KeithleySourceRequest("B", "current", 0.001, 0.067))
+        adapter.arm_output("B")
+        adapter.set_output("B", True)
+
+        with self.assertRaisesRegex(Exception, "No fake VISA response"):
+            adapter.ramp_to_level(
+                KeithleyRampRequest("B", 0.0011, 0.0001, 0.001, 1.0)
+            )
+
+        self.assertIn("smua.source.output = smua.OUTPUT_OFF", session.writes)
+        self.assertIn("smub.source.output = smub.OUTPUT_OFF", session.writes)
+        self.assertIn(adapter.state, {DeviceState.FAULT, DeviceState.UNKNOWN})
+
+    def test_keithley_ramp_preview_is_finite_and_respects_point_limit(self) -> None:
+        levels = build_keithley_ramp_levels(0.0, 0.001, 0.0003, max_points=10)
+        self.assertEqual(len(levels), 4)
+        self.assertAlmostEqual(levels[-1], 0.001)
+        self.assertTrue(all(right > left for left, right in zip((0.0, *levels), levels)))
+        with self.assertRaisesRegex(SafetyViolation, "requires 100"):
+            build_keithley_ramp_levels(0.0, 0.01, 0.0001, max_points=99)
+
+    def test_each_keithley_ivp_trip_forces_both_outputs_off(self) -> None:
+        raw = deepcopy(simulation_settings(approved=True).model_dump(mode="python"))
+        raw["devices"]["keithley"]["safety"]["allow_output_enable"] = True
+        raw["devices"]["keithley"]["safety"]["stop_on_compliance"] = False
+        raw["devices"]["keithley"]["safety"]["channels"]["B"]["lab_limits"][
+            "max_abs_power"
+        ] = "100 uW"
+        settings = StationSettings.model_validate(raw)
+        cases = (
+            ("current", "0.02\t0.01", "measured current"),
+            ("voltage", "0.001\t0.2", "measured voltage"),
+            ("power", "0.002\t0.06", "DUT power"),
+        )
+        for label, response, message in cases:
+            with self.subTest(boundary=label):
+                session = FakeVisaSession(
+                    responses={
+                        "*IDN?": "KEITHLEY INSTRUMENTS,2602A,123456,1.0",
+                        "print(errorqueue.count)": "0",
+                        "print(smub.measure.iv())": response,
+                    }
+                )
+                adapter = KeithleyAdapter(
+                    settings, session_factory=FakeVisaSessionFactory(session)
+                )
+                adapter.connect()
+                adapter.configure_source(
+                    KeithleySourceRequest("B", "current", 0.001, 0.067)
+                )
+                adapter.arm_output("B")
+                adapter.set_output("B", True)
+
+                with self.assertRaisesRegex(SafetyViolation, message):
+                    adapter.measure("B")
+
+                self.assertIn("smua.source.output = smua.OUTPUT_OFF", session.writes)
+                self.assertIn("smub.source.output = smub.OUTPUT_OFF", session.writes)
+                self.assertEqual(adapter.state, DeviceState.FAULT)
+
     def test_failed_emergency_shutdown_marks_each_device_state_unknown(self) -> None:
         rigol_session = FakeVisaSession(
             responses={"*IDN?": "Rigol Technologies,DG1032Z,DG1ZA172902039,00.01.08"}
@@ -193,6 +324,69 @@ class AdapterAndRunnerTests(unittest.TestCase):
             session.closed = True  # simulate a transport loss immediately before E-STOP
             adapter.emergency_off()
             self.assertEqual(adapter.state, DeviceState.UNKNOWN)
+
+    def test_shutdown_attempts_every_required_device_after_one_failure(self) -> None:
+        keithley = ShutdownProbe(fail=True)
+        rigol = ShutdownProbe()
+        anritsu = ShutdownProbe()
+        writer = MemoryWriter()
+        plan = ExecutionPlan(
+            recipe_name="shutdown-aggregation",
+            actions=(PlanAction("wait", "wait", {"duration_s": 0.0}, {}),),
+            total_points=0,
+            sha256="shutdown-aggregation",
+            recipe_source="schema_version: 1\n",
+            required_devices=frozenset({"keithley", "rigol", "anritsu"}),
+        )
+
+        result = RecipeRunner(
+            rigol=rigol,  # type: ignore[arg-type]
+            keithley=keithley,  # type: ignore[arg-type]
+            anritsu=anritsu,  # type: ignore[arg-type]
+            writer=writer,  # type: ignore[arg-type]
+        ).run(plan)
+
+        self.assertEqual((keithley.calls, rigol.calls, anritsu.calls), (2, 2, 2))
+        self.assertEqual(result.state, ApplicationState.FAULT)
+        self.assertEqual(writer.status, "faulted")
+        self.assertTrue(any(name == "shutdown_error" for name, _data, _severity in writer.events))
+
+    def test_runner_executes_hashed_shutdown_manifest_in_declared_order(self) -> None:
+        keithley = ShutdownProbe()
+        rigol = ShutdownProbe()
+        anritsu = ShutdownProbe()
+        writer = MemoryWriter()
+        manifest = (
+            "rigol.outputs_off",
+            "keithley.outputs_off",
+            "anritsu.rf_off_and_abort",
+            "storage.flush_checkpoint",
+        )
+        plan = ExecutionPlan(
+            recipe_name="ordered-shutdown",
+            actions=(PlanAction("wait", "wait", {"duration_s": 0.0}, {}),),
+            total_points=0,
+            sha256="ordered-shutdown",
+            recipe_source="schema_version: 1\n",
+            required_devices=frozenset({"keithley", "rigol", "anritsu"}),
+            safe_shutdown_actions=manifest,
+        )
+
+        result = RecipeRunner(
+            rigol=rigol,  # type: ignore[arg-type]
+            keithley=keithley,  # type: ignore[arg-type]
+            anritsu=anritsu,  # type: ignore[arg-type]
+            writer=writer,  # type: ignore[arg-type]
+        ).run(plan)
+
+        started = tuple(
+            data["action"]
+            for name, data, _severity in writer.events
+            if name == "shutdown_action_started"
+        )
+        self.assertEqual(result.state, ApplicationState.SAFE)
+        self.assertEqual(started, manifest)
+        self.assertEqual((rigol.calls, keithley.calls, anritsu.calls), (1, 1, 1))
 
     def test_anritsu_live_trace_has_inclusive_frequency_axis(self) -> None:
         values = ",".join(str(-50 + index / 100) for index in range(101))
@@ -336,6 +530,330 @@ class AdapterAndRunnerTests(unittest.TestCase):
         self.assertNotIn("TRAC:TYPE?", session.writes)
         self.assertNotIn("INIT:CONT ON", session.writes)
 
+    def test_anritsu_signal_generator_is_hidden_behind_qualified_limits_and_arm(self) -> None:
+        from app.devices.simulators import SimulatedVisaFactory
+
+        raw = simulation_settings(approved=True).model_dump(mode="python")
+        raw["devices"]["anritsu"]["signal_generator"] = {
+            "control_protocol": "basic_scpi",
+            "frequency": {"min": "250 kHz", "max": "3.6 GHz"},
+            "power": {"min": "-100 dBm", "max": "0 dBm"},
+            "arm_ttl": "30 s",
+        }
+        raw["devices"]["anritsu"]["safety"]["signal_generator_output_allowed"] = True
+        settings = StationSettings.model_validate(raw)
+        adapter = AnritsuAdapter(
+            settings, session_factory=SimulatedVisaFactory("anritsu")
+        )
+
+        adapter.connect()
+        self.assertTrue(adapter.capabilities.supports("signal_generator"))
+        with self.assertRaisesRegex(DeviceError, "explicit SG mode"):
+            adapter.read_signal_generator_configuration()
+        snapshot = adapter.configure_signal_generator(SignalGeneratorConfig(1e9, -20.0))
+        self.assertFalse(snapshot.output_enabled)
+        adapter.arm_signal_generator_output(ttl_s=1.0)
+        self.assertTrue(adapter.set_signal_generator_output(True))
+        self.assertEqual(adapter.state, DeviceState.OUTPUT_ON)
+        self.assertFalse(adapter.set_signal_generator_output(False))
+        self.assertEqual(adapter.state, DeviceState.OUTPUT_OFF)
+
+    def test_anritsu_connect_and_disconnect_prove_optional_sg_output_off(self) -> None:
+        session = FakeVisaSession(
+            responses={
+                "*IDN?": "ANRITSU,MS2830A,123456,1.0",
+                "*OPT?": "020",
+                "OUTP?": "0",
+            }
+        )
+        adapter = AnritsuAdapter(
+            simulation_settings(anritsu_enabled=False),
+            session_factory=FakeVisaSessionFactory(session),
+        )
+
+        adapter.connect()
+        self.assertEqual(
+            session.writes[:7],
+            ["*IDN?", "*OPT?", "INST SG", "OUTP 0", "OUTP?", "INST SPECT",],
+        )
+        session.writes.clear()
+
+        adapter.disconnect()
+        self.assertEqual(
+            session.writes,
+            ["INST SG", "OUTP 0", "OUTP?", "INST SPECT", "ABORT"],
+        )
+        self.assertEqual(adapter.state, DeviceState.DISCONNECTED)
+
+    def test_anritsu_connect_fails_closed_when_optional_sg_will_not_turn_off(self) -> None:
+        session = FakeVisaSession(
+            responses={
+                "*IDN?": "ANRITSU,MS2830A,123456,1.0",
+                "*OPT?": "020",
+                "OUTP?": "1",
+            }
+        )
+        adapter = AnritsuAdapter(
+            simulation_settings(anritsu_enabled=False),
+            session_factory=FakeVisaSessionFactory(session),
+        )
+
+        with self.assertRaisesRegex(DeviceError, "did not confirm RF OUTPUT OFF"):
+            adapter.connect()
+
+        self.assertEqual(adapter.state, DeviceState.DISCONNECTED)
+        self.assertIsNone(adapter.identity)
+
+    def test_anritsu_connect_enforces_profile_required_hardware_options(self) -> None:
+        raw = simulation_settings(anritsu_enabled=False).model_dump(mode="python")
+        raw["devices"]["anritsu"]["identity"]["required_options"] = ["008"]
+        session = FakeVisaSession(
+            responses={
+                "*IDN?": "ANRITSU,MS2830A,123456,1.0",
+                "*OPT?": "041",
+            }
+        )
+        adapter = AnritsuAdapter(
+            StationSettings.model_validate(raw),
+            session_factory=FakeVisaSessionFactory(session),
+        )
+
+        with self.assertRaisesRegex(DeviceError, "missing profile-required.*008"):
+            adapter.connect()
+
+        self.assertEqual(adapter.state, DeviceState.DISCONNECTED)
+
+    def test_anritsu_signal_generator_unverified_protocol_never_writes_configuration(self) -> None:
+        from app.devices.simulators import SimulatedVisaFactory
+
+        adapter = AnritsuAdapter(
+            simulation_settings(approved=True),
+            session_factory=SimulatedVisaFactory("anritsu"),
+        )
+        adapter.connect()
+
+        with self.assertRaisesRegex(SafetyViolation, "unverified"):
+            adapter.configure_signal_generator(SignalGeneratorConfig(1e9, -30.0))
+        self.assertEqual(adapter.state, DeviceState.VERIFIED)
+
+    def test_anritsu_advanced_spectrum_is_read_only_until_firmware_is_qualified(self) -> None:
+        from app.devices.simulators import SimulatedVisaFactory
+
+        adapter = AnritsuAdapter(
+            simulation_settings(approved=True),
+            session_factory=SimulatedVisaFactory("anritsu"),
+        )
+        adapter.connect()
+
+        snapshot = adapter.read_advanced_spectrum_configuration()
+        self.assertTrue(snapshot.rbw_auto)
+        self.assertEqual(snapshot.detector, "NORM")
+        self.assertFalse(snapshot.preamplifier_enabled)
+        with self.assertRaisesRegex(SafetyViolation, "unverified"):
+            adapter.configure_advanced_spectrum(AdvancedSpectrumConfig())
+
+    def test_anritsu_advanced_spectrum_configures_and_verifies_documented_controls(self) -> None:
+        from app.devices.simulators import SimulatedVisaFactory
+
+        raw = simulation_settings(approved=True).model_dump(mode="python")
+        raw["devices"]["anritsu"]["advanced_spectrum"] = {
+            "control_protocol": "standard_scpi",
+            "qualified_firmware": ["sim-1.0"],
+        }
+        rf_input = raw["devices"]["anritsu"]["safety"]["rf_input"]
+        rf_input["minimum_internal_attenuation"] = "20 dB"
+        rf_input["preamplifier_allowed"] = True
+        settings = StationSettings.model_validate(raw)
+        adapter = AnritsuAdapter(
+            settings,
+            session_factory=SimulatedVisaFactory("anritsu"),
+        )
+        adapter.connect()
+
+        actual = adapter.configure_advanced_spectrum(
+            AdvancedSpectrumConfig(
+                rbw_auto=False,
+                rbw_hz=3e3,
+                vbw_mode="off",
+                detector="POS",
+                attenuation_auto=False,
+                attenuation_db=20,
+                preamplifier_enabled=True,
+                sweep_time_auto=False,
+                sweep_time_s=0.2,
+            )
+        )
+
+        self.assertFalse(actual.rbw_auto)
+        self.assertEqual(actual.rbw_hz, 3e3)
+        self.assertEqual(actual.vbw_mode, "off")
+        self.assertEqual(actual.detector, "POS")
+        self.assertEqual(actual.attenuation_db, 20)
+        self.assertTrue(actual.preamplifier_enabled)
+        self.assertFalse(actual.sweep_time_auto)
+        self.assertEqual(actual.sweep_time_s, 0.2)
+
+    def test_anritsu_advanced_spectrum_rejects_auto_attenuation_with_profile_minimum(self) -> None:
+        from app.devices.simulators import SimulatedVisaFactory
+
+        raw = simulation_settings(approved=True).model_dump(mode="python")
+        raw["devices"]["anritsu"]["advanced_spectrum"] = {
+            "control_protocol": "standard_scpi",
+            "qualified_firmware": ["sim-1.0"],
+        }
+        raw["devices"]["anritsu"]["safety"]["rf_input"][
+            "minimum_internal_attenuation"
+        ] = "20 dB"
+        adapter = AnritsuAdapter(
+            StationSettings.model_validate(raw),
+            session_factory=SimulatedVisaFactory("anritsu"),
+        )
+        adapter.connect()
+
+        with self.assertRaisesRegex(SafetyViolation, "Automatic attenuation is forbidden"):
+            adapter.configure_advanced_spectrum(AdvancedSpectrumConfig())
+
+    def test_anritsu_advanced_recipe_executes_verified_configuration(self) -> None:
+        from app.devices.simulators import SimulatedVisaFactory
+
+        raw = simulation_settings(approved=True).model_dump(mode="python")
+        raw["devices"]["anritsu"]["advanced_spectrum"] = {
+            "control_protocol": "standard_scpi",
+            "qualified_firmware": ["sim-1.0"],
+        }
+        raw["devices"]["anritsu"]["identity"]["required_options"] = ["008"]
+        raw["devices"]["anritsu"]["safety"]["rf_input"][
+            "minimum_internal_attenuation"
+        ] = "20 dB"
+        settings = StationSettings.model_validate(raw)
+        recipe = parse_recipe_text(
+            """
+schema_version: 1
+name: advanced spectrum recipe
+root:
+  id: root
+  type: sequence
+  children:
+    - id: advanced
+      type: configure_anritsu_advanced
+      rbw_mode: manual
+      rbw: 3 kHz
+      vbw_mode: manual
+      vbw: 1 kHz
+      detector: RMS
+      attenuation_mode: manual
+      attenuation: 20 dB
+      sweep_time_mode: manual
+      sweep_time: 200 ms
+    - {id: point, type: checkpoint, label: configured}
+"""
+        )
+        plan = RecipeCompiler(settings).compile(recipe)
+        anritsu = AnritsuAdapter(
+            settings, session_factory=SimulatedVisaFactory("anritsu")
+        )
+        anritsu.connect()
+        writer = MemoryWriter()
+        result = RecipeRunner(
+            rigol=RigolAdapter(settings, session_factory=SimulatedVisaFactory("rigol")),
+            keithley=KeithleyAdapter(
+                settings, session_factory=SimulatedVisaFactory("keithley")
+            ),
+            anritsu=anritsu,
+            writer=writer,  # type: ignore[arg-type]
+        ).run(plan)
+
+        self.assertEqual(result.state, ApplicationState.SAFE)
+        self.assertEqual(result.stored_points, 1)
+        point, _trace = writer.points[0]
+        advanced_context = point.metadata["safety_context"]["anritsu.advanced"]
+        self.assertEqual(advanced_context["rbw_hz"], 3e3)
+        self.assertEqual(advanced_context["vbw_hz"], 1e3)
+        self.assertEqual(advanced_context["detector"], "RMS")
+        self.assertEqual(advanced_context["attenuation_db"], 20)
+        self.assertEqual(advanced_context["sweep_time_s"], 0.2)
+        configured = [
+            event for event in writer.events if event[0] == "action_finished"
+        ]
+        self.assertTrue(configured)
+
+    def test_anritsu_signal_generator_recipe_uses_arm_output_and_finally_off(self) -> None:
+        from app.devices.simulators import SimulatedVisaFactory
+
+        raw = simulation_settings(approved=True).model_dump(mode="python")
+        raw["devices"]["anritsu"]["signal_generator"] = {
+            "control_protocol": "basic_scpi",
+            "frequency": {"min": "250 kHz", "max": "3.6 GHz"},
+            "power": {"min": "-100 dBm", "max": "0 dBm"},
+            "arm_ttl": "30 s",
+        }
+        raw["devices"]["anritsu"]["safety"]["signal_generator_output_allowed"] = True
+        settings = StationSettings.model_validate(raw)
+        recipe = parse_recipe_text(
+            """
+schema_version: 1
+name: SG qualification
+dut_limits:
+  anritsu:
+    max_signal_generator_output: -10 dBm
+root:
+  id: root
+  type: sequence
+  children:
+    - {id: config, type: configure_anritsu_sg, frequency: 1 GHz, power: -20 dBm}
+    - {id: arm, type: arm_anritsu_sg_output}
+    - {id: on, type: set_anritsu_sg_output, enabled: true}
+    - {id: point, type: checkpoint, label: sg-on}
+finally:
+  - {id: off, type: set_anritsu_sg_output, enabled: false}
+"""
+        )
+        plan = RecipeCompiler(settings).compile(recipe)
+        anritsu = AnritsuAdapter(
+            settings, session_factory=SimulatedVisaFactory("anritsu")
+        )
+        anritsu.connect()
+        writer = MemoryWriter()
+        result = RecipeRunner(
+            rigol=RigolAdapter(settings, session_factory=SimulatedVisaFactory("rigol")),
+            keithley=KeithleyAdapter(
+                settings, session_factory=SimulatedVisaFactory("keithley")
+            ),
+            anritsu=anritsu,
+            writer=writer,  # type: ignore[arg-type]
+        ).run(plan)
+
+        self.assertEqual(result.state, ApplicationState.SAFE)
+        self.assertEqual(result.stored_points, 1)
+        self.assertEqual(writer.status, "completed")
+        self.assertEqual(anritsu.state, DeviceState.VERIFIED)
+        self.assertIn("anritsu.rf_off_and_abort", plan.safe_shutdown_actions)
+
+    def test_anritsu_signal_generator_recipe_requires_dut_output_limit(self) -> None:
+        raw = simulation_settings(approved=True).model_dump(mode="python")
+        raw["devices"]["anritsu"]["signal_generator"] = {
+            "control_protocol": "basic_scpi",
+            "frequency": {"min": "250 kHz", "max": "3.6 GHz"},
+            "power": {"min": "-100 dBm", "max": "0 dBm"},
+            "arm_ttl": "30 s",
+        }
+        raw["devices"]["anritsu"]["safety"]["signal_generator_output_allowed"] = True
+        settings = StationSettings.model_validate(raw)
+        recipe = parse_recipe_text(
+            """
+schema_version: 1
+name: unsafe SG
+root:
+  id: root
+  type: sequence
+  children:
+    - {id: arm, type: arm_anritsu_sg_output}
+    - {id: on, type: set_anritsu_sg_output, enabled: true}
+"""
+        )
+        with self.assertRaisesRegex(SafetyViolation, "complete recipe.dut_limits"):
+            RecipeCompiler(settings).compile(recipe)
+
     def test_anritsu_rejects_frequency_outside_the_approved_profile(self) -> None:
         session = FakeVisaSession(responses={"*IDN?": "ANRITSU,MS2830A,123456,1.0"})
         adapter = AnritsuAdapter(self.settings, session_factory=FakeVisaSessionFactory(session))
@@ -473,6 +991,42 @@ class AdapterAndRunnerTests(unittest.TestCase):
                 KeithleySourceRequest("B", "measure_only", 0, 0, source_autorange=False, source_range_si=0.01)
             )
 
+    def test_keithley_runtime_dut_trip_forces_outputs_off(self) -> None:
+        session = FakeVisaSession(
+            responses={
+                "*IDN?": "KEITHLEY INSTRUMENTS,2602A,123456,1.0",
+                "print(errorqueue.count)": "0",
+                "print(smub.measure.iv())": "0.001\t0.01",
+                "print(smua.source.output)": "0",
+                "print(smub.source.output)": "0",
+            }
+        )
+        adapter = KeithleyAdapter(
+            self.settings, session_factory=FakeVisaSessionFactory(session)
+        )
+        adapter.connect()
+        adapter.configure_source(
+            KeithleySourceRequest(
+                "B",
+                "current",
+                0.0004,
+                0.067,
+                dut_envelope=KeithleySafetyEnvelope(
+                    current_min_a=0.0,
+                    current_max_a=0.0005,
+                    voltage_min_v=-0.067,
+                    voltage_max_v=0.067,
+                    max_abs_power_w=50e-6,
+                ),
+            )
+        )
+
+        with self.assertRaisesRegex(SafetyViolation, "DUT limit"):
+            adapter.measure("B")
+        self.assertIn("smua.source.output = smua.OUTPUT_OFF", session.writes)
+        self.assertIn("smub.source.output = smub.OUTPUT_OFF", session.writes)
+        self.assertEqual(adapter.state, DeviceState.FAULT)
+
     def test_rigol_requires_one_shot_arm_before_enabling_output(self) -> None:
         raw = deepcopy(simulation_settings(approved=True).model_dump(mode="python"))
         raw["devices"]["rigol"]["safety"]["allow_output_enable"] = True
@@ -600,6 +1154,65 @@ class AdapterAndRunnerTests(unittest.TestCase):
         self.assertEqual(writer.status, "aborted")
         self.assertEqual(keithley.state, DeviceState.OUTPUT_OFF)
         self.assertIn("safe_finally_finished", tuple(event[0] for event in writer.events))
+
+    def test_pause_waits_for_checkpoint_and_shutdown_skips_unused_devices(self) -> None:
+        from app.devices.simulators import SimulatedVisaFactory, simulated_station_settings
+
+        settings = simulated_station_settings(loaded_settings())
+        rigol = RigolAdapter(settings, session_factory=SimulatedVisaFactory("rigol"))
+        keithley = KeithleyAdapter(
+            settings, session_factory=SimulatedVisaFactory("keithley")
+        )
+        anritsu = AnritsuAdapter(
+            settings, session_factory=SimulatedVisaFactory("anritsu")
+        )
+        anritsu.connect()
+        plan = ExecutionPlan(
+            recipe_name="anritsu-only-pause",
+            actions=(
+                PlanAction(
+                    "configure",
+                    "configure_anritsu",
+                    {"config": SpectrumConfig(1e6, 2e6, 0, 101)},
+                    {},
+                ),
+                PlanAction("spectrum", "acquire_spectrum", {"trace": "TRAC1"}, {}),
+            ),
+            total_points=1,
+            sha256="anritsu-only-pause",
+            recipe_source="schema_version: 1\n",
+            required_devices=frozenset({"anritsu"}),
+        )
+        writer = MemoryWriter()
+        runner = RecipeRunner(
+            rigol=rigol,
+            keithley=keithley,
+            anritsu=anritsu,
+            writer=writer,
+        )  # type: ignore[arg-type]
+        results: list[object] = []
+        runner.pause_after_point()
+        thread = threading.Thread(target=lambda: results.append(runner.run(plan)), daemon=True)
+        thread.start()
+        deadline = time.monotonic() + 2.0
+        while time.monotonic() < deadline:
+            if any(event[0] == "pause_pending" for event in writer.events):
+                break
+            time.sleep(0.01)
+
+        self.assertEqual(len(writer.points), 1)
+        self.assertTrue(thread.is_alive())
+        self.assertEqual(rigol.state, DeviceState.DISCONNECTED)
+        self.assertEqual(keithley.state, DeviceState.DISCONNECTED)
+
+        runner.resume()
+        thread.join(2.0)
+        self.assertFalse(thread.is_alive())
+        self.assertEqual(len(results), 1)
+        result = results[0]
+        self.assertEqual(result.state, ApplicationState.SAFE)
+        self.assertEqual(writer.status, "completed")
+        self.assertNotIn("shutdown_error", tuple(event[0] for event in writer.events))
 
 
 if __name__ == "__main__":

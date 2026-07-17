@@ -1,0 +1,69 @@
+﻿diff --git a/app/ui/main_window.py b/app/ui/main_window.py
+--- a/app/ui/main_window.py
++++ b/app/ui/main_window.py
+@@ -2580,12 +2580,25 @@
+         self._latest_trace: SpectrumTrace | None = None
+         self._averaged_trace: SpectrumTrace | None = None
+         self._reference_trace: SpectrumTrace | None = None
++        self._reference_spectrum: ReferenceSpectrum | None = None
++        self._pending_reference_kind: str | None = None
++        self._last_configuration: AnritsuConfigurationSnapshot | None = None
++        self._page_state = AnritsuPageState.IDLE
++        self._capabilities: object | None = None
+         self._averager = LinearPowerAverager()
+         self._averaging_active = False
+         self._averaging_destination: str | None = None
+         self._resume_live_after_averaging = False
+         self._live_frame_count = 0
++        self._fetch_started_monotonic: float | None = None
++        self._last_frame_monotonic: float | None = None
++        self._frame_intervals_s: list[float] = []
++        self._transfer_durations_s: list[float] = []
++        self._stale_frame_count = 0
++        self._coalesced_timer_ticks = 0
+         self._identical_live_frames = 0
+         self._last_live_signature: int | None = None
++        self._reconnect_pending = False
+@@ -2602,6 +2615,16 @@
+         title.setObjectName("pageTitle")
+         title_row.addWidget(title)
+         title_row.addStretch(1)
++        self.connection_indicator = QLabel("○  OFFLINE")
++        self.connection_indicator.setObjectName("anritsuConnectionIndicator")
++        title_row.addWidget(self.connection_indicator)
++        self.reconnect = QPushButton("Reconnect")
++        self.reconnect.setProperty("compact", True)
++        self.reconnect.setToolTip(
++            "Close the failed VISA session and verify a fresh connection. This does not change RF settings."
++        )
++        self.reconnect.hide()
++        title_row.addWidget(self.reconnect)
+         self.live_indicator = QLabel("●  LIVE OFF")
+@@ -2671,21 +2694,21 @@
+         controls = QGridLayout()
+         controls.setSpacing(6)
+         self.read_configuration = QPushButton("Read from instrument")
+-        configure = QPushButton("Apply configuration")
+-        self.single = QPushButton("Read current spectrum")
++        self.configure_button = QPushButton("Apply configuration")
++        self.single = QPushButton("Read once")
+         self.live = QPushButton("Start Live")
+-        abort = QPushButton("Abort")
+-        configure.setObjectName("primaryButton")
+-        abort.setObjectName("warningButton")
+-        for button in (self.read_configuration, configure, self.single, self.live, abort):
++        self.abort = QPushButton("Abort acquisition")
++        self.configure_button.setObjectName("primaryButton")
++        self.abort.setObjectName("warningButton")
++        self.abort.setToolTip(
++            "Stops Anritsu acquisition only. It does not disconnect the analyser and does not affect external RF sources."
++        )
++        for button in (self.read_configuration, self.configure_button, self.single, self.live, self.abort):
+             button.setProperty("compact", True)
+         controls.addWidget(self.read_configuration, 0, 0, 1, 2)
+-        controls.addWidget(configure, 1, 0)
++        controls.addWidget(self.configure_button, 1, 0)
+         controls.addWidget(self.single, 1, 1)
+         controls.addWidget(self.live, 2, 0)
+-        controls.addWidget(abort, 2, 1)
++        controls.addWidget(self.abort, 2, 1)
