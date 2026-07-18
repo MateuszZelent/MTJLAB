@@ -9,6 +9,7 @@ description = "Safe local control software for a Rigol, Keithley and Anritsu mea
 requires-python = ">=3.11"
 dependencies = [
   "h5py>=3.11",
+  "h5netcdf>=1.8,<2",
   "numpy>=1.26",
   "pydantic>=2.7,<3",
   "PySide6>=6.7",
