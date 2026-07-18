@@ -23,20 +23,33 @@ Najważniejsze przyczyny decyzji NO-GO:
 4. Ręczna ścieżka Rigola pozwala w symulacji wykonać `ARM` i `OUTPUT ON` przy
    profilu `unverified`, mimo że UI pokazuje profil jako `LOCKED`, a receptury są
    w tym stanie blokowane.
-5. Parser jednostek ma potwierdzone błędy dla `Ω`, `kΩ` i `µT`.
-6. Model gotowości stacji nie uwzględnia MOKE Box ani Lake Shore i nie rozpoznaje
-   RF OUTPUT ON generatora Anritsu.
-7. MOKE Box udostępnia w UI operacje, których protokół lub funkcja wykonawcza
-   nie są zakwalifikowane; oś pola w Sweeperze jest widoczna, lecz kompilator
-   celowo ją odrzuca.
-8. Lake Shore 475 jest właśnie aktywnie integrowany. Kod, UI, runner i testy
-   zmieniały się podczas audytu, więc nie istnieje zamrożony kandydat wydania.
-9. Środowisko zgłasza ostrzeżenie możliwej niezgodności binarnej NumPy, a
-   środowisko wykonawcze nie jest odtwarzalne z lockfile.
+5. Po remediacji punktów 5–9 nadal pozostają blokady fizycznej kwalifikacji,
+   profilu stanowiska, ręcznego OUTPUT Rigola i dostarczonych receptur.
 
 Wniosek: bezpieczne mechanizmy programowe są na dobrym poziomie, ale ich
 obecność nie zastępuje kwalifikacji fizycznego toru pomiarowego, wyjść,
 okablowania, E-STOP i zachowania po błędach transportu.
+
+### Aktualizacja po remediacji punktów 5–9
+
+Na gałęzi `codex/production-hardening-5-9`, w kandydacie
+`84c3ffbea2a8bb2de9e691bd905ce944375fa526`, usunięto programowe problemy
+opisane pierwotnie w punktach 5–9:
+
+- parser przyjmuje `Ω`, `kΩ`, `MΩ`, `mΩ`, `µT` i `μT`, zachowując poprawne
+  mnożniki SI;
+- readiness obejmuje Rigol, Keithley, Anritsu, MOKE Box i Lake Shore 475 oraz
+  rozpoznaje `set_anritsu_sg_output` z `enabled: true`;
+- produktowa powierzchnia MOKE jest wyłącznie read-only: profil odrzuca
+  uprawnienia VOUT, dispatcher nie udostępnia zapisu ani niezakwalifikowanych
+  surowych strumieni, a oś `moke_box.field_target` została usunięta z UI;
+- integracja Lake Shore 475 została zamrożona jako read-only testami pionowymi
+  UI → kompilator → runner → HDF5 → PyThat;
+- PyThat 0.2.14 działa przez `h5netcdf`, a dokładne środowisko Python 3.14.6
+  jest zapisane w lockfile i sprawdzane automatycznie.
+
+Werdykt pozostaje **NO-GO**, ponieważ remediacja programowa nie dostarcza
+brakującego HIL ani nie zamyka pozostałych ryzyk P0.
 
 ## 2. Stan kodu i wyniki weryfikacji
 
@@ -62,38 +75,33 @@ niezmienny kandydat wydania.
 
 ### Wyniki automatyczne
 
-Na jednym z końcowych snapshotów:
+Na zweryfikowanym kandydacie po remediacji:
 
 ```text
-376 passed, 73 warnings, 34 subtests passed in 161.18s
+398 passed, 1 skipped, 40 subtests passed in 113.70s
 ```
 
 Dodatkowo:
 
-- `ruff check app tests` — PASS na późniejszym snapshotcie;
-- `compileall -q app tests` — PASS;
+- `pytest` uruchomiono z `RuntimeWarning` traktowanym jako błąd — PASS;
+- `ruff check app tests tools` — PASS;
+- `compileall -q app tests tools` — PASS;
 - `git diff --check` — PASS.
+- `python tools/check_locked_environment.py requirements-dev.lock.txt` — PASS.
 
-To jest mocny wynik dla warstwy programowej. Nie stanowi jednak zgody
-produkcyjnej, ponieważ pliki zmieniały się również po pełnym uruchomieniu
-testów.
+Jedyny skip dotyczy nieobecnego w checkoutcie laboratoryjnego golden HDF5.
+Wynik jest dowodem regresji programowej, ale nie zgodą produkcyjną.
 
 ### Ostrzeżenia środowiska
 
-Testy zapisu HDF5/PyThat zgłaszają:
+Pierwotne ostrzeżenie ABI pochodziło z wyboru backendu `netCDF4` przez xarray.
+Kwalifikowany most wymusza `h5netcdf`, ładuje dane przed zamknięciem uchwytów i
+usuwa kontrolowany plik sidecar. Pełny test z `-W error::RuntimeWarning`
+przechodzi bez ostrzeżenia ABI.
 
-```text
-RuntimeWarning: numpy.ndarray size changed, may indicate binary incompatibility
-```
-
-Występują również liczne ostrzeżenia `DeprecationWarning` z warstwy
-xarray/netCDF4 przy NumPy 2.5. W osobnym teście diagnostycznym podniesienie
-`RuntimeWarning` do błędu przerwało zamknięcie/walidację pliku przez PyThat.
-Ryzyko dotyczy powtarzalności środowiska i integralności końcowego zapisu.
-
-Projekt ma wersję `0.1.0`. Większość zależności ma szerokie zakresy wersji.
-Nie znaleziono workflow CI, lockfile środowiska wykonawczego ani gotowego,
-zweryfikowanego artefaktu instalacyjnego.
+Dodano `.python-version`, `requirements.lock.txt`,
+`requirements-dev.lock.txt` i kontroler zgodności środowiska. Nadal brakuje
+workflow CI oraz zweryfikowanego instalatora/artefaktu.
 
 ## 3. Sweeper
 
@@ -113,11 +121,10 @@ zweryfikowanego artefaktu instalacyjnego.
 
 ### Braki
 
-1. `moke_box.field_target` jest dostępny w rejestrze parametrów Sweepera, ale
-   `configure_moke_box` jest bezwarunkowo odrzucany przez kompilator, ponieważ
-   nie ma zakwalifikowanej funkcji przenoszenia pole → nastawa sprzętowa.
-2. Lake Shore 475 ma nowy odczyt tylko do odczytu, ale integracja była nadal
-   zmieniana podczas audytu i nie ma fizycznego HIL.
+1. MOKE pozostaje wyłącznie urządzeniem odczytowym; niezakwalifikowana oś
+   `moke_box.field_target` nie jest już oferowana operatorowi.
+2. Lake Shore 475 ma zamrożoną programową ścieżkę read-only, ale nadal nie ma
+   fizycznego HIL.
 3. Nie wszystkie funkcje dostępne na stronach ręcznych urządzeń mają
    odpowiadające im, zakwalifikowane osie lub akcje Sweepera.
 4. Każda z czterech dostarczonych receptur w `recipes/*.yml` nie kompiluje się
@@ -144,24 +151,20 @@ Parser prawidłowo obsługuje między innymi:
 - odrzucanie wartości bez jednostki na granicy bezpieczeństwa;
 - odrzucanie `NaN`, nieskończoności i niezgodnego wymiaru.
 
-Potwierdzone błędy:
+Stan po remediacji:
 
 | Wpis | Oczekiwane | Wynik |
 |---|---:|---|
-| `50 Ω` | 50 Ω | odrzucone jako nieznana jednostka |
-| `1 kΩ` | 1000 Ω | odrzucone jako nieznana jednostka |
-| `1 µT` | 1e-6 T | odrzucone jako nieznana jednostka |
+| `50 Ω` | 50 Ω | poprawne |
+| `1 kΩ` | 1000 Ω | poprawne |
+| `1 MΩ` | 1e6 Ω | poprawne |
+| `1 mΩ` | 1e-3 Ω | poprawne |
+| `1 µT`, `1 μT` | 1e-6 T | poprawne |
 | `1 uT` | 1e-6 T | poprawne |
 
-Przyczyny w kodzie:
-
-- klucze zawierają wielkie `Ω`, natomiast parser wykonuje `.lower()`, zmieniając
-  symbol na małe `ω`;
-- alias mikrotesli jest zapisany jako uszkodzony tekst `Âµt`;
-- wpis `mΩ` mapuje się na mnożnik `1e6` i etykietę `Mohm`, co jest niezgodne ze
-  standardowym znaczeniem `mΩ` jako milioma.
-
-**Ocena:** nie można stwierdzić, że UI nie ma problemów z jednostkami.
+Parser normalizuje Unicode przez NFKC, rozróżnia wielkość prefiksów przy
+rezystancji i mapuje oba znaki mikro. Testy graniczne potwierdzają mnożniki.
+Nie zastępuje to UAT wszystkich pól UI na docelowej stacji.
 
 ## 5. Uruchamianie OUTPUT i bezpieczeństwo
 
@@ -218,26 +221,20 @@ Obecne zachowanie jest zbyt niejednoznaczne do akceptacji produkcyjnej.
 
 ## 6. Model gotowości stacji i komunikaty UI
 
-`evaluate_station_readiness()` sprawdza tylko:
+`evaluate_station_readiness()` sprawdza po remediacji:
 
 ```text
-rigol, keithley, anritsu
+rigol, keithley, anritsu, moke_box, lakeshore_gaussmeter
 ```
 
-Nie sprawdza wymaganych urządzeń `moke_box` ani `lakeshore_gaussmeter`.
-Plan wymagający jednego z nich może zatem nie otrzymać właściwego wpisu
-gotowości urządzenia.
-
-Detekcja planu energetyzującego rozpoznaje tylko:
+Detekcja planu energetyzującego rozpoznaje:
 
 ```text
-set_rigol_output, set_keithley_output
+set_rigol_output, set_keithley_output, set_anritsu_sg_output
 ```
 
-Nie rozpoznaje `set_anritsu_sg_output`. Dla planu włączającego RF panel
-gotowości może więc wyświetlić informację „Plan contains no OUTPUT ON action”.
-Kompilator nadal sprawdza RF, więc nie jest to bezpośrednie obejście interlocka,
-ale jest to mylący komunikat operatora przy operacji wysokiego ryzyka.
+Testy pokrywają brak konfiguracji obu urządzeń, pozytywną weryfikację
+endpointu/zasobu oraz komunikat DUT dla RF OUTPUT ON.
 
 ## 7. Ocena urządzeń
 
@@ -247,21 +244,21 @@ ale jest to mylący komunikat operatora przy operacji wysokiego ryzyka.
 | Keithley 2602A | Compliance przed ON, zakresy, sense, NPLC, rampy, runtime trip, dobre testy symulacyjne | Brak zasobu VISA, potwierdzonego IDN/serialu, testu obciążeniowego i podpisanego HIL | **Nieprodukcyjny** |
 | Anritsu MS2830A | Single sweep, OPC, ABORT, RF OFF, SG ARM i readback mają mocne testy | Brak realnego IDN/opcji i pełnych limitów RF; akwizycja i SG są wyłączone | **Nieprodukcyjny** |
 | MOKE Box | Zakwalifikowana część odczytu VOUT/Hall; zapis VOUT wyłączony | Funkcja pola i bezpieczne field-off niezakwalifikowane; wielostrumieniowa ramka niepotwierdzona | **Tylko diagnostyka read-only; nieprodukcyjny jako aktuator** |
-| Lake Shore 475 | Nowy adapter read-only, whitelist zapytań, blokada zapisów, testy symulacyjne | Integracja nadal w toku; brak docelowego profilu, fizycznego IDN/proby i HIL | **Nieprodukcyjny** |
+| Lake Shore 475 | Zamrożony adapter read-only, whitelist zapytań, blokada zapisów i pionowa regresja UI/recipe/runner/HDF5/PyThat | Brak docelowego profilu, fizycznego IDN/proby i HIL | **Programowo gotowy do HIL; nieprodukcyjny bez HIL** |
 | Lake Shore 425 | Granica architektoniczna/opcjonalny sterownik, bez kompletnej kwalifikacji produktu | Brak HIL i pełnej integracji produkcyjnej | **Nieprodukcyjny** |
 
 ### MOKE Box
 
-UI zawiera przycisk `Acquire streams`, natomiast rekonstrukcja protokołu nadal
-nie potwierdza kompletnego formatu wielostrumieniowej odpowiedzi. Wyjściowe
-sterowanie VOUT jest domyślnie zablokowane (`allow_vout_control: false`).
+UI nie zawiera już `Acquire streams` ani osi pola. Profil odrzuca zarówno
+`allow_vout_control: true`, jak i niepustą listę kanałów VOUT. Dispatcher
+dopuszcza tylko zakwalifikowane operacje odczytowe.
 `emergency_off()` dla tego modułu zamyka sesję i oznacza stan jako nieznany; nie
 jest to zakwalifikowane fizyczne wyzerowanie pola.
 
 ### Lake Shore 475
 
-Nowy adapter jest zaprojektowany konserwatywnie jako read-only: proxy dopuszcza
-tylko białą listę zapytań i odrzuca zapisy. To dobry kierunek. Nie można jednak
+Adapter jest konserwatywnie zamrożony jako read-only: proxy dopuszcza tylko
+białą listę zapytań i odrzuca zapisy. Nie można jednak
 uznać go za produkcyjny, dopóki nie przejdzie kwalifikacji dokładnego modelu,
 proby, jednostek B/H, trybów DC/RMS/peak, timeoutów i awarii transportu na
 fizycznym urządzeniu.
@@ -329,14 +326,13 @@ Nie stwierdzono podstawowego problemu uniemożliwiającego start UI w testach
 automatycznych. Nie można jednak podpisać stwierdzenia „UI działa dobrze” dla
 produkcji, ponieważ:
 
-1. istnieją błędy jednostek;
-2. panel gotowości pomija urządzenia i RF OUTPUT;
-3. stan `LOCKED` nie odpowiada ręcznej polityce Rigola;
-4. UI MOKE pokazuje operację wielostrumieniową przed kwalifikacją protokołu;
-5. Lake Shore był integrowany równolegle podczas audytu;
-6. nie wykonano udokumentowanego UAT z operatorem i fizycznymi urządzeniami;
-7. headless QA nie odtwarzało wiarygodnie docelowych fontów i wyglądu
+1. stan `LOCKED` nie odpowiada ręcznej polityce Rigola;
+2. nie wykonano udokumentowanego UAT z operatorem i fizycznymi urządzeniami;
+3. headless QA nie odtwarzało wiarygodnie docelowych fontów i wyglądu
    produkcyjnej stacji Windows.
+
+Błędy jednostek, pominięcia readiness, niezakwalifikowana powierzchnia MOKE i
+niestabilny zakres Lake Shore zostały zamknięte programowo.
 
 ## 10. Klasyfikacja ryzyk
 
@@ -350,16 +346,18 @@ produkcji, ponieważ:
 
 ### P1 — wymagane poprawki
 
-1. Naprawa `Ω`, `kΩ`, `µT` oraz jednoznaczne rozróżnienie `mΩ`/`MΩ`.
-2. Dodanie MOKE i Lake Shore do readiness oraz RF OUTPUT Anritsu do detekcji
-   energetyzacji.
-3. Ukrycie lub wyłączenie niezakwalifikowanych funkcji MOKE w produkcyjnym UI.
-4. Zamknięcie zakresu funkcjonalnego Lake Shore i pełna regresja po integracji.
-5. Usunięcie ostrzeżenia ABI i kwalifikacja dokładnych wersji bibliotek.
+Punkty P1 z pierwotnego audytu zostały zamknięte programowo:
+
+1. `Ω`, `kΩ`, `µT`, `mΩ` i `MΩ` — **zamknięte**.
+2. Readiness pięciu urządzeń i RF OUTPUT Anritsu — **zamknięte**.
+3. MOKE tylko do odczytu w profilu, module, UI i recepturach — **zamknięte**.
+4. Zamrożony zakres Lake Shore 475 z pełną regresją pionową — **zamknięte
+   programowo; HIL pozostaje P0**.
+5. Most `h5netcdf`, brak ostrzeżenia ABI i dokładne wersje — **zamknięte**.
 
 ### P2 — dojrzałość wydania
 
-1. Odtwarzalne środowisko z lockfile i dokładną wersją Pythona.
+1. CI instalujące i sprawdzające istniejący lockfile Python 3.14.6.
 2. CI wykonujące testy, lint, compileall, test pliku HDF5 i walidację PyThat.
 3. Zweryfikowany instalator/artefakt i procedura aktualizacji/rollback.
 4. UAT UI na docelowym ekranie, DPI, motywie, fontach i kontach operatorów.
@@ -373,7 +371,8 @@ warunków:
 1. Zamrożenie jednego commita/tagu i czyste drzewo robocze.
 2. Pełne `pytest`, `ruff`, `compileall` i `git diff --check` na tym samym
    commicie, w docelowym środowisku instalacyjnym.
-3. Naprawa błędów jednostek, readiness i polityki ręcznego OUTPUT Rigola.
+3. Domknięcie i kwalifikacja polityki ręcznego OUTPUT Rigola; jednostki i
+   readiness są już naprawione.
 4. Jednoznaczne wyłączenie z wersji 1.0 wszystkich niezakwalifikowanych funkcji
    MOKE/Lake Shore albo ukończenie ich implementacji i HIL.
 5. Uzupełnienie produkcyjnego profilu: dokładne zasoby, modele, seriale,
