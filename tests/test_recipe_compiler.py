@@ -11,6 +11,27 @@ from tests.helpers import ROOT, loaded_settings, simulation_settings
 
 
 class RecipeCompilerTests(unittest.TestCase):
+    def test_lakeshore_measurement_compiles_as_one_read_only_checkpoint(self) -> None:
+        raw = deepcopy(simulation_settings().model_dump(mode="python"))
+        raw["devices"]["lakeshore_gaussmeter"].update(
+            {"enabled": True, "resource": "SIM::LAKESHORE::INSTR"}
+        )
+        source = """\
+schema_version: 1
+name: lakeshore-checkpoint
+root:
+  id: field
+  type: measure_lakeshore_field
+"""
+
+        plan = RecipeCompiler(StationSettings.model_validate(raw)).compile(
+            parse_recipe_text(source)
+        )
+
+        self.assertEqual([action.kind for action in plan.actions], ["measure_lakeshore_field"])
+        self.assertEqual(plan.total_points, 1)
+        self.assertEqual(plan.required_devices, frozenset({"lakeshore_gaussmeter"}))
+
     def test_hall_measurement_inside_sweep_expands_to_one_stored_point_per_step(self) -> None:
         raw = deepcopy(simulation_settings().model_dump(mode="python"))
         raw["devices"]["moke_box"].update(

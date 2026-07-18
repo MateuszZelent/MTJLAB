@@ -16,6 +16,7 @@ from app.devices.keithley import KeithleyAdapter
 from app.devices.keithley import KeithleySourceRequest
 from app.devices.moke_box import MokeBoxAdapter, MokeBoxConfig
 from app.devices.moke_box.simulator import SimulatedMokeBoxTransport
+from app.devices.registry import built_in_device_registry
 from app.devices.rigol import RigolAdapter
 from app.devices.rigol.adapter import RigolChannelConfig
 from app.devices.simulators import SimulatedVisaFactory, simulated_station_settings
@@ -25,11 +26,68 @@ from app.engine.compiler import ExecutionPlan, PlanAction
 from app.recipes import load_recipe, parse_recipe_text
 from app.storage import Hdf5RunWriter
 from app.storage.hdf5_reader import Hdf5RunReader
+from app.storage.pythat_reader import read_pythat_run_data
 from app.settings.models import StationSettings
 from tests.helpers import loaded_settings
 
 
 class SimulatedRunTests(unittest.TestCase):
+    def test_lakeshore_recipe_compiles_runs_and_round_trips(self) -> None:
+        raw = deepcopy(simulated_station_settings(loaded_settings()).model_dump(mode="python"))
+        raw["devices"]["lakeshore_gaussmeter"].update(
+            {"enabled": True, "resource": "SIM::LAKESHORE::INSTR"}
+        )
+        settings = StationSettings.model_validate(raw)
+        recipe = parse_recipe_text(
+            """\
+schema_version: 1
+name: lakeshore-round-trip
+root:
+  id: field
+  type: measure_lakeshore_field
+"""
+        )
+        plan = RecipeCompiler(settings).compile(recipe)
+        context = SimulationContext(seed=475)
+        rigol = RigolAdapter(
+            settings, session_factory=SimulatedVisaFactory("rigol", context=context)
+        )
+        keithley = KeithleyAdapter(
+            settings, session_factory=SimulatedVisaFactory("keithley", context=context)
+        )
+        anritsu = AnritsuAdapter(
+            settings, session_factory=SimulatedVisaFactory("anritsu", context=context)
+        )
+        lakeshore = built_in_device_registry().get("lakeshore_gaussmeter").create_adapter(
+            settings, simulation=True
+        )
+        for device in (rigol, keithley, anritsu, lakeshore):
+            device.connect()
+
+        with tempfile.TemporaryDirectory() as temporary:
+            path = Path(temporary) / "lakeshore.h5"
+            writer = Hdf5RunWriter(
+                path,
+                recipe_source=recipe.source_text,
+                settings_source="simulation: true\n",
+                plan_hash=plan.sha256,
+                device_idn={"lakeshore_gaussmeter": "SIM475"},
+                expected_points=1,
+            )
+            result = RecipeRunner(
+                rigol=rigol,
+                keithley=keithley,
+                anritsu=anritsu,
+                lakeshore=lakeshore,  # type: ignore[arg-type]
+                writer=writer,
+            ).run(plan)
+
+            self.assertIsNone(result.error)
+            self.assertEqual(result.stored_points, 1)
+            point = Hdf5RunReader.points(path)[0]
+            self.assertIn("lakeshore.field_t", point.measurements)
+            self.assertEqual(read_pythat_run_data(path).dimensions["Checkpoint"], 1)
+
     def test_four_device_simulation_saves_full_state_for_every_spectrum(self) -> None:
         settings = simulated_station_settings(loaded_settings())
         context = SimulationContext(seed=2_026_0718)

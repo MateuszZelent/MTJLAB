@@ -921,6 +921,32 @@ class MainWindowTests(unittest.TestCase):
             window.close()
             self.application.processEvents()
 
+    def test_lakeshore_page_is_read_only_and_guards_inflight_live_reads(self) -> None:
+        window = MainWindow(".config/settings.yml", simulation=True)
+        try:
+            page = window.lakeshore_gaussmeter_page
+            page._controller.call = Mock()
+
+            page._read()
+            page._live_tick()
+
+            page._controller.call.assert_called_once_with("read_measurement")
+            self.assertFalse(page.read_now.isEnabled())
+            self.assertFalse(
+                any(
+                    hasattr(page, name)
+                    for name in (
+                        "unit_selector",
+                        "range_selector",
+                        "autorange_control",
+                        "mode_selector",
+                    )
+                )
+            )
+        finally:
+            window.close()
+            self.application.processEvents()
+
     def test_limit_edit_is_autosaved_after_short_idle_period(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             path = Path(temporary) / "settings.yml"
