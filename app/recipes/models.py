@@ -50,6 +50,7 @@ ACTION_TYPES: Final[frozenset[str]] = frozenset(
         "ramp_keithley_to_zero",
         "measure_keithley",
         "measure_moke_hall",
+        "measure_lakeshore_field",
         "update_keithley_level",
         "update_keithley_compliance",
         "update_rigol_frequency",

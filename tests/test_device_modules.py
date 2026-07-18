@@ -12,6 +12,7 @@ from app.devices.moke_box import MokeBoxAdapter, MokeBoxConfig
 from app.devices.registry import built_in_device_registry
 from app.devices.visa import FakeVisaSessionFactory
 from app.domain.errors import ConfigurationError, DeviceError
+from app.settings.models import StationSettings
 from tests.helpers import loaded_settings
 
 
@@ -53,7 +54,7 @@ class DeviceModuleTests(unittest.TestCase):
         )
         self.assertTrue(all(module.page_factory is not None for module in registry.enabled_modules()))
         self.assertIsNotNone(registry.get("moke_box").page_factory)
-        self.assertIsNone(registry.get("lakeshore_gaussmeter").page_factory)
+        self.assertIsNotNone(registry.get("lakeshore_gaussmeter").page_factory)
 
     def test_unconfigured_future_module_fails_closed(self) -> None:
         with self.assertRaises(ConfigurationError):
@@ -64,6 +65,31 @@ class DeviceModuleTests(unittest.TestCase):
 
         self.assertFalse(settings.moke_box.enabled)
         self.assertFalse(settings.lakeshore_gaussmeter.enabled)
+
+    def test_lakeshore_475_profile_can_be_enabled_with_a_qualified_resource(self) -> None:
+        raw = loaded_settings().model_dump(mode="python")
+        raw["devices"]["lakeshore_gaussmeter"] = {
+            "enabled": True,
+            "display_name": "Lake Shore 475",
+            "resource": "ASRL3::INSTR",
+            "visa_backend": "system",
+            "timeout": "3 s",
+            "baud_rate": 57600,
+            "expected_serial": "SIM475",
+            "require_serial_match": True,
+            "live_interval": "1 s",
+        }
+        settings = StationSettings.model_validate(raw)
+
+        self.assertTrue(settings.lakeshore_gaussmeter.enabled)
+        self.assertEqual(settings.lakeshore_gaussmeter.baud_rate, 57600)
+        self.assertEqual(
+            built_in_device_registry()
+            .get("lakeshore_gaussmeter")
+            .create_adapter(settings, simulation=True)
+            .__class__.__name__,
+            "LakeShore475Adapter",
+        )
 
     def test_recipe_controls_are_aggregated_from_enabled_module_manifests(self) -> None:
         definitions = built_in_device_registry().recipe_parameter_definitions()
@@ -114,6 +140,16 @@ class DeviceModuleTests(unittest.TestCase):
             "*IDN?", "UNIT?", "RDGMODE?", "RANGE?", "AUTO?", "TYPE?", "RDGFIELD?",
         })
 
+    def test_lakeshore_475_uses_installed_official_model425_connection_api(self) -> None:
+        session = simulated_475_session(field=0.01)
+        adapter = LakeShore475Adapter(
+            GaussmeterConfig(resource="SIM::LAKESHORE::INSTR"),
+            session_factory=FakeVisaSessionFactory(session),
+        )
+
+        self.assertEqual(adapter.connect().model, "MODEL475")
+        self.assertEqual(adapter.read_measurement().field_t, 0.01)
+
     def test_lakeshore_475_rejects_h_units_without_assuming_b_conversion(self) -> None:
         session = simulated_475_session(field=12.0, unit_code="3", mode_code="1")
         adapter = LakeShore475Adapter(
@@ -125,6 +161,31 @@ class DeviceModuleTests(unittest.TestCase):
 
         with self.assertRaisesRegex(DeviceError, "Oersted"):
             adapter.read_measurement()
+
+    def test_lakeshore_475_reads_rms_frequency_and_peak_pair(self) -> None:
+        rms_session = simulated_475_session(field=0.5, unit_code="2", mode_code="2")
+        rms = LakeShore475Adapter(
+            GaussmeterConfig(resource="SIM::LAKESHORE::INSTR"),
+            session_factory=FakeVisaSessionFactory(rms_session),
+            official_model_factory=_OfficialModel425Bridge,
+        )
+        rms.connect()
+        rms_reading = rms.read_measurement()
+        self.assertEqual(rms_reading.mode, MeasurementMode.RMS)
+        self.assertEqual(rms_reading.field_t, 0.5)
+        self.assertEqual(rms_reading.frequency_hz, 60.0)
+
+        peak_session = simulated_475_session(field=0.5, unit_code="2", mode_code="3")
+        peak = LakeShore475Adapter(
+            GaussmeterConfig(resource="SIM::LAKESHORE::INSTR"),
+            session_factory=FakeVisaSessionFactory(peak_session),
+            official_model_factory=_OfficialModel425Bridge,
+        )
+        peak.connect()
+        peak_reading = peak.read_measurement()
+        self.assertEqual(peak_reading.mode, MeasurementMode.PEAK)
+        self.assertEqual(peak_reading.negative_peak_t, -0.5)
+        self.assertEqual(peak_reading.positive_peak_t, 0.5)
 
     def test_moke_adapter_exposes_only_measurement_path(self) -> None:
         transport = _MokeTransport()

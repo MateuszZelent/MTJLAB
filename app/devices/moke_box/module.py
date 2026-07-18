@@ -8,7 +8,9 @@ from app.contracts import DeviceModule, RecipeExtension
 from app.devices.base import DeviceAdapter
 from app.devices.moke_box.adapter import MokeBoxAdapter, UnavailableMokeBoxAdapter
 from app.devices.moke_box.models import MokeBoxConfig
+from app.devices.moke_box.simulator import SimulatedMokeBoxTransport
 from app.devices.moke_box.transport import MokeBoxTcpTransport
+from app.devices.simulation import SimulationContext
 from app.devices.moke_box.ui import MokeBoxPage
 from app.domain.errors import ConfigurationError
 from app.domain.quantities import DIMENSION_TIME, parse_quantity
@@ -16,14 +18,21 @@ from app.settings.models import StationSettings
 from app.recipes.parameter_registry import parameter_definitions_for_module
 
 
+def create_simulated_moke_adapter(context: SimulationContext | None = None) -> MokeBoxAdapter:
+    """Build the protocol-faithful in-memory MOKE adapter for a synthetic run."""
+
+    return MokeBoxAdapter(
+        MokeBoxConfig(endpoint="SIM::MOKE::INSTR", expected_model="MOKE SIM"),
+        SimulatedMokeBoxTransport(context or SimulationContext(seed=0)),
+    )
+
+
 def _adapter(settings: StationSettings, simulation: bool) -> DeviceAdapter:
     if settings is None:
         raise ConfigurationError("MOKE Box requires a qualified station profile.")
     profile = settings.moke_box
     if simulation:
-        return UnavailableMokeBoxAdapter(
-            "MOKE Box hardware communication is disabled in simulation mode."
-        )
+        return create_simulated_moke_adapter()
     if not profile.enabled or not profile.protocol_qualified or not profile.endpoint:
         return UnavailableMokeBoxAdapter(
             "Configure enabled=true, endpoint=host:port and protocol_qualified=true "

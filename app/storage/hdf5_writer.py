@@ -32,6 +32,7 @@ class Hdf5RunWriter:
         csv_summary_path: str | Path | None = None,
         expected_points: int | None = None,
         operator_context: dict[str, object] | None = None,
+        simulation_metadata: dict[str, object] | None = None,
     ) -> None:
         try:
             import h5py
@@ -90,6 +91,11 @@ class Hdf5RunWriter:
         run.create_dataset(
             "operator_context_json",
             data=json.dumps(self._serializable(operator_context or {}), sort_keys=True),
+            dtype=h5py.string_dtype("utf-8"),
+        )
+        run.create_dataset(
+            "simulation_json",
+            data=json.dumps(self._serializable(simulation_metadata or {"enabled": False}), sort_keys=True),
             dtype=h5py.string_dtype("utf-8"),
         )
         self._thatec = ThatecHdf5Writer(
@@ -386,6 +392,7 @@ class Hdf5RunWriter:
         processed_values: tuple[float, ...] | None = None,
         processed_unit: str | None = None,
         processing_operation: str = "none",
+        device_states: dict[str, object] | None = None,
     ) -> int:
         if self._closed:
             raise ExecutionError("Attempted to write to a closed HDF5 file.")
@@ -408,6 +415,10 @@ class Hdf5RunWriter:
             group.create_dataset("setpoints_json", data=json.dumps(point.setpoints, sort_keys=True))
             group.create_dataset("measurements_json", data=json.dumps(point.measurements, sort_keys=True))
             group.create_dataset("metadata_json", data=json.dumps(point.metadata, sort_keys=True))
+            group.create_dataset(
+                "device_states_json",
+                data=json.dumps(self._serializable(device_states or {}), sort_keys=True),
+            )
             if trace is not None:
                 spectrum = group.create_group("spectrum")
                 spectrum.attrs["trace_name"] = trace.trace_name

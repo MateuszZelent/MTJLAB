@@ -27,6 +27,9 @@ from app.devices.rigol import (
     RigolModulationConfig,
 )
 from app.devices.moke_box.models import MokeHallVoltageReading, hall_field_from_voltage
+from app.devices.lakeshore_gaussmeter.models import (
+    FieldUnit, GaussmeterReading, GaussmeterSnapshot, MeasurementMode,
+)
 from app.devices.visa import FakeVisaSession, FakeVisaSessionFactory
 from app.domain.errors import DeviceError, SafetyViolation
 from app.domain.models import DeviceState
@@ -76,6 +79,16 @@ class HallProbe:
     reads: int = 0
 
     def read_hall_voltage(self) -> MokeHallVoltageReading:
+        self.reads += 1
+        return self.reading
+
+
+@dataclass
+class LakeShoreProbe:
+    reading: GaussmeterReading
+    reads: int = 0
+
+    def read_measurement(self) -> GaussmeterReading:
         self.reads += 1
         return self.reading
 
@@ -130,6 +143,21 @@ class AdapterAndRunnerTests(unittest.TestCase):
             point.measurements["moke_box.hall1_field_t"],
             hall_field_from_voltage(voltage_v),
         )
+
+    def test_lakeshore_action_stores_read_only_measurement_checkpoint(self) -> None:
+        snapshot = GaussmeterSnapshot("2", MeasurementMode.RMS, "2", FieldUnit.TESLA, "0", True, "40", datetime.now(timezone.utc))
+        lakeshore = LakeShoreProbe(GaussmeterReading.now(mode=MeasurementMode.RMS, unit=FieldUnit.TESLA, snapshot=snapshot, field_t=0.25, frequency_hz=60.0))
+        writer = MemoryWriter()
+        plan = ExecutionPlan("lake", (PlanAction("field", "measure_lakeshore_field", {}, {}),), 1, "lake", "schema_version: 1\n", required_devices=frozenset({"lakeshore_gaussmeter"}))
+
+        result = RecipeRunner(rigol=ShutdownProbe(), keithley=ShutdownProbe(), anritsu=ShutdownProbe(), lakeshore=lakeshore, writer=writer).run(plan)  # type: ignore[arg-type]
+
+        self.assertEqual(result.state, ApplicationState.SAFE)
+        self.assertEqual(lakeshore.reads, 1)
+        point, _trace = writer.points[0]
+        self.assertEqual(point.measurements["lakeshore.field_t"], 0.25)
+        self.assertEqual(point.measurements["lakeshore.frequency_hz"], 60.0)
+        self.assertEqual(point.measurements["lakeshore.mode_code"], 2.0)
 
     def test_rigol_cannot_enable_output_with_unapproved_profile(self) -> None:
         session = FakeVisaSession(

@@ -4,7 +4,8 @@ from __future__ import annotations
 
 import math
 import time
-from typing import Callable, Protocol
+from datetime import datetime, timezone
+from typing import Protocol
 
 from app.devices.base import DeviceAdapter, InstrumentSession, SessionFactory, parse_identity
 from app.devices.lakeshore_gaussmeter.models import (
@@ -115,7 +116,7 @@ class LakeShore475Adapter(DeviceAdapter):
             official_model = self._official_model_factory(connection)
             identity = parse_identity(self._config.resource, connection.query("*IDN?"))
             idn = identity.idn.upper()
-            if not (identity.manufacturer or "").upper() in {"LSCI", "LAKE SHORE"} or "MODEL475" not in idn:
+            if (identity.manufacturer or "").upper() not in {"LSCI", "LAKE SHORE"} or "MODEL475" not in idn:
                 raise ConnectionError(f"Unexpected Lake Shore Model 475 identity: {identity.idn}")
             if self._config.require_serial_match and identity.serial != self._config.expected_serial:
                 raise ConnectionError("Instrument serial number differs from the approved value.")
@@ -177,7 +178,16 @@ class LakeShore475Adapter(DeviceAdapter):
             auto = connection.query("AUTO?").strip()
             if auto not in {"0", "1"}:
                 raise ValueError(f"Unknown Lake Shore AUTO? code {auto!r}.")
-            snapshot = GaussmeterSnapshot(mode_code=mode_code, mode=measurement_mode_from_code(mode_code), unit_code=unit_code, unit=field_unit_from_code(unit_code), range_code=connection.query("RANGE?").strip(), autorange_enabled=auto == "1", probe_type_code=connection.query("TYPE?").strip(), timestamp_utc=__import__("datetime").datetime.now(__import__("datetime").timezone.utc))
+            snapshot = GaussmeterSnapshot(
+                mode_code=mode_code,
+                mode=measurement_mode_from_code(mode_code),
+                unit_code=unit_code,
+                unit=field_unit_from_code(unit_code),
+                range_code=connection.query("RANGE?").strip(),
+                autorange_enabled=auto == "1",
+                probe_type_code=connection.query("TYPE?").strip(),
+                timestamp_utc=datetime.now(timezone.utc),
+            )
         except (DeviceError, ValueError) as exc:
             self._state = DeviceState.FAULT
             raise DeviceError(f"Lake Shore configuration read failed: {exc}") from exc
@@ -206,3 +216,20 @@ class LakeShore475Adapter(DeviceAdapter):
         except DeviceError:
             self._state = DeviceState.FAULT
             raise
+
+
+class UnavailableLakeShoreAdapter(DeviceAdapter):
+    """Adapter returned for an incomplete disabled profile without opening I/O."""
+
+    def __init__(self, reason: str) -> None:
+        super().__init__()
+        self._reason = reason
+
+    def connect(self) -> DeviceIdentity:
+        raise ConnectionError(self._reason)
+
+    def disconnect(self) -> None:
+        self._state = DeviceState.DISCONNECTED
+
+    def emergency_off(self) -> None:
+        return None

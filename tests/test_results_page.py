@@ -40,6 +40,7 @@ class ResultsPageTests(unittest.TestCase):
                     acquired_at_utc=datetime.now(timezone.utc),
                     trace_name="TRAC1",
                 ),
+                device_states={"rigol": {"channel_1": {"requested": {"frequency_hz": 1_000.0}}}},
             )
             writer.close("completed")
 
@@ -51,9 +52,13 @@ class ResultsPageTests(unittest.TestCase):
                 self.assertIn("State: completed", page.metadata.toPlainText())
                 self.assertFalse(page.resume_button.isEnabled())
                 self.assertIn("browser-test", page.recipe_snapshot.toPlainText())
+                self.assertEqual(page.details_tabs.tabText(3), "PyThat data")
+                self.assertEqual(page.details_tabs.tabText(4), "Device state")
+                self.assertIn("Checkpoint", page.pythat_data.toPlainText())
                 self.assertEqual(page.points.topLevelItemCount(), 1)
                 page.points.setCurrentItem(page.points.topLevelItem(0))
                 self.application.processEvents()
+                self.assertIn("frequency_hz", page.device_state.toPlainText())
                 self.assertEqual(page.spectrum_plot.trace_point_count("Stored spectrum"), 3)
                 self.assertIn("3 points", page.spectrum_info.text())
             finally:

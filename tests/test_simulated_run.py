@@ -11,10 +11,17 @@ import json
 import h5py
 
 from app.devices.anritsu import AnritsuAdapter
+from app.devices.anritsu.adapter import SpectrumConfig
 from app.devices.keithley import KeithleyAdapter
+from app.devices.keithley import KeithleySourceRequest
+from app.devices.moke_box import MokeBoxAdapter, MokeBoxConfig
+from app.devices.moke_box.simulator import SimulatedMokeBoxTransport
 from app.devices.rigol import RigolAdapter
+from app.devices.rigol.adapter import RigolChannelConfig
 from app.devices.simulators import SimulatedVisaFactory, simulated_station_settings
+from app.devices.simulation import SimulationContext
 from app.engine import RecipeCompiler, RecipeRunner
+from app.engine.compiler import ExecutionPlan, PlanAction
 from app.recipes import load_recipe, parse_recipe_text
 from app.storage import Hdf5RunWriter
 from app.storage.hdf5_reader import Hdf5RunReader
@@ -23,6 +30,49 @@ from tests.helpers import loaded_settings
 
 
 class SimulatedRunTests(unittest.TestCase):
+    def test_four_device_simulation_saves_full_state_for_every_spectrum(self) -> None:
+        settings = simulated_station_settings(loaded_settings())
+        context = SimulationContext(seed=2_026_0718)
+        rigol = RigolAdapter(settings, session_factory=SimulatedVisaFactory("rigol", context=context))
+        keithley = KeithleyAdapter(settings, session_factory=SimulatedVisaFactory("keithley", context=context))
+        anritsu = AnritsuAdapter(settings, session_factory=SimulatedVisaFactory("anritsu", context=context))
+        moke = MokeBoxAdapter(
+            MokeBoxConfig(endpoint="SIM::MOKE::INSTR", expected_model="MOKE SIM"),
+            SimulatedMokeBoxTransport(context),
+        )
+        for device in (rigol, keithley, anritsu, moke):
+            device.connect()
+        plan = ExecutionPlan(
+            recipe_name="four-device-simulation",
+            actions=(
+                PlanAction("rigol", "configure_rigol", {"config": RigolChannelConfig(1, "SIN", 1_000.0, 0.001, -0.001, dut_min_impedance_ohm=50)}, {}),
+                PlanAction("keithley", "configure_keithley", {"request": KeithleySourceRequest("B", "current", 0.001, 0.067)}, {}),
+                PlanAction("anritsu", "configure_anritsu", {"config": SpectrumConfig(1e6, 2e6, 0.0, 101)}, {}),
+                PlanAction("moke", "measure_moke_hall", {"checkpoint": False}, {}),
+                PlanAction("spectrum", "acquire_spectrum", {"trace": "TRAC1", "average_count": 1}, {}),
+            ),
+            total_points=1,
+            sha256="four-device-simulation",
+            recipe_source="schema_version: 1\nname: four-device-simulation\n",
+            required_devices=frozenset({"rigol", "keithley", "anritsu", "moke_box"}),
+        )
+        with tempfile.TemporaryDirectory() as temporary:
+            path = Path(temporary) / "four-device.h5"
+            writer = Hdf5RunWriter(
+                path,
+                recipe_source=plan.recipe_source,
+                settings_source="simulation: true\n",
+                plan_hash=plan.sha256,
+                device_idn={"rigol": "SIM", "keithley": "SIM", "anritsu": "SIM", "moke_box": "MOKE SIM"},
+                simulation_metadata=context.metadata(("rigol", "keithley", "anritsu", "moke_box")),
+            )
+            result = RecipeRunner(rigol=rigol, keithley=keithley, anritsu=anritsu, moke_box=moke, writer=writer).run(plan)
+            self.assertIsNone(result.error)
+            spectra = [point for point in Hdf5RunReader.points(path) if point.has_spectrum]
+            self.assertEqual(len(spectra), 1)
+            self.assertEqual(set(spectra[0].device_states), {"rigol", "keithley", "anritsu", "moke_box"})
+            self.assertEqual(Hdf5RunReader.detail(path).simulation_metadata["seed"], 2_026_0718)
+
     def test_requested_10_by_100_recipe_runs_all_1000_processed_spectra(self) -> None:
         recipe_path = (
             Path(__file__).resolve().parents[1]

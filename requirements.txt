@@ -7,6 +7,7 @@ PySide6>=6.7
 pyqtgraph>=0.13.7,<0.14
 pyvisa>=1.14
 pyvisa-py>=0.7
+lakeshore==1.10.0
 ruamel.yaml>=0.18
 
 # Qualified reader used to validate thaTEC:OS-compatible HDF5 output.

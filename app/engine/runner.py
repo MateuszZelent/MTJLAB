@@ -2,17 +2,19 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import asdict, dataclass, is_dataclass
 from datetime import datetime, timezone
 import threading
 import time
 from typing import Callable
 from uuid import uuid4
+from enum import Enum
 
 from app.devices.anritsu.adapter import AnritsuAdapter, SpectrumTrace
 from app.devices.keithley.adapter import KeithleyAdapter
 from app.devices.moke_box.adapter import MokeBoxAdapter
 from app.devices.moke_box.models import hall_field_from_voltage
+from app.devices.lakeshore_gaussmeter.adapter import LakeShore475Adapter
 from app.devices.rigol.adapter import RigolAdapter
 from app.domain.errors import DeviceError, ExecutionError
 from app.domain.models import ApplicationState, DeviceState, MeasurementPoint
@@ -57,6 +59,7 @@ class RecipeRunner:
         keithley: KeithleyAdapter,
         anritsu: AnritsuAdapter,
         moke_box: MokeBoxAdapter | None = None,
+        lakeshore: LakeShore475Adapter | None = None,
         writer: Hdf5RunWriter,
         on_event: EventCallback | None = None,
         on_telemetry: TelemetryCallback | None = None,
@@ -66,6 +69,7 @@ class RecipeRunner:
         self._keithley = keithley
         self._anritsu = anritsu
         self._moke_box = moke_box
+        self._lakeshore = lakeshore
         self._writer = writer
         self._on_event = on_event or (lambda _name, _data: None)
         self._on_telemetry = on_telemetry or (lambda _name, _data: None)
@@ -78,6 +82,7 @@ class RecipeRunner:
         self._required_devices: frozenset[str] = frozenset()
         self._safe_shutdown_actions: tuple[str, ...] = ()
         self._active_safety_context: dict[str, dict[str, object]] = {}
+        self._device_states: dict[str, dict[str, object]] = {}
         self._rigol_output_active = {1: False, 2: False}
         self._keithley_output_active = {"A": False, "B": False}
         self._keithley_zeroed = {"A": True, "B": True}
@@ -129,6 +134,7 @@ class RecipeRunner:
         )
         self._safe_shutdown_actions = plan.safe_shutdown_actions
         self._active_safety_context = {}
+        self._device_states = {}
         self._rigol_output_active = {1: False, 2: False}
         self._keithley_output_active = {"A": False, "B": False}
         self._keithley_zeroed = {"A": True, "B": True}
@@ -202,7 +208,7 @@ class RecipeRunner:
                         },
                     )
                     write_started = time.monotonic()
-                    self._writer.append(point)
+                    self._append_checkpoint(point)
                     write_elapsed = time.monotonic() - write_started
                     stored += 1
                     self._emit_point_stored(
@@ -215,7 +221,10 @@ class RecipeRunner:
                     point_measurements.clear()
                     self._emit("compliance_detected", {"channels": compliance_channels, "point_index": stored - 1})
                     raise ExecutionError("Keithley reached compliance; the final checkpoint was saved and output was disabled.")
-                if acquisition is not None or action.kind in {"checkpoint", "measure_moke_hall"}:
+                if acquisition is not None or action.kind == "checkpoint" or (
+                    action.kind in {"measure_moke_hall", "measure_lakeshore_field"}
+                    and bool(action.payload.get("checkpoint", True))
+                ):
                     trace = acquisition.raw if acquisition is not None else None
                     point = MeasurementPoint(
                         index=stored,
@@ -243,9 +252,8 @@ class RecipeRunner:
                         acquisition is not None
                         and acquisition.processed_values is not None
                     ):
-                        self._writer.append(
-                            point,
-                            trace,
+                        self._append_checkpoint(
+                            point, trace,
                             processed_values=acquisition.processed_values,
                             processed_unit=acquisition.processed_unit,
                             processing_operation=acquisition.processing_operation,
@@ -253,7 +261,7 @@ class RecipeRunner:
                     else:
                         # Keep the writer protocol compatible with lightweight
                         # diagnostic writers and existing raw-only storage.
-                        self._writer.append(point, trace)
+                        self._append_checkpoint(point, trace)
                     write_elapsed = time.monotonic() - write_started
                     stored += 1
                     self._emit_point_stored(
@@ -573,6 +581,10 @@ class RecipeRunner:
                 "low_level_v": config.low_level_v,
                 "output_load": config.output_load,
             }
+            self._record_device_state(
+                "rigol", f"channel_{config.channel}", requested=config,
+                actual=self._active_safety_context[f"rigol.{config.channel}"],
+            )
         elif action.kind == "configure_rigol_output":
             config = payload["config"]
             self._rigol.configure_output(config)
@@ -589,6 +601,9 @@ class RecipeRunner:
                 "sync_delay_s": config.sync_delay_s,
             }
             self._active_safety_context[f"rigol.{config.channel}"] = context
+            self._record_device_state(
+                "rigol", f"channel_{config.channel}", requested=config, actual=context
+            )
         elif action.kind == "configure_keithley":
             request = payload["request"]
             self._keithley.configure_source(request)
@@ -605,6 +620,10 @@ class RecipeRunner:
                 "voltage_max_v": envelope.voltage_max_v if envelope is not None else None,
                 "max_abs_power_w": envelope.max_abs_power_w if envelope is not None else None,
             }
+            self._record_device_state(
+                "keithley", f"channel_{request.channel}", requested=request,
+                actual=self._active_safety_context[f"keithley.{request.channel}"],
+            )
         elif action.kind == "update_keithley_level":
             actual = self._keithley.update_source_level(
                 payload["channel"],
@@ -615,6 +634,7 @@ class RecipeRunner:
             context = self._active_safety_context.get(key, {})
             context["source_level_si"] = actual
             self._active_safety_context[key] = context
+            self._record_device_state("keithley", f"channel_{payload['channel']}", requested=payload, actual=context)
         elif action.kind == "update_keithley_compliance":
             actual = self._keithley.update_source_compliance(
                 payload["channel"],
@@ -625,6 +645,7 @@ class RecipeRunner:
             context = self._active_safety_context.get(key, {})
             context["compliance_si"] = actual
             self._active_safety_context[key] = context
+            self._record_device_state("keithley", f"channel_{payload['channel']}", requested=payload, actual=context)
         elif action.kind == "configure_anritsu":
             config = payload["config"]
             self._anritsu.configure_spectrum(config)
@@ -635,6 +656,10 @@ class RecipeRunner:
                 "points": config.points,
                 "max_expected_input_dbm": config.dut_max_expected_input_dbm,
             }
+            self._record_device_state(
+                "anritsu", "spectrum", requested=config,
+                actual=self._active_safety_context["anritsu"],
+            )
         elif action.kind == "configure_anritsu_advanced":
             config = payload["config"]
             actual = self._anritsu.configure_advanced_spectrum(config)
@@ -650,6 +675,10 @@ class RecipeRunner:
                 "sweep_time_auto": actual.sweep_time_auto,
                 "sweep_time_s": actual.sweep_time_s,
             }
+            self._record_device_state(
+                "anritsu", "advanced_spectrum", requested=config,
+                actual=self._active_safety_context["anritsu.advanced"],
+            )
         elif action.kind == "configure_anritsu_sg":
             config = payload["config"]
             self._anritsu.configure_signal_generator(config)
@@ -658,6 +687,10 @@ class RecipeRunner:
                 "frequency_hz": config.frequency_hz,
                 "power_dbm": config.power_dbm,
             }
+            self._record_device_state(
+                "anritsu", "signal_generator", requested=config,
+                actual=self._active_safety_context["anritsu.sg"],
+            )
         elif action.kind == "update_rigol_frequency":
             actual = self._rigol.update_frequency(
                 payload["channel"], payload["frequency_hz"]
@@ -666,6 +699,7 @@ class RecipeRunner:
             context = self._active_safety_context.get(key, {})
             context["frequency_hz"] = actual
             self._active_safety_context[key] = context
+            self._record_device_state("rigol", f"channel_{payload['channel']}", requested=payload, actual=context)
         elif action.kind == "update_rigol_levels":
             actual_high, actual_low = self._rigol.update_levels(
                 payload["channel"],
@@ -677,14 +711,23 @@ class RecipeRunner:
             context["high_level_v"] = actual_high
             context["low_level_v"] = actual_low
             self._active_safety_context[key] = context
+            self._record_device_state("rigol", f"channel_{payload['channel']}", requested=payload, actual=context)
         elif action.kind == "set_rigol_output":
             self._rigol.set_output(payload["channel"], payload["enabled"])
             self._rigol_output_active[payload["channel"]] = bool(payload["enabled"])
+            context = self._active_safety_context.get(f"rigol.{payload['channel']}", {})
+            context["output_enabled"] = bool(payload["enabled"])
+            self._active_safety_context[f"rigol.{payload['channel']}"] = context
+            self._record_device_state("rigol", f"channel_{payload['channel']}", requested=payload, actual=context)
         elif action.kind == "arm_rigol_output":
             self._rigol.arm_output(payload["channel"])
         elif action.kind == "set_keithley_output":
             self._keithley.set_output(payload["channel"], payload["enabled"])
             self._keithley_output_active[payload["channel"]] = bool(payload["enabled"])
+            context = self._active_safety_context.get(f"keithley.{payload['channel']}", {})
+            context["output_enabled"] = bool(payload["enabled"])
+            self._active_safety_context[f"keithley.{payload['channel']}"] = context
+            self._record_device_state("keithley", f"channel_{payload['channel']}", requested=payload, actual=context)
         elif action.kind == "arm_keithley_output":
             self._keithley.arm_output(payload["channel"])
         elif action.kind == "arm_anritsu_sg_output":
@@ -692,6 +735,10 @@ class RecipeRunner:
         elif action.kind == "set_anritsu_sg_output":
             self._anritsu.set_signal_generator_output(payload["enabled"])
             self._anritsu_sg_output_active = bool(payload["enabled"])
+            context = self._active_safety_context.get("anritsu.sg", {})
+            context["output_enabled"] = bool(payload["enabled"])
+            self._active_safety_context["anritsu.sg"] = context
+            self._record_device_state("anritsu", "signal_generator", requested=payload, actual=context)
         elif action.kind == "ramp_keithley_to_zero":
             self._keithley.ramp_to_zero(payload["channel"], deadline_s=payload["deadline_s"])
             self._keithley_zeroed[payload["channel"]] = True
@@ -711,6 +758,35 @@ class RecipeRunner:
             measurements["moke_box.hall1_field_t"] = hall_field_from_voltage(result.voltage_v)
             measurements["moke_box.hall1_stddev_v"] = result.stddev_v
             measurements["moke_box.hall1_raw_ad7734"] = float(result.raw_codes[0])
+            self._record_device_state(
+                "moke_box",
+                "hall_readback",
+                requested={"sample_count": 1},
+                actual={
+                    "voltage_v": result.voltage_v,
+                    "field_t": measurements["moke_box.hall1_field_t"],
+                    "stddev_v": result.stddev_v,
+                    "raw_ad7734": result.raw_codes[0],
+                },
+            )
+        elif action.kind == "measure_lakeshore_field":
+            if self._lakeshore is None:
+                raise ExecutionError("Lake Shore field measurement was requested but the adapter is unavailable.")
+            result = self._lakeshore.read_measurement()
+            snapshot = result.snapshot
+            if result.field_t is not None:
+                measurements["lakeshore.field_t"] = result.field_t
+            if result.frequency_hz is not None:
+                measurements["lakeshore.frequency_hz"] = result.frequency_hz
+            if result.negative_peak_t is not None:
+                measurements["lakeshore.negative_peak_t"] = result.negative_peak_t
+            if result.positive_peak_t is not None:
+                measurements["lakeshore.positive_peak_t"] = result.positive_peak_t
+            measurements["lakeshore.mode_code"] = float(snapshot.mode_code)
+            measurements["lakeshore.unit_code"] = float(snapshot.unit_code)
+            measurements["lakeshore.range_code"] = float(snapshot.range_code)
+            measurements["lakeshore.autorange_enabled"] = float(snapshot.autorange_enabled)
+            measurements["lakeshore.probe_type_code"] = float(snapshot.probe_type_code)
         elif action.kind == "acquire_reference":
             average_count = int(payload.get("average_count", 1))
             reference = self._acquire_averaged_spectrum(
@@ -932,6 +1008,58 @@ class RecipeRunner:
         """Copy the active, JSON-safe physical envelope into a checkpoint."""
 
         return {name: dict(values) for name, values in self._active_safety_context.items()}
+
+    @staticmethod
+    def _jsonable(value: object) -> object:
+        if is_dataclass(value) and not isinstance(value, type):
+            return RecipeRunner._jsonable(asdict(value))
+        if isinstance(value, Enum):
+            return value.value
+        if isinstance(value, dict):
+            return {str(key): RecipeRunner._jsonable(item) for key, item in value.items()}
+        if isinstance(value, (tuple, list)):
+            return [RecipeRunner._jsonable(item) for item in value]
+        return value
+
+    def _record_device_state(
+        self, device: str, section: str, *, requested: object, actual: object
+    ) -> None:
+        self._device_states.setdefault(device, {})[section] = {
+            "requested": self._jsonable(requested),
+            "actual": self._jsonable(actual),
+        }
+
+    def _device_state_snapshot(self) -> dict[str, dict[str, object]]:
+        return self._jsonable(self._device_states)  # type: ignore[return-value]
+
+    def _append_checkpoint(
+        self,
+        point: MeasurementPoint,
+        trace: SpectrumTrace | None = None,
+        *,
+        processed_values: tuple[float, ...] | None = None,
+        processed_unit: str | None = None,
+        processing_operation: str = "none",
+    ) -> object:
+        """Write a stateful checkpoint while retaining legacy diagnostic writers."""
+
+        kwargs = {
+            "processed_values": processed_values,
+            "processed_unit": processed_unit,
+            "processing_operation": processing_operation,
+            "device_states": self._device_state_snapshot(),
+        }
+        if processed_values is None:
+            kwargs.pop("processed_values")
+            kwargs.pop("processed_unit")
+            kwargs.pop("processing_operation")
+        try:
+            return self._writer.append(point, trace, **kwargs)
+        except TypeError as exc:
+            if "device_states" not in str(exc):
+                raise
+            kwargs.pop("device_states")
+            return self._writer.append(point, trace, **kwargs)
 
     def _runtime_state_snapshot(self) -> dict[str, object]:
         """Return a query-free state snapshot safe to attach to every audit event."""

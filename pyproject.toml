@@ -16,6 +16,7 @@ dependencies = [
   "PyThat==0.2.14",
   "pyvisa>=1.14",
   "pyvisa-py>=0.7",
+  "lakeshore==1.10.0",
   "ruamel.yaml>=0.18",
 ]
 

@@ -86,16 +86,16 @@ class MainWindow(QMainWindow):
         self._audit_healthy = True
         self._run_correlation_id: str | None = None
         suffix = " — SIMULATION" if simulation else ""
-        self.setWindowTitle("Lab Control — Rigol · Keithley · Anritsu · MOKE Box" + suffix)
+        self.setWindowTitle("Lab Control — Rigol · Keithley · Anritsu · MOKE Box · Lake Shore 475" + suffix)
         self.resize(1360, 880)
         self._composition = StationComposition(self._settings, simulation=self._simulation)
         self._controllers = self._composition.create_controllers(
-            ("rigol", "keithley", "anritsu", "moke_box"), self
+            ("rigol", "keithley", "anritsu", "moke_box", "lakeshore_gaussmeter"), self
         )
         for controller in self._controllers.values():
             controller.set_operation_guard(self._guard_manual_operation)
         self._device_states = {
-            key: "disconnected" for key in ("rigol", "keithley", "anritsu", "moke_box")
+            key: "disconnected" for key in ("rigol", "keithley", "anritsu", "moke_box", "lakeshore_gaussmeter")
         }
         self._run_controller = RunController(self)
         self._build()
@@ -118,12 +118,13 @@ class MainWindow(QMainWindow):
             key: self._composition.registry.get(key).create_page(
                 self._controllers[key], self._settings
             )
-            for key in ("rigol", "keithley", "anritsu", "moke_box")
+            for key in ("rigol", "keithley", "anritsu", "moke_box", "lakeshore_gaussmeter")
         }
         self.rigol_page = self._device_pages["rigol"]
         self.keithley_page = self._device_pages["keithley"]
         self.anritsu_page = self._device_pages["anritsu"]
         self.moke_box_page = self._device_pages["moke_box"]
+        self.lakeshore_gaussmeter_page = self._device_pages["lakeshore_gaussmeter"]
         self.connection_panels: dict[str, DeviceConnectionPanel] = {}
         for key, page in self._device_pages.items():
             device = getattr(self._settings, key)
@@ -235,6 +236,7 @@ class MainWindow(QMainWindow):
             (self.keithley_page, "Keithley"),
             (self.anritsu_page, "Anritsu"),
             (self.moke_box_page, "MOKE Box"),
+            (self.lakeshore_gaussmeter_page, "Lake Shore 475"),
             (self.recipe_page, "Sweeps"),
             (self.run_monitor, "Execution"),
             (self.results_page, "Results"),
@@ -269,6 +271,7 @@ class MainWindow(QMainWindow):
             self.keithley_page,
             self.anritsu_page,
             self.moke_box_page,
+            self.lakeshore_gaussmeter_page,
             self.recipe_page,
             self.settings_page,
         ):
@@ -324,6 +327,7 @@ class MainWindow(QMainWindow):
             "Keithley": "keithley.svg",
             "Anritsu": "anritsu.svg",
             "MOKE Box": "moke_box.svg",
+            "Lake Shore 475": "lakeshore.svg",
             "Sweeps": "recipes.svg",
             "Execution": "execution.svg",
             "Results": "results.svg",
@@ -363,8 +367,8 @@ class MainWindow(QMainWindow):
         )
         status_layout.addWidget(self.identity_status)
         self.toolbar_device_status: dict[str, QLabel] = {}
-        for device in ("rigol", "keithley", "anritsu", "moke_box"):
-            display = "MOKE" if device == "moke_box" else device.title()
+        for device in ("rigol", "keithley", "anritsu", "moke_box", "lakeshore_gaussmeter"):
+            display = {"moke_box": "MOKE", "lakeshore_gaussmeter": "Lake Shore"}.get(device, device.title())
             label = QLabel(f"● {display}: OFFLINE")
             label.setObjectName("compactDeviceStatus")
             label.setAccessibleName(f"{display} connection and output state")
@@ -408,6 +412,8 @@ class MainWindow(QMainWindow):
     ) -> tuple[str | None, str]:
         if device == "moke_box":
             return settings.moke_box.endpoint, "TCP/IP"
+        if device == "lakeshore_gaussmeter":
+            return settings.lakeshore_gaussmeter.resource, settings.lakeshore_gaussmeter.visa_backend
         connection = getattr(settings, device).connection
         return connection.resource, connection.visa_backend
 
@@ -643,7 +649,7 @@ class MainWindow(QMainWindow):
         self.dashboard.update_device_state(device, state)
         label = self.toolbar_device_status.get(device)
         if label is not None:
-            display = "MOKE" if device == "moke_box" else device.title()
+            display = {"moke_box": "MOKE", "lakeshore_gaussmeter": "Lake Shore"}.get(device, device.title())
             label.setText(f"● {display}: {state.replace('_', ' ').upper()}")
             label.setProperty("deviceState", state)
             label.style().unpolish(label)
@@ -952,6 +958,7 @@ class MainWindow(QMainWindow):
         self.keithley_page.set_settings(self._settings)
         self.anritsu_page.set_settings(self._settings)
         self.moke_box_page.set_settings(self._settings)
+        self.lakeshore_gaussmeter_page.set_settings(self._settings)
         for name, panel in self.connection_panels.items():
             resource, backend = self._device_connection_details(self._settings, name)
             panel.update_resource(resource, backend)
@@ -1098,7 +1105,10 @@ class MainWindow(QMainWindow):
             self.moke_box_page.stop_live(
                 "Live Hall readout paused while a recipe run owns the MOKE Box."
             )
-        for label in ("Rigol", "Keithley", "Anritsu", "MOKE Box", "Sweeps", "Settings"):
+            self.lakeshore_gaussmeter_page.stop_live(
+                "Live field readout paused while a recipe run owns the Lake Shore 475."
+            )
+        for label in ("Rigol", "Keithley", "Anritsu", "MOKE Box", "Lake Shore 475", "Sweeps", "Settings"):
             index = self._tab_indices[label]
             self.tabs.setTabEnabled(index, not locked)
             self.ribbon_actions[index].setEnabled(not locked)

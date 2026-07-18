@@ -87,6 +87,34 @@ class Hdf5WriterTests(unittest.TestCase):
                 )
                 self.assertIn(f"measurement/{spectrum_row}/data", file)
 
+    def test_writer_persists_simulation_and_full_device_state_per_checkpoint(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            path = Path(temporary) / "simulation.h5"
+            writer = Hdf5RunWriter(
+                path,
+                recipe_source="schema_version: 1\n",
+                settings_source="schema_version: 1\n",
+                plan_hash="simulation",
+                device_idn={"rigol": "SIM"},
+                simulation_metadata={"enabled": True, "seed": 17, "model_version": "1"},
+            )
+            writer.append(
+                MeasurementPoint(index=0, setpoints={}, measurements={}),
+                device_states={
+                    "rigol": {"channel_1": {"frequency_hz": 1_000.0, "output": True}},
+                    "keithley": {"channel_B": {"current_a": 0.001}},
+                    "anritsu": {"spectrum": {"rbw_hz": 1_000.0}},
+                    "moke_box": {"hall": {"field_t": 0.02}},
+                },
+            )
+            writer.close("completed")
+
+            detail = Hdf5RunReader.detail(path)
+            point = Hdf5RunReader.points(path)[0]
+            self.assertEqual(detail.simulation_metadata["seed"], 17)
+            self.assertTrue(point.device_states["rigol"]["channel_1"]["output"])
+            self.assertIn("moke_box", point.device_states)
+
     def test_generated_spectrum_round_trips_through_qualified_pythat(self) -> None:
         from PyThat import MeasurementTree
 

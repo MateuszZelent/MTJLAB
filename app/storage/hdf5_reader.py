@@ -36,6 +36,7 @@ class RunDetail:
     device_idn: dict[str, str]
     capabilities: dict[str, Any]
     operator_context: dict[str, Any]
+    simulation_metadata: dict[str, Any]
     events: tuple["StoredEvent", ...]
 
 
@@ -47,6 +48,7 @@ class StoredPoint:
     setpoints: dict[str, Any]
     measurements: dict[str, Any]
     metadata: dict[str, Any]
+    device_states: dict[str, Any]
     has_spectrum: bool
 
 
@@ -125,6 +127,7 @@ class Hdf5RunReader:
                 device_idn=Hdf5RunReader._dataset_json(run, "device_idn_json"),
                 capabilities=Hdf5RunReader._dataset_json(run, "capabilities_json"),
                 operator_context=Hdf5RunReader._dataset_json(run, "operator_context_json"),
+                simulation_metadata=Hdf5RunReader._dataset_json(run, "simulation_json"),
                 events=Hdf5RunReader._events(file),
             )
 
@@ -158,6 +161,7 @@ class Hdf5RunReader:
                         setpoints=Hdf5RunReader._dataset_json(group, "setpoints_json"),
                         measurements=Hdf5RunReader._dataset_json(group, "measurements_json"),
                         metadata=Hdf5RunReader._dataset_json(group, "metadata_json"),
+                        device_states=Hdf5RunReader._dataset_json(group, "device_states_json"),
                         has_spectrum=name in spectra,
                     )
                 )

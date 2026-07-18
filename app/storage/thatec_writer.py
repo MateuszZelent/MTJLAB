@@ -603,6 +603,7 @@ class ThatecHdf5Writer:
             "rigol": "Rigol DG1032Z",
             "keithley": "Keithley 2602A",
             "anritsu": "Anritsu Spectrum Analyzer",
+            "lakeshore": "Lake Shore 475",
         }.get(device_key, "Lab Control")
         leaf = parts[-1].lower()
         unit = ""
@@ -614,6 +615,7 @@ class ThatecHdf5Writer:
             (("resistance", "impedance", "_ohm"), "Ω"),
             (("duration", "settling", "_s"), "s"),
             (("dbm", "reference_level"), "dBm"),
+            (("field", "peak"), "T"),
         )
         for tokens, candidate in unit_tokens:
             if any(token in leaf for token in tokens):
@@ -640,5 +642,6 @@ class ThatecHdf5Writer:
             "rigol": f"Rigol {model}",
             "keithley": f"Keithley {model}",
             "anritsu": "Anritsu Spectrum Analyzer",
+            "lakeshore_gaussmeter": f"Lake Shore {model}",
         }
         return re.sub(r"[/\\]", "_", names.get(key, key))

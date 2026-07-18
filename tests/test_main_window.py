@@ -201,21 +201,22 @@ class MainWindowTests(unittest.TestCase):
         window = MainWindow(".config/settings.yml", simulation=True)
         try:
             settings = window.settings_page
-            self.assertEqual(settings.tabs.count(), 8)
+            self.assertEqual(settings.tabs.count(), 9)
             self.assertEqual(
-                [settings.tabs.tabText(index) for index in range(8)],
+                [settings.tabs.tabText(index) for index in range(9)],
                 [
                     "General",
                     "Rigol",
                     "Keithley",
                     "Anritsu",
                     "MOKE Box",
+                    "Lake Shore 475",
                     "Safety limits",
                     "Access roles",
                     "Diagnostics",
                 ],
             )
-            for name in ("general", "rigol", "keithley", "anritsu", "moke_box"):
+            for name in ("general", "rigol", "keithley", "anritsu", "moke_box", "lakeshore_gaussmeter"):
                 self.assertGreater(settings.trees[name].topLevelItemCount(), 0)
             self.assertGreater(settings.limits_table.rowCount(), 10)
         finally:
@@ -789,7 +790,7 @@ class MainWindowTests(unittest.TestCase):
         try:
             self.assertTrue(window.tabs.tabBar().isHidden())
             self.assertEqual([action.text() for action in window.ribbon_actions], [
-                "Dashboard", "Rigol", "Keithley", "Anritsu", "MOKE Box", "Sweeps", "Execution", "Results", "Settings"
+                "Dashboard", "Rigol", "Keithley", "Anritsu", "MOKE Box", "Lake Shore 475", "Sweeps", "Execution", "Results", "Settings"
             ])
             self.assertTrue(all(not action.icon().isNull() for action in window.ribbon_actions))
             window.ribbon_actions[2].trigger()

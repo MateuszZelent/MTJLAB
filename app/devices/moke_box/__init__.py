@@ -18,15 +18,15 @@ __all__ = [
     "MODULE", "MokeBoxAdapter", "MokeBoxBinaryTransport", "MokeBoxConfig",
     "MokeBoxTcpTransport", "MokeBoxTransport", "MokeFieldReading",
     "MokeGain", "MokeHallVoltageReading", "MokeReading", "MokeSampleBatch",
-    "MokeTarget", "hall_field_from_voltage",
+    "MokeTarget", "hall_field_from_voltage", "create_simulated_moke_adapter",
 ]
 
 
 def __getattr__(name: str) -> Any:
     """Load the manifest lazily because it owns the optional Qt UI package."""
 
-    if name == "MODULE":
-        from app.devices.moke_box.module import MODULE
+    if name in {"MODULE", "create_simulated_moke_adapter"}:
+        from app.devices.moke_box.module import MODULE, create_simulated_moke_adapter
 
-        return MODULE
+        return {"MODULE": MODULE, "create_simulated_moke_adapter": create_simulated_moke_adapter}[name]
     raise AttributeError(name)

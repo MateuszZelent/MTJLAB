@@ -737,6 +737,15 @@ class RecipePage(QWidget):
         )
         action(
             acquisition,
+            "Measure Lake Shore field",
+            "Store a read-only Lake Shore 475 DC, RMS, or peak field checkpoint.",
+            "lakeshore_gaussmeter",
+            QStyle.StandardPixmap.SP_DialogApplyButton,
+            lambda: self._library_add_basic("measure_lakeshore_field"),
+            drag_kind="flow:measure_lakeshore_field",
+        )
+        action(
+            acquisition,
             "Acquire reference",
             "Acquire and freeze the Anritsu reference used by processed checkpoints",
             "anritsu",
@@ -806,6 +815,7 @@ class RecipePage(QWidget):
         hint.setObjectName("recipeHint")
         hint.setWordWrap(True)
         layout.addWidget(hint)
+        self._update_lakeshore_library_availability()
         self.library_search.textChanged.connect(self._filter_library_actions)
         scroll.setWidget(panel)
         return scroll
@@ -815,6 +825,18 @@ class RecipePage(QWidget):
         for button in self._library_action_buttons:
             haystack = f"{button.text()} {button.toolTip()}".casefold()
             button.setVisible(not needle or needle in haystack)
+
+    def _update_lakeshore_library_availability(self) -> None:
+        enabled = self._settings.lakeshore_gaussmeter.enabled and bool(
+            self._settings.lakeshore_gaussmeter.resource
+        )
+        for button in self._library_action_buttons:
+            if button.property("deviceKind") == "lakeshore_gaussmeter":
+                button.setEnabled(enabled)
+                if not enabled:
+                    button.setToolTip(
+                        "Configure enabled=true and a VISA resource for Lake Shore 475 in Settings before adding this read-only checkpoint."
+                    )
 
     def _library_add_basic(
         self,
@@ -979,6 +1001,7 @@ class RecipePage(QWidget):
 
     def set_settings(self, settings: StationSettings) -> None:
         self._settings = settings
+        self._update_lakeshore_library_availability()
         self.recipe_profile_badge.setText(
             "Profile: LOCKED" if settings.outputs_locked else "Profile: APPROVED"
         )

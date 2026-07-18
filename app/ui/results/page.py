@@ -7,7 +7,7 @@ from pathlib import Path
 from PySide6.QtCore import Qt, Signal
 from PySide6.QtWidgets import QHBoxLayout, QLabel, QPlainTextEdit, QPushButton, QSplitter, QTabWidget, QTreeWidget, QTreeWidgetItem, QVBoxLayout, QWidget
 
-from app.storage import Hdf5RunReader, RunDetail, StoredPoint
+from app.storage import Hdf5RunReader, RunDetail, StoredPoint, read_pythat_run_data
 from app.ui.widgets import SpectrumPlotWidget
 
 
@@ -52,11 +52,18 @@ class ResultsPage(QWidget):
         self.metadata = QPlainTextEdit()
         self.recipe_snapshot = QPlainTextEdit()
         self.settings_snapshot = QPlainTextEdit()
-        for widget in (self.metadata, self.recipe_snapshot, self.settings_snapshot):
+        self.pythat_data = QPlainTextEdit()
+        self.device_state = QPlainTextEdit()
+        for widget in (
+            self.metadata, self.recipe_snapshot, self.settings_snapshot,
+            self.pythat_data, self.device_state,
+        ):
             widget.setReadOnly(True)
         self.details_tabs.addTab(self.metadata, "Metadata")
         self.details_tabs.addTab(self.recipe_snapshot, "Recipe")
         self.details_tabs.addTab(self.settings_snapshot, "Settings")
+        self.details_tabs.addTab(self.pythat_data, "PyThat data")
+        self.details_tabs.addTab(self.device_state, "Device state")
         right_layout.addWidget(self.details_tabs)
 
         self.points = QTreeWidget()
@@ -122,14 +129,23 @@ class ResultsPage(QWidget):
         try:
             detail = Hdf5RunReader.detail(path)
             points = Hdf5RunReader.points(path)
+            pythat_data = read_pythat_run_data(path)
         except Exception as exc:
             self.resume_button.setEnabled(False)
             self.metadata.setPlainText(f"Cannot read result:\n{exc}")
             self.recipe_snapshot.clear()
             self.settings_snapshot.clear()
+            self.pythat_data.clear()
+            self.device_state.clear()
             return
         self.resume_button.setEnabled(detail.summary.status in {"aborted", "faulted", "incomplete"})
         self._show_detail(detail)
+        self.pythat_data.setPlainText(
+            "Dimensions:\n"
+            + self._format_json(pythat_data.dimensions)
+            + "\n\nVariables:\n"
+            + "\n".join(pythat_data.variables)
+        )
         for point in points:
             fields = {**point.setpoints, **point.measurements}
             suffix = " • spectrum" if point.has_spectrum else ""
@@ -183,10 +199,12 @@ class ResultsPage(QWidget):
     def _point_selected(self, item: QTreeWidgetItem | None, _previous: QTreeWidgetItem | None) -> None:
         self._clear_spectrum()
         if item is None or self._selected_path is None:
+            self.device_state.clear()
             return
         point = item.data(0, Qt.ItemDataRole.UserRole)
         if not isinstance(point, StoredPoint):
             return
+        self.device_state.setPlainText(self._format_json(point.device_states))
         if not point.has_spectrum:
             self.spectrum_info.setText("This checkpoint contains no spectrum.")
             return
@@ -213,18 +231,24 @@ class ResultsPage(QWidget):
 
     @staticmethod
     def _point_tooltip(point: StoredPoint) -> str:
-        payload = {"setpoints": point.setpoints, "measurements": point.measurements, "metadata": point.metadata}
+        payload = {
+            "setpoints": point.setpoints,
+            "measurements": point.measurements,
+            "metadata": point.metadata,
+            "device_states": point.device_states,
+        }
         return ResultsPage._format_json(payload)
 
     def _clear_details(self) -> None:
         self.metadata.clear()
         self.recipe_snapshot.clear()
         self.settings_snapshot.clear()
+        self.pythat_data.clear()
+        self.device_state.clear()
         self._clear_spectrum()
 
     def _clear_spectrum(self) -> None:
         self.spectrum_plot.clear()
         self.spectrum_plot.set_title("Select a point containing a stored spectrum")
         self.spectrum_info.setText("Spectra are read from HDF5 without contacting instruments.")
-
 

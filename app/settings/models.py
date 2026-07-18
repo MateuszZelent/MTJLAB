@@ -444,21 +444,26 @@ class MokeBoxSettings(StrictModel):
 
 
 class LakeShoreGaussmeterSettings(StrictModel):
-    """Reserved, fail-closed profile surface for Model 425/475 integration."""
+    """Fail-closed connection profile for the read-only Model 475 adapter."""
 
-    enabled: Literal[False] = False
-    display_name: str = "Lake Shore Gaussmeter"
-    model: Literal["425", "475"] = "475"
-    connection: Literal["visa", "tcp", "usb"] = "visa"
+    enabled: bool = False
+    display_name: str = "Lake Shore 475"
     resource: str | None = None
+    visa_backend: str = "system"
     timeout: str = "3 s"
-    expected_vendor_contains: str = "LAKE SHORE"
+    baud_rate: Literal[9600, 19200, 38400, 57600] = 57600
     expected_serial: str | None = None
+    require_serial_match: bool = False
+    live_interval: str = "1 s"
 
     @model_validator(mode="after")
     def validate_timeout(self) -> "LakeShoreGaussmeterSettings":
         if parse_quantity(self.timeout, DIMENSION_TIME).si_value <= 0:
             raise ValueError("Lake Shore timeout must be positive")
+        if parse_quantity(self.live_interval, DIMENSION_TIME).si_value < 0.5:
+            raise ValueError("Lake Shore live_interval must be at least 500 ms")
+        if self.require_serial_match and not self.expected_serial:
+            raise ValueError("Lake Shore serial matching requires expected_serial")
         return self
 
 

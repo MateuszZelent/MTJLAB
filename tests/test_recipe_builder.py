@@ -385,6 +385,7 @@ finally: []
                     "Anritsu configuration",
                     "Anritsu signal generator",
                     "Measure MOKE Hall (V + field)",
+                    "Measure Lake Shore field",
                     "Acquire reference",
                     "Acquire spectrum once",
                     "Wait",
@@ -1473,7 +1474,7 @@ root:
     def test_node_library_filters_actions_and_adds_a_tree_node(self) -> None:
         page = RecipePage(simulation_settings())
         try:
-            self.assertEqual(len(page._library_action_buttons), 13)
+            self.assertEqual(len(page._library_action_buttons), 14)
             page.library_search.setText("spectrum analyzer")
             visible = [button.text() for button in page._library_action_buttons if not button.isHidden()]
             self.assertEqual(visible, ["Anritsu configuration"])

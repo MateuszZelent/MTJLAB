@@ -427,6 +427,17 @@ devices:
         sweep_points: 1001
         trace: "TRAC1"
 
+  lakeshore_gaussmeter:
+    enabled: false
+    display_name: Lake Shore 475
+    resource:
+    visa_backend: system
+    timeout: 3 s
+    baud_rate: 57600
+    expected_serial:
+    require_serial_match: false
+    live_interval: 1 s
+
 recipe_defaults:
   example_nested_sweep:
     keithley_channel: "B"

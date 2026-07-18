@@ -27,6 +27,30 @@ verified ratings, approved wiring and a reachable physical E-STOP/interlock.
 
 ## 2. Provision the qualification account
 
+### Lake Shore Model 475 (read-only) gate
+
+Keep `devices.lakeshore_gaussmeter.enabled: false` until a service-role operator
+archives a signed report for the exact instrument serial number. The adapter is
+read-only: the acceptable captured traffic contains only `*IDN?`, `UNIT?`,
+`RDGMODE?`, `RANGE?`, `AUTO?`, `TYPE?`, `RDGFIELD?`, `RDGFRQ?` and
+`RDGPEAK?`; it must contain no write command, including `*CLS`.
+
+Record these cases in the report:
+
+1. exact `LSCI,MODEL475,...` identity, serial and firmware;
+2. selected RS-232 9600/19200/38400/57600 baud with 7O1 and CR/LF, or the
+   identified GPIB resource;
+3. DC readings in gauss and tesla, including the recorded G-to-T conversion;
+4. explicit rejection of Oe and A/m by the application;
+5. DC on two ranges, RMS with frequency, and negative/positive peak readings;
+6. autorange and probe type readback without sending a configuration command;
+7. overload, malformed response, cable removal and power-loss behaviour;
+8. stable 500 ms live readout with no overlapping queries;
+9. a recipe checkpoint, HDF5/thaTEC readback and recovery verification;
+10. captured traffic proving no device write command and clean disconnect.
+
+Do not use a simulation result as a substitute for this physical HIL gate.
+
 Qualification requires the `service` role bound to the authenticated operating-system account. See
 [`ACCESS_CONTROL.md`](ACCESS_CONTROL.md). Restart the application or terminal session after changing
 role assignments. The report records the OS account, host and roles.

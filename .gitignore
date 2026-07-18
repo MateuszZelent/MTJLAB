@@ -9,3 +9,5 @@ qualification-sim*/
 .config/*.bak
 .config/settings.yml
 .config/logs/
+*.h5
+*.nc

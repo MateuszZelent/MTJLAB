@@ -55,9 +55,12 @@ root:
         type: acquire_spectrum
         trace: TRAC1
 
-  - id: wait-970b875f
-    type: wait
-    duration: 100 ms
+  - id: sequence-44c5f206
+    type: sequence
+    children:
+    - id: comment-f95a6f30
+      type: comment
+      text: Add actions to this sequence
 finally:
 - id: rigol-ch1-off-finally
   type: set_rigol_output
@@ -70,4 +73,8 @@ finally:
 - id: keithley-b-off-finally
   type: set_keithley_output
   channel: B
+  enabled: false
+- id: set_rigol_output-173cb705
+  type: set_rigol_output
+  channel: 1
   enabled: false

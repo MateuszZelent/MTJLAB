@@ -82,6 +82,8 @@ def required_devices_for_actions(actions: Iterable[PlanAction]) -> frozenset[str
             required.add("anritsu")
         if action.kind == "measure_moke_hall":
             required.add("moke_box")
+        if action.kind == "measure_lakeshore_field":
+            required.add("lakeshore_gaussmeter")
         if action.kind == "verify_connection":
             required.add(str(action.payload["device"]))
     return frozenset(required)
@@ -123,7 +125,12 @@ class RecipeCompiler:
                 f"The plan expands to {len(actions)} actions; the limit is {self._max_actions}."
             )
         total_points = sum(
-            action.kind in {"acquire_spectrum", "checkpoint", "measure_moke_hall"} for action in actions
+            action.kind in {"acquire_spectrum", "checkpoint"}
+            or (
+                action.kind in {"measure_moke_hall", "measure_lakeshore_field"}
+                and bool(action.payload.get("checkpoint", True))
+            )
+            for action in actions
         )
         total_spectra = sum(action.kind == "acquire_spectrum" for action in actions)
         required_devices = required_devices_for_actions(actions)
@@ -1384,6 +1391,13 @@ class RecipeCompiler:
             if not profile.enabled or not profile.protocol_qualified or not profile.endpoint:
                 raise ConfigurationError(
                     f"{node.id}: MOKE Hall measurement requires an enabled, protocol-qualified TCP endpoint."
+                )
+            payload = {"checkpoint": bool(data.get("checkpoint", True))}
+        elif node.type == "measure_lakeshore_field":
+            profile = self._settings.lakeshore_gaussmeter
+            if not profile.enabled or not profile.resource:
+                raise ConfigurationError(
+                    f"{node.id}: Lake Shore field measurement requires enabled=true and a VISA resource."
                 )
             payload = {}
         elif node.type in {"acquire_reference", "acquire_spectrum"}:

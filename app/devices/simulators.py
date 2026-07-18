@@ -4,10 +4,12 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 import math
+from random import Random
 import re
 from typing import Literal
 
 from app.devices.base import InstrumentSession
+from app.devices.simulation import SimulationContext
 from app.domain.errors import ConnectionError, DeviceError
 from app.settings.models import StationSettings
 
@@ -399,8 +401,9 @@ class KeithleySimulator(_BaseSimulator):
 
 
 class AnritsuSimulator(_BaseSimulator):
-    def __init__(self) -> None:
+    def __init__(self, *, random_source: Random | None = None) -> None:
         super().__init__()
+        self._random = random_source
         self.start_hz = 1e6
         self.stop_hz = 10e6
         self.points = 1001
@@ -589,7 +592,8 @@ class AnritsuSimulator(_BaseSimulator):
                 frequency = self.start_hz + span * index / (self.points - 1)
                 peak = 35 * math.exp(-((frequency - center) / (span / 12)) ** 2)
                 ripple = 2 * math.sin(index / 25 + self.trace_frame / 7)
-                values.append(f"{-80 + peak + ripple:.8g}")
+                noise = self._random.uniform(-0.15, 0.15) if self._random else 0.0
+                values.append(f"{-80 + peak + ripple + noise:.8g}")
             return ",".join(values)
         raise DeviceError(f"Anritsu simulator: unsupported query {command!r}.")
 
@@ -601,6 +605,7 @@ class SimulatedVisaFactory:
         self,
         device: Literal["rigol", "keithley", "anritsu"],
         *,
+        context: SimulationContext | None = None,
         fault: SimulatorFault | None = None,
         keithley_resistance_ohm: float = 10.0,
         keithley_noise_fraction: float = 0.0,
@@ -610,6 +615,7 @@ class SimulatedVisaFactory:
         keithley_command_errors: dict[str, str] | None = None,
     ) -> None:
         self.device = device
+        self.context = context
         self.fault = fault
         self.keithley_resistance_ohm = keithley_resistance_ohm
         if not math.isfinite(keithley_noise_fraction) or keithley_noise_fraction < 0:
@@ -630,7 +636,13 @@ class SimulatedVisaFactory:
             session.resistance_ohm = {"smua": self.keithley_resistance_ohm, "smub": self.keithley_resistance_ohm}
             session.noise_fraction = self.keithley_noise_fraction
         else:
-            session = AnritsuSimulator()
+            session = AnritsuSimulator(
+                random_source=(
+                    self.context.random_stream("anritsu", "trace")
+                    if self.context is not None
+                    else None
+                )
+            )
         session.error_queue = list(self.queued_errors)
         session.error_queue.extend(self.keithley_error_queue if self.device == "keithley" else ())
         session.command_errors = dict(self.command_errors)
@@ -663,4 +675,12 @@ def simulated_station_settings(settings: StationSettings) -> StationSettings:
     raw["devices"]["anritsu"]["safety"]["rf_input"]["max_expected_power_at_connector"] = "-10 dBm"
     raw["devices"]["anritsu"]["safety"]["frequency"] = {"min": "1 Hz", "max": "100 GHz"}
     raw["devices"]["anritsu"]["safety"]["reference_level"] = {"min": "-150 dBm", "max": "30 dBm"}
+    raw["devices"]["moke_box"].update(
+        {
+            "enabled": True,
+            "endpoint": "SIM::MOKE::INSTR",
+            "expected_model": "MOKE SIM",
+            "protocol_qualified": True,
+        }
+    )
     return StationSettings.model_validate(raw)

@@ -47,7 +47,7 @@ class DashboardPage(QWidget):
     assignments_requested = Signal(object)
     moke_assignment_requested = Signal(str)
     status = Signal(str)
-    _DEVICE_KEYS = ("rigol", "keithley", "anritsu", "moke_box")
+    _DEVICE_KEYS = ("rigol", "keithley", "anritsu", "moke_box", "lakeshore_gaussmeter")
 
     def __init__(
         self, settings: StationSettings, parent: QWidget | None = None, *, discovery_enabled: bool = True
@@ -90,6 +90,7 @@ class DashboardPage(QWidget):
             "keithley": DeviceCard(settings.keithley.display_name, settings.keithley.connection.resource),
             "anritsu": DeviceCard(settings.anritsu.display_name, settings.anritsu.connection.resource),
             "moke_box": DeviceCard(settings.moke_box.display_name, settings.moke_box.endpoint),
+            "lakeshore_gaussmeter": DeviceCard(settings.lakeshore_gaussmeter.display_name, settings.lakeshore_gaussmeter.resource),
         }
         for index, (device, card) in enumerate(self.cards.items()):
             grid.addWidget(card, index // 2, index % 2)
@@ -326,6 +327,13 @@ class DashboardPage(QWidget):
             if previous_resources.get(name) != device.connection.resource:
                 self._verified_resources.pop(name, None)
                 self._device_errors.pop(name, None)
+        self.cards["lakeshore_gaussmeter"].update_resource(
+            settings.lakeshore_gaussmeter.resource,
+            settings.lakeshore_gaussmeter.visa_backend,
+        )
+        if previous_resources.get("lakeshore_gaussmeter") != settings.lakeshore_gaussmeter.resource:
+            self._verified_resources.pop("lakeshore_gaussmeter", None)
+            self._device_errors.pop("lakeshore_gaussmeter", None)
         self.cards["moke_box"].update_resource(settings.moke_box.endpoint, "TCP/IP")
         if previous_resources.get("moke_box") != settings.moke_box.endpoint:
             self._verified_resources.pop("moke_box", None)
@@ -344,8 +352,12 @@ class DashboardPage(QWidget):
                 resource = device.endpoint or "Not assigned"
                 backend = "TCP/IP"
             else:
-                resource = device.connection.resource or "Not assigned"
-                backend = device.connection.visa_backend
+                if name == "lakeshore_gaussmeter":
+                    resource = device.resource or "Not assigned"
+                    backend = device.visa_backend
+                else:
+                    resource = device.connection.resource or "Not assigned"
+                    backend = device.connection.visa_backend
             values = (
                 device.display_name,
                 resource,
@@ -936,6 +948,8 @@ class DashboardPage(QWidget):
     def _device_resource(settings: StationSettings, device: str) -> str | None:
         if device == "moke_box":
             return settings.moke_box.endpoint
+        if device == "lakeshore_gaussmeter":
+            return settings.lakeshore_gaussmeter.resource
         return getattr(settings, device).connection.resource
 
     def mark_assignments_saved(self, assignments: dict[str, tuple[str, str, str]]) -> None:

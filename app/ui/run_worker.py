@@ -6,6 +6,7 @@ from datetime import datetime, timezone
 from io import StringIO
 from pathlib import Path
 import re
+import secrets
 
 from PySide6.QtCore import QObject, QThread, Signal, Slot
 from ruamel.yaml import YAML
@@ -15,8 +16,12 @@ from app.devices.anritsu import AnritsuAdapter
 from app.devices.base import DeviceAdapter
 from app.devices.keithley import KeithleyAdapter
 from app.devices.moke_box import MokeBoxAdapter
+from app.devices.moke_box.models import MokeBoxConfig
+from app.devices.moke_box.simulator import SimulatedMokeBoxTransport
+from app.devices.lakeshore_gaussmeter import LakeShore475Adapter
 from app.devices.rigol import RigolAdapter
 from app.devices.simulators import SimulatedVisaFactory
+from app.devices.simulation import SimulationContext
 from app.engine.compiler import ExecutionPlan, required_devices_for_actions
 from app.engine.policy import ExecutionPolicy
 from app.engine.recovery import RecoveryCheckpoint
@@ -54,6 +59,7 @@ class RunWorker(QObject):
         simulation: bool = False,
         recovery: RecoveryCheckpoint | None = None,
         operator_context: dict[str, object] | None = None,
+        simulation_seed: int | None = None,
         parent: QObject | None = None,
     ) -> None:
         super().__init__(parent)
@@ -63,21 +69,41 @@ class RunWorker(QObject):
         self._simulation = simulation
         self._recovery = recovery
         self._operator_context = dict(operator_context or {})
+        self._simulation_seed = simulation_seed
         self._runner: RecipeRunner | None = None
 
     @Slot()
     def run(self) -> None:
+        simulation_context = (
+            SimulationContext(
+                seed=(self._simulation_seed if self._simulation_seed is not None else secrets.randbits(64))
+            )
+            if self._simulation
+            else None
+        )
         rigol = RigolAdapter(
             self._settings,
-            session_factory=SimulatedVisaFactory("rigol") if self._simulation else None,
+            session_factory=(
+                SimulatedVisaFactory("rigol", context=simulation_context)
+                if self._simulation
+                else None
+            ),
         )
         keithley = KeithleyAdapter(
             self._settings,
-            session_factory=SimulatedVisaFactory("keithley") if self._simulation else None,
+            session_factory=(
+                SimulatedVisaFactory("keithley", context=simulation_context)
+                if self._simulation
+                else None
+            ),
         )
         anritsu = AnritsuAdapter(
             self._settings,
-            session_factory=SimulatedVisaFactory("anritsu") if self._simulation else None,
+            session_factory=(
+                SimulatedVisaFactory("anritsu", context=simulation_context)
+                if self._simulation
+                else None
+            ),
         )
         writer: Hdf5RunWriter | None = None
         devices: dict[str, DeviceAdapter] = {
@@ -86,15 +112,21 @@ class RunWorker(QObject):
             "anritsu": anritsu,
         }
         moke_box: MokeBoxAdapter | None = None
+        lakeshore: LakeShore475Adapter | None = None
         try:
             required_by_plan = set(
                 self._plan.required_devices
                 or required_devices_for_actions(self._plan.actions)
             )
             if "moke_box" in required_by_plan:
-                candidate = StationComposition(
-                    self._settings, simulation=self._simulation
-                ).create_adapter("moke_box")
+                candidate = (
+                    MokeBoxAdapter(
+                        MokeBoxConfig(endpoint="SIM::MOKE::INSTR", expected_model="MOKE SIM"),
+                        SimulatedMokeBoxTransport(simulation_context),
+                    )
+                    if simulation_context is not None
+                    else StationComposition(self._settings, simulation=False).create_adapter("moke_box")
+                )
                 if not isinstance(candidate, MokeBoxAdapter):
                     raise RuntimeError(
                         "MOKE Hall measurement requires an enabled, protocol-qualified "
@@ -102,6 +134,16 @@ class RunWorker(QObject):
                     )
                 moke_box = candidate
                 devices["moke_box"] = moke_box
+            if "lakeshore_gaussmeter" in required_by_plan:
+                candidate = StationComposition(
+                    self._settings, simulation=self._simulation
+                ).create_adapter("lakeshore_gaussmeter")
+                if not isinstance(candidate, LakeShore475Adapter):
+                    raise RuntimeError(
+                        "Lake Shore measurement requires an enabled 475 VISA profile."
+                    )
+                lakeshore = candidate
+                devices["lakeshore_gaussmeter"] = lakeshore
             # A recipe owns the complete station for its lifetime. Connecting
             # every configured device lets the final emergency-off sequence
             # confirm that *all* outputs are disabled after success, stop or
@@ -128,6 +170,11 @@ class RunWorker(QObject):
                     },
                     expected_points=self._plan.total_points,
                     operator_context=self._operator_context,
+                    simulation_metadata=(
+                        simulation_context.metadata(tuple(sorted(required)))
+                        if simulation_context is not None
+                        else {"enabled": False}
+                    ),
                     csv_summary_path=output_dir / f"{run_stem}.csv" if self._settings.storage.get("write_csv_summary") else None,
                 )
             else:
@@ -150,6 +197,7 @@ class RunWorker(QObject):
                 keithley=keithley,
                 anritsu=anritsu,
                 moke_box=moke_box,
+                lakeshore=lakeshore,
                 writer=writer,
                 on_event=lambda name, data: self.event.emit(name, data),
                 on_telemetry=lambda name, data: self.event.emit(name, data),
