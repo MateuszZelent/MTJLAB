@@ -2,11 +2,11 @@ from __future__ import annotations
 
 from datetime import datetime, timezone
 from pathlib import Path
-from contextlib import redirect_stdout
-from io import StringIO
 import json
+import sys
 import tempfile
 import unittest
+import warnings
 
 import h5py
 import csv
@@ -14,10 +14,38 @@ import csv
 from app.devices.anritsu import SpectrumTrace
 from app.domain.models import MeasurementPoint
 from app.recipes import generate_sweep_points
-from app.storage import Hdf5RunReader, Hdf5RunWriter
+from app.storage import Hdf5RunReader, Hdf5RunWriter, read_pythat_run_data
+from app.storage.pythat_bridge import open_measurement_tree
 
 
 class Hdf5WriterTests(unittest.TestCase):
+    def test_bridge_opens_run_without_numpy_abi_warning_or_netcdf4_import(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            path = Path(temporary) / "bridge.h5"
+            writer = Hdf5RunWriter(
+                path,
+                recipe_source="schema_version: 1\n",
+                settings_source="schema_version: 1\n",
+                plan_hash="bridge",
+                device_idn={},
+            )
+            writer.append(
+                MeasurementPoint(
+                    index=0,
+                    setpoints={},
+                    measurements={"lakeshore.field_t": 0.01},
+                )
+            )
+            writer.close("completed")
+            sys.modules.pop("netCDF4", None)
+
+            with warnings.catch_warnings():
+                warnings.simplefilter("error", RuntimeWarning)
+                data = read_pythat_run_data(path)
+
+            self.assertEqual(data.dimensions["Checkpoint"], 1)
+            self.assertNotIn("netCDF4", sys.modules)
+
     def test_writer_flushes_a_point_and_trace(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             path = Path(temporary) / "run.h5"
@@ -116,8 +144,6 @@ class Hdf5WriterTests(unittest.TestCase):
             self.assertIn("moke_box", point.device_states)
 
     def test_generated_spectrum_round_trips_through_qualified_pythat(self) -> None:
-        from PyThat import MeasurementTree
-
         with tempfile.TemporaryDirectory() as temporary:
             path = Path(temporary) / "pythat.h5"
             writer = Hdf5RunWriter(
@@ -137,8 +163,7 @@ class Hdf5WriterTests(unittest.TestCase):
                 ),
             )
             writer.close("completed")
-            with redirect_stdout(StringIO()):
-                tree = MeasurementTree(path, index=True, override=True)
+            tree = open_measurement_tree(path)
             self.assertEqual(tuple(tree.dataset.sizes), ("Checkpoint", "Frequency"))
             self.assertEqual(tree.dataset.sizes["Checkpoint"], 1)
             self.assertEqual(tree.dataset.sizes["Frequency"], 3)
@@ -215,16 +240,11 @@ class Hdf5WriterTests(unittest.TestCase):
             self.assertEqual(stored.processed_values, (10.0, 5.0, 5.0))
             self.assertEqual(stored.processed_unit, "dB")
             self.assertEqual(stored.processing_operation, "difference_db")
-            from PyThat import MeasurementTree
-
-            with redirect_stdout(StringIO()):
-                tree = MeasurementTree(path, index=True, override=True)
+            tree = open_measurement_tree(path)
             self.assertIn("Spectrum", tree.dataset.data_vars)
             self.assertIn("Spectrum raw-reference", tree.dataset.data_vars)
 
     def test_multi_point_run_round_trips_setpoints_measurements_and_spectrum(self) -> None:
-        from PyThat import MeasurementTree
-
         with tempfile.TemporaryDirectory() as temporary:
             path = Path(temporary) / "multi-point.h5"
             writer = Hdf5RunWriter(
@@ -251,8 +271,7 @@ class Hdf5WriterTests(unittest.TestCase):
                 )
             writer.close("completed")
 
-            with redirect_stdout(StringIO()):
-                tree = MeasurementTree(path, index=True, override=True)
+            tree = open_measurement_tree(path)
             self.assertEqual(tree.dataset.sizes["Checkpoint"], 2)
             self.assertEqual(tree.dataset.sizes["Frequency"], 3)
             self.assertEqual(

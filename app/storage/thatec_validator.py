@@ -2,16 +2,17 @@
 
 from __future__ import annotations
 
-from contextlib import redirect_stdout
 from dataclasses import dataclass
 import hashlib
 from importlib.metadata import PackageNotFoundError, version
 from importlib.resources import files
-from io import StringIO
 import json
 from pathlib import Path
 import re
 from typing import Any
+
+from app.domain.errors import ExecutionError
+from app.storage.pythat_bridge import open_measurement_tree
 
 
 @dataclass(frozen=True, slots=True)
@@ -81,8 +82,6 @@ class ThatecCompatibilityValidator:
 
         if require_pythat and not errors:
             try:
-                from PyThat import MeasurementTree
-
                 try:
                     pythat_version = version("PyThat")
                 except PackageNotFoundError:
@@ -95,10 +94,11 @@ class ThatecCompatibilityValidator:
                             f"version {pythat_version!r} is not qualified; expected {qualified!r}",
                         )
                     )
-                with redirect_stdout(StringIO()):
-                    tree = MeasurementTree(target, index=True, override=True)
+                tree = open_measurement_tree(target)
                 dimensions = tuple((str(name), int(size)) for name, size in tree.dataset.sizes.items())
                 data_variables = tuple(str(name) for name in tree.dataset.data_vars)
+            except ExecutionError as exc:
+                errors.append(CompatibilityIssue("PyThat", f"round-trip failed: {exc}"))
             except Exception as exc:
                 errors.append(CompatibilityIssue("PyThat", f"round-trip failed: {exc}"))
         return self._report(
