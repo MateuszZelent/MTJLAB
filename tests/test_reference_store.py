@@ -1,14 +1,13 @@
 from __future__ import annotations
 
-from contextlib import redirect_stdout
 from datetime import datetime, timezone
-from io import StringIO
 from pathlib import Path
 import tempfile
 import unittest
 
 from app.devices.anritsu import ReferenceSpectrum, SpectrumTrace
 from app.storage import ReferenceHdf5Store
+from app.storage.pythat_bridge import open_measurement_tree
 
 
 class ReferenceStoreTests(unittest.TestCase):
@@ -66,10 +65,7 @@ class ReferenceStoreTests(unittest.TestCase):
             self.assertEqual(loaded.sweep_time_s, 0.2)
             self.assertEqual(loaded.notes, "fixture reference")
 
-            from PyThat import MeasurementTree
-
-            with redirect_stdout(StringIO()):
-                tree = MeasurementTree(path, index=True, override=True)
+            tree = open_measurement_tree(path)
             self.assertEqual(tree.dataset.sizes["Checkpoint"], 1)
             self.assertEqual(tree.dataset.sizes["Frequency"], 3)
             self.assertIn("Spectrum", tree.dataset.data_vars)

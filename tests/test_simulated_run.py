@@ -4,8 +4,6 @@ from pathlib import Path
 import tempfile
 import unittest
 from copy import deepcopy
-from contextlib import redirect_stdout
-from io import StringIO
 import json
 
 import h5py
@@ -27,6 +25,7 @@ from app.recipes import load_recipe, parse_recipe_text
 from app.storage import Hdf5RunWriter
 from app.storage.hdf5_reader import Hdf5RunReader
 from app.storage.pythat_reader import read_pythat_run_data
+from app.storage.pythat_bridge import open_measurement_tree
 from app.settings.models import StationSettings
 from tests.helpers import loaded_settings
 
@@ -535,8 +534,6 @@ finally:
             self.assertEqual(safety["anritsu"]["max_expected_input_dbm"], -10.0)
 
     def test_nested_sweep_round_trips_all_cartesian_points_through_pythat(self) -> None:
-        from PyThat import MeasurementTree
-
         recipe_source = """\
 schema_version: 1
 name: two-by-two-storage-contract
@@ -618,8 +615,7 @@ root:
             self.assertIsNone(result.error)
             self.assertEqual(result.stored_points, 4)
 
-            with redirect_stdout(StringIO()):
-                tree = MeasurementTree(target, index=True, override=True)
+            tree = open_measurement_tree(target)
             self.assertEqual(tree.dataset.sizes["Keithley B current"], 2)
             self.assertEqual(tree.dataset.sizes["Rigol CH1 high level"], 2)
             self.assertEqual(tree.dataset.sizes["Frequency"], 101)
@@ -641,8 +637,6 @@ root:
 
     def test_full_100_by_20_run_writes_exactly_2000_complete_spectra(self) -> None:
         """Acceptance proof for the production plan's cardinality and storage contract."""
-
-        from PyThat import MeasurementTree
 
         recipe_source = """\
 schema_version: 1
@@ -732,8 +726,7 @@ root:
                 self.assertEqual(len(file["spectra"]), 2000)
                 self.assertTrue(all(len(file[f"spectra/{index}/power_dbm"]) == 101 for index in range(2000)))
 
-            with redirect_stdout(StringIO()):
-                tree = MeasurementTree(target, index=True, override=True)
+            tree = open_measurement_tree(target)
             self.assertEqual(tree.dataset.sizes["Keithley B current"], 100)
             self.assertEqual(tree.dataset.sizes["Rigol CH1 high level"], 20)
             self.assertEqual(tree.dataset.sizes["Frequency"], 101)
