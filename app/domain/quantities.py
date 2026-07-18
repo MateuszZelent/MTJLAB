@@ -11,6 +11,7 @@ from dataclasses import dataclass
 import math
 import re
 from typing import Final
+import unicodedata
 
 
 class QuantityError(ValueError):
@@ -40,32 +41,26 @@ _UNITS: Final[dict[str, UnitDefinition]] = {
     "v": UnitDefinition(DIMENSION_VOLTAGE, 1.0, "V"),
     "mv": UnitDefinition(DIMENSION_VOLTAGE, 1e-3, "mV"),
     "uv": UnitDefinition(DIMENSION_VOLTAGE, 1e-6, "uV"),
-    "µv": UnitDefinition(DIMENSION_VOLTAGE, 1e-6, "uV"),
     "kv": UnitDefinition(DIMENSION_VOLTAGE, 1e3, "kV"),
     "a": UnitDefinition(DIMENSION_CURRENT, 1.0, "A"),
     "ma": UnitDefinition(DIMENSION_CURRENT, 1e-3, "mA"),
     "ua": UnitDefinition(DIMENSION_CURRENT, 1e-6, "uA"),
-    "µa": UnitDefinition(DIMENSION_CURRENT, 1e-6, "uA"),
     "na": UnitDefinition(DIMENSION_CURRENT, 1e-9, "nA"),
     "w": UnitDefinition(DIMENSION_POWER, 1.0, "W"),
     "mw": UnitDefinition(DIMENSION_POWER, 1e-3, "mW"),
     "uw": UnitDefinition(DIMENSION_POWER, 1e-6, "uW"),
     "nw": UnitDefinition(DIMENSION_POWER, 1e-9, "nW"),
-    "µw": UnitDefinition(DIMENSION_POWER, 1e-6, "uW"),
     "hz": UnitDefinition(DIMENSION_FREQUENCY, 1.0, "Hz"),
     "khz": UnitDefinition(DIMENSION_FREQUENCY, 1e3, "kHz"),
     "mhz": UnitDefinition(DIMENSION_FREQUENCY, 1e6, "MHz"),
     "ghz": UnitDefinition(DIMENSION_FREQUENCY, 1e9, "GHz"),
     "ohm": UnitDefinition(DIMENSION_RESISTANCE, 1.0, "ohm"),
-    "Ω": UnitDefinition(DIMENSION_RESISTANCE, 1.0, "ohm"),
     "kohm": UnitDefinition(DIMENSION_RESISTANCE, 1e3, "kohm"),
-    "kΩ": UnitDefinition(DIMENSION_RESISTANCE, 1e3, "kohm"),
     "mohm": UnitDefinition(DIMENSION_RESISTANCE, 1e6, "Mohm"),
-    "mΩ": UnitDefinition(DIMENSION_RESISTANCE, 1e6, "Mohm"),
+    "milliohm": UnitDefinition(DIMENSION_RESISTANCE, 1e-3, "mΩ"),
     "s": UnitDefinition(DIMENSION_TIME, 1.0, "s"),
     "ms": UnitDefinition(DIMENSION_TIME, 1e-3, "ms"),
     "us": UnitDefinition(DIMENSION_TIME, 1e-6, "us"),
-    "µs": UnitDefinition(DIMENSION_TIME, 1e-6, "us"),
     "ns": UnitDefinition(DIMENSION_TIME, 1e-9, "ns"),
     "dbm": UnitDefinition(DIMENSION_DBM, 1.0, "dBm"),
     "db": UnitDefinition(DIMENSION_DB, 1.0, "dB"),
@@ -73,7 +68,6 @@ _UNITS: Final[dict[str, UnitDefinition]] = {
     "t": UnitDefinition(DIMENSION_MAGNETIC_FIELD, 1.0, "T"),
     "mt": UnitDefinition(DIMENSION_MAGNETIC_FIELD, 1e-3, "mT"),
     "ut": UnitDefinition(DIMENSION_MAGNETIC_FIELD, 1e-6, "uT"),
-    "Âµt": UnitDefinition(DIMENSION_MAGNETIC_FIELD, 1e-6, "uT"),
 }
 
 _QUANTITY_RE: Final = re.compile(
@@ -109,8 +103,27 @@ class Quantity:
         return f"{value:.{precision}g} {definition.display}"
 
 
+def _canonical_unit(unit: str) -> str:
+    normalized = unicodedata.normalize("NFKC", unit.strip())
+    omega_aliases = {
+        "Ω": "ohm",
+        "ω": "ohm",
+        "kΩ": "kohm",
+        "KΩ": "kohm",
+        "kω": "kohm",
+        "Kω": "kohm",
+        "MΩ": "Mohm",
+        "Mω": "Mohm",
+        "mΩ": "milliohm",
+        "mω": "milliohm",
+    }
+    if normalized in omega_aliases:
+        return omega_aliases[normalized].lower()
+    return normalized.replace("μ", "u").replace("µ", "u").lower()
+
+
 def _unit_definition(unit: str) -> UnitDefinition:
-    normalized = unit.strip().replace("Ω", "Ω").lower()
+    normalized = _canonical_unit(unit)
     try:
         return _UNITS[normalized]
     except KeyError as exc:

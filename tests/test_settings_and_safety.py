@@ -9,7 +9,9 @@ from app.domain.errors import SafetyViolation
 from app.domain.quantities import (
     DIMENSION_CURRENT,
     DIMENSION_FREQUENCY,
+    DIMENSION_MAGNETIC_FIELD,
     DIMENSION_POWER,
+    DIMENSION_RESISTANCE,
     QuantityError,
     format_quantity_auto,
     parse_quantity,
@@ -59,6 +61,24 @@ class QuantityAndSafetyTests(unittest.TestCase):
             parse_quantity("10", DIMENSION_CURRENT)
         self.assertAlmostEqual(parse_quantity("10 mA", DIMENSION_CURRENT).si_value, 0.01)
         self.assertAlmostEqual(parse_quantity("100 nW", DIMENSION_POWER).si_value, 1e-7)
+
+    def test_unicode_ohm_units_preserve_si_prefix_case(self) -> None:
+        self.assertEqual(parse_quantity("50 Ω", DIMENSION_RESISTANCE).si_value, 50.0)
+        self.assertEqual(parse_quantity("1 kΩ", DIMENSION_RESISTANCE).si_value, 1_000.0)
+        self.assertEqual(parse_quantity("1 MΩ", DIMENSION_RESISTANCE).si_value, 1_000_000.0)
+        milliohm = parse_quantity("1 mΩ", DIMENSION_RESISTANCE)
+        self.assertEqual(milliohm.si_value, 0.001)
+        self.assertEqual(milliohm.format("mΩ"), "1 mΩ")
+
+    def test_microtesla_accepts_micro_sign_and_greek_mu(self) -> None:
+        self.assertEqual(
+            parse_quantity("1 µT", DIMENSION_MAGNETIC_FIELD).si_value,
+            1e-6,
+        )
+        self.assertEqual(
+            parse_quantity("1 μT", DIMENSION_MAGNETIC_FIELD).si_value,
+            1e-6,
+        )
 
     def test_station_profile_is_loaded_and_outputs_locked(self) -> None:
         settings = loaded_settings()
