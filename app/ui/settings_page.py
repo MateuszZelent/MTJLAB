@@ -27,6 +27,7 @@ from PySide6.QtWidgets import (
     QPlainTextEdit,
     QPushButton,
     QFormLayout,
+    QFrame,
     QGroupBox,
     QScrollArea,
     QSpinBox,
@@ -141,6 +142,8 @@ class SettingsPage(QWidget):
         self._field_errors: dict[tuple[str | int, ...], QLabel] = {}
         self._limit_error_items: list[QTableWidgetItem] = []
         self._limit_items_by_path: dict[tuple[str | int, ...], QTableWidgetItem] = {}
+        self._safety_limit_editors: dict[tuple[str | int, ...], QLineEdit] = {}
+        self._safety_limit_error_labels: dict[tuple[str | int, ...], QLabel] = {}
         self._changing = False
         self._dirty = False
         self._autosave_timer = QTimer(self)
@@ -179,6 +182,26 @@ class SettingsPage(QWidget):
             form.setFrameShape(QScrollArea.Shape.NoFrame)
             self.forms[key] = form
             self.tabs.addTab(form, label)
+        limits_page = QWidget()
+        limits_page.setObjectName("settingsSpecialPage")
+        limits_layout = QVBoxLayout(limits_page)
+        limits_layout.setContentsMargins(18, 18, 18, 18)
+        limits_layout.setSpacing(12)
+        limits_title = QLabel("Safety limits")
+        limits_title.setObjectName("sectionTitle")
+        limits_description = QLabel(
+            "Approved laboratory boundaries. Enter values with units, for example 10 mA, 67 mV or 1 MHz."
+        )
+        limits_description.setObjectName("muted")
+        limits_description.setWordWrap(True)
+        self.limits_validation_banner = QLabel()
+        self.limits_validation_banner.setObjectName("settingsValidationBanner")
+        self.limits_validation_banner.setWordWrap(True)
+        self.limits_validation_banner.hide()
+        limits_card = QFrame()
+        limits_card.setObjectName("settingsTableCard")
+        limits_card_layout = QVBoxLayout(limits_card)
+        limits_card_layout.setContentsMargins(14, 14, 14, 14)
         self.limits_table = QTableWidget(0, 7)
         self.limits_table.setHorizontalHeaderLabels(
             ["Device / scope", "Parameter", "Minimum", "Maximum", "Unit", "Default", "Source"]
@@ -190,14 +213,40 @@ class SettingsPage(QWidget):
         limits_header = self.limits_table.horizontalHeader()
         limits_header.setSectionResizeMode(0, QHeaderView.ResizeMode.ResizeToContents)
         limits_header.setSectionResizeMode(1, QHeaderView.ResizeMode.Stretch)
-        for column in range(2, 7):
+        for column in range(4, 7):
             limits_header.setSectionResizeMode(column, QHeaderView.ResizeMode.ResizeToContents)
+        for column in (2, 3):
+            limits_header.setSectionResizeMode(column, QHeaderView.ResizeMode.Interactive)
+            self.limits_table.setColumnWidth(column, 170)
         self.limits_table.itemChanged.connect(self._limit_changed)
-        self.tabs.addTab(self.limits_table, "Safety limits")
+        # Retained as the draft model for compatibility with the profile editor.
+        # The operator-facing editor below is intentionally card based.
+        self.limits_table.hide()
+        self.limits_scroll = QScrollArea()
+        self.limits_scroll.setObjectName("settingsForm")
+        self.limits_scroll.setWidgetResizable(True)
+        self.limits_scroll.setFrameShape(QScrollArea.Shape.NoFrame)
+        limits_card_layout.addWidget(self.limits_scroll)
+        limits_layout.addWidget(limits_title)
+        limits_layout.addWidget(limits_description)
+        limits_layout.addWidget(self.limits_validation_banner)
+        limits_layout.addWidget(limits_card, 1)
+        self.limits_page = limits_page
+        self.tabs.addTab(limits_page, "Safety limits")
         roles_page = QWidget()
+        roles_page.setObjectName("settingsSpecialPage")
         roles_layout = QVBoxLayout(roles_page)
+        roles_layout.setContentsMargins(18, 18, 18, 18)
+        roles_layout.setSpacing(12)
+        roles_title = QLabel("Access roles")
+        roles_title.setObjectName("sectionTitle")
         self.roles_info = QLabel()
         self.roles_info.setWordWrap(True)
+        self.roles_info.setObjectName("muted")
+        roles_card = QFrame()
+        roles_card.setObjectName("settingsTableCard")
+        roles_card_layout = QVBoxLayout(roles_card)
+        roles_card_layout.setContentsMargins(10, 10, 10, 10)
         self.role_table = QTableWidget(0, 2)
         self.role_table.setHorizontalHeaderLabels(["Operating-system account", "Assigned role(s)"])
         self.role_table.setSelectionBehavior(QTableWidget.SelectionBehavior.SelectRows)
@@ -212,12 +261,25 @@ class SettingsPage(QWidget):
         role_buttons.addWidget(self.edit_role_button)
         role_buttons.addWidget(self.remove_role_button)
         role_buttons.addStretch(1)
+        roles_card_layout.addWidget(self.role_table, 1)
+        roles_card_layout.addLayout(role_buttons)
+        roles_layout.addWidget(roles_title)
         roles_layout.addWidget(self.roles_info)
-        roles_layout.addWidget(self.role_table, 1)
-        roles_layout.addLayout(role_buttons)
+        roles_layout.addWidget(roles_card, 1)
         self.tabs.addTab(roles_page, "Access roles")
         diagnostics_page = QWidget()
+        diagnostics_page.setObjectName("settingsSpecialPage")
         diagnostics_layout = QVBoxLayout(diagnostics_page)
+        diagnostics_layout.setContentsMargins(18, 18, 18, 18)
+        diagnostics_layout.setSpacing(12)
+        diagnostics_title = QLabel("Configuration diagnostics")
+        diagnostics_title.setObjectName("sectionTitle")
+        diagnostics_description = QLabel("Read-only checks for the active station profile.")
+        diagnostics_description.setObjectName("muted")
+        diagnostics_card = QFrame()
+        diagnostics_card.setObjectName("settingsTableCard")
+        diagnostics_card_layout = QVBoxLayout(diagnostics_card)
+        diagnostics_card_layout.setContentsMargins(10, 10, 10, 10)
         self.diagnostics_text = QPlainTextEdit()
         self.diagnostics_text.setReadOnly(True)
         diagnostics_buttons = QHBoxLayout()
@@ -226,7 +288,10 @@ class SettingsPage(QWidget):
         diagnostics_buttons.addWidget(refresh_diagnostics)
         diagnostics_buttons.addWidget(export_diagnostics)
         diagnostics_buttons.addStretch(1)
-        diagnostics_layout.addWidget(self.diagnostics_text, 1)
+        diagnostics_card_layout.addWidget(self.diagnostics_text, 1)
+        diagnostics_layout.addWidget(diagnostics_title)
+        diagnostics_layout.addWidget(diagnostics_description)
+        diagnostics_layout.addWidget(diagnostics_card, 1)
         diagnostics_layout.addLayout(diagnostics_buttons)
         self.tabs.addTab(diagnostics_page, "Diagnostics")
         self.tree = self.trees["general"]
@@ -759,6 +824,105 @@ class SettingsPage(QWidget):
         if isinstance(devices, dict):
             for device, nested in devices.items():
                 walk(nested, ("devices", str(device)))
+        self._populate_safety_limit_cards()
+
+    def _populate_safety_limit_cards(self) -> None:
+        """Build the operator-facing safety editor from the canonical limit rows."""
+
+        self._safety_limit_editors.clear()
+        self._safety_limit_error_labels.clear()
+        content = QWidget()
+        content_layout = QVBoxLayout(content)
+        content_layout.setContentsMargins(4, 4, 4, 4)
+        content_layout.setSpacing(14)
+        device_layouts: dict[str, QVBoxLayout] = {}
+
+        for row in range(self.limits_table.rowCount()):
+            minimum = self.limits_table.item(row, 2)
+            maximum = self.limits_table.item(row, 3)
+            if minimum is None or maximum is None:
+                continue
+            min_path = tuple(minimum.data(Qt.ItemDataRole.UserRole) or ())
+            max_path = tuple(maximum.data(Qt.ItemDataRole.UserRole) or ())
+            if not min_path or not max_path:
+                continue
+            device = str(min_path[1]).capitalize() if len(min_path) > 1 else "Device"
+            if device not in device_layouts:
+                card = QFrame()
+                card.setObjectName("safetyDeviceCard")
+                card_layout = QVBoxLayout(card)
+                card_layout.setContentsMargins(18, 16, 18, 16)
+                card_layout.setSpacing(10)
+                heading = QLabel(device)
+                heading.setObjectName("safetyDeviceTitle")
+                card_layout.addWidget(heading)
+                content_layout.addWidget(card)
+                device_layouts[device] = card_layout
+
+            scope_item = self.limits_table.item(row, 0)
+            parameter_item = self.limits_table.item(row, 1)
+            unit_item = self.limits_table.item(row, 4)
+            row_widget = QFrame()
+            row_widget.setObjectName("safetyLimitRow")
+            row_layout = QVBoxLayout(row_widget)
+            row_layout.setContentsMargins(12, 10, 12, 10)
+            row_layout.setSpacing(7)
+            values_layout = QHBoxLayout()
+            values_layout.setSpacing(10)
+            label_text = parameter_item.text().title() if parameter_item is not None else "Limit"
+            if scope_item is not None and scope_item.text() != device.lower():
+                label_text = f"{label_text}  ·  {scope_item.text()}"
+            label = QLabel(label_text)
+            label.setObjectName("safetyLimitLabel")
+            label.setMinimumWidth(250)
+            values_layout.addWidget(label, 1)
+            values_layout.addWidget(self._safety_boundary_label("MIN"))
+            minimum_editor = self._make_safety_limit_editor(min_path, minimum.text())
+            values_layout.addWidget(minimum_editor)
+            values_layout.addWidget(self._safety_boundary_label("MAX"))
+            maximum_editor = self._make_safety_limit_editor(max_path, maximum.text())
+            values_layout.addWidget(maximum_editor)
+            unit = QLabel(unit_item.text() if unit_item is not None else "SI / explicit")
+            unit.setObjectName("safetyLimitUnit")
+            unit.setMinimumWidth(84)
+            values_layout.addWidget(unit)
+            row_layout.addLayout(values_layout)
+            error = QLabel()
+            error.setObjectName("settingsFieldError")
+            error.setWordWrap(True)
+            error.hide()
+            row_layout.addWidget(error)
+            self._safety_limit_error_labels[min_path] = error
+            self._safety_limit_error_labels[max_path] = error
+            device_layouts[device].addWidget(row_widget)
+
+        content_layout.addStretch(1)
+        self.limits_scroll.setWidget(content)
+
+    @staticmethod
+    def _safety_boundary_label(text: str) -> QLabel:
+        label = QLabel(text)
+        label.setObjectName("safetyLimitTag")
+        return label
+
+    def _make_safety_limit_editor(
+        self, path: tuple[str | int, ...], value: str
+    ) -> QLineEdit:
+        editor = QLineEdit(value)
+        editor.setObjectName("safetyLimitInput")
+        editor.setMinimumWidth(156)
+        editor.setReadOnly(self._read_only)
+        editor.setProperty("limitPath", path)
+        editor.editingFinished.connect(lambda p=path, e=editor: self._commit_safety_limit_editor(p, e))
+        self._safety_limit_editors[path] = editor
+        return editor
+
+    def _commit_safety_limit_editor(
+        self, path: tuple[str | int, ...], editor: QLineEdit
+    ) -> None:
+        item = self._limit_items_by_path.get(path)
+        if item is not None and item.text() != editor.text():
+            item.setText(editor.text())
 
     def _populate_roles(self) -> None:
         self.role_table.setRowCount(0)
@@ -954,17 +1118,101 @@ class SettingsPage(QWidget):
         value = defaults.get(path[-1]) if isinstance(defaults, dict) else None
         return self._format_scalar(value) if value is not None else "—"
 
+    @staticmethod
+    def _limit_dimension(path: tuple[str | int, ...]) -> str | None:
+        parameter = str(path[-2]) if len(path) >= 2 else ""
+        exact = {
+            "frequency": DIMENSION_FREQUENCY,
+            "reference_level": DIMENSION_DBM,
+            "point_settle_time": DIMENSION_TIME,
+            "max_expected_power_at_connector": DIMENSION_DBM,
+            "external_attenuation": DIMENSION_DB,
+            "minimum_internal_attenuation": DIMENSION_DB,
+            "minimum_impedance": DIMENSION_RESISTANCE,
+            "dut_min_impedance": DIMENSION_RESISTANCE,
+            "max_abs_power": DIMENSION_POWER,
+            "estimated_load_power": DIMENSION_POWER,
+            "source_current": DIMENSION_CURRENT,
+            "current_compliance": DIMENSION_CURRENT,
+            "voltage_compliance": DIMENSION_VOLTAGE,
+            "source_voltage": DIMENSION_VOLTAGE,
+            "measured_current_trip": DIMENSION_CURRENT,
+            "measured_voltage_trip": DIMENSION_VOLTAGE,
+            "estimated_load_current": DIMENSION_CURRENT,
+            "settle_time": DIMENSION_TIME,
+            "modulation_rate": DIMENSION_FREQUENCY,
+            "sweep_duration": DIMENSION_TIME,
+            "burst_period": DIMENSION_TIME,
+        }
+        if parameter in exact:
+            return exact[parameter]
+        if "current" in parameter:
+            return DIMENSION_CURRENT
+        if "voltage" in parameter or parameter in {"high_level", "low_level", "offset", "amplitude_vpp"}:
+            return DIMENSION_VOLTAGE
+        if "frequency" in parameter:
+            return DIMENSION_FREQUENCY
+        if "power" in parameter:
+            return DIMENSION_POWER
+        if "time" in parameter or "settle" in parameter or "delay" in parameter:
+            return DIMENSION_TIME
+        return None
+
+    @staticmethod
+    def _is_empty_limit_value(text: str) -> bool:
+        return text.strip().lower() in {"", "null", "none"}
+
+    def _validate_limit_row(self, row: int) -> None:
+        minimum = self.limits_table.item(row, 2)
+        maximum = self.limits_table.item(row, 3)
+        if minimum is None or maximum is None:
+            return
+        path = minimum.data(Qt.ItemDataRole.UserRole)
+        if path is None:
+            return
+        base_path = tuple(path[:-1])
+        dimension = self._limit_dimension(tuple(path))
+        values: dict[str, float] = {}
+        for item, boundary in ((minimum, "minimum"), (maximum, "maximum")):
+            # A range is a single validation unit: correcting either boundary must
+            # also remove stale errors left on the opposite boundary.
+            self._set_limit_validation(item, None)
+            if self._is_empty_limit_value(item.text()):
+                continue
+            try:
+                if dimension is None:
+                    float(item.text().strip().replace(",", "."))
+                else:
+                    values[boundary] = parse_quantity(
+                        item.text(), dimension, require_unit=True
+                    ).si_value
+            except (QuantityError, ValueError) as exc:
+                expected = f" expected unit: {dimension}." if dimension else " expected a number."
+                self._set_limit_validation(item, f"Invalid {boundary} value:{expected} {exc}")
+        if len(values) == 2 and values["minimum"] > values["maximum"]:
+            message = "Minimum cannot exceed maximum."
+            self._set_limit_validation(minimum, message)
+            self._set_limit_validation(maximum, message)
+
     def _limit_changed(self, item: QTableWidgetItem) -> None:
         if self._changing or item.column() not in {2, 3}:
             return
         if item in self._limit_error_items:
-            item.setBackground(Qt.GlobalColor.transparent)
-            item.setData(_LIMIT_VALIDATION_MESSAGE_ROLE, None)
-            item.setToolTip("")
-            self._limit_error_items.remove(item)
+            self._set_limit_validation(item, None)
         path = item.data(Qt.ItemDataRole.UserRole)
         if path is None:
             return
+        safety_editor = self._safety_limit_editors.get(tuple(path))
+        if safety_editor is not None and safety_editor.text() != item.text():
+            safety_editor.setText(item.text())
+        self._validate_limit_row(item.row())
+        if self._limit_error_items:
+            self.limits_validation_banner.setText(
+                "Incorrect value or unit. Correct the red outlined field before saving."
+            )
+            self.limits_validation_banner.show()
+        else:
+            self.limits_validation_banner.hide()
         self._sync_tree_from_limit(tuple(path), item.text())
         self._dirty = True
         autosave = bool(self._raw.get("application", {}).get("settings_autosave", False))
@@ -997,6 +1245,9 @@ class SettingsPage(QWidget):
                     item = self.limits_table.item(row, column)
                     if item is not None and tuple(item.data(Qt.ItemDataRole.UserRole) or ()) == path:
                         item.setText(text)
+                        safety_editor = self._safety_limit_editors.get(path)
+                        if safety_editor is not None and safety_editor.text() != text:
+                            safety_editor.setText(text)
                         return
         finally:
             self._changing = False
@@ -1048,11 +1299,49 @@ class SettingsPage(QWidget):
     def _clear_validation_errors(self) -> None:
         for path in tuple(self._form_editors):
             self._clear_validation_error(path)
-        for item in self._limit_error_items:
-            item.setBackground(Qt.GlobalColor.transparent)
-            item.setData(_LIMIT_VALIDATION_MESSAGE_ROLE, None)
-            item.setToolTip("")
-        self._limit_error_items.clear()
+        for item in tuple(self._limit_error_items):
+            self._set_limit_validation(item, None)
+        self.limits_validation_banner.hide()
+        self.limits_validation_banner.clear()
+
+    def _set_limit_validation(self, item: QTableWidgetItem, message: str | None) -> None:
+        """Update error metadata without recursively re-entering itemChanged."""
+
+        previous_changing = self._changing
+        self._changing = True
+        try:
+            if item in self._limit_error_items:
+                self._limit_error_items.remove(item)
+            item.setData(_LIMIT_VALIDATION_MESSAGE_ROLE, message)
+            item.setToolTip(f"Validation error: {message}" if message else "")
+            if message:
+                self._limit_error_items.append(item)
+        finally:
+            self._changing = previous_changing
+        self._sync_safety_limit_validation(item)
+
+    def _sync_safety_limit_validation(self, item: QTableWidgetItem) -> None:
+        path = tuple(item.data(Qt.ItemDataRole.UserRole) or ())
+        if not path:
+            return
+        editor = self._safety_limit_editors.get(path)
+        message = item.data(_LIMIT_VALIDATION_MESSAGE_ROLE)
+        if editor is not None:
+            self._set_validation_state(editor, "error" if message else "")
+            editor.setToolTip(f"Validation error: {message}" if message else "")
+        label = self._safety_limit_error_labels.get(path)
+        if label is not None:
+            # MIN and MAX share one concise message line.  Do not hide it while
+            # the sibling boundary still has an error.
+            active_messages = [
+                candidate.data(_LIMIT_VALIDATION_MESSAGE_ROLE)
+                for candidate_path, candidate in self._limit_items_by_path.items()
+                if self._safety_limit_error_labels.get(candidate_path) is label
+                and candidate.data(_LIMIT_VALIDATION_MESSAGE_ROLE)
+            ]
+            active_message = active_messages[0] if active_messages else None
+            label.setText(str(active_message or ""))
+            label.setVisible(bool(active_message))
 
     def _mark_invalid_path(self, path: tuple[str | int, ...], message: str) -> QWidget | None:
         candidates = [
@@ -1078,10 +1367,7 @@ class SettingsPage(QWidget):
                 tuple(path[: len(limit_path)]) == limit_path
                 or tuple(limit_path[: len(path)]) == path
             ):
-                item.setData(_LIMIT_VALIDATION_MESSAGE_ROLE, message)
-                item.setToolTip(f"Validation error: {message}")
-                if item not in self._limit_error_items:
-                    self._limit_error_items.append(item)
+                self._set_limit_validation(item, message)
         return marked_editor
 
     @staticmethod
@@ -1150,9 +1436,16 @@ class SettingsPage(QWidget):
                         first_editor = editor
             if self._limit_error_items:
                 first = self._limit_error_items[0]
-                self.tabs.setCurrentWidget(self.limits_table)
-                self.limits_table.setCurrentItem(first)
-                self.limits_table.scrollToItem(first)
+                self.limits_validation_banner.setText(
+                    "Correct the highlighted safety-limit fields before validating again."
+                )
+                self.limits_validation_banner.show()
+                self.tabs.setCurrentWidget(self.limits_page)
+                path = tuple(first.data(Qt.ItemDataRole.UserRole) or ())
+                editor = self._safety_limit_editors.get(path)
+                if editor is not None:
+                    self.limits_scroll.ensureWidgetVisible(editor, 36, 72)
+                    editor.setFocus()
             elif first_editor is not None:
                 first_editor.setFocus()
                 first_editor.ensurePolished()

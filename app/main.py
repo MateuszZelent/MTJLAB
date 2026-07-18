@@ -18,6 +18,15 @@ QTabWidget::pane { border: 1px solid #26384a; }
 QScrollArea#settingsForm { background: transparent; }
 QGroupBox#settingsCard { background: #18212c; border: 1px solid #344659; border-radius: 10px; margin-top: 14px; padding: 12px; font-weight: 700; color: #dcecff; }
 QGroupBox#settingsCard::title { subcontrol-origin: margin; left: 14px; padding: 0 5px; }
+QFrame#settingsTableCard { background: #18212c; border: 1px solid #344659; border-radius: 10px; }
+QFrame#safetyDeviceCard { background: #202c39; border: 1px solid #40556b; border-radius: 10px; }
+QLabel#safetyDeviceTitle { color: #dcecff; font-size: 13pt; font-weight: 700; }
+QFrame#safetyLimitRow { background: #17212c; border: 1px solid #304457; border-radius: 7px; }
+QLabel#safetyLimitLabel { color: #e8edf3; font-weight: 600; }
+QLabel#safetyLimitTag { color: #9fb4c8; font-size: 8pt; font-weight: 700; }
+QLabel#safetyLimitUnit { color: #9fb4c8; }
+QLineEdit#safetyLimitInput { background: #111a23; border: 1px solid #526a81; border-radius: 5px; padding: 6px 8px; color: #f5f9ff; }
+QLabel#settingsValidationBanner { color: #ffb3bf; background: #3a1d27; border: 1px solid #9d3449; border-radius: 6px; padding: 9px 11px; font-weight: 600; }
 QLineEdit[validationState="error"], QComboBox[validationState="error"], QSpinBox[validationState="error"] { border: 2px solid #ff657a; background: #30202a; }
 QLabel#settingsFieldError { color: #ff9ba8; font-size: 9pt; font-weight: 600; }
 QTabBar::tab { background: #18212c; color: #91a0b2; padding: 10px 18px; margin-right: 2px; }
@@ -135,6 +144,15 @@ QTabWidget::pane { border: 1px solid #c8d3df; }
 QScrollArea#settingsForm { background: transparent; }
 QGroupBox#settingsCard { background: #ffffff; border: 1px solid #c8d3df; border-radius: 10px; margin-top: 14px; padding: 12px; font-weight: 700; color: #17324d; }
 QGroupBox#settingsCard::title { subcontrol-origin: margin; left: 14px; padding: 0 5px; }
+QFrame#settingsTableCard { background: #ffffff; border: 1px solid #c8d3df; border-radius: 10px; }
+QFrame#safetyDeviceCard { background: #f7faff; border: 1px solid #c8d8e8; border-radius: 10px; }
+QLabel#safetyDeviceTitle { color: #17324d; font-size: 13pt; font-weight: 700; }
+QFrame#safetyLimitRow { background: #ffffff; border: 1px solid #d8e2ec; border-radius: 7px; }
+QLabel#safetyLimitLabel { color: #17324d; font-weight: 600; }
+QLabel#safetyLimitTag { color: #58708a; font-size: 8pt; font-weight: 700; }
+QLabel#safetyLimitUnit { color: #58708a; }
+QLineEdit#safetyLimitInput { background: #ffffff; border: 1px solid #9eb4c9; border-radius: 5px; padding: 6px 8px; color: #17212b; }
+QLabel#settingsValidationBanner { color: #9e1d33; background: #fde7eb; border: 1px solid #e6a9b4; border-radius: 6px; padding: 9px 11px; font-weight: 600; }
 QLineEdit[validationState="error"], QComboBox[validationState="error"], QSpinBox[validationState="error"] { border: 2px solid #c7364e; background: #fff0f2; }
 QLabel#settingsFieldError { color: #b4233a; font-size: 9pt; font-weight: 600; }
 QTabBar::tab { background: #e8eef5; color: #526273; padding: 10px 18px; margin-right: 2px; }

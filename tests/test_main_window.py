@@ -369,7 +369,7 @@ class MainWindowTests(unittest.TestCase):
                         for item in expected
                     )
                 )
-                self.assertIs(page.tabs.currentWidget(), page.limits_table)
+                self.assertIs(page.tabs.currentWidget(), page.limits_page)
             finally:
                 window.close()
                 self.application.processEvents()
@@ -391,6 +391,14 @@ class MainWindowTests(unittest.TestCase):
                 self.assertIn(item, page._limit_error_items)
                 self.assertIn("frequency", item.toolTip().lower())
                 self.assertTrue(item.data(int(Qt.ItemDataRole.UserRole) + 101))
+                editor = page._safety_limit_editors[tuple(item.data(Qt.ItemDataRole.UserRole))]
+                self.assertEqual(editor.property("validationState"), "error")
+                self.assertFalse(page._safety_limit_error_labels[tuple(item.data(Qt.ItemDataRole.UserRole))].isHidden())
+                self.assertFalse(page.limits_validation_banner.isHidden())
+                item.setText("6 V")
+                self.assertIn(item, page._limit_error_items)
+                item.setText("5 MHz")
+                self.assertNotIn(item, page._limit_error_items)
             finally:
                 window.close()
                 self.application.processEvents()
