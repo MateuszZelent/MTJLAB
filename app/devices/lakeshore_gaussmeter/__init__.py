@@ -1,14 +1,7 @@
-"""Lake Shore gaussmeter module, independent of Qt and recipe UI."""
+"""Read-only Lake Shore Model 475 module."""
 
-from app.devices.lakeshore_gaussmeter.adapter import LakeShore425Adapter, LakeShore475Adapter
-from app.devices.lakeshore_gaussmeter.models import FieldReading, GaussmeterConfig, Model425Config
+from app.devices.lakeshore_gaussmeter.adapter import LakeShore475Adapter
+from app.devices.lakeshore_gaussmeter.models import GaussmeterConfig, GaussmeterReading, GaussmeterSnapshot, MeasurementMode
 from app.devices.lakeshore_gaussmeter.module import MODULE
 
-__all__ = [
-    "FieldReading",
-    "GaussmeterConfig",
-    "LakeShore425Adapter",
-    "LakeShore475Adapter",
-    "Model425Config",
-    "MODULE",
-]
+__all__ = ["GaussmeterConfig", "GaussmeterReading", "GaussmeterSnapshot", "LakeShore475Adapter", "MeasurementMode", "MODULE"]

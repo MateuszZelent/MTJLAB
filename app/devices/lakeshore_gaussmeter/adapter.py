@@ -1,82 +1,143 @@
-"""Safe high-level VISA adapter for a Lake Shore Model 475 gaussmeter."""
+"""Fail-closed, read-only Model 475 adapter using Lake Shore's public bridge."""
 
 from __future__ import annotations
 
 import math
-from typing import Protocol
+import time
+from typing import Callable, Protocol
 
-from app.devices.base import DeviceAdapter, InstrumentSession, SessionFactory, parse_identity, validate_identity
-from app.devices.lakeshore_gaussmeter.models import FieldReading, GaussmeterConfig, Model425Config
+from app.devices.base import DeviceAdapter, InstrumentSession, SessionFactory, parse_identity
+from app.devices.lakeshore_gaussmeter.models import (
+    FieldUnit,
+    GaussmeterConfig,
+    GaussmeterReading,
+    GaussmeterSnapshot,
+    MeasurementMode,
+    field_unit_from_code,
+    measurement_mode_from_code,
+)
 from app.devices.visa import PyVisaSessionFactory
 from app.domain.errors import ConnectionError, DeviceError, SafetyViolation
 from app.domain.models import DeviceCapabilities, DeviceIdentity, DeviceState
 
 
-class _Model425Driver(Protocol):
-    def connect_tcp(self, ip_address: str, tcp_port: int, timeout: float) -> None: ...
-    def connect_usb(self, **kwargs: object) -> None: ...
-    def disconnect_tcp(self) -> None: ...
-    def disconnect_usb(self) -> None: ...
-    def query(self, query_string: str) -> str: ...
+_ALLOWED_QUERIES = frozenset({"*IDN?", "UNIT?", "RDGMODE?", "RANGE?", "AUTO?", "TYPE?", "RDGFIELD?", "RDGFRQ?", "RDGPEAK?"})
+
+
+class _OfficialModelFactory(Protocol):
+    def __call__(self, connection: object) -> object: ...
+
+
+class _ReadOnlyConnection:
+    """Small public-API connection for ``Model425(connection=...)``."""
+
+    def __init__(self, session: InstrumentSession) -> None:
+        self._session = session
+        self._last_command_at: float | None = None
+
+    def _wait_for_slot(self) -> None:
+        if self._last_command_at is not None:
+            remaining = 0.05 - (time.monotonic() - self._last_command_at)
+            if remaining > 0:
+                time.sleep(remaining)
+        self._last_command_at = time.monotonic()
+
+    def query(self, command: str) -> str:
+        normalized = command.strip().upper()
+        if normalized not in _ALLOWED_QUERIES:
+            raise SafetyViolation(f"Lake Shore read-only proxy rejected query {command!r}.")
+        self._wait_for_slot()
+        return self._session.query(normalized)
+
+    def write(self, command: str) -> None:
+        raise SafetyViolation(f"Lake Shore read-only proxy rejected write {command!r}.")
+
+    def clear(self) -> None:
+        """Clear only a local transport buffer when the backend exposes it."""
+
+        clear = getattr(self._session, "clear", None)
+        if callable(clear):
+            clear()
+
+
+def _default_official_model_factory(connection: object) -> object:
+    try:
+        from lakeshore.model_425 import Model425
+    except ImportError as exc:
+        raise ConnectionError("Lake Shore support requires lakeshore==1.10.0.") from exc
+    return Model425(connection=connection)
 
 
 class LakeShore475Adapter(DeviceAdapter):
-    """Read-only, fail-closed adapter for the Model 475 field meter.
+    """The sole public Lake Shore adapter, restricted to Model 475 queries."""
 
-    It exposes measurement and configuration queries only.  The device has no
-    energy-output API, therefore ``emergency_off`` simply leaves the adapter in
-    a safe verified state.  The command spelling follows the Model 475 manual:
-    ``RDGFIELD?`` returns the current field reading.
-    """
-
-    def __init__(self, config: GaussmeterConfig, *, session_factory: SessionFactory | None = None) -> None:
+    def __init__(
+        self,
+        config: GaussmeterConfig,
+        *,
+        session_factory: SessionFactory | None = None,
+        official_model_factory: _OfficialModelFactory | None = None,
+    ) -> None:
         super().__init__()
         self._config = config
         self._factory = session_factory or PyVisaSessionFactory()
+        self._official_model_factory = official_model_factory or _default_official_model_factory
         self._session: InstrumentSession | None = None
+        self._connection: _ReadOnlyConnection | None = None
+        self._official_model: object | None = None
 
-    def _require_session(self) -> InstrumentSession:
-        if self._session is None:
-            raise ConnectionError("Lake Shore gaussmeter is not connected.")
-        return self._session
+    def _require_connection(self) -> _ReadOnlyConnection:
+        if self._connection is None:
+            raise ConnectionError("Lake Shore Model 475 is not connected.")
+        return self._connection
+
+    @staticmethod
+    def _is_asrl(resource: str) -> bool:
+        return resource.strip().upper().startswith("ASRL")
+
+    def _configure_session(self, session: InstrumentSession) -> None:
+        session.read_termination = "\r\n"
+        session.write_termination = "\r\n"
+        if self._is_asrl(self._config.resource):
+            for name, value in (("baud_rate", self._config.baud_rate), ("data_bits", 7), ("parity", "odd"), ("stop_bits", 1), ("flow_control", 0)):
+                try:
+                    setattr(session, name, value)
+                except (AttributeError, ValueError) as exc:
+                    raise ConnectionError(f"Could not configure Lake Shore serial {name}: {exc}") from exc
 
     def connect(self) -> DeviceIdentity:
         if self._session is not None:
             return self._identity_or_raise()
         session = self._factory.open(self._config.resource, self._config.visa_backend, self._config.timeout_ms)
         try:
-            session.read_termination = self._config.read_termination
-            session.write_termination = self._config.write_termination
-            identity = parse_identity(self._config.resource, session.query("*IDN?"))
-            validate_identity(
-                identity,
-                vendor_contains=self._config.expected_vendor_contains,
-                expected_models=self._config.expected_models,
-                expected_serial=self._config.expected_serial,
-                require_serial_match=self._config.require_serial_match,
-            )
-            session.write("*CLS")
+            self._configure_session(session)
+            connection = _ReadOnlyConnection(session)
+            official_model = self._official_model_factory(connection)
+            identity = parse_identity(self._config.resource, connection.query("*IDN?"))
+            idn = identity.idn.upper()
+            if not (identity.manufacturer or "").upper() in {"LSCI", "LAKE SHORE"} or "MODEL475" not in idn:
+                raise ConnectionError(f"Unexpected Lake Shore Model 475 identity: {identity.idn}")
+            if self._config.require_serial_match and identity.serial != self._config.expected_serial:
+                raise ConnectionError("Instrument serial number differs from the approved value.")
             self._session = session
-            self._identity = identity
-            self._state = DeviceState.VERIFIED
-            self._capabilities = DeviceCapabilities(
-                device_name="lakeshore_gaussmeter",
-                model=identity.model or "475",
-                firmware=identity.firmware,
-                features=frozenset({"field_reading", "read_only"}),
-            )
-            return identity
+            self._connection = connection
+            self._official_model = official_model
+            self.read_snapshot()
         except Exception:
-            try:
-                session.close()
-            finally:
-                self._state = DeviceState.DISCONNECTED
-                self._identity = None
-                self._capabilities = None
+            session.close()
+            self._state = DeviceState.DISCONNECTED
+            self._identity = None
+            self._capabilities = None
             raise
+        self._identity = identity
+        self._capabilities = DeviceCapabilities(device_name="lakeshore_gaussmeter", model="475", firmware=identity.firmware, features=frozenset({"field_reading", "dc", "rms", "peak", "read_only", "official_driver_bridge"}))
+        self._state = DeviceState.VERIFIED
+        return identity
 
     def disconnect(self) -> None:
         session, self._session = self._session, None
+        self._connection = None
+        self._official_model = None
         if session is not None:
             try:
                 session.close()
@@ -86,140 +147,62 @@ class LakeShore475Adapter(DeviceAdapter):
                 self._state = DeviceState.DISCONNECTED
 
     def emergency_off(self) -> None:
-        """The gaussmeter has no controllable output; preserve a safe state."""
-
         if self._session is not None:
             self._state = DeviceState.VERIFIED
 
-    def read_field(self) -> FieldReading:
-        """Acquire one numeric field reading without changing meter settings."""
-
-        response = self._require_session().query("RDGFIELD?").strip()
+    @staticmethod
+    def _numeric(response: str, command: str) -> float:
         try:
-            value = float(response.split(",", 1)[0].strip())
+            value = float(response.strip())
         except (TypeError, ValueError) as exc:
-            self._state = DeviceState.FAULT
-            raise DeviceError(f"Lake Shore returned an invalid RDGFIELD? value: {response!r}") from exc
+            raise DeviceError(f"Lake Shore returned invalid {command} response: {response!r}") from exc
         if not math.isfinite(value):
+            raise DeviceError(f"Lake Shore returned non-finite {command} response.")
+        return value
+
+    @staticmethod
+    def _tesla(value: float, unit: FieldUnit) -> float:
+        if unit is FieldUnit.GAUSS:
+            return value * 1e-4
+        if unit is FieldUnit.TESLA:
+            return value
+        name = "Oersted" if unit is FieldUnit.OERSTED else "A/m"
+        raise DeviceError(f"Lake Shore {name} readings cannot be safely converted to tesla.")
+
+    def read_snapshot(self) -> GaussmeterSnapshot:
+        connection = self._require_connection()
+        try:
+            mode_code = connection.query("RDGMODE?").strip()
+            unit_code = connection.query("UNIT?").strip()
+            auto = connection.query("AUTO?").strip()
+            if auto not in {"0", "1"}:
+                raise ValueError(f"Unknown Lake Shore AUTO? code {auto!r}.")
+            snapshot = GaussmeterSnapshot(mode_code=mode_code, mode=measurement_mode_from_code(mode_code), unit_code=unit_code, unit=field_unit_from_code(unit_code), range_code=connection.query("RANGE?").strip(), autorange_enabled=auto == "1", probe_type_code=connection.query("TYPE?").strip(), timestamp_utc=__import__("datetime").datetime.now(__import__("datetime").timezone.utc))
+        except (DeviceError, ValueError) as exc:
             self._state = DeviceState.FAULT
-            raise DeviceError("Lake Shore returned a non-finite field reading.")
-        self._state = DeviceState.VERIFIED
-        return FieldReading.now(value, self._config.field_unit)
+            raise DeviceError(f"Lake Shore configuration read failed: {exc}") from exc
+        return snapshot
 
-    def read_unit_code(self) -> str:
-        """Read the instrument unit selector without changing it."""
-
-        return self._require_session().query("UNIT?").strip()
-
-    def set_unit(self, _unit: str) -> None:
-        """Explicitly reject configuration until unit mapping is HIL-qualified."""
-
-        raise SafetyViolation(
-            "Changing Lake Shore units is disabled until the Model 475 UNIT mapping is HIL-qualified."
-        )
-
-
-class LakeShore425Adapter(DeviceAdapter):
-    """Read-only Model 425 adapter using Lake Shore's optional Python driver.
-
-    The official driver is loaded lazily, so an installation that only uses the
-    Model 475 VISA path does not gain a mandatory dependency.  The public
-    driver API exposes ``Model425``, ``connect_tcp``, ``connect_usb`` and
-    ``query``; no direct serial implementation is duplicated here.
-    """
-
-    def __init__(
-        self,
-        config: Model425Config,
-        *,
-        driver: _Model425Driver | None = None,
-    ) -> None:
-        super().__init__()
-        self._config = config
-        self._driver = driver
-        self._connected = False
-
-    def _load_driver(self) -> _Model425Driver:
-        if self._driver is not None:
-            return self._driver
+    def read_measurement(self) -> GaussmeterReading:
+        connection = self._require_connection()
         try:
-            from lakeshore.model_425 import Model425
-        except ImportError as exc:
-            raise ConnectionError(
-                "Lake Shore Model 425 requires the optional 'lakeshore' package. "
-                "Install it with: pip install lakeshore"
-            ) from exc
-        self._driver = Model425(timeout=self._config.timeout_s)
-        return self._driver
-
-    def connect(self) -> DeviceIdentity:
-        if self._connected:
-            return self._identity_or_raise()
-        driver = self._load_driver()
-        try:
-            if self._config.connection == "tcp":
-                driver.connect_tcp(self._config.ip_address or "", self._config.tcp_port, self._config.timeout_s)
-            else:
-                driver.connect_usb(
-                    serial_number=self._config.serial_number,
-                    com_port=self._config.com_port,
-                    timeout=self._config.timeout_s,
-                )
-            response = driver.query("*IDN?")
-            identity = parse_identity(
-                self._config.ip_address or self._config.com_port or self._config.serial_number or "Model425",
-                response,
-            )
-            validate_identity(
-                identity,
-                vendor_contains=self._config.expected_vendor_contains,
-                expected_models=self._config.expected_models,
-                expected_serial=None,
-                require_serial_match=False,
-            )
-        except Exception as exc:
-            self._state = DeviceState.DISCONNECTED
-            if isinstance(exc, ConnectionError):
-                raise
-            raise ConnectionError(f"Could not connect to Lake Shore Model 425: {exc}") from exc
-        self._connected = True
-        self._identity = identity
-        self._capabilities = DeviceCapabilities(
-            device_name="lakeshore_gaussmeter",
-            model=identity.model or "425",
-            firmware=identity.firmware,
-            features=frozenset({"field_reading", "read_only", "official_driver"}),
-        )
-        self._state = DeviceState.VERIFIED
-        return identity
-
-    def disconnect(self) -> None:
-        if self._connected and self._driver is not None:
-            try:
-                if self._config.connection == "tcp":
-                    self._driver.disconnect_tcp()
+            for _attempt in range(2):
+                snapshot = self.read_snapshot()
+                if snapshot.mode in {MeasurementMode.DC, MeasurementMode.RMS}:
+                    field_t = self._tesla(self._numeric(connection.query("RDGFIELD?"), "RDGFIELD?"), snapshot.unit)
+                    frequency_hz = self._numeric(connection.query("RDGFRQ?"), "RDGFRQ?") if snapshot.mode is MeasurementMode.RMS else None
+                    reading = GaussmeterReading.now(mode=snapshot.mode, unit=snapshot.unit, snapshot=snapshot, field_t=field_t, frequency_hz=frequency_hz)
                 else:
-                    self._driver.disconnect_usb()
-            finally:
-                self._connected = False
-                self._identity = None
-                self._capabilities = None
-                self._state = DeviceState.DISCONNECTED
-
-    def emergency_off(self) -> None:
-        if self._connected:
-            self._state = DeviceState.VERIFIED
-
-    def read_field(self) -> FieldReading:
-        if not self._connected or self._driver is None:
-            raise ConnectionError("Lake Shore Model 425 is not connected.")
-        try:
-            value = float(self._driver.query("FIELD?").strip().split(",", 1)[0])
-        except Exception as exc:
+                    values = [self._numeric(part, "RDGPEAK?") for part in connection.query("RDGPEAK?").split(",")]
+                    if len(values) != 2:
+                        raise DeviceError("Lake Shore RDGPEAK? must return negative and positive values.")
+                    reading = GaussmeterReading.now(mode=snapshot.mode, unit=snapshot.unit, snapshot=snapshot, negative_peak_t=self._tesla(values[0], snapshot.unit), positive_peak_t=self._tesla(values[1], snapshot.unit))
+                end_mode = connection.query("RDGMODE?").strip()
+                end_unit = connection.query("UNIT?").strip()
+                if end_mode == snapshot.mode_code and end_unit == snapshot.unit_code:
+                    self._state = DeviceState.VERIFIED
+                    return reading
+            raise DeviceError("Lake Shore unit or mode changed during both measurement attempts.")
+        except DeviceError:
             self._state = DeviceState.FAULT
-            raise DeviceError(f"Lake Shore Model 425 field acquisition failed: {exc}") from exc
-        if not math.isfinite(value):
-            self._state = DeviceState.FAULT
-            raise DeviceError("Lake Shore Model 425 returned a non-finite field reading.")
-        self._state = DeviceState.VERIFIED
-        return FieldReading.now(value, self._config.field_unit)
+            raise

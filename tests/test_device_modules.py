@@ -4,15 +4,14 @@ import unittest
 
 from app.devices.lakeshore_gaussmeter import (
     GaussmeterConfig,
-    LakeShore425Adapter,
     LakeShore475Adapter,
-    Model425Config,
+    MeasurementMode,
 )
 from app.devices.lakeshore_gaussmeter.simulator import simulated_475_session
 from app.devices.moke_box import MokeBoxAdapter, MokeBoxConfig
 from app.devices.registry import built_in_device_registry
 from app.devices.visa import FakeVisaSessionFactory
-from app.domain.errors import ConfigurationError
+from app.domain.errors import ConfigurationError, DeviceError
 from tests.helpers import loaded_settings
 
 
@@ -33,24 +32,12 @@ class _MokeTransport:
         self.connected = False
 
 
-class _Model425Driver:
-    def __init__(self) -> None:
-        self.connected = False
+class _OfficialModel425Bridge:
+    """Minimal official-driver stand-in; it only sees the read-only proxy."""
 
-    def connect_tcp(self, ip_address: str, tcp_port: int, timeout: float) -> None:
-        self.connected = bool(ip_address) and tcp_port == 7777 and timeout > 0
-
-    def connect_usb(self, **_kwargs: object) -> None:
-        self.connected = True
-
-    def disconnect_tcp(self) -> None:
-        self.connected = False
-
-    def disconnect_usb(self) -> None:
-        self.connected = False
-
-    def query(self, query_string: str) -> str:
-        return {"*IDN?": "LAKE SHORE,MODEL425,SIM425,sim-1.0", "FIELD?": "0.25"}[query_string]
+    def __init__(self, connection: object) -> None:
+        self.connection = connection
+        self.idn = connection.query("*IDN?")  # type: ignore[attr-defined]
 
 
 class DeviceModuleTests(unittest.TestCase):
@@ -104,20 +91,40 @@ class DeviceModuleTests(unittest.TestCase):
             },),
         )
 
-    def test_lakeshore_475_adapter_reads_field_without_writing_configuration(self) -> None:
-        session = simulated_475_session(field=0.03125)
+    def test_lakeshore_475_reads_dc_gauss_through_official_read_only_bridge(self) -> None:
+        session = simulated_475_session(field=312.5, unit_code="1", mode_code="1")
+        bridge: list[_OfficialModel425Bridge] = []
         adapter = LakeShore475Adapter(
             GaussmeterConfig(resource="SIM::LAKESHORE::INSTR"),
             session_factory=FakeVisaSessionFactory(session),
+            official_model_factory=lambda connection: bridge.append(
+                _OfficialModel425Bridge(connection)
+            ) or bridge[-1],
         )
         identity = adapter.connect()
-        reading = adapter.read_field()
+        reading = adapter.read_measurement()
 
         self.assertEqual(identity.model, "MODEL475")
-        self.assertEqual(reading.value, 0.03125)
-        self.assertEqual(reading.unit, "T")
+        self.assertEqual(reading.mode, MeasurementMode.DC)
+        self.assertEqual(reading.field_t, 0.03125)
+        self.assertIsNone(reading.frequency_hz)
+        self.assertEqual(len(bridge), 1)
         self.assertIn("RDGFIELD?", session.writes)
-        self.assertNotIn("UNIT 2", session.writes)
+        self.assertTrue(set(session.writes) <= {
+            "*IDN?", "UNIT?", "RDGMODE?", "RANGE?", "AUTO?", "TYPE?", "RDGFIELD?",
+        })
+
+    def test_lakeshore_475_rejects_h_units_without_assuming_b_conversion(self) -> None:
+        session = simulated_475_session(field=12.0, unit_code="3", mode_code="1")
+        adapter = LakeShore475Adapter(
+            GaussmeterConfig(resource="SIM::LAKESHORE::INSTR"),
+            session_factory=FakeVisaSessionFactory(session),
+            official_model_factory=_OfficialModel425Bridge,
+        )
+        adapter.connect()
+
+        with self.assertRaisesRegex(DeviceError, "Oersted"):
+            adapter.read_measurement()
 
     def test_moke_adapter_exposes_only_measurement_path(self) -> None:
         transport = _MokeTransport()
@@ -128,14 +135,3 @@ class DeviceModuleTests(unittest.TestCase):
         adapter.emergency_off()
         adapter.disconnect()
         self.assertFalse(transport.connected)
-
-    def test_lakeshore_425_uses_official_driver_boundary(self) -> None:
-        driver = _Model425Driver()
-        adapter = LakeShore425Adapter(
-            Model425Config(connection="tcp", ip_address="127.0.0.1"),
-            driver=driver,
-        )
-        self.assertEqual(adapter.connect().model, "MODEL425")
-        self.assertEqual(adapter.read_field().value, 0.25)
-        adapter.disconnect()
-        self.assertFalse(driver.connected)
