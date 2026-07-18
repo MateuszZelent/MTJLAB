@@ -175,6 +175,48 @@ class AdapterAndRunnerTests(unittest.TestCase):
         rigol.set_output(2, False)
         self.assertEqual(rigol.state, DeviceState.OUTPUT_ON)
 
+    def test_rigol_level_update_preserves_energized_output_and_reads_back(self) -> None:
+        raw = deepcopy(simulation_settings(approved=True).model_dump(mode="python"))
+        raw["devices"]["rigol"]["safety"]["allow_output_enable"] = True
+        settings = StationSettings.model_validate(raw)
+        session = FakeVisaSession()
+        session.responses.update(
+            {
+                "*IDN?": "Rigol Technologies,DG1032Z,DG1ZA172902039,00.01.08",
+                ":SYST:ERR?": "0,No error",
+                ":SOUR1:FUNC?": "SQU",
+                ":SOUR1:FREQ?": "1000",
+                ":SOUR1:VOLT:HIGH?": lambda _command: (
+                    "0.003"
+                    if ":SOUR1:VOLT:HIGH 0.003" in session.writes
+                    else "0.001"
+                ),
+                ":SOUR1:VOLT:LOW?": "-0.001",
+                ":OUTP1?": lambda _command: (
+                    "ON" if ":OUTP1 ON" in session.writes else "OFF"
+                ),
+            }
+        )
+        adapter = RigolAdapter(
+            settings, session_factory=FakeVisaSessionFactory(session)
+        )
+        adapter.connect()
+        adapter.configure_channel(
+            RigolChannelConfig(
+                1, "SQU", 1000, 0.001, -0.001, dut_min_impedance_ohm=50
+            )
+        )
+        adapter.arm_output(1)
+        adapter.set_output(1, True)
+
+        actual = adapter.update_levels(
+            1, high_level_v=0.003, low_level_v=-0.001
+        )
+
+        self.assertEqual(actual, (0.003, -0.001))
+        self.assertEqual(adapter.state, DeviceState.OUTPUT_ON)
+        self.assertIn(":SOUR1:VOLT:HIGH 0.003", session.writes)
+
     def test_keithley_measurement_trip_forces_all_outputs_off(self) -> None:
         raw = deepcopy(simulation_settings(approved=True).model_dump(mode="python"))
         raw["devices"]["keithley"]["safety"]["allow_output_enable"] = True
@@ -198,6 +240,59 @@ class AdapterAndRunnerTests(unittest.TestCase):
         self.assertIn("smua.source.output = smua.OUTPUT_OFF", session.writes)
         self.assertIn("smub.source.output = smub.OUTPUT_OFF", session.writes)
         self.assertEqual(adapter.state, DeviceState.FAULT)
+
+    def test_keithley_compliance_update_preserves_energized_output_and_reads_back(self) -> None:
+        raw = deepcopy(simulation_settings(approved=True).model_dump(mode="python"))
+        raw["devices"]["keithley"]["safety"]["allow_output_enable"] = True
+        settings = StationSettings.model_validate(raw)
+        session = FakeVisaSession(
+            responses={
+                "*IDN?": "KEITHLEY INSTRUMENTS,2602A,123456,1.0",
+                "print(errorqueue.count)": "0",
+                "print(smub.source.limitv)": lambda _command: (
+                    "0.05"
+                    if "smub.source.limitv = 0.05" in session.writes
+                    else "0.067"
+                ),
+            }
+        )
+        adapter = KeithleyAdapter(
+            settings, session_factory=FakeVisaSessionFactory(session)
+        )
+        adapter.connect()
+        adapter.configure_source(
+            KeithleySourceRequest("B", "current", 0.001, 0.067)
+        )
+        adapter.arm_output("B")
+        adapter.set_output("B", True)
+
+        actual = adapter.update_source_compliance(
+            "B", mode="current", compliance_si=0.05
+        )
+
+        self.assertEqual(actual, 0.05)
+        self.assertIn("smub.source.limitv = 0.05", session.writes)
+        self.assertEqual(adapter.state, DeviceState.OUTPUT_ON)
+
+    def test_keithley_configuration_rejects_nplc_readback_mismatch(self) -> None:
+        session = FakeVisaSession(
+            responses={
+                "*IDN?": "KEITHLEY INSTRUMENTS,2602A,123456,1.0",
+                "print(errorqueue.count)": "0",
+                "print(smub.measure.nplc)": "0.5",
+            }
+        )
+        adapter = KeithleyAdapter(
+            self.settings, session_factory=FakeVisaSessionFactory(session)
+        )
+        adapter.connect()
+
+        with self.assertRaisesRegex(DeviceError, "configuration readback mismatch"):
+            adapter.configure_source(
+                KeithleySourceRequest(
+                    "B", "current", 0.001, 0.067, nplc=1.0
+                )
+            )
 
     def test_keithley_manual_ramp_queries_actual_level_and_measures_each_step(self) -> None:
         raw = deepcopy(simulation_settings(approved=True).model_dump(mode="python"))
@@ -938,9 +1033,17 @@ root:
                 "*IDN?": "Rigol Technologies,DG1032Z,DG1ZA172902039,00.01.08",
                 ":SYST:ERR?": "0,No error",
                 ":OUTP1?": "OFF",
-                ":SOUR1:MOD?": "OFF",
-                ":SOUR1:SWE:STAT?": "OFF",
-                ":SOUR1:BURS:STAT?": "OFF",
+                ":SOUR1:MOD?": lambda _command: (
+                    "ON" if ":SOUR1:MOD ON" in session.writes else "OFF"
+                ),
+                ":SOUR1:SWE:STAT?": lambda _command: (
+                    "ON"
+                    if ":SOUR1:SWE:STAT ON" in session.writes
+                    else "OFF"
+                ),
+                ":SOUR1:BURS:STAT?": lambda _command: (
+                    "ON" if ":SOUR1:BURS ON" in session.writes else "OFF"
+                ),
                 ":SOUR1:PHAS?": "0",
             }
         )
@@ -955,6 +1058,33 @@ root:
         self.assertIn(":SOUR1:MOD:TYPE AM", session.writes)
         self.assertIn(":SOUR1:SWE:STAT ON", session.writes)
         self.assertIn(":SOUR1:BURS ON", session.writes)
+
+    def test_rigol_modulation_rejects_parameter_readback_mismatch(self) -> None:
+        session = FakeVisaSession(
+            responses={
+                "*IDN?": "Rigol Technologies,DG1032Z,DG1ZA172902039,00.01.08",
+                ":SYST:ERR?": "0,No error",
+                ":OUTP1?": "OFF",
+                ":SOUR1:MOD?": lambda _command: (
+                    "ON" if ":SOUR1:MOD ON" in session.writes else "OFF"
+                ),
+                ":SOUR1:SWE:STAT?": "OFF",
+                ":SOUR1:BURS:STAT?": "OFF",
+                ":SOUR1:PHAS?": "0",
+                ":SOUR1:AM:DEPT?": "49",
+            }
+        )
+        adapter = RigolAdapter(
+            self.settings, session_factory=FakeVisaSessionFactory(session)
+        )
+        adapter.connect()
+
+        with self.assertRaisesRegex(DeviceError, "modulation readback failed"):
+            adapter.configure_modulation(
+                RigolModulationConfig(
+                    1, True, "AM", rate_hz=1000, parameter=50
+                )
+            )
 
     def test_compliance_writes_a_partial_checkpoint_then_faults_safely(self) -> None:
         session = FakeVisaSession(
@@ -1149,7 +1279,12 @@ root:
                 PlanAction("keithley", "configure_keithley", {"request": KeithleySourceRequest("B", "current", .001, .067)}, {"keithley.B.current": .001}),
                 PlanAction("rigol", "configure_rigol", {"config": RigolChannelConfig(1, "SQU", 1000, .001, -.001, dut_min_impedance_ohm=50)}, {"rigol.1.high_level": .001}),
                 PlanAction("measure", "measure_keithley", {"channel": "B"}, {}),
-                PlanAction("trace", "acquire_spectrum", {"trace": "TRAC1"}, {}),
+                PlanAction(
+                    "trace",
+                    "acquire_spectrum",
+                    {"trace": "TRAC1", "average_count": 3},
+                    {},
+                ),
                 PlanAction("ramp", "ramp_keithley_to_zero", {"channel": "B", "deadline_s": 1.0}, {}),
             ),
             total_points=1,
@@ -1161,8 +1296,10 @@ root:
         self.assertEqual(result.stored_points, 1)
         self.assertEqual(writer.status, "completed")
         self.assertEqual(len(writer.points), 1)
+        stored_point, _stored_trace = writer.points[0]
+        self.assertEqual(stored_point.metadata["spectrum_average_count"], 3)
         self.assertEqual(writer.events[-1][0], "run_completed")
-        self.assertIn("INIT:IMM", anritsu_session.writes)
+        self.assertEqual(anritsu_session.writes.count("INIT:IMM"), 3)
 
     def test_operator_stop_runs_finally_ramp_and_closes_as_aborted(self) -> None:
         from app.devices.simulators import SimulatedVisaFactory, simulated_station_settings

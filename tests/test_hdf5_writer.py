@@ -125,6 +125,75 @@ class Hdf5WriterTests(unittest.TestCase):
             )
             self.assertEqual(spectrum_definition["units"], "dBm")
 
+    def test_reference_raw_and_processed_spectra_are_all_persisted(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            path = Path(temporary) / "reference-processed.h5"
+            writer = Hdf5RunWriter(
+                path,
+                recipe_source="schema_version: 1\n",
+                settings_source="schema_version: 1\n",
+                plan_hash="reference-processed",
+                device_idn={"anritsu": "ANRITSU,MS2830A,SIM,1.0"},
+            )
+            acquired = datetime.now(timezone.utc)
+            reference = SpectrumTrace(
+                frequencies_hz=(1e6, 2e6, 3e6),
+                powers_dbm=(-70.0, -60.0, -65.0),
+                acquired_at_utc=acquired,
+                trace_name="TRAC1",
+            )
+            raw = SpectrumTrace(
+                frequencies_hz=reference.frequencies_hz,
+                powers_dbm=(-60.0, -55.0, -60.0),
+                acquired_at_utc=acquired,
+                trace_name="TRAC1",
+            )
+            writer.store_reference(reference, kind="single", average_count=1)
+            writer.append(
+                MeasurementPoint(index=0, setpoints={}, measurements={}),
+                raw,
+                processed_values=(10.0, 5.0, 5.0),
+                processed_unit="dB",
+                processing_operation="difference_db",
+            )
+            writer.close("completed")
+
+            with h5py.File(path, "r") as file:
+                self.assertEqual(tuple(file["reference/frequency_hz"][:]), reference.frequencies_hz)
+                self.assertEqual(tuple(file["reference/power_dbm"][:]), reference.powers_dbm)
+                self.assertEqual(tuple(file["spectra/0/power_dbm"][:]), raw.powers_dbm)
+                self.assertEqual(
+                    tuple(file["spectra/0/processed_values"][:]), (10.0, 5.0, 5.0)
+                )
+                self.assertEqual(file["spectra/0"].attrs["processed_unit"], "dB")
+                self.assertEqual(
+                    file["spectra/0"].attrs["processing_operation"], "difference_db"
+                )
+                definitions = {
+                    name: dict(dataset.asstr()[()])
+                    for name, dataset in file["scan_definition"].items()
+                    if name.startswith("row_")
+                }
+                self.assertIn(
+                    "Spectrum raw-reference (dB)",
+                    {
+                        definition.get("control name")
+                        for definition in definitions.values()
+                    },
+                )
+            stored = Hdf5RunReader.spectrum(path, 0)
+            self.assertIsNotNone(stored)
+            assert stored is not None
+            self.assertEqual(stored.processed_values, (10.0, 5.0, 5.0))
+            self.assertEqual(stored.processed_unit, "dB")
+            self.assertEqual(stored.processing_operation, "difference_db")
+            from PyThat import MeasurementTree
+
+            with redirect_stdout(StringIO()):
+                tree = MeasurementTree(path, index=True, override=True)
+            self.assertIn("Spectrum", tree.dataset.data_vars)
+            self.assertIn("Spectrum raw-reference", tree.dataset.data_vars)
+
     def test_multi_point_run_round_trips_setpoints_measurements_and_spectrum(self) -> None:
         from PyThat import MeasurementTree
 
@@ -258,6 +327,7 @@ root:
                     if item.get("control name") == "Setpoint A current (A)"
                 )
                 self.assertEqual(tuple(file["measurement"][axis_row]["data"][:]), tuple(point.si_value for point in points))
+                self.assertEqual(axis["equation"], "x")
                 self.assertNotIn("Keithley A current (A)", [item.get("control name") for item in definitions.values()])
                 self.assertEqual(fixed["lab control role"], "setpoint")
                 self.assertEqual(len(file["measurement"][fixed_row]["data"]), 119)

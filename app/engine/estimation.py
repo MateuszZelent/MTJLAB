@@ -81,14 +81,25 @@ class PlanEstimator:
                 retryable_operations += 1
             elif action.kind == "configure_anritsu_advanced":
                 retryable_operations += 1
-            elif action.kind == "acquire_spectrum":
-                nominal += self._spectrum_base_s + latest_spectrum_points / self._transfer_rate
-                spectrum_values += latest_spectrum_points
-                retryable_operations += 1
+            elif action.kind in {"acquire_reference", "acquire_spectrum"}:
+                average_count = int(action.payload.get("average_count", 1))
+                nominal += average_count * (
+                    self._spectrum_base_s
+                    + latest_spectrum_points / self._transfer_rate
+                )
+                if action.kind == "acquire_spectrum":
+                    spectrum_values += latest_spectrum_points
+                    if action.payload.get("store_processed", False):
+                        spectrum_values += latest_spectrum_points
+                retryable_operations += average_count
+                if average_count > 1:
+                    warnings.append(
+                        f"{action.node_id}: averages {average_count} complete spectra."
+                    )
             elif action.kind == "ramp_keithley_to_zero":
                 nominal += min(float(action.payload["deadline_s"]), 1.0)
                 retryable_operations += 1
-            elif action.kind == "configure_rigol":
+            elif action.kind in {"configure_rigol", "configure_rigol_output"}:
                 retryable_operations += 1
             elif action.kind in {"set_rigol_output", "set_keithley_output"}:
                 energized = energized or bool(action.payload["enabled"])

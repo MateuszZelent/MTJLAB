@@ -234,13 +234,18 @@ class Hdf5RunWriter:
         for row_name in sorted(name for name in definition if name.startswith("row_")):
             values = dict(definition[row_name].asstr()[()])
             role = values.get("lab control role")
-            if role not in {"setpoint", "measurement", "spectrum"}:
+            if role not in {
+                "setpoint",
+                "measurement",
+                "spectrum",
+                "spectrum_processed",
+            }:
                 continue
             resumable_rows += 1
             if row_name not in measurement:
                 raise ExecutionError(f"Recovery row {row_name} has no measurement group.")
             row = measurement[row_name]
-            if role == "spectrum":
+            if role in {"spectrum", "spectrum_processed"}:
                 if len(row["data"].shape) != 2:
                     raise ExecutionError("Recovery spectrum is not rank 2.")
                 row["data"].resize((checkpoint_count, row["data"].shape[1]))
@@ -332,7 +337,56 @@ class Hdf5RunWriter:
         limits = source.get("dut_limits", {})
         return Hdf5RunWriter._serializable(limits) if isinstance(limits, dict) else {}
 
-    def append(self, point: MeasurementPoint, trace: SpectrumTrace | None = None) -> int:
+    def store_reference(
+        self,
+        trace: SpectrumTrace,
+        *,
+        kind: str = "single",
+        average_count: int = 1,
+    ) -> None:
+        """Durably store the immutable reference used by this run."""
+
+        if self._closed:
+            raise ExecutionError("Attempted to write a reference to a closed HDF5 file.")
+        self._validate_trace(trace)
+        if "reference" in self._file:
+            raise ExecutionError("This run already contains a reference spectrum.")
+        if kind not in {"single", "averaged", "loaded"}:
+            raise ExecutionError(f"Unsupported reference kind {kind!r}.")
+        if average_count < 1:
+            raise ExecutionError("Reference average_count must be positive.")
+        try:
+            group = self._file.create_group("reference")
+            group.attrs["trace_name"] = trace.trace_name
+            group.attrs["acquired_at_utc"] = trace.acquired_at_utc.isoformat()
+            group.attrs["kind"] = kind
+            group.attrs["average_count"] = int(average_count)
+            group.create_dataset(
+                "frequency_hz",
+                data=self._np.asarray(trace.frequencies_hz, dtype="f8"),
+                compression="gzip",
+            )
+            group.create_dataset(
+                "power_dbm",
+                data=self._np.asarray(trace.powers_dbm, dtype="f8"),
+                compression="gzip",
+            )
+            self._file.flush()
+        except Exception as exc:
+            if "reference" in self._file:
+                del self._file["reference"]
+                self._file.flush()
+            raise ExecutionError(f"Could not store the reference spectrum: {exc}") from exc
+
+    def append(
+        self,
+        point: MeasurementPoint,
+        trace: SpectrumTrace | None = None,
+        *,
+        processed_values: tuple[float, ...] | None = None,
+        processed_unit: str | None = None,
+        processing_operation: str = "none",
+    ) -> int:
         if self._closed:
             raise ExecutionError("Attempted to write to a closed HDF5 file.")
         index = self._point_count
@@ -340,6 +394,12 @@ class Hdf5RunWriter:
         self._validate_point(point)
         if trace is not None:
             self._validate_trace(trace)
+        self._validate_processed(
+            trace,
+            processed_values=processed_values,
+            processed_unit=processed_unit,
+            processing_operation=processing_operation,
+        )
         try:
             group = self._pending.create_group(name)
             group.attrs["complete"] = False
@@ -358,6 +418,14 @@ class Hdf5RunWriter:
                 spectrum.create_dataset(
                     "power_dbm", data=self._np.asarray(trace.powers_dbm, dtype="f8"), compression="gzip"
                 )
+                if processed_values is not None:
+                    spectrum.attrs["processed_unit"] = str(processed_unit)
+                    spectrum.attrs["processing_operation"] = processing_operation
+                    spectrum.create_dataset(
+                        "processed_values",
+                        data=self._np.asarray(processed_values, dtype="f8"),
+                        compression="gzip",
+                    )
             # Flush a self-contained pending checkpoint before exposing it to
             # readers.  Moving one HDF5 link is the commit boundary.
             self._file.flush()
@@ -366,7 +434,16 @@ class Hdf5RunWriter:
             if trace is not None:
                 self._spectra[name] = committed["spectrum"]
                 del committed["spectrum"]
-            self._thatec.append(point, trace)
+            if processed_values is not None:
+                self._thatec.append(
+                    point,
+                    trace,
+                    processed_values=processed_values,
+                    processed_unit=processed_unit,
+                    processing_operation=processing_operation,
+                )
+            else:
+                self._thatec.append(point, trace)
             committed.attrs["complete"] = True
             self._point_count += 1
             self._file.flush()
@@ -400,6 +477,33 @@ class Hdf5RunWriter:
             self._csv_stream = None
             self._csv_writer = None
         return index
+
+    @staticmethod
+    def _validate_processed(
+        trace: SpectrumTrace | None,
+        *,
+        processed_values: tuple[float, ...] | None,
+        processed_unit: str | None,
+        processing_operation: str,
+    ) -> None:
+        import math
+
+        if processed_values is None:
+            if processed_unit is not None or processing_operation != "none":
+                raise ExecutionError(
+                    "Processed-spectrum metadata was provided without processed values."
+                )
+            return
+        if trace is None:
+            raise ExecutionError("Processed spectrum requires its corresponding raw trace.")
+        if len(processed_values) != len(trace.powers_dbm):
+            raise ExecutionError("Raw and processed spectra must have identical point counts.")
+        if not processed_unit:
+            raise ExecutionError("Processed spectrum requires an explicit unit.")
+        if processing_operation == "none":
+            raise ExecutionError("Processed spectrum requires an explicit operation.")
+        if not all(math.isfinite(value) for value in processed_values):
+            raise ExecutionError("The processed spectrum contains NaN or infinity.")
 
     @staticmethod
     def _validate_point(point: MeasurementPoint) -> None:
@@ -488,7 +592,9 @@ class Hdf5RunWriter:
         self._closed = True
         from app.storage.thatec_validator import ThatecCompatibilityValidator
 
-        report = ThatecCompatibilityValidator().validate(self.path)
+        report = ThatecCompatibilityValidator().validate(
+            self.path, require_pythat=True
+        )
         if not report.valid:
             detail = "; ".join(
                 f"{issue.path}: {issue.message}" for issue in report.errors

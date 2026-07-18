@@ -91,6 +91,89 @@ def generate_sweep_points(
     )
 
 
+def estimate_sweep_point_count(
+    segments: Iterable[dict[str, Any]],
+    dimension: str,
+    *,
+    deduplicate_boundaries: bool = True,
+) -> int:
+    """Count an axis without allocating its point vector."""
+
+    total = 0
+    previous_stop: Quantity | None = None
+    for index, raw in enumerate(segments):
+        if not isinstance(raw, dict):
+            raise ConfigurationError(f"sweep.segments[{index}] must be a mapping.")
+        if "value" in raw:
+            if any(
+                key in raw for key in ("start", "stop", "points", "step", "spacing")
+            ):
+                raise ConfigurationError(
+                    f"sweep.segments[{index}] single value cannot define interval fields."
+                )
+            current_start = current_stop = parse_quantity(raw["value"], dimension)
+            count = 1
+            is_single = True
+        else:
+            has_points = "points" in raw
+            has_step = "step" in raw
+            if has_points == has_step:
+                raise ConfigurationError(
+                    f"sweep.segments[{index}] requires exactly one of points or step."
+                )
+            current_start = parse_quantity(raw["start"], dimension)
+            current_stop = parse_quantity(raw["stop"], dimension)
+            spacing = str(raw.get("spacing", "linear"))
+            if spacing not in {"linear", "log"}:
+                raise ConfigurationError(
+                    "Sweep segment spacing must be linear or log."
+                )
+            if has_points:
+                count = int(raw["points"])
+                if count < 2:
+                    raise ConfigurationError(
+                        "Sweep segment points must be an integer >= 2."
+                    )
+                if spacing == "log" and (
+                    current_start.si_value <= 0 or current_stop.si_value <= 0
+                ):
+                    raise ConfigurationError(
+                        "A logarithmic sweep segment requires positive endpoints."
+                    )
+            else:
+                if spacing != "linear":
+                    raise ConfigurationError(
+                        "A logarithmic sweep segment requires a point count, not a step."
+                    )
+                step = parse_quantity(raw["step"], dimension)
+                if step.si_value <= 0:
+                    raise ConfigurationError("Sweep segment step must be positive.")
+                distance = abs(current_stop.si_value - current_start.si_value)
+                count = (
+                    1
+                    if math.isclose(distance, 0.0, abs_tol=1e-15)
+                    else math.ceil(distance / step.si_value) + 1
+                )
+            is_single = False
+        if (
+            deduplicate_boundaries
+            and not is_single
+            and previous_stop is not None
+            and math.isclose(
+                previous_stop.si_value,
+                current_start.si_value,
+                rel_tol=1e-12,
+                abs_tol=1e-15,
+            )
+        ):
+            count -= 1
+        total += count
+        previous_stop = current_stop
+    if total <= 0:
+        raise ConfigurationError("A sweep axis must generate at least one point.")
+    return total
+
+
 def generate_sweep_stage_points(
     segments: Iterable[dict[str, Any]],
     dimension: str,
@@ -104,24 +187,37 @@ def generate_sweep_stage_points(
     for index, raw in enumerate(segments):
         if not isinstance(raw, dict):
             raise ConfigurationError(f"sweep.segments[{index}] must be a mapping.")
+        is_single = "value" in raw
         has_points = "points" in raw
         has_step = "step" in raw
-        if has_points == has_step:
+        if is_single:
+            if any(key in raw for key in ("start", "stop", "points", "step", "spacing")):
+                raise ConfigurationError(
+                    f"sweep.segments[{index}] single value cannot define interval fields."
+                )
+            try:
+                generated = (parse_quantity(raw["value"], dimension),)
+            except (KeyError, TypeError, ValueError) as exc:
+                raise ConfigurationError(
+                    f"Invalid sweep.segments[{index}] single value: {exc}"
+                ) from exc
+        elif has_points == has_step:
             raise ConfigurationError(
                 f"sweep.segments[{index}] requires exactly one of points or step."
             )
-        try:
-            segment = SweepSegment(
-                start=parse_quantity(raw["start"], dimension),
-                stop=parse_quantity(raw["stop"], dimension),
-                points=int(raw["points"]) if has_points else None,
-                step=parse_quantity(raw["step"], dimension) if has_step else None,
-                spacing=str(raw.get("spacing", "linear")),
-            )
-        except (KeyError, TypeError, ValueError) as exc:
-            raise ConfigurationError(f"Invalid sweep.segments[{index}]: {exc}") from exc
-        generated = generate_segment_points(segment)
-        if values and deduplicate_boundaries and math.isclose(
+        else:
+            try:
+                segment = SweepSegment(
+                    start=parse_quantity(raw["start"], dimension),
+                    stop=parse_quantity(raw["stop"], dimension),
+                    points=int(raw["points"]) if has_points else None,
+                    step=parse_quantity(raw["step"], dimension) if has_step else None,
+                    spacing=str(raw.get("spacing", "linear")),
+                )
+            except (KeyError, TypeError, ValueError) as exc:
+                raise ConfigurationError(f"Invalid sweep.segments[{index}]: {exc}") from exc
+            generated = generate_segment_points(segment)
+        if values and not is_single and deduplicate_boundaries and math.isclose(
             values[-1].si_value,
             generated[0].si_value,
             rel_tol=1e-12,
@@ -130,6 +226,6 @@ def generate_sweep_stage_points(
             generated = generated[1:]
         values.extend(generated)
         stages.append(generated)
-    if len(values) < 2:
-        raise ConfigurationError("A multi-segment sweep must generate at least two points.")
+    if not values:
+        raise ConfigurationError("A sweep axis must generate at least one point.")
     return tuple(stages)

@@ -148,8 +148,12 @@ class RigolSimulator(_BaseSimulator):
         self.modulation = {1: False, 2: False}
         self.sweep = {1: False, 2: False}
         self.burst = {1: False, 2: False}
+        self.programmed_scpi: dict[str, str] = {}
 
     def _write(self, command: str) -> None:
+        assignment = re.match(r"^(:[A-Za-z0-9:]+)\s+(.+)$", command)
+        if assignment:
+            self.programmed_scpi[assignment.group(1).upper()] = assignment.group(2)
         match = re.match(r"^:OUTP([12])\s+(ON|OFF)$", command, re.IGNORECASE)
         if match:
             self.output[int(match.group(1))] = match.group(2).upper() == "ON"
@@ -276,6 +280,9 @@ class RigolSimulator(_BaseSimulator):
         if match:
             values = self.high if match.group(2).upper() == "HIGH" else self.low
             return f"{values[int(match.group(1))]:.12g}"
+        readback = re.match(r"^(:[A-Za-z0-9:]+)\?$", command)
+        if readback and readback.group(1).upper() in self.programmed_scpi:
+            return self.programmed_scpi[readback.group(1).upper()]
         raise DeviceError(f"Rigol simulator: unsupported query {command!r}.")
 
 
@@ -290,11 +297,18 @@ class KeithleySimulator(_BaseSimulator):
         self.limit_current = {"smua": float("inf"), "smub": float("inf")}
         self.noise_fraction = 0.0
         self._measurement_index = {"smua": 0, "smub": 0}
+        self.programmed: dict[str, str] = {}
 
     def _write(self, command: str) -> None:
         if command == "errorqueue.clear()":
             self.error_queue.clear()
             return
+        assignment = re.match(
+            r"^(smu[ab]\.(?:(?:source|measure)\.[A-Za-z0-9_]+|sense))\s*=\s*(.+)$",
+            command,
+        )
+        if assignment:
+            self.programmed[assignment.group(1)] = assignment.group(2)
         mode = re.match(r"^(smu[ab])\.source\.func\s*=\s*\1\.(OUTPUT_DCAMPS|OUTPUT_DCVOLTS)$", command)
         if mode:
             self.mode[mode.group(1)] = "current" if mode.group(2) == "OUTPUT_DCAMPS" else "voltage"
@@ -327,6 +341,15 @@ class KeithleySimulator(_BaseSimulator):
         output = re.match(r"^print\((smu[ab])\.source\.output\)$", command)
         if output:
             return "1" if self.output[output.group(1)] else "0"
+        level = re.match(r"^print\((smu[ab])\.source\.level[iv]\)$", command)
+        if level:
+            return f"{self.level[level.group(1)]:.12g}"
+        readback = re.match(
+            r"^print\((smu[ab]\.(?:(?:source|measure)\.[A-Za-z0-9_]+|sense))\)$",
+            command,
+        )
+        if readback and readback.group(1) in self.programmed:
+            return self.programmed[readback.group(1)]
         measure_iv = re.match(r"^print\((smu[ab])\.measure\.iv\(\)\)$", command)
         if measure_iv:
             voltage, current = self._measured_iv(measure_iv.group(1))

@@ -57,6 +57,9 @@ class SettingsPage(QWidget):
         ("profile", "approved_by"),
         ("profile", "approved_at"),
     }
+    _OPERATOR_EDITABLE_PATHS = {
+        ("devices", "rigol", "safety", "allow_output_enable"),
+    }
 
     def __init__(
         self,
@@ -184,7 +187,7 @@ class SettingsPage(QWidget):
         self.remove_role_button.clicked.connect(self._remove_role_assignment)
         refresh_diagnostics.clicked.connect(self._refresh_diagnostics)
         export_diagnostics.clicked.connect(self.export_redacted_configuration)
-        if self._read_only:
+        if self._read_only and not self._can_edit_operator_output():
             self.validate_button.setEnabled(False)
             self.save_button.setEnabled(False)
             self.discard_button.setEnabled(False)
@@ -198,15 +201,22 @@ class SettingsPage(QWidget):
         self._read_only = self._base_read_only or not access_policy.allows(
             Permission.EDIT_SETTINGS
         )
-        self.validate_button.setEnabled(not self._read_only)
-        self.save_button.setEnabled(not self._read_only)
-        self.discard_button.setEnabled(not self._read_only)
+        can_edit = not self._read_only or self._can_edit_operator_output()
+        self.validate_button.setEnabled(can_edit)
+        self.save_button.setEnabled(can_edit)
+        self.discard_button.setEnabled(can_edit)
         self.approve_button.setEnabled(
             not self._base_read_only
             and access_policy.allows(Permission.APPROVE_PROFILE)
         )
         self._update_role_controls()
         self.reload()
+
+    def _can_edit_operator_output(self) -> bool:
+        return (
+            not self._base_read_only
+            and self._access.allows(Permission.OPERATE_OUTPUT)
+        )
 
     def _update_role_controls(self) -> None:
         allowed = (
@@ -252,7 +262,13 @@ class SettingsPage(QWidget):
             return
         state = self._settings.profile.state
         locked = "OUTPUTS LOCKED" if self._settings.outputs_locked else "profile approved"
-        mode = " • read-only for this role" if self._read_only else ""
+        mode = (
+            " • limited edit: Rigol output permission only"
+            if self._read_only and self._can_edit_operator_output()
+            else " • read-only for this role"
+            if self._read_only
+            else ""
+        )
         self._subtitle.setText(
             f"File: {self._repository.path}  •  Profile: {self._settings.profile.name}  •  "
             f"State: {state}  •  {locked}  •  User: {self._access.identity.display_name}{mode}"
@@ -376,10 +392,29 @@ class SettingsPage(QWidget):
         item.setData(0, Qt.ItemDataRole.UserRole, path)
         role_path = bool(path) and path[0] == "access_control"
         role_path_editable = not role_path or self._access.allows(Permission.MANAGE_ROLES)
-        if not self._read_only and role_path_editable and path not in self._PROTECTED_PATHS:
+        operator_output_permission = (
+            path in self._OPERATOR_EDITABLE_PATHS
+            and not self._base_read_only
+            and self._access.allows(Permission.OPERATE_OUTPUT)
+        )
+        if (
+            (not self._read_only or operator_output_permission)
+            and role_path_editable
+            and path not in self._PROTECTED_PATHS
+        ):
             item.setFlags(item.flags() | Qt.ItemFlag.ItemIsEditable)
+            if isinstance(value, bool):
+                item.setToolTip(
+                    1,
+                    "Double-click and enter true or false. This change is validated "
+                    "and saved to settings.yml.",
+                )
         else:
-            item.setToolTip(1, "This field can only be changed with the Approve profile button.")
+            item.setToolTip(
+                1,
+                "Read-only for the current role. General settings and safety limits "
+                "require an engineer identity.",
+            )
         if parent is None:
             tree.addTopLevelItem(item)
         else:
@@ -657,12 +692,23 @@ class SettingsPage(QWidget):
         return settings
 
     def save_draft(self, *, silent: bool = False) -> bool:
-        if not self._require_access(Permission.EDIT_SETTINGS, "saving station settings", silent=silent):
-            return False
         if not self._dirty:
             return True
         try:
             draft = self._apply_tree_values()
+            changed_paths = self._changed_leaf_paths(self._persisted_raw, draft)
+            general_edit_allowed = self._access.allows(Permission.EDIT_SETTINGS)
+            operator_output_edit = (
+                bool(changed_paths)
+                and changed_paths.issubset(self._OPERATOR_EDITABLE_PATHS)
+                and self._access.allows(Permission.OPERATE_OUTPUT)
+                and not self._base_read_only
+            )
+            if not general_edit_allowed and not operator_output_edit:
+                self._access.require(
+                    Permission.EDIT_SETTINGS,
+                    action="saving station settings",
+                )
             if (
                 draft.get("access_control") != self._persisted_raw.get("access_control")
                 and not self._access.allows(Permission.MANAGE_ROLES)
@@ -677,7 +723,7 @@ class SettingsPage(QWidget):
             draft["profile"]["approved_at"] = None
             draft["profile"]["approval_note"] = "Profile approval is required after settings changes."
             settings = self._repository.save_raw(draft)
-        except (ConfigurationError, ValueError) as exc:
+        except (AuthorizationError, ConfigurationError, ValueError) as exc:
             if silent:
                 self.status.emit(f"Autosave rejected invalid settings: {exc}")
             else:
@@ -698,6 +744,39 @@ class SettingsPage(QWidget):
             else "Configuration saved; profile approval is required"
         )
         return True
+
+    @classmethod
+    def _changed_leaf_paths(
+        cls,
+        before: object,
+        after: object,
+        path: tuple[str | int, ...] = (),
+    ) -> set[tuple[str | int, ...]]:
+        if isinstance(before, dict) and isinstance(after, dict):
+            changed: set[tuple[str | int, ...]] = set()
+            for key in set(before) | set(after):
+                if key not in before or key not in after:
+                    changed.add(path + (str(key),))
+                else:
+                    changed.update(
+                        cls._changed_leaf_paths(
+                            before[key], after[key], path + (str(key),)
+                        )
+                    )
+            return changed
+        if isinstance(before, list) and isinstance(after, list):
+            changed = set()
+            for index in range(max(len(before), len(after))):
+                if index >= len(before) or index >= len(after):
+                    changed.add(path + (index,))
+                else:
+                    changed.update(
+                        cls._changed_leaf_paths(
+                            before[index], after[index], path + (index,)
+                        )
+                    )
+            return changed
+        return {path} if before != after else set()
 
     def approve_profile(self) -> None:
         if not self._require_access(Permission.APPROVE_PROFILE, "approving the safety profile"):

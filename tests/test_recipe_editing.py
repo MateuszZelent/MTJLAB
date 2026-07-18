@@ -38,6 +38,20 @@ class RecipeEditingTests(unittest.TestCase):
         deleted = delete_recipe_node(added, node_id="new-wait")
         self.assertNotIn("new-wait", tuple(node.id for node in parse_recipe_text(deleted).root.children))
 
+    def test_builder_can_delete_the_last_root_child_and_leave_an_empty_plan(self) -> None:
+        source = """\
+schema_version: 1
+name: resettable
+root:
+  id: root
+  type: sequence
+  children:
+    - {id: only-node, type: wait, duration: 1 ms}
+finally: []
+"""
+        deleted = delete_recipe_node(source, node_id="only-node")
+        self.assertEqual(parse_recipe_text(deleted).root.children, ())
+
     def test_reorders_siblings_and_preserves_valid_recipe(self) -> None:
         moved = move_recipe_node(
             SOURCE,

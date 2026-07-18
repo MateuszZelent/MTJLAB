@@ -182,6 +182,52 @@ class FakeVisaSession:
                     if state:
                         return "1" if state.group(1) == "OUTPUT_ON" else "0"
                 return "0"
+            keithley_readback = re.match(
+                r"^print\((smu[ab]\.(?:(?:source|measure)\.[A-Za-z0-9_]+|sense))\)$",
+                command,
+            )
+            if keithley_readback:
+                field = keithley_readback.group(1)
+                assignment = re.compile(
+                    rf"^{re.escape(field)}\s*=\s*(.+)$", re.IGNORECASE
+                )
+                for write in reversed(self.writes[:-1]):
+                    match = assignment.match(write)
+                    if match:
+                        return match.group(1)
+            rigol_readback = re.match(
+                r"^:(OUTP\d+:LOAD|SOUR\d+:PHAS|"
+                r"SOUR\d+:FUNC:(?:SQU:DCYC|RAMP:SYMM|PULS:(?:WIDT|TRAN:LEAD|TRAN:TRA)))\?$",
+                command,
+            )
+            if rigol_readback:
+                field = rigol_readback.group(1)
+                assignment = re.compile(
+                    rf"^:{re.escape(field)}\s+(.+)$", re.IGNORECASE
+                )
+                for write in reversed(self.writes[:-1]):
+                    match = assignment.match(write)
+                    if match:
+                        return match.group(1)
+                if field.endswith(":LOAD"):
+                    return "INF"
+                if field.endswith(":PHAS"):
+                    return "0"
+                if field.endswith(":DCYC") or field.endswith(":SYMM"):
+                    return "50"
+                if field.endswith(":WIDT"):
+                    return "0.0001"
+                return "1e-08"
+            scpi_readback = re.match(r"^(:[A-Za-z0-9:]+)\?$", command)
+            if scpi_readback:
+                field = scpi_readback.group(1)
+                assignment = re.compile(
+                    rf"^{re.escape(field)}\s+(.+)$", re.IGNORECASE
+                )
+                for write in reversed(self.writes[:-1]):
+                    match = assignment.match(write)
+                    if match:
+                        return match.group(1)
             raise DeviceError(f"No fake VISA response is configured for {command!r}.")
         return response(command) if callable(response) else response
 

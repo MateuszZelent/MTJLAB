@@ -35,6 +35,7 @@ ACTION_TYPES: Final[frozenset[str]] = frozenset(
         "connect",
         "checkpoint",
         "configure_rigol",
+        "configure_rigol_output",
         "configure_keithley",
         "configure_anritsu",
         "configure_anritsu_advanced",
@@ -47,6 +48,11 @@ ACTION_TYPES: Final[frozenset[str]] = frozenset(
         "set_keithley_output",
         "ramp_keithley_to_zero",
         "measure_keithley",
+        "update_keithley_level",
+        "update_keithley_compliance",
+        "update_rigol_frequency",
+        "update_rigol_levels",
+        "acquire_reference",
         "acquire_spectrum",
         "wait",
         "comment",
@@ -107,7 +113,7 @@ def _parse_node(value: object, where: str) -> RecipeNode:
         for index, item in enumerate(else_raw)
     )
     containers = {"sequence", "sweep", "repeat", "if"}
-    if kind in {"sequence", "sweep", "repeat"} and not children:
+    if kind in {"sweep", "repeat"} and not children:
         raise ConfigurationError(f"{where}: {kind} requires at least one child.")
     if kind == "if" and not children and not else_children:
         raise ConfigurationError(f"{where}: if requires a children or else branch.")
@@ -123,7 +129,17 @@ def _parse_node(value: object, where: str) -> RecipeNode:
             if not isinstance(segments, list) or not segments:
                 raise ConfigurationError(f"{where}.segments must be a non-empty list.")
             for index, segment in enumerate(segments):
-                if not isinstance(segment, dict) or not {"start", "stop"}.issubset(segment):
+                if not isinstance(segment, dict):
+                    raise ConfigurationError(
+                        f"{where}.segments[{index}] must be a mapping."
+                    )
+                if "value" in segment:
+                    if set(segment) != {"value"}:
+                        raise ConfigurationError(
+                            f"{where}.segments[{index}] single value cannot define interval fields."
+                        )
+                    continue
+                if not {"start", "stop"}.issubset(segment):
                     raise ConfigurationError(
                         f"{where}.segments[{index}] requires start and stop."
                     )

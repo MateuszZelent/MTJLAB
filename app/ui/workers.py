@@ -14,6 +14,55 @@ from app.devices.anritsu.adapter import AnritsuAdapter
 from app.devices.base import DeviceAdapter
 from app.devices.keithley.adapter import KeithleyAdapter
 from app.devices.rigol.adapter import RigolAdapter
+from app.engine.compiler import RecipeCompiler
+from app.engine.estimation import PlanEstimator
+from app.recipes import parse_recipe_text
+from app.settings.models import StationSettings
+
+
+class RecipePreflightWorker(QObject):
+    """Compile and estimate an immutable recipe snapshot off the GUI thread."""
+
+    succeeded = Signal(object, object, object)
+    failed = Signal(str)
+    cancelled = Signal()
+    finished = Signal()
+
+    def __init__(
+        self,
+        settings: StationSettings,
+        source: str,
+        origin: str,
+    ) -> None:
+        super().__init__()
+        self._settings = settings
+        self._source = source
+        self._origin = origin
+
+    @Slot()
+    def run(self) -> None:
+        thread = QThread.currentThread()
+        try:
+            recipe = parse_recipe_text(self._source, origin=self._origin)
+            plan = RecipeCompiler(
+                self._settings,
+                cancellation_requested=thread.isInterruptionRequested,
+            ).compile(recipe)
+            if thread.isInterruptionRequested():
+                self.cancelled.emit()
+                return
+            estimate = PlanEstimator(self._settings).estimate(plan)
+            if thread.isInterruptionRequested():
+                self.cancelled.emit()
+                return
+            self.succeeded.emit(recipe, plan, estimate)
+        except Exception as exc:
+            if thread.isInterruptionRequested():
+                self.cancelled.emit()
+            else:
+                self.failed.emit(str(exc))
+        finally:
+            self.finished.emit()
 
 
 class InstrumentWorker(QObject):

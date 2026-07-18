@@ -23,6 +23,230 @@ from tests.helpers import loaded_settings
 
 
 class SimulatedRunTests(unittest.TestCase):
+    def test_requested_10_by_100_recipe_runs_all_1000_processed_spectra(self) -> None:
+        recipe_path = (
+            Path(__file__).resolve().parents[1]
+            / "recipes"
+            / "keithley_b_rigol_frequency_anritsu_reference_10x100.yml"
+        )
+        recipe = load_recipe(recipe_path)
+        raw = deepcopy(simulated_station_settings(loaded_settings()).model_dump(mode="python"))
+        raw["devices"]["rigol"]["safety"]["allow_output_enable"] = True
+        raw["devices"]["rigol"]["safety"]["channels"]["1"]["lab_limits"]["frequency"]["max"] = "1 GHz"
+        raw["devices"]["keithley"]["safety"]["allow_output_enable"] = True
+        limits = raw["devices"]["keithley"]["safety"]["channels"]["B"]["lab_limits"]
+        limits["source_current"] = {
+            "min": "0 A",
+            "max": "150 mA",
+            "max_abs": "150 mA",
+        }
+        limits["measured_current_trip"] = {"min": "-1 mA", "max": "151 mA"}
+        limits["max_abs_power"] = "10.05 mW"
+        settings = StationSettings.model_validate(raw)
+        plan = RecipeCompiler(settings).compile(recipe)
+        self.assertEqual(plan.total_points, 1000)
+        self.assertEqual(plan.total_spectra, 1000)
+
+        keithley_on = next(
+            index
+            for index, action in enumerate(plan.actions)
+            if action.node_id == "keithley-b-output-on"
+        )
+        rigol_on = next(
+            index
+            for index, action in enumerate(plan.actions)
+            if action.node_id == "rigol-ch1-output-on"
+        )
+        first_finally = next(
+            index for index, action in enumerate(plan.actions) if action.is_finally
+        )
+        energized_actions = plan.actions[max(keithley_on, rigol_on) + 1 : first_finally]
+        self.assertNotIn(
+            "configure_keithley", {action.kind for action in energized_actions}
+        )
+        self.assertNotIn("configure_rigol", {action.kind for action in energized_actions})
+
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            rigol = RigolAdapter(settings, session_factory=SimulatedVisaFactory("rigol"))
+            keithley = KeithleyAdapter(
+                settings, session_factory=SimulatedVisaFactory("keithley")
+            )
+            anritsu = AnritsuAdapter(
+                settings, session_factory=SimulatedVisaFactory("anritsu")
+            )
+            for device in (rigol, keithley, anritsu):
+                device.connect()
+            target = root / "requested-10x100.h5"
+            writer = Hdf5RunWriter(
+                target,
+                recipe_source=recipe.source_text,
+                settings_source="simulation: requested-range-qualification\n",
+                plan_hash=plan.sha256,
+                device_idn={},
+                expected_points=plan.total_points,
+            )
+            result = RecipeRunner(
+                rigol=rigol,
+                keithley=keithley,
+                anritsu=anritsu,
+                writer=writer,
+            ).run(plan)
+
+            self.assertIsNone(result.error)
+            self.assertEqual(result.stored_points, 1000)
+            self.assertFalse(rigol._output_states[1])
+            self.assertFalse(keithley._output_states["B"])
+            with h5py.File(target, "r") as file:
+                self.assertEqual(file["run"].attrs["status"], "completed")
+                self.assertEqual(len(file["spectra"]), 1000)
+                self.assertEqual(len(file["reference/power_dbm"]), 1001)
+                first = file["spectra/0"]
+                last = file["spectra/999"]
+                for spectrum in (first, last):
+                    self.assertEqual(len(spectrum["power_dbm"]), 1001)
+                    self.assertEqual(len(spectrum["processed_values"]), 1001)
+                    self.assertEqual(spectrum.attrs["processed_unit"], "dB")
+                    self.assertEqual(
+                        spectrum.attrs["processing_operation"], "difference_db"
+                    )
+
+    def test_reference_processed_cartesian_sweep_keeps_outputs_on_and_stores_both_spectra(self) -> None:
+        recipe_source = """\
+schema_version: 1
+name: reference-processed-cartesian
+dut_limits:
+  keithley:
+    B:
+      current: {min: "0 A", max: "2 mA"}
+      voltage: {min: "-67 mV", max: "67 mV"}
+      max_abs_power: "134 uW"
+  rigol:
+    1:
+      minimum_impedance: "50 ohm"
+      max_abs_current: "20 uA"
+      max_abs_power: "20 nW"
+  anritsu:
+    max_expected_input: "-10 dBm"
+root:
+  id: root
+  type: sequence
+  children:
+    - {id: rigol-off-initial, type: set_rigol_output, channel: 1, enabled: false}
+    - {id: keithley-off-initial, type: set_keithley_output, channel: B, enabled: false}
+    - id: anritsu-config
+      type: configure_anritsu
+      start_frequency: "1 MHz"
+      stop_frequency: "2 MHz"
+      reference_level: "0 dBm"
+      points: 101
+    - {id: reference, type: acquire_reference, trace: TRAC1}
+    - id: keithley-config
+      type: configure_keithley
+      channel: B
+      mode: current
+      level: "0 A"
+      compliance: "67 mV"
+    - id: rigol-config
+      type: configure_rigol
+      channel: 1
+      waveform: SIN
+      frequency: "1 kHz"
+      high_level: "1 mV"
+      low_level: "-1 mV"
+      output_load: HIGHZ
+      dut_min_impedance: "50 ohm"
+    - {id: keithley-arm, type: arm_keithley_output, channel: B}
+    - {id: keithley-on, type: set_keithley_output, channel: B, enabled: true}
+    - {id: rigol-arm, type: arm_rigol_output, channel: 1}
+    - {id: rigol-on, type: set_rigol_output, channel: 1, enabled: true}
+    - id: current
+      type: sweep
+      target: keithley.B.current
+      start: "0 A"
+      stop: "2 mA"
+      points: 2
+      children:
+        - id: current-point
+          type: update_keithley_level
+          channel: B
+          mode: current
+          level: "${keithley.B.current}"
+        - id: frequency
+          type: sweep
+          target: rigol.1.frequency
+          start: "1 kHz"
+          stop: "3 kHz"
+          points: 3
+          children:
+            - id: frequency-point
+              type: update_rigol_frequency
+              channel: 1
+              frequency: "${rigol.1.frequency}"
+            - id: spectrum
+              type: acquire_spectrum
+              trace: TRAC1
+              reference_operation: difference_db
+              store_raw: true
+              store_processed: true
+finally:
+  - {id: rigol-off, type: set_rigol_output, channel: 1, enabled: false}
+  - {id: keithley-zero, type: ramp_keithley_to_zero, channel: B, deadline: "10 s"}
+  - {id: keithley-off, type: set_keithley_output, channel: B, enabled: false}
+"""
+        raw = deepcopy(simulated_station_settings(loaded_settings()).model_dump(mode="python"))
+        raw["devices"]["rigol"]["safety"]["allow_output_enable"] = True
+        raw["devices"]["keithley"]["safety"]["allow_output_enable"] = True
+        settings = StationSettings.model_validate(raw)
+        plan = RecipeCompiler(settings).compile(parse_recipe_text(recipe_source))
+        self.assertEqual(plan.total_points, 6)
+
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            rigol = RigolAdapter(settings, session_factory=SimulatedVisaFactory("rigol"))
+            keithley = KeithleyAdapter(
+                settings, session_factory=SimulatedVisaFactory("keithley")
+            )
+            anritsu = AnritsuAdapter(
+                settings, session_factory=SimulatedVisaFactory("anritsu")
+            )
+            for device in (rigol, keithley, anritsu):
+                device.connect()
+            target = root / "reference-processed.h5"
+            writer = Hdf5RunWriter(
+                target,
+                recipe_source=recipe_source,
+                settings_source="simulation: true\n",
+                plan_hash=plan.sha256,
+                device_idn={},
+                expected_points=plan.total_points,
+            )
+            events: list[tuple[str, dict[str, object]]] = []
+            result = RecipeRunner(
+                rigol=rigol,
+                keithley=keithley,
+                anritsu=anritsu,
+                writer=writer,
+                on_event=lambda name, data: events.append((name, data)),
+            ).run(plan)
+
+            self.assertIsNone(result.error)
+            self.assertEqual(result.stored_points, 6)
+            self.assertFalse(rigol._output_states[1])
+            self.assertFalse(keithley._output_states["B"])
+            self.assertEqual(sum(name == "reference_stored" for name, _ in events), 1)
+            with h5py.File(target, "r") as file:
+                self.assertIn("reference/power_dbm", file)
+                self.assertEqual(len(file["spectra"]), 6)
+                for index in range(6):
+                    spectrum = file[f"spectra/{index}"]
+                    self.assertEqual(len(spectrum["power_dbm"]), 101)
+                    self.assertEqual(len(spectrum["processed_values"]), 101)
+                    self.assertEqual(spectrum.attrs["processed_unit"], "dB")
+                    self.assertEqual(
+                        spectrum.attrs["processing_operation"], "difference_db"
+                    )
+
     def test_recipe_compiles_runs_and_writes_one_hdf5_checkpoint(self) -> None:
         recipe_source = """\
 schema_version: 1

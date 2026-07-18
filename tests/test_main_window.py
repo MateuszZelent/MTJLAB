@@ -298,6 +298,22 @@ class MainWindowTests(unittest.TestCase):
                 window.close()
                 self.application.processEvents()
 
+    def test_settings_use_choice_editors_and_engineers_can_manage_roles(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            path = Path(temporary) / "settings.yml"
+            write_engineer_settings(path)
+            window = MainWindow(path, simulation=False, authenticated_username=TEST_ENGINEER)
+            try:
+                page = window.settings_page
+                editor = page.editor_for_path(("devices", "rigol", "enabled"))
+                self.assertIsInstance(editor, QComboBox)
+                self.assertEqual(editor.currentText(), "Yes")
+                self.assertTrue(page.add_role_button.isEnabled())
+                self.assertTrue(page.edit_role_button.isEnabled())
+            finally:
+                window.close()
+                self.application.processEvents()
+
     def test_operator_role_is_visible_and_cannot_edit_or_assign_station_configuration(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             settings_path = Path(temporary) / "settings.yml"
@@ -312,10 +328,39 @@ class MainWindowTests(unittest.TestCase):
             try:
                 self.assertIn("LAB\\operator", window.identity_status.text())
                 self.assertIn("operator", window.identity_status.text())
-                self.assertFalse(window.settings_page.save_button.isEnabled())
+                # Operators may save only the dedicated Rigol manual-output
+                # permission; general station configuration stays read-only.
+                self.assertTrue(window.settings_page.save_button.isEnabled())
                 self.assertFalse(window.settings_page.approve_button.isEnabled())
+                rigol_enabled = None
+                iterator = QTreeWidgetItemIterator(
+                    window.settings_page.trees["rigol"]
+                )
+                while iterator.value() is not None:
+                    candidate = iterator.value()
+                    if tuple(
+                        candidate.data(0, Qt.ItemDataRole.UserRole) or ()
+                    ) == ("devices", "rigol", "enabled"):
+                        rigol_enabled = candidate
+                        break
+                    iterator += 1
+                self.assertIsNotNone(rigol_enabled)
+                self.assertFalse(
+                    rigol_enabled.flags() & Qt.ItemFlag.ItemIsEditable
+                )
                 self.assertFalse(
                     window.keithley_page._limit_fields["level"].edit_button.isEnabled()
+                )
+                denied_button = window.keithley_page._limit_fields[
+                    "level"
+                ].edit_button
+                self.assertIn("current role(s) operator", denied_button.toolTip())
+                self.assertIn("engineer or service", denied_button.toolTip())
+                self.assertIn(
+                    "fixed by the instrument",
+                    window.keithley_page._limit_fields[
+                        "nplc"
+                    ].edit_button.toolTip(),
                 )
                 self.assertFalse(window.dashboard.save_assignments.isEnabled())
                 with patch.object(QMessageBox, "warning") as warning:
@@ -360,6 +405,53 @@ class MainWindowTests(unittest.TestCase):
                 self.assertEqual(loaded.profile.state, "approved")
                 self.assertEqual(loaded.profile.approved_by, TEST_ENGINEER)
                 self.assertIn("authenticated engineer", loaded.profile.approval_note)
+            finally:
+                window.close()
+                self.application.processEvents()
+
+    def test_operator_can_edit_only_rigol_manual_output_permission(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            settings_path = Path(temporary) / "settings.yml"
+            settings_path.write_text(
+                SETTINGS_TEMPLATE.read_text(encoding="utf-8"),
+                encoding="utf-8",
+            )
+            window = MainWindow(
+                settings_path,
+                simulation=False,
+                authenticated_username="LAB\\operator",
+            )
+            try:
+                page = window.settings_page
+                self.assertTrue(page.save_button.isEnabled())
+                target = None
+                iterator = QTreeWidgetItemIterator(page.trees["rigol"])
+                while iterator.value() is not None:
+                    item = iterator.value()
+                    if tuple(
+                        item.data(0, Qt.ItemDataRole.UserRole) or ()
+                    ) == (
+                        "devices",
+                        "rigol",
+                        "safety",
+                        "allow_output_enable",
+                    ):
+                        target = item
+                        break
+                    iterator += 1
+                self.assertIsNotNone(target)
+                self.assertTrue(target.flags() & Qt.ItemFlag.ItemIsEditable)
+                target.setText(1, "true")
+                self.application.processEvents()
+                self.assertTrue(page.save_draft())
+                self.assertTrue(
+                    SettingsRepository(settings_path)
+                    .load()
+                    .settings
+                    .rigol
+                    .safety
+                    .allow_output_enable
+                )
             finally:
                 window.close()
                 self.application.processEvents()
@@ -419,9 +511,10 @@ class MainWindowTests(unittest.TestCase):
             self.assertTrue(all(parameter.toolTip() for parameter in parameters))
             self.assertTrue(all(rigol.control_tabs.tabToolTip(index) for index in range(4)))
             buttons = {button.text(): button for button in rigol.findChildren(QPushButton)}
-            for label in ("ARM (30 s)", "OUTPUT ON", "OUTPUT OFF"):
+            for label in ("OUTPUT ON", "OUTPUT OFF"):
                 self.assertIn(label, buttons)
                 self.assertTrue(buttons[label].toolTip())
+            self.assertNotIn("ARM (30 s)", buttons)
         finally:
             window.close()
             self.application.processEvents()
@@ -1523,6 +1616,9 @@ class MainWindowTests(unittest.TestCase):
             try:
                 field = window.keithley_page._limit_fields["level"]
                 self.assertTrue(field.edit_button.isEnabled())
+                self.assertIn(
+                    "Saving revokes profile approval", field.edit_button.toolTip()
+                )
 
                 def complete_dialog() -> None:
                     dialog = QApplication.activeModalWidget()

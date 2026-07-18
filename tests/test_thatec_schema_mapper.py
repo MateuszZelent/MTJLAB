@@ -104,6 +104,118 @@ root:
         self.assertEqual(schema.axes[0].values_si[99], 0.1)
         self.assertEqual(schema.axes[0].values_si[-1], 0.15)
 
+    def test_keithley_device_provider_uses_the_same_public_axis_contract(self) -> None:
+        schema = ThatecSchemaMapper.from_recipe_source(
+            """\
+schema_version: 1
+name: device-provider-axis
+root:
+  id: keithley
+  type: sequence
+  device_module: keithley
+  operation: configure_selected_parameters
+  channel: B
+  source_mode: current
+  parameter_actions:
+    - parameter_id: source.level
+      mode: sweep
+      value: 1 mA
+      segments:
+        - {start: 0 A, stop: 1 mA, points: 3}
+  children:
+    - id: spectrum
+      type: acquire_spectrum
+""",
+            expected_points=3,
+        )
+
+        self.assertEqual(schema.mode, "recipe_sweeps")
+        self.assertEqual(schema.axes[0].target, "keithley.B.current")
+        self.assertEqual(schema.axes[0].values_si, (0.0, 0.0005, 0.001))
+
+    def test_rigol_device_provider_uses_the_same_public_axis_contract(self) -> None:
+        schema = ThatecSchemaMapper.from_recipe_source(
+            """\
+schema_version: 1
+name: rigol-device-provider-axis
+root:
+  id: rigol
+  type: sequence
+  device_module: rigol
+  operation: configure_selected_parameters
+  channel: 2
+  parameter_actions:
+    - parameter_id: carrier.frequency
+      mode: sweep
+      value: 1 kHz
+      segments:
+        - {start: 1 kHz, stop: 3 kHz, points: 3}
+  children:
+    - id: spectrum
+      type: acquire_spectrum
+""",
+            expected_points=3,
+        )
+
+        self.assertEqual(schema.mode, "recipe_sweeps")
+        self.assertEqual(schema.axes[0].target, "rigol.2.frequency")
+        self.assertEqual(schema.axes[0].values_si, (1000.0, 2000.0, 3000.0))
+
+    def test_anritsu_device_provider_uses_the_same_public_axis_contract(self) -> None:
+        schema = ThatecSchemaMapper.from_recipe_source(
+            """\
+schema_version: 1
+name: anritsu-device-provider-axis
+root:
+  id: anritsu
+  type: sequence
+  device_module: anritsu
+  operation: configure_selected_parameters
+  parameter_actions:
+    - parameter_id: spectrum.reference_level
+      mode: sweep
+      value: 0 dBm
+      segments:
+        - {start: -10 dBm, stop: 0 dBm, points: 3}
+  children:
+    - id: spectrum
+      type: acquire_spectrum
+""",
+            expected_points=3,
+        )
+
+        self.assertEqual(schema.mode, "recipe_sweeps")
+        self.assertEqual(
+            schema.axes[0].target, "anritsu.spectrum.reference_level"
+        )
+        self.assertEqual(schema.axes[0].values_si, (-10.0, -5.0, 0.0))
+
+    def test_anritsu_sg_device_provider_uses_the_same_public_axis_contract(self) -> None:
+        schema = ThatecSchemaMapper.from_recipe_source(
+            """\
+schema_version: 1
+name: anritsu-sg-device-provider-axis
+root:
+  id: sg
+  type: sequence
+  device_module: anritsu_sg
+  operation: configure_selected_parameters
+  parameter_actions:
+    - parameter_id: sg.power
+      mode: sweep
+      value: -30 dBm
+      segments:
+        - {start: -40 dBm, stop: -20 dBm, points: 3}
+  children:
+    - {id: spectrum, type: acquire_spectrum}
+""",
+            expected_points=3,
+        )
+
+        self.assertEqual(schema.mode, "recipe_sweeps")
+        self.assertEqual(schema.axes[0].target, "anritsu.sg.power")
+        self.assertEqual(schema.axes[0].values_si, (-40.0, -30.0, -20.0))
+
     def test_repeated_acquisitions_add_an_explicit_fast_axis(self) -> None:
         schema = ThatecSchemaMapper.from_recipe_source(
             """\

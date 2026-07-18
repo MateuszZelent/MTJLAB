@@ -66,9 +66,10 @@ class ExecutionPolicy:
             return float(action.payload["duration_s"]) + self.watchdog_grace_s
         if action.kind == "ramp_keithley_to_zero":
             return float(action.payload["deadline_s"]) + self.watchdog_grace_s
-        if action.kind == "acquire_spectrum":
+        if action.kind in {"acquire_reference", "acquire_spectrum"}:
+            average_count = int(action.payload.get("average_count", 1))
             return (
-                self.acquisition_timeout_s
+                average_count * self.acquisition_timeout_s
                 + self.command_timeout_s
                 + self.watchdog_grace_s
             )

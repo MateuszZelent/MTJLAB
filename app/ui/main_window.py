@@ -9,13 +9,13 @@ from copy import deepcopy
 from dataclasses import astuple, dataclass, replace
 from enum import StrEnum
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 from uuid import uuid4
 
 import pyqtgraph as pg
 
-from PySide6.QtCore import QMimeData, QSize, QSettings, QTimer, Qt, Signal
-from PySide6.QtGui import QAction, QActionGroup, QCloseEvent, QColor, QDrag, QIcon, QKeySequence, QPainter, QPixmap, QShortcut
+from PySide6.QtCore import QMimeData, QSize, QSettings, QThread, QTimer, Qt, Signal
+from PySide6.QtGui import QAction, QActionGroup, QCloseEvent, QColor, QDrag, QIcon, QKeySequence, QPainter, QPalette, QPixmap, QShortcut
 from PySide6.QtWidgets import (
     QAbstractItemView,
     QApplication,
@@ -42,6 +42,7 @@ from PySide6.QtWidgets import (
     QScrollArea,
     QSplitter,
     QSpinBox,
+    QStyledItemDelegate,
     QTabWidget,
     QStyle,
     QToolBar,
@@ -104,11 +105,16 @@ from app.recipes import (
     RecipeRepository,
     add_recipe_node,
     delete_recipe_node,
+    estimate_sweep_point_count,
     generate_sweep_stage_points,
     generate_sweep_points,
     move_recipe_node,
     parse_recipe_text,
     replace_recipe_node,
+)
+from app.recipes.parameter_registry import (
+    SWEEP_DIMENSIONS,
+    legacy_ui_parameter_definitions,
 )
 from app.settings import SettingsRepository
 from app.settings.models import StationSettings
@@ -124,7 +130,7 @@ from app.spectrum import (
 )
 from app.ui.settings_page import SettingsPage
 from app.ui.run_worker import RunController, serialize_settings_snapshot
-from app.ui.workers import DeviceController
+from app.ui.workers import DeviceController, RecipePreflightWorker
 from app.ui.discovery_worker import VisaDiscoveryWorker
 from app.ui.design_system import effective_theme
 from app.ui.widgets import NotificationBanner, SpectrumPlotWidget
@@ -895,6 +901,31 @@ class DashboardPage(QWidget):
             status_item.setText("Assigned")
 
 
+@dataclass(frozen=True, slots=True)
+class RigolConfigurationSnapshot:
+    """Qt-independent carrier configuration shared by manual and plan editors."""
+
+    channel: int = 1
+    waveform: str = "SIN"
+    frequency: str = "1 kHz"
+    high_level: str = "1 mV"
+    low_level: str = "-1 mV"
+    output_load: str = "HIGHZ"
+    phase_deg: str = "0"
+    square_duty_percent: str = "50"
+    ramp_symmetry_percent: str = "50"
+    pulse_width: str = "100 us"
+    pulse_leading: str = "10 ns"
+    pulse_trailing: str = "10 ns"
+    dut_min_impedance: str = "50 ohm"
+    output_polarity: str = "NORM"
+    output_mode: str = "NORM"
+    gate_polarity: str = "NORM"
+    sync_enabled: bool = False
+    sync_polarity: str = "NORM"
+    sync_delay: str = "0 s"
+
+
 class RigolPage(QWidget):
     status = Signal(str)
 
@@ -903,6 +934,7 @@ class RigolPage(QWidget):
         self._controller = controller
         self._station_settings = settings
         self._limit_fields: dict[QWidget, LimitField] = {}
+        self._pending_output_enable = False
         layout = QVBoxLayout(self)
         layout.setContentsMargins(18, 18, 18, 18)
         layout.setSpacing(14)
@@ -1020,15 +1052,14 @@ class RigolPage(QWidget):
         configure_output.setObjectName("primaryButton")
         self.sync_phases_button = QPushButton("Synchronize CH1/CH2 phases")
         self.sync_phases_button.setEnabled(False)
-        arm = QPushButton("ARM (30 s)")
-        arm.setObjectName("warningButton")
-        output_on = QPushButton("OUTPUT ON")
-        output_on.setObjectName("outputOnButton")
-        output_off = QPushButton("OUTPUT OFF")
-        output_off.setObjectName("outputOffButton")
+        self.output_on = QPushButton("OUTPUT ON")
+        self.output_on.setObjectName("outputOnButton")
+        self.output_off = QPushButton("OUTPUT OFF")
+        self.output_off.setObjectName("outputOffButton")
         self.output_scroll = self._form_page(
             "Output path and SYNC",
-            "Output-path changes are allowed only while OUTPUT is OFF. OUTPUT ON requires ARM and confirmation.",
+            "OUTPUT ON validates the visible channel settings, performs an internal "
+            "short-lived safety arm and enables the selected output.",
             (
                 ("Generator load setting", self.load),
                 ("Output polarity", self.output_polarity),
@@ -1038,7 +1069,12 @@ class RigolPage(QWidget):
                 ("SYNC polarity", self.sync_polarity),
                 ("SYNC delay", self.sync_delay),
             ),
-            (configure_output, self.sync_phases_button, arm, output_on, output_off),
+            (
+                configure_output,
+                self.sync_phases_button,
+                self.output_on,
+                self.output_off,
+            ),
         )
 
         self.advanced = QTabWidget()
@@ -1097,9 +1133,8 @@ class RigolPage(QWidget):
         self.offset.editingFinished.connect(self._sync_levels_from_vpp_offset)
         self.frequency.editingFinished.connect(self._sync_period_from_frequency)
         self.period.editingFinished.connect(self._sync_frequency_from_period)
-        arm.clicked.connect(self.arm_output)
-        output_on.clicked.connect(lambda: self.request_output(True))
-        output_off.clicked.connect(lambda: self._controller.call("set_output", (int(self.channel.currentText()), False)))
+        self.output_on.clicked.connect(lambda: self.request_output(True))
+        self.output_off.clicked.connect(lambda: self.request_output(False))
         controller.result.connect(self._result)
         controller.error.connect(self._error)
         controller.state_changed.connect(self._device_state_changed)
@@ -1119,9 +1154,8 @@ class RigolPage(QWidget):
             configure=configure,
             shape_apply=shape_apply,
             configure_output=configure_output,
-            arm=arm,
-            output_on=output_on,
-            output_off=output_off,
+            output_on=self.output_on,
+            output_off=self.output_off,
         )
 
     @staticmethod
@@ -1138,7 +1172,6 @@ class RigolPage(QWidget):
         configure: QPushButton,
         shape_apply: QPushButton,
         configure_output: QPushButton,
-        arm: QPushButton,
         output_on: QPushButton,
         output_off: QPushButton,
     ) -> None:
@@ -1201,8 +1234,11 @@ class RigolPage(QWidget):
             configure: ("Apply waveform safely", "Validates limits, forces the selected output OFF, writes only parameters relevant to the selected waveform and verifies read-back."),
             shape_apply: ("Apply shape", "Applies the waveform together with its duty, symmetry or pulse-edge parameters while OUTPUT remains OFF."),
             configure_output: ("Apply output path", "Configures load, polarity, gate and SYNC settings while OUTPUT remains OFF."),
-            arm: ("ARM", "Creates a 30-second permission window for OUTPUT ON after safety validation. ARM does not energize the connector."),
-            output_on: ("OUTPUT ON", "Energizes the physical BNC output. It requires a valid ARM and an additional confirmation dialog."),
+            output_on: (
+                "OUTPUT ON",
+                "Validates and applies the visible channel settings, performs an "
+                "internal short-lived safety arm and energizes the physical BNC output.",
+            ),
             output_off: ("OUTPUT OFF", "Immediately requests the selected physical output to be disabled. No ARM is required."),
         }
         for widget, (title, description) in help_items.items():
@@ -1282,6 +1318,32 @@ class RigolPage(QWidget):
     def set_settings(self, settings: StationSettings) -> None:
         self._station_settings = settings
         self._refresh_rigol_limits()
+
+    def configuration_snapshot(self) -> RigolConfigurationSnapshot:
+        """Return the visible carrier state without communicating with hardware."""
+
+        high, low = self._effective_levels()
+        return RigolConfigurationSnapshot(
+            channel=int(self.channel.currentText()),
+            waveform=self.waveform.currentText(),
+            frequency=self.frequency.text().strip(),
+            high_level=self._format_voltage(high),
+            low_level=self._format_voltage(low),
+            output_load=self.load.text().strip(),
+            phase_deg=self.phase.text().strip(),
+            square_duty_percent=self.duty.text().strip(),
+            ramp_symmetry_percent=self.ramp_symmetry.text().strip(),
+            pulse_width=self.pulse_width.text().strip(),
+            pulse_leading=self.pulse_leading.text().strip(),
+            pulse_trailing=self.pulse_trailing.text().strip(),
+            dut_min_impedance=self.dut_impedance.text().strip(),
+            output_polarity=self.output_polarity.currentText(),
+            output_mode=self.output_mode.currentText(),
+            gate_polarity=self.gate_polarity.currentText(),
+            sync_enabled=self.sync_enabled.isChecked(),
+            sync_polarity=self.sync_polarity.currentText(),
+            sync_delay=self.sync_delay.text().strip(),
+        )
 
     @staticmethod
     def _format_voltage(value_v: float) -> str:
@@ -1769,16 +1831,19 @@ class RigolPage(QWidget):
             self._controller.call("arm", int(channel))
 
     def request_output(self, enabled: bool) -> None:
-        channel = self.channel.currentText()
-        answer = QMessageBox.warning(
-            self,
-            "OUTPUT ON Rigol",
-            f"Enable the physical Rigol CH{channel} output? A valid ARM is required.",
-            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.Cancel,
-            QMessageBox.StandardButton.Cancel,
+        channel = int(self.channel.currentText())
+        if not enabled:
+            self._pending_output_enable = False
+            self._controller.call("set_output", (channel, False))
+            return
+        if self._pending_output_enable:
+            return
+        self._pending_output_enable = True
+        self.output_on.setEnabled(False)
+        self.status.emit(
+            f"Rigol CH{channel}: validating visible settings before OUTPUT ON"
         )
-        if answer == QMessageBox.StandardButton.Yes:
-            self._controller.call("set_output", (int(channel), enabled))
+        self.configure()
 
     def _result(self, operation: str, result: object) -> None:
         if operation == "configure" and hasattr(result, "peak_absolute_current_a"):
@@ -1789,13 +1854,32 @@ class RigolPage(QWidget):
                 f"estimated DUT power: {estimate.peak_estimated_dut_power_w * 1e3:.6g} mW; "
                 f"Vth High/Low: {estimate.open_circuit_high_v:.6g} / {estimate.open_circuit_low_v:.6g} V"
             )
-            self.status.emit("Rigol configured while OUTPUT is OFF")
+            if self._pending_output_enable:
+                channel = int(self.channel.currentText())
+                self.status.emit(
+                    f"Rigol CH{channel}: settings valid; applying internal safety arm"
+                )
+                self._controller.call("arm", channel)
+            else:
+                self.status.emit("Rigol configured while OUTPUT is OFF")
         elif operation in {"configure_modulation", "configure_sweep", "configure_burst"}:
             self.status.emit(f"Rigol: {operation} configured while OUTPUT is OFF")
         elif operation == "configure_output":
             self.status.emit("Rigol: output path confirmed while OUTPUT is OFF")
         elif operation == "arm":
-            self.status.emit("Rigol armed for 30 seconds; OUTPUT ON requires separate confirmation")
+            if self._pending_output_enable:
+                channel = int(self.channel.currentText())
+                self.status.emit(f"Rigol CH{channel}: enabling OUTPUT")
+                self._controller.call("set_output", (channel, True))
+            else:
+                self.status.emit("Rigol armed for 30 seconds")
+        elif operation == "set_output":
+            self._pending_output_enable = False
+            self.output_on.setEnabled(True)
+            self.status.emit(
+                f"Rigol CH{self.channel.currentText()} OUTPUT "
+                f"{'ON' if bool(result) else 'OFF'}"
+            )
         elif operation == "synchronize_phases":
             self.status.emit("Rigol: CH1/CH2 phases synchronized after capability confirmation")
 
@@ -1812,6 +1896,9 @@ class RigolPage(QWidget):
             "trigger_burst",
             "synchronize_phases",
         }:
+            if operation in {"configure", "arm", "set_output"}:
+                self._pending_output_enable = False
+                self.output_on.setEnabled(True)
             QMessageBox.warning(self, "Rigol", error)
 
 
@@ -1853,7 +1940,11 @@ def _keithley_roi_definition(
         },
         "source.compliance": {
             "label": f"Channel {snapshot.channel} · compliance",
-            "target": f"keithley.{snapshot.channel}.compliance",
+            "target": (
+                f"keithley.{snapshot.channel}.compliance_voltage"
+                if mode == "current"
+                else f"keithley.{snapshot.channel}.compliance_current"
+            ),
             "dimension": (
                 DIMENSION_VOLTAGE if mode == "current" else DIMENSION_CURRENT
             ),
@@ -3452,6 +3543,316 @@ class AnritsuPageState(StrEnum):
     ERROR = "error"
 
 
+class AnritsuSpectrumConfigurationPanel(QFrame):
+    """Shared, hardware-neutral spectrum setup for manual and plan hosts."""
+
+    def __init__(
+        self,
+        settings: StationSettings,
+        parent: QWidget | None = None,
+        *,
+        plan_mode: bool = False,
+    ) -> None:
+        super().__init__(parent)
+        self.setObjectName("anritsuSpectrumConfigurationPanel")
+        self._settings = settings
+        self.plan_mode = plan_mode
+        self.limit_fields: dict[str, LimitField] = {}
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(6)
+        form = QFormLayout()
+        form.setFieldGrowthPolicy(QFormLayout.FieldGrowthPolicy.AllNonFixedFieldsGrow)
+        form.setVerticalSpacing(7)
+        self.frequency_representation = QComboBox()
+        self.frequency_representation.addItem("Start / Stop", "start_stop")
+        self.frequency_representation.addItem("Center / Span", "center_span")
+        self.start = _line("1 MHz")
+        self.stop = _line("10 MHz")
+        self.reference = _line("0 dBm")
+        self.points = QComboBox()
+        self.frequency_label_a = QLabel("Start")
+        self.frequency_label_b = QLabel("Stop")
+        form.addRow("Frequency representation", self.frequency_representation)
+        form.addRow(
+            self.frequency_label_a, self._bounded("frequency", self.start)
+        )
+        form.addRow(
+            self.frequency_label_b, self._bounded("frequency", self.stop)
+        )
+        form.addRow(
+            "Reference level", self._bounded("reference_level", self.reference)
+        )
+        form.addRow("Points", self.points)
+        layout.addLayout(form)
+        if plan_mode:
+            note = QLabel(
+                "Plan editing is offline. Only selected overrides are stored; "
+                "no VISA command is sent to Anritsu."
+            )
+            note.setObjectName("recipeHint")
+            note.setWordWrap(True)
+            layout.addWidget(note)
+        self.frequency_representation.currentIndexChanged.connect(
+            self._change_frequency_representation
+        )
+        self.set_settings(settings)
+
+    def _limit_values(self, key: str) -> tuple[object, object]:
+        value = getattr(self._settings.anritsu.safety, key)
+        return value.min, value.max
+
+    def _bounded(self, key: str, editor: QWidget) -> LimitField:
+        field = LimitField(editor, *self._limit_values(key))
+        field.setProperty("limitKey", key)
+        if self.plan_mode:
+            field.edit_button.setVisible(False)
+        self.limit_fields[key + str(len(self.limit_fields))] = field
+        return field
+
+    def set_settings(self, settings: StationSettings) -> None:
+        self._settings = settings
+        minimum, maximum = self._limit_values("sweep_points")
+        current = self.points.currentData()
+        self.points.clear()
+        for value in ANRITSU_SWEEP_POINT_COUNTS:
+            if int(minimum) <= value <= int(maximum):
+                self.points.addItem(str(value), value)
+        index = self.points.findData(current if current is not None else 1001)
+        self.points.setCurrentIndex(index if index >= 0 else 0)
+        for field in self.limit_fields.values():
+            key = str(field.property("limitKey"))
+            field.set_limits(*self._limit_values(key))
+
+    def frequency_bounds(self) -> tuple[float, float]:
+        first = parse_quantity(self.start.text(), DIMENSION_FREQUENCY).si_value
+        second = parse_quantity(self.stop.text(), DIMENSION_FREQUENCY).si_value
+        if self.frequency_representation.currentData() == "center_span":
+            if second <= 0:
+                raise ConfigurationError("Frequency span must be positive.")
+            return first - second / 2, first + second / 2
+        return first, second
+
+    def configuration_snapshot(self) -> AnritsuConfigurationSnapshot:
+        start_hz, stop_hz = self.frequency_bounds()
+        return AnritsuConfigurationSnapshot(
+            start_hz=start_hz,
+            stop_hz=stop_hz,
+            reference_level_dbm=parse_quantity(
+                self.reference.text(), DIMENSION_DBM
+            ).si_value,
+            points=int(self.points.currentData()),
+            instrument_mode="PLAN_EDIT" if self.plan_mode else "MANUAL",
+        )
+
+    def load_snapshot(self, snapshot: AnritsuConfigurationSnapshot) -> None:
+        self.frequency_representation.setCurrentIndex(
+            self.frequency_representation.findData("start_stop")
+        )
+        self.start.setText(
+            format_quantity_auto(snapshot.start_hz, DIMENSION_FREQUENCY)
+        )
+        self.stop.setText(
+            format_quantity_auto(snapshot.stop_hz, DIMENSION_FREQUENCY)
+        )
+        self.reference.setText(f"{snapshot.reference_level_dbm:.9g} dBm")
+        index = self.points.findData(snapshot.points)
+        if index >= 0:
+            self.points.setCurrentIndex(index)
+
+    def _change_frequency_representation(self) -> None:
+        try:
+            first = parse_quantity(self.start.text(), DIMENSION_FREQUENCY).si_value
+            second = parse_quantity(self.stop.text(), DIMENSION_FREQUENCY).si_value
+            if self.frequency_representation.currentData() == "center_span":
+                self.frequency_label_a.setText("Center")
+                self.frequency_label_b.setText("Span")
+                self.start.setText(
+                    format_quantity_auto((first + second) / 2, DIMENSION_FREQUENCY)
+                )
+                self.stop.setText(
+                    format_quantity_auto(second - first, DIMENSION_FREQUENCY)
+                )
+            else:
+                self.frequency_label_a.setText("Start")
+                self.frequency_label_b.setText("Stop")
+                self.start.setText(
+                    format_quantity_auto(first - second / 2, DIMENSION_FREQUENCY)
+                )
+                self.stop.setText(
+                    format_quantity_auto(first + second / 2, DIMENSION_FREQUENCY)
+                )
+        except Exception:
+            return
+
+
+class AnritsuAdvancedSpectrumPanel(QFrame):
+    """Shared hardware-neutral RBW/VBW/input-path configuration panel."""
+
+    def __init__(
+        self,
+        parent: QWidget | None = None,
+        *,
+        hardware_options: tuple[str, ...] = (),
+    ) -> None:
+        super().__init__(parent)
+        self.setObjectName("anritsuAdvancedSpectrumPanel")
+        form = QFormLayout(self)
+        form.setContentsMargins(0, 0, 0, 0)
+        form.setFieldGrowthPolicy(QFormLayout.FieldGrowthPolicy.AllNonFixedFieldsGrow)
+
+        self.rbw_mode = QComboBox()
+        self.rbw_mode.addItem("Automatic", "auto")
+        self.rbw_mode.addItem("Manual", "manual")
+        self.rbw = _line("1 kHz")
+        form.addRow("RBW mode", self.rbw_mode)
+        form.addRow("Resolution bandwidth", self.rbw)
+
+        self.vbw_mode = QComboBox()
+        self.vbw_mode.addItem("Automatic", "auto")
+        self.vbw_mode.addItem("Manual", "manual")
+        self.vbw_mode.addItem("Off", "off")
+        self.vbw = _line("1 kHz")
+        form.addRow("VBW mode", self.vbw_mode)
+        form.addRow("Video bandwidth", self.vbw)
+
+        self.detector = QComboBox()
+        form.addRow("Detector", self.detector)
+        self.attenuation_mode = QComboBox()
+        self.attenuation_mode.addItem("Automatic", "auto")
+        self.attenuation_mode.addItem("Manual", "manual")
+        self.attenuation = QSpinBox()
+        self.attenuation.setRange(0, 60)
+        self.attenuation.setSingleStep(2)
+        self.attenuation.setSuffix(" dB")
+        form.addRow("RF attenuation mode", self.attenuation_mode)
+        form.addRow("RF attenuation", self.attenuation)
+        self.preamplifier = QCheckBox("Enable preamplifier")
+        form.addRow("Input gain", self.preamplifier)
+
+        self.sweep_time_mode = QComboBox()
+        self.sweep_time_mode.addItem("Automatic", "auto")
+        self.sweep_time_mode.addItem("Manual", "manual")
+        self.sweep_time = _line("100 ms")
+        form.addRow("Sweep-time mode", self.sweep_time_mode)
+        form.addRow("Sweep time", self.sweep_time)
+
+        self.refresh_detector_choices(hardware_options)
+        self.set_hardware_options(hardware_options)
+        for control in (
+            self.rbw_mode,
+            self.vbw_mode,
+            self.attenuation_mode,
+            self.sweep_time_mode,
+        ):
+            control.currentIndexChanged.connect(self.sync_editors)
+        self.sync_editors()
+
+    def refresh_detector_choices(self, options: tuple[str, ...]) -> None:
+        current = self.detector.currentData()
+        detectors = [
+            ("Normal peak", "NORM"),
+            ("Positive peak", "POS"),
+            ("Sample", "SAMP"),
+            ("Negative peak", "NEG"),
+            ("RMS", "RMS"),
+        ]
+        if {"016", "116"}.intersection(options):
+            detectors.extend(
+                [
+                    ("Quasi-peak", "QPE"),
+                    ("CISPR average", "CAV"),
+                    ("CISPR RMS", "CRMS"),
+                ]
+            )
+        self.detector.clear()
+        for label, value in detectors:
+            self.detector.addItem(label, value)
+        index = self.detector.findData(current or "NORM")
+        self.detector.setCurrentIndex(max(index, 0))
+
+    def set_hardware_options(self, options: tuple[str, ...]) -> None:
+        self.refresh_detector_choices(options)
+        has_preamp = bool(ANRITSU_PREAMPLIFIER_OPTIONS.intersection(options))
+        self.preamplifier.setEnabled(has_preamp)
+        self.preamplifier.setToolTip(
+            "Available because a supported preamplifier option was detected."
+            if has_preamp
+            else "No supported preamplifier option is currently detected."
+        )
+
+    def sync_editors(self, *_args: object) -> None:
+        self.rbw.setEnabled(self.rbw_mode.currentData() == "manual")
+        self.vbw.setEnabled(self.vbw_mode.currentData() == "manual")
+        self.attenuation.setEnabled(
+            self.attenuation_mode.currentData() == "manual"
+        )
+        self.sweep_time.setEnabled(
+            self.sweep_time_mode.currentData() == "manual"
+        )
+
+    def configuration(self) -> AdvancedSpectrumConfig:
+        return AdvancedSpectrumConfig(
+            rbw_auto=self.rbw_mode.currentData() == "auto",
+            rbw_hz=(
+                parse_quantity(self.rbw.text(), DIMENSION_FREQUENCY).si_value
+                if self.rbw_mode.currentData() == "manual"
+                else None
+            ),
+            vbw_mode=str(self.vbw_mode.currentData()),
+            vbw_hz=(
+                parse_quantity(self.vbw.text(), DIMENSION_FREQUENCY).si_value
+                if self.vbw_mode.currentData() == "manual"
+                else None
+            ),
+            detector=str(self.detector.currentData()),
+            attenuation_auto=self.attenuation_mode.currentData() == "auto",
+            attenuation_db=(
+                float(self.attenuation.value())
+                if self.attenuation_mode.currentData() == "manual"
+                else None
+            ),
+            preamplifier_enabled=self.preamplifier.isChecked(),
+            sweep_time_auto=self.sweep_time_mode.currentData() == "auto",
+            sweep_time_s=(
+                parse_quantity(self.sweep_time.text(), DIMENSION_TIME).si_value
+                if self.sweep_time_mode.currentData() == "manual"
+                else None
+            ),
+        )
+
+    def load_snapshot(self, snapshot: AdvancedSpectrumSnapshot) -> None:
+        for combo, value in (
+            (self.rbw_mode, "auto" if snapshot.rbw_auto else "manual"),
+            (self.vbw_mode, snapshot.vbw_mode),
+            (
+                self.attenuation_mode,
+                "auto" if snapshot.attenuation_auto else "manual",
+            ),
+            (
+                self.sweep_time_mode,
+                "auto" if snapshot.sweep_time_auto else "manual",
+            ),
+        ):
+            index = combo.findData(value)
+            if index >= 0:
+                combo.setCurrentIndex(index)
+        self.rbw.setText(format_quantity_auto(snapshot.rbw_hz, DIMENSION_FREQUENCY))
+        if snapshot.vbw_hz is not None:
+            self.vbw.setText(
+                format_quantity_auto(snapshot.vbw_hz, DIMENSION_FREQUENCY)
+            )
+        detector_index = self.detector.findData(snapshot.detector)
+        if detector_index >= 0:
+            self.detector.setCurrentIndex(detector_index)
+        self.attenuation.setValue(round(snapshot.attenuation_db))
+        self.preamplifier.setChecked(snapshot.preamplifier_enabled)
+        self.sweep_time.setText(
+            format_quantity_auto(snapshot.sweep_time_s, DIMENSION_TIME)
+        )
+        self.sync_editors()
+
+
 class AnritsuPage(QWidget):
     status = Signal(str)
 
@@ -3550,17 +3951,20 @@ class AnritsuPage(QWidget):
         setup_header.addWidget(self.hardware_info_button)
         self._advanced_dialog = self._build_advanced_spectrum_dialog()
         left_layout.addLayout(setup_header)
-        form = QFormLayout()
-        form.setFieldGrowthPolicy(QFormLayout.FieldGrowthPolicy.AllNonFixedFieldsGrow)
-        form.setVerticalSpacing(7)
-        self.start = _line("1 MHz")
-        self.stop = _line("10 MHz")
-        self.frequency_representation = QComboBox()
-        self.frequency_representation.addItem("Start / Stop", "start_stop")
-        self.frequency_representation.addItem("Center / Span", "center_span")
-        self.reference = _line("0 dBm")
-        self.points = QComboBox()
-        self._refresh_point_choices(1001)
+        self.configuration_panel = AnritsuSpectrumConfigurationPanel(
+            settings, self
+        )
+        self.start = self.configuration_panel.start
+        self.stop = self.configuration_panel.stop
+        self.frequency_representation = (
+            self.configuration_panel.frequency_representation
+        )
+        self.reference = self.configuration_panel.reference
+        self.points = self.configuration_panel.points
+        self.frequency_label_a = self.configuration_panel.frequency_label_a
+        self.frequency_label_b = self.configuration_panel.frequency_label_b
+        self._limit_fields = self.configuration_panel.limit_fields
+        left_layout.addWidget(self.configuration_panel)
         self.refresh = QSpinBox()
         self.refresh.setRange(10, 5000)
         self.refresh.setValue(500)
@@ -3569,17 +3973,9 @@ class AnritsuPage(QWidget):
             "Requested Live polling interval: 10 ms to 5 s. The effective frame rate is "
             "limited by the analyser sweep, VISA transfer and complete TRAC1 processing."
         )
-        form.addRow("Frequency representation", self.frequency_representation)
-        self.frequency_label_a = QLabel("Start")
-        self.frequency_label_b = QLabel("Stop")
-        form.addRow(self.frequency_label_a, self._anritsu_bounded("frequency", self.start))
-        form.addRow(self.frequency_label_b, self._anritsu_bounded("frequency", self.stop))
-        form.addRow(
-            "Reference level", self._anritsu_bounded("reference_level", self.reference)
-        )
-        form.addRow("Points", self.points)
-        form.addRow("Live refresh interval", self.refresh)
-        left_layout.addLayout(form)
+        refresh_form = QFormLayout()
+        refresh_form.addRow("Live refresh interval", self.refresh)
+        left_layout.addLayout(refresh_form)
         self.hardware_option_info = QLabel()
         self.hardware_range_info = QLabel()
         self.hardware_option_info.hide()
@@ -3724,9 +4120,6 @@ class AnritsuPage(QWidget):
         self.mode_tabs.setTabVisible(self.signal_generator_tab_index, False)
         layout.addWidget(self.mode_tabs, 1)
         self.read_configuration.clicked.connect(self.read_configuration_from_instrument)
-        self.frequency_representation.currentIndexChanged.connect(
-            self._change_frequency_representation
-        )
         self.configure_button.clicked.connect(self.configure)
         self.single.clicked.connect(self.read_once)
         self.live.clicked.connect(self.toggle_live)
@@ -3859,60 +4252,22 @@ class AnritsuPage(QWidget):
         self.advanced_protocol_status.setWordWrap(True)
         layout.addWidget(self.advanced_protocol_status)
 
-        form = QFormLayout()
-        form.setFieldGrowthPolicy(QFormLayout.FieldGrowthPolicy.AllNonFixedFieldsGrow)
-        self.advanced_rbw_mode = QComboBox()
-        self.advanced_rbw_mode.addItem("Automatic", "auto")
-        self.advanced_rbw_mode.addItem("Manual", "manual")
-        self.advanced_rbw = _line("1 kHz")
-        rbw_row = QWidget()
-        rbw_layout = QHBoxLayout(rbw_row)
-        rbw_layout.setContentsMargins(0, 0, 0, 0)
-        rbw_layout.addWidget(self.advanced_rbw_mode)
-        rbw_layout.addWidget(self.advanced_rbw, 1)
-        form.addRow("Resolution bandwidth (RBW)", rbw_row)
-
-        self.advanced_vbw_mode = QComboBox()
-        self.advanced_vbw_mode.addItem("Automatic", "auto")
-        self.advanced_vbw_mode.addItem("Manual", "manual")
-        self.advanced_vbw_mode.addItem("Off", "off")
-        self.advanced_vbw = _line("1 kHz")
-        vbw_row = QWidget()
-        vbw_layout = QHBoxLayout(vbw_row)
-        vbw_layout.setContentsMargins(0, 0, 0, 0)
-        vbw_layout.addWidget(self.advanced_vbw_mode)
-        vbw_layout.addWidget(self.advanced_vbw, 1)
-        form.addRow("Video bandwidth (VBW)", vbw_row)
-
-        self.advanced_detector = QComboBox()
-        self._refresh_advanced_detector_choices(())
-        form.addRow("Detector", self.advanced_detector)
-        self.advanced_attenuation_mode = QComboBox()
-        self.advanced_attenuation_mode.addItem("Automatic", "auto")
-        self.advanced_attenuation_mode.addItem("Manual", "manual")
-        self.advanced_attenuation = QSpinBox()
-        self.advanced_attenuation.setRange(0, 60)
-        self.advanced_attenuation.setSingleStep(2)
-        self.advanced_attenuation.setSuffix(" dB")
-        attenuation_row = QWidget()
-        attenuation_layout = QHBoxLayout(attenuation_row)
-        attenuation_layout.setContentsMargins(0, 0, 0, 0)
-        attenuation_layout.addWidget(self.advanced_attenuation_mode)
-        attenuation_layout.addWidget(self.advanced_attenuation, 1)
-        form.addRow("RF attenuation", attenuation_row)
-        self.advanced_preamplifier = QCheckBox("Enable preamplifier")
-        form.addRow("Input gain", self.advanced_preamplifier)
-        self.advanced_sweep_mode = QComboBox()
-        self.advanced_sweep_mode.addItem("Automatic", "auto")
-        self.advanced_sweep_mode.addItem("Manual", "manual")
-        self.advanced_sweep_time = _line("100 ms")
-        sweep_row = QWidget()
-        sweep_layout = QHBoxLayout(sweep_row)
-        sweep_layout.setContentsMargins(0, 0, 0, 0)
-        sweep_layout.addWidget(self.advanced_sweep_mode)
-        sweep_layout.addWidget(self.advanced_sweep_time, 1)
-        form.addRow("Sweep time", sweep_row)
-        layout.addLayout(form)
+        self.advanced_configuration_panel = AnritsuAdvancedSpectrumPanel(dialog)
+        self.advanced_rbw_mode = self.advanced_configuration_panel.rbw_mode
+        self.advanced_rbw = self.advanced_configuration_panel.rbw
+        self.advanced_vbw_mode = self.advanced_configuration_panel.vbw_mode
+        self.advanced_vbw = self.advanced_configuration_panel.vbw
+        self.advanced_detector = self.advanced_configuration_panel.detector
+        self.advanced_attenuation_mode = (
+            self.advanced_configuration_panel.attenuation_mode
+        )
+        self.advanced_attenuation = self.advanced_configuration_panel.attenuation
+        self.advanced_preamplifier = self.advanced_configuration_panel.preamplifier
+        self.advanced_sweep_mode = (
+            self.advanced_configuration_panel.sweep_time_mode
+        )
+        self.advanced_sweep_time = self.advanced_configuration_panel.sweep_time
+        layout.addWidget(self.advanced_configuration_panel)
 
         help_text = QLabel(
             "Documented limits: RBW 1 Hz–31.25 MHz; VBW 1 Hz–10 MHz or Off; "
@@ -3934,46 +4289,16 @@ class AnritsuPage(QWidget):
         self.advanced_read_button.clicked.connect(self.read_advanced_spectrum)
         self.advanced_apply_button.clicked.connect(self.configure_advanced_spectrum)
         close_button.clicked.connect(dialog.hide)
-        self.advanced_rbw_mode.currentIndexChanged.connect(self._sync_advanced_editors)
-        self.advanced_vbw_mode.currentIndexChanged.connect(self._sync_advanced_editors)
-        self.advanced_attenuation_mode.currentIndexChanged.connect(
-            self._sync_advanced_editors
-        )
-        self.advanced_sweep_mode.currentIndexChanged.connect(self._sync_advanced_editors)
         self._sync_advanced_editors()
         self._update_advanced_availability()
         return dialog
 
     def _refresh_advanced_detector_choices(self, options: tuple[str, ...]) -> None:
-        current = self.advanced_detector.currentData() if hasattr(self, "advanced_detector") else None
-        detectors = [
-            ("Normal peak", "NORM"),
-            ("Positive peak", "POS"),
-            ("Sample", "SAMP"),
-            ("Negative peak", "NEG"),
-            ("RMS", "RMS"),
-        ]
-        if {"016", "116"}.intersection(options):
-            detectors.extend(
-                [("Quasi-peak", "QPE"), ("CISPR average", "CAV"), ("CISPR RMS", "CRMS")]
-            )
-        if not hasattr(self, "advanced_detector"):
-            return
-        self.advanced_detector.clear()
-        for label, value in detectors:
-            self.advanced_detector.addItem(label, value)
-        index = self.advanced_detector.findData(current or "NORM")
-        self.advanced_detector.setCurrentIndex(max(index, 0))
+        if hasattr(self, "advanced_configuration_panel"):
+            self.advanced_configuration_panel.set_hardware_options(options)
 
     def _sync_advanced_editors(self) -> None:
-        self.advanced_rbw.setEnabled(self.advanced_rbw_mode.currentData() == "manual")
-        self.advanced_vbw.setEnabled(self.advanced_vbw_mode.currentData() == "manual")
-        self.advanced_attenuation.setEnabled(
-            self.advanced_attenuation_mode.currentData() == "manual"
-        )
-        self.advanced_sweep_time.setEnabled(
-            self.advanced_sweep_mode.currentData() == "manual"
-        )
+        self.advanced_configuration_panel.sync_editors()
 
     def _advanced_firmware_qualified(self) -> bool:
         protocol = self._station_settings.anritsu.advanced_spectrum
@@ -4016,34 +4341,7 @@ class AnritsuPage(QWidget):
 
     def configure_advanced_spectrum(self) -> None:
         try:
-            config = AdvancedSpectrumConfig(
-                rbw_auto=self.advanced_rbw_mode.currentData() == "auto",
-                rbw_hz=(
-                    parse_quantity(self.advanced_rbw.text(), DIMENSION_FREQUENCY).si_value
-                    if self.advanced_rbw_mode.currentData() == "manual"
-                    else None
-                ),
-                vbw_mode=str(self.advanced_vbw_mode.currentData()),
-                vbw_hz=(
-                    parse_quantity(self.advanced_vbw.text(), DIMENSION_FREQUENCY).si_value
-                    if self.advanced_vbw_mode.currentData() == "manual"
-                    else None
-                ),
-                detector=str(self.advanced_detector.currentData()),
-                attenuation_auto=self.advanced_attenuation_mode.currentData() == "auto",
-                attenuation_db=(
-                    float(self.advanced_attenuation.value())
-                    if self.advanced_attenuation_mode.currentData() == "manual"
-                    else None
-                ),
-                preamplifier_enabled=self.advanced_preamplifier.isChecked(),
-                sweep_time_auto=self.advanced_sweep_mode.currentData() == "auto",
-                sweep_time_s=(
-                    parse_quantity(self.advanced_sweep_time.text(), DIMENSION_TIME).si_value
-                    if self.advanced_sweep_mode.currentData() == "manual"
-                    else None
-                ),
-            )
+            config = self.advanced_configuration_panel.configuration()
         except Exception as exc:
             self.banner.show_message(f"Invalid advanced Spectrum settings: {exc}", severity="error")
             return
@@ -4063,38 +4361,7 @@ class AnritsuPage(QWidget):
 
     def _show_advanced_snapshot(self, snapshot: AdvancedSpectrumSnapshot) -> None:
         self._last_advanced_configuration = snapshot
-        self.advanced_rbw_mode.setCurrentIndex(
-            self.advanced_rbw_mode.findData("auto" if snapshot.rbw_auto else "manual")
-        )
-        self.advanced_rbw.setText(
-            format_quantity_auto(snapshot.rbw_hz, DIMENSION_FREQUENCY)
-        )
-        self.advanced_vbw_mode.setCurrentIndex(
-            self.advanced_vbw_mode.findData(snapshot.vbw_mode)
-        )
-        if snapshot.vbw_hz is not None:
-            self.advanced_vbw.setText(
-                format_quantity_auto(snapshot.vbw_hz, DIMENSION_FREQUENCY)
-            )
-        detector_index = self.advanced_detector.findData(snapshot.detector)
-        if detector_index >= 0:
-            self.advanced_detector.setCurrentIndex(detector_index)
-        self.advanced_attenuation_mode.setCurrentIndex(
-            self.advanced_attenuation_mode.findData(
-                "auto" if snapshot.attenuation_auto else "manual"
-            )
-        )
-        self.advanced_attenuation.setValue(round(snapshot.attenuation_db))
-        self.advanced_preamplifier.setChecked(snapshot.preamplifier_enabled)
-        self.advanced_sweep_mode.setCurrentIndex(
-            self.advanced_sweep_mode.findData(
-                "auto" if snapshot.sweep_time_auto else "manual"
-            )
-        )
-        self.advanced_sweep_time.setText(
-            format_quantity_auto(snapshot.sweep_time_s, DIMENSION_TIME)
-        )
-        self._sync_advanced_editors()
+        self.advanced_configuration_panel.load_snapshot(snapshot)
 
     def _anritsu_limit_values(self, key: str) -> tuple[object, object]:
         safety = self._station_settings.anritsu.safety
@@ -4178,9 +4445,7 @@ class AnritsuPage(QWidget):
 
     def set_settings(self, settings: StationSettings) -> None:
         self._station_settings = settings
-        self._refresh_point_choices()
-        for field in self._limit_fields.values():
-            field.set_limits(*self._anritsu_limit_values(str(field.property("limitKey"))))
+        self.configuration_panel.set_settings(settings)
         self._update_signal_generator_limits()
         self._update_advanced_availability()
         self._apply_page_state()
@@ -4349,6 +4614,18 @@ class AnritsuPage(QWidget):
         self.sg_status.style().unpolish(self.sg_status)
         self.sg_status.style().polish(self.sg_status)
         self._apply_page_state()
+
+    def signal_generator_snapshot(self) -> SignalGeneratorSnapshot:
+        """Expose the manual SG form as a read-only seed for the sweep editor."""
+
+        return SignalGeneratorSnapshot(
+            frequency_hz=parse_quantity(
+                self.sg_frequency.text(), DIMENSION_FREQUENCY
+            ).si_value,
+            power_dbm=parse_quantity(self.sg_power.text(), DIMENSION_DBM).si_value,
+            output_enabled=self._sg_output_enabled,
+            instrument_mode="PLAN_EDIT",
+        )
 
     def _update_anritsu_hardware_limits(self, options: tuple[str, ...]) -> None:
         frequency_option = frequency_option_for(options)
@@ -5128,21 +5405,7 @@ class AnritsuPage(QWidget):
 
 
 _SWEEPABLE_PARAMETERS: tuple[dict[str, str], ...] = (
-    {"device": "Keithley", "label": "Channel A · source current", "target": "keithley.A.current", "dimension": DIMENSION_CURRENT},
-    {"device": "Keithley", "label": "Channel A · source voltage", "target": "keithley.A.voltage", "dimension": DIMENSION_VOLTAGE},
-    {"device": "Keithley", "label": "Channel B · source current", "target": "keithley.B.current", "dimension": DIMENSION_CURRENT},
-    {"device": "Keithley", "label": "Channel B · source voltage", "target": "keithley.B.voltage", "dimension": DIMENSION_VOLTAGE},
-    {"device": "Rigol", "label": "CH1 · frequency", "target": "rigol.1.frequency", "dimension": DIMENSION_FREQUENCY},
-    {"device": "Rigol", "label": "CH1 · high level", "target": "rigol.1.high_level", "dimension": DIMENSION_VOLTAGE},
-    {"device": "Rigol", "label": "CH1 · low level", "target": "rigol.1.low_level", "dimension": DIMENSION_VOLTAGE},
-    {"device": "Rigol", "label": "CH2 · frequency", "target": "rigol.2.frequency", "dimension": DIMENSION_FREQUENCY},
-    {"device": "Rigol", "label": "CH2 · high level", "target": "rigol.2.high_level", "dimension": DIMENSION_VOLTAGE},
-    {"device": "Rigol", "label": "CH2 · low level", "target": "rigol.2.low_level", "dimension": DIMENSION_VOLTAGE},
-    {"device": "Anritsu SG", "label": "Signal generator · frequency", "target": "anritsu.sg.frequency", "dimension": DIMENSION_FREQUENCY},
-    {"device": "Anritsu SG", "label": "Signal generator · power", "target": "anritsu.sg.power", "dimension": DIMENSION_DBM},
-    {"device": "Anritsu Spectrum", "label": "Spectrum · start frequency", "target": "anritsu.spectrum.start_frequency", "dimension": DIMENSION_FREQUENCY},
-    {"device": "Anritsu Spectrum", "label": "Spectrum · stop frequency", "target": "anritsu.spectrum.stop_frequency", "dimension": DIMENSION_FREQUENCY},
-    {"device": "Anritsu Spectrum", "label": "Spectrum · reference level", "target": "anritsu.spectrum.reference_level", "dimension": DIMENSION_DBM},
+    legacy_ui_parameter_definitions()
 )
 
 
@@ -5215,6 +5478,36 @@ class DeviceParameterDialog(QDialog):
         super().accept()
 
 
+class SeamlessRoiCellDelegate(QStyledItemDelegate):
+    """Make ROI values edit like a spreadsheet cell, not a nested text box."""
+
+    def __init__(self, parent: QWidget | None = None) -> None:
+        super().__init__(parent)
+        self.setObjectName("seamlessRoiCellDelegate")
+
+    def createEditor(self, parent: QWidget, _option: Any, _index: Any) -> QLineEdit:
+        editor = QLineEdit(parent)
+        editor.setFrame(False)
+        editor.setContentsMargins(0, 0, 0, 0)
+        editor.setStyleSheet(
+            """
+            QLineEdit {
+                border: none;
+                border-radius: 0;
+                background: #ffffff;
+                color: #17212b;
+                padding: 0 7px;
+                selection-background-color: #cfe8ff;
+                selection-color: #17212b;
+            }
+            """
+        )
+        return editor
+
+    def updateEditorGeometry(self, editor: QWidget, option: Any, _index: Any) -> None:
+        editor.setGeometry(option.rect)
+
+
 class SweepGeneratorDialog(QDialog):
     """Dynamic interval editor with an exact point scatter preview."""
 
@@ -5246,16 +5539,74 @@ class SweepGeneratorDialog(QDialog):
         left_layout = QVBoxLayout(self.segment_panel)
         left_layout.setContentsMargins(0, 0, 6, 0)
         self.segments = QTableWidget(0, 5)
+        roi_palette = self.segments.palette()
+        roi_palette.setColor(QPalette.ColorRole.Base, QColor("#ffffff"))
+        roi_palette.setColor(QPalette.ColorRole.AlternateBase, QColor("#f7f9fc"))
+        roi_palette.setColor(QPalette.ColorRole.Text, QColor("#17212b"))
+        roi_palette.setColor(QPalette.ColorRole.Window, QColor("#ffffff"))
+        roi_palette.setColor(QPalette.ColorRole.WindowText, QColor("#17212b"))
+        roi_palette.setColor(QPalette.ColorRole.Button, QColor("#ffffff"))
+        roi_palette.setColor(QPalette.ColorRole.ButtonText, QColor("#17212b"))
+        roi_palette.setColor(QPalette.ColorRole.Highlight, QColor("#e8f3fd"))
+        roi_palette.setColor(QPalette.ColorRole.HighlightedText, QColor("#17212b"))
+        self.segments.setPalette(roi_palette)
+        self.segments.viewport().setPalette(roi_palette)
+        self.segments.viewport().setAutoFillBackground(True)
         self.segments.setHorizontalScrollBarPolicy(
             Qt.ScrollBarPolicy.ScrollBarAlwaysOff
         )
-        self.segments.setHorizontalHeaderLabels(("Start", "Stop", "Method", "Points / step", "Spacing"))
+        self.segments.setHorizontalHeaderLabels(
+            ("Start / value", "Stop", "Method", "Points / step", "Spacing")
+        )
+        self.segments.setStyleSheet(
+            """
+            QTableWidget {
+                border: 1px solid #cbd7e3;
+                border-radius: 8px;
+                background-color: #ffffff;
+                color: #17212b;
+                gridline-color: #dce4ec;
+            }
+            QTableWidget QTableCornerButton::section {
+                background-color: #f5f8fb;
+                border: none;
+                border-bottom: 1px solid #dce4ec;
+            }
+            QTableWidget::item {
+                padding: 0 7px;
+                background-color: #ffffff;
+                color: #17212b;
+            }
+            QTableWidget::item:selected {
+                background: #e8f3fd;
+                color: #17212b;
+            }
+            QHeaderView::section {
+                background-color: #f5f8fb;
+                color: #17212b;
+                border: none;
+                border-bottom: 1px solid #dce4ec;
+                padding: 6px;
+            }
+            """
+        )
+        self.segments.setEditTriggers(
+            QAbstractItemView.EditTrigger.SelectedClicked
+            | QAbstractItemView.EditTrigger.DoubleClicked
+            | QAbstractItemView.EditTrigger.EditKeyPressed
+            | QAbstractItemView.EditTrigger.AnyKeyPressed
+        )
+        self._roi_cell_delegate = SeamlessRoiCellDelegate(self.segments)
+        for column in (0, 1, 3):
+            self.segments.setItemDelegateForColumn(
+                column, self._roi_cell_delegate
+            )
         header = self.segments.horizontalHeader()
         header.setMinimumSectionSize(72)
         header.setStretchLastSection(False)
         for column in range(5):
             header.setSectionResizeMode(column, QHeaderView.ResizeMode.Fixed)
-        for column, width in ((0, 94), (1, 94), (2, 104), (3, 126), (4, 126)):
+        for column, width in ((0, 94), (1, 94), (2, 118), (3, 122), (4, 122)):
             self.segments.setColumnWidth(column, width)
         self.segments.verticalHeader().setMinimumSectionSize(34)
         self.segments.setMinimumHeight(190)
@@ -5303,8 +5654,14 @@ class SweepGeneratorDialog(QDialog):
         else:
             self.add_interval()
         self._update_responsive_layout()
+        self._connect_theme_source()
 
     def _resolved_plot_theme(self) -> str:
+        application = QApplication.instance()
+        if application is not None:
+            active = application.property("activeTheme")
+            if str(active).lower() in {"light", "dark"}:
+                return str(active).lower()
         owner: QWidget | None = self.parentWidget()
         while owner is not None:
             settings = getattr(owner, "_settings", None)
@@ -5313,6 +5670,24 @@ class SweepGeneratorDialog(QDialog):
                 return effective_theme(str(ui.get("theme", "system")))
             owner = owner.parentWidget()
         return effective_theme("system")
+
+    def _connect_theme_source(self) -> None:
+        owner: QWidget | None = self.parentWidget()
+        while owner is not None:
+            signal = getattr(owner, "theme_changed", None)
+            if signal is not None and hasattr(signal, "connect"):
+                signal.connect(self._set_plot_theme)
+                return
+            owner = owner.parentWidget()
+
+    def _set_plot_theme(self, theme: str) -> None:
+        resolved = effective_theme(theme)
+        if resolved == self.plot_theme:
+            return
+        self.plot_theme = resolved
+        self._apply_plot_theme()
+        self._set_plot_labels()
+        self._style_plot_legend()
 
     def _apply_plot_theme(self) -> None:
         background = "#ffffff" if self.plot_theme == "light" else "#101419"
@@ -5370,9 +5745,9 @@ class SweepGeneratorDialog(QDialog):
         viewport_width = self.segments.viewport().width()
         if viewport_width <= 0:
             return
-        method_width = 104
-        value_width = 126
-        spacing_width = 126
+        method_width = 118
+        value_width = 122
+        spacing_width = 122
         flexible = max(176, viewport_width - method_width - value_width - spacing_width - 2)
         start_width = flexible // 2
         stop_width = flexible - start_width
@@ -5396,33 +5771,125 @@ class SweepGeneratorDialog(QDialog):
         self.segments.insertRow(row)
         start, stop = _sweep_default(self.definition["dimension"])
         values = initial or {}
-        method_value = "Step" if "step" in values else "Points"
+        method_value = (
+            "Single value"
+            if "value" in values
+            else "Step" if "step" in values else "Points"
+        )
         point_value = str(values.get("step", values.get("points", "100")))
         for column, value in (
-            (0, str(values.get("start", start))),
+            (0, str(values.get("value", values.get("start", start)))),
             (1, str(values.get("stop", stop))),
             (3, point_value),
         ):
             self.segments.setItem(row, column, QTableWidgetItem(value))
         method = QComboBox()
-        method.addItems(("Points", "Step"))
-        method.setMinimumWidth(84)
+        method.setObjectName("roiCellCombo")
+        method.addItems(("Points", "Step", "Single value"))
+        method.setMinimumWidth(112)
         spacing = QComboBox()
+        spacing.setObjectName("roiCellCombo")
         spacing.addItems(("Linear", "Logarithmic"))
-        spacing.setMinimumWidth(108)
+        spacing.setMinimumWidth(112)
+        cell_combo_style = """
+            QComboBox#roiCellCombo {
+                border: none;
+                border-radius: 0;
+                background: #ffffff;
+                color: #17212b;
+                padding: 0 22px 0 7px;
+            }
+            QComboBox#roiCellCombo:hover { background: rgba(47, 130, 198, 18); }
+            QComboBox#roiCellCombo:disabled { color: #8a98a8; }
+            QComboBox#roiCellCombo::drop-down { border: none; width: 20px; }
+            QComboBox#roiCellCombo QAbstractItemView {
+                background: #ffffff;
+                color: #17212b;
+                selection-background-color: #e8f3fd;
+                selection-color: #17212b;
+            }
+        """
+        method.setStyleSheet(cell_combo_style)
+        spacing.setStyleSheet(cell_combo_style)
         method.setCurrentText(method_value)
         spacing.setCurrentText("Logarithmic" if values.get("spacing") == "log" else "Linear")
-        method.currentIndexChanged.connect(self._refresh_preview)
+        method.currentIndexChanged.connect(
+            lambda _index, widget=method: self._update_row_method(widget)
+        )
         spacing.currentIndexChanged.connect(self._refresh_preview)
         self.segments.setCellWidget(row, 2, method)
         self.segments.setCellWidget(row, 4, spacing)
         self.segments.blockSignals(False)
+        self._update_row_method(method)
+        self._refresh_preview()
+
+    def _update_row_method(self, method: QComboBox) -> None:
+        row = next(
+            (
+                index
+                for index in range(self.segments.rowCount())
+                if self.segments.cellWidget(index, 2) is method
+            ),
+            -1,
+        )
+        if row < 0:
+            return
+        single = method.currentText() == "Single value"
+        start_item = self.segments.item(row, 0)
+        if start_item is not None:
+            start_item.setToolTip(
+                "Exact value for one measurement"
+                if single
+                else "Inclusive start value of this interval"
+            )
+        for column, fallback in ((1, _sweep_default(self.definition["dimension"])[1]), (3, "100")):
+            item = self.segments.item(row, column)
+            if item is None:
+                continue
+            if single:
+                if item.text() != "—":
+                    item.setData(Qt.ItemDataRole.UserRole, item.text())
+                item.setText("—")
+                item.setFlags(item.flags() & ~Qt.ItemFlag.ItemIsEditable)
+                item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
+                item.setData(
+                    Qt.ItemDataRole.ForegroundRole, QColor("#8a98a8")
+                )
+                item.setToolTip("Not used by a Single value stage")
+            else:
+                stored = item.data(Qt.ItemDataRole.UserRole)
+                if item.text() == "—":
+                    item.setText(str(stored or fallback))
+                item.setFlags(item.flags() | Qt.ItemFlag.ItemIsEditable)
+                item.setTextAlignment(
+                    Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter
+                )
+                item.setData(Qt.ItemDataRole.ForegroundRole, None)
+                item.setToolTip(
+                    "Inclusive stop value"
+                    if column == 1
+                    else "Number of points or physical step"
+                )
+        spacing = self.segments.cellWidget(row, 4)
+        if isinstance(spacing, QComboBox):
+            spacing.setEnabled(not single)
         self._refresh_preview()
 
     def remove_interval(self) -> None:
         if self.segments.rowCount() > 1:
             self.segments.removeRow(self.segments.currentRow() if self.segments.currentRow() >= 0 else self.segments.rowCount() - 1)
         self._refresh_preview()
+
+    def select_interval(self, row: int | None) -> None:
+        if row is None or not 0 <= row < self.segments.rowCount():
+            return
+        self.segments.setCurrentCell(row, 0)
+        item = self.segments.item(row, 0)
+        if item is not None:
+            self.segments.scrollToItem(
+                item, QAbstractItemView.ScrollHint.PositionAtCenter
+            )
+        self.segments.setFocus()
 
     def segment_data(self) -> list[dict[str, object]]:
         result: list[dict[str, object]] = []
@@ -5434,6 +5901,9 @@ class SweepGeneratorDialog(QDialog):
             spacing = self.segments.cellWidget(row, 4)
             if not all((start, stop, value)) or not isinstance(method, QComboBox) or not isinstance(spacing, QComboBox):
                 raise ConfigurationError("Every interval needs start, stop and point data.")
+            if method.currentText() == "Single value":
+                result.append({"value": start.text().strip()})
+                continue
             raw: dict[str, object] = {
                 "start": start.text().strip(),
                 "stop": stop.text().strip(),
@@ -5448,8 +5918,19 @@ class SweepGeneratorDialog(QDialog):
 
     def _refresh_preview(self) -> None:
         try:
+            segments = self.segment_data()
+            point_count = estimate_sweep_point_count(
+                segments, self.definition["dimension"]
+            )
+            if point_count > 100_000:
+                self.plot.clear()
+                self.preview.setText(
+                    f"BLOCKER — {point_count:,} points exceed the 100,000 point "
+                    "plan limit. Reduce the point count or increase the step."
+                )
+                return
             stages = generate_sweep_stage_points(
-                self.segment_data(), self.definition["dimension"]
+                segments, self.definition["dimension"]
             )
             points = tuple(point for stage in stages for point in stage)
         except Exception as exc:
@@ -5461,22 +5942,34 @@ class SweepGeneratorDialog(QDialog):
         # always describe precisely the intervals visible in this refresh.
         palette = ("#4fa3ff", "#ef9b4b", "#73c991", "#d484d8", "#e6ce55", "#69cbd0")
         point_index = 0
+        previous_point: float | None = None
         for stage_index, stage in enumerate(stages):
             if not stage:
                 continue
             color = palette[stage_index % len(palette)]
-            x_values = list(range(point_index, point_index + len(stage)))
-            y_values = [point.si_value for point in stage]
+            stride = max(1, math.ceil(len(stage) / 2_000))
+            visible_indices = list(range(0, len(stage), stride))
+            if visible_indices[-1] != len(stage) - 1:
+                visible_indices.append(len(stage) - 1)
+            x_values = [point_index + index for index in visible_indices]
+            y_values = [stage[index].si_value for index in visible_indices]
+            # Shared boundaries are deduplicated in the execution axis. For
+            # presentation, reconnect the next stage to the preceding point so
+            # 0 → 1 followed by 1 → 0 is shown as one continuous trajectory.
+            if previous_point is not None and point_index > 0:
+                x_values.insert(0, point_index - 1)
+                y_values.insert(0, previous_point)
             self.plot.plot(
                 x_values,
                 y_values,
                 pen=pg.mkPen(color, width=1),
-                symbol="o",
+                symbol="o" if len(stage) <= 2_000 else None,
                 symbolSize=6,
                 symbolBrush=color,
                 name=f"Stage {stage_index + 1} ({len(stage):,} points)",
             )
             point_index += len(stage)
+            previous_point = stage[-1].si_value
         self._style_plot_legend()
         self.preview.setText(
             f"Generated {len(points):,} unique points • first {points[0].si_value:.12g} SI • "
@@ -5485,11 +5978,13 @@ class SweepGeneratorDialog(QDialog):
 
     def accept(self) -> None:
         try:
-            points = generate_sweep_points(self.segment_data(), self.definition["dimension"])
+            point_count = estimate_sweep_point_count(
+                self.segment_data(), self.definition["dimension"]
+            )
         except Exception as exc:
             QMessageBox.warning(self, "Point generator", str(exc))
             return
-        if len(points) > 100_000:
+        if point_count > 100_000:
             QMessageBox.warning(self, "Point generator", "The generator exceeds the 100,000 point safety preview limit.")
             return
         super().accept()
@@ -5663,6 +6158,129 @@ class FixedValueDialog(QDialog):
         super().accept()
 
 
+class AnritsuAcquisitionEditorDialog(QDialog):
+    """Edit trace and reference-processing policy without touching VISA."""
+
+    operations = (
+        ("None — raw spectrum", "none"),
+        ("Difference in dB", "difference_db"),
+        ("Linear ratio", "ratio_linear"),
+        ("Add power", "add_power"),
+        ("Subtract power", "subtract_power"),
+        ("Multiply linear", "multiply_linear"),
+    )
+
+    def __init__(
+        self,
+        node: RecipeNode,
+        parent: QWidget | None = None,
+    ) -> None:
+        super().__init__(parent)
+        self._reference_only = node.type == "acquire_reference"
+        self.setWindowTitle(
+            "Anritsu reference acquisition"
+            if self._reference_only
+            else "Anritsu spectrum acquisition"
+        )
+        self.setMinimumSize(480, 300)
+        layout = QVBoxLayout(self)
+        heading = QLabel(
+            "Reference acquisition"
+            if self._reference_only
+            else "Spectrum and reference processing"
+        )
+        heading.setObjectName("pageTitle")
+        layout.addWidget(heading)
+        note = QLabel(
+            "This editor changes only the declarative plan. The selected trace "
+            "and storage policy are validated again during preflight."
+        )
+        note.setWordWrap(True)
+        note.setObjectName("muted")
+        layout.addWidget(note)
+        form = QFormLayout()
+        self.trace = QComboBox()
+        self.trace.addItems(("TRAC1",))
+        self.trace.setCurrentText(str(node.data.get("trace", "TRAC1")))
+        form.addRow("Trace", self.trace)
+        self.average_count = QSpinBox()
+        self.average_count.setRange(1, 9999)
+        self.average_count.setValue(int(node.data.get("average_count", 1)))
+        self.average_count.setToolTip(
+            "Complete spectra are averaged in linear mW, never directly in dBm."
+        )
+        form.addRow("Average complete spectra", self.average_count)
+        self.reference_operation = QComboBox()
+        for label, value in self.operations:
+            self.reference_operation.addItem(label, value)
+        operation = str(node.data.get("reference_operation", "none"))
+        index = self.reference_operation.findData(operation)
+        self.reference_operation.setCurrentIndex(index if index >= 0 else 0)
+        self.store_raw = QCheckBox("Store raw spectrum")
+        self.store_raw.setChecked(bool(node.data.get("store_raw", True)))
+        self.store_processed = QCheckBox("Store processed spectrum")
+        self.store_processed.setChecked(
+            bool(node.data.get("store_processed", operation != "none"))
+        )
+        if not self._reference_only:
+            form.addRow("Reference operation", self.reference_operation)
+            form.addRow("", self.store_raw)
+            form.addRow("", self.store_processed)
+        layout.addLayout(form)
+        layout.addStretch(1)
+        buttons = QDialogButtonBox(
+            QDialogButtonBox.StandardButton.Cancel
+            | QDialogButtonBox.StandardButton.Apply
+        )
+        buttons.button(QDialogButtonBox.StandardButton.Apply).setText(
+            "Apply acquisition settings"
+        )
+        buttons.accepted.connect(self.accept)
+        buttons.rejected.connect(self.reject)
+        layout.addWidget(buttons)
+        self.reference_operation.currentIndexChanged.connect(
+            self._operation_changed
+        )
+        self._operation_changed()
+
+    def _operation_changed(self) -> None:
+        processed = self.reference_operation.currentData() != "none"
+        self.store_processed.setEnabled(processed)
+        if not processed:
+            self.store_processed.setChecked(False)
+
+    def node_fields(self) -> dict[str, object]:
+        fields: dict[str, object] = {
+            "trace": self.trace.currentText(),
+            "average_count": self.average_count.value(),
+        }
+        if not self._reference_only:
+            fields.update(
+                {
+                    "reference_operation": str(
+                        self.reference_operation.currentData()
+                    ),
+                    "store_raw": self.store_raw.isChecked(),
+                    "store_processed": self.store_processed.isChecked(),
+                }
+            )
+        return fields
+
+    def accept(self) -> None:
+        if (
+            not self._reference_only
+            and not self.store_raw.isChecked()
+            and not self.store_processed.isChecked()
+        ):
+            QMessageBox.warning(
+                self,
+                "Anritsu acquisition",
+                "Store at least the raw or processed spectrum.",
+            )
+            return
+        super().accept()
+
+
 class CommentEditorDialog(QDialog):
     """Focused editor for human-readable notes embedded in a sweep tree."""
 
@@ -5761,6 +6379,849 @@ class CommentEditorDialog(QDialog):
         self.counter.setText(f"{count:,} characters")
         save = self.buttons.button(QDialogButtonBox.StandardButton.Save)
         save.setEnabled(bool(self.comment_text()))
+
+
+class RigolNodeEditorDialog(QDialog):
+    """Offline carrier/output editor with one optional local sweep axis."""
+
+    def __init__(
+        self,
+        parent: QWidget | None = None,
+        *,
+        settings: StationSettings | None = None,
+        snapshot: RigolConfigurationSnapshot | None = None,
+        parameter_actions: list[dict[str, object]] | None = None,
+        channel: int = 1,
+        output_policy: str = "unchanged",
+    ) -> None:
+        super().__init__(parent)
+        snapshot = snapshot or RigolConfigurationSnapshot(channel=channel)
+        self._settings = settings
+        self._working_segments: dict[str, list[dict[str, object]]] = {}
+        self.plan_mode = True
+        self.hardware_actions_enabled = False
+        self.setWindowTitle("Rigol DG1032Z — configure sweep node")
+        self.resize(780, 640)
+        layout = QVBoxLayout(self)
+        heading = QLabel("Rigol DG1032Z · Carrier and output")
+        heading.setObjectName("pageTitle")
+        layout.addWidget(heading)
+        description = QLabel(
+            "The complete carrier snapshot is stored in the recipe. Select one of "
+            "Frequency, HighL or LowL as a local ROI axis when required."
+        )
+        description.setWordWrap(True)
+        description.setObjectName("recipeHint")
+        layout.addWidget(description)
+        content = QSplitter(Qt.Orientation.Horizontal)
+        carrier = QFrame()
+        form = QFormLayout(carrier)
+        self.channel = QComboBox()
+        self.channel.addItem("Channel 1", 1)
+        self.channel.addItem("Channel 2", 2)
+        channel_index = self.channel.findData(snapshot.channel)
+        self.channel.setCurrentIndex(channel_index if channel_index >= 0 else 0)
+        form.addRow("Channel", self.channel)
+        self.waveform = QComboBox()
+        self.waveform.addItems(("SIN", "SQU", "RAMP", "PULS", "NOIS", "DC"))
+        self.waveform.setCurrentText(snapshot.waveform)
+        self.frequency = _line(snapshot.frequency)
+        self.high_level = _line(snapshot.high_level)
+        self.low_level = _line(snapshot.low_level)
+        self.output_load = _line(snapshot.output_load)
+        self.phase = _line(snapshot.phase_deg)
+        self.duty = _line(snapshot.square_duty_percent)
+        self.symmetry = _line(snapshot.ramp_symmetry_percent)
+        self.pulse_width = _line(snapshot.pulse_width)
+        self.pulse_leading = _line(snapshot.pulse_leading)
+        self.pulse_trailing = _line(snapshot.pulse_trailing)
+        self.dut_impedance = _line(snapshot.dut_min_impedance)
+        self.output_polarity = QComboBox()
+        self.output_polarity.addItems(("NORM", "INV"))
+        self.output_polarity.setCurrentText(snapshot.output_polarity)
+        self.output_mode = QComboBox()
+        self.output_mode.addItems(("NORM", "GAT"))
+        self.output_mode.setCurrentText(snapshot.output_mode)
+        self.gate_polarity = QComboBox()
+        self.gate_polarity.addItems(("NORM", "INV"))
+        self.gate_polarity.setCurrentText(snapshot.gate_polarity)
+        self.sync_enabled = QCheckBox("SYNC enabled")
+        self.sync_enabled.setChecked(snapshot.sync_enabled)
+        self.sync_polarity = QComboBox()
+        self.sync_polarity.addItems(("NORM", "INV"))
+        self.sync_polarity.setCurrentText(snapshot.sync_polarity)
+        self.sync_delay = _line(snapshot.sync_delay)
+        for label, widget in (
+            ("Waveform", self.waveform),
+            ("Frequency", self.frequency),
+            ("HighL", self.high_level),
+            ("LowL", self.low_level),
+            ("Load", self.output_load),
+            ("Phase [deg]", self.phase),
+            ("Square duty [%]", self.duty),
+            ("Ramp symmetry [%]", self.symmetry),
+            ("Pulse width", self.pulse_width),
+            ("Pulse leading edge", self.pulse_leading),
+            ("Pulse trailing edge", self.pulse_trailing),
+            ("Minimum DUT impedance", self.dut_impedance),
+            ("Output polarity", self.output_polarity),
+            ("Output mode", self.output_mode),
+            ("Gate polarity", self.gate_polarity),
+            ("", self.sync_enabled),
+            ("SYNC polarity", self.sync_polarity),
+            ("SYNC delay", self.sync_delay),
+        ):
+            form.addRow(label, widget)
+        content.addWidget(carrier)
+        actions_frame = QFrame()
+        actions_layout = QFormLayout(actions_frame)
+        self.parameter_selectors: dict[str, QComboBox] = {}
+        for parameter_id, label in (
+            ("carrier.frequency", "Frequency"),
+            ("carrier.high_level", "HighL"),
+            ("carrier.low_level", "LowL"),
+        ):
+            selector = QComboBox()
+            selector.addItem("Set fixed", "set")
+            selector.addItem("Sweep — ROI required", "sweep")
+            selector.currentIndexChanged.connect(self._selection_changed)
+            self.parameter_selectors[parameter_id] = selector
+            actions_layout.addRow(label, selector)
+        self.open_roi_button = QPushButton("Edit selected ROI…")
+        self.open_roi_button.setEnabled(False)
+        self.open_roi_button.clicked.connect(self._open_roi)
+        actions_layout.addRow(self.open_roi_button)
+        self.output_policy = QComboBox()
+        self.output_policy.addItem("Leave OUTPUT unchanged", "unchanged")
+        self.output_policy.addItem("Switch OUTPUT ON", "on")
+        self.output_policy.addItem("Switch OUTPUT OFF", "off")
+        output_index = self.output_policy.findData(output_policy)
+        self.output_policy.setCurrentIndex(output_index if output_index >= 0 else 0)
+        actions_layout.addRow("Output", self.output_policy)
+        content.addWidget(actions_frame)
+        content.setStretchFactor(0, 3)
+        content.setStretchFactor(1, 2)
+        layout.addWidget(content, 1)
+        note = QLabel(
+            "Plan editing is offline. Hardware sweep/modulation/burst stay manual-only; "
+            "recipe axes use validated point updates with readback."
+        )
+        note.setWordWrap(True)
+        note.setObjectName("recipeHint")
+        layout.addWidget(note)
+        buttons = QDialogButtonBox(
+            QDialogButtonBox.StandardButton.Cancel
+            | QDialogButtonBox.StandardButton.Ok
+        )
+        buttons.button(QDialogButtonBox.StandardButton.Ok).setText(
+            "Apply Rigol configuration"
+        )
+        buttons.accepted.connect(self.accept)
+        buttons.rejected.connect(self.reject)
+        layout.addWidget(buttons)
+        self.load_plan_actions(parameter_actions or [])
+        self._selection_changed()
+
+    def selected_channel(self) -> int:
+        return int(self.channel.currentData())
+
+    def selected_output_policy(self) -> str:
+        return str(self.output_policy.currentData())
+
+    def configuration_snapshot(self) -> RigolConfigurationSnapshot:
+        return RigolConfigurationSnapshot(
+            channel=self.selected_channel(),
+            waveform=self.waveform.currentText(),
+            frequency=self.frequency.text().strip(),
+            high_level=self.high_level.text().strip(),
+            low_level=self.low_level.text().strip(),
+            output_load=self.output_load.text().strip(),
+            phase_deg=self.phase.text().strip(),
+            square_duty_percent=self.duty.text().strip(),
+            ramp_symmetry_percent=self.symmetry.text().strip(),
+            pulse_width=self.pulse_width.text().strip(),
+            pulse_leading=self.pulse_leading.text().strip(),
+            pulse_trailing=self.pulse_trailing.text().strip(),
+            dut_min_impedance=self.dut_impedance.text().strip(),
+            output_polarity=self.output_polarity.currentText(),
+            output_mode=self.output_mode.currentText(),
+            gate_polarity=self.gate_polarity.currentText(),
+            sync_enabled=self.sync_enabled.isChecked(),
+            sync_polarity=self.sync_polarity.currentText(),
+            sync_delay=self.sync_delay.text().strip(),
+        )
+
+    def planned_parameter_actions(self) -> list[dict[str, object]]:
+        values = {
+            "carrier.frequency": self.frequency.text().strip(),
+            "carrier.high_level": self.high_level.text().strip(),
+            "carrier.low_level": self.low_level.text().strip(),
+        }
+        result: list[dict[str, object]] = []
+        for parameter_id, selector in self.parameter_selectors.items():
+            action: dict[str, object] = {
+                "parameter_id": parameter_id,
+                "mode": str(selector.currentData()),
+                "value": values[parameter_id],
+            }
+            if action["mode"] == "sweep" and parameter_id in self._working_segments:
+                action["segments"] = [
+                    dict(segment)
+                    for segment in self._working_segments[parameter_id]
+                ]
+            result.append(action)
+        return result
+
+    def load_plan_actions(self, actions: list[dict[str, object]]) -> None:
+        for action in actions:
+            parameter_id = str(action.get("parameter_id", ""))
+            selector = self.parameter_selectors.get(parameter_id)
+            if selector is None:
+                continue
+            index = selector.findData(str(action.get("mode", "set")))
+            if index >= 0:
+                selector.setCurrentIndex(index)
+            segments = action.get("segments")
+            if isinstance(segments, list):
+                self._working_segments[parameter_id] = [
+                    dict(segment)
+                    for segment in segments
+                    if isinstance(segment, dict)
+                ]
+
+    def _selected_sweep_parameter(self) -> str | None:
+        selected = [
+            parameter_id
+            for parameter_id, selector in self.parameter_selectors.items()
+            if selector.currentData() == "sweep"
+        ]
+        return selected[0] if len(selected) == 1 else None
+
+    def _selection_changed(self, *_args: object) -> None:
+        self.open_roi_button.setEnabled(
+            self._selected_sweep_parameter() is not None
+        )
+
+    def _open_roi(self) -> None:
+        parameter_id = self._selected_sweep_parameter()
+        if parameter_id is None:
+            return
+        dimension = (
+            DIMENSION_FREQUENCY
+            if parameter_id == "carrier.frequency"
+            else DIMENSION_VOLTAGE
+        )
+        labels = {
+            "carrier.frequency": "Carrier frequency",
+            "carrier.high_level": "High level",
+            "carrier.low_level": "Low level",
+        }
+        dialog = SweepGeneratorDialog(
+            {
+                "device": "Rigol",
+                "label": labels[parameter_id],
+                "target": (
+                    f"rigol.{self.selected_channel()}."
+                    f"{parameter_id.removeprefix('carrier.')}"
+                ),
+                "dimension": dimension,
+            },
+            self,
+            initial_segments=self._working_segments.get(parameter_id),
+        )
+        if dialog.exec() == QDialog.DialogCode.Accepted:
+            self._working_segments[parameter_id] = dialog.segment_data()
+
+    def accept(self) -> None:
+        sweeps = [
+            action
+            for action in self.planned_parameter_actions()
+            if action["mode"] == "sweep"
+        ]
+        if len(sweeps) > 1:
+            QMessageBox.warning(
+                self, "Rigol node", "One Rigol node supports one local sweep axis."
+            )
+            return
+        if sweeps and "segments" not in sweeps[0]:
+            QMessageBox.warning(
+                self, "Rigol node", "Define ROI for the selected sweep parameter."
+            )
+            return
+        snapshot = self.configuration_snapshot()
+        if self._settings is not None:
+            try:
+                config = RigolChannelConfig(
+                    channel=snapshot.channel,
+                    waveform=snapshot.waveform,
+                    frequency_hz=parse_quantity(
+                        snapshot.frequency, DIMENSION_FREQUENCY
+                    ).si_value,
+                    high_level_v=parse_quantity(
+                        snapshot.high_level, DIMENSION_VOLTAGE
+                    ).si_value,
+                    low_level_v=parse_quantity(
+                        snapshot.low_level, DIMENSION_VOLTAGE
+                    ).si_value,
+                    output_load=snapshot.output_load,
+                    phase_deg=float(snapshot.phase_deg.replace(",", ".")),
+                    dut_min_impedance_ohm=parse_quantity(
+                        snapshot.dut_min_impedance, DIMENSION_RESISTANCE
+                    ).si_value,
+                )
+                validate_rigol_waveform(
+                    channel=self._settings.rigol.safety.channels[
+                        str(snapshot.channel)
+                    ],
+                    safety=self._settings.rigol.safety,
+                    waveform=config.waveform,
+                    frequency=config.frequency_hz,
+                    high_level=config.high_level_v,
+                    low_level=config.low_level_v,
+                    output_load=config.output_load,
+                    dut_min_impedance=config.dut_min_impedance_ohm,
+                )
+                sync_delay_s = parse_quantity(
+                    snapshot.sync_delay, DIMENSION_TIME
+                ).si_value
+                if not 0 <= sync_delay_s <= 10:
+                    raise ConfigurationError(
+                        "Rigol SYNC delay must be in the range 0..10 s."
+                    )
+            except Exception as exc:
+                QMessageBox.warning(self, "Rigol configuration", str(exc))
+                return
+        super().accept()
+
+
+class AnritsuNodeEditorDialog(QDialog):
+    """Offline Anritsu spectrum DeviceNode editor using the shared panel."""
+
+    parameter_specs = (
+        ("spectrum.start_frequency", "Start frequency", True),
+        ("spectrum.stop_frequency", "Stop frequency", True),
+        ("spectrum.reference_level", "Reference level", True),
+        ("spectrum.points", "Trace points", False),
+        ("advanced.rbw_mode", "RBW mode", False),
+        ("advanced.rbw", "Resolution bandwidth", False),
+        ("advanced.vbw_mode", "VBW mode", False),
+        ("advanced.vbw", "Video bandwidth", False),
+        ("advanced.detector", "Detector", False),
+        ("advanced.attenuation_mode", "RF attenuation mode", False),
+        ("advanced.attenuation", "RF attenuation", False),
+        ("advanced.preamplifier_enabled", "Preamplifier", False),
+        ("advanced.sweep_time_mode", "Sweep-time mode", False),
+        ("advanced.sweep_time", "Sweep time", False),
+    )
+
+    def __init__(
+        self,
+        settings: StationSettings,
+        parent: QWidget | None = None,
+        *,
+        snapshot: AnritsuConfigurationSnapshot | None = None,
+    ) -> None:
+        super().__init__(parent)
+        self.plan_mode = True
+        self.hardware_actions_enabled = False
+        self._working_segments: dict[str, list[dict[str, object]]] = {}
+        self.setWindowTitle("Anritsu MS2830A — configure sweep node")
+        self.resize(1180, 760)
+        self.setMinimumSize(680, 480)
+        layout = QVBoxLayout(self)
+        heading = QLabel("Anritsu MS2830A · Spectrum analyser")
+        heading.setObjectName("pageTitle")
+        layout.addWidget(heading)
+        self.content_splitter = QSplitter(Qt.Orientation.Horizontal)
+        self.content_splitter.setChildrenCollapsible(False)
+        left = QFrame()
+        left.setObjectName("recipeEditorParameters")
+        left_layout = QVBoxLayout(left)
+        parameter_tabs = QTabWidget()
+        self.configuration_panel = AnritsuSpectrumConfigurationPanel(
+            settings, parameter_tabs, plan_mode=True
+        )
+        self.configuration_panel.frequency_representation.setCurrentIndex(
+            self.configuration_panel.frequency_representation.findData("start_stop")
+        )
+        self.configuration_panel.frequency_representation.setEnabled(False)
+        if snapshot is not None:
+            self.configuration_panel.load_snapshot(snapshot)
+        self.advanced_panel = AnritsuAdvancedSpectrumPanel(parameter_tabs)
+        self.advanced_panel.preamplifier.setEnabled(True)
+        self.advanced_panel.preamplifier.setToolTip(
+            "The selected state is validated against detected Anritsu hardware "
+            "options before execution."
+        )
+        parameter_tabs.addTab(self.configuration_panel, "Spectrum setup")
+        parameter_tabs.addTab(self.advanced_panel, "Bandwidth & input path")
+        left_layout.addWidget(parameter_tabs)
+        self.content_splitter.addWidget(left)
+        right = QFrame()
+        right.setObjectName("recipeEditorParameters")
+        right_layout = QGridLayout(right)
+        title = QLabel("Select what this node controls")
+        title.setObjectName("sectionTitle")
+        right_layout.addWidget(title, 0, 0, 1, 2)
+        self.parameter_selectors: dict[str, QComboBox] = {}
+        for row, (parameter_id, label, sweepable) in enumerate(
+            self.parameter_specs, start=1
+        ):
+            right_layout.addWidget(QLabel(label), row, 0)
+            selector = QComboBox()
+            selector.addItem("Bez zmian", "unchanged")
+            selector.addItem("Ustaw", "set")
+            if sweepable:
+                selector.addItem("Sweep — ROI wymagane", "sweep")
+            selector.currentIndexChanged.connect(self._selection_changed)
+            self.parameter_selectors[parameter_id] = selector
+            right_layout.addWidget(selector, row, 1)
+        operation_row = len(self.parameter_specs) + 1
+        self.acquire_single = QCheckBox("Acquire single spectrum at this tree position")
+        self.acquire_single.setChecked(False)
+        self.acquire_single.setVisible(False)
+        right_layout.addWidget(self.acquire_single, operation_row, 0, 1, 2)
+        self.trace = QComboBox()
+        self.trace.addItems(("TRAC1",))
+        self.trace_label = QLabel("Trace")
+        self.trace_label.setVisible(False)
+        self.trace.setVisible(False)
+        right_layout.addWidget(self.trace_label, operation_row + 1, 0)
+        right_layout.addWidget(self.trace, operation_row + 1, 1)
+        self.open_roi_button = QPushButton("Przejdź do ROI…")
+        self.open_roi_button.setEnabled(False)
+        self.open_roi_button.clicked.connect(self._open_roi)
+        right_layout.addWidget(
+            self.open_roi_button, operation_row + 2, 0, 1, 2
+        )
+        note = QLabel(
+            "Only selected parameters are stored. Unselected values remain exactly "
+            "as currently configured in the Anritsu module. Spectrum acquisition "
+            "is a separate Acquire spectrum once block placed inside the loop."
+        )
+        note.setObjectName("recipeHint")
+        note.setWordWrap(True)
+        right_layout.addWidget(note, operation_row + 3, 0, 1, 2)
+        right_layout.setRowStretch(operation_row + 4, 1)
+        self.content_splitter.addWidget(right)
+        self.content_splitter.setSizes([570, 390])
+        layout.addWidget(self.content_splitter, 1)
+        buttons = QDialogButtonBox(
+            QDialogButtonBox.StandardButton.Cancel
+            | QDialogButtonBox.StandardButton.Apply
+        )
+        buttons.button(QDialogButtonBox.StandardButton.Apply).setText(
+            "Apply Anritsu node"
+        )
+        buttons.accepted.connect(self.accept)
+        buttons.rejected.connect(self.reject)
+        layout.addWidget(buttons)
+
+    def resizeEvent(self, event: object) -> None:
+        super().resizeEvent(event)  # type: ignore[arg-type]
+        orientation = (
+            Qt.Orientation.Vertical
+            if self.width() < 900
+            else Qt.Orientation.Horizontal
+        )
+        if self.content_splitter.orientation() != orientation:
+            self.content_splitter.setOrientation(orientation)
+            self.content_splitter.setSizes(
+                [max(260, self.height() // 2), max(220, self.height() // 2)]
+                if orientation == Qt.Orientation.Vertical
+                else [570, 390]
+            )
+
+    def _parameter_value(self, parameter_id: str) -> str:
+        panel = self.configuration_panel
+        advanced = self.advanced_panel
+        return {
+            "spectrum.start_frequency": panel.start.text().strip(),
+            "spectrum.stop_frequency": panel.stop.text().strip(),
+            "spectrum.reference_level": panel.reference.text().strip(),
+            "spectrum.points": str(panel.points.currentData()),
+            "advanced.rbw_mode": str(advanced.rbw_mode.currentData()),
+            "advanced.rbw": advanced.rbw.text().strip(),
+            "advanced.vbw_mode": str(advanced.vbw_mode.currentData()),
+            "advanced.vbw": advanced.vbw.text().strip(),
+            "advanced.detector": str(advanced.detector.currentData()),
+            "advanced.attenuation_mode": str(
+                advanced.attenuation_mode.currentData()
+            ),
+            "advanced.attenuation": f"{advanced.attenuation.value()} dB",
+            "advanced.preamplifier_enabled": (
+                "true" if advanced.preamplifier.isChecked() else "false"
+            ),
+            "advanced.sweep_time_mode": str(
+                advanced.sweep_time_mode.currentData()
+            ),
+            "advanced.sweep_time": advanced.sweep_time.text().strip(),
+        }[parameter_id]
+
+    @staticmethod
+    def _roi_definition(parameter_id: str, label: str) -> dict[str, str]:
+        dimensions = {
+            "spectrum.start_frequency": DIMENSION_FREQUENCY,
+            "spectrum.stop_frequency": DIMENSION_FREQUENCY,
+            "spectrum.reference_level": DIMENSION_DBM,
+        }
+        if parameter_id not in dimensions:
+            raise ConfigurationError(
+                f"Anritsu parameter {parameter_id!r} cannot be a sweep axis."
+            )
+        return {
+            "device": "Anritsu Spectrum",
+            "label": f"Spectrum · {label.lower()}",
+            "target": f"anritsu.{parameter_id}",
+            "dimension": dimensions[parameter_id],
+        }
+
+    def _selected_sweep_parameter(self) -> str | None:
+        selected = [
+            parameter_id
+            for parameter_id, selector in self.parameter_selectors.items()
+            if selector.currentData() == "sweep"
+        ]
+        return selected[0] if len(selected) == 1 else None
+
+    def _selection_changed(self) -> None:
+        self.open_roi_button.setEnabled(
+            self._selected_sweep_parameter() is not None
+        )
+
+    def _open_roi(self) -> None:
+        parameter_id = self._selected_sweep_parameter()
+        if parameter_id is None:
+            return
+        label = next(
+            label
+            for candidate, label, _sweepable in self.parameter_specs
+            if candidate == parameter_id
+        )
+        dialog = SweepGeneratorDialog(
+            self._roi_definition(parameter_id, label),
+            self,
+            initial_segments=self._working_segments.get(parameter_id),
+        )
+        if dialog.exec() == QDialog.DialogCode.Accepted:
+            self._working_segments[parameter_id] = dialog.segment_data()
+
+    def planned_parameter_actions(self) -> list[dict[str, object]]:
+        actions: list[dict[str, object]] = []
+        for parameter_id, selector in self.parameter_selectors.items():
+            mode = str(selector.currentData())
+            if mode == "unchanged":
+                continue
+            action: dict[str, object] = {
+                "parameter_id": parameter_id,
+                "mode": mode,
+                "value": self._parameter_value(parameter_id),
+            }
+            if mode == "sweep" and parameter_id in self._working_segments:
+                action["segments"] = [
+                    dict(segment)
+                    for segment in self._working_segments[parameter_id]
+                ]
+            actions.append(action)
+        return actions
+
+    def load_plan_actions(
+        self,
+        actions: list[dict[str, object]],
+        *,
+        acquire_single: bool,
+        trace: str,
+    ) -> None:
+        for action in actions:
+            parameter_id = str(action.get("parameter_id", ""))
+            selector = self.parameter_selectors.get(parameter_id)
+            if selector is None:
+                continue
+            self._load_parameter_value(
+                parameter_id, str(action.get("value", ""))
+            )
+            index = selector.findData(str(action.get("mode", "unchanged")))
+            if index >= 0:
+                selector.setCurrentIndex(index)
+            segments = action.get("segments")
+            if isinstance(segments, list):
+                self._working_segments[parameter_id] = [
+                    dict(segment)
+                    for segment in segments
+                    if isinstance(segment, dict)
+                ]
+        self.acquire_single.setChecked(acquire_single)
+        trace_index = self.trace.findText(trace)
+        if trace_index >= 0:
+            self.trace.setCurrentIndex(trace_index)
+        self._selection_changed()
+
+    def _load_parameter_value(self, parameter_id: str, value: str) -> None:
+        panel = self.configuration_panel
+        advanced = self.advanced_panel
+        line_edits = {
+            "spectrum.start_frequency": panel.start,
+            "spectrum.stop_frequency": panel.stop,
+            "spectrum.reference_level": panel.reference,
+            "advanced.rbw": advanced.rbw,
+            "advanced.vbw": advanced.vbw,
+            "advanced.sweep_time": advanced.sweep_time,
+        }
+        if parameter_id in line_edits:
+            line_edits[parameter_id].setText(value)
+            return
+        combos = {
+            "advanced.rbw_mode": advanced.rbw_mode,
+            "advanced.vbw_mode": advanced.vbw_mode,
+            "advanced.detector": advanced.detector,
+            "advanced.attenuation_mode": advanced.attenuation_mode,
+            "advanced.sweep_time_mode": advanced.sweep_time_mode,
+        }
+        if parameter_id in combos:
+            index = combos[parameter_id].findData(value)
+            if index >= 0:
+                combos[parameter_id].setCurrentIndex(index)
+            return
+        if parameter_id == "spectrum.points":
+            try:
+                index = panel.points.findData(int(value))
+            except ValueError:
+                index = -1
+            if index >= 0:
+                panel.points.setCurrentIndex(index)
+            return
+        if parameter_id == "advanced.attenuation":
+            try:
+                parsed = parse_quantity(value, "dimensionless", require_unit=False)
+                advanced.attenuation.setValue(round(parsed.si_value))
+            except (ConfigurationError, ValueError):
+                try:
+                    advanced.attenuation.setValue(
+                        round(float(value.lower().replace("db", "").strip()))
+                    )
+                except ValueError:
+                    pass
+            return
+        if parameter_id == "advanced.preamplifier_enabled":
+            advanced.preamplifier.setChecked(value.strip().lower() == "true")
+
+    def accept(self) -> None:
+        actions = self.planned_parameter_actions()
+        action_by_parameter = {
+            str(action["parameter_id"]): action for action in actions
+        }
+        for mode_parameter, value_parameter in (
+            ("advanced.rbw_mode", "advanced.rbw"),
+            ("advanced.vbw_mode", "advanced.vbw"),
+            ("advanced.attenuation_mode", "advanced.attenuation"),
+            ("advanced.sweep_time_mode", "advanced.sweep_time"),
+        ):
+            mode_action = action_by_parameter.get(mode_parameter)
+            value_action = action_by_parameter.get(value_parameter)
+            manual = (
+                mode_action is not None
+                and str(mode_action.get("value", "")).lower() == "manual"
+            )
+            if manual != (value_action is not None):
+                QMessageBox.warning(
+                    self,
+                    "Anritsu node",
+                    f"{mode_parameter}='manual' and {value_parameter} "
+                    "must be selected together.",
+                )
+                return
+        sweep_actions = [action for action in actions if action["mode"] == "sweep"]
+        if len(sweep_actions) > 1:
+            QMessageBox.warning(
+                self, "Anritsu node", "One Anritsu node supports one sweep axis."
+            )
+            return
+        if any("segments" not in action for action in sweep_actions):
+            QMessageBox.warning(
+                self, "Anritsu node", "Define ROI for the selected sweep parameter."
+            )
+            return
+        if not actions and not self.acquire_single.isChecked():
+            QMessageBox.information(
+                self, "Anritsu node", "Select a parameter or acquisition operation."
+            )
+            return
+        super().accept()
+
+
+class AnritsuSignalGeneratorNodeEditorDialog(QDialog):
+    """Offline editor for an Anritsu SG DeviceNode and its single local ROI."""
+
+    parameter_specs = (
+        ("sg.frequency", "RF frequency", DIMENSION_FREQUENCY),
+        ("sg.power", "RF power", DIMENSION_DBM),
+    )
+
+    def __init__(
+        self,
+        parent: QWidget | None = None,
+        *,
+        frequency: str = "1 GHz",
+        power: str = "-30 dBm",
+        parameter_actions: list[dict[str, object]] | None = None,
+    ) -> None:
+        super().__init__(parent)
+        self.setWindowTitle("Anritsu MS2830A — signal generator sweep node")
+        self.resize(620, 420)
+        self.setMinimumSize(520, 360)
+        self._working_segments: dict[str, list[dict[str, object]]] = {}
+        layout = QVBoxLayout(self)
+        heading = QLabel("Anritsu MS2830A · Signal generator")
+        heading.setObjectName("pageTitle")
+        layout.addWidget(heading)
+        form = QGridLayout()
+        self.frequency = QLineEdit(frequency)
+        self.power = QLineEdit(power)
+        self.parameter_selectors: dict[str, QComboBox] = {}
+        for row, (parameter_id, label, _dimension) in enumerate(
+            self.parameter_specs
+        ):
+            field = self.frequency if parameter_id == "sg.frequency" else self.power
+            selector = QComboBox()
+            selector.addItem("Bez zmian", "unchanged")
+            selector.addItem("Ustaw", "set")
+            selector.addItem("Sweep — ROI wymagane", "sweep")
+            selector.currentIndexChanged.connect(self._selection_changed)
+            self.parameter_selectors[parameter_id] = selector
+            form.addWidget(QLabel(label), row, 0)
+            form.addWidget(field, row, 1)
+            form.addWidget(selector, row, 2)
+        layout.addLayout(form)
+        self.open_roi_button = QPushButton("Edytuj ROI…")
+        self.open_roi_button.setEnabled(False)
+        self.open_roi_button.clicked.connect(self._open_roi)
+        layout.addWidget(self.open_roi_button)
+        note = QLabel(
+            "Konfiguracja SG przy każdym punkcie pozostawia RF OFF. "
+            "Włączenie RF wymaga osobnych, jawnych kroków ARM i OUTPUT ON "
+            "wewnątrz pętli oraz przechodzi pełny preflight bezpieczeństwa."
+        )
+        note.setObjectName("recipeHint")
+        note.setWordWrap(True)
+        layout.addWidget(note)
+        layout.addStretch(1)
+        buttons = QDialogButtonBox(
+            QDialogButtonBox.StandardButton.Cancel
+            | QDialogButtonBox.StandardButton.Apply
+        )
+        buttons.button(QDialogButtonBox.StandardButton.Apply).setText(
+            "Apply Anritsu SG node"
+        )
+        buttons.accepted.connect(self.accept)
+        buttons.rejected.connect(self.reject)
+        layout.addWidget(buttons)
+        self.load_plan_actions(parameter_actions or [])
+
+    def _selected_sweep_parameter(self) -> str | None:
+        selected = [
+            parameter_id
+            for parameter_id, selector in self.parameter_selectors.items()
+            if selector.currentData() == "sweep"
+        ]
+        return selected[0] if len(selected) == 1 else None
+
+    def _selection_changed(self) -> None:
+        self.open_roi_button.setEnabled(
+            self._selected_sweep_parameter() is not None
+        )
+
+    def _open_roi(self) -> None:
+        parameter_id = self._selected_sweep_parameter()
+        if parameter_id is None:
+            return
+        label, dimension = next(
+            (label, dimension)
+            for candidate, label, dimension in self.parameter_specs
+            if candidate == parameter_id
+        )
+        dialog = SweepGeneratorDialog(
+            {
+                "device": "Anritsu SG",
+                "label": f"Signal generator · {label.lower()}",
+                "target": f"anritsu.{parameter_id}",
+                "dimension": dimension,
+            },
+            self,
+            initial_segments=self._working_segments.get(parameter_id),
+        )
+        if dialog.exec() == QDialog.DialogCode.Accepted:
+            self._working_segments[parameter_id] = dialog.segment_data()
+
+    def load_plan_actions(self, actions: list[dict[str, object]]) -> None:
+        for action in actions:
+            parameter_id = str(action.get("parameter_id", ""))
+            selector = self.parameter_selectors.get(parameter_id)
+            if selector is None:
+                continue
+            value = str(action.get("value", ""))
+            (self.frequency if parameter_id == "sg.frequency" else self.power).setText(
+                value
+            )
+            index = selector.findData(str(action.get("mode", "unchanged")))
+            if index >= 0:
+                selector.setCurrentIndex(index)
+            segments = action.get("segments")
+            if isinstance(segments, list):
+                self._working_segments[parameter_id] = [
+                    dict(segment)
+                    for segment in segments
+                    if isinstance(segment, dict)
+                ]
+        self._selection_changed()
+
+    def planned_parameter_actions(self) -> list[dict[str, object]]:
+        actions: list[dict[str, object]] = []
+        for parameter_id, _label, _dimension in self.parameter_specs:
+            mode = str(self.parameter_selectors[parameter_id].currentData())
+            if mode == "unchanged":
+                continue
+            action: dict[str, object] = {
+                "parameter_id": parameter_id,
+                "mode": mode,
+                "value": (
+                    self.frequency.text().strip()
+                    if parameter_id == "sg.frequency"
+                    else self.power.text().strip()
+                ),
+            }
+            if mode == "sweep" and parameter_id in self._working_segments:
+                action["segments"] = [
+                    dict(segment)
+                    for segment in self._working_segments[parameter_id]
+                ]
+            actions.append(action)
+        return actions
+
+    def accept(self) -> None:
+        try:
+            parse_quantity(self.frequency.text(), DIMENSION_FREQUENCY)
+            parse_quantity(self.power.text(), DIMENSION_DBM)
+        except ConfigurationError as exc:
+            QMessageBox.warning(self, "Anritsu SG node", str(exc))
+            return
+        actions = self.planned_parameter_actions()
+        sweeps = [action for action in actions if action["mode"] == "sweep"]
+        if len(sweeps) > 1:
+            QMessageBox.warning(
+                self, "Anritsu SG node", "One SG node supports one sweep axis."
+            )
+            return
+        if any("segments" not in action for action in sweeps):
+            QMessageBox.warning(
+                self, "Anritsu SG node", "Define ROI for the selected sweep parameter."
+            )
+            return
+        if not actions:
+            QMessageBox.information(
+                self, "Anritsu SG node", "Select at least one parameter."
+            )
+            return
+        super().accept()
 
 
 class SweepLibraryButton(QToolButton):
@@ -5890,6 +7351,7 @@ class RecipePage(QWidget):
     status = Signal(str)
     run_requested = Signal(object)
     plan_preflight_changed = Signal(object)
+    operator_row_role = int(Qt.ItemDataRole.UserRole) + 17
 
     def __init__(self, settings: StationSettings, parent: QWidget | None = None) -> None:
         super().__init__(parent)
@@ -6002,6 +7464,9 @@ class RecipePage(QWidget):
         )
         self._settings = settings
         self._keithley_snapshot_provider = None
+        self._rigol_snapshot_provider = None
+        self._anritsu_snapshot_provider = None
+        self._anritsu_sg_snapshot_provider = None
         # The Recipe Builder owns a high-density workspace.  Do not use
         # palette(base) here: on Windows it may resolve to a stale dark system
         # palette after the application has switched to the light stylesheet.
@@ -6034,6 +7499,9 @@ class RecipePage(QWidget):
             """
         )
         self._plan = None
+        self._preflight_thread: QThread | None = None
+        self._preflight_worker: RecipePreflightWorker | None = None
+        self._preflight_source: str | None = None
         self._repository = RecipeRepository()
         self._loading_source = False
         self._tree_undo: list[str] = []
@@ -6064,33 +7532,98 @@ class RecipePage(QWidget):
         self.recipe_command_bar.setObjectName("recipeCommandBar")
         self.recipe_command_bar.setMovable(False)
         self.recipe_command_bar.setIconSize(QSize(18, 18))
+        self.recipe_command_bar.setToolButtonStyle(
+            Qt.ToolButtonStyle.ToolButtonTextBesideIcon
+        )
         path_line = QHBoxLayout()
         self.path = _line("recipes/example_nested_sweep.yml", 42)
-        load_button = QPushButton("Load into editor")
-        save_button = QPushButton("Save version")
-        self.undo_tree_button = QPushButton("Undo")
-        self.redo_tree_button = QPushButton("Redo")
-        self.undo_tree_button.setEnabled(False)
-        self.redo_tree_button.setEnabled(False)
-        compile_button = QPushButton("Compile")
         self.restore_button = QPushButton("Restore autosave")
         self.restore_button.setEnabled(False)
         self.run_button = QPushButton("Run plan")
         self.run_button.setEnabled(False)
-        def command_action(text: str, icon: QStyle.StandardPixmap, callback: object) -> QAction:
+
+        def command_action(
+            text: str,
+            icon: QStyle.StandardPixmap,
+            callback: Callable[[], None],
+            *,
+            shortcut: QKeySequence | QKeySequence.StandardKey | None = None,
+        ) -> QAction:
             action = QAction(self.style().standardIcon(icon), text, self)
             action.setToolTip(text)
-            action.triggered.connect(callback)  # type: ignore[arg-type]
+            action.setStatusTip(text)
+            if shortcut is not None:
+                action.setShortcut(shortcut)
+            # QAction.triggered emits ``checked: bool``. Adapt that signal once
+            # here so commands keep their natural no-argument API, including
+            # methods with keyword-only options such as ``load_editor``.
+            action.triggered.connect(
+                lambda _checked=False, command=callback: command()
+            )
             self.recipe_command_bar.addAction(action)
             return action
 
-        command_action("Load recipe", QStyle.StandardPixmap.SP_DialogOpenButton, self.load_editor)
-        command_action("Save recipe", QStyle.StandardPixmap.SP_DialogSaveButton, self.save_recipe)
+        self.new_recipe_action = command_action(
+            "New",
+            QStyle.StandardPixmap.SP_FileIcon,
+            self.new_recipe,
+            shortcut=QKeySequence.StandardKey.New,
+        )
+        self.load_recipe_action = command_action(
+            "Load recipe",
+            QStyle.StandardPixmap.SP_DialogOpenButton,
+            self.browse_recipe,
+            shortcut=QKeySequence.StandardKey.Open,
+        )
+        self.save_recipe_action = command_action(
+            "Save recipe",
+            QStyle.StandardPixmap.SP_DialogSaveButton,
+            self.save_recipe,
+            shortcut=QKeySequence.StandardKey.Save,
+        )
         self.recipe_command_bar.addSeparator()
-        self.undo_tree_action = command_action("Undo", QStyle.StandardPixmap.SP_ArrowBack, self.undo_tree_edit)
-        self.redo_tree_action = command_action("Redo", QStyle.StandardPixmap.SP_ArrowForward, self.redo_tree_edit)
+        self.undo_tree_action = command_action(
+            "Undo",
+            QStyle.StandardPixmap.SP_ArrowBack,
+            self.undo_tree_edit,
+            shortcut=QKeySequence.StandardKey.Undo,
+        )
+        self.redo_tree_action = command_action(
+            "Redo",
+            QStyle.StandardPixmap.SP_ArrowForward,
+            self.redo_tree_edit,
+            shortcut=QKeySequence.StandardKey.Redo,
+        )
         self.recipe_command_bar.addSeparator()
-        command_action("Validate & preview", QStyle.StandardPixmap.SP_DialogApplyButton, self.compile_recipe)
+        self.compile_recipe_action = command_action(
+            "Validate & preview",
+            QStyle.StandardPixmap.SP_DialogApplyButton,
+            self.compile_recipe_async,
+            shortcut=QKeySequence("Ctrl+Return"),
+        )
+        self.recipe_command_bar.addSeparator()
+        self.library_visibility_action = QAction("Library", self)
+        self.library_visibility_action.setCheckable(True)
+        self.library_visibility_action.setChecked(True)
+        self.library_visibility_action.setToolTip("Show or hide the node library")
+        self.library_visibility_action.toggled.connect(
+            lambda visible: self._set_workspace_panel_visible(
+                "library", visible
+            )
+        )
+        self.recipe_command_bar.addAction(self.library_visibility_action)
+        self.inspector_visibility_action = QAction("Inspector", self)
+        self.inspector_visibility_action.setCheckable(True)
+        self.inspector_visibility_action.setChecked(True)
+        self.inspector_visibility_action.setToolTip(
+            "Show or hide the selected-node inspector"
+        )
+        self.inspector_visibility_action.toggled.connect(
+            lambda visible: self._set_workspace_panel_visible(
+                "inspector", visible
+            )
+        )
+        self.recipe_command_bar.addAction(self.inspector_visibility_action)
         self.recipe_command_bar.addSeparator()
         self.recipe_profile_badge = QLabel(
             "Profile: LOCKED" if self._settings.outputs_locked else "Profile: APPROVED"
@@ -6114,10 +7647,13 @@ class RecipePage(QWidget):
         self.node_kind.addItem("If / else group", "if")
         self.node_kind.addItem("Wait", "wait")
         self.node_kind.addItem("Measure Keithley", "measure_keithley")
+        self.node_kind.addItem("Acquire Anritsu reference", "acquire_reference")
         self.node_kind.addItem("Acquire Anritsu spectrum", "acquire_spectrum")
         self.node_kind.addItem("Keithley ramp to zero", "ramp_keithley_to_zero")
         self.node_kind.addItem("Keithley output OFF", "set_keithley_output")
         self.node_kind.addItem("Rigol output OFF", "set_rigol_output")
+        self.node_kind.addItem("Anritsu SG ARM", "arm_anritsu_sg_output")
+        self.node_kind.addItem("Anritsu SG RF ON", "set_anritsu_sg_output_on")
         self.node_kind.addItem("Anritsu SG output OFF", "set_anritsu_sg_output")
         self.node_kind.addItem("Comment", "comment")
         def tool_button(
@@ -6137,8 +7673,16 @@ class RecipePage(QWidget):
         self.add_controls_button = tool_button(
             "+ Device controls / point generator", "Choose instrument parameters and create a fixed setting or point generator", QStyle.StandardPixmap.SP_ComputerIcon, primary=True
         )
+        self.edit_device_button = tool_button(
+            "Device settings",
+            "Open a separate configuration window for the selected instrument",
+            QStyle.StandardPixmap.SP_ComputerIcon,
+            primary=True,
+        )
         self.edit_generator_button = tool_button(
-            "Edit", "Open the selected sweep or fixed Keithley setting", QStyle.StandardPixmap.SP_FileDialogDetailedView
+            "Edit ROI",
+            "Open only the point/interval editor for the selected sweep",
+            QStyle.StandardPixmap.SP_FileDialogDetailedView,
         )
         self.delete_node_button = tool_button(
             "Delete", "Delete the selected node (Delete)", QStyle.StandardPixmap.SP_TrashIcon
@@ -6152,6 +7696,7 @@ class RecipePage(QWidget):
         self.move_down_button = tool_button(
             "Down", "Move the selected node down (Alt+Down)", QStyle.StandardPixmap.SP_ArrowDown
         )
+        builder_actions.addWidget(self.edit_device_button)
         builder_actions.addWidget(self.edit_generator_button)
         builder_actions.addWidget(self.delete_node_button)
         builder_actions.addWidget(self.duplicate_node_button)
@@ -6165,6 +7710,10 @@ class RecipePage(QWidget):
         self._workspace_layout_updating = False
         self._workspace_user_resized = False
         self._last_workspace_layout_width = -1
+        self._workspace_visibility_override: dict[str, bool | None] = {
+            "library": None,
+            "inspector": None,
+        }
         self.editor = QPlainTextEdit()
         self.editor.setPlaceholderText("Declarative YAML recipe — no Python code and no raw SCPI.")
         self.editor.setMinimumWidth(320)
@@ -6189,8 +7738,8 @@ class RecipePage(QWidget):
         self.builder_tabs.setMinimumWidth(390)
         self.builder_tabs.addTab(self.tree, "Measurement tree")
         self.builder_tabs.addTab(self.editor, "YAML source")
-        library = self._build_device_library()
-        self.workspace_splitter.addWidget(library)
+        self.library_panel = self._build_device_library()
+        self.workspace_splitter.addWidget(self.library_panel)
         self.workspace_splitter.addWidget(self.builder_tabs)
         self.inspector_panel = QWidget()
         self.inspector_panel.setMinimumWidth(280)
@@ -6230,21 +7779,20 @@ class RecipePage(QWidget):
         self.summary = QLabel("The recipe has not been compiled.")
         self.summary.setWordWrap(True)
         layout.addWidget(self.summary)
-        load_button.clicked.connect(self.load_editor)
-        save_button.clicked.connect(self.save_recipe)
-        self.undo_tree_button.clicked.connect(self.undo_tree_edit)
-        self.redo_tree_button.clicked.connect(self.redo_tree_edit)
-        compile_button.clicked.connect(self.compile_recipe)
         self.restore_button.clicked.connect(self.restore_autosave)
         self.run_button.clicked.connect(self.request_run)
         self.editor.textChanged.connect(self._source_changed)
         self.tree.currentItemChanged.connect(self._node_selected)
+        self.tree.itemClicked.connect(self._operator_row_clicked)
         self.tree.itemDoubleClicked.connect(self._open_node_editor)
         self.tree.move_requested.connect(self._move_recipe_node)
         self.tree.library_drop_requested.connect(self._drop_library_block)
         self.add_node_button.clicked.connect(self._add_basic_node)
         self.add_controls_button.clicked.connect(self._add_device_controls)
-        self.edit_generator_button.clicked.connect(self._edit_selected_node)
+        self.edit_device_button.clicked.connect(
+            self._edit_selected_device_settings
+        )
+        self.edit_generator_button.clicked.connect(self._edit_selected_roi)
         self.delete_node_button.clicked.connect(self._delete_selected_node)
         self.duplicate_node_button.clicked.connect(self._duplicate_selected_node)
         self.move_up_button.clicked.connect(lambda: self._move_selected_sibling(-1))
@@ -6258,6 +7806,8 @@ class RecipePage(QWidget):
             QShortcut(QKeySequence("Alt+Up"), self.tree, activated=lambda: self._move_selected_sibling(-1)),
             QShortcut(QKeySequence("Alt+Down"), self.tree, activated=lambda: self._move_selected_sibling(1)),
             QShortcut(QKeySequence("Ctrl+Shift+G"), self.tree, activated=self._edit_selected_node),
+            QShortcut(QKeySequence("Return"), self.tree, activated=self._edit_selected_node),
+            QShortcut(QKeySequence("Enter"), self.tree, activated=self._edit_selected_node),
         )
         self.load_editor(show_error=False)
 
@@ -6265,18 +7815,73 @@ class RecipePage(QWidget):
         if not self._workspace_layout_updating:
             self._workspace_user_resized = True
 
+    def _set_workspace_panel_visible(self, panel: str, visible: bool) -> None:
+        self._workspace_visibility_override[panel] = visible
+        widget = (
+            getattr(self, "library_panel", None)
+            if panel == "library"
+            else getattr(self, "inspector_panel", None)
+        )
+        if isinstance(widget, QWidget):
+            widget.setVisible(visible)
+            self._workspace_user_resized = False
+            self._update_workspace_layout(force=True)
+
     def _update_workspace_layout(self, *, force: bool = False) -> None:
         """Keep Library, measurement tree and Inspector useful at every width."""
 
         if not hasattr(self, "workspace_splitter"):
             return
-        available = max(900, self.workspace_splitter.width() or self.width() - 28)
+        available = max(480, self.workspace_splitter.width() or self.width() - 28)
         if not force and (
             self._workspace_user_resized
             or abs(available - self._last_workspace_layout_width) < 24
         ):
             return
         self._last_workspace_layout_width = available
+        inspector_override = self._workspace_visibility_override["inspector"]
+        library_override = self._workspace_visibility_override["library"]
+        show_inspector = (
+            available >= 1_200
+            if inspector_override is None
+            else inspector_override
+        )
+        show_library = (
+            available >= 760 if library_override is None else library_override
+        )
+        for action, widget, visible in (
+            (
+                self.library_visibility_action,
+                self.library_panel,
+                show_library,
+            ),
+            (
+                self.inspector_visibility_action,
+                self.inspector_panel,
+                show_inspector,
+            ),
+        ):
+            action.blockSignals(True)
+            action.setChecked(visible)
+            action.blockSignals(False)
+            widget.setVisible(visible)
+        if not show_library:
+            sizes = [0, available, 0]
+            self._workspace_layout_updating = True
+            try:
+                self.workspace_splitter.setSizes(sizes)
+            finally:
+                self._workspace_layout_updating = False
+            return
+        if not show_inspector:
+            library = max(210, min(260, round(available * 0.24)))
+            sizes = [library, max(390, available - library), 0]
+            self._workspace_layout_updating = True
+            try:
+                self.workspace_splitter.setSizes(sizes)
+            finally:
+                self._workspace_layout_updating = False
+            return
         if available >= 1600:
             library = max(270, min(340, round(available * 0.17)))
             inspector = max(420, min(560, round(available * 0.25)))
@@ -6360,7 +7965,7 @@ class RecipePage(QWidget):
             target_layout.addWidget(button)
             self._library_action_buttons.append(button)
 
-        devices = group("Devices", "3")
+        devices = group("Devices", "4")
         action(
             devices, "Keithley 2600", "Source-measure unit module", "keithley",
             QStyle.StandardPixmap.SP_DriveHDIcon,
@@ -6374,13 +7979,42 @@ class RecipePage(QWidget):
             drag_kind="device:rigol",
         )
         action(
-            devices, "Anritsu MS2830A", "Spectrum analyzer module", "anritsu",
+            devices, "Anritsu configuration", "Configure Spectrum Analyzer settings once", "anritsu",
             QStyle.StandardPixmap.SP_ComputerIcon,
             lambda: self._library_add_device("anritsu"),
             drag_kind="device:anritsu",
         )
+        action(
+            devices,
+            "Anritsu signal generator",
+            "Configure RF frequency or power; RF remains OFF until explicit ARM/ON steps",
+            "anritsu",
+            QStyle.StandardPixmap.SP_ComputerIcon,
+            lambda: self._library_add_device("anritsu_sg"),
+            drag_kind="device:anritsu_sg",
+        )
 
-        flow = group("Flow", "4")
+        acquisition = group("Acquisition", "2")
+        action(
+            acquisition,
+            "Acquire reference",
+            "Acquire and freeze the Anritsu reference used by processed checkpoints",
+            "anritsu",
+            QStyle.StandardPixmap.SP_DialogSaveButton,
+            lambda: self._library_add_basic("acquire_reference"),
+            drag_kind="flow:acquire_reference",
+        )
+        action(
+            acquisition,
+            "Acquire spectrum once",
+            "Read one qualified TRAC1 spectrum at the current loop point",
+            "anritsu",
+            QStyle.StandardPixmap.SP_MediaPlay,
+            lambda: self._library_add_basic("acquire_spectrum"),
+            drag_kind="flow:acquire_spectrum",
+        )
+
+        flow = group("Flow", "6")
         action(
             flow, "Wait", "Add a settling delay", "timing",
             QStyle.StandardPixmap.SP_BrowserReload,
@@ -6405,10 +8039,29 @@ class RecipePage(QWidget):
             lambda: self._library_add_basic("comment"),
             drag_kind="flow:comment",
         )
+        action(
+            flow,
+            "Anritsu SG ARM",
+            "Create one short-lived permission token for the next RF ON step",
+            "anritsu",
+            QStyle.StandardPixmap.SP_DialogApplyButton,
+            lambda: self._library_add_basic("arm_anritsu_sg_output"),
+            drag_kind="flow:arm_anritsu_sg_output",
+        )
+        action(
+            flow,
+            "Anritsu SG RF ON",
+            "Enable RF using a fresh ARM token; blocked by preflight unless approved",
+            "anritsu",
+            QStyle.StandardPixmap.SP_MediaPlay,
+            lambda: self._library_add_basic("set_anritsu_sg_output_on"),
+            drag_kind="flow:set_anritsu_sg_output_on",
+        )
         layout.addStretch(1)
         hint = QLabel(
             "Drag a device or flow block into the measurement tree. "
-            "Device blocks remain inactive until their configuration editor is implemented."
+            "Every device block must be configured before validation; incomplete "
+            "blocks are rejected without executing their children."
         )
         hint.setObjectName("recipeHint")
         hint.setWordWrap(True)
@@ -6423,12 +8076,23 @@ class RecipePage(QWidget):
             haystack = f"{button.text()} {button.toolTip()}".casefold()
             button.setVisible(not needle or needle in haystack)
 
-    def _library_add_basic(self, kind: str) -> None:
-        index = self.node_kind.findData(kind)
-        if index < 0:
+    def _library_add_basic(
+        self,
+        kind: str,
+        *,
+        parent_id: str | None = None,
+        branch: str | None = None,
+        index: int | None = None,
+    ) -> None:
+        combo_index = self.node_kind.findData(kind)
+        if combo_index < 0:
             raise ConfigurationError(f"Library node kind {kind!r} is not registered.")
-        self.node_kind.setCurrentIndex(index)
-        self._add_basic_node()
+        self.node_kind.setCurrentIndex(combo_index)
+        self._add_basic_node(
+            parent_id=parent_id,
+            branch=branch,
+            insert_index=index,
+        )
 
     def _library_add_device(
         self,
@@ -6442,20 +8106,37 @@ class RecipePage(QWidget):
             "keithley": "Keithley 2600",
             "rigol": "Rigol DG1032Z",
             "anritsu": "Anritsu MS2830A",
+            "anritsu_sg": "Anritsu MS2830A Signal Generator",
         }
         if device not in labels:
             raise ConfigurationError(f"Unknown device module {device!r}.")
         if parent_id is None or branch is None:
             parent_id, branch = self._builder_parent()
-        if device == "anritsu":
+        if device == "anritsu_sg":
+            node = {
+                "id": self._new_node_id("anritsu-sg"),
+                "type": "sequence",
+                "text": "Anritsu SG — configuration required · RF OFF",
+                "device_module": "anritsu_sg",
+                "label": labels[device],
+                "operation": "configure_selected_parameters",
+                "configuration_required": True,
+                "parameter_actions": [],
+                "children": [],
+            }
+        elif device == "anritsu":
             node = {
                 "id": self._new_node_id("anritsu-spectrum"),
-                "type": "acquire_spectrum",
+                "type": "sequence",
+                "text": "Anritsu MS2830A · acquire single spectrum",
                 "trace": "TRAC1",
                 "device_module": "anritsu",
                 "label": labels[device],
-                "operation": "acquire_single_spectrum",
-                "configuration_required": False,
+                "operation": "configure_selected_parameters",
+                "configuration_required": True,
+                "acquire_single": False,
+                "parameter_actions": [],
+                "children": [],
             }
         else:
             node = {
@@ -6480,12 +8161,21 @@ class RecipePage(QWidget):
             index=index,
             node=node,
         )
-        if device == "anritsu":
+        if device == "anritsu_sg":
             self._apply_builder_source(
-                source, "Added Anritsu single-spectrum acquisition"
+                source, "Added editable Anritsu signal-generator module"
             )
             self.summary.setText(
-                "Anritsu single-spectrum acquisition added at the selected tree position."
+                "Anritsu SG added. Double-click it to configure frequency/power; "
+                "RF remains OFF until explicit ARM/ON actions."
+            )
+        elif device == "anritsu":
+            self._apply_builder_source(
+                source, "Added editable Anritsu spectrum module"
+            )
+            self.summary.setText(
+                "Anritsu configuration added. Double-click it to select Spectrum "
+                "settings. Add Acquire spectrum once separately inside a loop."
             )
         else:
             self._apply_builder_source(source, f"Added {labels[device]} module placeholder")
@@ -6512,10 +8202,12 @@ class RecipePage(QWidget):
                 return
             if category != "flow":
                 return
-            destination = self._find_tree_item(parent_id)
-            if destination is not None:
-                self.tree.setCurrentItem(destination)
-            self._library_add_basic(kind)
+            self._library_add_basic(
+                kind,
+                parent_id=parent_id,
+                branch=branch,
+                index=index,
+            )
         except Exception as exc:
             self.status.emit(f"Library drop rejected without changing the plan: {exc}")
             QMessageBox.warning(
@@ -6559,6 +8251,21 @@ class RecipePage(QWidget):
 
         self._keithley_snapshot_provider = provider
 
+    def set_rigol_snapshot_provider(self, provider: object) -> None:
+        """Bind read-only access to the manual Rigol carrier form state."""
+
+        self._rigol_snapshot_provider = provider
+
+    def set_anritsu_snapshot_provider(self, provider: object) -> None:
+        """Bind read-only access to the manual Anritsu spectrum form state."""
+
+        self._anritsu_snapshot_provider = provider
+
+    def set_anritsu_sg_snapshot_provider(self, provider: object) -> None:
+        """Bind read-only access to the manual Anritsu SG form state."""
+
+        self._anritsu_sg_snapshot_provider = provider
+
     def _source_changed(self) -> None:
         if self._loading_source:
             return
@@ -6590,11 +8297,67 @@ class RecipePage(QWidget):
             recipe = parse_recipe_text(source, origin=self.path.text())
             self._populate_recipe_tree(recipe.root, recipe.finally_nodes, None)
             self.summary.setText("Recipe loaded. Compile it before running.")
-        except Exception:
-            self.tree.clear()
-            self.inspector.clear()
+        except Exception as exc:
+            self._emit_tree_diagnostic(
+                "TREE_LOAD_REJECTED",
+                path=self.path.text(),
+                error_type=type(exc).__name__,
+                error=str(exc),
+            )
+            self.summary.setText(
+                "Recipe could not be rendered. The previous tree remains visible; "
+                "see Event log for diagnostics."
+            )
         self._update_repository_state()
         self.status.emit("Recipe loaded into the editor")
+
+    def new_recipe(self, *, confirm: bool = True) -> None:
+        """Start an empty, valid plan without touching the currently saved file."""
+
+        if confirm and self.editor.toPlainText().strip():
+            answer = QMessageBox.question(
+                self,
+                "New sweep",
+                "Start a new empty sweep? Unsaved changes in the editor will be replaced.",
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.Cancel,
+                QMessageBox.StandardButton.Cancel,
+            )
+            if answer != QMessageBox.StandardButton.Yes:
+                return
+        source = (
+            "schema_version: 1\n"
+            "name: Untitled sweep\n"
+            "root:\n"
+            "  id: sequence-main\n"
+            "  type: sequence\n"
+            "  children: []\n"
+            "finally: []\n"
+        )
+        self.path.setText(str(Path("recipes") / "untitled_sweep.yml"))
+        self._apply_builder_source(source, "Created a new empty sweep")
+        self._tree_undo.clear()
+        self._tree_redo.clear()
+        self._update_tree_history_controls()
+        self.status.emit("New empty sweep ready")
+
+    def browse_recipe(self) -> None:
+        """Choose a YAML recipe with the native file explorer and load it."""
+
+        current_text = self.path.text().strip()
+        current = Path(current_text).expanduser() if current_text else Path("recipes")
+        if not current.is_absolute():
+            current = (Path.cwd() / current).resolve()
+        initial_location = current if current.exists() else current.parent
+        selected, _selected_filter = QFileDialog.getOpenFileName(
+            self,
+            "Open sweep recipe",
+            str(initial_location),
+            "YAML recipes (*.yml *.yaml);;All files (*)",
+        )
+        if not selected:
+            return
+        self.path.setText(str(Path(selected)))
+        self.load_editor()
 
     def save_recipe(self) -> None:
         source = self.editor.toPlainText()
@@ -6642,17 +8405,119 @@ class RecipePage(QWidget):
         )
 
     def compile_recipe(self) -> None:
+        """Synchronous preflight API used by deterministic tests and automation."""
+
         try:
             recipe = parse_recipe_text(self.editor.toPlainText(), origin=self.path.text())
             plan = RecipeCompiler(self._settings).compile(recipe)
             estimate = PlanEstimator(self._settings).estimate(plan)
         except Exception as exc:
+            self._emit_tree_diagnostic(
+                "TREE_COMPILE_REJECTED",
+                path=self.path.text(),
+                error_type=type(exc).__name__,
+                error=str(exc),
+            )
             QMessageBox.warning(self, "Recipe", str(exc))
             return
-        self.tree.clear()
+        self._accept_preflight(recipe, plan, estimate)
+
+    def compile_recipe_async(self) -> None:
+        """Run operator-triggered validation without blocking the Qt event loop."""
+
+        if (
+            self._preflight_thread is not None
+            and self._preflight_thread.isRunning()
+        ):
+            self._preflight_thread.requestInterruption()
+            self.compile_recipe_action.setEnabled(False)
+            self.compile_recipe_action.setText("Cancelling…")
+            self.summary.setText("Cancelling recipe validation…")
+            return
+        source = self.editor.toPlainText()
+        self._plan = None
+        self.run_button.setEnabled(False)
+        self.plan_preflight_changed.emit(None)
+        self._preflight_source = source
+        self.compile_recipe_action.setText("Cancel validation")
+        self.summary.setText(
+            "Validating recipe and estimating time/data size in the background…"
+        )
+        self.status.emit("Recipe validation started")
+        thread = QThread(self)
+        worker = RecipePreflightWorker(
+            self._settings, source, self.path.text()
+        )
+        worker.moveToThread(thread)
+        thread.started.connect(worker.run)
+        worker.succeeded.connect(self._preflight_succeeded)
+        worker.failed.connect(self._preflight_failed)
+        worker.cancelled.connect(self._preflight_cancelled)
+        worker.finished.connect(thread.quit)
+        worker.finished.connect(worker.deleteLater)
+        thread.finished.connect(self._preflight_finished)
+        thread.finished.connect(thread.deleteLater)
+        self._preflight_thread = thread
+        self._preflight_worker = worker
+        thread.start()
+
+    def _preflight_succeeded(
+        self, recipe: object, plan: object, estimate: object
+    ) -> None:
+        if self._preflight_source != self.editor.toPlainText():
+            self.summary.setText(
+                "Recipe changed during validation; the stale result was discarded. "
+                "Validate the current source again."
+            )
+            self.status.emit("Stale recipe validation discarded")
+            return
+        if not isinstance(plan, ExecutionPlan) or not isinstance(
+            estimate, PlanEstimate
+        ):
+            self._preflight_failed("Preflight returned an invalid result.")
+            return
+        if not hasattr(recipe, "root") or not hasattr(recipe, "finally_nodes"):
+            self._preflight_failed("Preflight returned an invalid recipe snapshot.")
+            return
+        self._accept_preflight(recipe, plan, estimate)
+
+    def _preflight_failed(self, error: str) -> None:
+        self._emit_tree_diagnostic(
+            "TREE_COMPILE_REJECTED",
+            path=self.path.text(),
+            error_type="BackgroundPreflightError",
+            error=error,
+        )
+        self.summary.setText(f"Validation blocked: {error}")
+        QMessageBox.warning(self, "Recipe", error)
+
+    def _preflight_cancelled(self) -> None:
+        self.summary.setText("Recipe validation cancelled; Run remains disabled.")
+        self.status.emit("Recipe validation cancelled")
+
+    def _preflight_finished(self) -> None:
+        self.compile_recipe_action.setText("Validate & preview")
+        self.compile_recipe_action.setEnabled(True)
+        self._preflight_thread = None
+        self._preflight_worker = None
+        self._preflight_source = None
+
+    def cancel_preflight(self, *, wait_ms: int = 3_000) -> None:
+        """Stop an in-flight validation before the owning window is destroyed."""
+
+        thread = self._preflight_thread
+        if thread is None or not thread.isRunning():
+            return
+        thread.requestInterruption()
+        thread.quit()
+        thread.wait(wait_ms)
+
+    def _accept_preflight(
+        self, recipe: object, plan: ExecutionPlan, estimate: PlanEstimate
+    ) -> None:
         self._plan = plan
         self.run_button.setEnabled(True)
-        self._populate_recipe_tree(recipe.root, recipe.finally_nodes, plan)
+        self._populate_recipe_tree(recipe.root, recipe.finally_nodes, plan)  # type: ignore[attr-defined]
         self.summary.setText(
             f"Plan: {len(plan.actions)} actions • {plan.total_points} checkpoints • "
             f"{plan.total_spectra} spectra • hash {plan.sha256}\n"
@@ -6676,6 +8541,27 @@ class RecipePage(QWidget):
         finally_nodes: tuple[RecipeNode, ...],
         plan: object | None,
     ) -> None:
+        selected_id: str | None = None
+        current = self.tree.currentItem()
+        current_node = (
+            current.data(0, Qt.ItemDataRole.UserRole)
+            if current is not None
+            else None
+        )
+        if isinstance(current_node, RecipeNode):
+            selected_id = current_node.id
+        expanded_ids: set[str] = set()
+
+        def remember_expansion(item: QTreeWidgetItem) -> None:
+            item_node = item.data(0, Qt.ItemDataRole.UserRole)
+            if isinstance(item_node, RecipeNode) and item.isExpanded():
+                expanded_ids.add(item_node.id)
+            for child_index in range(item.childCount()):
+                remember_expansion(item.child(child_index))
+
+        for top_index in range(self.tree.topLevelItemCount()):
+            remember_expansion(self.tree.topLevelItem(top_index))
+        previous_scroll = self.tree.verticalScrollBar().value()
         top_level_items: list[QTreeWidgetItem] = []
         occurrences: dict[str, int] = {}
         if plan is not None:
@@ -6686,6 +8572,9 @@ class RecipePage(QWidget):
             count = occurrences.get(node.id, 0)
             detail = node.type + (f" • {count} action(s)" if plan is not None else "")
             label, detail, icon = self._tree_presentation(node, count, plan is not None)
+            if node.data.get("disabled") is True:
+                label = f"Disabled — {label}"
+                detail = "Skipped with all children"
             status_text, status_color = self._tree_status(node, detail)
             item = QTreeWidgetItem([label, detail, status_text])
             item.setIcon(0, self._tree_node_icon(node, icon))
@@ -6702,6 +8591,7 @@ class RecipePage(QWidget):
             else:
                 parent.addChild(item)
             self._add_operator_control_rows(node, item)
+            self._add_native_sweep_roi_rows(node, item)
             for child in node.children:
                 add_node(child, item)
             if node.else_children:
@@ -6722,9 +8612,21 @@ class RecipePage(QWidget):
         # A presentation exception must never erase the operator's current tree.
         self.tree.clear()
         self.tree.addTopLevelItems(top_level_items)
-        self.tree.expandAll()
-        if self.tree.topLevelItemCount():
+        if expanded_ids:
+            for node_id in expanded_ids:
+                item = self._find_tree_item(node_id)
+                if item is not None:
+                    item.setExpanded(True)
+        else:
+            self.tree.expandAll()
+        selected = (
+            self._find_tree_item(selected_id) if selected_id is not None else None
+        )
+        if selected is not None:
+            self.tree.setCurrentItem(selected)
+        elif self.tree.topLevelItemCount():
             self.tree.setCurrentItem(self.tree.topLevelItem(0))
+        self.tree.verticalScrollBar().setValue(previous_scroll)
 
     @staticmethod
     def _keithley_parameter_label(node: RecipeNode, parameter_id: str) -> str:
@@ -6765,7 +8667,8 @@ class RecipePage(QWidget):
     ) -> None:
         """Render device overrides as read-only operator controls below the module."""
 
-        if node.data.get("device_module") != "keithley":
+        device_module = str(node.data.get("device_module", ""))
+        if device_module not in {"keithley", "anritsu", "anritsu_sg", "rigol"}:
             return
         raw_actions = node.data.get("parameter_actions")
         actions = (
@@ -6779,15 +8682,30 @@ class RecipePage(QWidget):
             *,
             color: str,
             badge: str,
+            metadata: dict[str, object] | None = None,
             owner: QTreeWidgetItem = parent,
         ) -> QTreeWidgetItem:
             row = QTreeWidgetItem(columns)
-            row.setFlags(row.flags() & ~Qt.ItemFlag.ItemIsSelectable)
+            if metadata is None:
+                row.setFlags(row.flags() & ~Qt.ItemFlag.ItemIsSelectable)
+            else:
+                row.setData(0, self.operator_row_role, metadata)
+                row.setToolTip(
+                    0,
+                    "Click to open the ROI editor directly for this sweep axis.",
+                )
+                link_font = row.font(0)
+                link_font.setUnderline(True)
+                row.setFont(0, link_font)
+                row.setData(
+                    0, Qt.ItemDataRole.ForegroundRole, QColor("#1769aa")
+                )
             row.setIcon(0, self._tree_badge_icon("Operator control", color, badge))
-            row.setToolTip(
-                0,
-                "Operator control summary. Double-click the parent device node to edit it.",
-            )
+            if metadata is None:
+                row.setToolTip(
+                    0,
+                    "Operator control summary. Double-click the parent device node to edit it.",
+                )
             row.setData(2, Qt.ItemDataRole.ForegroundRole, QColor(color))
             status_font = row.font(2)
             status_font.setBold(True)
@@ -6798,7 +8716,28 @@ class RecipePage(QWidget):
 
         for action in actions:
             parameter_id = str(action.get("parameter_id", ""))
-            label = self._keithley_parameter_label(node, parameter_id)
+            label = (
+                self._keithley_parameter_label(node, parameter_id)
+                if device_module == "keithley"
+                else {
+                    "spectrum.start_frequency": "Start frequency",
+                    "spectrum.stop_frequency": "Stop frequency",
+                    "spectrum.reference_level": "Reference level",
+                    "spectrum.points": "Trace points",
+                    "sg.frequency": "RF frequency",
+                    "sg.power": "RF power",
+                    "advanced.rbw_mode": "RBW mode",
+                    "advanced.rbw": "Resolution bandwidth",
+                    "advanced.vbw_mode": "VBW mode",
+                    "advanced.vbw": "Video bandwidth",
+                    "advanced.detector": "Detector",
+                    "advanced.attenuation_mode": "RF attenuation mode",
+                    "advanced.attenuation": "RF attenuation",
+                    "advanced.preamplifier_enabled": "Preamplifier",
+                    "advanced.sweep_time_mode": "Sweep-time mode",
+                    "advanced.sweep_time": "Sweep time",
+                }.get(parameter_id, parameter_id)
+            )
             mode = str(action.get("mode", "set"))
             value = str(action.get("value", ""))
             if mode != "sweep":
@@ -6809,7 +8748,17 @@ class RecipePage(QWidget):
                 )
                 continue
             segments = action.get("segments")
-            dimension = self._keithley_parameter_dimension(node, parameter_id)
+            dimension = (
+                self._keithley_parameter_dimension(node, parameter_id)
+                if device_module == "keithley"
+                else {
+                    "spectrum.start_frequency": DIMENSION_FREQUENCY,
+                    "spectrum.stop_frequency": DIMENSION_FREQUENCY,
+                      "spectrum.reference_level": DIMENSION_DBM,
+                      "sg.frequency": DIMENSION_FREQUENCY,
+                      "sg.power": DIMENSION_DBM,
+                  }.get(parameter_id)
+            )
             if not isinstance(segments, list) or not segments or dimension is None:
                 informational_row(
                     [label, "Sweep range requires ROI definition", "ROI"],
@@ -6820,9 +8769,14 @@ class RecipePage(QWidget):
             try:
                 generated = generate_sweep_points(segments, dimension)
                 stages = generate_sweep_stage_points(segments, dimension)
+                first_value = segments[0].get(
+                    "value", segments[0].get("start", "?")
+                )
+                last_value = segments[-1].get(
+                    "value", segments[-1].get("stop", "?")
+                )
                 sweep_detail = (
-                    f"{segments[0].get('start', '?')} → "
-                    f"{segments[-1].get('stop', '?')} · "
+                    f"{first_value} → {last_value} · "
                     f"{len(generated):,} pts · {len(segments)} ROI"
                 )
             except Exception:
@@ -6836,30 +8790,71 @@ class RecipePage(QWidget):
                 [label, sweep_detail, "SWEEP"],
                 color="#1769aa",
                 badge="S",
+                metadata={
+                    "kind": "sweep_parameter",
+                    "device_module": device_module,
+                    "owner_node_id": node.id,
+                    "parameter_id": parameter_id,
+                    "stage_index": None,
+                },
             )
             for index, (segment, stage_points) in enumerate(
                 zip(segments, stages, strict=True), start=1
             ):
-                spacing = str(segment.get("spacing", "linear")).title()
+                single_value = segment.get("value")
+                spacing = (
+                    "Single value"
+                    if single_value is not None
+                    else str(segment.get("spacing", "linear")).title()
+                )
+                stage_range = (
+                    str(single_value)
+                    if single_value is not None
+                    else f"{segment.get('start', '?')} → {segment.get('stop', '?')}"
+                )
                 stage = QTreeWidgetItem(
                     [
                         f"ROI {index}",
-                        (
-                            f"{segment.get('start', '?')} → {segment.get('stop', '?')} · "
-                            f"{len(stage_points):,} pts · {spacing}"
-                        ),
+                        f"{stage_range} · {len(stage_points):,} pts · {spacing}",
                         "STAGE",
                     ]
                 )
-                stage.setFlags(stage.flags() & ~Qt.ItemFlag.ItemIsSelectable)
+                stage.setData(
+                    0,
+                    self.operator_row_role,
+                    {
+                        "kind": "roi_stage",
+                        "device_module": device_module,
+                        "owner_node_id": node.id,
+                        "parameter_id": parameter_id,
+                        "stage_index": index - 1,
+                    },
+                )
                 stage.setIcon(0, self._tree_badge_icon("ROI stage", "#6f8aa3", str(index)))
+                stage_link_font = stage.font(0)
+                stage_link_font.setUnderline(True)
+                stage.setFont(0, stage_link_font)
+                stage.setData(
+                    0, Qt.ItemDataRole.ForegroundRole, QColor("#1769aa")
+                )
                 stage.setForeground(1, QColor("#647588"))
                 stage.setForeground(2, QColor("#647588"))
                 stage.setToolTip(
                     0,
-                    "Exact ROI stage generated for this parameter sweep.",
+                    "Click to open this stage directly in the ROI editor.",
                 )
                 sweep_row.addChild(stage)
+
+        if device_module == "anritsu" and node.data.get("acquire_single"):
+            informational_row(
+                [
+                    "Single spectrum",
+                    f"Acquire {node.data.get('trace', 'TRAC1')} at each parent-loop point",
+                    "ACQUIRE",
+                ],
+                color="#18844c",
+                badge="A",
+            )
 
         output_policy = str(node.data.get("output_policy", "unchanged"))
         if output_policy in {"on", "off"}:
@@ -6875,9 +8870,122 @@ class RecipePage(QWidget):
             )
 
     @staticmethod
+    def _native_sweep_segments(node: RecipeNode) -> list[dict[str, object]]:
+        """Return one visual ROI contract for either supported sweep syntax."""
+
+        raw_segments = node.data.get("segments")
+        if isinstance(raw_segments, list) and raw_segments:
+            return [
+                dict(segment)
+                for segment in raw_segments
+                if isinstance(segment, dict)
+            ]
+        if node.type != "sweep":
+            return []
+        if not all(key in node.data for key in ("start", "stop", "points")):
+            return []
+        return [
+            {
+                "start": node.data["start"],
+                "stop": node.data["stop"],
+                "points": node.data["points"],
+                "spacing": node.data.get("spacing", "linear"),
+            }
+        ]
+
+    def _add_native_sweep_roi_rows(
+        self, node: RecipeNode, parent: QTreeWidgetItem
+    ) -> None:
+        """Expose every native sweep interval as a direct, editable ROI row."""
+
+        if node.type != "sweep":
+            return
+        target = str(node.data.get("target", ""))
+        definition = next(
+            (
+                item
+                for item in _SWEEPABLE_PARAMETERS
+                if item["target"] == target
+            ),
+            None,
+        )
+        dimension = (
+            definition["dimension"]
+            if definition is not None
+            else SWEEP_DIMENSIONS.get(target)
+        )
+        segments = self._native_sweep_segments(node)
+        if dimension is None or not segments:
+            return
+        try:
+            stages = generate_sweep_stage_points(segments, dimension)
+        except Exception as exc:
+            self._emit_tree_diagnostic(
+                "TREE_ROI_RENDER_REJECTED",
+                node_id=node.id,
+                target=target,
+                error_type=type(exc).__name__,
+                error=str(exc),
+            )
+            return
+        for index, (segment, stage_points) in enumerate(
+            zip(segments, stages, strict=True), start=1
+        ):
+            single_value = segment.get("value")
+            stage_range = (
+                str(single_value)
+                if single_value is not None
+                else f"{segment.get('start', '?')} → {segment.get('stop', '?')}"
+            )
+            spacing = (
+                "Single value"
+                if single_value is not None
+                else str(segment.get("spacing", "linear")).title()
+            )
+            row = QTreeWidgetItem(
+                [
+                    f"ROI {index}",
+                    f"{stage_range} · {len(stage_points):,} pts · {spacing}",
+                    "STAGE",
+                ]
+            )
+            row.setData(
+                0,
+                self.operator_row_role,
+                {
+                    "kind": "native_sweep_roi",
+                    "owner_node_id": node.id,
+                    "parameter_id": target,
+                    "stage_index": index - 1,
+                },
+            )
+            row.setIcon(
+                0, self._tree_badge_icon("ROI stage", "#6f8aa3", str(index))
+            )
+            link_font = row.font(0)
+            link_font.setUnderline(True)
+            row.setFont(0, link_font)
+            row.setData(0, Qt.ItemDataRole.ForegroundRole, QColor("#1769aa"))
+            row.setForeground(1, QColor("#647588"))
+            row.setForeground(2, QColor("#647588"))
+            row.setToolTip(0, "Click to edit this ROI without changing loop children.")
+            parent.addChild(row)
+
+    @staticmethod
     def _tree_status(node: RecipeNode, detail: str) -> tuple[str, str]:
+        if node.data.get("disabled") is True:
+            return "DISABLED", "#6b7785"
         if node.data.get("configuration_required"):
             return "SETUP", "#c77800"
+        if (
+            node.data.get("operation") == "configure_selected_parameters"
+            and (
+                node.data.get("device_module")
+                not in {"keithley", "rigol", "anritsu", "anritsu_sg"}
+                or not isinstance(node.data.get("configuration"), dict)
+            )
+        ):
+            return "PREVIEW", "#b4233a"
         if detail.startswith("Sweep axis"):
             return "SWEEP", "#1769aa"
         if detail.startswith("Fixed setting") or detail.startswith("Fixed configuration"):
@@ -6886,7 +8994,7 @@ class RecipePage(QWidget):
             return "FLOW", "#7253a6"
         if node.type.startswith("set_") or node.type.startswith("ramp_"):
             return "SAFE", "#18844c"
-        if node.type == "acquire_spectrum":
+        if node.type in {"acquire_reference", "acquire_spectrum"}:
             return "ACQUIRE", "#18844c"
         return "READY", "#536577"
 
@@ -6904,7 +9012,7 @@ class RecipePage(QWidget):
             definition = next((item for item in _SWEEPABLE_PARAMETERS if item["target"] == target), None)
             label = definition["label"] if definition else target
             try:
-                dimension = definition["dimension"] if definition else _SWEEP_DIMENSIONS[target]
+                dimension = definition["dimension"] if definition else SWEEP_DIMENSIONS[target]
                 segments = node.data.get("segments")
                 if isinstance(segments, list):
                     points = generate_sweep_points(segments, dimension)
@@ -6933,11 +9041,56 @@ class RecipePage(QWidget):
             return f"Rigol CH{node.data.get('channel', '?')} configuration", "Fixed setting", QStyle.StandardPixmap.SP_MediaPlay
         if node.type == "configure_anritsu":
             return "Anritsu spectrum configuration", "Analyzer setting", QStyle.StandardPixmap.SP_ComputerIcon
+        if node.type == "acquire_reference":
+            return (
+                f"Acquire reference spectrum - {node.data.get('trace', 'TRAC1')}",
+                "Anritsu reference",
+                QStyle.StandardPixmap.SP_DialogSaveButton,
+            )
         if node.type == "acquire_spectrum":
+            operation = str(node.data.get("reference_operation", "none"))
+            if operation == "difference_db":
+                return (
+                    f"Acquire spectrum - {node.data.get('trace', 'TRAC1')} - "
+                    "store raw + raw-reference",
+                    "Anritsu processed acquisition",
+                    QStyle.StandardPixmap.SP_MediaPlay,
+                )
             return (
                 f"Acquire single spectrum · {node.data.get('trace', 'TRAC1')}",
                 "Anritsu acquisition",
                 QStyle.StandardPixmap.SP_MediaPlay,
+            )
+        if node.type == "update_keithley_level":
+            return (
+                f"Set Keithley {node.data.get('channel', '?')} "
+                f"{node.data.get('mode', 'source')} = {node.data.get('level', '')}",
+                "Point update - OUTPUT unchanged",
+                QStyle.StandardPixmap.SP_DriveHDIcon,
+            )
+        if node.type == "update_rigol_frequency":
+            return (
+                f"Set Rigol CH{node.data.get('channel', '?')} frequency = "
+                f"{node.data.get('frequency', '')}",
+                "Point update - OUTPUT unchanged",
+                QStyle.StandardPixmap.SP_MediaPlay,
+            )
+        if node.type == "arm_anritsu_sg_output":
+            return (
+                "ARM Anritsu SG RF output",
+                "One-shot safety permission",
+                QStyle.StandardPixmap.SP_DialogApplyButton,
+            )
+        if node.type == "set_anritsu_sg_output":
+            enabled = bool(node.data.get("enabled", False))
+            return (
+                f"Anritsu SG RF OUTPUT {'ON' if enabled else 'OFF'}",
+                "Energization" if enabled else "Safety action",
+                (
+                    QStyle.StandardPixmap.SP_MediaPlay
+                    if enabled
+                    else QStyle.StandardPixmap.SP_BrowserStop
+                ),
             )
         if node.type == "measure_keithley":
             return f"Measure Keithley {node.data.get('channel', '?')}", "Measurement", QStyle.StandardPixmap.SP_DialogApplyButton
@@ -6949,6 +9102,51 @@ class RecipePage(QWidget):
                 text or "Empty comment",
                 "Comment",
                 QStyle.StandardPixmap.SP_FileIcon,
+            )
+        if node.data.get("device_module") == "anritsu_sg":
+            actions = [
+                action
+                for action in node.data.get("parameter_actions", [])
+                if isinstance(action, dict)
+            ]
+            sweep = next(
+                (action for action in actions if action.get("mode") == "sweep"),
+                None,
+            )
+            return (
+                f"Anritsu SG · {len(actions)} parameter(s) · RF OFF",
+                "Sweep axis" if sweep is not None else "Fixed configuration",
+                QStyle.StandardPixmap.SP_ComputerIcon,
+            )
+        if node.data.get("device_module") == "anritsu":
+            raw_actions = node.data.get("parameter_actions")
+            actions = (
+                [action for action in raw_actions if isinstance(action, dict)]
+                if isinstance(raw_actions, list)
+                else []
+            )
+            sweep = next(
+                (action for action in actions if action.get("mode") == "sweep"),
+                None,
+            )
+            acquisition = " · acquire once" if node.data.get("acquire_single") else ""
+            return (
+                f"Anritsu Spectrum · {len(actions)} parameter(s){acquisition}",
+                "Sweep axis" if sweep is not None else "Fixed configuration",
+                QStyle.StandardPixmap.SP_ComputerIcon,
+            )
+        if node.data.get("device_module") == "rigol":
+            channel = int(node.data.get("channel", 1))
+            output = str(node.data.get("output_policy", "unchanged"))
+            output_label = (
+                f"OUTPUT {output.upper()}"
+                if output in {"on", "off"}
+                else "OUTPUT unchanged"
+            )
+            return (
+                f"Rigol CH{channel} · {output_label}",
+                "Fixed configuration",
+                QStyle.StandardPixmap.SP_DriveFDIcon,
             )
         if node.data.get("device_module"):
             raw_actions = node.data.get("parameter_actions")
@@ -7124,11 +9322,24 @@ class RecipePage(QWidget):
 
     def _tree_node_icon(self, node: RecipeNode, fallback: QStyle.StandardPixmap) -> QIcon:
         target = str(node.data.get("target", ""))
-        if target.startswith("keithley.") or node.type.startswith("configure_keithley") or node.type == "measure_keithley":
+        if (
+            target.startswith("keithley.")
+            or node.type.startswith("configure_keithley")
+            or node.type in {"measure_keithley", "update_keithley_level"}
+        ):
             return self._tree_badge_icon("Keithley", "#d94343", "K")
-        if target.startswith("rigol.") or node.type.startswith("configure_rigol") or node.type.startswith("set_rigol"):
+        if (
+            target.startswith("rigol.")
+            or node.type.startswith("configure_rigol")
+            or node.type.startswith("set_rigol")
+            or node.type == "update_rigol_frequency"
+        ):
             return self._tree_badge_icon("Rigol", "#d7a50b", "R")
-        if target.startswith("anritsu.") or "anritsu" in node.type or node.type == "acquire_spectrum":
+        if (
+            target.startswith("anritsu.")
+            or "anritsu" in node.type
+            or node.type in {"acquire_reference", "acquire_spectrum"}
+        ):
             return self._tree_badge_icon("Anritsu", "#269c5a", "A")
         module = node.data.get("device_module")
         if module == "keithley":
@@ -7172,11 +9383,40 @@ class RecipePage(QWidget):
             self.inspector.clear()
             self.inspector_summary.setText("Select a node to see its measurement role and configuration.")
             self.open_editor_button.setEnabled(False)
+            self.edit_device_button.setEnabled(False)
+            self.edit_generator_button.setEnabled(False)
+            return
+        operator_row = item.data(0, self.operator_row_role)
+        if isinstance(operator_row, dict):
+            stage_index = operator_row.get("stage_index")
+            parameter_id = str(operator_row.get("parameter_id", ""))
+            owner_id = str(operator_row.get("owner_node_id", ""))
+            stage_label = (
+                f"ROI {int(stage_index) + 1}"
+                if isinstance(stage_index, int)
+                else "Sweep axis"
+            )
+            self.inspector_summary.setText(
+                f"<b>{stage_label}</b><br>{parameter_id} · direct ROI editor"
+            )
+            self.open_editor_button.setEnabled(True)
+            self.open_editor_button.setText("Edit ROI")
+            self.edit_device_button.setEnabled(False)
+            self.edit_generator_button.setEnabled(True)
+            self.inspector.setPlainText(
+                f"Device node: {owner_id}\n"
+                f"Parameter: {parameter_id}\n"
+                f"Selected: {stage_label}\n\n"
+                "Click this row or use Open parameter editor to edit ROI directly. "
+                "The device configuration window will not be opened."
+            )
             return
         node = item.data(0, Qt.ItemDataRole.UserRole)
         if not isinstance(node, RecipeNode):
             self.inspector_summary.setText("Safety cleanup runs after success, operator stop and faults.")
             self.open_editor_button.setEnabled(False)
+            self.edit_device_button.setEnabled(False)
+            self.edit_generator_button.setEnabled(False)
             self.inspector.setPlainText(
                 "Finally actions run during normal completion, operator stop and fault cleanup. "
                 "They may only ramp Keithley to zero or disable outputs."
@@ -7186,10 +9426,36 @@ class RecipePage(QWidget):
         self.inspector_summary.setText(
             f"<b>{label}</b><br>{detail} • {len(node.children)} child node(s)"
         )
-        self.open_editor_button.setEnabled(
-            node.type in {"sweep", "configure_keithley", "comment"}
-            or bool(node.data.get("device_module"))
+        has_device_settings = bool(
+            node.data.get("device_module")
+            or self._legacy_device_configuration_node(node) is not None
         )
+        has_roi = node.type == "sweep" or (
+            bool(node.data.get("device_module"))
+            and any(
+                isinstance(action, dict) and action.get("mode") == "sweep"
+                for action in node.data.get("parameter_actions", [])
+            )
+        )
+        is_comment = node.type == "comment"
+        is_acquisition = node.type in {
+            "acquire_reference",
+            "acquire_spectrum",
+        }
+        self.open_editor_button.setText(
+            "Device settings"
+            if has_device_settings
+            else "Edit ROI"
+            if has_roi
+            else "Acquisition settings"
+            if is_acquisition
+            else "Edit comment"
+        )
+        self.open_editor_button.setEnabled(
+            has_device_settings or has_roi or is_comment or is_acquisition
+        )
+        self.edit_device_button.setEnabled(has_device_settings)
+        self.edit_generator_button.setEnabled(has_roi)
         actions = (
             tuple(action for action in self._plan.actions if action.node_id == node.id)
             if self._plan is not None
@@ -7218,6 +9484,20 @@ class RecipePage(QWidget):
             )
         self.inspector.setPlainText("\n".join(lines))
 
+    def _operator_row_clicked(
+        self, item: QTreeWidgetItem, _column: int
+    ) -> None:
+        metadata = item.data(0, self.operator_row_role)
+        if (
+            isinstance(metadata, dict)
+            and metadata.get("kind")
+            in {"sweep_parameter", "roi_stage", "native_sweep_roi"}
+        ):
+            if metadata.get("kind") == "native_sweep_roi":
+                self._edit_native_sweep_roi_from_tree(dict(metadata))
+            else:
+                self._edit_device_roi_from_tree(dict(metadata))
+
     def _move_recipe_node(
         self,
         node_id: str,
@@ -7225,6 +9505,13 @@ class RecipePage(QWidget):
         destination_branch: str,
         destination_index: int,
     ) -> None:
+        self._emit_tree_diagnostic(
+            "TREE_MOVE_REQUESTED",
+            node_id=node_id,
+            destination_parent_id=destination_parent_id,
+            destination_branch=destination_branch,
+            destination_index=destination_index,
+        )
         try:
             moved_source = move_recipe_node(
                 self.editor.toPlainText(),
@@ -7235,6 +9522,15 @@ class RecipePage(QWidget):
             )
             parse_recipe_text(moved_source, origin=self.path.text())
         except Exception as exc:
+            self._emit_tree_diagnostic(
+                "TREE_MOVE_REJECTED",
+                node_id=node_id,
+                destination_parent_id=destination_parent_id,
+                destination_branch=destination_branch,
+                destination_index=destination_index,
+                error_type=type(exc).__name__,
+                error=str(exc),
+            )
             QMessageBox.warning(self, "Recipe move rejected", str(exc))
             return
         self._apply_builder_source(
@@ -7293,14 +9589,12 @@ class RecipePage(QWidget):
     def _update_tree_history_controls(self) -> None:
         can_undo = bool(self._tree_undo)
         can_redo = bool(self._tree_redo)
-        self.undo_tree_button.setEnabled(can_undo)
-        self.redo_tree_button.setEnabled(can_redo)
         self.undo_tree_action.setEnabled(can_undo)
         self.redo_tree_action.setEnabled(can_redo)
-        self.undo_tree_button.setToolTip(
+        self.undo_tree_action.setToolTip(
             "Undo the last Tree Builder operation" if self._tree_undo else "No Tree Builder operation to undo"
         )
-        self.redo_tree_button.setToolTip(
+        self.redo_tree_action.setToolTip(
             "Redo the last Tree Builder operation" if self._tree_redo else "No Tree Builder operation to redo"
         )
 
@@ -7336,14 +9630,32 @@ class RecipePage(QWidget):
         self._update_tree_history_controls()
 
     def _apply_builder_source(self, source: str, status: str) -> None:
-        recipe = parse_recipe_text(source, origin="tree-builder")
         previous = self.editor.toPlainText()
         previous_plan = self._plan
+        try:
+            recipe = parse_recipe_text(source, origin="tree-builder")
+        except Exception as exc:
+            self._emit_tree_diagnostic(
+                "TREE_SOURCE_REJECTED",
+                operation=status,
+                source_length=len(source),
+                error_type=type(exc).__name__,
+                error=str(exc),
+            )
+            raise
         self._plan = None
         try:
             self._populate_recipe_tree(recipe.root, recipe.finally_nodes, None)
-        except Exception:
+        except Exception as exc:
             self._plan = previous_plan
+            self._emit_tree_diagnostic(
+                "TREE_RENDER_REJECTED",
+                operation=status,
+                root_id=recipe.root.id,
+                source_length=len(source),
+                error_type=type(exc).__name__,
+                error=str(exc),
+            )
             raise
         if source != previous:
             self._tree_undo.append(previous)
@@ -7358,9 +9670,24 @@ class RecipePage(QWidget):
         self.status.emit(status)
         self._update_tree_history_controls()
 
-    def _add_basic_node(self) -> None:
+    def _emit_tree_diagnostic(self, event: str, **context: object) -> None:
+        """Send one searchable, structured Tree Builder record to Event log."""
+
+        payload = json.dumps(
+            context, ensure_ascii=False, sort_keys=True, default=str
+        )
+        self.status.emit(f"{event} | {payload}")
+
+    def _add_basic_node(
+        self,
+        *,
+        parent_id: str | None = None,
+        branch: str | None = None,
+        insert_index: int | None = None,
+    ) -> None:
         kind = str(self.node_kind.currentData())
-        parent_id, branch = self._builder_parent()
+        if parent_id is None or branch is None:
+            parent_id, branch = self._builder_parent()
         node_id = self._new_node_id(kind)
         defaults: dict[str, dict[str, object]] = {
             "sequence": {
@@ -7407,7 +9734,18 @@ class RecipePage(QWidget):
             },
             "wait": {"id": node_id, "type": "wait", "duration": "100 ms"},
             "measure_keithley": {"id": node_id, "type": "measure_keithley", "channel": "B"},
-            "acquire_spectrum": {"id": node_id, "type": "acquire_spectrum", "trace": "TRAC1"},
+            "acquire_reference": {
+                "id": node_id,
+                "type": "acquire_reference",
+                "trace": "TRAC1",
+                "average_count": 1,
+            },
+            "acquire_spectrum": {
+                "id": node_id,
+                "type": "acquire_spectrum",
+                "trace": "TRAC1",
+                "average_count": 1,
+            },
             "comment": {"id": node_id, "type": "comment", "text": "Describe this step"},
             "ramp_keithley_to_zero": {
                 "id": node_id,
@@ -7432,10 +9770,23 @@ class RecipePage(QWidget):
                 "type": "set_anritsu_sg_output",
                 "enabled": False,
             },
+            "arm_anritsu_sg_output": {
+                "id": node_id,
+                "type": "arm_anritsu_sg_output",
+            },
+            "set_anritsu_sg_output_on": {
+                "id": node_id,
+                "type": "set_anritsu_sg_output",
+                "enabled": True,
+            },
         }
         try:
             source = add_recipe_node(
-                self.editor.toPlainText(), parent_id=parent_id, branch=branch, node=defaults[kind]
+                self.editor.toPlainText(),
+                parent_id=parent_id,
+                branch=branch,
+                index=insert_index,
+                node=defaults[kind],
             )
             self._apply_builder_source(source, f"Added {kind} node")
         except Exception as exc:
@@ -7494,27 +9845,303 @@ class RecipePage(QWidget):
             self._apply_builder_source(source, f"Added {added} {noun}")
 
     def _edit_selected_node(self) -> None:
+        """Open the most specific editor while keeping device and ROI tasks separate."""
+
         item = self.tree.currentItem()
+        operator_row = (
+            item.data(0, self.operator_row_role) if item is not None else None
+        )
+        if isinstance(operator_row, dict):
+            self._edit_selected_roi()
+            return
         node = item.data(0, Qt.ItemDataRole.UserRole) if item is not None else None
-        if (
-            isinstance(node, RecipeNode)
-            and node.data.get("device_module") == "keithley"
-        ):
-            self._edit_keithley_module_node(node)
-            return
-        if isinstance(node, RecipeNode) and node.type == "sweep":
-            self._edit_selected_generator()
-            return
-        if isinstance(node, RecipeNode) and node.type == "configure_keithley":
-            self._edit_selected_fixed_keithley(node)
-            return
         if isinstance(node, RecipeNode) and node.type == "comment":
             self._edit_comment_node(node)
             return
+        if isinstance(node, RecipeNode) and node.type in {
+            "acquire_reference",
+            "acquire_spectrum",
+        }:
+            self._edit_anritsu_acquisition_node(node)
+            return
+        if isinstance(node, RecipeNode) and (
+            node.data.get("device_module")
+            or self._legacy_device_configuration_node(node) is not None
+        ):
+            self._edit_selected_device_settings()
+            return
+        self._edit_selected_roi()
+
+    def _edit_selected_roi(self) -> None:
+        item = self.tree.currentItem()
+        operator_row = (
+            item.data(0, self.operator_row_role) if item is not None else None
+        )
+        if isinstance(operator_row, dict):
+            if operator_row.get("kind") == "native_sweep_roi":
+                self._edit_native_sweep_roi_from_tree(dict(operator_row))
+            else:
+                self._edit_device_roi_from_tree(dict(operator_row))
+            return
+        node = item.data(0, Qt.ItemDataRole.UserRole) if item is not None else None
+        if isinstance(node, RecipeNode) and node.type == "sweep":
+            self._edit_selected_generator(node=node)
+            return
+        if isinstance(node, RecipeNode) and node.data.get("device_module"):
+            sweep = next(
+                (
+                    action
+                    for action in node.data.get("parameter_actions", [])
+                    if isinstance(action, dict) and action.get("mode") == "sweep"
+                ),
+                None,
+            )
+            if sweep is not None:
+                self._edit_device_roi_from_tree(
+                    {
+                        "device_module": node.data.get("device_module"),
+                        "owner_node_id": node.id,
+                        "parameter_id": sweep.get("parameter_id"),
+                        "stage_index": None,
+                    }
+                )
+                return
         QMessageBox.information(
             self,
-            "Edit node",
-            "Select a Keithley fixed setting or a generated sweep to open its parameter editor.",
+            "Edit ROI",
+            "Select an ROI row, a sweep axis, or a device module containing a sweep.",
+        )
+
+    @staticmethod
+    def _legacy_device_configuration_node(
+        node: RecipeNode,
+    ) -> RecipeNode | None:
+        if node.type in {
+            "configure_keithley",
+            "configure_rigol",
+            "configure_anritsu",
+            "configure_anritsu_advanced",
+            "configure_anritsu_sg",
+        }:
+            return node
+        if node.type == "sweep":
+            return next(
+                (
+                    child
+                    for child in node.children
+                    if child.type
+                    in {
+                        "configure_keithley",
+                        "configure_rigol",
+                        "configure_anritsu",
+                        "configure_anritsu_sg",
+                    }
+                ),
+                None,
+            )
+        return None
+
+    def _edit_selected_device_settings(self) -> None:
+        item = self.tree.currentItem()
+        node = item.data(0, Qt.ItemDataRole.UserRole) if item is not None else None
+        if not isinstance(node, RecipeNode):
+            QMessageBox.information(
+                self, "Device settings", "Select a device or its sweep axis first."
+            )
+            return
+        if node.data.get("device_module") == "keithley":
+            self._edit_keithley_module_node(node)
+            return
+        if node.data.get("device_module") == "rigol":
+            self._edit_rigol_module_node(node)
+            return
+        if node.data.get("device_module") == "anritsu":
+            self._edit_anritsu_module_node(node)
+            return
+        if node.data.get("device_module") == "anritsu_sg":
+            self._edit_anritsu_sg_module_node(node)
+            return
+        configuration = self._legacy_device_configuration_node(node)
+        if configuration is None:
+            QMessageBox.information(
+                self,
+                "Device settings",
+                "The selected object has no device configuration window.",
+            )
+            return
+        if configuration.type == "configure_keithley":
+            self._edit_legacy_keithley_configuration(configuration)
+        elif configuration.type == "configure_rigol":
+            self._edit_legacy_rigol_configuration(configuration)
+        elif configuration.type == "configure_anritsu":
+            self._edit_legacy_anritsu_configuration(configuration)
+        elif configuration.type == "configure_anritsu_sg":
+            QMessageBox.information(
+                self,
+                "Anritsu SG settings",
+                "Signal-generator plan editing will be available in the Anritsu module.",
+            )
+        else:
+            QMessageBox.information(
+                self,
+                "Device settings",
+                "Select the parent Anritsu configuration node.",
+            )
+
+    def _edit_device_roi_from_tree(self, metadata: dict[str, object]) -> None:
+        if metadata.get("device_module") == "anritsu_sg":
+            owner = self._find_tree_item(str(metadata.get("owner_node_id", "")))
+            node = (
+                owner.data(0, Qt.ItemDataRole.UserRole)
+                if owner is not None
+                else None
+            )
+            if isinstance(node, RecipeNode):
+                self._edit_anritsu_sg_module_node(node)
+        elif metadata.get("device_module") == "anritsu":
+            self._edit_anritsu_roi_from_tree(metadata)
+        elif metadata.get("device_module") == "rigol":
+            self._edit_rigol_roi_from_tree(metadata)
+        else:
+            self._edit_keithley_roi_from_tree(metadata)
+
+    def _edit_native_sweep_roi_from_tree(
+        self, metadata: dict[str, object]
+    ) -> None:
+        owner_id = str(metadata.get("owner_node_id", ""))
+        owner_item = self._find_tree_item(owner_id)
+        node = (
+            owner_item.data(0, Qt.ItemDataRole.UserRole)
+            if owner_item is not None
+            else None
+        )
+        if not isinstance(node, RecipeNode) or node.type != "sweep":
+            QMessageBox.warning(
+                self, "ROI editor", "The owning sweep no longer exists."
+            )
+            return
+        stage_index = metadata.get("stage_index")
+        self._edit_selected_generator(
+            node=node,
+            stage_index=stage_index if isinstance(stage_index, int) else None,
+        )
+
+    def _edit_keithley_roi_from_tree(
+        self, metadata: dict[str, object]
+    ) -> None:
+        owner_id = str(metadata.get("owner_node_id", ""))
+        parameter_id = str(metadata.get("parameter_id", ""))
+        owner_item = self._find_tree_item(owner_id)
+        node = (
+            owner_item.data(0, Qt.ItemDataRole.UserRole)
+            if owner_item is not None
+            else None
+        )
+        if not isinstance(node, RecipeNode):
+            QMessageBox.warning(
+                self, "ROI editor", "The owning device node no longer exists."
+            )
+            return
+        raw_actions = node.data.get("parameter_actions")
+        actions = (
+            [dict(action) for action in raw_actions if isinstance(action, dict)]
+            if isinstance(raw_actions, list)
+            else []
+        )
+        sweep_action = next(
+            (
+                action
+                for action in actions
+                if action.get("parameter_id") == parameter_id
+                and action.get("mode") == "sweep"
+            ),
+            None,
+        )
+        if sweep_action is None:
+            QMessageBox.warning(
+                self,
+                "ROI editor",
+                "The selected parameter is no longer configured as a sweep axis.",
+            )
+            return
+        snapshot = replace(
+            self._current_keithley_snapshot(),
+            channel=str(node.data.get("channel", "B")),
+            source_mode=str(node.data.get("source_mode", "current")),
+        )
+        for action in actions:
+            snapshot = self._snapshot_with_override(snapshot, action)
+        definition = self._keithley_roi_definition(snapshot, parameter_id)
+        initial = sweep_action.get("segments")
+        dialog = SweepGeneratorDialog(
+            definition,
+            self,
+            initial_segments=(
+                [dict(segment) for segment in initial if isinstance(segment, dict)]
+                if isinstance(initial, list)
+                else None
+            ),
+        )
+        dialog.setWindowTitle(
+            f"Keithley {snapshot.channel} — ROI · {definition['label']}"
+        )
+        stage_index = metadata.get("stage_index")
+        dialog.select_interval(stage_index if isinstance(stage_index, int) else None)
+        if dialog.exec() != QDialog.DialogCode.Accepted:
+            return
+        try:
+            self._apply_keithley_roi_segments(
+                node, parameter_id, dialog.segment_data()
+            )
+        except Exception as exc:
+            QMessageBox.warning(self, "ROI editor", str(exc))
+
+    def _apply_keithley_roi_segments(
+        self,
+        node: RecipeNode,
+        parameter_id: str,
+        segments: list[dict[str, object]],
+    ) -> None:
+        raw_actions = node.data.get("parameter_actions")
+        actions = (
+            [dict(action) for action in raw_actions if isinstance(action, dict)]
+            if isinstance(raw_actions, list)
+            else []
+        )
+        target = next(
+            (
+                action
+                for action in actions
+                if action.get("parameter_id") == parameter_id
+                and action.get("mode") == "sweep"
+            ),
+            None,
+        )
+        if target is None:
+            raise ConfigurationError(
+                "The selected Keithley parameter is not a sweep axis."
+            )
+        snapshot = replace(
+            self._current_keithley_snapshot(),
+            channel=str(node.data.get("channel", "B")),
+            source_mode=str(node.data.get("source_mode", "current")),
+        )
+        for action in actions:
+            snapshot = self._snapshot_with_override(snapshot, action)
+        definition = self._keithley_roi_definition(snapshot, parameter_id)
+        generate_sweep_points(segments, definition["dimension"])
+        target["segments"] = [dict(segment) for segment in segments]
+        replacement = self._configured_keithley_node(
+            node,
+            snapshot,
+            parameter_actions=actions,
+            output_policy=str(node.data.get("output_policy", "unchanged")),
+        )
+        source = replace_recipe_node(
+            self.editor.toPlainText(), node_id=node.id, node=replacement
+        )
+        self._apply_builder_source(
+            source, f"Updated ROI for {parameter_id} in {node.id}"
         )
 
     def _edit_keithley_module_node(self, node: RecipeNode) -> None:
@@ -7558,6 +10185,774 @@ class RecipePage(QWidget):
         except Exception as exc:
             QMessageBox.warning(self, "Keithley node", str(exc))
 
+    def _edit_anritsu_module_node(self, node: RecipeNode) -> None:
+        snapshot = self._current_anritsu_snapshot()
+        configuration = node.data.get("configuration")
+        if isinstance(configuration, dict):
+            try:
+                snapshot = replace(
+                    snapshot,
+                    start_hz=parse_quantity(
+                        configuration["start_frequency"], DIMENSION_FREQUENCY
+                    ).si_value,
+                    stop_hz=parse_quantity(
+                        configuration["stop_frequency"], DIMENSION_FREQUENCY
+                    ).si_value,
+                    reference_level_dbm=parse_quantity(
+                        configuration["reference_level"], DIMENSION_DBM
+                    ).si_value,
+                    points=int(configuration["points"]),
+                )
+            except (KeyError, TypeError, ValueError, ConfigurationError):
+                pass
+        raw_actions = node.data.get("parameter_actions")
+        actions = (
+            [dict(action) for action in raw_actions if isinstance(action, dict)]
+            if isinstance(raw_actions, list)
+            else []
+        )
+        for action in actions:
+            snapshot = self._anritsu_snapshot_with_override(snapshot, action)
+        dialog = AnritsuNodeEditorDialog(
+            self._settings, self, snapshot=snapshot
+        )
+        dialog.load_plan_actions(
+            actions,
+            acquire_single=bool(node.data.get("acquire_single", False)),
+            trace=str(node.data.get("trace", "TRAC1")),
+        )
+        if dialog.exec() != QDialog.DialogCode.Accepted:
+            return
+        snapshot = dialog.configuration_panel.configuration_snapshot()
+        replacement = self._configured_anritsu_node(
+            node,
+            snapshot=snapshot,
+            parameter_actions=dialog.planned_parameter_actions(),
+            acquire_single=dialog.acquire_single.isChecked(),
+            trace=dialog.trace.currentText(),
+        )
+        try:
+            source = replace_recipe_node(
+                self.editor.toPlainText(), node_id=node.id, node=replacement
+            )
+            self._apply_builder_source(source, "Configured Anritsu spectrum module")
+        except Exception as exc:
+            QMessageBox.warning(self, "Anritsu node", str(exc))
+
+    def _edit_anritsu_sg_module_node(self, node: RecipeNode) -> None:
+        configuration = node.data.get("configuration")
+        snapshot = self._current_anritsu_sg_snapshot()
+        frequency = format_quantity_auto(
+            snapshot.frequency_hz, DIMENSION_FREQUENCY
+        )
+        power = f"{snapshot.power_dbm:.9g} dBm"
+        if isinstance(configuration, dict):
+            frequency = str(configuration.get("frequency", frequency))
+            power = str(configuration.get("power", power))
+        actions = [
+            dict(action)
+            for action in node.data.get("parameter_actions", [])
+            if isinstance(action, dict)
+        ]
+        dialog = AnritsuSignalGeneratorNodeEditorDialog(
+            self,
+            frequency=frequency,
+            power=power,
+            parameter_actions=actions,
+        )
+        if dialog.exec() != QDialog.DialogCode.Accepted:
+            return
+        replacement = self._configured_anritsu_sg_node(
+            node,
+            frequency=dialog.frequency.text().strip(),
+            power=dialog.power.text().strip(),
+            parameter_actions=dialog.planned_parameter_actions(),
+        )
+        try:
+            source = replace_recipe_node(
+                self.editor.toPlainText(), node_id=node.id, node=replacement
+            )
+            self._apply_builder_source(
+                source, "Configured Anritsu signal-generator module · RF OFF"
+            )
+        except Exception as exc:
+            QMessageBox.warning(self, "Anritsu SG node", str(exc))
+
+    def _edit_rigol_module_node(self, node: RecipeNode) -> None:
+        snapshot = self._current_rigol_snapshot()
+        configuration = node.data.get("configuration")
+        if isinstance(configuration, dict):
+            try:
+                snapshot = RigolConfigurationSnapshot(**configuration)
+            except TypeError:
+                pass
+        raw_actions = node.data.get("parameter_actions")
+        actions = (
+            [dict(action) for action in raw_actions if isinstance(action, dict)]
+            if isinstance(raw_actions, list)
+            else []
+        )
+        dialog = RigolNodeEditorDialog(
+            self,
+            settings=self._settings,
+            snapshot=snapshot,
+            parameter_actions=actions,
+            output_policy=str(node.data.get("output_policy", "unchanged")),
+        )
+        if dialog.exec() != QDialog.DialogCode.Accepted:
+            return
+        replacement = self._configured_rigol_node(
+            node,
+            snapshot=dialog.configuration_snapshot(),
+            parameter_actions=dialog.planned_parameter_actions(),
+            output_policy=dialog.selected_output_policy(),
+        )
+        try:
+            source = replace_recipe_node(
+                self.editor.toPlainText(), node_id=node.id, node=replacement
+            )
+            self._apply_builder_source(
+                source,
+                f"Configured Rigol CH{replacement['channel']} OUTPUT "
+                f"{str(replacement['output_policy']).upper()}",
+            )
+        except Exception as exc:
+            QMessageBox.warning(self, "Rigol node", str(exc))
+
+    def _edit_rigol_roi_from_tree(
+        self, metadata: dict[str, object]
+    ) -> None:
+        owner_id = str(metadata.get("owner_node_id", ""))
+        parameter_id = str(metadata.get("parameter_id", ""))
+        owner_item = self._find_tree_item(owner_id)
+        node = (
+            owner_item.data(0, Qt.ItemDataRole.UserRole)
+            if owner_item is not None
+            else None
+        )
+        if not isinstance(node, RecipeNode):
+            QMessageBox.warning(
+                self, "ROI editor", "The owning Rigol node no longer exists."
+            )
+            return
+        actions = [
+            dict(action)
+            for action in node.data.get("parameter_actions", [])
+            if isinstance(action, dict)
+        ]
+        action = next(
+            (
+                candidate
+                for candidate in actions
+                if candidate.get("parameter_id") == parameter_id
+                and candidate.get("mode") == "sweep"
+            ),
+            None,
+        )
+        if action is None:
+            return
+        suffix = {
+            "carrier.frequency": "frequency",
+            "carrier.high_level": "high_level",
+            "carrier.low_level": "low_level",
+        }.get(parameter_id)
+        if suffix is None:
+            return
+        dimension = (
+            DIMENSION_FREQUENCY
+            if parameter_id == "carrier.frequency"
+            else DIMENSION_VOLTAGE
+        )
+        initial = action.get("segments")
+        dialog = SweepGeneratorDialog(
+            {
+                "device": "Rigol",
+                "label": f"Rigol CH{node.data.get('channel')} · {suffix}",
+                "target": f"rigol.{node.data.get('channel')}.{suffix}",
+                "dimension": dimension,
+            },
+            self,
+            initial_segments=(
+                [
+                    dict(segment)
+                    for segment in initial
+                    if isinstance(segment, dict)
+                ]
+                if isinstance(initial, list)
+                else None
+            ),
+        )
+        stage_index = metadata.get("stage_index")
+        dialog.select_interval(
+            stage_index if isinstance(stage_index, int) else None
+        )
+        if dialog.exec() != QDialog.DialogCode.Accepted:
+            return
+        action["segments"] = dialog.segment_data()
+        configuration = node.data.get("configuration")
+        try:
+            snapshot = (
+                RigolConfigurationSnapshot(**configuration)
+                if isinstance(configuration, dict)
+                else self._current_rigol_snapshot()
+            )
+        except TypeError:
+            snapshot = self._current_rigol_snapshot()
+        replacement = self._configured_rigol_node(
+            node,
+            snapshot=snapshot,
+            parameter_actions=actions,
+            output_policy=str(node.data.get("output_policy", "unchanged")),
+        )
+        source = replace_recipe_node(
+            self.editor.toPlainText(), node_id=node.id, node=replacement
+        )
+        self._apply_builder_source(
+            source, f"Updated Rigol ROI for {parameter_id}"
+        )
+
+    def _edit_legacy_keithley_configuration(self, node: RecipeNode) -> None:
+        snapshot = replace(
+            self._current_keithley_snapshot(),
+            channel=str(node.data.get("channel", "B")),
+            source_mode=str(node.data.get("mode", "current")),
+            source_level=str(node.data.get("level", "1 mA")),
+            compliance=str(node.data.get("compliance", "67 mV")),
+            nplc=str(node.data.get("nplc", "1")),
+            settling_time=str(node.data.get("settle_time", "100 ms")),
+            sense_mode=str(node.data.get("sense_mode", "2wire")),
+            source_autorange=bool(node.data.get("source_autorange", True)),
+            source_range=str(node.data.get("source_range", "AUTO")),
+            measure_voltage_autorange=bool(
+                node.data.get("measure_voltage_autorange", True)
+            ),
+            measure_voltage_range=str(
+                node.data.get("measure_voltage_range", "AUTO")
+            ),
+            measure_current_autorange=bool(
+                node.data.get("measure_current_autorange", True)
+            ),
+            measure_current_range=str(
+                node.data.get("measure_current_range", "AUTO")
+            ),
+        )
+        dialog = KeithleyNodeEditorDialog(
+            self._settings, self, snapshot=snapshot
+        )
+        for selector in dialog.parameter_selectors.values():
+            index = selector.findData("set")
+            if index >= 0:
+                selector.setCurrentIndex(index)
+        dialog.output_policy.setEnabled(False)
+        dialog.output_policy.setToolTip(
+            "Legacy configuration nodes do not change OUTPUT."
+        )
+        if dialog.exec() != QDialog.DialogCode.Accepted:
+            return
+        updated = dialog.configuration_snapshot()
+        replacement = self._node_to_mapping(node)
+        replacement.update(
+            {
+                "channel": updated.channel,
+                "mode": updated.source_mode,
+                "level": updated.source_level,
+                "compliance": updated.compliance,
+                "nplc": float(updated.nplc.replace(",", ".")),
+                "settle_time": updated.settling_time,
+                "sense_mode": updated.sense_mode,
+                "source_autorange": updated.source_autorange,
+                "source_range": updated.source_range,
+                "measure_voltage_autorange": updated.measure_voltage_autorange,
+                "measure_voltage_range": updated.measure_voltage_range,
+                "measure_current_autorange": updated.measure_current_autorange,
+                "measure_current_range": updated.measure_current_range,
+            }
+        )
+        source = replace_recipe_node(
+            self.editor.toPlainText(), node_id=node.id, node=replacement
+        )
+        self._apply_builder_source(source, f"Updated Keithley settings {node.id}")
+
+    def _edit_legacy_rigol_configuration(self, node: RecipeNode) -> None:
+        snapshot = RigolConfigurationSnapshot(
+            channel=int(node.data.get("channel", 1)),
+            waveform=str(node.data.get("waveform", "SIN")),
+            frequency=str(node.data.get("frequency", "1 kHz")),
+            high_level=str(node.data.get("high_level", "1 mV")),
+            low_level=str(node.data.get("low_level", "-1 mV")),
+            output_load=str(node.data.get("output_load", "HIGHZ")),
+            phase_deg=str(node.data.get("phase_deg", "0")),
+            square_duty_percent=str(
+                node.data.get("square_duty_percent", "50")
+            ),
+            ramp_symmetry_percent=str(
+                node.data.get("ramp_symmetry_percent", "50")
+            ),
+            pulse_width=str(node.data.get("pulse_width", "100 us")),
+            pulse_leading=str(node.data.get("pulse_leading", "10 ns")),
+            pulse_trailing=str(node.data.get("pulse_trailing", "10 ns")),
+            dut_min_impedance=str(
+                node.data.get("dut_min_impedance", "50 ohm")
+            ),
+        )
+        dialog = RigolNodeEditorDialog(
+            self,
+            settings=self._settings,
+            snapshot=snapshot,
+            output_policy="unchanged",
+        )
+        dialog.output_policy.setEnabled(False)
+        dialog.output_policy.setToolTip(
+            "Legacy configuration nodes do not change OUTPUT."
+        )
+        if dialog.exec() != QDialog.DialogCode.Accepted:
+            return
+        updated = dialog.configuration_snapshot()
+        replacement = self._node_to_mapping(node)
+        replacement.update(
+            {
+                "channel": updated.channel,
+                "waveform": updated.waveform,
+                "frequency": updated.frequency,
+                "high_level": updated.high_level,
+                "low_level": updated.low_level,
+                "output_load": updated.output_load,
+                "phase_deg": float(updated.phase_deg.replace(",", ".")),
+                "dut_min_impedance": updated.dut_min_impedance,
+            }
+        )
+        for key, value, waveform in (
+            ("square_duty_percent", updated.square_duty_percent, "SQU"),
+            ("ramp_symmetry_percent", updated.ramp_symmetry_percent, "RAMP"),
+            ("pulse_width", updated.pulse_width, "PULS"),
+            ("pulse_leading", updated.pulse_leading, "PULS"),
+            ("pulse_trailing", updated.pulse_trailing, "PULS"),
+        ):
+            if updated.waveform == waveform:
+                replacement[key] = value
+            else:
+                replacement.pop(key, None)
+        source = replace_recipe_node(
+            self.editor.toPlainText(), node_id=node.id, node=replacement
+        )
+        self._apply_builder_source(source, f"Updated Rigol settings {node.id}")
+
+    def _edit_legacy_anritsu_configuration(self, node: RecipeNode) -> None:
+        current = self._current_anritsu_snapshot()
+        try:
+            snapshot = replace(
+                current,
+                start_hz=parse_quantity(
+                    node.data.get("start_frequency"), DIMENSION_FREQUENCY
+                ).si_value,
+                stop_hz=parse_quantity(
+                    node.data.get("stop_frequency"), DIMENSION_FREQUENCY
+                ).si_value,
+                reference_level_dbm=parse_quantity(
+                    node.data.get("reference_level"), DIMENSION_DBM
+                ).si_value,
+                points=int(node.data.get("points", 1001)),
+            )
+        except Exception as exc:
+            QMessageBox.warning(self, "Anritsu settings", str(exc))
+            return
+        actions = [
+            {
+                "parameter_id": "spectrum.start_frequency",
+                "mode": "set",
+                "value": str(node.data.get("start_frequency")),
+            },
+            {
+                "parameter_id": "spectrum.stop_frequency",
+                "mode": "set",
+                "value": str(node.data.get("stop_frequency")),
+            },
+            {
+                "parameter_id": "spectrum.reference_level",
+                "mode": "set",
+                "value": str(node.data.get("reference_level")),
+            },
+            {
+                "parameter_id": "spectrum.points",
+                "mode": "set",
+                "value": str(node.data.get("points", 1001)),
+            },
+        ]
+        dialog = AnritsuNodeEditorDialog(
+            self._settings, self, snapshot=snapshot
+        )
+        dialog.load_plan_actions(
+            actions, acquire_single=False, trace=str(node.data.get("trace", "TRAC1"))
+        )
+        if dialog.exec() != QDialog.DialogCode.Accepted:
+            return
+        updated = dialog.configuration_panel.configuration_snapshot()
+        replacement = self._node_to_mapping(node)
+        replacement.update(
+            {
+                "start_frequency": f"{updated.start_hz:.12g} Hz",
+                "stop_frequency": f"{updated.stop_hz:.12g} Hz",
+                "reference_level": f"{updated.reference_level_dbm:.12g} dBm",
+                "points": updated.points,
+            }
+        )
+        source = replace_recipe_node(
+            self.editor.toPlainText(), node_id=node.id, node=replacement
+        )
+        self._apply_builder_source(source, f"Updated Anritsu settings {node.id}")
+
+    @staticmethod
+    def _configured_rigol_node(
+        node: RecipeNode,
+        *,
+        channel: int | None = None,
+        snapshot: RigolConfigurationSnapshot | None = None,
+        parameter_actions: list[dict[str, object]] | None = None,
+        output_policy: str,
+    ) -> dict[str, object]:
+        snapshot = snapshot or RigolConfigurationSnapshot(channel=channel or 1)
+        channel = snapshot.channel
+        if channel not in {1, 2}:
+            raise ConfigurationError("Rigol output channel must be 1 or 2.")
+        if output_policy not in {"unchanged", "on", "off"}:
+            raise ConfigurationError(
+                "Rigol output policy must be unchanged, on or off."
+            )
+        actions = parameter_actions or [
+            {
+                "parameter_id": "carrier.frequency",
+                "mode": "set",
+                "value": snapshot.frequency,
+            },
+            {
+                "parameter_id": "carrier.high_level",
+                "mode": "set",
+                "value": snapshot.high_level,
+            },
+            {
+                "parameter_id": "carrier.low_level",
+                "mode": "set",
+                "value": snapshot.low_level,
+            },
+        ]
+        allowed = {
+            "carrier.frequency",
+            "carrier.high_level",
+            "carrier.low_level",
+        }
+        if any(action.get("parameter_id") not in allowed for action in actions):
+            raise ConfigurationError("Rigol node contains an unsupported parameter action.")
+        sweeps = [action for action in actions if action.get("mode") == "sweep"]
+        if len(sweeps) > 1:
+            raise ConfigurationError("One Rigol node supports one local sweep axis.")
+        roi_required = any(
+            not isinstance(action.get("segments"), list) or not action.get("segments")
+            for action in sweeps
+        )
+        children = [
+            RecipePage._node_to_mapping(child)
+            for child in node.children
+            if not (
+                child.type == "comment"
+                and child.data.get("text")
+                == "Drop nested devices or flow actions here"
+            )
+        ]
+        return {
+            "id": node.id,
+            "type": "sequence",
+            "text": f"Rigol CH{channel} · OUTPUT {output_policy.upper()}",
+            "device_module": "rigol",
+            "label": "Rigol DG1032Z",
+            "operation": "configure_selected_parameters",
+            "configuration_required": roi_required,
+            "channel": channel,
+            "parameter_actions": actions,
+            "output_policy": output_policy,
+            "roi_required": roi_required,
+            "configuration": {
+                field: getattr(snapshot, field)
+                for field in snapshot.__dataclass_fields__
+            },
+            "children": children,
+        }
+
+    def _current_rigol_snapshot(self) -> RigolConfigurationSnapshot:
+        provider = self._rigol_snapshot_provider
+        if callable(provider):
+            snapshot = provider()
+            if isinstance(snapshot, RigolConfigurationSnapshot):
+                return snapshot
+        return RigolConfigurationSnapshot()
+
+    def _current_anritsu_snapshot(self) -> AnritsuConfigurationSnapshot:
+        provider = self._anritsu_snapshot_provider
+        if callable(provider):
+            snapshot = provider()
+            if isinstance(snapshot, AnritsuConfigurationSnapshot):
+                return snapshot
+        return AnritsuConfigurationSnapshot(
+            start_hz=1e6,
+            stop_hz=10e6,
+            reference_level_dbm=0.0,
+            points=1001,
+            instrument_mode="PLAN_EDIT",
+        )
+
+    def _current_anritsu_sg_snapshot(self) -> SignalGeneratorSnapshot:
+        provider = self._anritsu_sg_snapshot_provider
+        if callable(provider):
+            try:
+                snapshot = provider()
+            except (ConfigurationError, ValueError):
+                snapshot = None
+            if isinstance(snapshot, SignalGeneratorSnapshot):
+                return snapshot
+        generator = self._settings.anritsu.signal_generator
+        frequency = generator.frequency.min or "1 GHz"
+        power = generator.power.min or "-30 dBm"
+        return SignalGeneratorSnapshot(
+            frequency_hz=parse_quantity(
+                frequency, DIMENSION_FREQUENCY
+            ).si_value,
+            power_dbm=parse_quantity(power, DIMENSION_DBM).si_value,
+            output_enabled=False,
+            instrument_mode="PLAN_EDIT",
+        )
+
+    @staticmethod
+    def _anritsu_snapshot_with_override(
+        snapshot: AnritsuConfigurationSnapshot,
+        override: dict[str, object],
+    ) -> AnritsuConfigurationSnapshot:
+        parameter_id = str(override.get("parameter_id", ""))
+        value = str(override.get("value", ""))
+        try:
+            if parameter_id == "spectrum.start_frequency":
+                return replace(
+                    snapshot,
+                    start_hz=parse_quantity(value, DIMENSION_FREQUENCY).si_value,
+                )
+            if parameter_id == "spectrum.stop_frequency":
+                return replace(
+                    snapshot,
+                    stop_hz=parse_quantity(value, DIMENSION_FREQUENCY).si_value,
+                )
+            if parameter_id == "spectrum.reference_level":
+                return replace(
+                    snapshot,
+                    reference_level_dbm=parse_quantity(value, DIMENSION_DBM).si_value,
+                )
+            if parameter_id == "spectrum.points":
+                return replace(snapshot, points=int(value))
+        except (ConfigurationError, ValueError):
+            return snapshot
+        return snapshot
+
+    @staticmethod
+    def _configured_anritsu_sg_node(
+        node: RecipeNode,
+        *,
+        frequency: str,
+        power: str,
+        parameter_actions: list[dict[str, object]],
+    ) -> dict[str, object]:
+        allowed = {"sg.frequency", "sg.power"}
+        if any(
+            action.get("parameter_id") not in allowed
+            or action.get("mode") not in {"set", "sweep"}
+            for action in parameter_actions
+        ):
+            raise ConfigurationError(
+                "Anritsu SG node contains an unsupported parameter action."
+            )
+        sweeps = [
+            action for action in parameter_actions if action.get("mode") == "sweep"
+        ]
+        if len(sweeps) > 1:
+            raise ConfigurationError("One Anritsu SG node supports one sweep axis.")
+        roi_required = any(
+            not isinstance(action.get("segments"), list)
+            or not action.get("segments")
+            for action in sweeps
+        )
+        return {
+            "id": node.id,
+            "type": "sequence",
+            "text": (
+                f"Anritsu SG · {len(parameter_actions)} parameter(s) · RF OFF"
+            ),
+            "device_module": "anritsu_sg",
+            "label": "Anritsu MS2830A Signal Generator",
+            "operation": "configure_selected_parameters",
+            "configuration_required": roi_required,
+            "roi_required": roi_required,
+            "parameter_actions": parameter_actions,
+            "configuration": {
+                "frequency": frequency,
+                "power": power,
+            },
+            "children": [
+                RecipePage._node_to_mapping(child) for child in node.children
+            ],
+        }
+
+    @staticmethod
+    def _configured_anritsu_node(
+        node: RecipeNode,
+        *,
+        snapshot: AnritsuConfigurationSnapshot | None = None,
+        parameter_actions: list[dict[str, object]],
+        acquire_single: bool,
+        trace: str,
+    ) -> dict[str, object]:
+        allowed = {
+            "spectrum.start_frequency",
+            "spectrum.stop_frequency",
+            "spectrum.reference_level",
+            "spectrum.points",
+            "advanced.rbw_mode",
+            "advanced.rbw",
+            "advanced.vbw_mode",
+            "advanced.vbw",
+            "advanced.detector",
+            "advanced.attenuation_mode",
+            "advanced.attenuation",
+            "advanced.preamplifier_enabled",
+            "advanced.sweep_time_mode",
+            "advanced.sweep_time",
+        }
+        if any(action.get("parameter_id") not in allowed for action in parameter_actions):
+            raise ConfigurationError("Anritsu node contains an unsupported parameter action.")
+        sweeps = [action for action in parameter_actions if action.get("mode") == "sweep"]
+        if len(sweeps) > 1:
+            raise ConfigurationError("One Anritsu node supports one sweep axis.")
+        roi_required = any(
+            not isinstance(action.get("segments"), list) or not action.get("segments")
+            for action in sweeps
+        )
+        children = [
+            RecipePage._node_to_mapping(child)
+            for child in node.children
+        ]
+        existing = next(
+            (child for child in node.children if child.type == "acquire_spectrum"),
+            None,
+        )
+        if acquire_single and existing is None:
+            children.append(
+                {
+                    "id": f"anritsu-acquire-{uuid4().hex[:8]}",
+                    "type": "acquire_spectrum",
+                    "trace": trace,
+                }
+            )
+        snapshot = snapshot or AnritsuConfigurationSnapshot(
+            start_hz=1e6,
+            stop_hz=10e6,
+            reference_level_dbm=0.0,
+            points=1001,
+            instrument_mode="PLAN_EDIT",
+        )
+        return {
+            "id": node.id,
+            "type": "sequence",
+            "text": (
+                f"Anritsu Spectrum · {len(parameter_actions)} parameter(s)"
+                + (" · acquire once" if acquire_single else "")
+            ),
+            "device_module": "anritsu",
+            "label": "Anritsu MS2830A",
+            "operation": "configure_selected_parameters",
+            "configuration_required": roi_required,
+            "roi_required": roi_required,
+            "parameter_actions": parameter_actions,
+            "acquire_single": acquire_single,
+            "trace": trace,
+            "configuration": {
+                "start_frequency": f"{snapshot.start_hz:.12g} Hz",
+                "stop_frequency": f"{snapshot.stop_hz:.12g} Hz",
+                "reference_level": f"{snapshot.reference_level_dbm:.12g} dBm",
+                "points": snapshot.points,
+            },
+            "children": children,
+        }
+
+    def _edit_anritsu_roi_from_tree(
+        self, metadata: dict[str, object]
+    ) -> None:
+        owner_id = str(metadata.get("owner_node_id", ""))
+        parameter_id = str(metadata.get("parameter_id", ""))
+        owner_item = self._find_tree_item(owner_id)
+        node = owner_item.data(0, Qt.ItemDataRole.UserRole) if owner_item else None
+        if not isinstance(node, RecipeNode):
+            QMessageBox.warning(self, "ROI editor", "The Anritsu node no longer exists.")
+            return
+        actions = [
+            dict(action)
+            for action in node.data.get("parameter_actions", [])
+            if isinstance(action, dict)
+        ]
+        action = next(
+            (
+                candidate for candidate in actions
+                if candidate.get("parameter_id") == parameter_id
+                and candidate.get("mode") == "sweep"
+            ),
+            None,
+        )
+        if action is None:
+            return
+        label = next(
+            label for candidate, label, _ in AnritsuNodeEditorDialog.parameter_specs
+            if candidate == parameter_id
+        )
+        definition = AnritsuNodeEditorDialog._roi_definition(parameter_id, label)
+        initial = action.get("segments")
+        dialog = SweepGeneratorDialog(
+            definition,
+            self,
+            initial_segments=(
+                [dict(segment) for segment in initial if isinstance(segment, dict)]
+                if isinstance(initial, list) else None
+            ),
+        )
+        stage_index = metadata.get("stage_index")
+        dialog.select_interval(stage_index if isinstance(stage_index, int) else None)
+        if dialog.exec() != QDialog.DialogCode.Accepted:
+            return
+        action["segments"] = dialog.segment_data()
+        configuration = node.data.get("configuration")
+        snapshot = self._current_anritsu_snapshot()
+        if isinstance(configuration, dict):
+            try:
+                snapshot = replace(
+                    snapshot,
+                    start_hz=parse_quantity(
+                        configuration["start_frequency"], DIMENSION_FREQUENCY
+                    ).si_value,
+                    stop_hz=parse_quantity(
+                        configuration["stop_frequency"], DIMENSION_FREQUENCY
+                    ).si_value,
+                    reference_level_dbm=parse_quantity(
+                        configuration["reference_level"], DIMENSION_DBM
+                    ).si_value,
+                    points=int(configuration["points"]),
+                )
+            except (KeyError, TypeError, ValueError, ConfigurationError):
+                pass
+        replacement = self._configured_anritsu_node(
+            node,
+            snapshot=snapshot,
+            parameter_actions=actions,
+            acquire_single=bool(node.data.get("acquire_single", False)),
+            trace=str(node.data.get("trace", "TRAC1")),
+        )
+        source = replace_recipe_node(
+            self.editor.toPlainText(), node_id=node.id, node=replacement
+        )
+        self._apply_builder_source(source, f"Updated Anritsu ROI for {parameter_id}")
+
     def _edit_comment_node(self, node: RecipeNode) -> None:
         dialog = CommentEditorDialog(str(node.data.get("text", "")), self)
         if dialog.exec() != QDialog.DialogCode.Accepted:
@@ -7571,6 +10966,30 @@ class RecipePage(QWidget):
             self._apply_builder_source(source, f"Updated comment {node.id}")
         except Exception as exc:
             QMessageBox.warning(self, "Edit comment", str(exc))
+
+    def _edit_anritsu_acquisition_node(self, node: RecipeNode) -> None:
+        dialog = AnritsuAcquisitionEditorDialog(node, self)
+        if dialog.exec() != QDialog.DialogCode.Accepted:
+            return
+        replacement = self._node_to_mapping(node)
+        for field in (
+            "trace",
+            "average_count",
+            "reference_operation",
+            "store_raw",
+            "store_processed",
+        ):
+            replacement.pop(field, None)
+        replacement.update(dialog.node_fields())
+        try:
+            source = replace_recipe_node(
+                self.editor.toPlainText(), node_id=node.id, node=replacement
+            )
+            self._apply_builder_source(
+                source, f"Updated Anritsu acquisition {node.id}"
+            )
+        except Exception as exc:
+            QMessageBox.warning(self, "Anritsu acquisition", str(exc))
 
     @staticmethod
     def _configured_keithley_node(
@@ -7629,6 +11048,21 @@ class RecipePage(QWidget):
             "parameter_actions": actions,
             "output_policy": output_policy,
             "roi_required": roi_required,
+            "configuration": {
+                "channel": snapshot.channel,
+                "source_mode": snapshot.source_mode,
+                "source_level": snapshot.source_level,
+                "compliance": snapshot.compliance,
+                "nplc": snapshot.nplc,
+                "settling_time": snapshot.settling_time,
+                "sense_mode": snapshot.sense_mode,
+                "source_autorange": snapshot.source_autorange,
+                "source_range": snapshot.source_range,
+                "measure_voltage_autorange": snapshot.measure_voltage_autorange,
+                "measure_voltage_range": snapshot.measure_voltage_range,
+                "measure_current_autorange": snapshot.measure_current_autorange,
+                "measure_current_range": snapshot.measure_current_range,
+            },
         }
         if node.children:
             result["children"] = [
@@ -7721,12 +11155,27 @@ class RecipePage(QWidget):
         """Open the appropriate parameter window from a direct tree interaction."""
 
         self.tree.setCurrentItem(item)
+        operator_row = item.data(0, self.operator_row_role)
+        if isinstance(operator_row, dict):
+            self._edit_selected_roi()
+            return
         node = item.data(0, Qt.ItemDataRole.UserRole)
         if not isinstance(node, RecipeNode):
             return
         if (
-            node.type in {"sweep", "configure_keithley", "comment"}
-            or node.data.get("device_module") == "keithley"
+            node.type in {
+                "sweep",
+                "configure_keithley",
+                "configure_rigol",
+                "configure_anritsu",
+                "configure_anritsu_advanced",
+                "configure_anritsu_sg",
+                "acquire_reference",
+                "acquire_spectrum",
+                "comment",
+            }
+            or node.data.get("device_module")
+            in {"keithley", "anritsu", "anritsu_sg", "rigol"}
         ):
             self._edit_selected_node()
             return
@@ -7767,25 +11216,77 @@ class RecipePage(QWidget):
         if item is not None:
             self.tree.setCurrentItem(item)
         menu = QMenu(self.tree)
+        menu.addAction("New empty sweep", self.new_recipe)
+        menu.addSeparator()
         menu.addAction("Add node", self._add_basic_node)
         menu.addAction("Add device control / point generator", self._add_device_controls)
         menu.addSeparator()
-        edit = menu.addAction("Edit selected node", self._edit_selected_node)
+        edit_device = menu.addAction(
+            "Device settings", self._edit_selected_device_settings
+        )
+        edit_roi = menu.addAction("Edit ROI", self._edit_selected_roi)
+        edit_comment = menu.addAction("Edit comment", self._edit_selected_node)
+        edit_acquisition = menu.addAction(
+            "Acquisition settings", self._edit_selected_node
+        )
+        toggle_enabled = menu.addAction(
+            "Enable selected node"
+            if isinstance(node := (
+                self.tree.currentItem().data(0, Qt.ItemDataRole.UserRole)
+                if self.tree.currentItem() is not None
+                else None
+            ), RecipeNode)
+            and node.data.get("disabled") is True
+            else "Disable selected node",
+            self._toggle_selected_node_disabled,
+        )
         duplicate = menu.addAction("Duplicate selected node", self._duplicate_selected_node)
         delete = menu.addAction("Delete selected node", self._delete_selected_node)
         move_up = menu.addAction("Move selected node up", lambda: self._move_selected_sibling(-1))
         move_down = menu.addAction("Move selected node down", lambda: self._move_selected_sibling(1))
         selected = self.tree.currentItem()
         node = selected.data(0, Qt.ItemDataRole.UserRole) if selected is not None else None
+        operator_row = (
+            selected.data(0, self.operator_row_role)
+            if selected is not None
+            else None
+        )
         editable = isinstance(node, RecipeNode)
-        edit.setEnabled(
+        has_device_settings = bool(
             editable
             and (
-                node.type in {"sweep", "configure_keithley", "comment"}
-                or bool(node.data.get("device_module"))
+                node.data.get("device_module")
+                or self._legacy_device_configuration_node(node) is not None
             )
         )
-        duplicate.setEnabled(editable and not node.children and not node.else_children)
+        has_roi = bool(
+            isinstance(operator_row, dict)
+            or (
+                editable
+                and (
+                    node.type == "sweep"
+                    or (
+                        node.data.get("device_module")
+                        and any(
+                            isinstance(action, dict)
+                            and action.get("mode") == "sweep"
+                            for action in node.data.get("parameter_actions", [])
+                        )
+                    )
+                )
+            )
+        )
+        edit_device.setEnabled(has_device_settings)
+        edit_roi.setEnabled(has_roi)
+        edit_comment.setEnabled(editable and node.type == "comment")
+        edit_acquisition.setEnabled(
+            editable
+            and node.type in {"acquire_reference", "acquire_spectrum"}
+        )
+        toggle_enabled.setEnabled(
+            editable and not self._tree_item_is_in_finally(selected)
+        )
+        duplicate.setEnabled(editable and selected.parent() is not None)
         delete.setEnabled(editable)
         move_up.setEnabled(editable and selected.parent() is not None)
         move_down.setEnabled(editable and selected.parent() is not None)
@@ -7849,20 +11350,30 @@ class RecipePage(QWidget):
             "power": value if field == "power" else defaults.get("sg_power", "-30 dBm"),
         }
 
-    def _edit_selected_generator(self) -> None:
+    def _edit_selected_generator(
+        self,
+        *,
+        node: RecipeNode | None = None,
+        stage_index: int | None = None,
+    ) -> None:
         item = self.tree.currentItem()
-        node = item.data(0, Qt.ItemDataRole.UserRole) if item is not None else None
+        if node is None:
+            node = (
+                item.data(0, Qt.ItemDataRole.UserRole)
+                if item is not None
+                else None
+            )
         if not isinstance(node, RecipeNode) or node.type != "sweep":
             QMessageBox.information(self, "Edit generator", "Select a generated sweep node first.")
             return
         target = str(node.data.get("target", ""))
         definition = next((item for item in _SWEEPABLE_PARAMETERS if item["target"] == target), None)
-        segments = node.data.get("segments")
-        if definition is None or not isinstance(segments, list):
+        segments = self._native_sweep_segments(node)
+        if definition is None or not segments:
             QMessageBox.information(
                 self,
                 "Edit generator",
-                "This legacy sweep has no visual segment definition. Create a new generator sweep instead.",
+                "This sweep target cannot be represented by the visual ROI editor.",
             )
             return
         if target.startswith("keithley."):
@@ -7883,6 +11394,7 @@ class RecipePage(QWidget):
                 dialog.sense_mode.setCurrentText(str(existing_config.data.get("sense_mode", dialog.sense_mode.currentText())))
         else:
             dialog = SweepGeneratorDialog(definition, self, initial_segments=segments)
+        dialog.select_interval(stage_index)
         if dialog.exec() != QDialog.DialogCode.Accepted:
             return
         children = [self._node_to_mapping(child) for child in node.children]
@@ -7891,13 +11403,16 @@ class RecipePage(QWidget):
             for child in children:
                 if child["type"] == "configure_keithley":
                     child.update(options)
-        replacement = {
-            "id": node.id,
-            "type": "sweep",
-            "target": target,
-            "segments": dialog.segment_data(),
-            "children": children,
-        }
+        replacement = {"id": node.id, "type": "sweep", **node.data}
+        for legacy_field in ("start", "stop", "points", "spacing"):
+            replacement.pop(legacy_field, None)
+        replacement.update(
+            {
+                "target": target,
+                "segments": dialog.segment_data(),
+                "children": children,
+            }
+        )
         try:
             source = replace_recipe_node(
                 self.editor.toPlainText(), node_id=node.id, node=replacement
@@ -7997,19 +11512,95 @@ class RecipePage(QWidget):
         except Exception as exc:
             QMessageBox.warning(self, "Delete node", str(exc))
 
+    @staticmethod
+    def _tree_item_is_in_finally(item: QTreeWidgetItem | None) -> bool:
+        current = item
+        while current is not None:
+            if (
+                current.data(0, Qt.ItemDataRole.UserRole) is None
+                and current.text(0).startswith("Finally")
+            ):
+                return True
+            current = current.parent()
+        return False
+
+    def _toggle_selected_node_disabled(self) -> None:
+        item = self.tree.currentItem()
+        node = item.data(0, Qt.ItemDataRole.UserRole) if item is not None else None
+        if not isinstance(node, RecipeNode):
+            return
+        if self._tree_item_is_in_finally(item):
+            QMessageBox.warning(
+                self,
+                "Disable node",
+                "Finally safety actions cannot be disabled.",
+            )
+            return
+        replacement = self._node_to_mapping(node)
+        disabled = node.data.get("disabled") is not True
+        if disabled:
+            replacement["disabled"] = True
+        else:
+            replacement.pop("disabled", None)
+        try:
+            source = replace_recipe_node(
+                self.editor.toPlainText(), node_id=node.id, node=replacement
+            )
+            self._apply_builder_source(
+                source,
+                f"{'Disabled' if disabled else 'Enabled'} {node.id}",
+            )
+        except Exception as exc:
+            QMessageBox.warning(self, "Enable / disable node", str(exc))
+
     def _duplicate_selected_node(self) -> None:
         item = self.tree.currentItem()
         node = item.data(0, Qt.ItemDataRole.UserRole) if item is not None else None
-        if not isinstance(node, RecipeNode) or node.children or node.else_children:
-            QMessageBox.information(self, "Duplicate node", "Select a leaf node to duplicate.")
+        parent = item.parent() if item is not None else None
+        if not isinstance(node, RecipeNode) or parent is None:
+            QMessageBox.information(
+                self, "Duplicate node", "Select a non-root recipe node to duplicate."
+            )
             return
-        parent_id, branch = self._builder_parent()
-        copy = {"id": self._new_node_id(node.type), "type": node.type, **node.data}
+        if parent.text(0).startswith("Else") and parent.parent() is not None:
+            owner = parent.parent().data(0, Qt.ItemDataRole.UserRole)
+            if not isinstance(owner, RecipeNode):
+                return
+            parent_id, branch = owner.id, "else"
+        elif parent.text(0).startswith("Finally"):
+            parent_id, branch = "__finally__", "children"
+        else:
+            owner = parent.data(0, Qt.ItemDataRole.UserRole)
+            if not isinstance(owner, RecipeNode):
+                return
+            parent_id, branch = owner.id, "children"
+        copy = self._clone_node_mapping(self._node_to_mapping(node))
         try:
-            source = add_recipe_node(self.editor.toPlainText(), parent_id=parent_id, branch=branch, node=copy)
+            source = add_recipe_node(
+                self.editor.toPlainText(),
+                parent_id=parent_id,
+                branch=branch,
+                index=parent.indexOfChild(item) + 1,
+                node=copy,
+            )
             self._apply_builder_source(source, f"Duplicated {node.id}")
         except Exception as exc:
             QMessageBox.warning(self, "Duplicate node", str(exc))
+
+    def _clone_node_mapping(
+        self, mapping: dict[str, object]
+    ) -> dict[str, object]:
+        clone = deepcopy(mapping)
+        clone["id"] = self._new_node_id(str(clone.get("type", "node")))
+        for branch in ("children", "else"):
+            raw_children = clone.get(branch)
+            if isinstance(raw_children, list):
+                clone[branch] = [
+                    self._clone_node_mapping(child)
+                    for child in raw_children
+                    if isinstance(child, dict)
+                ]
+        return clone
 
     def _move_selected_sibling(self, delta: int) -> None:
         item = self.tree.currentItem()
@@ -8518,6 +12109,15 @@ class MainWindow(QMainWindow):
         self.recipe_page.set_keithley_snapshot_provider(
             self.keithley_page.configuration_panel.snapshot
         )
+        self.recipe_page.set_rigol_snapshot_provider(
+            self.rigol_page.configuration_snapshot
+        )
+        self.recipe_page.set_anritsu_snapshot_provider(
+            self.anritsu_page.configuration_panel.configuration_snapshot
+        )
+        self.recipe_page.set_anritsu_sg_snapshot_provider(
+            self.anritsu_page.signal_generator_snapshot
+        )
         self.run_monitor = RunMonitorPage()
         self.results_page = ResultsPage(str(self._settings.storage.get("output_directory", "./measurements")))
         self.settings_page = SettingsPage(
@@ -8528,26 +12128,63 @@ class MainWindow(QMainWindow):
         self.dashboard.set_assignment_allowed(
             self._access.allows(Permission.ASSIGN_VISA)
         )
-        for field in self.rigol_page.findChildren(LimitField):
-            field.edit_button.setEnabled(
-                not self._simulation and self._access.allows(Permission.EDIT_SETTINGS)
+        roles = ", ".join(
+            sorted(role.value for role in self._access.identity.roles)
+        ) or "none"
+
+        def configure_limit_button(
+            field: LimitField,
+            *,
+            device: str,
+            fixed_instrument_range: bool = False,
+        ) -> bool:
+            if fixed_instrument_range:
+                enabled = False
+                reason = (
+                    "This range is fixed by the instrument and is not an editable "
+                    "laboratory safety limit."
+                )
+            elif self._simulation:
+                enabled = False
+                reason = (
+                    "Safety-limit editing is disabled in simulation mode. "
+                    "Open the hardware station profile to edit approved limits."
+                )
+            elif not self._access.allows(Permission.EDIT_SETTINGS):
+                enabled = False
+                reason = (
+                    f"Access denied: current role(s) {roles} do not include "
+                    "EDIT_SETTINGS. Use an engineer or service account."
+                )
+            else:
+                enabled = True
+                reason = (
+                    "Edit this safety range. Saving revokes profile approval and "
+                    "requires a new authorized approval."
+                )
+            field.edit_button.setEnabled(enabled)
+            field.edit_button.setToolTip(reason)
+            field.edit_button.setAccessibleName(
+                f"Edit {device} safety limits"
             )
+            field.edit_button.setAccessibleDescription(reason)
+            return enabled
+
+        for field in self.rigol_page.findChildren(LimitField):
+            configure_limit_button(field, device="Rigol")
             field.edit_requested.connect(lambda field=field: self._edit_device_limit("rigol", field))
         for field in self.keithley_page.findChildren(LimitField):
-            editable = (
-                not self._simulation
-                and self._access.allows(Permission.EDIT_SETTINGS)
-                and str(field.property("limitKey")) != "nplc"
+            editable = configure_limit_button(
+                field,
+                device="Keithley",
+                fixed_instrument_range=(
+                    str(field.property("limitKey")) == "nplc"
+                ),
             )
-            field.edit_button.setEnabled(editable)
             if editable:
                 field.edit_requested.connect(lambda field=field: self._edit_device_limit("keithley", field))
-            else:
-                field.edit_button.setToolTip("NPLC range is fixed by the instrument and is not a laboratory safety limit.")
         for field in self.anritsu_page.findChildren(LimitField):
-            field.edit_button.setEnabled(
-                not self._simulation and self._access.allows(Permission.EDIT_SETTINGS)
-            )
+            configure_limit_button(field, device="Anritsu")
             field.edit_requested.connect(lambda field=field: self._edit_device_limit("anritsu", field))
         for widget, name in (
             (self.dashboard, "Dashboard"),
@@ -8789,6 +12426,9 @@ class MainWindow(QMainWindow):
 
     def _set_theme_mode(self, mode: str, *, persist: bool = True) -> None:
         theme = effective_theme(mode)
+        application = QApplication.instance()
+        if application is not None:
+            application.setProperty("activeTheme", theme)
         for plot in self.findChildren(SpectrumPlotWidget):
             plot.apply_theme(theme)
         self.theme_changed.emit(theme)
@@ -9425,6 +13065,7 @@ class MainWindow(QMainWindow):
             critical=True,
         )
         self._save_workspace()
+        self.recipe_page.cancel_preflight()
         self.anritsu_page._timer.stop()
         self._run_controller.close()
         for controller in self._controllers.values():

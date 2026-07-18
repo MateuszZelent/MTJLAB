@@ -4,15 +4,9 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 import math
-from typing import Final
 
-from app.domain.quantities import (
-    DIMENSION_CURRENT,
-    DIMENSION_DBM,
-    DIMENSION_FREQUENCY,
-    DIMENSION_VOLTAGE,
-)
 from app.recipes.models import RecipeNode, parse_recipe_text
+from app.recipes.parameter_registry import parameter_descriptor
 from app.recipes.sweep_points import generate_sweep_points
 
 
@@ -40,102 +34,6 @@ class ThatecSchema:
     @property
     def point_count(self) -> int:
         return math.prod(axis.points for axis in self.axes)
-
-
-_TARGETS: Final[dict[str, tuple[str, str, str, str]]] = {
-    "keithley.A.level": (DIMENSION_CURRENT, "Keithley 2602A", "Keithley A level", "A"),
-    "keithley.B.level": (DIMENSION_CURRENT, "Keithley 2602A", "Keithley B level", "A"),
-    "keithley.A.current": (
-        DIMENSION_CURRENT,
-        "Keithley 2602A",
-        "Keithley A current",
-        "A",
-    ),
-    "keithley.B.current": (
-        DIMENSION_CURRENT,
-        "Keithley 2602A",
-        "Keithley B current",
-        "A",
-    ),
-    "keithley.A.voltage": (
-        DIMENSION_VOLTAGE,
-        "Keithley 2602A",
-        "Keithley A voltage",
-        "V",
-    ),
-    "keithley.B.voltage": (
-        DIMENSION_VOLTAGE,
-        "Keithley 2602A",
-        "Keithley B voltage",
-        "V",
-    ),
-    "rigol.1.high_level": (
-        DIMENSION_VOLTAGE,
-        "Rigol DG1032Z",
-        "Rigol CH1 high level",
-        "V",
-    ),
-    "rigol.2.high_level": (
-        DIMENSION_VOLTAGE,
-        "Rigol DG1032Z",
-        "Rigol CH2 high level",
-        "V",
-    ),
-    "rigol.1.low_level": (
-        DIMENSION_VOLTAGE,
-        "Rigol DG1032Z",
-        "Rigol CH1 low level",
-        "V",
-    ),
-    "rigol.2.low_level": (
-        DIMENSION_VOLTAGE,
-        "Rigol DG1032Z",
-        "Rigol CH2 low level",
-        "V",
-    ),
-    "rigol.1.frequency": (
-        DIMENSION_FREQUENCY,
-        "Rigol DG1032Z",
-        "Rigol CH1 frequency",
-        "Hz",
-    ),
-    "rigol.2.frequency": (
-        DIMENSION_FREQUENCY,
-        "Rigol DG1032Z",
-        "Rigol CH2 frequency",
-        "Hz",
-    ),
-    "anritsu.spectrum.start_frequency": (
-        DIMENSION_FREQUENCY,
-        "Anritsu Spectrum Analyzer",
-        "Anritsu start frequency",
-        "Hz",
-    ),
-    "anritsu.spectrum.stop_frequency": (
-        DIMENSION_FREQUENCY,
-        "Anritsu Spectrum Analyzer",
-        "Anritsu stop frequency",
-        "Hz",
-    ),
-    "anritsu.spectrum.reference_level": (
-        DIMENSION_DBM,
-        "Anritsu Spectrum Analyzer",
-        "Anritsu reference level",
-        "dBm",
-    ),
-    "anritsu.sg.frequency": (
-        DIMENSION_FREQUENCY,
-        "Anritsu Signal Generator",
-        "Anritsu SG frequency",
-        "Hz",
-    ),
-    "anritsu.sg.power": (
-        DIMENSION_DBM,
-        "Anritsu Signal Generator",
-        "Anritsu SG power",
-        "dBm",
-    ),
-}
 
 
 class ThatecSchemaMapper:
@@ -198,6 +96,38 @@ class ThatecSchemaMapper:
         if node.type == "sweep":
             axis = cls._axis_from_node(node)
             ancestors = (*ancestors, axis)
+        elif (
+            node.type == "sequence"
+            and node.data.get("device_module") == "keithley"
+            and node.data.get("operation") == "configure_selected_parameters"
+        ):
+            axis = cls._keithley_device_axis(node)
+            if axis is not None:
+                ancestors = (*ancestors, axis)
+        elif (
+            node.type == "sequence"
+            and node.data.get("device_module") == "rigol"
+            and node.data.get("operation") == "configure_selected_parameters"
+        ):
+            axis = cls._rigol_device_axis(node)
+            if axis is not None:
+                ancestors = (*ancestors, axis)
+        elif (
+            node.type == "sequence"
+            and node.data.get("device_module") == "anritsu"
+            and node.data.get("operation") == "configure_selected_parameters"
+        ):
+            axis = cls._anritsu_device_axis(node)
+            if axis is not None:
+                ancestors = (*ancestors, axis)
+        elif (
+            node.type == "sequence"
+            and node.data.get("device_module") == "anritsu_sg"
+            and node.data.get("operation") == "configure_selected_parameters"
+        ):
+            axis = cls._anritsu_sg_device_axis(node)
+            if axis is not None:
+                ancestors = (*ancestors, axis)
         elif node.type == "repeat":
             count = int(node.data["count"])
             ancestors = (
@@ -217,9 +147,167 @@ class ThatecSchemaMapper:
             cls._collect_acquisition_paths(child, ancestors, paths)
 
     @staticmethod
+    def _keithley_device_axis(node: RecipeNode) -> ThatecSweepAxis | None:
+        raw_actions = node.data.get("parameter_actions")
+        if not isinstance(raw_actions, list):
+            return None
+        sweep = next(
+            (
+                action
+                for action in raw_actions
+                if isinstance(action, dict) and action.get("mode") == "sweep"
+            ),
+            None,
+        )
+        if sweep is None:
+            return None
+        channel = str(node.data.get("channel", ""))
+        mode = str(node.data.get("source_mode", ""))
+        parameter_id = str(sweep.get("parameter_id", ""))
+        if parameter_id == "source.level":
+            target = f"keithley.{channel}.{mode}"
+        elif parameter_id == "source.compliance":
+            compliance_kind = (
+                "compliance_voltage"
+                if mode == "current"
+                else "compliance_current"
+            )
+            target = f"keithley.{channel}.{compliance_kind}"
+        elif parameter_id == "measurement.settling_time":
+            target = f"keithley.{channel}.settling_time"
+        else:
+            return None
+        descriptor = parameter_descriptor(target)
+        segments = sweep.get("segments")
+        if not isinstance(segments, list) or not segments:
+            return None
+        generated = generate_sweep_points(segments, descriptor.dimension)
+        return ThatecSweepAxis(
+            target=target,
+            device_name=descriptor.device_name,
+            control_name=descriptor.control_name,
+            unit=descriptor.unit,
+            values_si=tuple(point.si_value for point in generated),
+            spacing="piecewise",
+        )
+
+    @staticmethod
+    def _rigol_device_axis(node: RecipeNode) -> ThatecSweepAxis | None:
+        raw_actions = node.data.get("parameter_actions")
+        if not isinstance(raw_actions, list):
+            return None
+        sweep = next(
+            (
+                action
+                for action in raw_actions
+                if isinstance(action, dict) and action.get("mode") == "sweep"
+            ),
+            None,
+        )
+        if sweep is None:
+            return None
+        parameter_id = str(sweep.get("parameter_id", ""))
+        suffix = {
+            "carrier.frequency": "frequency",
+            "carrier.high_level": "high_level",
+            "carrier.low_level": "low_level",
+        }.get(parameter_id)
+        if suffix is None:
+            return None
+        target = f"rigol.{node.data.get('channel')}.{suffix}"
+        descriptor = parameter_descriptor(target)
+        segments = sweep.get("segments")
+        if not isinstance(segments, list) or not segments:
+            return None
+        generated = generate_sweep_points(segments, descriptor.dimension)
+        return ThatecSweepAxis(
+            target=target,
+            device_name=descriptor.device_name,
+            control_name=descriptor.control_name,
+            unit=descriptor.unit,
+            values_si=tuple(point.si_value for point in generated),
+            spacing="piecewise",
+        )
+
+    @staticmethod
+    def _anritsu_device_axis(node: RecipeNode) -> ThatecSweepAxis | None:
+        raw_actions = node.data.get("parameter_actions")
+        if not isinstance(raw_actions, list):
+            return None
+        sweep = next(
+            (
+                action
+                for action in raw_actions
+                if isinstance(action, dict) and action.get("mode") == "sweep"
+            ),
+            None,
+        )
+        if sweep is None:
+            return None
+        target = {
+            "spectrum.start_frequency": "anritsu.spectrum.start_frequency",
+            "spectrum.stop_frequency": "anritsu.spectrum.stop_frequency",
+            "spectrum.reference_level": "anritsu.spectrum.reference_level",
+        }.get(str(sweep.get("parameter_id", "")))
+        if target is None:
+            return None
+        descriptor = parameter_descriptor(target)
+        segments = sweep.get("segments")
+        if not isinstance(segments, list) or not segments:
+            return None
+        generated = generate_sweep_points(segments, descriptor.dimension)
+        return ThatecSweepAxis(
+            target=target,
+            device_name=descriptor.device_name,
+            control_name=descriptor.control_name,
+            unit=descriptor.unit,
+            values_si=tuple(point.si_value for point in generated),
+            spacing="piecewise",
+        )
+
+    @staticmethod
+    def _anritsu_sg_device_axis(node: RecipeNode) -> ThatecSweepAxis | None:
+        raw_actions = node.data.get("parameter_actions")
+        if not isinstance(raw_actions, list):
+            return None
+        sweep = next(
+            (
+                action
+                for action in raw_actions
+                if isinstance(action, dict) and action.get("mode") == "sweep"
+            ),
+            None,
+        )
+        if sweep is None:
+            return None
+        target = {
+            "sg.frequency": "anritsu.sg.frequency",
+            "sg.power": "anritsu.sg.power",
+        }.get(str(sweep.get("parameter_id", "")))
+        if target is None:
+            return None
+        descriptor = parameter_descriptor(target)
+        segments = sweep.get("segments")
+        if not isinstance(segments, list) or not segments:
+            return None
+        generated = generate_sweep_points(segments, descriptor.dimension)
+        return ThatecSweepAxis(
+            target=target,
+            device_name=descriptor.device_name,
+            control_name=descriptor.control_name,
+            unit=descriptor.unit,
+            values_si=tuple(point.si_value for point in generated),
+            spacing="piecewise",
+        )
+
+    @staticmethod
     def _axis_from_node(node: RecipeNode) -> ThatecSweepAxis:
         target = str(node.data["target"])
-        dimension, device, control, unit = _TARGETS[target]
+        descriptor = parameter_descriptor(target)
+        dimension = descriptor.dimension
+        device = descriptor.device_name
+        control = descriptor.control_name
+        unit = descriptor.unit
         segments = node.data.get("segments")
         if isinstance(segments, list):
             generated = generate_sweep_points(segments, dimension)

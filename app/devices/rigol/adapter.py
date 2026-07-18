@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 import math
 import time
 from typing import Literal
@@ -125,9 +125,12 @@ class RigolAdapter(DeviceAdapter):
         self._output_states: dict[int, bool] = {1: False, 2: False}
 
     def _interlock(self) -> OutputInterlock:
+        # Manual Rigol operation is guarded by the explicit device/channel
+        # enable flags and validated electrical limits.  It does not require
+        # the station profile document to be in the recipe-approval state.
         return OutputInterlock(
             profile_approved=self._station.profile.state == "approved",
-            profile_locks_outputs=True,
+            profile_locks_outputs=False,
         )
 
     def _require_session(self) -> InstrumentSession:
@@ -335,6 +338,100 @@ class RigolAdapter(DeviceAdapter):
         self._update_aggregate_output_state()
         return estimate
 
+    def update_frequency(self, channel: int, frequency_hz: float) -> float:
+        """Change only carrier frequency while preserving the current OUTPUT state."""
+
+        config = self._last_config.get(channel)
+        if config is None:
+            raise SafetyViolation(
+                "Configure and validate the Rigol channel before updating frequency."
+            )
+        if config.waveform.upper() in {"DC", "NOIS"}:
+            raise SafetyViolation(
+                f"Rigol {config.waveform.upper()} does not support carrier-frequency updates."
+            )
+        updated = replace(config, frequency_hz=float(frequency_hz))
+        self._validate_waveform_config(updated)
+        session = self._require_session()
+        prefix = f":SOUR{channel}"
+        output_before = session.query(f":OUTP{channel}?").strip().upper() in {"1", "ON"}
+        session.write(f"{prefix}:FREQ {updated.frequency_hz:.12g}")
+        self._check_errors()
+        try:
+            actual = float(session.query(f"{prefix}:FREQ?"))
+        except (TypeError, ValueError) as exc:
+            raise DeviceError("Rigol returned an invalid frequency readback.") from exc
+        output_after = session.query(f":OUTP{channel}?").strip().upper() in {"1", "ON"}
+        if output_after != output_before:
+            raise DeviceError("Rigol OUTPUT state changed during a frequency update.")
+        if not self._same_number(actual, updated.frequency_hz, absolute=1e-3):
+            raise DeviceError(
+                f"Rigol frequency readback {actual:.9g} Hz does not match "
+                f"{updated.frequency_hz:.9g} Hz."
+            )
+        self._last_config[channel] = updated
+        self._output_states[channel] = output_after
+        self._update_aggregate_output_state()
+        return actual
+
+    def update_levels(
+        self,
+        channel: int,
+        *,
+        high_level_v: float,
+        low_level_v: float,
+    ) -> tuple[float, float]:
+        """Update HighL/LowL atomically while preserving and verifying OUTPUT."""
+
+        config = self._last_config.get(channel)
+        if config is None:
+            raise SafetyViolation(
+                "Configure and validate the Rigol channel before updating levels."
+            )
+        updated = replace(
+            config,
+            high_level_v=float(high_level_v),
+            low_level_v=float(low_level_v),
+        )
+        self._validate_waveform_config(updated)
+        session = self._require_session()
+        prefix = f":SOUR{channel}"
+        output_before = (
+            session.query(f":OUTP{channel}?").strip().upper() in {"1", "ON"}
+        )
+        current_low = float(session.query(f"{prefix}:VOLT:LOW?"))
+        commands = [
+            f"{prefix}:VOLT:HIGH {updated.high_level_v:.12g}",
+            f"{prefix}:VOLT:LOW {updated.low_level_v:.12g}",
+        ]
+        if updated.high_level_v <= current_low:
+            commands.reverse()
+        for command in commands:
+            session.write(command)
+        self._check_errors()
+        try:
+            actual_high = float(session.query(f"{prefix}:VOLT:HIGH?"))
+            actual_low = float(session.query(f"{prefix}:VOLT:LOW?"))
+        except (TypeError, ValueError) as exc:
+            raise DeviceError("Rigol returned invalid level readback.") from exc
+        output_after = (
+            session.query(f":OUTP{channel}?").strip().upper() in {"1", "ON"}
+        )
+        if output_after != output_before:
+            raise DeviceError("Rigol OUTPUT state changed during a level update.")
+        if not self._same_number(
+            actual_high, updated.high_level_v, absolute=1e-6
+        ) or not self._same_number(
+            actual_low, updated.low_level_v, absolute=1e-6
+        ):
+            raise DeviceError(
+                "Rigol level readback does not match requested HighL/LowL."
+            )
+        self._last_config[channel] = updated
+        self._output_states[channel] = output_after
+        self._update_aggregate_output_state()
+        return actual_high, actual_low
+
     def _validate_waveform_config(self, config: RigolChannelConfig) -> RigolCurrentEstimate:
         channel = self._channel_settings(config.channel)
         return validate_rigol_waveform(
@@ -369,6 +466,14 @@ class RigolAdapter(DeviceAdapter):
             )
             actual_high = float(session.query(f"{prefix}:VOLT:HIGH?"))
             actual_low = float(session.query(f"{prefix}:VOLT:LOW?"))
+            actual_load = session.query(
+                f":OUTP{expected.channel}:LOAD?"
+            ).strip().upper()
+            actual_phase = (
+                float(session.query(f"{prefix}:PHAS?"))
+                if expected.waveform.upper() not in {"DC", "NOIS"}
+                else expected.phase_deg
+            )
             actual_output = session.query(f":OUTP{expected.channel}?").strip().upper()
         except (TypeError, ValueError) as exc:
             raise DeviceError("Rigol returned an invalid configuration readback.") from exc
@@ -381,6 +486,61 @@ class RigolAdapter(DeviceAdapter):
             mismatches.append(f"HighL {actual_high:.9g} ≠ {expected.high_level_v:.9g} V")
         if not self._same_number(actual_low, expected.low_level_v, absolute=1e-6):
             mismatches.append(f"LowL {actual_low:.9g} ≠ {expected.low_level_v:.9g} V")
+        if not self._load_response_matches(actual_load, expected.output_load):
+            mismatches.append(
+                f"LOAD {actual_load} ≠ {self._format_load(expected.output_load)}"
+            )
+        if not self._same_number(actual_phase, expected.phase_deg, absolute=1e-6):
+            mismatches.append(
+                f"PHAS {actual_phase:.9g} ≠ {expected.phase_deg:.9g} deg"
+            )
+        shape_queries = {
+            "SQU": ("DCYC", expected.square_duty_percent),
+            "RAMP": ("SYMM", expected.ramp_symmetry_percent),
+            "PULS": ("WIDT", expected.pulse_width_s),
+        }
+        shape_suffix, expected_shape = shape_queries.get(
+            expected.waveform.upper(), ("", None)
+        )
+        if expected_shape is not None:
+            try:
+                actual_shape = float(
+                    session.query(
+                        f"{prefix}:FUNC:{expected.waveform.upper()}:{shape_suffix}?"
+                    )
+                )
+            except (TypeError, ValueError) as exc:
+                raise DeviceError(
+                    "Rigol returned an invalid waveform-shape readback."
+                ) from exc
+            tolerance = 1e-9 if expected.waveform.upper() == "PULS" else 1e-6
+            if not self._same_number(
+                actual_shape, expected_shape, absolute=tolerance
+            ):
+                mismatches.append(
+                    f"{shape_suffix} {actual_shape:.9g} ≠ {expected_shape:.9g}"
+                )
+        if expected.waveform.upper() == "PULS":
+            for suffix, expected_value in (
+                ("TRAN:LEAD", expected.pulse_leading_s),
+                ("TRAN:TRA", expected.pulse_trailing_s),
+            ):
+                if expected_value is None:
+                    continue
+                try:
+                    actual_value = float(
+                        session.query(f"{prefix}:FUNC:PULS:{suffix}?")
+                    )
+                except (TypeError, ValueError) as exc:
+                    raise DeviceError(
+                        "Rigol returned an invalid pulse-edge readback."
+                    ) from exc
+                if not self._same_number(
+                    actual_value, expected_value, absolute=1e-9
+                ):
+                    mismatches.append(
+                        f"{suffix} {actual_value:.9g} ≠ {expected_value:.9g}"
+                    )
         if actual_output in {"1", "ON"}:
             mismatches.append("output turned on during a configuration transaction")
         if mismatches:
@@ -575,6 +735,29 @@ class RigolAdapter(DeviceAdapter):
         session.write(f"{source}:MOD {'ON' if config.enabled else 'OFF'}")
         self._check_errors()
         self._verify_output_off(config.channel)
+        expected_fields: dict[str, str | float | int | bool] = {
+            "MOD": config.enabled,
+            "MOD:TYPE": kind,
+            f"{kind}:SOUR": config.source,
+            f"{kind}:{suffix}": config.parameter,
+        }
+        if kind in {"AM", "FM", "PM", "PWM"}:
+            expected_fields.update(
+                {
+                    f"{kind}:INT:FREQ": config.rate_hz,
+                    f"{kind}:INT:FUNC": config.internal_shape,
+                }
+            )
+        else:
+            expected_fields.update(
+                {
+                    f"{kind}:INT:RATE": config.rate_hz,
+                    f"{kind}:POL": config.polarity,
+                }
+            )
+        self._verify_advanced_configuration(
+            config.channel, "modulation", expected_fields
+        )
         if config.enabled:
             self._modulation_enabled.add(config.channel)
         else:
@@ -637,6 +820,24 @@ class RigolAdapter(DeviceAdapter):
             session.write(command)
         self._check_errors()
         self._verify_output_off(config.channel)
+        self._verify_advanced_configuration(
+            config.channel,
+            "frequency sweep",
+            {
+                "FREQ:STAR": config.start_hz,
+                "FREQ:STOP": config.stop_hz,
+                "SWE:TIME": config.duration_s,
+                "SWE:SPAC": config.spacing,
+                "SWE:STEP": config.steps,
+                "SWE:HTIM:STAR": config.start_hold_s,
+                "SWE:HTIM:STOP": config.stop_hold_s,
+                "SWE:RTIM": config.return_time_s,
+                "SWE:TRIG:SOUR": config.trigger_source,
+                "SWE:TRIG:SLOP": config.trigger_slope,
+                "SWE:TRIG:TRIGO": config.trigger_output,
+                "SWE:STAT": config.enabled,
+            },
+        )
 
     def trigger_frequency_sweep(self, channel: int) -> None:
         self._assert_feature("frequency_sweep")
@@ -694,6 +895,23 @@ class RigolAdapter(DeviceAdapter):
             session.write(command)
         self._check_errors()
         self._verify_output_off(config.channel)
+        self._verify_advanced_configuration(
+            config.channel,
+            "burst",
+            {
+                "BURS:MODE": config.mode,
+                "BURS:NCYC": config.cycles,
+                "BURS:PHAS": config.phase_deg,
+                "BURS:INT:PER": config.period_s,
+                "BURS:TDEL": config.delay_s,
+                "BURS:TRIG:SOUR": config.trigger_source,
+                "BURS:TRIG:SLOP": config.trigger_slope,
+                "BURS:TRIG:TRIGO": config.trigger_output,
+                "BURS:GATE:POL": config.gate_polarity,
+                "BURS:IDLE": config.idle,
+                "BURS:STAT": config.enabled,
+            },
+        )
 
     def trigger_burst(self, channel: int) -> None:
         self._assert_feature("burst")
@@ -712,6 +930,51 @@ class RigolAdapter(DeviceAdapter):
             raise DeviceError("Rigol enabled output during advanced configuration.")
         self._output_states[channel] = False
         self._update_aggregate_output_state()
+
+    def _verify_advanced_configuration(
+        self,
+        channel: int,
+        operation: str,
+        fields: dict[str, str | float | int | bool],
+    ) -> None:
+        """Read back each advanced field after an OUTPUT-OFF transaction."""
+
+        session = self._require_session()
+        prefix = f":SOUR{channel}"
+        mismatches: list[str] = []
+        for suffix, expected in fields.items():
+            response = session.query(f"{prefix}:{suffix}?").strip().upper()
+            if isinstance(expected, bool):
+                actual = response in {"1", "ON"}
+                if actual != expected:
+                    mismatches.append(
+                        f"{suffix} {response} != {'ON' if expected else 'OFF'}"
+                    )
+            elif isinstance(expected, str):
+                if response != expected.upper():
+                    mismatches.append(
+                        f"{suffix} {response} != {expected.upper()}"
+                    )
+            else:
+                try:
+                    actual_number = float(response)
+                except ValueError as exc:
+                    raise DeviceError(
+                        f"Rigol returned invalid {operation} readback for "
+                        f"{suffix}: {response!r}."
+                    ) from exc
+                if not self._same_number(
+                    actual_number, float(expected), absolute=1e-9
+                ):
+                    mismatches.append(
+                        f"{suffix} {actual_number:.12g} != {float(expected):.12g}"
+                    )
+        self._verify_output_off(channel)
+        if mismatches:
+            raise DeviceError(
+                f"Rigol {operation} readback failed (output remains OFF): "
+                + "; ".join(mismatches)
+            )
 
     def _verify_output_configuration(self, expected: RigolOutputConfig) -> None:
         session = self._require_session()

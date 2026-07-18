@@ -58,6 +58,9 @@ class StoredSpectrum:
     frequencies_hz: tuple[float, ...]
     powers_dbm: tuple[float, ...]
     source_point_count: int
+    processed_values: tuple[float, ...] | None = None
+    processed_unit: str | None = None
+    processing_operation: str = "none"
 
 
 @dataclass(frozen=True, slots=True)
@@ -177,10 +180,19 @@ class Hdf5RunReader:
             if len(frequencies) != len(powers) or not frequencies:
                 raise ExecutionError(f"Spectrum {index} has a mismatched or empty point count.")
             source_count = len(frequencies)
+            processed: tuple[float, ...] | None = None
+            if "processed_values" in group:
+                processed = tuple(float(value) for value in group["processed_values"][:])
+                if len(processed) != source_count:
+                    raise ExecutionError(
+                        f"Spectrum {index} has a mismatched processed point count."
+                    )
             if max_points is not None and max_points > 0 and source_count > max_points:
                 selected = peak_preserving_indices(powers, max_points)
                 frequencies = tuple(frequencies[item] for item in selected)
                 powers = tuple(powers[item] for item in selected)
+                if processed is not None:
+                    processed = tuple(processed[item] for item in selected)
             return StoredSpectrum(
                 index=index,
                 trace_name=Hdf5RunReader._attribute_text(group.attrs.get("trace_name")) or "TRAC1",
@@ -188,6 +200,18 @@ class Hdf5RunReader:
                 frequencies_hz=frequencies,
                 powers_dbm=powers,
                 source_point_count=source_count,
+                processed_values=processed,
+                processed_unit=(
+                    Hdf5RunReader._attribute_text(group.attrs.get("processed_unit"))
+                    if processed is not None
+                    else None
+                ),
+                processing_operation=(
+                    Hdf5RunReader._attribute_text(
+                        group.attrs.get("processing_operation")
+                    )
+                    or "none"
+                ),
             )
 
     @staticmethod

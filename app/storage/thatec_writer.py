@@ -48,8 +48,12 @@ class ThatecHdf5Writer:
         self._scalar_rows: dict[tuple[str, str], str] = {}
         self._spectrum_row: str | None = None
         self._trace_points: int | None = None
+        self._processed_spectrum_row: str | None = None
+        self._processed_trace_points: int | None = None
+        self._processed_unit: str | None = None
         self._last_scalar_rows: list[str] = []
         self._last_spectrum_appended = False
+        self._last_processed_spectrum_appended = False
         self._last_checkpoint_incremented = False
         self._last_created: list[tuple[str, tuple[str, str] | None]] = []
 
@@ -139,6 +143,9 @@ class ThatecHdf5Writer:
         self._scalar_rows = {}
         self._spectrum_row = None
         self._trace_points = None
+        self._processed_spectrum_row = None
+        self._processed_trace_points = None
+        self._processed_unit = None
         for row_name in sorted(
             name for name in self._definition if re.fullmatch(r"row_[0-9]+", name)
         ):
@@ -153,19 +160,36 @@ class ThatecHdf5Writer:
                 if len(data.shape) != 2:
                     raise ValueError("Recovered spectrum row is not rank 2.")
                 self._trace_points = int(data.shape[1])
+            elif role == "spectrum_processed":
+                self._processed_spectrum_row = row_name
+                data = file[f"measurement/{row_name}/data"]
+                if len(data.shape) != 2:
+                    raise ValueError("Recovered processed spectrum row is not rank 2.")
+                self._processed_trace_points = int(data.shape[1])
+                self._processed_unit = definition.get("lab control unit", "dB")
         self._last_scalar_rows = []
         self._last_spectrum_appended = False
+        self._last_processed_spectrum_appended = False
         self._last_checkpoint_incremented = False
         self._last_created = []
         file.attrs["measurement running"] = np.uint8(1)
         self._append_log(f"Process resumed from checkpoint {checkpoint_count}.")
         return self
 
-    def append(self, point: MeasurementPoint, trace: SpectrumTrace | None) -> None:
+    def append(
+        self,
+        point: MeasurementPoint,
+        trace: SpectrumTrace | None,
+        *,
+        processed_values: tuple[float, ...] | None = None,
+        processed_unit: str | None = None,
+        processing_operation: str = "none",
+    ) -> None:
         """Append one aligned public checkpoint and remember its rollback boundary."""
 
         self._last_scalar_rows = []
         self._last_spectrum_appended = False
+        self._last_processed_spectrum_appended = False
         self._last_checkpoint_incremented = False
         self._last_created = []
         values = {
@@ -191,6 +215,17 @@ class ThatecHdf5Writer:
         if self._spectrum_row is not None:
             self._append_spectrum(trace)
             self._last_spectrum_appended = True
+        if processed_values is not None and self._processed_spectrum_row is None:
+            if trace is None or not processed_unit:
+                raise ValueError("Processed thaTEC spectrum requires raw trace and unit.")
+            self._create_processed_spectrum_row(
+                trace,
+                processed_unit,
+                processing_operation,
+            )
+        if self._processed_spectrum_row is not None:
+            self._append_processed_spectrum(trace, processed_values)
+            self._last_processed_spectrum_appended = True
 
         self._checkpoint_count += 1
         self._last_checkpoint_incremented = True
@@ -210,6 +245,19 @@ class ThatecHdf5Writer:
             row["data"].resize((max(0, row["data"].shape[0] - 1), self._trace_points))
             row["timestamp"].resize((max(0, len(row["timestamp"]) - 1),))
             row["scale"].resize((max(0, len(row["scale"]) - 4),))
+        if (
+            self._last_processed_spectrum_appended
+            and self._processed_spectrum_row is not None
+        ):
+            row = self._file[f"measurement/{self._processed_spectrum_row}"]
+            row["data"].resize(
+                (
+                    max(0, row["data"].shape[0] - 1),
+                    self._processed_trace_points,
+                )
+            )
+            row["timestamp"].resize((max(0, len(row["timestamp"]) - 1),))
+            row["scale"].resize((max(0, len(row["scale"]) - 4),))
         if self._last_checkpoint_incremented:
             self._checkpoint_count = max(0, self._checkpoint_count - 1)
 
@@ -221,12 +269,17 @@ class ThatecHdf5Writer:
             if role_key is None:
                 self._spectrum_row = None
                 self._trace_points = None
+            elif role_key == ("__spectrum__", "processed"):
+                self._processed_spectrum_row = None
+                self._processed_trace_points = None
+                self._processed_unit = None
             else:
                 self._scalar_rows.pop(role_key, None)
         if self._last_created:
             self._rebuild_tree_view()
         self._last_scalar_rows = []
         self._last_spectrum_appended = False
+        self._last_processed_spectrum_appended = False
         self._last_checkpoint_incremented = False
         self._last_created = []
 
@@ -371,6 +424,119 @@ class ThatecHdf5Writer:
             1.0,
         )
 
+    def _create_processed_spectrum_row(
+        self,
+        trace: SpectrumTrace,
+        unit: str,
+        operation: str,
+    ) -> None:
+        self._processed_trace_points = len(trace.powers_dbm)
+        self._processed_unit = unit
+        row_name = self._allocate_row()
+        self._processed_spectrum_row = row_name
+        label = (
+            "Spectrum raw-reference"
+            if operation == "difference_db"
+            else f"Spectrum processed {operation}"
+        )
+        self._definition.create_dataset(
+            row_name,
+            data=self._table(
+                (
+                    ("device name", "Anritsu Spectrum Analyzer"),
+                    ("control name", f"{label} ({unit})"),
+                    ("dimensions", "1"),
+                    ("data type", "11"),
+                    ("tree indent level", str(self._indicator_indent)),
+                    ("function", "indicator"),
+                    ("lab control role", "spectrum_processed"),
+                    ("lab control key", operation),
+                    ("lab control unit", unit),
+                )
+            ),
+            dtype=self._text,
+        )
+        row = self._file["measurement"].create_group(row_name)
+        data = row.create_dataset(
+            "data",
+            shape=(self._checkpoint_count, self._processed_trace_points),
+            maxshape=(None, self._processed_trace_points),
+            dtype="f8",
+            compression="gzip",
+        )
+        data.attrs["data type"] = self._np.int32(11)
+        data.attrs["dim of data"] = self._np.int32(1)
+        if self._checkpoint_count:
+            data[:] = self._np.nan
+        timestamps = row.create_dataset(
+            "timestamp",
+            shape=(self._checkpoint_count,),
+            maxshape=(None,),
+            dtype="f8",
+        )
+        if self._checkpoint_count:
+            timestamps[:] = self._np.nan
+        scale = row.create_dataset(
+            "scale",
+            shape=(self._checkpoint_count * 4,),
+            maxshape=(None,),
+            dtype="f8",
+        )
+        if self._checkpoint_count:
+            scale_values = (
+                trace.frequencies_hz[0],
+                self._frequency_step(trace),
+                0.0,
+                1.0,
+            )
+            scale[:] = self._np.tile(scale_values, self._checkpoint_count)
+        row.create_dataset(
+            "metadata",
+            data=self._table(
+                (
+                    ("name", "Frequency"),
+                    ("unit", "Hz"),
+                    ("offset", f"{trace.frequencies_hz[0]:.12E}"),
+                    ("multiplier", f"{self._frequency_step(trace):.12E}"),
+                    ("name", "Processed amplitude"),
+                    ("unit", unit),
+                    ("offset", "0.000000000000E+00"),
+                    ("multiplier", "1.000000000000E+00"),
+                )
+            ),
+            dtype=self._text,
+        )
+        self._last_created.append((row_name, ("__spectrum__", "processed")))
+        self._rebuild_tree_view()
+
+    def _append_processed_spectrum(
+        self,
+        trace: SpectrumTrace | None,
+        values: tuple[float, ...] | None,
+    ) -> None:
+        assert self._processed_spectrum_row is not None
+        assert self._processed_trace_points is not None
+        row = self._file[f"measurement/{self._processed_spectrum_row}"]
+        index = row["data"].shape[0]
+        row["data"].resize((index + 1, self._processed_trace_points))
+        row["timestamp"].resize((index + 1,))
+        row["scale"].resize(((index + 1) * 4,))
+        if trace is None or values is None:
+            row["data"][index, :] = self._np.nan
+            row["timestamp"][index] = self._np.nan
+            row["scale"][index * 4 : (index + 1) * 4] = (0.0, 1.0, 0.0, 1.0)
+            return
+        if len(values) != self._processed_trace_points:
+            raise ValueError("thaTEC processed spectrum point count changed during one run")
+        row["data"][index, :] = self._np.asarray(values, dtype="f8")
+        row["timestamp"][index] = trace.acquired_at_utc.timestamp()
+        row["scale"][index * 4 : (index + 1) * 4] = (
+            trace.frequencies_hz[0],
+            self._frequency_step(trace),
+            0.0,
+            1.0,
+        )
+
     def _rebuild_tree_view(self) -> None:
         rows: list[tuple[str, str, str]] = []
         for name in sorted(key for key in self._definition if key.startswith("row_")):
@@ -402,7 +568,10 @@ class ThatecHdf5Writer:
                     ("start", f"{axis.values_si[0]:.12E}"),
                     ("stop", f"{axis.values_si[-1]:.12E}"),
                     ("steps", str(axis.points)),
-                    ("equation", "x" if axis.spacing == "linear" else "log(x)"),
+                    (
+                        "equation",
+                        "log(x)" if axis.spacing == "log" else "x",
+                    ),
                 )
             ),
             dtype=self._text,

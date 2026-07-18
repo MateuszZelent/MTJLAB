@@ -4,12 +4,89 @@ import unittest
 
 from app.domain.errors import ConfigurationError
 from app.domain.quantities import DIMENSION_CURRENT
-from app.recipes import generate_sweep_points, generate_sweep_stage_points, parse_recipe_text
+from app.recipes import (
+    estimate_sweep_point_count,
+    generate_sweep_points,
+    generate_sweep_stage_points,
+    parse_recipe_text,
+)
 from app.engine.compiler import RecipeCompiler
 from tests.helpers import simulation_settings
 
 
 class SweepPointGeneratorTests(unittest.TestCase):
+    def test_count_estimate_matches_generation_without_allocating_axis(self) -> None:
+        segments = [
+            {"start": "0 A", "stop": "1 A", "points": 11},
+            {"start": "1 A", "stop": "2 A", "step": "0.25 A"},
+            {"value": "3 A"},
+        ]
+        self.assertEqual(
+            estimate_sweep_point_count(segments, DIMENSION_CURRENT),
+            len(generate_sweep_points(segments, DIMENSION_CURRENT)),
+        )
+
+    def test_count_estimate_handles_a_large_step_axis(self) -> None:
+        self.assertEqual(
+            estimate_sweep_point_count(
+                [{"start": "0 A", "stop": "1000 A", "step": "1 mA"}],
+                DIMENSION_CURRENT,
+            ),
+            1_000_001,
+        )
+
+    def test_descending_second_stage_preserves_full_round_trip_trajectory(self) -> None:
+        segments = [
+            {"start": "0 A", "stop": "1 A", "points": 3, "spacing": "linear"},
+            {"start": "1 A", "stop": "0 A", "points": 3, "spacing": "linear"},
+        ]
+        stages = generate_sweep_stage_points(segments, DIMENSION_CURRENT)
+        self.assertEqual(
+            tuple(tuple(point.si_value for point in stage) for stage in stages),
+            ((0.0, 0.5, 1.0), (0.5, 0.0)),
+        )
+        self.assertEqual(
+            tuple(point.si_value for point in generate_sweep_points(segments, DIMENSION_CURRENT)),
+            (0.0, 0.5, 1.0, 0.5, 0.0),
+        )
+
+    def test_single_value_stage_is_an_explicit_measurement_and_is_not_deduplicated(self) -> None:
+        segments = [
+            {"start": "0 A", "stop": "1 A", "points": 3, "spacing": "linear"},
+            {"value": "1 A"},
+            {"value": "2 A"},
+            {"value": "0 A"},
+        ]
+        stages = generate_sweep_stage_points(segments, DIMENSION_CURRENT)
+        self.assertEqual(tuple(len(stage) for stage in stages), (3, 1, 1, 1))
+        self.assertEqual(
+            tuple(point.si_value for point in generate_sweep_points(segments, DIMENSION_CURRENT)),
+            (0.0, 0.5, 1.0, 1.0, 2.0, 0.0),
+        )
+
+    def test_axis_may_consist_of_one_single_value_measurement(self) -> None:
+        points = generate_sweep_points([{"value": "0 A"}], DIMENSION_CURRENT)
+        self.assertEqual(tuple(point.si_value for point in points), (0.0,))
+
+    def test_single_value_stage_round_trips_through_recipe_and_compiler(self) -> None:
+        recipe = parse_recipe_text(
+            """\
+schema_version: 1
+name: single-point-stage
+root:
+  id: axis
+  type: sweep
+  target: keithley.B.current
+  segments:
+    - {value: 0 A}
+  children:
+    - {id: checkpoint, type: checkpoint, label: zero}
+"""
+        )
+        plan = RecipeCompiler(simulation_settings()).compile(recipe)
+        self.assertEqual(plan.total_points, 1)
+        self.assertEqual(plan.actions[0].setpoints_si["keithley.B.current"], 0.0)
+
     def test_multiple_intervals_join_into_one_deduplicated_axis(self) -> None:
         points = generate_sweep_points(
             [

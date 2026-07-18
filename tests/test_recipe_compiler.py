@@ -11,10 +11,171 @@ from tests.helpers import ROOT, loaded_settings, simulation_settings
 
 
 class RecipeCompilerTests(unittest.TestCase):
-    def test_uncompiled_device_sweep_provider_is_blocked_instead_of_running_child_once(self) -> None:
+    def test_compilation_can_be_cancelled_before_expansion(self) -> None:
         source = """\
 schema_version: 1
-name: provider-required
+name: cancellable
+root:
+  id: root
+  type: sequence
+  children:
+    - {id: wait, type: wait, duration: 1 ms}
+"""
+        with self.assertRaisesRegex(Exception, "compilation cancelled"):
+            RecipeCompiler(
+                simulation_settings(), cancellation_requested=lambda: True
+            ).compile(parse_recipe_text(source))
+
+    def test_disabled_subtree_is_skipped_with_all_children(self) -> None:
+        source = """\
+schema_version: 1
+name: disabled-subtree
+root:
+  id: root
+  type: sequence
+  children:
+    - id: disabled-group
+      type: sequence
+      disabled: true
+      children:
+        - {id: hidden-wait, type: wait, duration: 1 s}
+    - {id: active-wait, type: wait, duration: 1 ms}
+"""
+        plan = RecipeCompiler(simulation_settings()).compile(
+            parse_recipe_text(source)
+        )
+        self.assertEqual([action.node_id for action in plan.actions], ["active-wait"])
+
+    def test_finally_safety_action_cannot_be_disabled(self) -> None:
+        source = """\
+schema_version: 1
+name: disabled-finally
+root:
+  id: active-wait
+  type: wait
+  duration: 1 ms
+finally:
+  - {id: unsafe-disabled-off, type: set_rigol_output, channel: 1, enabled: false, disabled: true}
+"""
+        with self.assertRaisesRegex(Exception, "finally safety actions cannot be disabled"):
+            RecipeCompiler(simulation_settings()).compile(parse_recipe_text(source))
+
+    def test_compiles_reference_processed_nested_setpoint_updates(self) -> None:
+        raw = deepcopy(simulation_settings(approved=True).model_dump(mode="python"))
+        raw["devices"]["rigol"]["safety"]["allow_output_enable"] = True
+        raw["devices"]["rigol"]["safety"]["channels"]["1"]["lab_limits"]["frequency"]["max"] = "1 GHz"
+        raw["devices"]["keithley"]["safety"]["allow_output_enable"] = True
+        channel = raw["devices"]["keithley"]["safety"]["channels"]["B"]["lab_limits"]
+        channel["source_current"] = {"min": "0 A", "max": "150 mA", "max_abs": "150 mA"}
+        channel["measured_current_trip"] = {"min": "-1 mA", "max": "151 mA"}
+        channel["max_abs_power"] = "10.05 mW"
+        settings = StationSettings.model_validate(raw)
+        source = """\
+schema_version: 1
+name: requested-reference-cartesian-sweep
+dut_limits:
+  keithley:
+    B:
+      current: {min: "0 A", max: "150 mA"}
+      voltage: {min: "-67 mV", max: "67 mV"}
+      max_abs_power: "10.05 mW"
+  rigol:
+    1:
+      minimum_impedance: "50 ohm"
+      max_abs_current: "20 uA"
+      max_abs_power: "20 nW"
+  anritsu:
+    max_expected_input: "-10 dBm"
+root:
+  id: root
+  type: sequence
+  children:
+    - {id: rigol-off-initial, type: set_rigol_output, channel: 1, enabled: false}
+    - {id: keithley-off-initial, type: set_keithley_output, channel: B, enabled: false}
+    - id: anritsu-config
+      type: configure_anritsu
+      start_frequency: "1 MHz"
+      stop_frequency: "10 MHz"
+      reference_level: "0 dBm"
+      points: 101
+    - {id: reference, type: acquire_reference, trace: TRAC1}
+    - id: keithley-config
+      type: configure_keithley
+      channel: B
+      mode: current
+      level: "0 A"
+      compliance: "67 mV"
+    - id: rigol-config
+      type: configure_rigol
+      channel: 1
+      waveform: SIN
+      frequency: "100 kHz"
+      high_level: "1 mV"
+      low_level: "-1 mV"
+      output_load: HIGHZ
+      dut_min_impedance: "50 ohm"
+    - {id: keithley-arm, type: arm_keithley_output, channel: B}
+    - {id: keithley-on, type: set_keithley_output, channel: B, enabled: true}
+    - {id: rigol-arm, type: arm_rigol_output, channel: 1}
+    - {id: rigol-on, type: set_rigol_output, channel: 1, enabled: true}
+    - id: keithley-current
+      type: sweep
+      target: keithley.B.current
+      start: "0 A"
+      stop: "150 mA"
+      points: 10
+      children:
+        - id: keithley-point
+          type: update_keithley_level
+          channel: B
+          mode: current
+          level: "${keithley.B.current}"
+        - id: rigol-frequency
+          type: sweep
+          target: rigol.1.frequency
+          start: "100 kHz"
+          stop: "1 GHz"
+          points: 100
+          children:
+            - id: rigol-point
+              type: update_rigol_frequency
+              channel: 1
+              frequency: "${rigol.1.frequency}"
+            - id: spectrum
+              type: acquire_spectrum
+              trace: TRAC1
+              reference_operation: difference_db
+              store_raw: true
+              store_processed: true
+finally:
+  - {id: rigol-off-finally, type: set_rigol_output, channel: 1, enabled: false}
+  - {id: keithley-zero-finally, type: ramp_keithley_to_zero, channel: B, deadline: "30 s"}
+  - {id: keithley-off-finally, type: set_keithley_output, channel: B, enabled: false}
+"""
+        plan = RecipeCompiler(settings).compile(parse_recipe_text(source))
+
+        self.assertEqual(plan.total_points, 1000)
+        self.assertEqual(plan.total_spectra, 1000)
+        self.assertEqual(
+            sum(action.kind == "acquire_reference" for action in plan.actions), 1
+        )
+        self.assertEqual(
+            sum(action.kind == "update_keithley_level" for action in plan.actions), 10
+        )
+        self.assertEqual(
+            sum(action.kind == "update_rigol_frequency" for action in plan.actions), 1000
+        )
+        acquisitions = [
+            action for action in plan.actions if action.kind == "acquire_spectrum"
+        ]
+        self.assertEqual(acquisitions[0].payload["reference_operation"], "difference_db")
+        self.assertTrue(acquisitions[0].payload["store_raw"])
+        self.assertTrue(acquisitions[0].payload["store_processed"])
+
+    def test_keithley_device_provider_expands_roi_and_runs_children_per_point(self) -> None:
+        source = """\
+schema_version: 1
+name: keithley-provider
 root:
   id: root
   type: sequence
@@ -25,6 +186,20 @@ root:
       operation: configure_selected_parameters
       channel: B
       source_mode: current
+      configuration:
+        channel: B
+        source_mode: current
+        source_level: 1 mA
+        compliance: 67 mV
+        nplc: 1
+        settling_time: 100 ms
+        sense_mode: 2wire
+        source_autorange: true
+        source_range: AUTO
+        measure_voltage_autorange: true
+        measure_voltage_range: AUTO
+        measure_current_autorange: true
+        measure_current_range: AUTO
       parameter_actions:
         - parameter_id: source.level
           mode: sweep
@@ -39,17 +214,525 @@ root:
           type: acquire_spectrum
           trace: TRAC1
 """
-        with self.assertRaisesRegex(Exception, "provider compilation"):
+        plan = RecipeCompiler(simulation_settings()).compile(parse_recipe_text(source))
+
+        self.assertEqual(plan.total_spectra, 3)
+        self.assertEqual(
+            [action.kind for action in plan.actions],
+            [
+                "configure_keithley",
+                "update_keithley_level",
+                "wait",
+                "acquire_spectrum",
+                "update_keithley_level",
+                "wait",
+                "acquire_spectrum",
+                "update_keithley_level",
+                "wait",
+                "acquire_spectrum",
+            ],
+        )
+        acquisitions = [
+            action for action in plan.actions if action.kind == "acquire_spectrum"
+        ]
+        self.assertEqual(
+            [action.setpoints_si["keithley.B.current"] for action in acquisitions],
+            [0.0, 0.0005, 0.001],
+        )
+
+    def test_keithley_device_provider_requires_full_configuration_snapshot(self) -> None:
+        source = """\
+schema_version: 1
+name: missing-provider-snapshot
+root:
+  id: keithley-axis
+  type: sequence
+  device_module: keithley
+  operation: configure_selected_parameters
+  channel: B
+  source_mode: current
+  parameter_actions:
+    - parameter_id: source.level
+      mode: set
+      value: 1 mA
+  children:
+    - id: spectrum
+      type: acquire_spectrum
+      trace: TRAC1
+"""
+        with self.assertRaisesRegex(Exception, "complete configuration snapshot"):
             RecipeCompiler(simulation_settings()).compile(parse_recipe_text(source))
 
+    def test_keithley_provider_compiles_compliance_axis_without_output_cycle(self) -> None:
+        source = """\
+schema_version: 1
+name: compliance-provider
+root:
+  id: keithley-axis
+  type: sequence
+  device_module: keithley
+  operation: configure_selected_parameters
+  channel: B
+  source_mode: current
+  output_policy: unchanged
+  configuration:
+    channel: B
+    source_mode: current
+    source_level: 1 mA
+    compliance: 50 mV
+    nplc: 1
+    settling_time: 0 s
+    sense_mode: 2wire
+    source_autorange: true
+    source_range: AUTO
+    measure_voltage_autorange: true
+    measure_voltage_range: AUTO
+    measure_current_autorange: true
+    measure_current_range: AUTO
+  parameter_actions:
+    - parameter_id: source.compliance
+      mode: sweep
+      value: 50 mV
+      segments:
+        - {start: 40 mV, stop: 60 mV, points: 3}
+  children:
+    - id: spectrum
+      type: acquire_spectrum
+      trace: TRAC1
+"""
+        plan = RecipeCompiler(simulation_settings()).compile(
+            parse_recipe_text(source)
+        )
+
+        self.assertEqual(
+            sum(
+                action.kind == "update_keithley_compliance"
+                for action in plan.actions
+            ),
+            3,
+        )
+        self.assertFalse(
+            any(
+                action.kind in {"arm_keithley_output", "set_keithley_output"}
+                for action in plan.actions
+            )
+        )
+        acquisitions = [
+            action for action in plan.actions if action.kind == "acquire_spectrum"
+        ]
+        self.assertEqual(
+            [
+                action.setpoints_si["keithley.B.compliance_voltage"]
+                for action in acquisitions
+            ],
+            [0.04, 0.05, 0.06],
+        )
+
+    def test_rigol_device_provider_expands_frequency_axis_per_child(self) -> None:
+        source = """\
+schema_version: 1
+name: rigol-provider
+root:
+  id: rigol-axis
+  type: sequence
+  device_module: rigol
+  operation: configure_selected_parameters
+  channel: 1
+  output_policy: unchanged
+  configuration:
+    channel: 1
+    waveform: SQU
+    frequency: 1 kHz
+    high_level: 1 mV
+    low_level: -1 mV
+    output_load: HIGHZ
+    phase_deg: "0"
+    square_duty_percent: "50"
+    ramp_symmetry_percent: "50"
+    pulse_width: 100 us
+    pulse_leading: 10 ns
+    pulse_trailing: 10 ns
+    dut_min_impedance: 50 ohm
+  parameter_actions:
+    - parameter_id: carrier.frequency
+      mode: sweep
+      value: 1 kHz
+      segments:
+        - {start: 1 kHz, stop: 3 kHz, points: 3}
+    - parameter_id: carrier.high_level
+      mode: set
+      value: 1 mV
+    - parameter_id: carrier.low_level
+      mode: set
+      value: -1 mV
+  children:
+    - id: spectrum
+      type: acquire_spectrum
+      trace: TRAC1
+"""
+        raw = deepcopy(simulation_settings(approved=True).model_dump(mode="python"))
+        raw["devices"]["anritsu"]["advanced_spectrum"] = {
+            "control_protocol": "standard_scpi",
+            "qualified_firmware": ["7.03.00"],
+        }
+        plan = RecipeCompiler(StationSettings.model_validate(raw)).compile(
+            parse_recipe_text(source)
+        )
+
+        self.assertEqual(
+            [action.kind for action in plan.actions],
+                [
+                    "configure_rigol",
+                    "configure_rigol_output",
+                    "update_rigol_frequency",
+                "acquire_spectrum",
+                "update_rigol_frequency",
+                "acquire_spectrum",
+                "update_rigol_frequency",
+                "acquire_spectrum",
+            ],
+        )
+        output_path = plan.actions[1].payload["config"]
+        self.assertEqual(output_path.polarity, "NORM")
+        self.assertFalse(output_path.sync_enabled)
+        acquisitions = [
+            action for action in plan.actions if action.kind == "acquire_spectrum"
+        ]
+        self.assertEqual(
+            [action.setpoints_si["rigol.1.frequency"] for action in acquisitions],
+            [1000.0, 2000.0, 3000.0],
+        )
+
+    def test_rigol_high_level_axis_uses_readback_update_action(self) -> None:
+        source = """\
+schema_version: 1
+name: rigol-level-provider
+root:
+  id: rigol-axis
+  type: sequence
+  device_module: rigol
+  operation: configure_selected_parameters
+  channel: 1
+  configuration:
+    channel: 1
+    waveform: SIN
+    frequency: 1 kHz
+    high_level: 1 mV
+    low_level: -1 mV
+    output_load: HIGHZ
+    phase_deg: "0"
+    dut_min_impedance: 50 ohm
+  parameter_actions:
+    - parameter_id: carrier.high_level
+      mode: sweep
+      value: 1 mV
+      segments:
+        - {start: 1 mV, stop: 3 mV, points: 3}
+  children:
+    - id: spectrum
+      type: acquire_spectrum
+"""
+        plan = RecipeCompiler(simulation_settings()).compile(
+            parse_recipe_text(source)
+        )
+
+        self.assertEqual(
+            sum(action.kind == "update_rigol_levels" for action in plan.actions),
+            3,
+        )
+        self.assertFalse(
+            any(
+                action.kind in {"arm_rigol_output", "set_rigol_output"}
+                for action in plan.actions
+            )
+        )
+
+    def test_anritsu_device_provider_expands_axis_and_preserves_acquisition_child(self) -> None:
+        source = """\
+schema_version: 1
+name: anritsu-provider
+root:
+  id: anritsu-axis
+  type: sequence
+  device_module: anritsu
+  operation: configure_selected_parameters
+  configuration:
+    start_frequency: 1 MHz
+    stop_frequency: 10 MHz
+    reference_level: 0 dBm
+    points: 101
+  parameter_actions:
+    - parameter_id: spectrum.start_frequency
+      mode: sweep
+      value: 1 MHz
+      segments:
+        - {start: 1 MHz, stop: 3 MHz, points: 3}
+    - parameter_id: advanced.rbw_mode
+      mode: set
+      value: manual
+    - parameter_id: advanced.rbw
+      mode: set
+      value: 10 kHz
+  children:
+    - id: spectrum
+      type: acquire_spectrum
+      trace: TRAC1
+"""
+        raw = deepcopy(simulation_settings(approved=True).model_dump(mode="python"))
+        raw["devices"]["anritsu"]["advanced_spectrum"] = {
+            "control_protocol": "standard_scpi",
+            "qualified_firmware": ["7.03.00"],
+        }
+        plan = RecipeCompiler(StationSettings.model_validate(raw)).compile(
+            parse_recipe_text(source)
+        )
+
+        self.assertEqual(
+            [action.kind for action in plan.actions],
+            [
+                "configure_anritsu",
+                "configure_anritsu_advanced",
+                "acquire_spectrum",
+                "configure_anritsu",
+                "configure_anritsu_advanced",
+                "acquire_spectrum",
+                "configure_anritsu",
+                "configure_anritsu_advanced",
+                "acquire_spectrum",
+            ],
+        )
+        acquisitions = [
+            action for action in plan.actions if action.kind == "acquire_spectrum"
+        ]
+        self.assertEqual(
+            [
+                action.setpoints_si["anritsu.spectrum.start_frequency"]
+                for action in acquisitions
+            ],
+            [1e6, 2e6, 3e6],
+        )
+
+    def test_anritsu_provider_rejects_manual_mode_without_paired_value(self) -> None:
+        source = """\
+schema_version: 1
+name: invalid-anritsu-advanced-pair
+root:
+  id: anritsu
+  type: sequence
+  device_module: anritsu
+  operation: configure_selected_parameters
+  configuration:
+    start_frequency: 1 MHz
+    stop_frequency: 10 MHz
+    reference_level: 0 dBm
+    points: 101
+  parameter_actions:
+    - {parameter_id: advanced.rbw_mode, mode: set, value: manual}
+  children:
+    - {id: wait, type: wait, duration: 1 ms}
+"""
+        with self.assertRaisesRegex(Exception, "must be selected together"):
+            RecipeCompiler(simulation_settings()).compile(
+                parse_recipe_text(source)
+            )
+
+    def test_anritsu_sg_device_provider_expands_axis_with_rf_off_configuration(self) -> None:
+        source = """\
+schema_version: 1
+name: anritsu-sg-provider
+root:
+  id: sg
+  type: sequence
+  device_module: anritsu_sg
+  operation: configure_selected_parameters
+  configuration:
+    frequency: 1 GHz
+    power: -30 dBm
+  parameter_actions:
+    - parameter_id: sg.frequency
+      mode: sweep
+      value: 1 GHz
+      segments:
+        - {start: 1 GHz, stop: 1.2 GHz, points: 3}
+    - {parameter_id: sg.power, mode: set, value: -40 dBm}
+  children:
+    - {id: spectrum, type: acquire_spectrum, trace: TRAC1}
+"""
+        raw = deepcopy(simulation_settings(approved=True).model_dump(mode="python"))
+        raw["devices"]["anritsu"]["signal_generator"].update(
+            {
+                "control_protocol": "basic_scpi",
+                "frequency": {"min": "100 MHz", "max": "6 GHz"},
+                "power": {"min": "-100 dBm", "max": "0 dBm"},
+            }
+        )
+        plan = RecipeCompiler(StationSettings.model_validate(raw)).compile(
+            parse_recipe_text(source)
+        )
+
+        self.assertEqual(
+            [action.kind for action in plan.actions],
+            [
+                "configure_anritsu_sg",
+                "acquire_spectrum",
+                "configure_anritsu_sg",
+                "acquire_spectrum",
+                "configure_anritsu_sg",
+                "acquire_spectrum",
+            ],
+        )
+        acquisitions = [
+            action for action in plan.actions if action.kind == "acquire_spectrum"
+        ]
+        self.assertEqual(
+            [
+                action.setpoints_si["anritsu.sg.frequency"]
+                for action in acquisitions
+            ],
+            [1e9, 1.1e9, 1.2e9],
+        )
+        self.assertTrue(
+            all(
+                action.setpoints_si["anritsu.sg.power"] == -40.0
+                for action in acquisitions
+            )
+        )
+
+    def test_anritsu_sg_axis_requires_fresh_arm_before_rf_on_at_every_point(self) -> None:
+        source = """\
+schema_version: 1
+name: anritsu-sg-energized-provider
+dut_limits:
+  anritsu:
+    max_signal_generator_output: -10 dBm
+root:
+  id: sg
+  type: sequence
+  device_module: anritsu_sg
+  operation: configure_selected_parameters
+  configuration: {frequency: 1 GHz, power: -30 dBm}
+  parameter_actions:
+    - parameter_id: sg.frequency
+      mode: sweep
+      value: 1 GHz
+      segments:
+        - {start: 1 GHz, stop: 1.1 GHz, points: 2}
+  children:
+    - {id: arm, type: arm_anritsu_sg_output}
+    - {id: rf-on, type: set_anritsu_sg_output, enabled: true}
+    - {id: spectrum, type: acquire_spectrum, trace: TRAC1}
+    - {id: rf-off, type: set_anritsu_sg_output, enabled: false}
+"""
+        raw = deepcopy(simulation_settings(approved=True).model_dump(mode="python"))
+        raw["devices"]["anritsu"]["safety"][
+            "signal_generator_output_allowed"
+        ] = True
+        raw["devices"]["anritsu"]["signal_generator"].update(
+            {
+                "control_protocol": "basic_scpi",
+                "frequency": {"min": "100 MHz", "max": "6 GHz"},
+                "power": {"min": "-100 dBm", "max": "0 dBm"},
+            }
+        )
+        plan = RecipeCompiler(StationSettings.model_validate(raw)).compile(
+            parse_recipe_text(source)
+        )
+
+        self.assertEqual(
+            [action.kind for action in plan.actions],
+            [
+                "configure_anritsu_sg",
+                "arm_anritsu_sg_output",
+                "set_anritsu_sg_output",
+                "acquire_spectrum",
+                "set_anritsu_sg_output",
+                "configure_anritsu_sg",
+                "arm_anritsu_sg_output",
+                "set_anritsu_sg_output",
+                "acquire_spectrum",
+                "set_anritsu_sg_output",
+            ],
+        )
+
+    def test_incomplete_device_placeholder_blocks_children_before_compilation(self) -> None:
+        source = """\
+schema_version: 1
+name: incomplete-placeholder
+root:
+  id: root
+  type: sequence
+  children:
+    - id: keithley-placeholder
+      type: sequence
+      device_module: keithley
+      configuration_required: true
+      children:
+        - id: spectrum-must-not-run
+          type: acquire_spectrum
+          trace: TRAC1
+"""
+        with self.assertRaisesRegex(Exception, "configuration is incomplete"):
+            RecipeCompiler(simulation_settings()).compile(parse_recipe_text(source))
+
+    def test_preflight_rejects_update_without_prior_device_configuration(self) -> None:
+        source = """\
+schema_version: 1
+name: invalid-update-order
+root:
+  id: update
+  type: update_rigol_frequency
+  channel: 1
+  frequency: 1 kHz
+"""
+        with self.assertRaisesRegex(Exception, "requires an earlier configuration"):
+            RecipeCompiler(simulation_settings()).compile(parse_recipe_text(source))
+
+    def test_preflight_rejects_output_on_without_one_shot_arm(self) -> None:
+        raw = deepcopy(simulation_settings(approved=True).model_dump(mode="python"))
+        raw["devices"]["rigol"]["safety"]["allow_output_enable"] = True
+        source = """\
+schema_version: 1
+name: invalid-output-order
+dut_limits:
+  rigol:
+    1:
+      minimum_impedance: 50 ohm
+      max_abs_current: 1 mA
+      max_abs_power: 1 mW
+root:
+  id: root
+  type: sequence
+  children:
+    - id: configure
+      type: configure_rigol
+      channel: 1
+      waveform: SIN
+      frequency: 1 kHz
+      high_level: 1 mV
+      low_level: -1 mV
+      dut_min_impedance: 50 ohm
+    - {id: output-on, type: set_rigol_output, channel: 1, enabled: true}
+"""
+        with self.assertRaisesRegex(Exception, "requires an earlier one-shot ARM"):
+            RecipeCompiler(StationSettings.model_validate(raw)).compile(
+                parse_recipe_text(source)
+            )
+
     def test_rf_interlock_blocks_unapproved_recipe(self) -> None:
-        recipe = load_recipe(ROOT / "recipes" / "example_nested_sweep.yml")
+        recipe = load_recipe(
+            ROOT / "recipes" / "example_energized_nested_sweep_template.yml"
+        )
         with self.assertRaises(SafetyViolation):
             RecipeCompiler(loaded_settings()).compile(recipe)
 
     def test_example_expands_to_2000_spectra(self) -> None:
-        recipe = load_recipe(ROOT / "recipes" / "example_nested_sweep.yml")
-        plan = RecipeCompiler(simulation_settings()).compile(recipe)
+        recipe = load_recipe(
+            ROOT / "recipes" / "example_energized_nested_sweep_template.yml"
+        )
+        raw = deepcopy(simulation_settings(approved=True).model_dump(mode="python"))
+        raw["devices"]["rigol"]["safety"]["allow_output_enable"] = True
+        raw["devices"]["keithley"]["safety"]["allow_output_enable"] = True
+        plan = RecipeCompiler(StationSettings.model_validate(raw)).compile(recipe)
         self.assertEqual(plan.total_points, 2000)
         self.assertEqual(plan.required_devices, {"rigol", "keithley", "anritsu"})
         self.assertEqual(

@@ -16,6 +16,11 @@ from app.domain.errors import DeviceError, ExecutionError
 from app.domain.models import ApplicationState, DeviceState, MeasurementPoint
 from app.engine.compiler import ExecutionPlan, PlanAction, required_devices_for_actions
 from app.engine.policy import ExecutionPolicy
+from app.spectrum import (
+    LinearPowerAverager,
+    apply_reference_operation,
+    frequency_grids_match,
+)
 from app.storage.hdf5_writer import Hdf5RunWriter
 
 
@@ -29,6 +34,15 @@ class RunResult:
     completed_actions: int
     stored_points: int
     error: str | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class _AcquiredSpectrum:
+    raw: SpectrumTrace
+    average_count: int = 1
+    processed_values: tuple[float, ...] | None = None
+    processed_unit: str | None = None
+    processing_operation: str = "none"
 
 
 class RecipeRunner:
@@ -73,6 +87,7 @@ class RecipeRunner:
         self._watchdog_deadline_monotonic = 0.0
         self._watchdog_started_monotonic = 0.0
         self._correlation_id = ""
+        self._reference_trace: SpectrumTrace | None = None
 
     @property
     def state(self) -> ApplicationState:
@@ -116,6 +131,7 @@ class RecipeRunner:
         self._anritsu_sg_output_active = False
         self._last_safe_boundary_points = stored_points
         self._watchdog_timed_out.clear()
+        self._reference_trace = None
         self._correlation_id = str(uuid4())
         self._start_watchdog()
         self._state = ApplicationState.RUNNING
@@ -164,7 +180,7 @@ class RecipeRunner:
                         "cancellation_requested": self._stop_requested.is_set(),
                     },
                 )
-                trace = self._execute_with_policy(action, point_measurements)
+                acquisition = self._execute_with_policy(action, point_measurements)
                 point_setpoints.update(action.setpoints_si)
                 completed = action_index + 1
                 compliance_channels = self._compliance_channels(point_measurements)
@@ -195,7 +211,8 @@ class RecipeRunner:
                     point_measurements.clear()
                     self._emit("compliance_detected", {"channels": compliance_channels, "point_index": stored - 1})
                     raise ExecutionError("Keithley reached compliance; the final checkpoint was saved and output was disabled.")
-                if trace is not None or action.kind == "checkpoint":
+                if acquisition is not None or action.kind == "checkpoint":
+                    trace = acquisition.raw if acquisition is not None else None
                     point = MeasurementPoint(
                         index=stored,
                         setpoints=dict(point_setpoints),
@@ -205,10 +222,34 @@ class RecipeRunner:
                             "checkpoint_label": action.payload.get("label", action.node_id),
                             "monotonic_s": time.monotonic(),
                             "safety_context": self._safety_context_snapshot(),
+                            "spectrum_processing": (
+                                acquisition.processing_operation
+                                if acquisition is not None
+                                else "none"
+                            ),
+                            "spectrum_average_count": (
+                                acquisition.average_count
+                                if acquisition is not None
+                                else 1
+                            ),
                         },
                     )
                     write_started = time.monotonic()
-                    self._writer.append(point, trace)
+                    if (
+                        acquisition is not None
+                        and acquisition.processed_values is not None
+                    ):
+                        self._writer.append(
+                            point,
+                            trace,
+                            processed_values=acquisition.processed_values,
+                            processed_unit=acquisition.processed_unit,
+                            processing_operation=acquisition.processing_operation,
+                        )
+                    else:
+                        # Keep the writer protocol compatible with lightweight
+                        # diagnostic writers and existing raw-only storage.
+                        self._writer.append(point, trace)
                     write_elapsed = time.monotonic() - write_started
                     stored += 1
                     self._emit_point_stored(
@@ -250,7 +291,7 @@ class RecipeRunner:
         self,
         action: PlanAction,
         measurements: dict[str, float],
-    ) -> SpectrumTrace | None:
+    ) -> _AcquiredSpectrum | None:
         retries = self._policy.retry_count if self._can_retry(action) else 0
         for attempt in range(retries + 1):
             deadline_s = self._policy.deadline_for(action)
@@ -294,6 +335,8 @@ class RecipeRunner:
 
         if action.kind == "configure_rigol":
             return not self._rigol_output_active[action.payload["config"].channel]
+        if action.kind == "configure_rigol_output":
+            return not self._rigol_output_active[action.payload["config"].channel]
         if action.kind == "configure_keithley":
             return not self._keithley_output_active[action.payload["request"].channel]
         if action.kind == "set_rigol_output":
@@ -307,6 +350,7 @@ class RecipeRunner:
             "configure_anritsu_advanced",
             "configure_anritsu_sg",
             "measure_keithley",
+            "acquire_reference",
             "acquire_spectrum",
             "ramp_keithley_to_zero",
         }
@@ -322,7 +366,10 @@ class RecipeRunner:
             return self._rigol
         if "keithley" in action.kind:
             return self._keithley
-        if "anritsu" in action.kind or action.kind == "acquire_spectrum":
+        if "anritsu" in action.kind or action.kind in {
+            "acquire_reference",
+            "acquire_spectrum",
+        }:
             return self._anritsu
         return None
 
@@ -497,7 +544,9 @@ class RecipeRunner:
         self._writer.close("faulted")
         return RunResult(self._state, completed, stored, reason)
 
-    def _execute(self, action: PlanAction, measurements: dict[str, float]) -> SpectrumTrace | None:
+    def _execute(
+        self, action: PlanAction, measurements: dict[str, float]
+    ) -> _AcquiredSpectrum | None:
         payload = action.payload
         if action.kind == "configure_rigol":
             config = payload["config"]
@@ -520,6 +569,22 @@ class RecipeRunner:
                 "low_level_v": config.low_level_v,
                 "output_load": config.output_load,
             }
+        elif action.kind == "configure_rigol_output":
+            config = payload["config"]
+            self._rigol.configure_output(config)
+            self._rigol_output_active[config.channel] = False
+            context = self._active_safety_context.get(
+                f"rigol.{config.channel}", {}
+            )
+            context["output_path"] = {
+                "polarity": config.polarity,
+                "mode": config.mode,
+                "gate_polarity": config.gate_polarity,
+                "sync_enabled": config.sync_enabled,
+                "sync_polarity": config.sync_polarity,
+                "sync_delay_s": config.sync_delay_s,
+            }
+            self._active_safety_context[f"rigol.{config.channel}"] = context
         elif action.kind == "configure_keithley":
             request = payload["request"]
             self._keithley.configure_source(request)
@@ -536,6 +601,26 @@ class RecipeRunner:
                 "voltage_max_v": envelope.voltage_max_v if envelope is not None else None,
                 "max_abs_power_w": envelope.max_abs_power_w if envelope is not None else None,
             }
+        elif action.kind == "update_keithley_level":
+            actual = self._keithley.update_source_level(
+                payload["channel"],
+                mode=payload["mode"],
+                level_si=payload["level_si"],
+            )
+            key = f"keithley.{payload['channel']}"
+            context = self._active_safety_context.get(key, {})
+            context["source_level_si"] = actual
+            self._active_safety_context[key] = context
+        elif action.kind == "update_keithley_compliance":
+            actual = self._keithley.update_source_compliance(
+                payload["channel"],
+                mode=payload["mode"],
+                compliance_si=payload["compliance_si"],
+            )
+            key = f"keithley.{payload['channel']}"
+            context = self._active_safety_context.get(key, {})
+            context["compliance_si"] = actual
+            self._active_safety_context[key] = context
         elif action.kind == "configure_anritsu":
             config = payload["config"]
             self._anritsu.configure_spectrum(config)
@@ -569,6 +654,25 @@ class RecipeRunner:
                 "frequency_hz": config.frequency_hz,
                 "power_dbm": config.power_dbm,
             }
+        elif action.kind == "update_rigol_frequency":
+            actual = self._rigol.update_frequency(
+                payload["channel"], payload["frequency_hz"]
+            )
+            key = f"rigol.{payload['channel']}"
+            context = self._active_safety_context.get(key, {})
+            context["frequency_hz"] = actual
+            self._active_safety_context[key] = context
+        elif action.kind == "update_rigol_levels":
+            actual_high, actual_low = self._rigol.update_levels(
+                payload["channel"],
+                high_level_v=payload["high_level_v"],
+                low_level_v=payload["low_level_v"],
+            )
+            key = f"rigol.{payload['channel']}"
+            context = self._active_safety_context.get(key, {})
+            context["high_level_v"] = actual_high
+            context["low_level_v"] = actual_low
+            self._active_safety_context[key] = context
         elif action.kind == "set_rigol_output":
             self._rigol.set_output(payload["channel"], payload["enabled"])
             self._rigol_output_active[payload["channel"]] = bool(payload["enabled"])
@@ -595,9 +699,66 @@ class RecipeRunner:
             measurements[f"{prefix}.power_w"] = result.power_w
             measurements[f"{prefix}.compliance_detected"] = float(result.compliance_detected)
             measurements[f"{prefix}.compliance_stop_required"] = float(result.compliance_stop_required)
+        elif action.kind == "acquire_reference":
+            average_count = int(payload.get("average_count", 1))
+            reference = self._acquire_averaged_spectrum(
+                payload["trace"],
+                payload.get("dut_max_expected_input_dbm"),
+                average_count,
+            )
+            self._writer.store_reference(
+                reference,
+                kind="single" if average_count == 1 else "averaged",
+                average_count=average_count,
+            )
+            self._reference_trace = reference
+            self._emit(
+                "reference_stored",
+                {
+                    "trace": reference.trace_name,
+                    "points": len(reference.powers_dbm),
+                    "average_count": average_count,
+                    "acquired_at_utc": reference.acquired_at_utc.isoformat(),
+                },
+            )
         elif action.kind == "acquire_spectrum":
-            return self._anritsu.acquire_single_sweep(
-                payload["trace"], payload.get("dut_max_expected_input_dbm")
+            average_count = int(payload.get("average_count", 1))
+            trace = self._acquire_averaged_spectrum(
+                payload["trace"],
+                payload.get("dut_max_expected_input_dbm"),
+                average_count,
+            )
+            operation = str(payload.get("reference_operation", "none"))
+            processed: tuple[float, ...] | None = None
+            processed_unit: str | None = None
+            if operation != "none":
+                reference = self._reference_trace
+                if reference is None:
+                    raise ExecutionError(
+                        "Reference processing was requested, but no reference "
+                        "spectrum is active in this run."
+                    )
+                if not frequency_grids_match(
+                    trace.frequencies_hz, reference.frequencies_hz
+                ):
+                    raise ExecutionError(
+                        "The acquired spectrum frequency grid differs from the reference."
+                    )
+                processed, processed_unit = apply_reference_operation(
+                    trace.powers_dbm,
+                    reference.powers_dbm,
+                    operation,
+                )
+            if not bool(payload.get("store_processed", operation != "none")):
+                processed = None
+                processed_unit = None
+                operation = "none"
+            return _AcquiredSpectrum(
+                raw=trace,
+                average_count=average_count,
+                processed_values=processed,
+                processed_unit=processed_unit,
+                processing_operation=operation,
             )
         elif action.kind == "checkpoint":
             pass
@@ -622,6 +783,41 @@ class RecipeRunner:
         else:
             raise ExecutionError(f"The runner does not support action {action.kind!r}.")
         return None
+
+    def _acquire_averaged_spectrum(
+        self,
+        trace_name: str,
+        dut_max_expected_input_dbm: float | None,
+        average_count: int,
+    ) -> SpectrumTrace:
+        """Acquire complete, grid-matched traces and average in linear power."""
+
+        averager = LinearPowerAverager()
+        first: SpectrumTrace | None = None
+        latest: SpectrumTrace | None = None
+        for _index in range(average_count):
+            self._raise_if_stop_requested()
+            latest = self._anritsu.acquire_single_sweep(
+                trace_name, dut_max_expected_input_dbm
+            )
+            if first is None:
+                first = latest
+            elif not frequency_grids_match(
+                first.frequencies_hz, latest.frequencies_hz
+            ):
+                raise ExecutionError(
+                    "Anritsu averaging aborted because the frequency grid changed "
+                    "between complete spectra."
+                )
+            averager.add(latest.powers_dbm)
+        if first is None or latest is None:
+            raise ExecutionError("Anritsu averaging requires at least one spectrum.")
+        return SpectrumTrace(
+            frequencies_hz=first.frequencies_hz,
+            powers_dbm=averager.result(),
+            acquired_at_utc=latest.acquired_at_utc,
+            trace_name=latest.trace_name,
+        )
 
     def _interruptible_wait(self, duration_s: float) -> None:
         deadline = time.monotonic() + duration_s

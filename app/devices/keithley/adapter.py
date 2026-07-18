@@ -247,6 +247,7 @@ class KeithleyAdapter(DeviceAdapter):
             self._configure_measurement_ranges_and_sense(session, smu, request)
             session.write(f"{smu}.measure.nplc = {request.nplc:.12g}")
             self._check_errors()
+            self._verify_applied_configuration(request)
             self._last_request[request.channel] = request
             self._update_aggregate_output_state()
             return
@@ -262,8 +263,201 @@ class KeithleyAdapter(DeviceAdapter):
             session.write(f"{smu}.source.levelv = {request.level_si:.12g}")
         session.write(f"{smu}.measure.nplc = {request.nplc:.12g}")
         self._check_errors()
+        self._verify_applied_configuration(request)
         self._last_request[request.channel] = request
         self._update_aggregate_output_state()
+
+    def _verify_applied_configuration(
+        self, expected: KeithleySourceRequest
+    ) -> None:
+        """Read back every programmed source and measurement-path parameter."""
+
+        session = self._require_session()
+        smu = self._smu(expected.channel)
+        mismatches: list[str] = []
+
+        def query(field: str) -> str:
+            return session.query(f"print({field})").strip()
+
+        def numeric(field: str, expected_value: float) -> None:
+            response = query(field)
+            try:
+                actual = float(response)
+            except ValueError as exc:
+                raise DeviceError(
+                    f"Keithley returned invalid numeric readback for {field}: "
+                    f"{response!r}."
+                ) from exc
+            if not math.isclose(
+                actual, expected_value, rel_tol=1e-9, abs_tol=1e-12
+            ):
+                mismatches.append(
+                    f"{field} {actual:.12g} != {expected_value:.12g}"
+                )
+
+        def enum(field: str, expected_name: str, expected_numeric: int) -> None:
+            response = query(field).upper()
+            normalized = response.rsplit(".", 1)[-1]
+            accepted = {
+                expected_name,
+                str(expected_numeric),
+                f"{float(expected_numeric):g}",
+            }
+            if normalized not in accepted:
+                mismatches.append(
+                    f"{field} {response!r} != {expected_name}"
+                )
+
+        if self._output_is_enabled(expected.channel):
+            mismatches.append(f"{smu}.source.output is ON after configuration")
+        numeric(f"{smu}.measure.nplc", expected.nplc)
+        enum(
+            f"{smu}.sense",
+            "SENSE_2WIRE" if expected.sense_mode == "2wire" else "SENSE_4WIRE",
+            0 if expected.sense_mode == "2wire" else 1,
+        )
+        enum(
+            f"{smu}.measure.autorangev",
+            "AUTORANGE_ON" if expected.measure_voltage_autorange else "AUTORANGE_OFF",
+            1 if expected.measure_voltage_autorange else 0,
+        )
+        enum(
+            f"{smu}.measure.autorangei",
+            "AUTORANGE_ON" if expected.measure_current_autorange else "AUTORANGE_OFF",
+            1 if expected.measure_current_autorange else 0,
+        )
+        if expected.measure_voltage_range_si is not None:
+            numeric(
+                f"{smu}.measure.rangev", expected.measure_voltage_range_si
+            )
+        if expected.measure_current_range_si is not None:
+            numeric(
+                f"{smu}.measure.rangei", expected.measure_current_range_si
+            )
+        if expected.mode != "measure_only":
+            suffix = "i" if expected.mode == "current" else "v"
+            enum(
+                f"{smu}.source.func",
+                "OUTPUT_DCAMPS"
+                if expected.mode == "current"
+                else "OUTPUT_DCVOLTS",
+                0 if expected.mode == "current" else 1,
+            )
+            numeric(f"{smu}.source.level{suffix}", expected.level_si)
+            numeric(
+                f"{smu}.source.{'limitv' if expected.mode == 'current' else 'limiti'}",
+                expected.compliance_si,
+            )
+            enum(
+                f"{smu}.source.autorange{suffix}",
+                "AUTORANGE_ON" if expected.source_autorange else "AUTORANGE_OFF",
+                1 if expected.source_autorange else 0,
+            )
+            if expected.source_range_si is not None:
+                numeric(
+                    f"{smu}.source.range{suffix}", expected.source_range_si
+                )
+        if mismatches:
+            raise DeviceError(
+                "Keithley configuration readback mismatch: "
+                + "; ".join(mismatches)
+            )
+
+    def update_source_level(
+        self,
+        channel: Literal["A", "B"],
+        *,
+        mode: Literal["current", "voltage"],
+        level_si: float,
+    ) -> float:
+        """Change one source setpoint without cycling OUTPUT or other parameters."""
+
+        if channel not in {"A", "B"}:
+            raise SafetyViolation("Keithley channel must be A or B.")
+        current = self._last_request.get(channel)
+        if current is None or current.mode == "measure_only":
+            raise SafetyViolation(
+                "Configure a Keithley source before updating its source level."
+            )
+        if current.mode != mode:
+            raise SafetyViolation(
+                f"Keithley channel {channel} is configured for {current.mode}, not {mode}."
+            )
+        updated = replace(current, level_si=float(level_si))
+        validate_keithley_source(self._channel_settings(channel), updated)
+        smu = self._smu(channel)
+        suffix = "i" if mode == "current" else "v"
+        session = self._require_session()
+        output_before = self._output_is_enabled(channel)
+        session.write(f"{smu}.source.level{suffix} = {updated.level_si:.12g}")
+        self._check_errors()
+        try:
+            actual = float(session.query(f"print({smu}.source.level{suffix})"))
+        except (TypeError, ValueError) as exc:
+            raise DeviceError("Keithley returned an invalid source-level readback.") from exc
+        output_after = self._output_is_enabled(channel)
+        if output_after != output_before:
+            raise DeviceError("Keithley OUTPUT state changed during a source-level update.")
+        if not math.isclose(actual, updated.level_si, rel_tol=1e-9, abs_tol=1e-12):
+            raise DeviceError(
+                f"Keithley source-level readback {actual:.12g} does not match "
+                f"{updated.level_si:.12g} SI."
+            )
+        self._last_request[channel] = updated
+        self._output_states[channel] = output_after
+        self._update_aggregate_output_state()
+        return actual
+
+    def update_source_compliance(
+        self,
+        channel: Literal["A", "B"],
+        *,
+        mode: Literal["current", "voltage"],
+        compliance_si: float,
+    ) -> float:
+        """Change compliance with full validation and no OUTPUT state transition."""
+
+        if channel not in {"A", "B"}:
+            raise SafetyViolation("Keithley channel must be A or B.")
+        current = self._last_request.get(channel)
+        if current is None or current.mode == "measure_only":
+            raise SafetyViolation(
+                "Configure a Keithley source before updating compliance."
+            )
+        if current.mode != mode:
+            raise SafetyViolation(
+                f"Keithley channel {channel} is configured for {current.mode}, not {mode}."
+            )
+        updated = replace(current, compliance_si=float(compliance_si))
+        validate_keithley_source(self._channel_settings(channel), updated)
+        smu = self._smu(channel)
+        field = "limitv" if mode == "current" else "limiti"
+        session = self._require_session()
+        output_before = self._output_is_enabled(channel)
+        session.write(f"{smu}.source.{field} = {updated.compliance_si:.12g}")
+        self._check_errors()
+        try:
+            actual = float(session.query(f"print({smu}.source.{field})"))
+        except (TypeError, ValueError) as exc:
+            raise DeviceError(
+                "Keithley returned an invalid compliance readback."
+            ) from exc
+        output_after = self._output_is_enabled(channel)
+        if output_after != output_before:
+            raise DeviceError(
+                "Keithley OUTPUT state changed during a compliance update."
+            )
+        if not math.isclose(
+            actual, updated.compliance_si, rel_tol=1e-9, abs_tol=1e-12
+        ):
+            raise DeviceError(
+                f"Keithley compliance readback {actual:.12g} does not match "
+                f"{updated.compliance_si:.12g} SI."
+            )
+        self._last_request[channel] = updated
+        self._output_states[channel] = output_after
+        self._update_aggregate_output_state()
+        return actual
 
     @staticmethod
     def _configure_ranges_and_sense(
