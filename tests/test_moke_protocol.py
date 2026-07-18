@@ -9,6 +9,8 @@ from app.devices.moke_box.protocol import (
 )
 from app.devices.moke_box.adapter import MokeBoxAdapter
 from app.devices.moke_box.models import MokeBoxConfig, hall_field_from_voltage
+from app.devices.moke_box.simulator import SimulatedMokeBoxTransport
+from app.devices.simulation import SimulationContext
 from app.domain.errors import DeviceError
 
 
@@ -79,6 +81,19 @@ class MokeProtocolTests(unittest.TestCase):
         self.assertEqual(transport.sent, [readback_vout(), request_samples(1)])
         self.assertEqual(reading.samples, 1)
         self.assertAlmostEqual(reading.voltage_v, -0.09945, places=4)
+
+    def test_connected_binary_adapter_advertises_read_only_capabilities(self) -> None:
+        adapter = MokeBoxAdapter(
+            MokeBoxConfig("SIM::MOKE::INSTR"),
+            SimulatedMokeBoxTransport(SimulationContext(seed=0)),
+        )
+
+        adapter.connect()
+
+        self.assertEqual(
+            adapter.capabilities.features,
+            frozenset({"read_only", "vout_readback", "hall_voltage_readback"}),
+        )
 
 
 class _BinaryTransport:

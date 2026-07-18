@@ -140,11 +140,6 @@ _DESCRIPTORS: Final[tuple[ParameterDescriptor, ...]] = (
         "Anritsu Spectrum", "Spectrum · reference level",
         DIMENSION_DBM, "dBm",
     ),
-    ParameterDescriptor(
-        "moke_box.field_target", "moke_box", "MOKE Box",
-        "MOKE Box field target", "MOKE Box", "Magnetic field target",
-        DIMENSION_MAGNETIC_FIELD, "T",
-    ),
 )
 
 PARAMETER_DESCRIPTORS: Final = _DESCRIPTORS
@@ -202,7 +197,6 @@ def legacy_ui_parameter_definitions() -> tuple[dict[str, str], ...]:
                 "anritsu.spectrum.start_frequency",
                 "anritsu.spectrum.stop_frequency",
                 "anritsu.spectrum.reference_level",
-                "moke_box.field_target",
             )
         )
     }

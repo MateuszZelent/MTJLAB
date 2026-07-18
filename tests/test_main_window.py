@@ -809,8 +809,9 @@ class MainWindowTests(unittest.TestCase):
         window = MainWindow(".config/settings.yml", simulation=True)
         try:
             page = window.moke_box_page
-            self.assertEqual(page.views.count(), 3)
+            self.assertEqual(page.views.count(), 2)
             self.assertEqual(len(page.vout_values), 8)
+            self.assertFalse(hasattr(page, "acquire_button"))
             self.assertFalse(page.read_vouts_button.isEnabled())
             self.assertEqual(page.field_samples.value(), 1)
             self.assertEqual(page.read_fields_button.text(), "Get Hall voltage (V)")

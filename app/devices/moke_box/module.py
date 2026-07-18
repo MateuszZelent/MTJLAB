@@ -2,8 +2,6 @@
 
 from __future__ import annotations
 
-from collections.abc import Mapping
-
 from app.contracts import DeviceModule, RecipeExtension
 from app.devices.base import DeviceAdapter
 from app.devices.moke_box.adapter import MokeBoxAdapter, UnavailableMokeBoxAdapter
@@ -43,37 +41,23 @@ def _adapter(settings: StationSettings, simulation: bool) -> DeviceAdapter:
             endpoint=profile.endpoint,
             timeout_s=parse_quantity(profile.timeout, DIMENSION_TIME).si_value,
             expected_model=profile.expected_model,
-            allow_vout_control=profile.allow_vout_control,
-            allowed_vout_channels=profile.allowed_vout_channels,
+            allow_vout_control=False,
+            allowed_vout_channels=(),
         ),
         MokeBoxTcpTransport(),
     )
 
 
 def _dispatch(adapter: DeviceAdapter, operation: str, _payload: object) -> object:
-    if operation not in {
-        "read_signal", "read_vouts", "acquire_samples", "read_fields", "read_hall_voltage",
-        "set_hall_gains", "set_kerr_gain", "set_vout", "ramp_vout",
-    }:
+    if operation not in {"read_signal", "read_vouts", "read_hall_voltage"}:
         raise ValueError(f"Unsupported MOKE Box operation {operation!r}.")
     method = getattr(adapter, operation, None)
     if not callable(method):
         raise TypeError("MOKE Box module received an incompatible adapter.")
-    if operation == "acquire_samples":
-        if not isinstance(_payload, Mapping):
-            raise ValueError("MOKE sample acquisition requires a payload mapping.")
-        return method(
-            int(_payload["count"]),
-            active_streams=int(_payload.get("active_streams", 4)),
-        )
-    if operation in {"read_fields", "read_hall_voltage"}:
-        if not isinstance(_payload, Mapping):
+    if operation == "read_hall_voltage":
+        if not isinstance(_payload, dict):
             raise ValueError("MOKE Hall read requires a payload mapping.")
         return method(int(_payload["count"]))
-    if operation in {"set_hall_gains", "set_kerr_gain", "set_vout", "ramp_vout"}:
-        if not isinstance(_payload, Mapping):
-            raise ValueError(f"MOKE {operation} requires a payload mapping.")
-        return method(**dict(_payload))
     return method()
 
 
@@ -87,7 +71,7 @@ MODULE = DeviceModule(
     settings_key="moke_box",
     adapter_factory=_adapter,
     dispatch=_dispatch,
-    capabilities=frozenset({"vout_readback", "hall_field_readback", "sample_acquisition"}),
+    capabilities=frozenset({"read_only", "vout_readback", "hall_voltage_readback"}),
     enabled_by_default=False,
     recipe_extension=RecipeExtension(
         module_key="moke_box",

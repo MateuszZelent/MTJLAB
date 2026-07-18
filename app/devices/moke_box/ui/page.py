@@ -2,45 +2,24 @@
 
 from __future__ import annotations
 
-import statistics
-
 from PySide6.QtCore import QTimer, Qt, Signal
 from PySide6.QtWidgets import (
     QCheckBox,
-    QComboBox,
     QDialog,
     QFrame,
     QGridLayout,
     QHBoxLayout,
-    QHeaderView,
     QLabel,
     QPushButton,
     QSpinBox,
-    QTableWidget,
-    QTableWidgetItem,
     QTabWidget,
     QVBoxLayout,
     QWidget,
 )
 
-from app.devices.moke_box.models import MokeHallVoltageReading, MokeSampleBatch, hall_field_from_voltage
-from app.devices.moke_box.protocol import decode_voltage
+from app.devices.moke_box.models import MokeHallVoltageReading, hall_field_from_voltage
 from app.settings.models import StationSettings
 from app.ui.workers import DeviceController
-
-
-_STREAM_LABELS = {
-    "main_box.0": "Hall 1 · longitudinal",
-    "main_box.1": "Hall 1 current",
-    "main_box.2": "Hall 2 · transversal",
-    "main_box.3": "Hall 2 current",
-    "kerr0.0": "Kerr 0 · I1",
-    "kerr0.1": "Kerr 0 · I2",
-    "kerr0.2": "Kerr 0 · I12",
-    "kerr1.0": "Kerr 1 · I1",
-    "kerr1.1": "Kerr 1 · I2",
-    "kerr1.2": "Kerr 1 · I12",
-}
 
 
 class MokeHallLiveWindow(QDialog):
@@ -191,7 +170,6 @@ class MokeBoxPage(QWidget):
         self.views.setObjectName("mokeViews")
         self.views.addTab(self._build_vout_view(), "VOUT 0–7")
         self.views.addTab(self._build_field_view(), "Hall field")
-        self.views.addTab(self._build_stream_view(), "Raw streams")
         outer.addWidget(self.views, 1)
 
     def _build_vout_view(self) -> QWidget:
@@ -324,51 +302,6 @@ class MokeBoxPage(QWidget):
         layout.addStretch(1)
         return page
 
-    def _build_stream_view(self) -> QWidget:
-        page = QWidget()
-        layout = QVBoxLayout(page)
-        header = QHBoxLayout()
-        copy = QVBoxLayout()
-        title = QLabel("AD7734 stream inspector")
-        title.setObjectName("sectionTitle")
-        hint = QLabel("Inspect MainBox and optional Kerr streams without changing gain or VOUT.")
-        hint.setObjectName("muted")
-        copy.addWidget(title)
-        copy.addWidget(hint)
-        header.addLayout(copy, 1)
-        header.addWidget(QLabel("Samples:"))
-        self.stream_samples = QSpinBox()
-        self.stream_samples.setRange(1, 1_000)
-        self.stream_samples.setValue(20)
-        header.addWidget(self.stream_samples)
-        self.active_streams = QComboBox()
-        self.active_streams.addItem("MainBox · 4", 4)
-        self.active_streams.addItem("MainBox + Kerr0 · 7", 7)
-        self.active_streams.addItem("MainBox + Kerr0 + Kerr1 · 10", 10)
-        header.addWidget(self.active_streams)
-        self.acquire_button = QPushButton("Acquire streams")
-        self.acquire_button.setObjectName("primaryButton")
-        self.acquire_button.clicked.connect(self._acquire_streams)
-        header.addWidget(self.acquire_button)
-        layout.addLayout(header)
-
-        self.stream_table = QTableWidget(0, 5)
-        self.stream_table.setHorizontalHeaderLabels(
-            ["Stream", "Protocol key", "Samples", "Mean", "Range"]
-        )
-        self.stream_table.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
-        self.stream_table.setSelectionBehavior(QTableWidget.SelectionBehavior.SelectRows)
-        self.stream_table.setAlternatingRowColors(True)
-        self.stream_table.verticalHeader().setVisible(False)
-        table_header = self.stream_table.horizontalHeader()
-        table_header.setSectionResizeMode(0, QHeaderView.ResizeMode.Stretch)
-        table_header.setSectionResizeMode(1, QHeaderView.ResizeMode.ResizeToContents)
-        table_header.setSectionResizeMode(2, QHeaderView.ResizeMode.ResizeToContents)
-        table_header.setSectionResizeMode(3, QHeaderView.ResizeMode.ResizeToContents)
-        table_header.setSectionResizeMode(4, QHeaderView.ResizeMode.Stretch)
-        layout.addWidget(self.stream_table, 1)
-        return page
-
     def set_settings(self, settings: StationSettings) -> None:
         self._settings = settings
         profile = settings.moke_box
@@ -378,15 +311,9 @@ class MokeBoxPage(QWidget):
                 "Configuration incomplete. Set the TCP endpoint and explicitly qualify the reconstructed protocol in Station settings. "
                 "No connection will be opened until then."
             )
-        elif profile.allow_vout_control:
-            channels = ", ".join(map(str, profile.allowed_vout_channels)) or "none"
-            self.safety_note.setText(
-                "This page remains read-only. The profile permits VOUT control for channels "
-                f"{channels}, but field-off and physical channel mapping still require an external hardware interlock."
-            )
         else:
             self.safety_note.setText(
-                "Read-only profile: the page can read VOUT, Hall and Kerr data. It never sends gain or VOUT-setting commands. "
+                "Read-only profile: the page can read VOUT and the qualified Hall-1 voltage. It never sends gain or VOUT-setting commands. "
                 "MOKE field-off is not yet qualified, so E-STOP closes the TCP session and reports UNKNOWN."
             )
 
@@ -469,13 +396,6 @@ class MokeBoxPage(QWidget):
             self._hall_live_window.set_status(reason)
         self._sync_live_window()
 
-    def _acquire_streams(self) -> None:
-        self._start("acquire_samples", "Acquiring streams…")
-        self._controller.call(
-            "acquire_samples",
-            {"count": self.stream_samples.value(), "active_streams": self.active_streams.currentData()},
-        )
-
     def _start(self, operation: str, message: str) -> None:
         if self._pending_operation is not None:
             return
@@ -495,9 +415,6 @@ class MokeBoxPage(QWidget):
         elif operation == "read_hall_voltage" and isinstance(result, MokeHallVoltageReading):
             self._show_hall_reading(result)
             self.status.emit("MOKE Box: Hall voltage measurement completed")
-        elif operation == "acquire_samples" and isinstance(result, MokeSampleBatch):
-            self._show_streams(result)
-            self.status.emit("MOKE Box: raw stream acquisition completed")
         if operation == self._pending_operation:
             self._pending_operation = None
             self._set_measurement_controls(True)
@@ -546,7 +463,7 @@ class MokeBoxPage(QWidget):
             self.stop_live("Live Hall readout stopped: reconnect MOKE Box before reading again.")
 
     def _set_measurement_controls(self, enabled: bool) -> None:
-        for control in (self.read_vouts_button, self.read_fields_button, self.acquire_button):
+        for control in (self.read_vouts_button, self.read_fields_button):
             control.setEnabled(enabled)
         self.live_hall.setEnabled(enabled)
         self.open_live_window_button.setEnabled(enabled)
@@ -559,19 +476,3 @@ class MokeBoxPage(QWidget):
         if self._hall_live_window is not None:
             self._hall_live_window.close()
         super().closeEvent(event)  # type: ignore[arg-type]
-
-    def _show_streams(self, batch: MokeSampleBatch) -> None:
-        self.stream_table.setRowCount(0)
-        for key, raw_values in batch.samples_by_stream.items():
-            voltages = tuple(decode_voltage(value >> 8, value & 0xFF) for value in raw_values)
-            row = self.stream_table.rowCount()
-            self.stream_table.insertRow(row)
-            values = (
-                _STREAM_LABELS.get(key, key),
-                key,
-                str(len(voltages)),
-                f"{statistics.fmean(voltages):+.6f} V",
-                f"{min(voltages):+.6f} … {max(voltages):+.6f} V",
-            )
-            for column, value in enumerate(values):
-                self.stream_table.setItem(row, column, QTableWidgetItem(value))

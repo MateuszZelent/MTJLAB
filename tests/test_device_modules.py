@@ -9,6 +9,7 @@ from app.devices.lakeshore_gaussmeter import (
 )
 from app.devices.lakeshore_gaussmeter.simulator import simulated_475_session
 from app.devices.moke_box import MokeBoxAdapter, MokeBoxConfig
+from app.devices.moke_box.module import MODULE as MOKE_MODULE
 from app.devices.registry import built_in_device_registry
 from app.devices.visa import FakeVisaSessionFactory
 from app.domain.errors import ConfigurationError, DeviceError
@@ -109,13 +110,37 @@ class DeviceModuleTests(unittest.TestCase):
         )
         self.assertEqual(
             built_in_device_registry().get("moke_box").recipe_extension.parameter_definitions,
-            ({
-                "device": "MOKE Box",
-                "label": "Magnetic field target",
-                "target": "moke_box.field_target",
-                "dimension": "magnetic_field",
-            },),
+            (),
         )
+
+    def test_moke_module_exposes_only_qualified_read_operations(self) -> None:
+        self.assertEqual(
+            MOKE_MODULE.capabilities,
+            frozenset({"read_only", "vout_readback", "hall_voltage_readback"}),
+        )
+        adapter = MokeBoxAdapter(MokeBoxConfig(endpoint="moke://sim"), _MokeTransport())
+        for operation in (
+            "acquire_samples",
+            "read_fields",
+            "set_hall_gains",
+            "set_kerr_gain",
+            "set_vout",
+            "ramp_vout",
+        ):
+            with self.subTest(operation=operation):
+                with self.assertRaisesRegex(ValueError, "Unsupported"):
+                    MOKE_MODULE.dispatch(adapter, operation, {})
+
+    def test_moke_profile_rejects_every_output_control_permission(self) -> None:
+        raw = loaded_settings().model_dump(mode="python")
+        raw["devices"]["moke_box"]["allow_vout_control"] = True
+        with self.assertRaisesRegex(ValueError, "read-only"):
+            StationSettings.model_validate(raw)
+
+        raw["devices"]["moke_box"]["allow_vout_control"] = False
+        raw["devices"]["moke_box"]["allowed_vout_channels"] = [0]
+        with self.assertRaisesRegex(ValueError, "read-only"):
+            StationSettings.model_validate(raw)
 
     def test_lakeshore_475_reads_dc_gauss_through_official_read_only_bridge(self) -> None:
         session = simulated_475_session(field=312.5, unit_code="1", mode_code="1")

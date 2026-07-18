@@ -436,8 +436,8 @@ class MokeBoxSettings(StrictModel):
     def validate_timeout(self) -> "MokeBoxSettings":
         if parse_quantity(self.timeout, DIMENSION_TIME).si_value <= 0:
             raise ValueError("MOKE Box timeout must be positive")
-        if self.allow_vout_control and not self.protocol_qualified:
-            raise ValueError("MOKE VOUT control requires protocol_qualified: true")
+        if self.allow_vout_control or self.allowed_vout_channels:
+            raise ValueError("MOKE Box is read-only; VOUT control permissions are forbidden")
         if any(channel not in range(8) for channel in self.allowed_vout_channels):
             raise ValueError("MOKE VOUT channels must be in 0..7")
         return self

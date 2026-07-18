@@ -123,9 +123,9 @@ class MokeBoxAdapter(DeviceAdapter):
             model=self._config.expected_model or "MOKE Box",
             firmware=None,
             features=frozenset(
-                {"moke_reading", "vout_readback", "sample_acquisition"}
+                {"read_only", "vout_readback", "hall_voltage_readback"}
                 if self._binary_transport
-                else {"moke_reading", "read_only"}
+                else {"read_only"}
             ),
         )
         self._state = DeviceState.VERIFIED
