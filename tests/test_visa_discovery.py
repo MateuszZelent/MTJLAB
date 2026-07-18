@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import unittest
 
-from app.devices.discovery import discover_visa_resources, identify_device
+from app.devices.discovery import discover_tcp_endpoints, discover_tcp_ip_range, discover_visa_resources, identify_device
 
 
 class DiscoverySession:
@@ -39,6 +39,14 @@ class DiscoveryManager:
         self.closed = True
 
 
+class TcpConnection:
+    def __init__(self) -> None:
+        self.closed = False
+
+    def close(self) -> None:
+        self.closed = True
+
+
 class VisaDiscoveryTests(unittest.TestCase):
     def test_supported_identities_are_classified_conservatively(self) -> None:
         self.assertEqual(identify_device("RIGOL TECHNOLOGIES,DG1032Z,SN,1"), "rigol")
@@ -69,6 +77,50 @@ class VisaDiscoveryTests(unittest.TestCase):
         )
         self.assertEqual(len(results), 1)
         self.assertIn("Backend unavailable", results[0].error or "")
+
+    def test_tcp_discovery_returns_only_hosts_with_open_requested_port(self) -> None:
+        opened: list[TcpConnection] = []
+
+        def connector(address: tuple[str, int], timeout: float) -> TcpConnection:
+            self.assertEqual(address[1], 10001)
+            self.assertEqual(timeout, 0.1)
+            if address[0] != "192.168.50.2":
+                raise OSError("connection refused")
+            connection = TcpConnection()
+            opened.append(connection)
+            return connection
+
+        results = discover_tcp_endpoints(
+            "192.168.50.0/30", 10001, timeout_s=0.1, connector=connector
+        )
+
+        self.assertEqual([result.endpoint for result in results], ["192.168.50.2:10001"])
+        self.assertTrue(opened[0].closed)
+
+    def test_tcp_discovery_rejects_public_or_unbounded_networks_without_opt_in(self) -> None:
+        with self.assertRaises(ValueError):
+            discover_tcp_endpoints("8.8.8.0/24", 10001)
+        with self.assertRaises(ValueError):
+            discover_tcp_endpoints("192.168.0.0/16", 10001)
+
+    def test_tcp_discovery_allows_explicitly_confirmed_campus_network(self) -> None:
+        result = discover_tcp_endpoints(
+            "131.246.221.118/32",
+            10001,
+            allow_non_private=True,
+            connector=lambda _address, _timeout: TcpConnection(),
+        )
+        self.assertEqual([endpoint.endpoint for endpoint in result], ["131.246.221.118:10001"])
+
+    def test_tcp_discovery_supports_inclusive_ip_range(self) -> None:
+        results = discover_tcp_ip_range(
+            "131.246.221.117", "131.246.221.119", 10001,
+            allow_non_private=True,
+            connector=lambda address, _timeout: (
+                TcpConnection() if address[0].endswith(".118") else (_ for _ in ()).throw(OSError())
+            ),
+        )
+        self.assertEqual([endpoint.endpoint for endpoint in results], ["131.246.221.118:10001"])
 
 
 if __name__ == "__main__":

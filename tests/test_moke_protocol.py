@@ -60,6 +60,24 @@ class MokeProtocolTests(unittest.TestCase):
         with self.assertRaises(DeviceError):
             adapter.set_vout(0, 1.0)
 
+    def test_binary_adapter_averages_documented_hall_streams(self) -> None:
+        frames = [
+            MokeFrame(0, 1, channel, 0x80, 0x00).encode()
+            for channel in range(4)
+        ]
+        frames.extend(MokeFrame(0, 1, 0, 0x80, 0x00).encode() for _ in range(10))
+        transport = _BinaryTransport(b"".join(frames))
+        adapter = MokeBoxAdapter(MokeBoxConfig("127.0.0.1:10001"), transport)
+        adapter.connect()
+
+        reading = adapter.read_fields(1)
+
+        self.assertEqual(transport.sent, [request_samples(1)])
+        self.assertEqual(reading.samples, 1)
+        self.assertAlmostEqual(reading.hall1_voltage_v, 0.0)
+        self.assertAlmostEqual(reading.hall2_voltage_v, 0.0)
+        self.assertAlmostEqual(reading.hall1_field_t, -0.0007387072430926411)
+
 
 class _BinaryTransport:
     def __init__(self, response: bytes) -> None:

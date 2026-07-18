@@ -2,16 +2,18 @@
 
 from __future__ import annotations
 
-from PySide6.QtCore import Signal
-from PySide6.QtWidgets import QComboBox, QFrame, QGridLayout, QHBoxLayout, QHeaderView, QLabel, QPushButton, QTableWidget, QTableWidgetItem, QVBoxLayout, QWidget
+import ipaddress
 
-from app.devices.discovery import DiscoveredInstrument
+from PySide6.QtCore import Signal
+from PySide6.QtWidgets import QComboBox, QFrame, QGridLayout, QHBoxLayout, QHeaderView, QLabel, QLineEdit, QMessageBox, QPushButton, QSpinBox, QTableWidget, QTableWidgetItem, QVBoxLayout, QWidget
+
+from app.devices.discovery import DiscoveredInstrument, DiscoveredTcpEndpoint
 from app.domain.readiness import ReadinessLevel, StationReadiness, evaluate_station_readiness
 from app.engine.compiler import ExecutionPlan
 from app.engine.estimation import PlanEstimate
 from app.settings.models import StationSettings
 from app.ui.dashboard.device_card import DeviceCard
-from app.ui.discovery_worker import VisaDiscoveryWorker
+from app.ui.discovery_worker import TcpDiscoveryWorker, VisaDiscoveryWorker
 
 
 class DashboardPage(QWidget):
@@ -26,6 +28,7 @@ class DashboardPage(QWidget):
         self._settings = settings
         self._discovery_enabled = discovery_enabled
         self._discovery_worker: VisaDiscoveryWorker | None = None
+        self._tcp_discovery_worker: TcpDiscoveryWorker | None = None
         self._discovery_results: tuple[DiscoveredInstrument, ...] = ()
         self._device_states = {name: "disconnected" for name in ("rigol", "keithley", "anritsu")}
         self._verified_resources: dict[str, str] = {}
@@ -101,6 +104,57 @@ class DashboardPage(QWidget):
         self.discovery_table.setMinimumHeight(190)
         discovery_layout.addWidget(self.discovery_table)
         layout.addWidget(discovery)
+
+        tcp_discovery = QFrame()
+        tcp_discovery.setObjectName("discoveryCard")
+        tcp_layout = QVBoxLayout(tcp_discovery)
+        tcp_header = QHBoxLayout()
+        tcp_title = QLabel("TCP/IP port discovery")
+        tcp_title.setObjectName("sectionTitle")
+        tcp_header.addWidget(tcp_title)
+        tcp_header.addStretch(1)
+        self.tcp_network = QLineEdit(self._moke_network_default(settings))
+        self.tcp_network.setPlaceholderText("192.168.1.0/24 or start IP")
+        self.tcp_network.setAccessibleName("Network CIDR or first IP for TCP port scan")
+        self.tcp_network.setMaximumWidth(170)
+        self.tcp_range_end = QLineEdit()
+        self.tcp_range_end.setPlaceholderText("optional end IP")
+        self.tcp_range_end.setAccessibleName("Last IP for TCP port scan range")
+        self.tcp_range_end.setMaximumWidth(135)
+        self.tcp_port = QSpinBox()
+        self.tcp_port.setRange(1, 65_535)
+        self.tcp_port.setValue(10_001)
+        self.tcp_port.setAccessibleName("TCP port for MOKE Box discovery")
+        self.tcp_scan_button = QPushButton("Scan TCP/IP")
+        self.tcp_scan_button.setToolTip(
+            "Test one port on each host in the supplied private subnet. No MOKE command is sent."
+        )
+        tcp_header.addWidget(QLabel("CIDR / from:"))
+        tcp_header.addWidget(self.tcp_network)
+        tcp_header.addWidget(QLabel("to:"))
+        tcp_header.addWidget(self.tcp_range_end)
+        tcp_header.addWidget(QLabel("Port:"))
+        tcp_header.addWidget(self.tcp_port)
+        tcp_header.addWidget(self.tcp_scan_button)
+        tcp_layout.addLayout(tcp_header)
+        self.tcp_discovery_info = QLabel(
+            "No TCP/IP scan performed. The reconstructed MOKE Box protocol uses TCP port 10001."
+        )
+        self.tcp_discovery_info.setObjectName("muted")
+        self.tcp_discovery_info.setWordWrap(True)
+        tcp_layout.addWidget(self.tcp_discovery_info)
+        self.tcp_discovery_table = QTableWidget(0, 2)
+        self.tcp_discovery_table.setHorizontalHeaderLabels(["Open endpoint", "Result"])
+        self.tcp_discovery_table.setAlternatingRowColors(True)
+        self.tcp_discovery_table.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
+        self.tcp_discovery_table.setSelectionBehavior(QTableWidget.SelectionBehavior.SelectRows)
+        self.tcp_discovery_table.verticalHeader().setVisible(False)
+        tcp_table_header = self.tcp_discovery_table.horizontalHeader()
+        tcp_table_header.setSectionResizeMode(0, QHeaderView.ResizeMode.Stretch)
+        tcp_table_header.setSectionResizeMode(1, QHeaderView.ResizeMode.Stretch)
+        self.tcp_discovery_table.setMinimumHeight(110)
+        tcp_layout.addWidget(self.tcp_discovery_table)
+        layout.addWidget(tcp_discovery)
         self.checklist = QLabel()
         self.checklist.setObjectName("checklist")
         self.checklist.setWordWrap(True)
@@ -116,10 +170,13 @@ class DashboardPage(QWidget):
         layout.addStretch(1)
         emergency.clicked.connect(self.emergency_requested)
         self.scan_button.clicked.connect(self._scan_visa)
+        self.tcp_scan_button.clicked.connect(self._scan_tcp)
         self.save_assignments.clicked.connect(self._emit_assignments)
         if not discovery_enabled:
             self.scan_button.setEnabled(False)
             self.scan_button.setToolTip("VISA discovery is disabled in simulation mode.")
+            self.tcp_scan_button.setEnabled(False)
+            self.tcp_scan_button.setToolTip("TCP/IP discovery is disabled in simulation mode.")
         self.update_settings(settings)
 
     def update_settings(self, settings: StationSettings) -> None:
@@ -288,6 +345,83 @@ class DashboardPage(QWidget):
     def _scan_failed(self, error: str) -> None:
         self.discovery_info.setText(f"VISA scan failed: {error}")
         self.status.emit(f"VISA discovery failed: {error}")
+
+    @staticmethod
+    def _moke_network_default(settings: StationSettings) -> str:
+        endpoint = settings.moke_box.endpoint
+        if endpoint:
+            host, separator, _port = endpoint.rpartition(":")
+            octets = host.split(".") if separator else ()
+            if len(octets) == 4 and all(part.isdigit() and 0 <= int(part) <= 255 for part in octets):
+                return ".".join((*octets[:3], "0")) + "/24"
+        return "192.168.0.0/24"
+
+    def _scan_tcp(self) -> None:
+        if self._tcp_discovery_worker is not None and self._tcp_discovery_worker.isRunning():
+            return
+        network = self.tcp_network.text().strip()
+        range_end = self.tcp_range_end.text().strip() or None
+        port = self.tcp_port.value()
+        try:
+            scan_is_non_private = (
+                not ipaddress.IPv4Address(network).is_private
+                if range_end
+                else not ipaddress.ip_network(network, strict=False).is_private
+            )
+        except ValueError:
+            scan_is_non_private = False
+        allow_non_private = False
+        if scan_is_non_private:
+            scan_scope = f"{network}–{range_end}" if range_end else network
+            answer = QMessageBox.warning(
+                self,
+                "Confirm TCP/IP scan",
+                f"{scan_scope} is not an RFC1918 private range. It may still be your "
+                "campus or company LAN, but scanning it makes TCP connection attempts "
+                f"to every host on port {port}. Continue?",
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.Cancel,
+                QMessageBox.StandardButton.Cancel,
+            )
+            if answer != QMessageBox.StandardButton.Yes:
+                return
+            allow_non_private = True
+        self.tcp_scan_button.setEnabled(False)
+        self.tcp_discovery_table.setRowCount(0)
+        self.tcp_discovery_info.setText(
+            f"Scanning {network}{f'–{range_end}' if range_end else ''} on TCP port {port}… "
+            "no MOKE command will be sent."
+        )
+        self._tcp_discovery_worker = TcpDiscoveryWorker(
+            network, port, range_end=range_end,
+            allow_non_private=allow_non_private, parent=self
+        )
+        self._tcp_discovery_worker.completed.connect(self._tcp_scan_completed)
+        self._tcp_discovery_worker.failed.connect(self._tcp_scan_failed)
+        self._tcp_discovery_worker.finished.connect(
+            lambda: self.tcp_scan_button.setEnabled(self._discovery_enabled)
+        )
+        self._tcp_discovery_worker.start()
+
+    def _tcp_scan_completed(self, payload: object) -> None:
+        results = tuple(payload) if isinstance(payload, tuple) else ()
+        self.tcp_discovery_table.setRowCount(0)
+        for endpoint in results:
+            if not isinstance(endpoint, DiscoveredTcpEndpoint):
+                continue
+            row = self.tcp_discovery_table.rowCount()
+            self.tcp_discovery_table.insertRow(row)
+            self.tcp_discovery_table.setItem(row, 0, QTableWidgetItem(endpoint.endpoint))
+            self.tcp_discovery_table.setItem(row, 1, QTableWidgetItem("TCP port open"))
+        self.tcp_discovery_info.setText(
+            f"TCP/IP scan complete: {self.tcp_discovery_table.rowCount()} host(s) accepted port {self.tcp_port.value()}."
+        )
+        self.status.emit(
+            f"TCP/IP discovery completed: {self.tcp_discovery_table.rowCount()} host(s) accepted port {self.tcp_port.value()}"
+        )
+
+    def _tcp_scan_failed(self, error: str) -> None:
+        self.tcp_discovery_info.setText(f"TCP/IP scan failed: {error}")
+        self.status.emit(f"TCP/IP discovery failed: {error}")
 
     def _emit_assignments(self) -> None:
         assignments: dict[str, tuple[str, str, str]] = {}
