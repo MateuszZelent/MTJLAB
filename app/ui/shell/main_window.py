@@ -39,7 +39,7 @@ from app.security import AccessPolicy, Permission
 from app.storage import Hdf5RunReader
 from app.ui.settings_page import SettingsPage
 from app.ui.run_worker import RunController, serialize_settings_snapshot
-from app.ui.dashboard import DashboardPage, DeviceCard
+from app.ui.dashboard import DashboardPage, DeviceCard, DeviceConnectionPanel
 from app.ui.execution import RunMonitorPage
 from app.ui.results import ResultsPage
 from app.ui.design_system import effective_theme
@@ -121,6 +121,19 @@ class MainWindow(QMainWindow):
         self.rigol_page = self._device_pages["rigol"]
         self.keithley_page = self._device_pages["keithley"]
         self.anritsu_page = self._device_pages["anritsu"]
+        self.connection_panels: dict[str, DeviceConnectionPanel] = {}
+        for key, page in self._device_pages.items():
+            device = getattr(self._settings, key)
+            panel = DeviceConnectionPanel(device.display_name, device.connection.resource)
+            page.layout().insertWidget(0, panel)
+            self.connection_panels[key] = panel
+            # Compatibility facade for integrations that accessed connection
+            # controls through the dashboard card. The buttons themselves are
+            # parented and rendered only on the device page.
+            card = self.dashboard.cards[key]
+            card.connect_button = panel.connect_button
+            card.disconnect_button = panel.disconnect_button
+            card.test_button = panel.test_button
         self.recipe_page = RecipePage(
             self._settings,
             device_registry=self._composition.registry,
@@ -505,18 +518,20 @@ class MainWindow(QMainWindow):
     def _connect_controllers(self) -> None:
         for name, controller in self._controllers.items():
             card = self.dashboard.cards[name]
-            card.connect_requested.connect(lambda current=controller: current.call("connect"))
-            card.disconnect_requested.connect(lambda current=controller: current.call("disconnect"))
-            card.test_requested.connect(
-                lambda current=controller, current_card=card: (
+            panel = self.connection_panels[name]
+            panel.connect_requested.connect(lambda current=controller: current.call("connect"))
+            panel.disconnect_requested.connect(lambda current=controller: current.call("disconnect"))
+            panel.test_requested.connect(
+                lambda current=controller, current_card=panel: (
                     current_card.set_testing(True),
                     current.call("test_communication"),
                 )
             )
             controller.state_changed.connect(card.update_state)
+            controller.state_changed.connect(panel.update_state)
             controller.state_changed.connect(lambda state, device=name: self._set_device_state(device, state))
             controller.result.connect(
-                lambda operation, result, device=name, current=card: self._device_result(
+                lambda operation, result, device=name, current=panel: self._device_result(
                     device, current, operation, result
                 )
             )
@@ -529,9 +544,10 @@ class MainWindow(QMainWindow):
             elif name == "anritsu":
                 controller.capabilities_changed.connect(self.anritsu_page.set_capabilities)
 
-    def _device_result(self, device: str, card: DeviceCard, operation: str, result: object) -> None:
+    def _device_result(self, device: str, card: DeviceConnectionPanel, operation: str, result: object) -> None:
         if operation == "connect":
             card.update_identity(result)
+            self.dashboard.cards[device].update_identity(result)
             self.dashboard.mark_identity_verified(device)
             self._log(f"Connected: {getattr(result, 'idn', result)}")
         elif operation == "disconnect":
@@ -540,7 +556,10 @@ class MainWindow(QMainWindow):
             card.set_reconfiguring(False)
             card.update_state("disconnected")
             card.identity.setText("IDN: not connected")
-            self._log(f"VISA ADAPTER REPLACE COMPLETE: {card.resource.text()}")
+            self.dashboard.cards[device].set_reconfiguring(False)
+            self.dashboard.cards[device].update_state("disconnected")
+            self.dashboard.cards[device].identity.setText("IDN: not connected")
+            self._log(f"VISA ADAPTER REPLACE COMPLETE: {card.summary.text()}")
         elif operation == "test_communication" and isinstance(result, dict):
             card.set_testing(False)
             card.update_state("verified")
@@ -551,6 +570,7 @@ class MainWindow(QMainWindow):
                 f"SN {result.get('serial', '—')} • FW {result.get('firmware', '—')}\n"
                 f"Protocols/features: {features} • Options: {options}"
             )
+            self.dashboard.cards[device].identity.setText(card.identity.text())
             self.dashboard.mark_identity_verified(device)
             self._log(
                 f"Communication test passed: {result.get('idn', '')}; "
@@ -561,7 +581,7 @@ class MainWindow(QMainWindow):
         if operation == "replace_adapter":
             self.dashboard.cards[device].set_reconfiguring(False)
         elif operation == "test_communication":
-            card = self.dashboard.cards[device]
+            card = self.connection_panels[device]
             card.set_testing(False)
             card.update_state("fault")
             card.identity.setText(f"TEST FAILED: {error}")
@@ -880,6 +900,9 @@ class MainWindow(QMainWindow):
         self.rigol_page.set_settings(self._settings)
         self.keithley_page.set_settings(self._settings)
         self.anritsu_page.set_settings(self._settings)
+        for name, panel in self.connection_panels.items():
+            connection = getattr(self._settings, name).connection
+            panel.update_resource(connection.resource, connection.visa_backend)
         self.recipe_page.set_settings(self._settings)
         profile_state = "LOCKED" if self._settings.outputs_locked else "APPROVED"
         self.profile_status.setText(f"Profile: {profile_state}")
@@ -888,6 +911,7 @@ class MainWindow(QMainWindow):
         self.profile_status.style().polish(self.profile_status)
         for name, controller in self._controllers.items():
             self.dashboard.cards[name].set_reconfiguring(True)
+            self.connection_panels[name].set_reconfiguring(True)
             connection = getattr(self._settings, name).connection
             self._log(
                 f"VISA ADAPTER REPLACE QUEUED [{name}]: resource={connection.resource!r}, "

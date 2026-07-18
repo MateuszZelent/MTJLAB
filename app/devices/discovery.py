@@ -10,6 +10,13 @@ from typing import Callable, Iterable
 
 import pyvisa
 
+from app.devices.moke_box.protocol import (
+    MokeFrame,
+    MokeResponseType,
+    MokeTarget,
+    readback_vout,
+)
+
 
 @dataclass(frozen=True, slots=True)
 class DiscoveredInstrument:
@@ -26,10 +33,52 @@ class DiscoveredTcpEndpoint:
 
     host: str
     port: int
+    moke_verified: bool | None = None
+    verification_detail: str | None = None
+    tx_bytes: bytes = b""
+    rx_bytes: bytes = b""
 
     @property
     def endpoint(self) -> str:
         return f"{self.host}:{self.port}"
+
+
+def detect_local_ipv4_address(
+    *, socket_factory: Callable[[int, int], object] | None = None
+) -> str:
+    """Return the IPv4 source address selected by the active default route.
+
+    UDP ``connect`` selects a route locally; this helper sends no payload or
+    application command. The returned address is used only to prefill a scan.
+    """
+
+    factory = socket_factory or socket.socket
+    probe = None
+    try:
+        probe = factory(socket.AF_INET, socket.SOCK_DGRAM)
+        probe.connect(("1.1.1.1", 53))
+        address = str(probe.getsockname()[0])
+        parsed = ipaddress.IPv4Address(address)
+        if parsed.is_unspecified or parsed.is_loopback:
+            raise OSError("no routable IPv4 address was selected")
+        return address
+    except OSError as exc:
+        raise OSError("Could not determine the active local IPv4 address.") from exc
+    finally:
+        if probe is not None:
+            try:
+                probe.close()
+            except Exception:
+                pass
+
+
+def suggested_scan_cidr(address: str, *, prefix_length: int = 24) -> str:
+    """Return the containing IPv4 network for a conservative scan default."""
+
+    try:
+        return str(ipaddress.ip_network(f"{address}/{prefix_length}", strict=False))
+    except ValueError as exc:
+        raise ValueError("Cannot derive a scan network from the local IPv4 address.") from exc
 
 
 def identify_device(idn: str) -> str | None:
@@ -112,9 +161,13 @@ def discover_tcp_endpoints(
     network: str,
     port: int,
     *,
-    timeout_s: float = 0.15,
+    timeout_s: float = 0.5,
     max_hosts: int = 1_024,
     allow_non_private: bool = False,
+    verify_moke: bool = False,
+    progress_callback: Callable[[int, int, str], None] | None = None,
+    activity_callback: Callable[[str, str, str], None] | None = None,
+    cancellation_requested: Callable[[], bool] | None = None,
     connector: Callable[[tuple[str, int], float], object] | None = None,
 ) -> tuple[DiscoveredTcpEndpoint, ...]:
     """Find open instances of one TCP port within an explicitly supplied LAN.
@@ -143,7 +196,9 @@ def discover_tcp_endpoints(
     if len(hosts) > max_hosts:
         raise ValueError(f"TCP scan is limited to {max_hosts} hosts; use a narrower subnet.")
     return _scan_tcp_hosts(
-        hosts, port, timeout_s=timeout_s, connector=connector
+        hosts, port, timeout_s=timeout_s, connector=connector, verify_moke=verify_moke,
+        progress_callback=progress_callback, activity_callback=activity_callback,
+        cancellation_requested=cancellation_requested,
     )
 
 
@@ -152,9 +207,13 @@ def discover_tcp_ip_range(
     end: str,
     port: int,
     *,
-    timeout_s: float = 0.15,
+    timeout_s: float = 0.5,
     max_hosts: int = 1_024,
     allow_non_private: bool = False,
+    verify_moke: bool = False,
+    progress_callback: Callable[[int, int, str], None] | None = None,
+    activity_callback: Callable[[str, str, str], None] | None = None,
+    cancellation_requested: Callable[[], bool] | None = None,
     connector: Callable[[tuple[str, int], float], object] | None = None,
 ) -> tuple[DiscoveredTcpEndpoint, ...]:
     """Find one open TCP port over an inclusive, explicit IPv4 address range."""
@@ -177,7 +236,11 @@ def discover_tcp_ip_range(
     if count > max_hosts:
         raise ValueError(f"TCP scan is limited to {max_hosts} hosts; use a narrower range.")
     hosts = tuple(str(ipaddress.IPv4Address(value)) for value in range(int(first), int(last) + 1))
-    return _scan_tcp_hosts(hosts, port, timeout_s=timeout_s, connector=connector)
+    return _scan_tcp_hosts(
+        hosts, port, timeout_s=timeout_s, connector=connector, verify_moke=verify_moke,
+        progress_callback=progress_callback, activity_callback=activity_callback,
+        cancellation_requested=cancellation_requested,
+    )
 
 
 def _scan_tcp_hosts(
@@ -186,6 +249,10 @@ def _scan_tcp_hosts(
     *,
     timeout_s: float,
     connector: Callable[[tuple[str, int], float], object] | None,
+    verify_moke: bool,
+    progress_callback: Callable[[int, int, str], None] | None,
+    activity_callback: Callable[[str, str, str], None] | None,
+    cancellation_requested: Callable[[], bool] | None,
 ) -> tuple[DiscoveredTcpEndpoint, ...]:
     """Probe a prevalidated finite host list without speaking an application protocol."""
 
@@ -194,9 +261,48 @@ def _scan_tcp_hosts(
     def probe(host: str) -> DiscoveredTcpEndpoint | None:
         connection = None
         try:
+            if cancellation_requested is not None and cancellation_requested():
+                if activity_callback is not None:
+                    activity_callback(host, "cancelled", "")
+                return None
+            if activity_callback is not None:
+                activity_callback(host, "scanning", "")
             connection = open_connection((host, port), timeout_s)
-            return DiscoveredTcpEndpoint(host, port)
+            if cancellation_requested is not None and cancellation_requested():
+                if activity_callback is not None:
+                    activity_callback(host, "cancelled", "")
+                return None
+            if not verify_moke:
+                if activity_callback is not None:
+                    activity_callback(host, "open", "Not requested")
+                return DiscoveredTcpEndpoint(host, port)
+            tx_bytes = readback_vout()
+            try:
+                rx_bytes = _verify_moke_readback(connection)
+            except Exception as exc:
+                if activity_callback is not None:
+                    activity_callback(host, "open", str(exc))
+                return DiscoveredTcpEndpoint(
+                    host,
+                    port,
+                    False,
+                    str(exc),
+                    tx_bytes,
+                    getattr(exc, "received", b""),
+                )
+            if activity_callback is not None:
+                activity_callback(host, "open", "MOKE Box verified")
+            return DiscoveredTcpEndpoint(
+                host,
+                port,
+                True,
+                "Readback VOUT returned all 8 AD5362 channels.",
+                tx_bytes,
+                rx_bytes,
+            )
         except OSError:
+            if activity_callback is not None:
+                activity_callback(host, "closed", "")
             return None
         finally:
             if connection is not None:
@@ -209,8 +315,58 @@ def _scan_tcp_hosts(
     workers = min(64, len(hosts))
     with ThreadPoolExecutor(max_workers=workers, thread_name_prefix="tcp-discovery") as executor:
         futures = {executor.submit(probe, host): host for host in hosts}
+        completed = 0
         for future in as_completed(futures):
+            host = futures[future]
             result = future.result()
+            completed += 1
+            if progress_callback is not None:
+                progress_callback(completed, len(hosts), host)
             if result is not None:
                 found.append(result)
     return tuple(sorted(found, key=lambda result: tuple(map(int, result.host.split(".")))))
+
+
+class _MokeReadbackError(OSError):
+    """Readback failure retaining any bytes received for diagnostics."""
+
+    def __init__(self, message: str, received: bytes = b"") -> None:
+        super().__init__(message)
+        self.received = received
+
+
+def _verify_moke_readback(connection: object) -> bytes:
+    """Verify the documented, read-only MOKE VOUT response on one connection."""
+
+    sendall = getattr(connection, "sendall", None)
+    recv = getattr(connection, "recv", None)
+    if not callable(sendall) or not callable(recv):
+        raise _MokeReadbackError("TCP connection does not support MOKE readback verification.")
+    sendall(readback_vout())
+    chunks: list[bytes] = []
+    remaining = 32
+    while remaining:
+        chunk = recv(remaining)
+        if not chunk:
+            raise _MokeReadbackError(
+                "Connection closed during MOKE VOUT readback.", b"".join(chunks)
+            )
+        chunks.append(chunk)
+        remaining -= len(chunk)
+    raw = b"".join(chunks)
+    try:
+        frames = tuple(
+            MokeFrame.decode(raw[index:index + 4]) for index in range(0, 32, 4)
+        )
+    except Exception as exc:
+        raise _MokeReadbackError(f"Invalid MOKE VOUT response: {exc}", raw) from exc
+    channels = {
+        frame.channel
+        for frame in frames
+        if frame.origin == MokeTarget.OPT2 and frame.record_type == MokeResponseType.AD5362
+    }
+    if channels != set(range(8)) or len({frame.channel for frame in frames}) != 8:
+        raise _MokeReadbackError(
+            "Response is not the documented eight-channel MOKE VOUT readback.", raw
+        )
+    return raw

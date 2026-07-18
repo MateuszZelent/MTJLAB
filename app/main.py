@@ -71,6 +71,11 @@ QPushButton#outputOffButton:hover { background: #218967; }
 QPushButton#emergencyButton { background: #8f2638; color: white; }
 QPushButton#emergencyButton:hover { background: #b7334b; }
 QFrame#deviceCard { background: #18212c; border: 1px solid #344659; border-radius: 8px; padding: 10px; min-height: 170px; }
+QFrame#connectionPanel { background: #151f2b; border: 1px solid #30455b; border-radius: 10px; padding: 10px; }
+QTabWidget#dashboardWorkspace::pane { border: 1px solid #30455b; border-radius: 10px; background: #111923; top: -1px; }
+QTabWidget#dashboardWorkspace QTabBar::tab { background: transparent; color: #91a0b2; padding: 9px 18px; margin-right: 4px; border-bottom: 2px solid transparent; }
+QTabWidget#dashboardWorkspace QTabBar::tab:selected { color: #72b7f2; border-bottom-color: #4ba3ff; }
+QTabWidget#dashboardWorkspace QTabBar::tab:hover { color: #e8edf3; }
 QLabel#pageTitle { font-size: 20pt; font-weight: 700; }
 QLabel#cardTitle { font-size: 14pt; font-weight: 700; }
 QLabel#sectionTitle { font-size: 13pt; font-weight: 700; color: #f2f6fa; }
@@ -195,6 +200,11 @@ QPushButton#outputOnButton:hover, QPushButton#emergencyButton:hover { background
 QPushButton#outputOffButton { background: #19805c; color: white; }
 QPushButton#outputOffButton:hover { background: #209a70; }
 QFrame#deviceCard { background: #ffffff; border: 1px solid #c8d3df; border-radius: 8px; padding: 10px; min-height: 170px; }
+QFrame#connectionPanel { background: #ffffff; border: 1px solid #c8d3df; border-radius: 10px; padding: 10px; }
+QTabWidget#dashboardWorkspace::pane { border: 1px solid #c8d3df; border-radius: 10px; background: #f7f9fb; top: -1px; }
+QTabWidget#dashboardWorkspace QTabBar::tab { background: transparent; color: #607284; padding: 9px 18px; margin-right: 4px; border-bottom: 2px solid transparent; }
+QTabWidget#dashboardWorkspace QTabBar::tab:selected { color: #0b5da7; border-bottom-color: #1976bd; }
+QTabWidget#dashboardWorkspace QTabBar::tab:hover { color: #17212b; }
 QLabel#pageTitle { font-size: 20pt; font-weight: 700; }
 QLabel#cardTitle { font-size: 14pt; font-weight: 700; }
 QLabel#sectionTitle { font-size: 13pt; font-weight: 700; color: #17212b; }

@@ -44,16 +44,6 @@ class DeviceCard(QFrame):
         self.assignment_hint.setObjectName("assignmentPendingHint")
         self.assignment_hint.setWordWrap(True)
         self.assignment_hint.hide()
-        controls = QHBoxLayout()
-        self.connect_button = QPushButton("Connect")
-        self.disconnect_button = QPushButton("Disconnect")
-        self.test_button = QPushButton("Test")
-        self.test_button.setToolTip(
-            "Open a temporary session, validate IDN/model/serial and protocol probes, force safe OFF, then disconnect."
-        )
-        controls.addWidget(self.connect_button)
-        controls.addWidget(self.disconnect_button)
-        controls.addWidget(self.test_button)
         layout.addWidget(name)
         layout.addWidget(self.state)
         layout.addWidget(self.resource)
@@ -61,10 +51,6 @@ class DeviceCard(QFrame):
         layout.addStretch(1)
         layout.addLayout(assignment_row)
         layout.addWidget(self.assignment_hint)
-        layout.addLayout(controls)
-        self.connect_button.clicked.connect(self.connect_requested)
-        self.disconnect_button.clicked.connect(self.disconnect_requested)
-        self.test_button.clicked.connect(self.test_requested)
         self.assign_button.clicked.connect(self._request_assignment)
         self.detected_resources.currentIndexChanged.connect(self._detected_selection_changed)
         self.update_resource(resource)
@@ -86,17 +72,10 @@ class DeviceCard(QFrame):
         self.resource.setToolTip(resource or "")
 
     def set_reconfiguring(self, active: bool) -> None:
-        self.connect_button.setEnabled(not active)
-        self.disconnect_button.setEnabled(not active)
-        self.test_button.setEnabled(not active)
         if active:
             self.state.setText("APPLYING NEW VISA ADDRESS…")
 
     def set_testing(self, active: bool) -> None:
-        self.connect_button.setEnabled(not active)
-        self.disconnect_button.setEnabled(not active)
-        self.test_button.setEnabled(not active)
-        self.test_button.setText("Testing…" if active else "Test")
         if active:
             self.state.setText("TESTING COMMUNICATION…")
 
@@ -122,16 +101,18 @@ class DeviceCard(QFrame):
             self.assign_button.setEnabled(False)
             self.assign_button.setText("Assign VISA")
             self.assignment_hint.hide()
-            self.connect_button.setEnabled(True)
-            self.test_button.setEnabled(True)
+            if hasattr(self, "connect_button"):
+                self.connect_button.setEnabled(True)
+                self.test_button.setEnabled(True)
         elif assigned_index >= 0:
             self.detected_resources.setCurrentIndex(assigned_index)
             self.detected_resources.setEnabled(False)
             self.assign_button.setEnabled(False)
             self.assign_button.setText("Assigned ✓")
             self.assignment_hint.hide()
-            self.connect_button.setEnabled(True)
-            self.test_button.setEnabled(True)
+            if hasattr(self, "connect_button"):
+                self.connect_button.setEnabled(True)
+                self.test_button.setEnabled(True)
         else:
             self.detected_resources.setCurrentIndex(0)
             self.detected_resources.setEnabled(True)
@@ -171,9 +152,74 @@ class DeviceCard(QFrame):
             f"⚠ {resource} is selected but not active. Click Assign VISA before Connect or Test."
         )
         self.assignment_hint.show()
-        self.connect_button.setEnabled(False)
-        self.test_button.setEnabled(False)
-        self.connect_button.setToolTip("Assign the selected VISA resource first; this prevents using the old address.")
-        self.test_button.setToolTip("Assign the selected VISA resource first; Test never uses an unconfirmed selection.")
+        if hasattr(self, "connect_button"):
+            self.connect_button.setEnabled(False)
+            self.test_button.setEnabled(False)
 
 
+class DeviceConnectionPanel(QFrame):
+    """Device-local connection controls; never shown on the station dashboard."""
+
+    connect_requested = Signal()
+    disconnect_requested = Signal()
+    test_requested = Signal()
+
+    def __init__(self, title: str, resource: str | None, parent: QWidget | None = None) -> None:
+        super().__init__(parent)
+        self.setObjectName("connectionPanel")
+        layout = QHBoxLayout(self)
+        copy = QVBoxLayout()
+        heading = QLabel("Instrument connection")
+        heading.setObjectName("sectionTitle")
+        self.summary = QLabel()
+        self.identity = self.summary
+        self.summary.setObjectName("muted")
+        self.summary.setWordWrap(True)
+        copy.addWidget(heading)
+        copy.addWidget(self.summary)
+        layout.addLayout(copy, 1)
+        self.state = QLabel("DISCONNECTED")
+        self.state.setObjectName("stateDisconnected")
+        layout.addWidget(self.state)
+        self.connect_button = QPushButton("Connect")
+        self.disconnect_button = QPushButton("Disconnect")
+        self.test_button = QPushButton("Test")
+        self.test_button.setToolTip(
+            "Open a temporary session, validate identity and protocol, force safe OFF, then disconnect."
+        )
+        layout.addWidget(self.connect_button)
+        layout.addWidget(self.disconnect_button)
+        layout.addWidget(self.test_button)
+        self.connect_button.clicked.connect(self.connect_requested)
+        self.disconnect_button.clicked.connect(self.disconnect_requested)
+        self.test_button.clicked.connect(self.test_requested)
+        self.update_resource(resource)
+
+    def update_resource(self, resource: str | None, backend: str | None = None) -> None:
+        detail = resource or "No VISA resource configured"
+        if backend:
+            detail += f"  •  {backend} backend"
+        self.summary.setText(detail)
+
+    def update_state(self, state: str) -> None:
+        self.state.setText(state.replace("_", " ").upper())
+        self.state.setObjectName("state" + "".join(part.title() for part in state.split("_")))
+        self.state.style().unpolish(self.state)
+        self.state.style().polish(self.state)
+
+    def update_identity(self, value: object) -> None:
+        if idn := getattr(value, "idn", None):
+            self.summary.setText(idn)
+
+    def set_reconfiguring(self, active: bool) -> None:
+        self._set_busy(active, "Applying new VISA address…")
+
+    def set_testing(self, active: bool) -> None:
+        self._set_busy(active, "Testing communication…")
+        self.test_button.setText("Testing…" if active else "Test")
+
+    def _set_busy(self, active: bool, label: str) -> None:
+        for button in (self.connect_button, self.disconnect_button, self.test_button):
+            button.setEnabled(not active)
+        if active:
+            self.state.setText(label.upper())

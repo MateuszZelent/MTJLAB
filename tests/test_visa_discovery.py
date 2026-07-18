@@ -2,7 +2,15 @@ from __future__ import annotations
 
 import unittest
 
-from app.devices.discovery import discover_tcp_endpoints, discover_tcp_ip_range, discover_visa_resources, identify_device
+from app.devices.discovery import (
+    detect_local_ipv4_address,
+    discover_tcp_endpoints,
+    discover_tcp_ip_range,
+    discover_visa_resources,
+    identify_device,
+    suggested_scan_cidr,
+)
+from app.devices.moke_box.protocol import MokeFrame, MokeResponseType, MokeTarget, readback_vout
 
 
 class DiscoverySession:
@@ -47,6 +55,36 @@ class TcpConnection:
         self.closed = True
 
 
+class RouteProbe(TcpConnection):
+    def __init__(self, address: str) -> None:
+        super().__init__()
+        self.address = address
+        self.connected_to: tuple[str, int] | None = None
+
+    def connect(self, address: tuple[str, int]) -> None:
+        self.connected_to = address
+
+    def getsockname(self) -> tuple[str, int]:
+        return self.address, 45_000
+
+
+class MokeReadbackConnection(TcpConnection):
+    def __init__(self) -> None:
+        super().__init__()
+        self.sent: list[bytes] = []
+        self.response = b"".join(
+            MokeFrame(MokeTarget.OPT2, MokeResponseType.AD5362, channel, 0x80, 0x00).encode()
+            for channel in range(8)
+        )
+
+    def sendall(self, value: bytes) -> None:
+        self.sent.append(value)
+
+    def recv(self, count: int) -> bytes:
+        chunk, self.response = self.response[:count], self.response[count:]
+        return chunk
+
+
 class VisaDiscoveryTests(unittest.TestCase):
     def test_supported_identities_are_classified_conservatively(self) -> None:
         self.assertEqual(identify_device("RIGOL TECHNOLOGIES,DG1032Z,SN,1"), "rigol")
@@ -80,6 +118,7 @@ class VisaDiscoveryTests(unittest.TestCase):
 
     def test_tcp_discovery_returns_only_hosts_with_open_requested_port(self) -> None:
         opened: list[TcpConnection] = []
+        progress: list[tuple[int, int, str]] = []
 
         def connector(address: tuple[str, int], timeout: float) -> TcpConnection:
             self.assertEqual(address[1], 10001)
@@ -91,11 +130,17 @@ class VisaDiscoveryTests(unittest.TestCase):
             return connection
 
         results = discover_tcp_endpoints(
-            "192.168.50.0/30", 10001, timeout_s=0.1, connector=connector
+            "192.168.50.0/30", 10001, timeout_s=0.1, connector=connector,
+            progress_callback=lambda completed, total, host: progress.append(
+                (completed, total, host)
+            ),
         )
 
         self.assertEqual([result.endpoint for result in results], ["192.168.50.2:10001"])
         self.assertTrue(opened[0].closed)
+        self.assertEqual({host for _completed, _total, host in progress}, {"192.168.50.1", "192.168.50.2"})
+        self.assertEqual([completed for completed, _total, _host in progress], [1, 2])
+        self.assertTrue(all(total == 2 for _completed, total, _host in progress))
 
     def test_tcp_discovery_rejects_public_or_unbounded_networks_without_opt_in(self) -> None:
         with self.assertRaises(ValueError):
@@ -121,6 +166,66 @@ class VisaDiscoveryTests(unittest.TestCase):
             ),
         )
         self.assertEqual([endpoint.endpoint for endpoint in results], ["131.246.221.118:10001"])
+
+    def test_local_ipv4_detection_prefills_a_conservative_network(self) -> None:
+        probe = RouteProbe("131.246.221.118")
+        address = detect_local_ipv4_address(socket_factory=lambda _family, _kind: probe)
+        self.assertEqual(address, "131.246.221.118")
+        self.assertEqual(probe.connected_to, ("1.1.1.1", 53))
+        self.assertTrue(probe.closed)
+        self.assertEqual(suggested_scan_cidr(address), "131.246.221.0/24")
+
+    def test_tcp_discovery_can_verify_documented_moke_vout_readback(self) -> None:
+        connection = MokeReadbackConnection()
+        results = discover_tcp_endpoints(
+            "192.168.50.2/32", 10001, verify_moke=True,
+            connector=lambda _address, _timeout: connection,
+        )
+        self.assertEqual(len(results), 1)
+        self.assertTrue(results[0].moke_verified)
+        self.assertEqual(results[0].tx_bytes, bytes.fromhex("18000018"))
+        self.assertEqual(len(results[0].rx_bytes), 32)
+        self.assertEqual(connection.sent, [readback_vout()])
+        self.assertEqual(connection.sent, [bytes.fromhex("18000018")])
+        self.assertTrue(connection.closed)
+
+    def test_tcp_discovery_rejects_invalid_moke_readback_without_writing_again(self) -> None:
+        connection = MokeReadbackConnection()
+        connection.response = connection.response[:-1] + bytes((connection.response[-1] ^ 0x01,))
+        results = discover_tcp_endpoints(
+            "192.168.50.2/32", 10001, verify_moke=True,
+            connector=lambda _address, _timeout: connection,
+        )
+        self.assertEqual(len(results), 1)
+        self.assertFalse(results[0].moke_verified)
+        self.assertEqual(results[0].tx_bytes, bytes.fromhex("18000018"))
+        self.assertEqual(len(results[0].rx_bytes), 32)
+        self.assertEqual(connection.sent, [bytes.fromhex("18000018")])
+
+    def test_tcp_discovery_retains_partial_moke_response_for_diagnostics(self) -> None:
+        connection = MokeReadbackConnection()
+        connection.response = connection.response[:4]
+        results = discover_tcp_endpoints(
+            "192.168.50.2/32", 10001, verify_moke=True,
+            connector=lambda _address, _timeout: connection,
+        )
+        self.assertEqual(len(results), 1)
+        self.assertFalse(results[0].moke_verified)
+        self.assertEqual(results[0].tx_bytes, bytes.fromhex("18000018"))
+        self.assertEqual(len(results[0].rx_bytes), 4)
+        self.assertEqual(connection.sent, [bytes.fromhex("18000018")])
+
+    def test_tcp_discovery_honors_stop_request_before_opening_hosts(self) -> None:
+        activity: list[tuple[str, str, str]] = []
+        results = discover_tcp_endpoints(
+            "192.168.50.0/30",
+            10001,
+            cancellation_requested=lambda: True,
+            activity_callback=lambda host, state, detail: activity.append((host, state, detail)),
+            connector=lambda _address, _timeout: self.fail("connector must not be called"),
+        )
+        self.assertEqual(results, ())
+        self.assertEqual({state for _host, state, _detail in activity}, {"cancelled"})
 
 
 if __name__ == "__main__":
