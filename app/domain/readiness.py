@@ -12,6 +12,10 @@ from app.engine.compiler import ExecutionPlan
 from app.engine.estimation import PlanEstimate
 from app.settings.models import StationSettings
 
+_ENERGIZING_OUTPUT_ACTIONS = frozenset(
+    {"set_rigol_output", "set_keithley_output", "set_anritsu_sg_output"}
+)
+
 
 class ReadinessLevel(StrEnum):
     PASS = "pass"
@@ -89,9 +93,18 @@ def evaluate_station_readiness(
 
     required = plan.required_devices if plan is not None else frozenset()
     errors = device_errors or {}
-    for device in ("rigol", "keithley", "anritsu"):
-        configured = getattr(settings, device)
-        resource = configured.connection.resource
+    devices = (
+        ("rigol", settings.rigol, settings.rigol.connection.resource),
+        ("keithley", settings.keithley, settings.keithley.connection.resource),
+        ("anritsu", settings.anritsu, settings.anritsu.connection.resource),
+        ("moke_box", settings.moke_box, settings.moke_box.endpoint),
+        (
+            "lakeshore_gaussmeter",
+            settings.lakeshore_gaussmeter,
+            settings.lakeshore_gaussmeter.resource,
+        ),
+    )
+    for device, configured, resource in devices:
         state = str(device_states.get(device, "disconnected"))
         is_required = device in required
         if not configured.enabled:
@@ -99,7 +112,7 @@ def evaluate_station_readiness(
             detail = "Disabled in the current profile"
         elif not resource:
             level = ReadinessLevel.FAIL if is_required else ReadinessLevel.WARNING
-            detail = "No VISA resource assigned"
+            detail = "No connection resource assigned"
         elif state in {"output_on", "armed", "compliance", "fault", "unknown"}:
             level = ReadinessLevel.FAIL
             detail = f"Unsafe/manual state: {state.replace('_', ' ')}"
@@ -158,7 +171,7 @@ def evaluate_station_readiness(
             )
         )
         energized = any(
-            action.kind in {"set_rigol_output", "set_keithley_output"}
+            action.kind in _ENERGIZING_OUTPUT_ACTIONS
             and bool(action.payload.get("enabled"))
             for action in plan.actions
         )

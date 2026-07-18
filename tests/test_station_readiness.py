@@ -91,6 +91,100 @@ class StationReadinessTests(unittest.TestCase):
             )
         self.assertIn("device.keithley", {item.key for item in readiness.blocking_items})
 
+    def test_required_moke_and_lakeshore_devices_are_reported_as_blockers(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            settings = self._settings(Path(directory) / "results")
+            plan = ExecutionPlan(
+                "readiness",
+                (),
+                0,
+                "b" * 64,
+                "name: readiness",
+                frozenset({"moke_box", "lakeshore_gaussmeter"}),
+                0,
+            )
+            readiness = evaluate_station_readiness(
+                settings,
+                device_states={},
+                verified_resources={},
+                audit_healthy=True,
+                plan=plan,
+                estimate=self._estimate(),
+            )
+        self.assertEqual(
+            {item.key for item in readiness.blocking_items},
+            {"device.moke_box", "device.lakeshore_gaussmeter"},
+        )
+
+    def test_moke_endpoint_and_lakeshore_resource_can_be_identity_verified(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            settings = self._settings(Path(directory) / "results")
+            raw = settings.model_dump(mode="python")
+            raw["devices"]["moke_box"].update(
+                {"enabled": True, "endpoint": "192.0.2.10:5000"}
+            )
+            raw["devices"]["lakeshore_gaussmeter"].update(
+                {"enabled": True, "resource": "ASRL3::INSTR"}
+            )
+            settings = StationSettings.model_validate(raw)
+            plan = ExecutionPlan(
+                "readiness",
+                (),
+                0,
+                "c" * 64,
+                "name: readiness",
+                frozenset({"moke_box", "lakeshore_gaussmeter"}),
+                0,
+            )
+            readiness = evaluate_station_readiness(
+                settings,
+                device_states={
+                    "moke_box": "disconnected",
+                    "lakeshore_gaussmeter": "disconnected",
+                },
+                verified_resources={
+                    "moke_box": "192.0.2.10:5000",
+                    "lakeshore_gaussmeter": "ASRL3::INSTR",
+                },
+                audit_healthy=True,
+                plan=plan,
+                estimate=self._estimate(),
+            )
+        levels = {item.key: item.level for item in readiness.items}
+        self.assertEqual(levels["device.moke_box"], ReadinessLevel.PASS)
+        self.assertEqual(levels["device.lakeshore_gaussmeter"], ReadinessLevel.PASS)
+
+    def test_anritsu_rf_output_on_requires_validated_dut_envelope(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            settings = self._settings(Path(directory) / "results")
+            plan = ExecutionPlan(
+                "readiness",
+                (
+                    PlanAction(
+                        "rf-on",
+                        "set_anritsu_sg_output",
+                        {"enabled": True},
+                        {},
+                    ),
+                ),
+                0,
+                "d" * 64,
+                "name: readiness",
+                frozenset({"anritsu"}),
+                0,
+            )
+            readiness = evaluate_station_readiness(
+                settings,
+                device_states={"anritsu": "disconnected"},
+                verified_resources={},
+                audit_healthy=True,
+                plan=plan,
+                estimate=self._estimate(),
+            )
+        detail = next(item.detail for item in readiness.items if item.key == "dut")
+        self.assertIn("validated", detail.lower())
+        self.assertNotIn("no OUTPUT ON", detail)
+
 
 if __name__ == "__main__":
     unittest.main()
