@@ -1170,7 +1170,6 @@ class SettingsPage(QWidget):
         path = minimum.data(Qt.ItemDataRole.UserRole)
         if path is None:
             return
-        base_path = tuple(path[:-1])
         dimension = self._limit_dimension(tuple(path))
         values: dict[str, float] = {}
         for item, boundary in ((minimum, "minimum"), (maximum, "maximum")):

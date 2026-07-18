@@ -939,7 +939,9 @@ class MainWindowTests(unittest.TestCase):
             self.assertEqual(keithley._limit_fields["compliance"].maximum.text(), "MAX  10 mA")
 
             anritsu = window.anritsu_page
-            self.assertEqual(anritsu._limit_fields["frequency0"].minimum.text(), "MIN  NOT SET")
+            expected_anritsu_minimum = window._settings.anritsu.safety.frequency.min
+            expected_text = "NOT SET" if expected_anritsu_minimum is None else expected_anritsu_minimum
+            self.assertEqual(anritsu._limit_fields["frequency0"].minimum.text(), f"MIN  {expected_text}")
             self.assertNotIn("sweep_points3", anritsu._limit_fields)
             self.assertGreater(anritsu.points.count(), 1)
         finally:
@@ -1063,7 +1065,10 @@ class MainWindowTests(unittest.TestCase):
                 channel="A", voltage_v=1.0, current_a=0.1,
                 power_w=0.1, compliance_detected=False,
             )
-            with patch("app.ui.main_window.time.monotonic", side_effect=[110.0, 145.0]):
+            with patch(
+                "app.devices.keithley_2600.ui.page.time.monotonic",
+                side_effect=[110.0, 145.0],
+            ):
                 keithley._update_channel_measurement(measurement)
                 keithley._update_channel_measurement(measurement)
 

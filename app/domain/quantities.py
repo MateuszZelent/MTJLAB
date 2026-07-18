@@ -26,6 +26,7 @@ DIMENSION_TIME: Final = "time"
 DIMENSION_DBM: Final = "dbm"
 DIMENSION_DB: Final = "db"
 DIMENSION_RATIO: Final = "ratio"
+DIMENSION_MAGNETIC_FIELD: Final = "magnetic_field"
 
 
 @dataclass(frozen=True, slots=True)
@@ -69,6 +70,10 @@ _UNITS: Final[dict[str, UnitDefinition]] = {
     "dbm": UnitDefinition(DIMENSION_DBM, 1.0, "dBm"),
     "db": UnitDefinition(DIMENSION_DB, 1.0, "dB"),
     "%": UnitDefinition(DIMENSION_RATIO, 0.01, "%"),
+    "t": UnitDefinition(DIMENSION_MAGNETIC_FIELD, 1.0, "T"),
+    "mt": UnitDefinition(DIMENSION_MAGNETIC_FIELD, 1e-3, "mT"),
+    "ut": UnitDefinition(DIMENSION_MAGNETIC_FIELD, 1e-6, "uT"),
+    "Âµt": UnitDefinition(DIMENSION_MAGNETIC_FIELD, 1e-6, "uT"),
 }
 
 _QUANTITY_RE: Final = re.compile(
@@ -174,6 +179,7 @@ _AUTO_DISPLAY_UNITS: Final[dict[str, tuple[str, ...]]] = {
     DIMENSION_DBM: ("dBm",),
     DIMENSION_DB: ("dB",),
     DIMENSION_RATIO: ("%",),
+    DIMENSION_MAGNETIC_FIELD: ("T", "mT", "uT"),
 }
 
 

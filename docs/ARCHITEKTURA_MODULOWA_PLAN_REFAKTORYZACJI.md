@@ -1,8 +1,34 @@
 # Architektura modułowa aplikacji pomiarowej — plan refaktoryzacji
 
-Status: propozycja do akceptacji  
+Status: implementation in progress
 Data: 2026-07-18  
-Zakres: dokumentacja i plan; bez zmiany zachowania aplikacji
+Zakres: plan i migracja struktury, bez celowej zmiany zachowania pomiarow
+
+## Status implementacji (2026-07-18)
+
+Zrealizowane elementy planu:
+
+- `app/ui/main_window.py` jest 64-liniowa fasada zgodnosci; wlasciwy shell jest w
+  `app/ui/shell/main_window.py`;
+- dashboard, execution, results, wspolne widgety i workspace recept maja osobne
+  pakiety `app/ui/*`;
+- Rigol DG1000Z, Keithley 2600 i Anritsu MS2830A maja pionowe pakiety z manifestem
+  `DeviceModule`; rejestr jest tworzony w `app/devices/registry.py`;
+- `RecipeExtension` dostarcza rejestrowane definicje parametrow recept, a dialog
+  wyboru parametrow otrzymuje je z rejestru;
+- utworzono nieaktywne, fail-closed moduly `moke_box` oraz
+  `lakeshore_gaussmeter`; Lake Shore 425 korzysta z opcjonalnej granicy oficjalnego
+  drivera, a 475 ma read-only adapter VISA;
+- test architektury kontroluje brak importow UI w warstwach urzadzeniowych oraz
+  to, ze fasada `main_window.py` pozostaje mala.
+
+Pozostale zadania:
+
+- przeniesc pozostale zachowania urzadzeniowe z `RecipePage` do konkretnych
+  rozszerzen recept; obecnie most `legacy_device_extensions.py` zachowuje
+  kompatybilnosc podczas tej migracji;
+- rozbic duze strony urzadzeniowe na mniejsze panele/presentery;
+- wykonac HIL przed wlaczeniem MOKE Box lub Lake Shore w profilu produkcyjnym.
 
 ## 1. Streszczenie decyzji
 
@@ -22,7 +48,8 @@ nie zmieniamy równocześnie protokołów VISA, formatu receptur, formatu danych
 
 ### 2.1. Fakty z repozytorium
 
-- `app/ui/main_window.py`: 13 076 linii;
+- `app/ui/main_window.py`: fasada kompatybilnosci (ponizej 100 linii);
+- `app/ui/shell/main_window.py`: shell aplikacji;
 - `RecipePage`: 4 271 linii;
 - `AnritsuPage`: 1 549 linii;
 - `KeithleyPage`: 1 040 linii;
@@ -431,4 +458,3 @@ nazw pakietów i finalizacją kontraktu rejestru.
 - emergency-off, blokady output, audyt i recovery zachowują co najmniej obecny
   poziom ochrony;
 - dokumentacja uruchomienia, architektury i dodawania urządzenia odpowiada kodowi.
-

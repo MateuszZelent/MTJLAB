@@ -1,0 +1,1029 @@
+"""Manual-control UI for the Rigol DG1000Z module."""
+
+from __future__ import annotations
+
+import math
+from dataclasses import dataclass
+
+from PySide6.QtCore import Qt, Signal
+from PySide6.QtWidgets import (
+    QCheckBox, QComboBox, QFormLayout, QFrame, QGridLayout, QHBoxLayout,
+    QLabel, QMessageBox, QPushButton, QScrollArea, QSpinBox, QSplitter,
+    QTabWidget, QVBoxLayout, QWidget,
+)
+
+from app.devices.rigol import (
+    RigolBurstConfig, RigolChannelConfig, RigolFrequencySweepConfig,
+    RigolModulationConfig, RigolOutputConfig,
+)
+from app.domain.quantities import (
+    DIMENSION_FREQUENCY, DIMENSION_RESISTANCE, DIMENSION_TIME, DIMENSION_VOLTAGE,
+    parse_quantity,
+)
+from app.safety.rigol_current import validate_rigol_frequency_sweep, validate_rigol_waveform
+from app.settings.models import StationSettings
+from app.ui.common import line_edit as _line
+from app.ui.widgets import LimitField, NotificationBanner, SpectrumPlotWidget
+from app.ui.workers import DeviceController
+
+
+@dataclass(frozen=True, slots=True)
+class RigolConfigurationSnapshot:
+    """Qt-independent carrier configuration shared by manual and plan editors."""
+
+    channel: int = 1
+    waveform: str = "SIN"
+    frequency: str = "1 kHz"
+    high_level: str = "1 mV"
+    low_level: str = "-1 mV"
+    output_load: str = "HIGHZ"
+    phase_deg: str = "0"
+    square_duty_percent: str = "50"
+    ramp_symmetry_percent: str = "50"
+    pulse_width: str = "100 us"
+    pulse_leading: str = "10 ns"
+    pulse_trailing: str = "10 ns"
+    dut_min_impedance: str = "50 ohm"
+    output_polarity: str = "NORM"
+    output_mode: str = "NORM"
+    gate_polarity: str = "NORM"
+    sync_enabled: bool = False
+    sync_polarity: str = "NORM"
+    sync_delay: str = "0 s"
+
+
+class RigolPage(QWidget):
+    status = Signal(str)
+
+    def __init__(self, controller: DeviceController, settings: StationSettings, parent: QWidget | None = None) -> None:
+        super().__init__(parent)
+        self._controller = controller
+        self._station_settings = settings
+        self._limit_fields: dict[QWidget, LimitField] = {}
+        self._pending_output_enable = False
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(18, 18, 18, 18)
+        layout.setSpacing(14)
+
+        header = QFrame()
+        header.setObjectName("rigolHero")
+        header_layout = QHBoxLayout(header)
+        heading = QVBoxLayout()
+        title = QLabel("Rigol DG1032Z")
+        title.setObjectName("pageTitle")
+        subtitle = QLabel("Function generator · channel control and safe output activation")
+        subtitle.setObjectName("muted")
+        heading.addWidget(title)
+        heading.addWidget(subtitle)
+        header_layout.addLayout(heading, 1)
+
+        self.device_led = QLabel("●")
+        self.device_led.setObjectName("rigolLed")
+        self.device_state = QLabel("DISCONNECTED")
+        self.device_state.setObjectName("rigolState")
+        state_box = QVBoxLayout()
+        state_line = QHBoxLayout()
+        state_line.addWidget(self.device_led)
+        state_line.addWidget(self.device_state)
+        state_box.addLayout(state_line)
+        self.capability_badge = QLabel("Capabilities: awaiting identification")
+        self.capability_badge.setObjectName("rigolBadge")
+        state_box.addWidget(self.capability_badge)
+        header_layout.addLayout(state_box)
+        layout.addWidget(header)
+        self.banner = NotificationBanner()
+        layout.addWidget(self.banner)
+
+        self.channel = QComboBox()
+        self.channel.addItems(["1", "2"])
+        self.waveform = QComboBox()
+        self.waveform.addItems(["SIN", "SQU", "RAMP", "PULS", "NOIS", "DC"])
+        self.waveform.setCurrentText("SIN")
+        self.time_mode = QComboBox()
+        self.time_mode.addItems(["Frequency", "Period"])
+        self.frequency = _line("1 kHz")
+        self.period = _line("1 ms")
+        self.level_mode = QComboBox()
+        self.level_mode.addItems(["HighL / LowL", "Amplitude / Offset"])
+        self.level_mode.setCurrentText("Amplitude / Offset")
+        self.high_level = _line("1 mV")
+        self.low_level = _line("-1 mV")
+        self.vpp = _line("2 mV")
+        self.offset = _line("0 V")
+        self.load = _line("HIGHZ")
+        self.output_polarity = QComboBox()
+        self.output_polarity.addItems(["NORM", "INV"])
+        self.output_mode = QComboBox()
+        self.output_mode.addItems(["NORM", "GAT"])
+        self.gate_polarity = QComboBox()
+        self.gate_polarity.addItems(["NORM", "INV"])
+        self.sync_enabled = QCheckBox("SYNC enabled")
+        self.sync_polarity = QComboBox()
+        self.sync_polarity.addItems(["NORM", "INV"])
+        self.sync_delay = _line("0 s")
+        self.dut_impedance = _line("50 ohm")
+        self.phase = _line("0")
+        self.duty = _line("50")
+        self.ramp_symmetry = _line("50")
+        self.pulse_width = _line("100 us")
+        self.pulse_leading = _line("10 ns")
+        self.pulse_trailing = _line("10 ns")
+        self._level_syncing = False
+        self._time_syncing = False
+
+        splitter = QSplitter(Qt.Orientation.Horizontal)
+        splitter.setChildrenCollapsible(False)
+        self.control_tabs = QTabWidget()
+        self.control_tabs.setObjectName("rigolControlTabs")
+
+        configure = QPushButton("Validate and apply waveform")
+        configure.setObjectName("primaryButton")
+        self.basic_scroll = self._form_page(
+            "Basic parameters",
+            "For a standard sine wave, change only Frequency and Amplitude. Other fields already contain safe defaults.",
+            (
+                ("Channel", self.channel),
+                ("Waveform", self.waveform),
+                ("Time representation", self.time_mode),
+                ("Frequency", self._bounded(self.frequency, "frequency")),
+                ("Period", self.period),
+                ("Level representation", self.level_mode),
+                ("HighL", self._bounded(self.high_level, "high_level")),
+                ("LowL", self._bounded(self.low_level, "low_level")),
+                ("Amplitude (Vpp)", self._bounded(self.vpp, "amplitude_vpp")),
+                ("Offset / DC level", self._bounded(self.offset, "offset")),
+                ("Minimum DUT impedance", self._bounded(self.dut_impedance, "declared_dut_impedance")),
+                ("Phase [deg]", self.phase),
+            ),
+            (configure,),
+        )
+        self.basic_form = self.basic_scroll.widget().findChild(QFormLayout)
+        shape_apply = QPushButton("Apply shape parameters")
+        shape_apply.setObjectName("primaryButton")
+        self.shape_scroll = self._form_page(
+            "Waveform shape",
+            "Only parameters applicable to the selected waveform are shown.",
+            (
+                ("Duty [%] · SQU", self.duty),
+                ("Symmetry [%] · RAMP", self.ramp_symmetry),
+                ("Pulse width · PULS", self.pulse_width),
+                ("Pulse leading edge · PULS", self.pulse_leading),
+                ("Pulse trailing edge · PULS", self.pulse_trailing),
+            ),
+            (shape_apply,),
+        )
+        self.shape_form = self.shape_scroll.widget().findChild(QFormLayout)
+
+        configure_output = QPushButton("Apply output path")
+        configure_output.setObjectName("primaryButton")
+        self.sync_phases_button = QPushButton("Synchronize CH1/CH2 phases")
+        self.sync_phases_button.setEnabled(False)
+        self.output_on = QPushButton("OUTPUT ON")
+        self.output_on.setObjectName("outputOnButton")
+        self.output_off = QPushButton("OUTPUT OFF")
+        self.output_off.setObjectName("outputOffButton")
+        self.output_scroll = self._form_page(
+            "Output path and SYNC",
+            "OUTPUT ON validates the visible channel settings, performs an internal "
+            "short-lived safety arm and enables the selected output.",
+            (
+                ("Generator load setting", self.load),
+                ("Output polarity", self.output_polarity),
+                ("Output mode", self.output_mode),
+                ("Gate polarity", self.gate_polarity),
+                ("", self.sync_enabled),
+                ("SYNC polarity", self.sync_polarity),
+                ("SYNC delay", self.sync_delay),
+            ),
+            (
+                configure_output,
+                self.sync_phases_button,
+                self.output_on,
+                self.output_off,
+            ),
+        )
+
+        self.advanced = QTabWidget()
+        self.advanced.setObjectName("rigolAdvancedTabs")
+        self.advanced.addTab(self._modulation_tab(), "Modulation")
+        self.advanced.addTab(self._sweep_tab(), "Sweep")
+        self.advanced.addTab(self._burst_tab(), "Burst")
+
+        self.control_tabs.addTab(self.basic_scroll, "Basic")
+        self.control_tabs.addTab(self.shape_scroll, "Shape")
+        self.control_tabs.addTab(self.output_scroll, "Output")
+        self.control_tabs.addTab(self.advanced, "Advanced")
+        splitter.addWidget(self.control_tabs)
+
+        insight = QWidget()
+        insight_layout = QVBoxLayout(insight)
+        insight_layout.setContentsMargins(10, 0, 0, 0)
+        preview_title = QLabel("Waveform preview")
+        preview_title.setObjectName("sectionTitle")
+        insight_layout.addWidget(preview_title)
+        self.preview_plot = SpectrumPlotWidget(legend=False)
+        self.preview_plot.set_labels(x="Normalized period", x_unit="", y="Voltage", y_unit="V")
+        self.preview_plot.setMinimumHeight(260)
+        insight_layout.addWidget(self.preview_plot, 1)
+
+        safety = QFrame()
+        safety.setObjectName("rigolSafetyCard")
+        safety_layout = QVBoxLayout(safety)
+        safety_title = QLabel("Load safety")
+        safety_title.setObjectName("sectionTitle")
+        safety_layout.addWidget(safety_title)
+        self.estimate = QLabel("Estimated current: —")
+        self.estimate.setObjectName("muted")
+        self.estimate.setWordWrap(True)
+        safety_layout.addWidget(self.estimate)
+        warning = QLabel("⚠ This estimate is not a measurement. Verify DUT impedance and profile limits before ARM.")
+        warning.setObjectName("rigolWarning")
+        warning.setWordWrap(True)
+        safety_layout.addWidget(warning)
+        insight_layout.addWidget(safety)
+        splitter.addWidget(insight)
+        splitter.setStretchFactor(0, 5)
+        splitter.setStretchFactor(1, 4)
+        splitter.setSizes([620, 500])
+        layout.addWidget(splitter, 1)
+
+        configure.clicked.connect(self.configure)
+        shape_apply.clicked.connect(self.configure)
+        configure_output.clicked.connect(self.configure_output)
+        self.sync_phases_button.clicked.connect(lambda: self._controller.call("synchronize_phases"))
+        self.high_level.editingFinished.connect(self._sync_vpp_offset_from_levels)
+        self.low_level.editingFinished.connect(self._sync_vpp_offset_from_levels)
+        self.vpp.editingFinished.connect(self._sync_levels_from_vpp_offset)
+        self.offset.editingFinished.connect(self._sync_levels_from_vpp_offset)
+        self.frequency.editingFinished.connect(self._sync_period_from_frequency)
+        self.period.editingFinished.connect(self._sync_frequency_from_period)
+        self.output_on.clicked.connect(lambda: self.request_output(True))
+        self.output_off.clicked.connect(lambda: self.request_output(False))
+        controller.result.connect(self._result)
+        controller.error.connect(self._error)
+        controller.state_changed.connect(self._device_state_changed)
+        self.waveform.currentTextChanged.connect(self._update_dynamic_controls)
+        self.level_mode.currentTextChanged.connect(self._update_dynamic_controls)
+        self.time_mode.currentTextChanged.connect(self._update_dynamic_controls)
+        self.waveform.currentTextChanged.connect(self._update_preview)
+        self.channel.currentTextChanged.connect(self._update_preview)
+        self.channel.currentTextChanged.connect(self._refresh_rigol_limits)
+        for field in (self.frequency, self.period, self.high_level, self.low_level, self.vpp, self.offset, self.duty, self.ramp_symmetry, self.pulse_width):
+            field.textChanged.connect(self._update_preview)
+        self._sync_vpp_offset_from_levels()
+        self._sync_period_from_frequency()
+        self._update_dynamic_controls()
+        self._update_preview()
+        self._install_rigol_help(
+            configure=configure,
+            shape_apply=shape_apply,
+            configure_output=configure_output,
+            output_on=self.output_on,
+            output_off=self.output_off,
+        )
+
+    @staticmethod
+    def _set_help(widget: QWidget, title: str, text: str) -> None:
+        help_text = f"<b>{title}</b><br>{text}"
+        widget.setToolTip(help_text)
+        widget.setToolTipDuration(20_000)
+        widget.setWhatsThis(help_text)
+        widget.setAccessibleDescription(f"{title}. {text}")
+
+    def _install_rigol_help(
+        self,
+        *,
+        configure: QPushButton,
+        shape_apply: QPushButton,
+        configure_output: QPushButton,
+        output_on: QPushButton,
+        output_off: QPushButton,
+    ) -> None:
+        help_items = {
+            self.channel: ("Channel", "Selects physical output CH1 or CH2. Each channel has independent settings and safety limits."),
+            self.waveform: ("Waveform", "SIN is sine, SQU square, RAMP triangular/ramp, PULS pulse, NOIS noise and DC a constant voltage."),
+            self.time_mode: ("Time representation", "Choose whether the same repetition rate is entered as frequency or period. The application converts one into the other."),
+            self.frequency: ("Frequency", "Number of waveform cycles per second. For a standard sine wave this and Amplitude are normally the only values you change."),
+            self.period: ("Period", "Duration of one complete waveform cycle. Period equals 1/frequency."),
+            self.level_mode: ("Level representation", "HighL/LowL defines the upper and lower levels directly. Amplitude/Offset defines Vpp and the vertical center; both describe the same signal."),
+            self.high_level: ("HighL", "Highest programmed waveform voltage. This is a generator setting/read-back, not a measured DUT voltage."),
+            self.low_level: ("LowL", "Lowest programmed waveform voltage. Vpp = HighL − LowL."),
+            self.vpp: ("Amplitude (Vpp)", "Peak-to-peak voltage: the difference between maximum and minimum level. A 2 mVpp sine at 0 V offset spans −1 mV to +1 mV."),
+            self.offset: ("Offset / DC level", "Moves the waveform vertically around zero. In DC mode this is the constant programmed output voltage."),
+            self.dut_impedance: ("Minimum DUT impedance", "Safety declaration used to estimate worst-case current. The Rigol does not measure DUT impedance; enter the lowest credible load impedance."),
+            self.phase: ("Phase", "Starting angular position of the waveform in degrees. The safe default is 0°. It matters mainly when comparing or synchronizing channels."),
+            self.duty: ("Square duty cycle", "Percentage of each period for which a square wave remains at HighL. 50% gives equal high and low durations."),
+            self.ramp_symmetry: ("Ramp symmetry", "Percentage of the period spent on the rising part of a ramp. 50% produces a symmetric triangle."),
+            self.pulse_width: ("Pulse width", "Time for which a pulse remains at its active/high level. It must fit within the selected period."),
+            self.pulse_leading: ("Leading-edge time", "Programmed transition time from LowL to HighL for a pulse."),
+            self.pulse_trailing: ("Trailing-edge time", "Programmed transition time from HighL to LowL for a pulse."),
+            self.load: ("Load setting", "Expected external load used by the generator to calculate displayed voltage. HIGHZ means a high-impedance load. This does not measure the real DUT impedance."),
+            self.output_polarity: ("Output polarity", "NORM preserves the waveform; INV inverts it around the configured offset."),
+            self.output_mode: ("Output mode", "NORM continuously follows the selected waveform. GAT makes output behavior depend on an external gate signal."),
+            self.gate_polarity: ("Gate polarity", "Selects which external gate level is considered active when gated output mode is used."),
+            self.sync_enabled: ("SYNC output", "Enables the rear-panel synchronization signal associated with this channel. It is a timing reference, not the analog waveform output."),
+            self.sync_polarity: ("SYNC polarity", "Selects normal or inverted polarity for the SYNC timing signal."),
+            self.sync_delay: ("SYNC delay", "Time shift applied between the waveform timing and its SYNC output."),
+            self.mod_enabled: ("Modulation", "Modulation varies a carrier parameter using another signal. Leave disabled for an ordinary sine, square, ramp or pulse."),
+            self.mod_type: ("Modulation type", "AM varies amplitude, FM frequency, PM phase; ASK/FSK/PSK switch between discrete states; PWM varies pulse width."),
+            self.mod_source: ("Modulation source", "INT uses the generator's internal modulating waveform. EXT uses a signal connected to the rear Mod/Trig connector."),
+            self.mod_rate: ("Modulation rate", "Repetition frequency of the internal modulating signal or digital state changes."),
+            self.mod_parameter: ("Modulation parameter", "Type-dependent amount, such as AM depth, FM deviation or PM deviation. Its meaning changes with Modulation type."),
+            self.mod_shape: ("Internal modulation shape", "Waveform used internally to vary the carrier when Source is INT."),
+            self.mod_polarity: ("Modulation polarity", "Defines the logical polarity for supported digital modulation types such as ASK/FSK/PSK."),
+            self.sweep_enabled: ("Frequency sweep", "Automatically changes frequency from Start to Stop. Leave disabled for a fixed-frequency signal."),
+            self.sweep_start: ("Sweep start", "Frequency at the beginning of the sweep."),
+            self.sweep_stop: ("Sweep stop", "Frequency at the end of the sweep. It may be above or below Start."),
+            self.sweep_duration: ("Sweep time", "Time used to traverse from the start frequency to the stop frequency."),
+            self.sweep_start_hold: ("Start hold", "Time spent at the start frequency before the sweep begins."),
+            self.sweep_stop_hold: ("Stop hold", "Time spent at the stop frequency after the sweep reaches it."),
+            self.sweep_return_time: ("Return time", "Time used to return from Stop to Start before the next sweep cycle."),
+            self.sweep_spacing: ("Sweep spacing", "LIN changes frequency linearly, LOG logarithmically, and STEP advances through discrete frequency points."),
+            self.sweep_steps: ("Sweep steps", "Number of discrete points used by STEP sweep mode."),
+            self.sweep_trigger: ("Sweep trigger source", "INT starts sweeps internally, EXT waits for the rear trigger input, and MAN waits for the Trigger sweep button."),
+            self.sweep_trigger_slope: ("Trigger slope", "Selects rising/positive or falling/negative edge of an external trigger."),
+            self.sweep_trigger_out: ("Trigger output", "Emits a timing signal so another instrument can synchronize with the sweep."),
+            self.burst_enabled: ("Burst", "Outputs a limited group of cycles after a trigger, or follows an external gate. Leave disabled for continuous output."),
+            self.burst_mode: ("Burst mode", "TRIG outputs the configured number of cycles after a trigger. GAT outputs while the external gate has the active level."),
+            self.burst_cycles: ("Burst cycles", "Number of complete carrier cycles emitted for each trigger in TRIG mode."),
+            self.burst_phase: ("Burst start phase", "Carrier phase at which each triggered burst begins."),
+            self.burst_period: ("Burst period", "Interval between internally triggered bursts. It is not the carrier waveform period."),
+            self.burst_delay: ("Burst delay", "Delay from the accepted trigger to the start of the burst."),
+            self.burst_trigger: ("Burst trigger source", "INT generates triggers internally, EXT uses the rear input, and MAN uses the Trigger burst button."),
+            self.burst_trigger_slope: ("Burst trigger slope", "Selects the active edge of the external burst trigger."),
+            self.burst_trigger_out: ("Burst trigger output", "Provides a trigger timing signal for synchronizing other instruments."),
+            self.burst_gate_polarity: ("Burst gate polarity", "Selects which level at the external gate input allows waveform output in GAT mode."),
+            self.burst_idle: ("Burst idle level", "Determines the output level between bursts: first point, top, center or bottom of the waveform."),
+            self.sync_phases_button: ("Synchronize phases", "Aligns the phase reference of CH1 and CH2. It does not enable either output."),
+            configure: ("Apply waveform safely", "Validates limits, forces the selected output OFF, writes only parameters relevant to the selected waveform and verifies read-back."),
+            shape_apply: ("Apply shape", "Applies the waveform together with its duty, symmetry or pulse-edge parameters while OUTPUT remains OFF."),
+            configure_output: ("Apply output path", "Configures load, polarity, gate and SYNC settings while OUTPUT remains OFF."),
+            output_on: (
+                "OUTPUT ON",
+                "Validates and applies the visible channel settings, performs an "
+                "internal short-lived safety arm and energizes the physical BNC output.",
+            ),
+            output_off: ("OUTPUT OFF", "Immediately requests the selected physical output to be disabled. No ARM is required."),
+        }
+        for widget, (title, description) in help_items.items():
+            self._set_help(widget, title, description)
+
+        tab_help = {
+            0: "Basic waveform selection, frequency/period and voltage levels. Start here for ordinary signals.",
+            1: "Parameters specific to square, ramp and pulse shapes. This tab appears only when relevant.",
+            2: "Physical output path, load model, polarity, SYNC and protected OUTPUT controls.",
+            3: "Optional modulation, frequency sweep and burst functions. Leave these disabled for normal continuous output.",
+        }
+        for index, description in tab_help.items():
+            self.control_tabs.setTabToolTip(index, description)
+        self.advanced.setTabToolTip(0, "Vary carrier amplitude, frequency, phase or digital state with an internal or external signal.")
+        self.advanced.setTabToolTip(1, "Automatically move carrier frequency between Start and Stop.")
+        self.advanced.setTabToolTip(2, "Generate finite cycle groups or externally gated waveform segments.")
+
+    @staticmethod
+    def _form_page(
+        title: str,
+        description: str,
+        rows: tuple[tuple[str, QWidget], ...],
+        actions: tuple[QPushButton, ...],
+    ) -> QScrollArea:
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll.setFrameShape(QFrame.Shape.NoFrame)
+        scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        content = QWidget()
+        content_layout = QVBoxLayout(content)
+        content_layout.setContentsMargins(18, 18, 18, 24)
+        content_layout.setSpacing(12)
+        heading = QLabel(title)
+        heading.setObjectName("sectionTitle")
+        content_layout.addWidget(heading)
+        help_text = QLabel(description)
+        help_text.setObjectName("muted")
+        help_text.setWordWrap(True)
+        content_layout.addWidget(help_text)
+        form = QFormLayout()
+        form.setFieldGrowthPolicy(QFormLayout.FieldGrowthPolicy.AllNonFixedFieldsGrow)
+        form.setRowWrapPolicy(QFormLayout.RowWrapPolicy.WrapLongRows)
+        form.setVerticalSpacing(12)
+        for label, widget in rows:
+            form.addRow(label, widget)
+        content_layout.addLayout(form)
+        action_grid = QGridLayout()
+        for index, button in enumerate(actions):
+            action_grid.addWidget(button, index // 2, index % 2)
+        content_layout.addLayout(action_grid)
+        content_layout.addStretch(1)
+        scroll.setWidget(content)
+        return scroll
+
+    def _rigol_limit_values(self, key: str) -> tuple[object, object]:
+        limits = self._station_settings.rigol.safety.channels[self.channel.currentText()].lab_limits
+        value = getattr(limits, key)
+        if key == "declared_dut_impedance":
+            return value.min, "no profile maximum"
+        return value.min, value.max
+
+    def _bounded(self, editor: QWidget, limit_key: str) -> LimitField:
+        minimum, maximum = self._rigol_limit_values(limit_key)
+        field = LimitField(editor, minimum, maximum)
+        field.setProperty("limitKey", limit_key)
+        self._limit_fields[editor] = field
+        return field
+
+    def _row_widget(self, editor: QWidget) -> QWidget:
+        return self._limit_fields.get(editor, editor)
+
+    def _refresh_rigol_limits(self, *_args: object) -> None:
+        for field in self._limit_fields.values():
+            key = str(field.property("limitKey"))
+            field.set_limits(*self._rigol_limit_values(key))
+
+    def set_settings(self, settings: StationSettings) -> None:
+        self._station_settings = settings
+        self._refresh_rigol_limits()
+
+    def configuration_snapshot(self) -> RigolConfigurationSnapshot:
+        """Return the visible carrier state without communicating with hardware."""
+
+        high, low = self._effective_levels()
+        return RigolConfigurationSnapshot(
+            channel=int(self.channel.currentText()),
+            waveform=self.waveform.currentText(),
+            frequency=self.frequency.text().strip(),
+            high_level=self._format_voltage(high),
+            low_level=self._format_voltage(low),
+            output_load=self.load.text().strip(),
+            phase_deg=self.phase.text().strip(),
+            square_duty_percent=self.duty.text().strip(),
+            ramp_symmetry_percent=self.ramp_symmetry.text().strip(),
+            pulse_width=self.pulse_width.text().strip(),
+            pulse_leading=self.pulse_leading.text().strip(),
+            pulse_trailing=self.pulse_trailing.text().strip(),
+            dut_min_impedance=self.dut_impedance.text().strip(),
+            output_polarity=self.output_polarity.currentText(),
+            output_mode=self.output_mode.currentText(),
+            gate_polarity=self.gate_polarity.currentText(),
+            sync_enabled=self.sync_enabled.isChecked(),
+            sync_polarity=self.sync_polarity.currentText(),
+            sync_delay=self.sync_delay.text().strip(),
+        )
+
+    @staticmethod
+    def _format_voltage(value_v: float) -> str:
+        if 0 < abs(value_v) < 1:
+            return f"{value_v * 1e3:.12g} mV"
+        return f"{value_v:.12g} V"
+
+    def set_capabilities(self, capabilities: object) -> None:
+        supports = getattr(capabilities, "supports", lambda _feature: False)
+        features = (
+            ("modulation", "MOD"),
+            ("frequency_sweep", "SWEEP"),
+            ("burst", "BURST"),
+            ("phase_sync", "PHASE SYNC"),
+        )
+        supported = [label for feature, label in features if supports(feature)]
+        # Advanced pages remain openable before a capability probe.  Actions
+        # themselves still verify capabilities before talking to the device.
+        for index in range(self.advanced.count()):
+            self.advanced.setTabEnabled(index, True)
+        self.sync_phases_button.setEnabled(bool(supports("phase_sync")))
+        self.capability_badge.setText("Capabilities: " + (" · ".join(supported) if supported else "no extensions"))
+
+    def _device_state_changed(self, state: str) -> None:
+        normalized = str(state).strip().lower()
+        colors = {
+            "verified": "#38d996",
+            "output_off": "#38d996",
+            "output_on": "#ffcc66",
+            "connecting": "#66b3ff",
+            "fault": "#ff657a",
+            "unknown": "#ff657a",
+            "disconnected": "#91a0b2",
+        }
+        self.device_state.setText(normalized.replace("_", " ").upper())
+        self.device_led.setStyleSheet(f"color: {colors.get(normalized, '#91a0b2')};")
+
+    def _update_dynamic_controls(self, *_args: object) -> None:
+        waveform = self.waveform.currentText()
+        is_dc = waveform == "DC"
+        has_time = waveform not in {"DC", "NOIS"}
+        high_low_mode = self.level_mode.currentText() == "HighL / LowL"
+
+        visibility = {
+            self.time_mode: has_time,
+            self.frequency: has_time and self.time_mode.currentText() == "Frequency",
+            self.period: has_time and self.time_mode.currentText() == "Period",
+            self.level_mode: not is_dc,
+            self.high_level: not is_dc and high_low_mode,
+            self.low_level: not is_dc and high_low_mode,
+            self.vpp: not is_dc and not high_low_mode,
+            self.offset: is_dc or not high_low_mode,
+            self.phase: waveform not in {"DC", "NOIS"},
+        }
+        for widget, visible in visibility.items():
+            self.basic_form.setRowVisible(self._row_widget(widget), visible)
+
+        shape_visibility = {
+            self.duty: waveform == "SQU",
+            self.ramp_symmetry: waveform == "RAMP",
+            self.pulse_width: waveform == "PULS",
+            self.pulse_leading: waveform == "PULS",
+            self.pulse_trailing: waveform == "PULS",
+        }
+        for widget, visible in shape_visibility.items():
+            self.shape_form.setRowVisible(widget, visible)
+        self.control_tabs.setTabVisible(1, any(shape_visibility.values()))
+        self.control_tabs.setTabVisible(3, not is_dc)
+        if is_dc and self.control_tabs.currentIndex() in {1, 3}:
+            self.control_tabs.setCurrentIndex(0)
+        self._update_preview()
+
+    def _effective_levels(self) -> tuple[float, float]:
+        if self.waveform.currentText() == "DC":
+            value = parse_quantity(self.offset.text(), DIMENSION_VOLTAGE).si_value
+            return value, value
+        if self.level_mode.currentText() == "Amplitude / Offset":
+            vpp = parse_quantity(self.vpp.text(), DIMENSION_VOLTAGE).si_value
+            offset = parse_quantity(self.offset.text(), DIMENSION_VOLTAGE).si_value
+            return offset + vpp / 2, offset - vpp / 2
+        return (
+            parse_quantity(self.high_level.text(), DIMENSION_VOLTAGE).si_value,
+            parse_quantity(self.low_level.text(), DIMENSION_VOLTAGE).si_value,
+        )
+
+    def _update_preview(self, *_args: object) -> None:
+        try:
+            high, low = self._effective_levels()
+        except Exception:
+            high, low = 1e-3, -1e-3
+        if high < low:
+            high, low = low, high
+        amplitude = (high - low) / 2
+        center = (high + low) / 2
+        waveform = self.waveform.currentText()
+        duty = self._bounded_number(self.duty.text(), 50.0, 0.01, 99.99) / 100
+        symmetry = self._bounded_number(self.ramp_symmetry.text(), 50.0, 0.01, 99.99) / 100
+        try:
+            frequency = parse_quantity(self.frequency.text(), DIMENSION_FREQUENCY).si_value
+            width = parse_quantity(self.pulse_width.text(), DIMENSION_TIME).si_value
+            pulse_duty = min(max(frequency * width, 0.001), 0.999)
+        except Exception:
+            pulse_duty = 0.2
+        x_values: list[float] = []
+        y_values: list[float] = []
+        for index in range(241):
+            x = index / 240
+            if waveform == "SIN":
+                value = center + amplitude * math.sin(2 * math.pi * x)
+            elif waveform == "SQU":
+                value = high if x % 1 < duty else low
+            elif waveform == "RAMP":
+                if x <= symmetry:
+                    value = low + (high - low) * x / symmetry
+                else:
+                    value = high - (high - low) * (x - symmetry) / (1 - symmetry)
+            elif waveform == "PULS":
+                value = high if x % 1 < pulse_duty else low
+            elif waveform == "NOIS":
+                noise = 0.58 * math.sin(2 * math.pi * 37 * x) + 0.28 * math.sin(2 * math.pi * 83 * x + 0.7)
+                value = center + amplitude * max(-1.0, min(1.0, noise))
+            elif waveform == "DC":
+                value = high
+            else:
+                value = center
+            x_values.append(x)
+            y_values.append(value)
+        self.preview_plot.set_trace("Waveform", x_values, y_values, color="#2196f3", primary=True)
+        if waveform == "DC":
+            title = f"CH{self.channel.currentText()} · DC · Offset {high:.6g} V"
+        else:
+            title = f"CH{self.channel.currentText()} · {waveform} · HighL {high:.6g} V · LowL {low:.6g} V"
+        self.preview_plot.set_title(title)
+
+    @staticmethod
+    def _bounded_number(text: str, fallback: float, minimum: float, maximum: float) -> float:
+        try:
+            value = float(text.replace(",", "."))
+        except ValueError:
+            value = fallback
+        return min(max(value, minimum), maximum)
+
+    def _sync_vpp_offset_from_levels(self) -> None:
+        if self._level_syncing:
+            return
+        try:
+            high = parse_quantity(self.high_level.text(), DIMENSION_VOLTAGE).si_value
+            low = parse_quantity(self.low_level.text(), DIMENSION_VOLTAGE).si_value
+        except Exception:
+            return
+        self._level_syncing = True
+        try:
+            self.vpp.setText(self._format_voltage(high - low))
+            self.offset.setText(self._format_voltage((high + low) / 2))
+        finally:
+            self._level_syncing = False
+        self._update_preview()
+
+    def _sync_levels_from_vpp_offset(self) -> None:
+        if self._level_syncing:
+            return
+        try:
+            offset = parse_quantity(self.offset.text(), DIMENSION_VOLTAGE).si_value
+            vpp = (
+                0.0
+                if self.waveform.currentText() == "DC"
+                else parse_quantity(self.vpp.text(), DIMENSION_VOLTAGE).si_value
+            )
+        except Exception:
+            return
+        self._level_syncing = True
+        try:
+            self.high_level.setText(self._format_voltage(offset + vpp / 2))
+            self.low_level.setText(self._format_voltage(offset - vpp / 2))
+        finally:
+            self._level_syncing = False
+        self._update_preview()
+
+    def _sync_period_from_frequency(self) -> None:
+        if self._time_syncing:
+            return
+        try:
+            frequency = parse_quantity(self.frequency.text(), DIMENSION_FREQUENCY).si_value
+            if frequency <= 0:
+                return
+        except Exception:
+            return
+        self._time_syncing = True
+        try:
+            period = 1 / frequency
+            if period < 1e-6:
+                self.period.setText(f"{period * 1e9:.12g} ns")
+            elif period < 1e-3:
+                self.period.setText(f"{period * 1e6:.12g} us")
+            elif period < 1:
+                self.period.setText(f"{period * 1e3:.12g} ms")
+            else:
+                self.period.setText(f"{period:.12g} s")
+        finally:
+            self._time_syncing = False
+
+    def _sync_frequency_from_period(self) -> None:
+        if self._time_syncing:
+            return
+        try:
+            period = parse_quantity(self.period.text(), DIMENSION_TIME).si_value
+            if period <= 0:
+                return
+        except Exception:
+            return
+        self._time_syncing = True
+        try:
+            frequency = 1 / period
+            if frequency >= 1e6:
+                self.frequency.setText(f"{frequency / 1e6:.12g} MHz")
+            elif frequency >= 1e3:
+                self.frequency.setText(f"{frequency / 1e3:.12g} kHz")
+            else:
+                self.frequency.setText(f"{frequency:.12g} Hz")
+        finally:
+            self._time_syncing = False
+
+    def _modulation_tab(self) -> QWidget:
+        tab = QWidget()
+        form = QFormLayout(tab)
+        self.mod_enabled = QCheckBox("Modulation enabled")
+        self.mod_type = QComboBox()
+        self.mod_type.addItems(["AM", "FM", "PM", "ASK", "FSK", "PSK", "PWM"])
+        self.mod_source = QComboBox()
+        self.mod_source.addItems(["INT", "EXT"])
+        self.mod_rate = _line("1 kHz")
+        self.mod_parameter = _line("50")
+        self.mod_shape = QComboBox()
+        self.mod_shape.addItems(["SIN", "SQU", "RAMP", "NOIS", "ARB"])
+        self.mod_polarity = QComboBox()
+        self.mod_polarity.addItems(["POS", "NEG"])
+        apply = QPushButton("Apply modulation while OUTPUT is OFF")
+        for label, widget in (
+            ("State", self.mod_enabled),
+            ("Typ", self.mod_type),
+            ("Source", self.mod_source),
+                ("Rate / freq.", self._bounded(self.mod_rate, "modulation_rate")),
+            ("Type parameter", self.mod_parameter),
+            ("Internal shape", self.mod_shape),
+            ("Polarity", self.mod_polarity),
+            ("", apply),
+        ):
+            form.addRow(label, widget)
+        apply.clicked.connect(self.configure_modulation)
+        self._set_help(apply, "Apply modulation", "Validates and applies modulation settings while the physical output remains OFF.")
+        return self._scroll_widget(tab)
+
+    def _sweep_tab(self) -> QWidget:
+        tab = QWidget()
+        form = QFormLayout(tab)
+        self.sweep_enabled = QCheckBox("Sweep enabled")
+        self.sweep_start = _line("100 Hz")
+        self.sweep_stop = _line("1 kHz")
+        self.sweep_duration = _line("1 s")
+        self.sweep_start_hold = _line("0 s")
+        self.sweep_stop_hold = _line("0 s")
+        self.sweep_return_time = _line("0 s")
+        self.sweep_spacing = QComboBox()
+        self.sweep_spacing.addItems(["LIN", "LOG", "STEP"])
+        self.sweep_steps = QSpinBox()
+        self.sweep_steps.setRange(2, 1_000_000)
+        self.sweep_steps.setValue(10)
+        self.sweep_trigger = QComboBox()
+        self.sweep_trigger.addItems(["INT", "EXT", "MAN"])
+        self.sweep_trigger_slope = QComboBox()
+        self.sweep_trigger_slope.addItems(["POS", "NEG"])
+        self.sweep_trigger_out = QCheckBox("Trigger output")
+        apply = QPushButton("Apply sweep while OUTPUT is OFF")
+        trigger = QPushButton("Trigger sweep")
+        for label, widget in (
+            ("State", self.sweep_enabled),
+            ("Start", self._bounded(self.sweep_start, "frequency")),
+            ("Stop", self._bounded(self.sweep_stop, "frequency")),
+            ("Time", self._bounded(self.sweep_duration, "sweep_duration")),
+            ("Hold start", self.sweep_start_hold),
+            ("Hold stop", self.sweep_stop_hold),
+            ("Return time", self.sweep_return_time),
+            ("Spacing", self.sweep_spacing),
+            ("Steps", self._bounded(self.sweep_steps, "sweep_steps")),
+            ("Trigger source", self.sweep_trigger),
+            ("Trigger slope", self.sweep_trigger_slope),
+            ("", self.sweep_trigger_out),
+            ("", apply),
+            ("", trigger),
+        ):
+            form.addRow(label, widget)
+        apply.clicked.connect(self.configure_sweep)
+        trigger.clicked.connect(lambda: self._controller.call("trigger_sweep", int(self.channel.currentText())))
+        self._set_help(apply, "Apply sweep", "Validates and programs the sweep while the physical output remains OFF.")
+        self._set_help(trigger, "Manual sweep trigger", "Starts one sweep when Trigger source is MAN. It does not bypass output safety interlocks.")
+        return self._scroll_widget(tab)
+
+    def _burst_tab(self) -> QWidget:
+        tab = QWidget()
+        form = QFormLayout(tab)
+        self.burst_enabled = QCheckBox("Burst enabled")
+        self.burst_mode = QComboBox()
+        self.burst_mode.addItems(["TRIG", "GAT"])
+        self.burst_cycles = QSpinBox()
+        self.burst_cycles.setRange(1, 1_000_000)
+        self.burst_cycles.setValue(1)
+        self.burst_phase = _line("0")
+        self.burst_period = _line("1 ms")
+        self.burst_delay = _line("0 s")
+        self.burst_trigger = QComboBox()
+        self.burst_trigger.addItems(["INT", "EXT", "MAN"])
+        self.burst_trigger_slope = QComboBox()
+        self.burst_trigger_slope.addItems(["POS", "NEG"])
+        self.burst_trigger_out = QCheckBox("Trigger output")
+        self.burst_gate_polarity = QComboBox()
+        self.burst_gate_polarity.addItems(["POS", "NEG"])
+        self.burst_idle = QComboBox()
+        self.burst_idle.addItems(["FPT", "TOP", "CENT", "BOT"])
+        apply = QPushButton("Apply burst while OUTPUT is OFF")
+        trigger = QPushButton("Trigger burst")
+        for label, widget in (
+            ("State", self.burst_enabled),
+            ("Mode", self.burst_mode),
+            ("Cycles", self._bounded(self.burst_cycles, "burst_cycles")),
+            ("Phase [deg]", self.burst_phase),
+            ("Period", self._bounded(self.burst_period, "burst_period")),
+            ("Delay", self.burst_delay),
+            ("Trigger source", self.burst_trigger),
+            ("Trigger slope", self.burst_trigger_slope),
+            ("", self.burst_trigger_out),
+            ("Gate polarity", self.burst_gate_polarity),
+            ("Idle", self.burst_idle),
+            ("", apply),
+            ("", trigger),
+        ):
+            form.addRow(label, widget)
+        apply.clicked.connect(self.configure_burst)
+        trigger.clicked.connect(lambda: self._controller.call("trigger_burst", int(self.channel.currentText())))
+        self._set_help(apply, "Apply burst", "Validates and programs burst settings while the physical output remains OFF.")
+        self._set_help(trigger, "Manual burst trigger", "Emits one configured burst when Trigger source is MAN.")
+        return self._scroll_widget(tab)
+
+    @staticmethod
+    def _scroll_widget(content: QWidget) -> QScrollArea:
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll.setFrameShape(QFrame.Shape.NoFrame)
+        scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        scroll.setWidget(content)
+        return scroll
+
+    def configure(self) -> None:
+        try:
+            high_level, low_level = self._effective_levels()
+            frequency_hz = (
+                1.0
+                if self.waveform.currentText() in {"DC", "NOIS"}
+                else parse_quantity(self.frequency.text(), DIMENSION_FREQUENCY).si_value
+            )
+            config = RigolChannelConfig(
+                channel=int(self.channel.currentText()),
+                waveform=self.waveform.currentText(),
+                frequency_hz=frequency_hz,
+                high_level_v=high_level,
+                low_level_v=low_level,
+                output_load=self.load.text().strip(),
+                phase_deg=float(self.phase.text().replace(",", ".")),
+                square_duty_percent=float(self.duty.text().replace(",", ".")) if self.waveform.currentText() == "SQU" else None,
+                ramp_symmetry_percent=float(self.ramp_symmetry.text().replace(",", ".")) if self.waveform.currentText() == "RAMP" else None,
+                pulse_width_s=parse_quantity(self.pulse_width.text(), DIMENSION_TIME).si_value if self.waveform.currentText() == "PULS" else None,
+                pulse_leading_s=parse_quantity(self.pulse_leading.text(), DIMENSION_TIME).si_value if self.waveform.currentText() == "PULS" else None,
+                pulse_trailing_s=parse_quantity(self.pulse_trailing.text(), DIMENSION_TIME).si_value if self.waveform.currentText() == "PULS" else None,
+                dut_min_impedance_ohm=parse_quantity(self.dut_impedance.text(), DIMENSION_RESISTANCE).si_value,
+            )
+            validate_rigol_waveform(
+                channel=self._station_settings.rigol.safety.channels[self.channel.currentText()],
+                safety=self._station_settings.rigol.safety,
+                waveform=config.waveform,
+                frequency=config.frequency_hz,
+                high_level=config.high_level_v,
+                low_level=config.low_level_v,
+                output_load=config.output_load,
+                dut_min_impedance=config.dut_min_impedance_ohm,
+            )
+        except Exception as exc:
+            self.banner.show_message(f"Invalid waveform settings: {exc}")
+            return
+        self._controller.call("configure", config)
+
+    def configure_output(self) -> None:
+        try:
+            config = RigolOutputConfig(
+                channel=int(self.channel.currentText()),
+                output_load=self.load.text().strip(),
+                polarity=self.output_polarity.currentText(),  # type: ignore[arg-type]
+                mode=self.output_mode.currentText(),  # type: ignore[arg-type]
+                gate_polarity=self.gate_polarity.currentText(),  # type: ignore[arg-type]
+                sync_enabled=self.sync_enabled.isChecked(),
+                sync_polarity=self.sync_polarity.currentText(),  # type: ignore[arg-type]
+                sync_delay_s=parse_quantity(self.sync_delay.text(), DIMENSION_TIME).si_value,
+            )
+        except Exception as exc:
+            QMessageBox.warning(self, "Output Rigol", str(exc))
+            return
+        self._controller.call("configure_output", config)
+
+    def configure_modulation(self) -> None:
+        try:
+            config = RigolModulationConfig(
+                channel=int(self.channel.currentText()),
+                enabled=self.mod_enabled.isChecked(),
+                modulation_type=self.mod_type.currentText(),  # type: ignore[arg-type]
+                source=self.mod_source.currentText(),  # type: ignore[arg-type]
+                rate_hz=parse_quantity(self.mod_rate.text(), DIMENSION_FREQUENCY).si_value,
+                parameter=float(self.mod_parameter.text().replace(",", ".")),
+                internal_shape=self.mod_shape.currentText(),  # type: ignore[arg-type]
+                polarity=self.mod_polarity.currentText(),  # type: ignore[arg-type]
+            )
+        except Exception as exc:
+            QMessageBox.warning(self, "Rigol modulation", str(exc))
+            return
+        self._controller.call("configure_modulation", config)
+
+    def configure_sweep(self) -> None:
+        try:
+            config = RigolFrequencySweepConfig(
+                channel=int(self.channel.currentText()),
+                enabled=self.sweep_enabled.isChecked(),
+                start_hz=parse_quantity(self.sweep_start.text(), DIMENSION_FREQUENCY).si_value,
+                stop_hz=parse_quantity(self.sweep_stop.text(), DIMENSION_FREQUENCY).si_value,
+                duration_s=parse_quantity(self.sweep_duration.text(), "time").si_value,
+                spacing=self.sweep_spacing.currentText(),  # type: ignore[arg-type]
+                steps=self.sweep_steps.value(),
+                start_hold_s=parse_quantity(self.sweep_start_hold.text(), DIMENSION_TIME).si_value,
+                stop_hold_s=parse_quantity(self.sweep_stop_hold.text(), DIMENSION_TIME).si_value,
+                return_time_s=parse_quantity(self.sweep_return_time.text(), DIMENSION_TIME).si_value,
+                trigger_source=self.sweep_trigger.currentText(),  # type: ignore[arg-type]
+                trigger_slope=self.sweep_trigger_slope.currentText(),  # type: ignore[arg-type]
+                trigger_output=self.sweep_trigger_out.isChecked(),
+            )
+            validate_rigol_frequency_sweep(
+                channel=self._station_settings.rigol.safety.channels[self.channel.currentText()],
+                start_hz=config.start_hz,
+                stop_hz=config.stop_hz,
+                duration_s=config.duration_s,
+                steps=config.steps,
+                start_hold_s=config.start_hold_s,
+                stop_hold_s=config.stop_hold_s,
+                return_time_s=config.return_time_s,
+            )
+        except Exception as exc:
+            QMessageBox.warning(self, "Sweep Rigol", str(exc))
+            return
+        self._controller.call("configure_sweep", config)
+
+    def configure_burst(self) -> None:
+        try:
+            config = RigolBurstConfig(
+                channel=int(self.channel.currentText()),
+                enabled=self.burst_enabled.isChecked(),
+                mode=self.burst_mode.currentText(),  # type: ignore[arg-type]
+                cycles=self.burst_cycles.value(),
+                phase_deg=float(self.burst_phase.text().replace(",", ".")),
+                period_s=parse_quantity(self.burst_period.text(), "time").si_value,
+                delay_s=parse_quantity(self.burst_delay.text(), "time").si_value,
+                trigger_source=self.burst_trigger.currentText(),  # type: ignore[arg-type]
+                trigger_slope=self.burst_trigger_slope.currentText(),  # type: ignore[arg-type]
+                trigger_output=self.burst_trigger_out.isChecked(),
+                gate_polarity=self.burst_gate_polarity.currentText(),  # type: ignore[arg-type]
+                idle=self.burst_idle.currentText(),  # type: ignore[arg-type]
+            )
+        except Exception as exc:
+            QMessageBox.warning(self, "Burst Rigol", str(exc))
+            return
+        self._controller.call("configure_burst", config)
+
+    def arm_output(self) -> None:
+        channel = self.channel.currentText()
+        answer = QMessageBox.question(
+            self,
+            "ARM Rigol",
+            f"Arm Rigol CH{channel} for 30 seconds? This does not enable the output yet.",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.Cancel,
+        )
+        if answer == QMessageBox.StandardButton.Yes:
+            self._controller.call("arm", int(channel))
+
+    def request_output(self, enabled: bool) -> None:
+        channel = int(self.channel.currentText())
+        if not enabled:
+            self._pending_output_enable = False
+            self._controller.call("set_output", (channel, False))
+            return
+        if self._pending_output_enable:
+            return
+        self._pending_output_enable = True
+        self.output_on.setEnabled(False)
+        self.status.emit(
+            f"Rigol CH{channel}: validating visible settings before OUTPUT ON"
+        )
+        self.configure()
+
+    def _result(self, operation: str, result: object) -> None:
+        if operation == "configure" and hasattr(result, "peak_absolute_current_a"):
+            estimate = result
+            self.estimate.setText(
+                "Estimated load current (not measured): "
+                f"{estimate.peak_absolute_current_a * 1e3:.6g} mA; "
+                f"estimated DUT power: {estimate.peak_estimated_dut_power_w * 1e3:.6g} mW; "
+                f"Vth High/Low: {estimate.open_circuit_high_v:.6g} / {estimate.open_circuit_low_v:.6g} V"
+            )
+            if self._pending_output_enable:
+                channel = int(self.channel.currentText())
+                self.status.emit(
+                    f"Rigol CH{channel}: settings valid; applying internal safety arm"
+                )
+                self._controller.call("arm", channel)
+            else:
+                self.status.emit("Rigol configured while OUTPUT is OFF")
+        elif operation in {"configure_modulation", "configure_sweep", "configure_burst"}:
+            self.status.emit(f"Rigol: {operation} configured while OUTPUT is OFF")
+        elif operation == "configure_output":
+            self.status.emit("Rigol: output path confirmed while OUTPUT is OFF")
+        elif operation == "arm":
+            if self._pending_output_enable:
+                channel = int(self.channel.currentText())
+                self.status.emit(f"Rigol CH{channel}: enabling OUTPUT")
+                self._controller.call("set_output", (channel, True))
+            else:
+                self.status.emit("Rigol armed for 30 seconds")
+        elif operation == "set_output":
+            self._pending_output_enable = False
+            self.output_on.setEnabled(True)
+            self.status.emit(
+                f"Rigol CH{self.channel.currentText()} OUTPUT "
+                f"{'ON' if bool(result) else 'OFF'}"
+            )
+        elif operation == "synchronize_phases":
+            self.status.emit("Rigol: CH1/CH2 phases synchronized after capability confirmation")
+
+    def _error(self, operation: str, error: str) -> None:
+        if operation in {
+            "configure",
+            "set_output",
+            "arm",
+            "configure_modulation",
+            "configure_output",
+            "configure_sweep",
+            "configure_burst",
+            "trigger_sweep",
+            "trigger_burst",
+            "synchronize_phases",
+        }:
+            if operation in {"configure", "arm", "set_output"}:
+                self._pending_output_enable = False
+                self.output_on.setEnabled(True)
+            QMessageBox.warning(self, "Rigol", error)
+
+

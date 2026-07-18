@@ -10,6 +10,7 @@ from app.domain.quantities import (
     DIMENSION_CURRENT,
     DIMENSION_DBM,
     DIMENSION_FREQUENCY,
+    DIMENSION_MAGNETIC_FIELD,
     DIMENSION_TIME,
     DIMENSION_VOLTAGE,
 )
@@ -139,6 +140,11 @@ _DESCRIPTORS: Final[tuple[ParameterDescriptor, ...]] = (
         "Anritsu Spectrum", "Spectrum · reference level",
         DIMENSION_DBM, "dBm",
     ),
+    ParameterDescriptor(
+        "moke_box.field_target", "moke_box", "MOKE Box",
+        "MOKE Box field target", "MOKE Box", "Magnetic field target",
+        DIMENSION_MAGNETIC_FIELD, "T",
+    ),
 )
 
 PARAMETER_DESCRIPTORS: Final = _DESCRIPTORS
@@ -196,6 +202,7 @@ def legacy_ui_parameter_definitions() -> tuple[dict[str, str], ...]:
                 "anritsu.spectrum.start_frequency",
                 "anritsu.spectrum.stop_frequency",
                 "anritsu.spectrum.reference_level",
+                "moke_box.field_target",
             )
         )
     }
@@ -216,3 +223,30 @@ def legacy_ui_parameter_definitions() -> tuple[dict[str, str], ...]:
         }
         for descriptor in descriptors
     )
+
+
+def parameter_definitions_for_module(module_key: str) -> tuple[dict[str, str], ...]:
+    """Return the recipe controls exposed by one registered device module."""
+
+    return tuple(
+        definition
+        for definition in legacy_ui_parameter_definitions()
+        if PARAMETERS_BY_TARGET[definition["target"]].device_module == module_key
+    )
+
+
+# Transitional compatibility surface for the existing Qt recipe editor.  It
+# belongs to the recipe domain, not to the UI package of any particular device.
+SWEEPABLE_PARAMETERS: Final[tuple[dict[str, str], ...]] = legacy_ui_parameter_definitions()
+
+
+def sweep_default(dimension: str) -> tuple[str, str]:
+    """Return conservative editor defaults for a registered sweep dimension."""
+
+    return {
+        DIMENSION_CURRENT: ("0 A", "1 mA"),
+        DIMENSION_VOLTAGE: ("0 V", "10 mV"),
+        DIMENSION_FREQUENCY: ("1 kHz", "10 kHz"),
+        DIMENSION_DBM: ("-30 dBm", "0 dBm"),
+        DIMENSION_MAGNETIC_FIELD: ("0 mT", "1 mT"),
+    }[dimension]

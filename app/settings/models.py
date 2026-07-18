@@ -420,10 +420,56 @@ class AnritsuSettings(StrictModel):
         return self
 
 
+class MokeBoxSettings(StrictModel):
+    """MOKE Box profile; output control stays fail-closed until qualified."""
+
+    enabled: bool = False
+    display_name: str = "MOKE Box"
+    endpoint: str | None = None
+    timeout: str = "3 s"
+    expected_model: str | None = None
+    protocol_qualified: bool = False
+    allow_vout_control: bool = False
+    allowed_vout_channels: tuple[int, ...] = ()
+
+    @model_validator(mode="after")
+    def validate_timeout(self) -> "MokeBoxSettings":
+        if parse_quantity(self.timeout, DIMENSION_TIME).si_value <= 0:
+            raise ValueError("MOKE Box timeout must be positive")
+        if self.allow_vout_control and not self.protocol_qualified:
+            raise ValueError("MOKE VOUT control requires protocol_qualified: true")
+        if any(channel not in range(8) for channel in self.allowed_vout_channels):
+            raise ValueError("MOKE VOUT channels must be in 0..7")
+        return self
+
+
+class LakeShoreGaussmeterSettings(StrictModel):
+    """Reserved, fail-closed profile surface for Model 425/475 integration."""
+
+    enabled: Literal[False] = False
+    display_name: str = "Lake Shore Gaussmeter"
+    model: Literal["425", "475"] = "475"
+    connection: Literal["visa", "tcp", "usb"] = "visa"
+    resource: str | None = None
+    timeout: str = "3 s"
+    expected_vendor_contains: str = "LAKE SHORE"
+    expected_serial: str | None = None
+
+    @model_validator(mode="after")
+    def validate_timeout(self) -> "LakeShoreGaussmeterSettings":
+        if parse_quantity(self.timeout, DIMENSION_TIME).si_value <= 0:
+            raise ValueError("Lake Shore timeout must be positive")
+        return self
+
+
 class DevicesSettings(StrictModel):
     rigol: RigolSettings
     keithley: KeithleySettings
     anritsu: AnritsuSettings
+    moke_box: MokeBoxSettings = Field(default_factory=MokeBoxSettings)
+    lakeshore_gaussmeter: LakeShoreGaussmeterSettings = Field(
+        default_factory=LakeShoreGaussmeterSettings
+    )
 
 
 class StationSettings(StrictModel):
@@ -459,3 +505,11 @@ class StationSettings(StrictModel):
     @property
     def anritsu(self) -> AnritsuSettings:
         return self.devices.anritsu
+
+    @property
+    def moke_box(self) -> MokeBoxSettings:
+        return self.devices.moke_box
+
+    @property
+    def lakeshore_gaussmeter(self) -> LakeShoreGaussmeterSettings:
+        return self.devices.lakeshore_gaussmeter

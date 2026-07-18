@@ -14,6 +14,7 @@ from app.devices.anritsu.adapter import AnritsuAdapter
 from app.devices.base import DeviceAdapter
 from app.devices.keithley.adapter import KeithleyAdapter
 from app.devices.rigol.adapter import RigolAdapter
+from app.contracts import OperationDispatcher
 from app.engine.compiler import RecipeCompiler
 from app.engine.estimation import PlanEstimator
 from app.recipes import parse_recipe_text
@@ -73,9 +74,14 @@ class InstrumentWorker(QObject):
     shutdown_complete = Signal()
     traffic = Signal(str)
 
-    def __init__(self, adapter: DeviceAdapter) -> None:
+    def __init__(
+        self,
+        adapter: DeviceAdapter,
+        dispatcher: OperationDispatcher | None = None,
+    ) -> None:
         super().__init__()
         self._adapter = adapter
+        self._dispatcher = dispatcher
         self._attach_traffic_logger()
 
     def _attach_traffic_logger(self) -> None:
@@ -159,6 +165,10 @@ class InstrumentWorker(QObject):
             return self._adapter.disconnect()
         if operation == "emergency_off":
             return self._adapter.emergency_off()
+        if self._dispatcher is not None:
+            return self._dispatcher(self._adapter, operation, payload)
+        # Compatibility path for existing callers that construct a controller
+        # without a module manifest. New code must pass DeviceModule.dispatch.
         if isinstance(self._adapter, RigolAdapter):
             if operation == "configure":
                 return self._adapter.configure_channel(payload)  # type: ignore[arg-type]
@@ -235,11 +245,17 @@ class DeviceController(QObject):
     capabilities_changed = Signal(object)
     traffic = Signal(str)
 
-    def __init__(self, adapter: DeviceAdapter, parent: QObject | None = None) -> None:
+    def __init__(
+        self,
+        adapter: DeviceAdapter,
+        parent: QObject | None = None,
+        *,
+        dispatcher: OperationDispatcher | None = None,
+    ) -> None:
         super().__init__(parent)
         self._operation_guard: Callable[[str, object], None] | None = None
         self._thread = QThread(self)
-        self._worker = InstrumentWorker(adapter)
+        self._worker = InstrumentWorker(adapter, dispatcher=dispatcher)
         self._worker.moveToThread(self._thread)
         self.request.connect(self._worker.execute, Qt.ConnectionType.QueuedConnection)
         self._worker.completed.connect(self.result)

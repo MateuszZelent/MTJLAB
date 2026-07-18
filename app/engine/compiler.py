@@ -376,6 +376,11 @@ class RecipeCompiler:
                 for child in node.children:
                     self._visit(child, nested, actions, is_finally=is_finally)
             return
+        if node.type == "configure_moke_box":
+            raise ConfigurationError(
+                f"{node.id}: MOKE field sweeps require a hardware-qualified field "
+                "transfer function. The reconstructed protocol only confirms raw VOUT."
+            )
         if node.type == "repeat":
             for index in range(int(node.data["count"])):
                 self._check_cancelled()

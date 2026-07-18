@@ -40,6 +40,7 @@ ACTION_TYPES: Final[frozenset[str]] = frozenset(
         "configure_anritsu",
         "configure_anritsu_advanced",
         "configure_anritsu_sg",
+        "configure_moke_box",
         "arm_anritsu_sg_output",
         "set_anritsu_sg_output",
         "arm_rigol_output",
