@@ -54,6 +54,7 @@ _ROLE_PERMISSIONS: dict[Role, frozenset[Permission]] = {
             Permission.EDIT_SETTINGS,
             Permission.APPROVE_PROFILE,
             Permission.ASSIGN_VISA,
+            Permission.MANAGE_ROLES,
         }
     ),
     Role.SERVICE: frozenset(Permission),

@@ -5,20 +5,34 @@ from __future__ import annotations
 from copy import deepcopy
 from datetime import datetime, timezone
 import json
-from typing import Any
+from types import UnionType
+from typing import Any, Literal, Union, get_args, get_origin
+
+from pydantic import BaseModel, ValidationError
 
 from PySide6.QtCore import QTimer, Qt, Signal
+from PySide6.QtGui import QColor, QPalette, QPen
 from PySide6.QtWidgets import (
     QHBoxLayout,
     QHeaderView,
     QDialog,
     QDialogButtonBox,
+    QCheckBox,
+    QComboBox,
     QFileDialog,
     QInputDialog,
     QLabel,
+    QLineEdit,
     QMessageBox,
     QPlainTextEdit,
     QPushButton,
+    QFormLayout,
+    QGroupBox,
+    QScrollArea,
+    QSpinBox,
+    QStyle,
+    QStyledItemDelegate,
+    QStyleOptionViewItem,
     QTabWidget,
     QTableWidget,
     QTableWidgetItem,
@@ -30,6 +44,18 @@ from PySide6.QtWidgets import (
 )
 
 from app.domain.errors import AuthorizationError, ConfigurationError
+from app.domain.quantities import (
+    DIMENSION_CURRENT,
+    DIMENSION_DB,
+    DIMENSION_DBM,
+    DIMENSION_FREQUENCY,
+    DIMENSION_POWER,
+    DIMENSION_RESISTANCE,
+    DIMENSION_TIME,
+    DIMENSION_VOLTAGE,
+    QuantityError,
+    parse_quantity,
+)
 from app.security import AccessPolicy, Permission
 from app.settings import SettingsRepository
 from app.settings.diagnostics import (
@@ -38,6 +64,39 @@ from app.settings.diagnostics import (
     structural_diff,
 )
 from app.settings.models import StationSettings
+
+
+_LIMIT_VALIDATION_MESSAGE_ROLE = int(Qt.ItemDataRole.UserRole) + 101
+
+
+class _SafetyLimitValidationDelegate(QStyledItemDelegate):
+    """Paint validation failures above stylesheet-driven table selection colours."""
+
+    def createEditor(self, parent: QWidget, option: QStyleOptionViewItem, index: Any) -> QWidget:
+        editor = QLineEdit(parent)
+        editor.setPlaceholderText("e.g. 10 mA")
+        editor.setStyleSheet(
+            "QLineEdit { background: #ffffff; color: #101820; border: 2px solid #1976bd; "
+            "border-radius: 4px; padding: 2px 5px; selection-background-color: #1976bd; "
+            "selection-color: #ffffff; }"
+        )
+        return editor
+
+    def paint(self, painter: Any, option: QStyleOptionViewItem, index: Any) -> None:
+        message = index.data(_LIMIT_VALIDATION_MESSAGE_ROLE)
+        if not message:
+            super().paint(painter, option, index)
+            return
+        highlighted = QStyleOptionViewItem(option)
+        highlighted.state &= ~QStyle.StateFlag.State_Selected
+        highlighted.palette.setColor(QPalette.ColorRole.Base, QColor("#ffe1e6"))
+        highlighted.palette.setColor(QPalette.ColorRole.AlternateBase, QColor("#ffe1e6"))
+        highlighted.palette.setColor(QPalette.ColorRole.Text, QColor("#8d1024"))
+        super().paint(painter, highlighted, index)
+        painter.save()
+        painter.setPen(QPen(QColor("#d32645"), 2))
+        painter.drawRect(option.rect.adjusted(1, 1, -2, -2))
+        painter.restore()
 
 
 class SettingsPage(QWidget):
@@ -77,6 +136,11 @@ class SettingsPage(QWidget):
         self._raw: dict[str, Any] = {}
         self._persisted_raw: dict[str, Any] = {}
         self._settings: StationSettings | None = None
+        self._choice_editors: dict[tuple[str | int, ...], QComboBox] = {}
+        self._form_editors: dict[tuple[str | int, ...], QWidget] = {}
+        self._field_errors: dict[tuple[str | int, ...], QLabel] = {}
+        self._limit_error_items: list[QTableWidgetItem] = []
+        self._limit_items_by_path: dict[tuple[str | int, ...], QTableWidgetItem] = {}
         self._changing = False
         self._dirty = False
         self._autosave_timer = QTimer(self)
@@ -97,6 +161,7 @@ class SettingsPage(QWidget):
 
         self.tabs = QTabWidget()
         self.trees: dict[str, QTreeWidget] = {}
+        self.forms: dict[str, QScrollArea] = {}
         for key, label in (
             ("general", "General"),
             ("rigol", "Rigol"),
@@ -108,12 +173,18 @@ class SettingsPage(QWidget):
             tree.setAlternatingRowColors(True)
             tree.itemChanged.connect(self._changed)
             self.trees[key] = tree
-            self.tabs.addTab(tree, label)
+            form = QScrollArea()
+            form.setObjectName("settingsForm")
+            form.setWidgetResizable(True)
+            form.setFrameShape(QScrollArea.Shape.NoFrame)
+            self.forms[key] = form
+            self.tabs.addTab(form, label)
         self.limits_table = QTableWidget(0, 7)
         self.limits_table.setHorizontalHeaderLabels(
             ["Device / scope", "Parameter", "Minimum", "Maximum", "Unit", "Default", "Source"]
         )
         self.limits_table.setAlternatingRowColors(True)
+        self.limits_table.setItemDelegate(_SafetyLimitValidationDelegate(self.limits_table))
         self.limits_table.setSelectionBehavior(QTableWidget.SelectionBehavior.SelectRows)
         self.limits_table.verticalHeader().setVisible(False)
         limits_header = self.limits_table.horizontalHeader()
@@ -134,9 +205,11 @@ class SettingsPage(QWidget):
         self.role_table.horizontalHeader().setSectionResizeMode(0, QHeaderView.ResizeMode.Stretch)
         self.role_table.horizontalHeader().setSectionResizeMode(1, QHeaderView.ResizeMode.Stretch)
         role_buttons = QHBoxLayout()
-        self.add_role_button = QPushButton("Add assignment…")
-        self.remove_role_button = QPushButton("Remove assignment")
+        self.add_role_button = QPushButton("Add user…")
+        self.edit_role_button = QPushButton("Edit selected…")
+        self.remove_role_button = QPushButton("Remove selected")
         role_buttons.addWidget(self.add_role_button)
+        role_buttons.addWidget(self.edit_role_button)
         role_buttons.addWidget(self.remove_role_button)
         role_buttons.addStretch(1)
         roles_layout.addWidget(self.roles_info)
@@ -184,6 +257,7 @@ class SettingsPage(QWidget):
         self.save_button.clicked.connect(self.save_draft)
         self.approve_button.clicked.connect(self.approve_profile)
         self.add_role_button.clicked.connect(self._add_role_assignment)
+        self.edit_role_button.clicked.connect(self._edit_role_assignment)
         self.remove_role_button.clicked.connect(self._remove_role_assignment)
         refresh_diagnostics.clicked.connect(self._refresh_diagnostics)
         export_diagnostics.clicked.connect(self.export_redacted_configuration)
@@ -224,10 +298,12 @@ class SettingsPage(QWidget):
             and self._access.allows(Permission.MANAGE_ROLES)
         )
         self.add_role_button.setEnabled(allowed)
+        self.edit_role_button.setEnabled(allowed)
         self.remove_role_button.setEnabled(allowed)
         self.roles_info.setText(
             "Identity provider: operating-system login. Unassigned accounts receive the configured "
-            "default operator role. Only a service identity can change assignments in this table."
+            "default operator role. Engineers can manage operator and engineer accounts; "
+            "only a service identity can grant the service role."
             + ("" if allowed else " This session is read-only for role assignments.")
         )
 
@@ -345,7 +421,12 @@ class SettingsPage(QWidget):
         try:
             for tree in self.trees.values():
                 tree.clear()
-            general = {key: value for key, value in self._raw.items() if key != "devices"}
+            self._choice_editors.clear()
+            general = {
+                key: value
+                for key, value in self._raw.items()
+                if key not in {"schema_version", "devices", "access_control"}
+            }
             self._add_items(self.trees["general"], None, general, ())
             devices = self._raw.get("devices", {})
             for device in ("rigol", "keithley", "anritsu"):
@@ -358,10 +439,133 @@ class SettingsPage(QWidget):
             for tree in self.trees.values():
                 tree.expandToDepth(3)
                 tree.resizeColumnToContents(0)
+            self._populate_forms(general, devices)
             self._populate_limits()
             self._populate_roles()
         finally:
             self._changing = False
+
+    def _populate_forms(self, general: dict[str, Any], devices: dict[str, Any]) -> None:
+        self._form_editors.clear()
+        self._field_errors.clear()
+        self._populate_form("general", general, ())
+        for device in ("rigol", "keithley", "anritsu"):
+            self._populate_form("%s" % device, devices.get(device, {}), ("devices", device))
+
+    @staticmethod
+    def _title(text: object) -> str:
+        return str(text).replace("_", " ").replace("-", " ").title()
+
+    def _populate_form(
+        self, name: str, data: Any, prefix: tuple[str | int, ...]
+    ) -> None:
+        host = QWidget()
+        layout = QVBoxLayout(host)
+        layout.setContentsMargins(18, 18, 18, 18)
+        layout.setSpacing(14)
+        cards: dict[str, QFormLayout] = {}
+
+        def card_for(section: str) -> QFormLayout:
+            if section not in cards:
+                card = QGroupBox(section)
+                card.setObjectName("settingsCard")
+                form = QFormLayout(card)
+                form.setLabelAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
+                form.setHorizontalSpacing(18)
+                form.setVerticalSpacing(10)
+                layout.addWidget(card)
+                cards[section] = form
+            return cards[section]
+
+        def walk(value: Any, path: tuple[str | int, ...], labels: tuple[str, ...]) -> None:
+            if isinstance(value, dict):
+                for key, nested in value.items():
+                    if key == "lab_limits":
+                        continue
+                    walk(nested, path + (str(key),), labels + (self._title(key),))
+                return
+            if isinstance(value, list):
+                for index, nested in enumerate(value):
+                    walk(nested, path + (index,), labels + (str(index + 1),))
+                return
+            section = labels[0] if labels else "Station"
+            label = " › ".join(labels[1:]) or section
+            card_for(section).addRow(QLabel(label), self._form_editor(path, value))
+
+        walk(data, prefix, ())
+        layout.addStretch(1)
+        self.forms[name].setWidget(host)
+
+    def _form_editable(self, path: tuple[str | int, ...]) -> bool:
+        role_path = bool(path) and path[0] == "access_control"
+        operator_output = (
+            path in self._OPERATOR_EDITABLE_PATHS
+            and not self._base_read_only
+            and self._access.allows(Permission.OPERATE_OUTPUT)
+        )
+        return (
+            (not self._read_only or operator_output)
+            and (not role_path or self._access.allows(Permission.MANAGE_ROLES))
+            and path not in self._PROTECTED_PATHS
+        )
+
+    def _form_editor(self, path: tuple[str | int, ...], value: Any) -> QWidget:
+        editable = self._form_editable(path)
+        choices = self._choices_for_path(path, value)
+        if isinstance(value, bool):
+            editor = QCheckBox("Enabled")
+            editor.setChecked(value)
+            editor.toggled.connect(lambda _checked, path=path: self._form_changed(path))
+        elif choices:
+            editor = QComboBox()
+            for label, data in choices:
+                editor.addItem(label, data)
+            editor.setCurrentIndex(max(0, editor.findData(self._format_scalar(value))))
+            editor.currentIndexChanged.connect(lambda _index, path=path: self._form_changed(path))
+        elif isinstance(value, int) and not isinstance(value, bool):
+            editor = QSpinBox()
+            editor.setRange(-1_000_000_000, 1_000_000_000)
+            editor.setValue(value)
+            editor.valueChanged.connect(lambda _number, path=path: self._form_changed(path))
+        else:
+            editor = QLineEdit(self._format_scalar(value))
+            editor.editingFinished.connect(lambda path=path: self._form_changed(path))
+        editor.setEnabled(editable)
+        editor.setToolTip(" · ".join(str(part) for part in path))
+        field = QWidget()
+        field_layout = QVBoxLayout(field)
+        field_layout.setContentsMargins(0, 0, 0, 0)
+        field_layout.setSpacing(3)
+        error = QLabel()
+        error.setObjectName("settingsFieldError")
+        error.setWordWrap(True)
+        error.hide()
+        field_layout.addWidget(editor)
+        field_layout.addWidget(error)
+        self._form_editors[path] = editor
+        self._field_errors[path] = error
+        return field
+
+    def _form_value(self, editor: QWidget, original: Any) -> Any:
+        if isinstance(editor, QCheckBox):
+            return editor.isChecked()
+        if isinstance(editor, QComboBox):
+            return self._parse_scalar(str(editor.currentData()), original)
+        if isinstance(editor, QSpinBox):
+            return editor.value()
+        if isinstance(editor, QLineEdit):
+            return self._parse_scalar(editor.text(), original)
+        return original
+
+    def _form_changed(self, path: tuple[str | int, ...]) -> None:
+        if self._changing:
+            return
+        self._clear_validation_error(path)
+        self._dirty = True
+        autosave = bool(self._raw.get("application", {}).get("settings_autosave", False))
+        if autosave and not self._read_only:
+            self._autosave_timer.start()
+            self.status.emit("Autosave pending…")
 
     def _add_items(
         self,
@@ -403,12 +607,9 @@ class SettingsPage(QWidget):
             and path not in self._PROTECTED_PATHS
         ):
             item.setFlags(item.flags() | Qt.ItemFlag.ItemIsEditable)
-            if isinstance(value, bool):
-                item.setToolTip(
-                    1,
-                    "Double-click and enter true or false. This change is validated "
-                    "and saved to settings.yml.",
-                )
+            choices = self._choices_for_path(path, value)
+            if choices:
+                self._install_choice_editor(tree, item, path, choices)
         else:
             item.setToolTip(
                 1,
@@ -430,19 +631,99 @@ class SettingsPage(QWidget):
 
     def _changed(self, item: QTreeWidgetItem, column: int) -> None:
         if not self._changing and column == 1 and item.data(0, Qt.ItemDataRole.UserRole) is not None:
-            self._sync_limit_from_tree(tuple(item.data(0, Qt.ItemDataRole.UserRole)), item.text(1))
+            path = tuple(item.data(0, Qt.ItemDataRole.UserRole))
+            self._sync_limit_from_tree(path, item.text(1))
+            editor = self._form_editors.get(path)
+            if isinstance(editor, QLineEdit):
+                editor.setText(item.text(1))
+            elif isinstance(editor, QCheckBox):
+                editor.setChecked(item.text(1).strip().lower() == "true")
+            elif isinstance(editor, QComboBox):
+                editor.setCurrentIndex(max(0, editor.findData(item.text(1))))
             self._dirty = True
             autosave = bool(self._raw.get("application", {}).get("settings_autosave", False))
             if autosave and not self._read_only:
                 self._autosave_timer.start()
                 self.status.emit("Autosave pending…")
 
+    @staticmethod
+    def _unwrap_annotation(annotation: object) -> object:
+        origin = get_origin(annotation)
+        if origin in (Union, UnionType):
+            choices = [item for item in get_args(annotation) if item is not type(None)]
+            return choices[0] if len(choices) == 1 else annotation
+        return annotation
+
+    @classmethod
+    def _annotation_for_path(cls, path: tuple[str | int, ...]) -> object | None:
+        annotation: object = StationSettings
+        for part in path:
+            annotation = cls._unwrap_annotation(annotation)
+            if isinstance(annotation, type) and issubclass(annotation, BaseModel):
+                field = annotation.model_fields.get(str(part))
+                if field is None:
+                    return None
+                annotation = field.annotation
+                continue
+            origin = get_origin(annotation)
+            arguments = get_args(annotation)
+            if origin is dict:
+                annotation = arguments[1] if len(arguments) > 1 else Any
+            elif origin in (list, tuple):
+                annotation = arguments[0] if arguments else Any
+            else:
+                return None
+        return cls._unwrap_annotation(annotation)
+
+    @classmethod
+    def _choices_for_path(
+        cls, path: tuple[str | int, ...], value: object
+    ) -> tuple[tuple[str, str], ...]:
+        if isinstance(value, bool):
+            return (("Yes", "true"), ("No", "false"))
+        annotation = cls._annotation_for_path(path)
+        if annotation is not None and get_origin(annotation) is Literal:
+            return tuple((str(option), str(option)) for option in get_args(annotation))
+        return ()
+
+    def _install_choice_editor(
+        self,
+        tree: QTreeWidget,
+        item: QTreeWidgetItem,
+        path: tuple[str | int, ...],
+        choices: tuple[tuple[str, str], ...],
+    ) -> None:
+        editor = QComboBox(tree)
+        for label, data in choices:
+            editor.addItem(label, data)
+        index = editor.findData(self._format_scalar(self._get_path(self._raw, path)))
+        editor.setCurrentIndex(max(index, 0))
+        editor.setToolTip("Select a validated value from the list.")
+        editor.setEnabled(bool(item.flags() & Qt.ItemFlag.ItemIsEditable))
+        editor.currentIndexChanged.connect(
+            lambda _index, item=item, editor=editor: item.setText(1, str(editor.currentData()))
+        )
+        tree.setItemWidget(item, 1, editor)
+        self._choice_editors[path] = editor
+
+    def editor_for_path(self, path: tuple[str | int, ...]) -> QComboBox | None:
+        """Return the list editor for a settings value, when it has choices."""
+
+        editor = self._form_editors.get(path)
+        return editor if isinstance(editor, QComboBox) else self._choice_editors.get(path)
+
     def _apply_tree_values(self) -> dict[str, Any]:
         draft = deepcopy(self._raw)
+
+        for path, editor in self._form_editors.items():
+            original = self._get_path(draft, path)
+            self._set_path(draft, path, self._form_value(editor, original))
 
         def walk(item: QTreeWidgetItem) -> None:
             path = item.data(0, Qt.ItemDataRole.UserRole)
             if path is not None:
+                if tuple(path) in self._form_editors:
+                    return
                 original = self._get_path(draft, tuple(path))
                 self._set_path(draft, tuple(path), self._parse_scalar(item.text(1), original))
             for index in range(item.childCount()):
@@ -463,6 +744,7 @@ class SettingsPage(QWidget):
 
     def _populate_limits(self) -> None:
         self.limits_table.setRowCount(0)
+        self._limit_items_by_path.clear()
 
         def walk(value: Any, path: tuple[str | int, ...]) -> None:
             if not isinstance(value, dict):
@@ -491,24 +773,83 @@ class SettingsPage(QWidget):
             role_text = ", ".join(str(role) for role in roles) if isinstance(roles, list) else str(roles)
             self.role_table.setItem(row, 1, QTableWidgetItem(role_text))
 
+    def _role_choices(self) -> tuple[str, ...]:
+        if any(role.value == "service" for role in self._access.identity.roles):
+            return ("operator", "engineer", "service")
+        return ("operator", "engineer")
+
+    def _choose_roles(
+        self, *, username: str = "", roles: tuple[str, ...] = ()
+    ) -> tuple[str, tuple[str, ...]] | None:
+        dialog = QDialog(self)
+        dialog.setWindowTitle("User access role")
+        dialog.setMinimumWidth(420)
+        layout = QVBoxLayout(dialog)
+        note = QLabel("Assign one or more station roles to an operating-system account.")
+        note.setWordWrap(True)
+        layout.addWidget(note)
+        layout.addWidget(QLabel("Operating-system account"))
+        account = QLineEdit(username)
+        account.setPlaceholderText("DOMAIN\\user")
+        layout.addWidget(account)
+        layout.addWidget(QLabel("Roles"))
+        checkboxes: list[QCheckBox] = []
+        for role in self._role_choices():
+            check = QCheckBox(role.capitalize())
+            check.setProperty("role", role)
+            check.setChecked(role in roles)
+            layout.addWidget(check)
+            checkboxes.append(check)
+        buttons = QDialogButtonBox(
+            QDialogButtonBox.StandardButton.Save | QDialogButtonBox.StandardButton.Cancel
+        )
+        buttons.accepted.connect(dialog.accept)
+        buttons.rejected.connect(dialog.reject)
+        layout.addWidget(buttons)
+        if dialog.exec() != QDialog.DialogCode.Accepted:
+            return None
+        selected = tuple(str(check.property("role")) for check in checkboxes if check.isChecked())
+        normalized = account.text().strip()
+        if not normalized or not selected:
+            QMessageBox.warning(self, "User role", "Enter an account name and select at least one role.")
+            return None
+        return normalized, selected
+
     def _add_role_assignment(self) -> None:
         if not self._require_access(Permission.MANAGE_ROLES, "adding an OS role assignment"):
             return
-        username, ok = QInputDialog.getText(
-            self, "Add role assignment", "Exact operating-system account (for example DOMAIN\\user):"
-        )
-        username = username.strip()
-        if not ok or not username:
+        selection = self._choose_roles()
+        if selection is None:
             return
-        role, ok = QInputDialog.getItem(
-            self,
-            "Assigned role",
-            "Role:",
-            ["operator", "engineer", "service"],
-            0,
-            False,
+        self._upsert_role_assignment(*selection)
+
+    def _edit_role_assignment(self) -> None:
+        if not self._require_access(Permission.MANAGE_ROLES, "editing an OS role assignment"):
+            return
+        row = self.role_table.currentRow()
+        account = self.role_table.item(row, 0) if row >= 0 else None
+        assigned = self.role_table.item(row, 1) if row >= 0 else None
+        if account is None or assigned is None:
+            return
+        selection = self._choose_roles(
+            username=account.text(),
+            roles=tuple(part.strip() for part in assigned.text().split(",") if part.strip()),
         )
-        if not ok:
+        if selection is None:
+            return
+        assignments = self._raw.setdefault("access_control", {}).setdefault("user_roles", {})
+        assignments.pop(account.text(), None)
+        self._upsert_role_assignment(*selection)
+
+    def _upsert_role_assignment(self, username: str, roles: tuple[str, ...]) -> None:
+        if "service" in roles and not any(
+            role.value == "service" for role in self._access.identity.roles
+        ):
+            QMessageBox.warning(
+                self,
+                "Access denied",
+                "Only a service identity can grant the service role.",
+            )
             return
         assignments = self._raw.setdefault("access_control", {}).setdefault("user_roles", {})
         normalized = AccessPolicy.normalize_username(username)
@@ -531,7 +872,7 @@ class SettingsPage(QWidget):
             if answer != QMessageBox.StandardButton.Yes:
                 return
             del assignments[existing]
-        assignments[username] = [str(role)]
+        assignments[username] = list(roles)
         self._dirty = True
         self._populate()
         self.status.emit(
@@ -583,6 +924,7 @@ class SettingsPage(QWidget):
                     Qt.ItemDataRole.UserRole,
                     path + (("min" if column == 2 else "max"),),
                 )
+                self._limit_items_by_path[tuple(item.data(Qt.ItemDataRole.UserRole))] = item
                 if not self._read_only:
                     item.setFlags(item.flags() | Qt.ItemFlag.ItemIsEditable)
                 else:
@@ -615,6 +957,11 @@ class SettingsPage(QWidget):
     def _limit_changed(self, item: QTableWidgetItem) -> None:
         if self._changing or item.column() not in {2, 3}:
             return
+        if item in self._limit_error_items:
+            item.setBackground(Qt.GlobalColor.transparent)
+            item.setData(_LIMIT_VALIDATION_MESSAGE_ROLE, None)
+            item.setToolTip("")
+            self._limit_error_items.remove(item)
         path = item.data(Qt.ItemDataRole.UserRole)
         if path is None:
             return
@@ -628,6 +975,9 @@ class SettingsPage(QWidget):
     def _sync_tree_from_limit(self, path: tuple[str | int, ...], text: str) -> None:
         self._changing = True
         try:
+            editor = self._form_editors.get(path)
+            if isinstance(editor, QLineEdit):
+                editor.setText(text)
             for tree in self.trees.values():
                 iterator = QTreeWidgetItemIterator(tree)
                 while iterator.value() is not None:
@@ -680,13 +1030,150 @@ class SettingsPage(QWidget):
             return float(value.replace(",", "."))
         return value
 
+    @staticmethod
+    def _set_validation_state(widget: QWidget, state: str) -> None:
+        widget.setProperty("validationState", state)
+        widget.style().unpolish(widget)
+        widget.style().polish(widget)
+
+    def _clear_validation_error(self, path: tuple[str | int, ...]) -> None:
+        editor = self._form_editors.get(path)
+        message = self._field_errors.get(path)
+        if editor is not None:
+            self._set_validation_state(editor, "")
+        if message is not None:
+            message.clear()
+            message.hide()
+
+    def _clear_validation_errors(self) -> None:
+        for path in tuple(self._form_editors):
+            self._clear_validation_error(path)
+        for item in self._limit_error_items:
+            item.setBackground(Qt.GlobalColor.transparent)
+            item.setData(_LIMIT_VALIDATION_MESSAGE_ROLE, None)
+            item.setToolTip("")
+        self._limit_error_items.clear()
+
+    def _mark_invalid_path(self, path: tuple[str | int, ...], message: str) -> QWidget | None:
+        candidates = [
+            candidate for candidate in self._form_editors
+            if (
+                len(candidate) <= len(path) and tuple(path[: len(candidate)]) == candidate
+            )
+            or (
+                len(path) <= len(candidate) and tuple(candidate[: len(path)]) == path
+            )
+        ]
+        marked_editor: QWidget | None = None
+        if candidates:
+            matched = max(candidates, key=len)
+            editor = self._form_editors[matched]
+            self._set_validation_state(editor, "error")
+            label = self._field_errors[matched]
+            label.setText(message)
+            label.show()
+            marked_editor = editor
+        for limit_path, item in self._limit_items_by_path.items():
+            if (
+                tuple(path[: len(limit_path)]) == limit_path
+                or tuple(limit_path[: len(path)]) == path
+            ):
+                item.setData(_LIMIT_VALIDATION_MESSAGE_ROLE, message)
+                item.setToolTip(f"Validation error: {message}")
+                if item not in self._limit_error_items:
+                    self._limit_error_items.append(item)
+        return marked_editor
+
+    @staticmethod
+    def _missing_range_boundaries(
+        value: Any, path: tuple[str | int, ...] = ()
+    ) -> tuple[tuple[str | int, ...], ...]:
+        missing: list[tuple[str | int, ...]] = []
+        if isinstance(value, dict):
+            if "min" in value and "max" in value:
+                for boundary in ("min", "max"):
+                    if value[boundary] is None:
+                        missing.append(path + (boundary,))
+            for key, nested in value.items():
+                if isinstance(nested, (dict, list)):
+                    missing.extend(
+                        SettingsPage._missing_range_boundaries(nested, path + (str(key),))
+                    )
+        elif isinstance(value, list):
+            for index, nested in enumerate(value):
+                missing.extend(SettingsPage._missing_range_boundaries(nested, path + (index,)))
+        return tuple(missing)
+
+    def _semantic_error_paths(
+        self, error: Exception, draft: dict[str, Any]
+    ) -> tuple[tuple[str | int, ...], ...]:
+        message = str(error).lower()
+        anritsu_safety = ("devices", "anritsu", "safety")
+        if "anritsu acquisition requires complete frequency and reference-level limits" in message:
+            return tuple(
+                anritsu_safety + (range_name, boundary)
+                for range_name in ("frequency", "reference_level")
+                for boundary in ("min", "max")
+            )
+        if "optional range must define both limits" in message:
+            return self._missing_range_boundaries(draft)
+        if "signal generator output permission requires complete frequency and power limits" in message:
+            return tuple(
+                ("devices", "anritsu", "signal_generator", range_name, boundary)
+                for range_name in ("frequency", "power")
+                for boundary in ("min", "max")
+            )
+        return ()
+
+    def _show_validation_errors(self, error: Exception, draft: dict[str, Any] | None = None) -> None:
+        previous_changing = self._changing
+        self._changing = True
+        try:
+            self._clear_validation_errors()
+            details = error.errors() if isinstance(error, ValidationError) else []
+            first_editor: QWidget | None = None
+            for detail in details:
+                location = tuple(detail.get("loc", ()))
+                message = str(detail.get("msg", "Invalid value."))
+                editor = self._mark_invalid_path(location, message)
+                if first_editor is None and editor is not None:
+                    first_editor = editor
+            if draft is not None:
+                for path in self._semantic_error_paths(error, draft):
+                    editor = self._mark_invalid_path(path, str(error))
+                    if first_editor is None and editor is not None:
+                        first_editor = editor
+            if first_editor is None and draft is not None and not self._limit_error_items:
+                for path in self._changed_leaf_paths(self._persisted_raw, draft):
+                    editor = self._mark_invalid_path(path, str(error))
+                    if first_editor is None and editor is not None:
+                        first_editor = editor
+            if self._limit_error_items:
+                first = self._limit_error_items[0]
+                self.tabs.setCurrentWidget(self.limits_table)
+                self.limits_table.setCurrentItem(first)
+                self.limits_table.scrollToItem(first)
+            elif first_editor is not None:
+                first_editor.setFocus()
+                first_editor.ensurePolished()
+                first_editor.scroll(0, 0)
+        finally:
+            self._changing = previous_changing
+
+    def _validation_failed(
+        self, title: str, error: Exception, draft: dict[str, Any] | None = None
+    ) -> None:
+        self._show_validation_errors(error, draft)
+        QMessageBox.critical(self, title, str(error))
+
     def validate_draft(self) -> StationSettings | None:
         try:
             draft = self._apply_tree_values()
             settings = StationSettings.model_validate(draft)
         except (ConfigurationError, ValueError) as exc:
-            QMessageBox.critical(self, "Validation error", str(exc))
+            self._validation_failed("Validation error", exc, locals().get("draft"))
             return None
+        self._clear_validation_errors()
         QMessageBox.information(self, "Validation", "The configuration is valid.")
         self.status.emit("Configuration validation passed")
         return settings
@@ -714,7 +1201,7 @@ class SettingsPage(QWidget):
                 and not self._access.allows(Permission.MANAGE_ROLES)
             ):
                 raise AuthorizationError(
-                    "Only a service identity can change access_control settings."
+                    "An engineer or service identity is required to change access-control settings."
                 )
             # A limit edit invalidates a previous approval and retains the safe
             # output lock.  Explicit approval is handled below.
@@ -723,16 +1210,23 @@ class SettingsPage(QWidget):
             draft["profile"]["approved_at"] = None
             draft["profile"]["approval_note"] = "Profile approval is required after settings changes."
             settings = self._repository.save_raw(draft)
-        except (AuthorizationError, ConfigurationError, ValueError) as exc:
+        except AuthorizationError as exc:
             if silent:
                 self.status.emit(f"Autosave rejected invalid settings: {exc}")
             else:
                 QMessageBox.critical(self, "Changes not saved", str(exc))
             return False
+        except (ConfigurationError, ValueError) as exc:
+            if silent:
+                self.status.emit(f"Autosave rejected invalid settings: {exc}")
+            else:
+                self._validation_failed("Changes not saved", exc, locals().get("draft"))
+            return False
         self._raw = draft
         self._persisted_raw = deepcopy(draft)
         self._settings = settings
         self._dirty = False
+        self._clear_validation_errors()
         if not silent:
             self._populate()
         self._update_subtitle()

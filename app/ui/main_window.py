@@ -1082,8 +1082,6 @@ class RigolPage(QWidget):
         self.advanced.addTab(self._modulation_tab(), "Modulation")
         self.advanced.addTab(self._sweep_tab(), "Sweep")
         self.advanced.addTab(self._burst_tab(), "Burst")
-        for index in range(self.advanced.count()):
-            self.advanced.setTabEnabled(index, False)
 
         self.control_tabs.addTab(self.basic_scroll, "Basic")
         self.control_tabs.addTab(self.shape_scroll, "Shape")
@@ -1360,9 +1358,10 @@ class RigolPage(QWidget):
             ("phase_sync", "PHASE SYNC"),
         )
         supported = [label for feature, label in features if supports(feature)]
-        self.advanced.setTabEnabled(0, bool(supports("modulation")))
-        self.advanced.setTabEnabled(1, bool(supports("frequency_sweep")))
-        self.advanced.setTabEnabled(2, bool(supports("burst")))
+        # Advanced pages remain openable before a capability probe.  Actions
+        # themselves still verify capabilities before talking to the device.
+        for index in range(self.advanced.count()):
+            self.advanced.setTabEnabled(index, True)
         self.sync_phases_button.setEnabled(bool(supports("phase_sync")))
         self.capability_badge.setText("Capabilities: " + (" · ".join(supported) if supported else "no extensions"))
 

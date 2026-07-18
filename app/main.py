@@ -15,6 +15,11 @@ STYLE = """
 QMainWindow { background: #10151d; color: #e8edf3; }
 QWidget { background: #10151d; color: #e8edf3; font-family: Segoe UI; font-size: 10pt; }
 QTabWidget::pane { border: 1px solid #26384a; }
+QScrollArea#settingsForm { background: transparent; }
+QGroupBox#settingsCard { background: #18212c; border: 1px solid #344659; border-radius: 10px; margin-top: 14px; padding: 12px; font-weight: 700; color: #dcecff; }
+QGroupBox#settingsCard::title { subcontrol-origin: margin; left: 14px; padding: 0 5px; }
+QLineEdit[validationState="error"], QComboBox[validationState="error"], QSpinBox[validationState="error"] { border: 2px solid #ff657a; background: #30202a; }
+QLabel#settingsFieldError { color: #ff9ba8; font-size: 9pt; font-weight: 600; }
 QTabBar::tab { background: #18212c; color: #91a0b2; padding: 10px 18px; margin-right: 2px; }
 QTabBar::tab:selected { background: #26384a; color: #e8edf3; }
 QTabBar::tab:hover { color: #ffffff; background: #213043; }
@@ -127,6 +132,11 @@ QWidget { background: #f4f7fb; color: #17212b; font-family: Segoe UI; font-size:
 QMenuBar, QMenu { background: #ffffff; color: #17212b; }
 QMenu::item:selected { background: #dbeafe; }
 QTabWidget::pane { border: 1px solid #c8d3df; }
+QScrollArea#settingsForm { background: transparent; }
+QGroupBox#settingsCard { background: #ffffff; border: 1px solid #c8d3df; border-radius: 10px; margin-top: 14px; padding: 12px; font-weight: 700; color: #17324d; }
+QGroupBox#settingsCard::title { subcontrol-origin: margin; left: 14px; padding: 0 5px; }
+QLineEdit[validationState="error"], QComboBox[validationState="error"], QSpinBox[validationState="error"] { border: 2px solid #c7364e; background: #fff0f2; }
+QLabel#settingsFieldError { color: #b4233a; font-size: 9pt; font-weight: 600; }
 QTabBar::tab { background: #e8eef5; color: #526273; padding: 10px 18px; margin-right: 2px; }
 QTabBar::tab:selected { background: #ffffff; color: #17212b; }
 QTabBar::tab:hover { color: #0b5da7; background: #dce9f6; }

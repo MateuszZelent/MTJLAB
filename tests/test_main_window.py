@@ -11,7 +11,7 @@ from types import SimpleNamespace
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 from PySide6.QtCore import QTimer, Qt
-from PySide6.QtWidgets import QApplication, QLabel, QMessageBox, QPushButton, QScrollArea, QTreeWidgetItemIterator
+from PySide6.QtWidgets import QApplication, QComboBox, QLabel, QMessageBox, QPushButton, QScrollArea, QTreeWidgetItemIterator
 from PySide6.QtTest import QTest
 
 from app.domain.models import DeviceCapabilities
@@ -63,7 +63,7 @@ class MainWindowTests(unittest.TestCase):
             self.assertEqual(rigol.burst_phase.text(), "0")
             self.assertEqual(rigol.burst_trigger_slope.currentText(), "POS")
             self.assertFalse(rigol.sync_phases_button.isEnabled())
-            self.assertFalse(rigol.advanced.isTabEnabled(0))
+            self.assertTrue(rigol.advanced.isTabEnabled(0))
 
             rigol.set_capabilities(
                 DeviceCapabilities(
@@ -314,6 +314,87 @@ class MainWindowTests(unittest.TestCase):
                 window.close()
                 self.application.processEvents()
 
+    def test_invalid_safety_limit_is_highlighted_after_validation(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            path = Path(temporary) / "settings.yml"
+            write_engineer_settings(path)
+            window = MainWindow(path, simulation=False, authenticated_username=TEST_ENGINEER)
+            try:
+                page = window.settings_page
+                row = next(
+                    row
+                    for row in range(page.limits_table.rowCount())
+                    if page.limits_table.item(row, 1).text() == "frequency"
+                )
+                page.limits_table.item(row, 2).setText("10 GHz")
+                page.limits_table.item(row, 3).setText("1 Hz")
+                with patch.object(QMessageBox, "critical"):
+                    self.assertIsNone(page.validate_draft())
+                self.assertIn(page.limits_table.item(row, 2), page._limit_error_items)
+                self.assertIn(page.limits_table.item(row, 3), page._limit_error_items)
+            finally:
+                window.close()
+                self.application.processEvents()
+
+    def test_anritsu_acquisition_error_highlights_missing_frequency_and_reference_limits(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            path = Path(temporary) / "settings.yml"
+            write_engineer_settings(path)
+            window = MainWindow(path, simulation=False, authenticated_username=TEST_ENGINEER)
+            try:
+                page = window.settings_page
+                safety = page._raw["devices"]["anritsu"]["safety"]
+                safety["acquisition_allowed"] = True
+                safety["frequency"] = {"min": None, "max": None}
+                safety["reference_level"] = {"min": None, "max": None}
+                page._populate()
+                with patch.object(QMessageBox, "critical"):
+                    self.assertIsNone(page.validate_draft())
+                expected = {
+                    ("devices", "anritsu", "safety", "frequency", boundary)
+                    for boundary in ("min", "max")
+                } | {
+                    ("devices", "anritsu", "safety", "reference_level", boundary)
+                    for boundary in ("min", "max")
+                }
+                self.assertTrue(expected.issubset(set(page._limit_items_by_path)))
+                self.assertTrue(
+                    all(page._limit_items_by_path[item] in page._limit_error_items for item in expected)
+                )
+                self.assertTrue(
+                    all(
+                        page._limit_items_by_path[item].data(
+                            int(Qt.ItemDataRole.UserRole) + 101
+                        )
+                        for item in expected
+                    )
+                )
+                self.assertIs(page.tabs.currentWidget(), page.limits_table)
+            finally:
+                window.close()
+                self.application.processEvents()
+
+    def test_safety_limit_cell_rejects_wrong_unit_immediately(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            path = Path(temporary) / "settings.yml"
+            write_engineer_settings(path)
+            window = MainWindow(path, simulation=False, authenticated_username=TEST_ENGINEER)
+            try:
+                page = window.settings_page
+                row = next(
+                    row
+                    for row in range(page.limits_table.rowCount())
+                    if page.limits_table.item(row, 1).text() == "frequency"
+                )
+                item = page.limits_table.item(row, 2)
+                item.setText("5 V")
+                self.assertIn(item, page._limit_error_items)
+                self.assertIn("frequency", item.toolTip().lower())
+                self.assertTrue(item.data(int(Qt.ItemDataRole.UserRole) + 101))
+            finally:
+                window.close()
+                self.application.processEvents()
+
     def test_operator_role_is_visible_and_cannot_edit_or_assign_station_configuration(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             settings_path = Path(temporary) / "settings.yml"
@@ -394,7 +475,7 @@ class MainWindowTests(unittest.TestCase):
             try:
                 self.assertTrue(window.settings_page.save_button.isEnabled())
                 self.assertTrue(window.settings_page.approve_button.isEnabled())
-                self.assertFalse(window.settings_page.add_role_button.isEnabled())
+                self.assertTrue(window.settings_page.add_role_button.isEnabled())
                 phrase = f"APPROVE {window._settings.profile.id}"
                 with patch(
                     "app.ui.settings_page.QInputDialog.getText",
@@ -468,17 +549,7 @@ class MainWindowTests(unittest.TestCase):
             try:
                 page = window.settings_page
                 self.assertTrue(page.add_role_button.isEnabled())
-                with (
-                    patch(
-                        "app.ui.settings_page.QInputDialog.getText",
-                        return_value=("LAB\\new-engineer", True),
-                    ),
-                    patch(
-                        "app.ui.settings_page.QInputDialog.getItem",
-                        return_value=("engineer", True),
-                    ),
-                ):
-                    page._add_role_assignment()
+                page._upsert_role_assignment("LAB\\new-engineer", ("engineer",))
                 self.assertTrue(page._dirty)
                 self.assertTrue(page.save_draft())
                 assignments = SettingsRepository(settings_path).load().settings.access_control.user_roles
