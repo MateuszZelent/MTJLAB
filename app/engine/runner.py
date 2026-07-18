@@ -11,6 +11,8 @@ from uuid import uuid4
 
 from app.devices.anritsu.adapter import AnritsuAdapter, SpectrumTrace
 from app.devices.keithley.adapter import KeithleyAdapter
+from app.devices.moke_box.adapter import MokeBoxAdapter
+from app.devices.moke_box.models import hall_field_from_voltage
 from app.devices.rigol.adapter import RigolAdapter
 from app.domain.errors import DeviceError, ExecutionError
 from app.domain.models import ApplicationState, DeviceState, MeasurementPoint
@@ -54,6 +56,7 @@ class RecipeRunner:
         rigol: RigolAdapter,
         keithley: KeithleyAdapter,
         anritsu: AnritsuAdapter,
+        moke_box: MokeBoxAdapter | None = None,
         writer: Hdf5RunWriter,
         on_event: EventCallback | None = None,
         on_telemetry: TelemetryCallback | None = None,
@@ -62,6 +65,7 @@ class RecipeRunner:
         self._rigol = rigol
         self._keithley = keithley
         self._anritsu = anritsu
+        self._moke_box = moke_box
         self._writer = writer
         self._on_event = on_event or (lambda _name, _data: None)
         self._on_telemetry = on_telemetry or (lambda _name, _data: None)
@@ -211,7 +215,7 @@ class RecipeRunner:
                     point_measurements.clear()
                     self._emit("compliance_detected", {"channels": compliance_channels, "point_index": stored - 1})
                     raise ExecutionError("Keithley reached compliance; the final checkpoint was saved and output was disabled.")
-                if acquisition is not None or action.kind == "checkpoint":
+                if acquisition is not None or action.kind in {"checkpoint", "measure_moke_hall"}:
                     trace = acquisition.raw if acquisition is not None else None
                     point = MeasurementPoint(
                         index=stored,
@@ -699,6 +703,14 @@ class RecipeRunner:
             measurements[f"{prefix}.power_w"] = result.power_w
             measurements[f"{prefix}.compliance_detected"] = float(result.compliance_detected)
             measurements[f"{prefix}.compliance_stop_required"] = float(result.compliance_stop_required)
+        elif action.kind == "measure_moke_hall":
+            if self._moke_box is None:
+                raise ExecutionError("MOKE Hall measurement was requested but MOKE Box is unavailable.")
+            result = self._moke_box.read_hall_voltage()
+            measurements["moke_box.hall1_voltage_v"] = result.voltage_v
+            measurements["moke_box.hall1_field_t"] = hall_field_from_voltage(result.voltage_v)
+            measurements["moke_box.hall1_stddev_v"] = result.stddev_v
+            measurements["moke_box.hall1_raw_ad7734"] = float(result.raw_codes[0])
         elif action.kind == "acquire_reference":
             average_count = int(payload.get("average_count", 1))
             reference = self._acquire_averaged_spectrum(

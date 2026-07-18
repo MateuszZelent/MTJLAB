@@ -78,6 +78,22 @@ class RecipeBuilderTests(unittest.TestCase):
         finally:
             page.close()
 
+    def test_tree_builder_can_add_read_only_moke_hall_checkpoint(self) -> None:
+        page = RecipePage(simulation_settings())
+        try:
+            page.new_recipe(confirm=False)
+            self.assertGreaterEqual(page.node_kind.findData("measure_moke_hall"), 0)
+            page._library_add_basic("measure_moke_hall")
+
+            recipe = parse_recipe_text(page.editor.toPlainText())
+            node = recipe.root.children[0]
+            self.assertEqual(node.type, "measure_moke_hall")
+            item = page._find_tree_item(node.id)
+            self.assertIsNotNone(item)
+            self.assertIn("MOKE Hall 1", item.text(0))
+        finally:
+            page.close()
+
     def test_tree_rebuild_preserves_selected_node_and_expansion_state(self) -> None:
         page = RecipePage(simulation_settings())
         try:

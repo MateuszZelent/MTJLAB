@@ -8,13 +8,14 @@ from importlib.resources import files
 import os
 from pathlib import Path
 import tempfile
+import time
 from typing import Any
 
 from pydantic import ValidationError
 from ruamel.yaml import YAML
 
 from app.domain.errors import ConfigurationError
-from app.settings.models import StationSettings
+from app.settings.models import MokeBoxSettings, StationSettings
 
 
 @dataclass(slots=True)
@@ -56,6 +57,13 @@ class SettingsRepository:
                 "user_roles": {},
             },
         )
+        devices = raw.setdefault("devices", {})
+        if isinstance(devices, dict):
+            # Version-1 profiles predating the MOKE module receive an explicit,
+            # disabled and fail-closed profile that can be edited in the UI.
+            devices.setdefault(
+                "moke_box", MokeBoxSettings().model_dump(mode="json")
+            )
         try:
             settings = StationSettings.model_validate(raw)
         except ValidationError as exc:
@@ -83,7 +91,7 @@ class SettingsRepository:
                 os.fsync(stream.fileno())
             if self.path.exists():
                 return False
-            os.replace(temp_path, self.path)
+            self._replace_with_windows_retry(temp_path, self.path)
             return True
         finally:
             temp_path.unlink(missing_ok=True)
@@ -158,7 +166,20 @@ class SettingsRepository:
             if self.path.exists():
                 backup = self.path.with_suffix(self.path.suffix + ".bak")
                 backup.write_bytes(self.path.read_bytes())
-            os.replace(temp_path, self.path)
+            self._replace_with_windows_retry(temp_path, self.path)
         except Exception:
             temp_path.unlink(missing_ok=True)
             raise
+
+    @staticmethod
+    def _replace_with_windows_retry(source: Path, destination: Path) -> None:
+        """Atomically replace a profile despite short-lived Windows file locks."""
+
+        for attempt in range(6):
+            try:
+                os.replace(source, destination)
+                return
+            except PermissionError:
+                if attempt == 5:
+                    raise
+                time.sleep(0.05 * (attempt + 1))

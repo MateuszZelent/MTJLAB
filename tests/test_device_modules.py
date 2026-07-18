@@ -65,7 +65,7 @@ class DeviceModuleTests(unittest.TestCase):
             {"rigol", "keithley", "anritsu"},
         )
         self.assertTrue(all(module.page_factory is not None for module in registry.enabled_modules()))
-        self.assertIsNone(registry.get("moke_box").page_factory)
+        self.assertIsNotNone(registry.get("moke_box").page_factory)
         self.assertIsNone(registry.get("lakeshore_gaussmeter").page_factory)
 
     def test_unconfigured_future_module_fails_closed(self) -> None:

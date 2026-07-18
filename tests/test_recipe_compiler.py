@@ -11,6 +11,37 @@ from tests.helpers import ROOT, loaded_settings, simulation_settings
 
 
 class RecipeCompilerTests(unittest.TestCase):
+    def test_hall_measurement_inside_sweep_expands_to_one_stored_point_per_step(self) -> None:
+        raw = deepcopy(simulation_settings().model_dump(mode="python"))
+        raw["devices"]["moke_box"].update(
+            {
+                "enabled": True,
+                "protocol_qualified": True,
+                "endpoint": "127.0.0.1:10001",
+            }
+        )
+        source = """\
+schema_version: 1
+name: hall-at-each-sweep-point
+root:
+  id: source-level
+  type: sweep
+  target: keithley.B.current
+  start: "0 A"
+  stop: "1 mA"
+  points: 3
+  children:
+    - {id: hall, type: measure_moke_hall}
+"""
+
+        plan = RecipeCompiler(StationSettings.model_validate(raw)).compile(
+            parse_recipe_text(source)
+        )
+
+        self.assertEqual([action.kind for action in plan.actions], ["measure_moke_hall"] * 3)
+        self.assertEqual(plan.total_points, 3)
+        self.assertEqual(plan.required_devices, frozenset({"moke_box"}))
+
     def test_compilation_can_be_cancelled_before_expansion(self) -> None:
         source = """\
 schema_version: 1

@@ -200,6 +200,7 @@ class DeviceConnectionPanel(QFrame):
         if backend:
             detail += f"  •  {backend} backend"
         self.summary.setText(detail)
+        self._set_summary_error(False)
 
     def update_state(self, state: str) -> None:
         self.state.setText(state.replace("_", " ").upper())
@@ -210,13 +211,30 @@ class DeviceConnectionPanel(QFrame):
     def update_identity(self, value: object) -> None:
         if idn := getattr(value, "idn", None):
             self.summary.setText(idn)
+            self._set_summary_error(False)
 
     def set_reconfiguring(self, active: bool) -> None:
-        self._set_busy(active, "Applying new VISA address…")
+        self._set_busy(active, "Applying connection settings…")
 
     def set_testing(self, active: bool) -> None:
         self._set_busy(active, "Testing communication…")
         self.test_button.setText("Testing…" if active else "Test")
+
+    def set_connecting(self, active: bool) -> None:
+        self._set_busy(active, "Connecting…")
+        self.connect_button.setText("Connecting…" if active else "Connect")
+
+    def show_error(self, action: str, error: str) -> None:
+        self.set_connecting(False)
+        self.set_testing(False)
+        self.update_state("fault")
+        self.summary.setText(f"{action.upper()} FAILED: {error}")
+        self._set_summary_error(True)
+
+    def _set_summary_error(self, active: bool) -> None:
+        self.summary.setProperty("connectionState", "error" if active else "normal")
+        self.summary.style().unpolish(self.summary)
+        self.summary.style().polish(self.summary)
 
     def _set_busy(self, active: bool, label: str) -> None:
         for button in (self.connect_button, self.disconnect_button, self.test_button):

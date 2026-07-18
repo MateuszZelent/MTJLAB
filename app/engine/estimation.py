@@ -76,6 +76,12 @@ class PlanEstimator:
                 # two line cycles per configured NPLC.
                 nominal += 2.0 / self._line_frequency_hz
                 retryable_operations += 1
+            elif action.kind == "measure_moke_hall":
+                # One read-only TCP request plus a four-byte AD7734 reply.
+                # The generic command overhead above remains the conservative
+                # estimate; count it as retryable because a failed read closes
+                # the MOKE session before a retry can reconnect.
+                retryable_operations += 1
             elif action.kind == "configure_anritsu":
                 latest_spectrum_points = int(action.payload["config"].points)
                 retryable_operations += 1

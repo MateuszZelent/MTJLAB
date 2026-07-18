@@ -45,7 +45,9 @@ from app.ui.discovery_worker import MokeIdentificationWorker, TcpDiscoveryWorker
 class DashboardPage(QWidget):
     emergency_requested = Signal()
     assignments_requested = Signal(object)
+    moke_assignment_requested = Signal(str)
     status = Signal(str)
+    _DEVICE_KEYS = ("rigol", "keithley", "anritsu", "moke_box")
 
     def __init__(
         self, settings: StationSettings, parent: QWidget | None = None, *, discovery_enabled: bool = True
@@ -60,7 +62,7 @@ class DashboardPage(QWidget):
         self._identifying_port: int | None = None
         self._tcp_rows_by_host: dict[str, int] = {}
         self._discovery_results: tuple[DiscoveredInstrument, ...] = ()
-        self._device_states = {name: "disconnected" for name in ("rigol", "keithley", "anritsu")}
+        self._device_states = {name: "disconnected" for name in self._DEVICE_KEYS}
         self._verified_resources: dict[str, str] = {}
         self._device_errors: dict[str, str] = {}
         self._audit_healthy = True
@@ -87,12 +89,19 @@ class DashboardPage(QWidget):
             "rigol": DeviceCard(settings.rigol.display_name, settings.rigol.connection.resource),
             "keithley": DeviceCard(settings.keithley.display_name, settings.keithley.connection.resource),
             "anritsu": DeviceCard(settings.anritsu.display_name, settings.anritsu.connection.resource),
+            "moke_box": DeviceCard(settings.moke_box.display_name, settings.moke_box.endpoint),
         }
-        for column, (device, card) in enumerate(self.cards.items()):
-            grid.addWidget(card, 0, column)
-            card.assign_resource_requested.connect(
-                lambda payload, device=device: self._card_assignment_requested(device, payload)
-            )
+        for index, (device, card) in enumerate(self.cards.items()):
+            grid.addWidget(card, index // 2, index % 2)
+            if device == "moke_box":
+                card.detected_resources.hide()
+                card.assign_button.hide()
+                card.assignment_hint.hide()
+                card.resource.setToolTip("MOKE Box uses raw TCP/IP, not VISA.")
+            else:
+                card.assign_resource_requested.connect(
+                    lambda payload, device=device: self._card_assignment_requested(device, payload)
+                )
         overview_layout.addLayout(grid)
         self.checklist = QLabel()
         self.checklist.setObjectName("checklist")
@@ -184,6 +193,15 @@ class DashboardPage(QWidget):
         self.tcp_identify_button.setToolTip(
             "Test only the selected open endpoint and show the raw MOKE TX/RX exchange."
         )
+        self.tcp_test_entered_button = QPushButton("Test entered IP")
+        self.tcp_test_entered_button.setToolTip(
+            "Test the single IPv4 address entered in CIDR / IP / from without scanning a subnet."
+        )
+        self.tcp_assign_moke_button = QPushButton("Assign MOKE Box")
+        self.tcp_assign_moke_button.setEnabled(False)
+        self.tcp_assign_moke_button.setToolTip(
+            "Save the selected verified TCP endpoint as the read-only MOKE Box connection."
+        )
         self.tcp_scan_button = QPushButton("Scan TCP/IP")
         self.tcp_scan_button.setToolTip(
             "Test one port on each host in the supplied private subnet. No MOKE command is sent."
@@ -191,7 +209,7 @@ class DashboardPage(QWidget):
         self.tcp_stop_button = QPushButton("Stop scan")
         self.tcp_stop_button.setEnabled(False)
         self.tcp_stop_button.setToolTip("Stop scheduling further TCP connection attempts.")
-        tcp_header.addWidget(QLabel("CIDR / from:"))
+        tcp_header.addWidget(QLabel("CIDR / IP / from:"))
         tcp_header.addWidget(self.tcp_network)
         tcp_header.addWidget(QLabel("to:"))
         tcp_header.addWidget(self.tcp_range_end)
@@ -202,7 +220,9 @@ class DashboardPage(QWidget):
         tcp_header.addWidget(self.tcp_detect_button)
         tcp_header.addWidget(self.tcp_scan_button)
         tcp_header.addWidget(self.tcp_stop_button)
+        tcp_header.addWidget(self.tcp_test_entered_button)
         tcp_header.addWidget(self.tcp_identify_button)
+        tcp_header.addWidget(self.tcp_assign_moke_button)
         tcp_layout.addLayout(tcp_header)
         self.tcp_discovery_info = QLabel(
             "No TCP/IP scan performed. The reconstructed MOKE Box protocol uses TCP port 10001."
@@ -276,6 +296,8 @@ class DashboardPage(QWidget):
         self.tcp_scan_button.clicked.connect(self._scan_tcp)
         self.tcp_stop_button.clicked.connect(self._stop_tcp_scan)
         self.tcp_identify_button.clicked.connect(self._identify_selected_moke)
+        self.tcp_test_entered_button.clicked.connect(self._test_entered_moke_ip)
+        self.tcp_assign_moke_button.clicked.connect(self._assign_selected_moke)
         self.save_assignments.clicked.connect(self._emit_assignments)
         if not discovery_enabled:
             self.scan_button.setEnabled(False)
@@ -284,13 +306,15 @@ class DashboardPage(QWidget):
             self.tcp_scan_button.setToolTip("TCP/IP discovery is disabled in simulation mode.")
             self.tcp_stop_button.setEnabled(False)
             self.tcp_identify_button.setEnabled(False)
+            self.tcp_test_entered_button.setEnabled(False)
+            self.tcp_assign_moke_button.setEnabled(False)
             self.tcp_detect_button.setEnabled(False)
         self.update_settings(settings)
 
     def update_settings(self, settings: StationSettings) -> None:
         previous_resources = {
-            name: getattr(self._settings, name).connection.resource
-            for name in ("rigol", "keithley", "anritsu")
+            name: self._device_resource(self._settings, name)
+            for name in self._DEVICE_KEYS
         }
         self._settings = settings
         for name, device in (
@@ -302,20 +326,30 @@ class DashboardPage(QWidget):
             if previous_resources.get(name) != device.connection.resource:
                 self._verified_resources.pop(name, None)
                 self._device_errors.pop(name, None)
+        self.cards["moke_box"].update_resource(settings.moke_box.endpoint, "TCP/IP")
+        if previous_resources.get("moke_box") != settings.moke_box.endpoint:
+            self._verified_resources.pop("moke_box", None)
+            self._device_errors.pop("moke_box", None)
         self._refresh_saved_devices()
         self._refresh_card_resource_choices()
         self._refresh_readiness()
 
     def _refresh_saved_devices(self) -> None:
         self.saved_table.setRowCount(0)
-        for name in ("rigol", "keithley", "anritsu"):
+        for name in self._DEVICE_KEYS:
             device = getattr(self._settings, name)
             row = self.saved_table.rowCount()
             self.saved_table.insertRow(row)
+            if name == "moke_box":
+                resource = device.endpoint or "Not assigned"
+                backend = "TCP/IP"
+            else:
+                resource = device.connection.resource or "Not assigned"
+                backend = device.connection.visa_backend
             values = (
                 device.display_name,
-                device.connection.resource or "Not assigned",
-                device.connection.visa_backend,
+                resource,
+                backend,
                 self._device_states.get(name, "disconnected").replace("_", " ").title(),
             )
             for column, value in enumerate(values):
@@ -341,7 +375,7 @@ class DashboardPage(QWidget):
         self._refresh_saved_devices()
 
     def mark_identity_verified(self, device: str) -> None:
-        resource = getattr(self._settings, device).connection.resource
+        resource = self._device_resource(self._settings, device)
         if resource:
             self._verified_resources[device] = resource
             self._device_errors.pop(device, None)
@@ -512,10 +546,12 @@ class DashboardPage(QWidget):
                 return
             allow_non_private = True
         self.tcp_scan_button.setEnabled(False)
+        self.tcp_test_entered_button.setEnabled(False)
         self.tcp_stop_button.setEnabled(True)
         self.tcp_discovery_table.setRowCount(0)
         self._tcp_rows_by_host.clear()
         self.tcp_identify_button.setEnabled(False)
+        self.tcp_assign_moke_button.setEnabled(False)
         total_hosts = self._tcp_scan_host_count(network, range_end)
         self.tcp_scan_progress.show()
         self.tcp_scan_progress.setRange(0, max(total_hosts or 1, 1))
@@ -552,6 +588,7 @@ class DashboardPage(QWidget):
 
     def _tcp_scan_finished(self) -> None:
         self.tcp_scan_button.setEnabled(self._discovery_enabled)
+        self.tcp_test_entered_button.setEnabled(self._discovery_enabled)
         self.tcp_stop_button.setEnabled(False)
 
     def _tcp_scan_progressed(self, completed: int, total: int, host: str) -> None:
@@ -601,8 +638,29 @@ class DashboardPage(QWidget):
         if selected:
             row = selected[0].row()
             state = self.tcp_discovery_table.item(row, 1)
-            enabled = state is not None and state.text() == "TCP port open"
+            enabled = state is not None and state.text() in {"TCP port open", "Entered manually"}
         self.tcp_identify_button.setEnabled(enabled and self._discovery_enabled)
+        verified = False
+        if selected:
+            row = selected[0].row()
+            verification = self.tcp_discovery_table.item(row, 2)
+            verified = verification is not None and verification.text() == "MOKE Box verified"
+        self.tcp_assign_moke_button.setEnabled(verified and self._discovery_enabled)
+
+    def _assign_selected_moke(self) -> None:
+        selected = self.tcp_discovery_table.selectedItems()
+        if not selected:
+            return
+        row = selected[0].row()
+        endpoint = self.tcp_discovery_table.item(row, 0)
+        verification = self.tcp_discovery_table.item(row, 2)
+        if (
+            endpoint is None
+            or verification is None
+            or verification.text() != "MOKE Box verified"
+        ):
+            return
+        self.moke_assignment_requested.emit(endpoint.text())
 
     def _identify_selected_moke(self) -> None:
         if (
@@ -616,7 +674,11 @@ class DashboardPage(QWidget):
         row = selected[0].row()
         endpoint_item = self.tcp_discovery_table.item(row, 0)
         state_item = self.tcp_discovery_table.item(row, 1)
-        if endpoint_item is None or state_item is None or state_item.text() != "TCP port open":
+        if (
+            endpoint_item is None
+            or state_item is None
+            or state_item.text() not in {"TCP port open", "Entered manually"}
+        ):
             return
         host, separator, port_text = endpoint_item.text().rpartition(":")
         if not separator:
@@ -640,14 +702,45 @@ class DashboardPage(QWidget):
         self._identifying_host = host
         self._identifying_port = port
         self.tcp_identify_button.setEnabled(False)
+        self.tcp_test_entered_button.setEnabled(False)
         self.tcp_discovery_table.setItem(row, 2, QTableWidgetItem("Verifying MOKE…"))
         self._moke_identification_worker = MokeIdentificationWorker(
             host, port, max(0.2, self.tcp_timeout_ms.value() / 1_000), self
         )
         self._moke_identification_worker.completed.connect(self._moke_identification_completed)
         self._moke_identification_worker.failed.connect(self._moke_identification_failed)
-        self._moke_identification_worker.finished.connect(self._update_tcp_identify_enabled)
+        self._moke_identification_worker.finished.connect(self._moke_identification_finished)
         self._moke_identification_worker.start()
+
+    def _moke_identification_finished(self) -> None:
+        self.tcp_test_entered_button.setEnabled(self._discovery_enabled)
+        self._update_tcp_identify_enabled()
+
+    def _test_entered_moke_ip(self) -> None:
+        value = self.tcp_network.text().strip()
+        try:
+            if "/" in value:
+                network = ipaddress.ip_network(value, strict=False)
+                if network.prefixlen != 32:
+                    raise ValueError("enter one IP address or a /32 network")
+                host = str(network.network_address)
+            else:
+                host = str(ipaddress.IPv4Address(value))
+        except ValueError as exc:
+            self.tcp_discovery_info.setText(f"Cannot test entered MOKE IP: {exc}.")
+            return
+        row = self._tcp_rows_by_host.get(host)
+        if row is None:
+            row = self.tcp_discovery_table.rowCount()
+            self._tcp_rows_by_host[host] = row
+            self.tcp_discovery_table.insertRow(row)
+        self.tcp_discovery_table.setItem(
+            row, 0, QTableWidgetItem(f"{host}:{self.tcp_port.value()}")
+        )
+        self.tcp_discovery_table.setItem(row, 1, QTableWidgetItem("Entered manually"))
+        self.tcp_discovery_table.setItem(row, 2, QTableWidgetItem("Pending test"))
+        self.tcp_discovery_table.selectRow(row)
+        self._identify_selected_moke()
 
     def _moke_identification_completed(self, payload: object) -> None:
         if not isinstance(payload, DiscoveredTcpEndpoint):
@@ -658,6 +751,7 @@ class DashboardPage(QWidget):
             "MOKE Box verified" if payload.moke_verified else payload.verification_detail or "Not MOKE",
         )
         self.status.emit(f"MOKE identification completed: {payload.endpoint}")
+        self._update_tcp_identify_enabled()
         self._show_moke_test_trace(
             payload.endpoint,
             payload.moke_verified is True,
@@ -668,8 +762,9 @@ class DashboardPage(QWidget):
 
     def _moke_identification_failed(self, error: str) -> None:
         if self._identifying_host is not None:
-            self._tcp_host_activity(self._identifying_host, "open", f"Identification failed: {error}")
+            self._tcp_host_activity(self._identifying_host, "closed", f"Test failed: {error}")
         self.status.emit(f"MOKE identification failed: {error}")
+        self._update_tcp_identify_enabled()
         endpoint = (
             f"{self._identifying_host}:{self._identifying_port}"
             if self._identifying_host is not None and self._identifying_port is not None
@@ -823,7 +918,8 @@ class DashboardPage(QWidget):
             "keithley": self._settings.keithley.connection,
             "anritsu": self._settings.anritsu.connection,
         }
-        for device, card in self.cards.items():
+        for device in ("rigol", "keithley", "anritsu"):
+            card = self.cards[device]
             matches = tuple(
                 result
                 for result in self._discovery_results
@@ -835,6 +931,12 @@ class DashboardPage(QWidget):
                 configured_resource=connection.resource,
                 configured_backend=connection.visa_backend,
             )
+
+    @staticmethod
+    def _device_resource(settings: StationSettings, device: str) -> str | None:
+        if device == "moke_box":
+            return settings.moke_box.endpoint
+        return getattr(settings, device).connection.resource
 
     def mark_assignments_saved(self, assignments: dict[str, tuple[str, str, str]]) -> None:
         """Lock rows whose resource was successfully persisted by MainWindow."""

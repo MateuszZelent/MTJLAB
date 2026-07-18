@@ -55,6 +55,32 @@ class MokeSampleBatch:
 
 
 @dataclass(frozen=True, slots=True)
+class MokeHallVoltageReading:
+    """Direct, read-only Hall-1 voltage from the live AD7734 response."""
+
+    voltage_v: float
+    stddev_v: float
+    samples: int
+    raw_codes: tuple[int, ...]
+    timestamp_utc: datetime
+
+    @classmethod
+    def from_ad7734_codes(cls, codes: tuple[int, ...]) -> "MokeHallVoltageReading":
+        from app.devices.moke_box.protocol import decode_ad7734_voltage
+
+        if not codes:
+            raise ValueError("MOKE Hall response must contain at least one AD7734 sample.")
+        values = tuple(decode_ad7734_voltage(code) for code in codes)
+        return cls(
+            voltage_v=statistics.fmean(values),
+            stddev_v=statistics.pstdev(values),
+            samples=len(values),
+            raw_codes=codes,
+            timestamp_utc=datetime.now(timezone.utc),
+        )
+
+
+@dataclass(frozen=True, slots=True)
 class MokeFieldReading:
     """Open-loop Hall-field measurement using the verified base calibration."""
 

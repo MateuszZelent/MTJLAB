@@ -6,9 +6,10 @@ from collections.abc import Mapping
 
 from app.contracts import DeviceModule, RecipeExtension
 from app.devices.base import DeviceAdapter
-from app.devices.moke_box.adapter import MokeBoxAdapter
+from app.devices.moke_box.adapter import MokeBoxAdapter, UnavailableMokeBoxAdapter
 from app.devices.moke_box.models import MokeBoxConfig
 from app.devices.moke_box.transport import MokeBoxTcpTransport
+from app.devices.moke_box.ui import MokeBoxPage
 from app.domain.errors import ConfigurationError
 from app.domain.quantities import DIMENSION_TIME, parse_quantity
 from app.settings.models import StationSettings
@@ -20,10 +21,13 @@ def _adapter(settings: StationSettings, simulation: bool) -> DeviceAdapter:
         raise ConfigurationError("MOKE Box requires a qualified station profile.")
     profile = settings.moke_box
     if simulation:
-        raise ConfigurationError("MOKE Box has no simulator; use qualified hardware only.")
+        return UnavailableMokeBoxAdapter(
+            "MOKE Box hardware communication is disabled in simulation mode."
+        )
     if not profile.enabled or not profile.protocol_qualified or not profile.endpoint:
-        raise ConfigurationError(
-            "MOKE Box requires enabled, endpoint, and protocol_qualified profile settings."
+        return UnavailableMokeBoxAdapter(
+            "Configure enabled=true, endpoint=host:port and protocol_qualified=true "
+            "for MOKE Box in Station settings, then reconnect."
         )
     return MokeBoxAdapter(
         MokeBoxConfig(
@@ -39,7 +43,7 @@ def _adapter(settings: StationSettings, simulation: bool) -> DeviceAdapter:
 
 def _dispatch(adapter: DeviceAdapter, operation: str, _payload: object) -> object:
     if operation not in {
-        "read_signal", "read_vouts", "acquire_samples", "read_fields",
+        "read_signal", "read_vouts", "acquire_samples", "read_fields", "read_hall_voltage",
         "set_hall_gains", "set_kerr_gain", "set_vout", "ramp_vout",
     }:
         raise ValueError(f"Unsupported MOKE Box operation {operation!r}.")
@@ -53,9 +57,9 @@ def _dispatch(adapter: DeviceAdapter, operation: str, _payload: object) -> objec
             int(_payload["count"]),
             active_streams=int(_payload.get("active_streams", 4)),
         )
-    if operation == "read_fields":
+    if operation in {"read_fields", "read_hall_voltage"}:
         if not isinstance(_payload, Mapping):
-            raise ValueError("MOKE field read requires a payload mapping.")
+            raise ValueError("MOKE Hall read requires a payload mapping.")
         return method(int(_payload["count"]))
     if operation in {"set_hall_gains", "set_kerr_gain", "set_vout", "ramp_vout"}:
         if not isinstance(_payload, Mapping):
@@ -64,17 +68,22 @@ def _dispatch(adapter: DeviceAdapter, operation: str, _payload: object) -> objec
     return method()
 
 
+def _page(controller: object, settings: StationSettings) -> object:
+    return MokeBoxPage(controller, settings)  # type: ignore[arg-type]
+
+
 MODULE = DeviceModule(
     key="moke_box",
     display_name="MOKE Box",
     settings_key="moke_box",
     adapter_factory=_adapter,
     dispatch=_dispatch,
-    capabilities=frozenset({"moke_reading", "vout_readback", "field_sweep"}),
+    capabilities=frozenset({"vout_readback", "hall_field_readback", "sample_acquisition"}),
     enabled_by_default=False,
     recipe_extension=RecipeExtension(
         module_key="moke_box",
         parameter_definitions=parameter_definitions_for_module("moke_box"),
         library_block_keys=("moke_box",),
     ),
+    page_factory=_page,
 )

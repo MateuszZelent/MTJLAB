@@ -363,7 +363,8 @@ def _verify_moke_readback(connection: object) -> bytes:
     channels = {
         frame.channel
         for frame in frames
-        if frame.origin == MokeTarget.OPT2 and frame.record_type == MokeResponseType.AD5362
+        if frame.origin in {MokeTarget.MAIN_BOX, MokeTarget.OPT2}
+        and frame.record_type == MokeResponseType.AD5362
     }
     if channels != set(range(8)) or len({frame.channel for frame in frames}) != 8:
         raise _MokeReadbackError(

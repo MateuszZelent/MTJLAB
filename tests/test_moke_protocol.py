@@ -3,7 +3,8 @@ from __future__ import annotations
 import unittest
 
 from app.devices.moke_box.protocol import (
-    MokeFrame, MokeTarget, decode_voltage, encode_voltage, readback_vout, request_samples,
+    MokeAd7734Frame, MokeFrame, MokeTarget, decode_ad7734_voltage, decode_voltage,
+    encode_voltage, readback_vout, request_samples,
     set_hall_gains, set_kerr_gain, set_vout,
 )
 from app.devices.moke_box.adapter import MokeBoxAdapter
@@ -37,46 +38,47 @@ class MokeProtocolTests(unittest.TestCase):
         with self.assertRaises(DeviceError):
             MokeFrame.decode(bytes.fromhex("D28000D3"))
 
+    def test_live_ad7734_frame_uses_24_bit_payload_not_checksum(self) -> None:
+        frame = MokeAd7734Frame.decode(bytes.fromhex("087EBA1C"))
+
+        self.assertEqual(frame.origin, MokeTarget.MAIN_BOX)
+        self.assertEqual(frame.channel, 0)
+        self.assertEqual(frame.code_u24, 0x7EBA1C)
+        self.assertAlmostEqual(decode_ad7734_voltage(frame.code_u24), -0.09945, places=4)
+
     def test_binary_adapter_reads_all_vouts(self) -> None:
         transport = _BinaryTransport(
-            b"".join(
-                MokeFrame(3, 2, channel, *encode_voltage(channel - 4)).encode()
-                for channel in range(8)
-            )
+            _vout_response() + _vout_response(values=tuple(channel - 4 for channel in range(8)))
         )
         adapter = MokeBoxAdapter(MokeBoxConfig("127.0.0.1:10001"), transport)
         adapter.connect()
 
         values = adapter.read_vouts()
 
-        self.assertEqual(transport.sent, [readback_vout()])
+        self.assertEqual(transport.sent, [readback_vout(), readback_vout()])
         self.assertEqual(set(values), set(range(8)))
         self.assertAlmostEqual(values[4], 0.0)
 
     def test_binary_adapter_rejects_unqualified_vout_write(self) -> None:
-        adapter = MokeBoxAdapter(MokeBoxConfig("127.0.0.1:10001"), _BinaryTransport(b""))
+        adapter = MokeBoxAdapter(
+            MokeBoxConfig("127.0.0.1:10001"), _BinaryTransport(_vout_response())
+        )
         adapter.connect()
 
         with self.assertRaises(DeviceError):
             adapter.set_vout(0, 1.0)
 
-    def test_binary_adapter_averages_documented_hall_streams(self) -> None:
-        frames = [
-            MokeFrame(0, 1, channel, 0x80, 0x00).encode()
-            for channel in range(4)
-        ]
-        frames.extend(MokeFrame(0, 1, 0, 0x80, 0x00).encode() for _ in range(10))
-        transport = _BinaryTransport(b"".join(frames))
+    def test_binary_adapter_reads_live_hall1_24_bit_sample(self) -> None:
+        sample = MokeAd7734Frame(MokeTarget.MAIN_BOX, 0, 0x7EBA1C).encode()
+        transport = _BinaryTransport(_vout_response() + sample)
         adapter = MokeBoxAdapter(MokeBoxConfig("127.0.0.1:10001"), transport)
         adapter.connect()
 
-        reading = adapter.read_fields(1)
+        reading = adapter.read_hall_voltage(1)
 
-        self.assertEqual(transport.sent, [request_samples(1)])
+        self.assertEqual(transport.sent, [readback_vout(), request_samples(1)])
         self.assertEqual(reading.samples, 1)
-        self.assertAlmostEqual(reading.hall1_voltage_v, 0.0)
-        self.assertAlmostEqual(reading.hall2_voltage_v, 0.0)
-        self.assertAlmostEqual(reading.hall1_field_t, -0.0007387072430926411)
+        self.assertAlmostEqual(reading.voltage_v, -0.09945, places=4)
 
 
 class _BinaryTransport:
@@ -91,9 +93,19 @@ class _BinaryTransport:
         self.sent.append(frame)
 
     def recv_exact(self, count: int) -> bytes:
-        if len(self.response) != count:
-            raise AssertionError(f"expected {count} bytes, got {len(self.response)}")
-        return self.response
+        if len(self.response) < count:
+            raise AssertionError(f"expected at least {count} bytes, got {len(self.response)}")
+        result, self.response = self.response[:count], self.response[count:]
+        return result
 
     def close(self) -> None:
         return None
+
+
+def _vout_response(
+    *, values: tuple[float, ...] = (0.0,) * 8, origin: MokeTarget = MokeTarget.MAIN_BOX
+) -> bytes:
+    return b"".join(
+        MokeFrame(origin, 2, channel, *encode_voltage(value)).encode()
+        for channel, value in enumerate(values)
+    )

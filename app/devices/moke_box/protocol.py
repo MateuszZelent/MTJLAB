@@ -71,6 +71,37 @@ class MokeFrame:
         return cls((header >> 6) & 0x03, (header >> 3) & 0x07, header & 0x07, msb, lsb)
 
 
+@dataclass(frozen=True, slots=True)
+class MokeAd7734Frame:
+    """One physical AD7734 sample: header followed by a signed 24-bit ADC code.
+
+    Unlike the AD5362 VOUT reply, the final byte is ADC data, not a checksum.
+    This was confirmed against the live MOKE Box on 2026-07-18.
+    """
+
+    origin: int
+    channel: int
+    code_u24: int
+
+    @property
+    def code_s24(self) -> int:
+        return self.code_u24 - 0x800000
+
+    def encode(self) -> bytes:
+        header = make_header(self.origin, MokeResponseType.AD7734, self.channel)
+        return bytes((header, *self.code_u24.to_bytes(3, "big")))
+
+    @classmethod
+    def decode(cls, raw: bytes) -> "MokeAd7734Frame":
+        if len(raw) != 4:
+            raise DeviceError(f"MOKE AD7734 record must have 4 bytes, received {len(raw)}.")
+        header, *payload = raw
+        origin, record_type, channel = (header >> 6) & 0x03, (header >> 3) & 0x07, header & 0x07
+        if record_type != MokeResponseType.AD7734:
+            raise DeviceError("Expected an AD7734 response record.")
+        return cls(origin, channel, int.from_bytes(bytes(payload), "big"))
+
+
 def encode_voltage(voltage_v: float) -> tuple[int, int]:
     if not math.isfinite(voltage_v):
         raise ValueError("MOKE VOUT voltage must be finite.")
@@ -83,6 +114,15 @@ def encode_voltage(voltage_v: float) -> tuple[int, int]:
 def decode_voltage(msb: int, lsb: int) -> float:
     signed = ((msb << 8) | lsb) - 32768
     return 10.0 * signed / (32767.0 if signed >= 0 else 32768.0)
+
+
+def decode_ad7734_voltage(code_u24: int) -> float:
+    """Decode the live AD7734 bipolar 24-bit result to the ±10 V input range."""
+
+    if not 0 <= code_u24 <= 0xFFFFFF:
+        raise ValueError("MOKE AD7734 code must be an unsigned 24-bit integer.")
+    signed = code_u24 - 0x800000
+    return 10.0 * signed / (0x7FFFFF if signed >= 0 else 0x800000)
 
 
 def set_vout(channel: int, voltage_v: float) -> bytes:

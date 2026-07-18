@@ -377,6 +377,7 @@ class RecipePage(QWidget):
         self.node_kind.addItem("If / else group", "if")
         self.node_kind.addItem("Wait", "wait")
         self.node_kind.addItem("Measure Keithley", "measure_keithley")
+        self.node_kind.addItem("Measure MOKE Hall (V + field)", "measure_moke_hall")
         self.node_kind.addItem("Acquire Anritsu reference", "acquire_reference")
         self.node_kind.addItem("Acquire Anritsu spectrum", "acquire_spectrum")
         self.node_kind.addItem("Keithley ramp to zero", "ramp_keithley_to_zero")
@@ -724,7 +725,16 @@ class RecipePage(QWidget):
             drag_kind="device:anritsu_sg",
         )
 
-        acquisition = group("Acquisition", "2")
+        acquisition = group("Acquisition", "3")
+        action(
+            acquisition,
+            "Measure MOKE Hall (V + field)",
+            "Read Hall 1 voltage and store the derived base-polynomial field at this sweep point. Read-only; no VOUT or gain command.",
+            "moke_box",
+            QStyle.StandardPixmap.SP_DialogApplyButton,
+            lambda: self._library_add_basic("measure_moke_hall"),
+            drag_kind="flow:measure_moke_hall",
+        )
         action(
             acquisition,
             "Acquire reference",
@@ -1724,7 +1734,7 @@ class RecipePage(QWidget):
             return "FLOW", "#7253a6"
         if node.type.startswith("set_") or node.type.startswith("ramp_"):
             return "SAFE", "#18844c"
-        if node.type in {"acquire_reference", "acquire_spectrum"}:
+        if node.type in {"acquire_reference", "acquire_spectrum", "measure_moke_hall"}:
             return "ACQUIRE", "#18844c"
         return "READY", "#536577"
 
@@ -1824,6 +1834,12 @@ class RecipePage(QWidget):
             )
         if node.type == "measure_keithley":
             return f"Measure Keithley {node.data.get('channel', '?')}", "Measurement", QStyle.StandardPixmap.SP_DialogApplyButton
+        if node.type == "measure_moke_hall":
+            return (
+                "Measure MOKE Hall 1 voltage + field",
+                "Read-only checkpoint · one AD7734 sample",
+                QStyle.StandardPixmap.SP_DialogApplyButton,
+            )
         if node.type == "wait":
             return f"Wait {node.data.get('duration', '')}", "Timing", QStyle.StandardPixmap.SP_BrowserReload
         if node.type == "comment":
@@ -2071,6 +2087,8 @@ class RecipePage(QWidget):
             or node.type in {"acquire_reference", "acquire_spectrum"}
         ):
             return self._tree_badge_icon("Anritsu", "#269c5a", "A")
+        if node.type == "measure_moke_hall":
+            return self._tree_badge_icon("MOKE Box", "#2478a5", "M")
         module = node.data.get("device_module")
         if module == "keithley":
             return self._tree_badge_icon("Keithley", "#d94343", "K")
@@ -2464,6 +2482,7 @@ class RecipePage(QWidget):
             },
             "wait": {"id": node_id, "type": "wait", "duration": "100 ms"},
             "measure_keithley": {"id": node_id, "type": "measure_keithley", "channel": "B"},
+            "measure_moke_hall": {"id": node_id, "type": "measure_moke_hall"},
             "acquire_reference": {
                 "id": node_id,
                 "type": "acquire_reference",

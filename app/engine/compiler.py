@@ -80,6 +80,8 @@ def required_devices_for_actions(actions: Iterable[PlanAction]) -> frozenset[str
             required.add("keithley")
         if "anritsu" in action.kind or action.kind in {"acquire_reference", "acquire_spectrum"}:
             required.add("anritsu")
+        if action.kind == "measure_moke_hall":
+            required.add("moke_box")
         if action.kind == "verify_connection":
             required.add(str(action.payload["device"]))
     return frozenset(required)
@@ -121,7 +123,7 @@ class RecipeCompiler:
                 f"The plan expands to {len(actions)} actions; the limit is {self._max_actions}."
             )
         total_points = sum(
-            action.kind in {"acquire_spectrum", "checkpoint"} for action in actions
+            action.kind in {"acquire_spectrum", "checkpoint", "measure_moke_hall"} for action in actions
         )
         total_spectra = sum(action.kind == "acquire_spectrum" for action in actions)
         required_devices = required_devices_for_actions(actions)
@@ -1377,6 +1379,13 @@ class RecipeCompiler:
             if channel not in {"A", "B"}:
                 raise ConfigurationError(f"{node.id}: measure_keithley requires channel A or B.")
             payload = {"channel": channel}
+        elif node.type == "measure_moke_hall":
+            profile = self._settings.moke_box
+            if not profile.enabled or not profile.protocol_qualified or not profile.endpoint:
+                raise ConfigurationError(
+                    f"{node.id}: MOKE Hall measurement requires an enabled, protocol-qualified TCP endpoint."
+                )
+            payload = {}
         elif node.type in {"acquire_reference", "acquire_spectrum"}:
             if self._settings.anritsu.acquisition.single_sweep_mode != "standard_scpi_opc":
                 raise SafetyViolation(

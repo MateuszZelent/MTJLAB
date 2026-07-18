@@ -3,5 +3,7 @@ name: Untitled sweep
 root:
   id: sequence-main
   type: sequence
-  children: []
+  children:
+  - id: measure_moke_hall-32c9e4cf
+    type: measure_moke_hall
 finally: []

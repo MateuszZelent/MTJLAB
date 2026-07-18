@@ -170,6 +170,7 @@ class SettingsPage(QWidget):
             ("rigol", "Rigol"),
             ("keithley", "Keithley"),
             ("anritsu", "Anritsu"),
+            ("moke_box", "MOKE Box"),
         ):
             tree = QTreeWidget()
             tree.setHeaderLabels(["Parameter", "Value"])
@@ -494,7 +495,7 @@ class SettingsPage(QWidget):
             }
             self._add_items(self.trees["general"], None, general, ())
             devices = self._raw.get("devices", {})
-            for device in ("rigol", "keithley", "anritsu"):
+            for device in ("rigol", "keithley", "anritsu", "moke_box"):
                 self._add_items(
                     self.trees[device],
                     None,
@@ -514,7 +515,7 @@ class SettingsPage(QWidget):
         self._form_editors.clear()
         self._field_errors.clear()
         self._populate_form("general", general, ())
-        for device in ("rigol", "keithley", "anritsu"):
+        for device in ("rigol", "keithley", "anritsu", "moke_box"):
             self._populate_form("%s" % device, devices.get(device, {}), ("devices", device))
 
     @staticmethod

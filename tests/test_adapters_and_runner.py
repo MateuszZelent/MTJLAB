@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from datetime import datetime, timezone
 from copy import deepcopy
 import threading
 import time
@@ -25,6 +26,7 @@ from app.devices.rigol import (
     RigolFrequencySweepConfig,
     RigolModulationConfig,
 )
+from app.devices.moke_box.models import MokeHallVoltageReading, hall_field_from_voltage
 from app.devices.visa import FakeVisaSession, FakeVisaSessionFactory
 from app.domain.errors import DeviceError, SafetyViolation
 from app.domain.models import DeviceState
@@ -68,9 +70,66 @@ class ShutdownProbe:
         self.state = DeviceState.OUTPUT_OFF
 
 
+@dataclass
+class HallProbe:
+    reading: MokeHallVoltageReading
+    reads: int = 0
+
+    def read_hall_voltage(self) -> MokeHallVoltageReading:
+        self.reads += 1
+        return self.reading
+
+
 class AdapterAndRunnerTests(unittest.TestCase):
     def setUp(self) -> None:
         self.settings = simulation_settings()
+
+    def test_moke_hall_action_stores_voltage_and_derived_field_checkpoint(self) -> None:
+        voltage_v = -0.099453926
+        moke_box = HallProbe(
+            MokeHallVoltageReading(
+                voltage_v=voltage_v,
+                stddev_v=0.0,
+                samples=1,
+                raw_codes=(0x7EBA1C,),
+                timestamp_utc=datetime.now(timezone.utc),
+            )
+        )
+        writer = MemoryWriter()
+        plan = ExecutionPlan(
+            recipe_name="moke-hall",
+            actions=(
+                PlanAction(
+                    "hall-at-sweep-point",
+                    "measure_moke_hall",
+                    {},
+                    {"keithley.B.current": 0.001},
+                ),
+            ),
+            total_points=1,
+            sha256="moke-hall",
+            recipe_source="schema_version: 1\n",
+            required_devices=frozenset({"moke_box"}),
+        )
+
+        result = RecipeRunner(
+            rigol=ShutdownProbe(),  # type: ignore[arg-type]
+            keithley=ShutdownProbe(),  # type: ignore[arg-type]
+            anritsu=ShutdownProbe(),  # type: ignore[arg-type]
+            moke_box=moke_box,  # type: ignore[arg-type]
+            writer=writer,  # type: ignore[arg-type]
+        ).run(plan)
+
+        self.assertEqual(result.state, ApplicationState.SAFE)
+        self.assertEqual(result.stored_points, 1)
+        self.assertEqual(moke_box.reads, 1)
+        point, trace = writer.points[0]
+        self.assertIsNone(trace)
+        self.assertAlmostEqual(point.measurements["moke_box.hall1_voltage_v"], voltage_v)
+        self.assertAlmostEqual(
+            point.measurements["moke_box.hall1_field_t"],
+            hall_field_from_voltage(voltage_v),
+        )
 
     def test_rigol_cannot_enable_output_with_unapproved_profile(self) -> None:
         session = FakeVisaSession(

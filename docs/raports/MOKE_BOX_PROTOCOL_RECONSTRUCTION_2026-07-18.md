@@ -14,7 +14,8 @@ Najważniejsze ustalenia:
 - każda komenda i każdy rekord odpowiedzi ma dokładnie 4 bajty;
 - bajt 0 zawiera adres modułu, typ i kanał;
 - bajty 1–2 zawierają 16-bitową wartość albo parametr;
-- bajt 3 jest ważoną sumą kontrolną modulo 256;
+- dla komend i odpowiedzi AD5362 (VOUT) bajt 3 jest ważoną sumą kontrolną modulo 256;
+- dla odpowiedzi AD7734 (Hall/Kerr) bajty 1–3 są pojedynczym, 24-bitowym wynikiem ADC — bez checksumy;
 - wyjścia analogowe są zadawane jako napięcie `VOUT` w zakresie `-10...+10 V`, a nie bezpośrednio w amperach;
 - pomiary Halla i Kerra wracają przez przetwornik AD7734;
 - odczyt ośmiu wyjść VOUT wraca jako dane AD5362;
@@ -105,13 +106,28 @@ type    = (HEADER & 0x38) >> 3
 channel =  HEADER & 0x07
 ```
 
-### 4.2. Suma kontrolna
+### 4.2. Suma kontrolna i payload AD7734
 
 ```text
 CHECKSUM = (HEADER + 2*MSB + 4*LSB) & 0xFF
 ```
 
 VI wykonuje pośrednie konwersje do `U8`, lecz wynik jest równoważny sumie modulo 256.
+
+Checksum dotyczy ramek poleceń oraz rekordów odpowiedzi AD5362. Test fizycznego
+MOKE Box przeprowadzony 2026-07-18 potwierdził odmienny format AD7734:
+
+```text
+08 7E BA 1C
+│  └──────── 24-bitowy kod ADC = 0x7EBA1C
+└─────────── MainBox / AD7734 / kanał 0 (Hall 1)
+```
+
+Ostatni bajt `1C` nie jest checksumą. Kod ADC ma reprezentację bipolarną
+offsetową: `signed = code_u24 - 0x800000`, a napięcie wejściowe wynosi
+`10 * signed / 0x7FFFFF` dla wartości dodatnich albo `/ 0x800000` dla ujemnych.
+Powyższa ramka daje około `-0,09945 V`, zgodne ze wskazaniem LabVIEW około
+`-0,09933 V`.
 
 Przykład:
 
@@ -164,7 +180,11 @@ Dozwolone kombinacje odpowiedzi typu AD7734:
 - `Kerr0`: kanały 0–2;
 - `Kerr1`: kanały 0–2.
 
-Odpowiedź AD5362 używa origin `Opt2` i kanałów 0–7.
+Analiza VI wskazywała odpowiedź AD5362 z origin `Opt2` i kanałami 0–7. Test
+rzeczywistego urządzenia `131.246.221.33:10001` wykonany 2026-07-18 zwrócił
+jednak origin `MainBox`, nagłówki `10...17`. Sterownik akceptuje oba warianty,
+ale zawsze wymaga typu AD5362, ośmiu unikalnych kanałów 0–7 i poprawnej
+checksumy każdego rekordu.
 
 ## 6. Kodowanie wartości analogowej ±10 V
 
@@ -299,12 +319,17 @@ ramka   = 18 00 00 18
 Następnie host odczytuje dokładnie 32 bajty, czyli osiem rekordów po 4 bajty. Oczekiwane rekordy mają:
 
 ```text
-origin  = Opt2 (3)
+origin  = MainBox (0) na sprawdzonym urządzeniu; Opt2 (3) w analizowanym VI
 type    = AD5362 (2)
 channel = 0..7
 ```
 
-Oczekiwane nagłówki to `D0...D7`. Payload każdego rekordu jest dekodowany tym samym algorytmem ±10 V. `readback_VOUT.vi` zwraca tablicę ośmiu napięć w kolejności rekordów, a `V_read_out_channel.vi` wybiera z niej żądany indeks.
+Nagłówki wynikające z analizy VI to `D0...D7`. Przechwyt rzeczywistego
+urządzenia `131.246.221.33:10001` zwrócił `10...17`; pełna odpowiedź dla
+zerowych VOUT miała postać `10 80 00 10 ... 17 80 00 17`. Payload każdego
+rekordu jest dekodowany tym samym algorytmem ±10 V. `readback_VOUT.vi` zwraca
+tablicę ośmiu napięć w kolejności rekordów, a `V_read_out_channel.vi` wybiera z
+niej żądany indeks.
 
 Przykład syntetycznej odpowiedzi dla VOUT2=`0 V`:
 
@@ -346,7 +371,7 @@ Kontrolka `Set-up` ma niestandardowe wartości numeryczne równe liczbie aktywny
 | 7 | `MainBox and Kerr0` | 7 |
 | 10 | `MainBox, Kerr0 and Kerr1` | 10 |
 
-Po wysłaniu żądania `N` VI oczekuje:
+Rekonstrukcja VI wskazywała, że po wysłaniu żądania `N` host oczekuje:
 
 ```text
 record_count = N * active_stream_count + 10
@@ -354,6 +379,12 @@ byte_count   = 4 * record_count
 ```
 
 Dodatkowe 10 rekordów stanowi zapas/overhead narzucony przez oryginalny VI. Sorter przyjmuje całość, ale dodaje do każdej tablicy najwyżej `N` wartości.
+
+**Weryfikacja fizyczna (2026-07-18):** `Send Data(1)` zwróciło dokładnie jeden
+rekord `08 7E BA 1C`, bez dalszych danych w ciągu 25 s. Produkcyjny odczyt
+napięcia Halla używa więc wyłącznie potwierdzonego trybu: jedna próbka,
+MainBox/AD7734/kanał 0. Wielokanałowy układ `N × streams + 10` pozostaje
+niezweryfikowany i nie jest używany do odczytu Halla.
 
 Sekwencja `get_data.vi`:
 
@@ -677,7 +708,7 @@ To jest najbezpieczniejszy sposób potwierdzenia semantyki firmware bez wysyłan
 2. Ustawić sprzętowy limit prądu na minimalną bezpieczną wartość.
 3. Połączyć tylko jednego klienta TCP.
 4. Wykonać wyłącznie `Readback VOUT`.
-5. Zażądać małej liczby próbek, np. `N=10`, i sprawdzić AD7734/checksum.
+5. Zażądać jednej próbki (`N=1`) i sprawdzić odpowiedź AD7734 jako 24-bitowy kod ADC, bez checksumy.
 6. Nie wysyłać `Reset` ani komend zarezerwowanych.
 
 ### Etap C — identyfikacja kanału VOUT
@@ -711,7 +742,7 @@ Sterownik bez LabVIEW można uznać za zgodny, jeżeli:
 - wszystkie wektory ramek z sekcji 6–7 przechodzą testy jednostkowe;
 - parser poprawnie składa dane z fragmentowanych odczytów TCP;
 - zrzut z oryginalnej aplikacji daje identyczne nagłówki i checksum;
-- odczyt VOUT zwraca osiem kanałów z origin `Opt2`, type `AD5362`;
+- odczyt VOUT zwraca osiem kanałów z origin `MainBox` albo `Opt2`, type `AD5362`;
 - akwizycja `N` daje dokładnie `N` wartości dla każdego aktywnego strumienia;
 - po błędzie ramki sterownik zamyka sesję i nie kontynuuje sterowania na przesuniętym strumieniu;
 - napięcie wyjściowe jest ograniczone niezależnie od danych kalibracyjnych;

@@ -49,6 +49,7 @@ ACTION_TYPES: Final[frozenset[str]] = frozenset(
         "set_keithley_output",
         "ramp_keithley_to_zero",
         "measure_keithley",
+        "measure_moke_hall",
         "update_keithley_level",
         "update_keithley_compliance",
         "update_rigol_frequency",

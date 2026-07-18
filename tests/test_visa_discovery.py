@@ -202,6 +202,22 @@ class VisaDiscoveryTests(unittest.TestCase):
         self.assertEqual(len(results[0].rx_bytes), 32)
         self.assertEqual(connection.sent, [bytes.fromhex("18000018")])
 
+    def test_tcp_discovery_accepts_observed_main_box_vout_headers(self) -> None:
+        connection = MokeReadbackConnection()
+        connection.response = b"".join(
+            MokeFrame(MokeTarget.MAIN_BOX, MokeResponseType.AD5362, channel, 0x80, 0x00).encode()
+            for channel in range(8)
+        )
+        results = discover_tcp_endpoints(
+            "192.168.50.2/32", 10001, verify_moke=True,
+            connector=lambda _address, _timeout: connection,
+        )
+        self.assertTrue(results[0].moke_verified)
+        self.assertEqual(results[0].rx_bytes, bytes.fromhex(
+            "10800010 11800011 12800012 13800013 "
+            "14800014 15800015 16800016 17800017"
+        ))
+
     def test_tcp_discovery_retains_partial_moke_response_for_diagnostics(self) -> None:
         connection = MokeReadbackConnection()
         connection.response = connection.response[:4]

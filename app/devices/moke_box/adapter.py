@@ -8,8 +8,15 @@ import time
 from typing import Protocol
 
 from app.devices.base import DeviceAdapter
-from app.devices.moke_box.models import MokeBoxConfig, MokeFieldReading, MokeReading, MokeSampleBatch
+from app.devices.moke_box.models import (
+    MokeBoxConfig,
+    MokeFieldReading,
+    MokeHallVoltageReading,
+    MokeReading,
+    MokeSampleBatch,
+)
 from app.devices.moke_box.protocol import (
+    MokeAd7734Frame,
     MokeFrame,
     MokeGain,
     MokeResponseType,
@@ -43,6 +50,25 @@ class MokeBoxBinaryTransport(Protocol):
     def close(self) -> None: ...
 
 
+class UnavailableMokeBoxAdapter(DeviceAdapter):
+    """Fail-closed placeholder used while the MOKE profile is incomplete."""
+
+    def __init__(self, reason: str) -> None:
+        super().__init__()
+        self._reason = reason
+
+    def connect(self) -> DeviceIdentity:
+        self._state = DeviceState.DISCONNECTED
+        raise ConnectionError(self._reason)
+
+    def disconnect(self) -> None:
+        self._state = DeviceState.DISCONNECTED
+
+    def emergency_off(self) -> None:
+        # No session exists and therefore no protocol command can be sent.
+        self._state = DeviceState.DISCONNECTED
+
+
 class MokeBoxAdapter(DeviceAdapter):
     """Read-only high-level adapter; no unqualified remote control is exposed."""
 
@@ -63,12 +89,22 @@ class MokeBoxAdapter(DeviceAdapter):
             return self._identity_or_raise()
         try:
             self._transport.connect(self._config.endpoint, self._config.timeout_s)
+            self._connected = True
+            if self._binary_transport:
+                # Raw TCP has no IDN command. A complete, checksum-valid VOUT
+                # response is therefore the non-destructive identity probe.
+                self._read_vouts_from_transport()
             identifier = (
                 (self._config.expected_model or "MOKE Box binary protocol")
                 if self._binary_transport
                 else self._legacy_transport().identify().strip()
             )
         except Exception as exc:
+            self._connected = False
+            try:
+                self._transport.close()
+            except Exception:
+                pass
             self._state = DeviceState.DISCONNECTED
             raise ConnectionError(f"Could not connect to MOKE Box: {exc}") from exc
         if not identifier:
@@ -81,7 +117,6 @@ class MokeBoxAdapter(DeviceAdapter):
         ):
             self._transport.close()
             raise ConnectionError(f"Unexpected MOKE Box identity: {identifier!r}")
-        self._connected = True
         self._identity = DeviceIdentity(resource=self._config.endpoint, idn=identifier, model=self._config.expected_model)
         self._capabilities = DeviceCapabilities(
             device_name="moke_box",
@@ -102,15 +137,21 @@ class MokeBoxAdapter(DeviceAdapter):
                 self._transport.close()
             finally:
                 self._connected = False
-                self._identity = None
-                self._capabilities = None
-                self._state = DeviceState.DISCONNECTED
+        self._identity = None
+        self._capabilities = None
+        self._state = DeviceState.DISCONNECTED
 
     def emergency_off(self) -> None:
-        """MOKE Box control is read-only until its actuator protocol is qualified."""
+        """Close the session and report UNKNOWN; field-off is not yet qualified."""
 
         if self._connected:
-            self._state = DeviceState.VERIFIED
+            try:
+                self._transport.close()
+            finally:
+                self._connected = False
+                self._identity = None
+                self._capabilities = None
+                self._state = DeviceState.UNKNOWN
 
     def read_signal(self) -> MokeReading:
         if not self._connected:
@@ -128,25 +169,29 @@ class MokeBoxAdapter(DeviceAdapter):
     def read_vouts(self) -> dict[int, float]:
         """Read all eight DAC values using the confirmed 32-byte response."""
 
-        transport = self._require_binary_transport()
+        self._require_binary_transport()
         with self._lock:
             try:
-                transport.send(readback_vout())
-                frames = self._decode_frames(transport.recv_exact(32))
-                values: dict[int, float] = {}
-                for frame in frames:
-                    if (
-                        frame.origin != MokeTarget.OPT2
-                        or frame.record_type != MokeResponseType.AD5362
-                        or frame.channel in values
-                    ):
-                        raise DeviceError("Unexpected MOKE VOUT readback record.")
-                    values[frame.channel] = decode_voltage(frame.msb, frame.lsb)
-                if set(values) != set(range(8)):
-                    raise DeviceError("MOKE VOUT readback did not contain channels 0..7 exactly once.")
-                return values
+                return self._read_vouts_from_transport()
             except Exception as exc:
                 self._fault_and_close(exc, "MOKE VOUT readback failed")
+
+    def _read_vouts_from_transport(self) -> dict[int, float]:
+        transport = self._require_binary_transport()
+        transport.send(readback_vout())
+        frames = self._decode_frames(transport.recv_exact(32))
+        values: dict[int, float] = {}
+        for frame in frames:
+            if (
+                frame.origin not in {MokeTarget.MAIN_BOX, MokeTarget.OPT2}
+                or frame.record_type != MokeResponseType.AD5362
+                or frame.channel in values
+            ):
+                raise DeviceError("Unexpected MOKE VOUT readback record.")
+            values[frame.channel] = decode_voltage(frame.msb, frame.lsb)
+        if set(values) != set(range(8)):
+            raise DeviceError("MOKE VOUT readback did not contain channels 0..7 exactly once.")
+        return values
 
     def acquire_samples(self, count: int, *, active_streams: int = 4) -> MokeSampleBatch:
         """Acquire the documented AD7734 stream batch without stream resynchronisation."""
@@ -187,6 +232,31 @@ class MokeBoxAdapter(DeviceAdapter):
             return MokeFieldReading.from_hall_voltages(hall1, hall2)
         except (KeyError, ValueError) as exc:
             self._fault_and_close(exc, "MOKE Hall field calculation failed")
+
+    def read_hall_voltage(self, count: int = 1) -> MokeHallVoltageReading:
+        """Read Hall-1 directly using the physical AD7734 24-bit response layout.
+
+        The live unit returns one MainBox/channel-0 record per requested sample.
+        Multi-channel batch framing is deliberately not used here because the
+        reconstructed ``N * streams + 10`` layout was not observed on hardware.
+        """
+
+        if count != 1:
+            raise ValueError(
+                "The physical MOKE Box currently qualifies one Hall sample per request only."
+            )
+        transport = self._require_binary_transport()
+        with self._lock:
+            try:
+                transport.send(request_samples(count))
+                frame = MokeAd7734Frame.decode(transport.recv_exact(4))
+                if frame.origin != MokeTarget.MAIN_BOX or frame.channel != 0:
+                    raise DeviceError("Unexpected MOKE Hall response; expected MainBox channel 0.")
+                return MokeHallVoltageReading.from_ad7734_codes(
+                    (frame.code_u24,)
+                )
+            except Exception as exc:
+                self._fault_and_close(exc, "MOKE Hall-voltage read failed")
 
     def set_hall_gains(self, hall1: MokeGain | int, hall2: MokeGain | int) -> None:
         """Set the two documented Hall gains; the command has no firmware ACK."""

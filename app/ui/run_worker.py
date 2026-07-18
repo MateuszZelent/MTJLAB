@@ -10,8 +10,11 @@ import re
 from PySide6.QtCore import QObject, QThread, Signal, Slot
 from ruamel.yaml import YAML
 
+from app.bootstrap import StationComposition
 from app.devices.anritsu import AnritsuAdapter
+from app.devices.base import DeviceAdapter
 from app.devices.keithley import KeithleyAdapter
+from app.devices.moke_box import MokeBoxAdapter
 from app.devices.rigol import RigolAdapter
 from app.devices.simulators import SimulatedVisaFactory
 from app.engine.compiler import ExecutionPlan, required_devices_for_actions
@@ -77,8 +80,28 @@ class RunWorker(QObject):
             session_factory=SimulatedVisaFactory("anritsu") if self._simulation else None,
         )
         writer: Hdf5RunWriter | None = None
+        devices: dict[str, DeviceAdapter] = {
+            "rigol": rigol,
+            "keithley": keithley,
+            "anritsu": anritsu,
+        }
+        moke_box: MokeBoxAdapter | None = None
         try:
-            devices = {"rigol": rigol, "keithley": keithley, "anritsu": anritsu}
+            required_by_plan = set(
+                self._plan.required_devices
+                or required_devices_for_actions(self._plan.actions)
+            )
+            if "moke_box" in required_by_plan:
+                candidate = StationComposition(
+                    self._settings, simulation=self._simulation
+                ).create_adapter("moke_box")
+                if not isinstance(candidate, MokeBoxAdapter):
+                    raise RuntimeError(
+                        "MOKE Hall measurement requires an enabled, protocol-qualified "
+                        "MOKE Box profile and is unavailable in simulation."
+                    )
+                moke_box = candidate
+                devices["moke_box"] = moke_box
             # A recipe owns the complete station for its lifetime. Connecting
             # every configured device lets the final emergency-off sequence
             # confirm that *all* outputs are disabled after success, stop or
@@ -126,6 +149,7 @@ class RunWorker(QObject):
                 rigol=rigol,
                 keithley=keithley,
                 anritsu=anritsu,
+                moke_box=moke_box,
                 writer=writer,
                 on_event=lambda name, data: self.event.emit(name, data),
                 on_telemetry=lambda name, data: self.event.emit(name, data),
@@ -156,7 +180,7 @@ class RunWorker(QObject):
             # A run owns separate VISA sessions.  Release all of them on both
             # success and failure; RecipeRunner has already requested its
             # ordered emergency-off policy before this cleanup.
-            for device in (keithley, rigol, anritsu):
+            for device in devices.values():
                 try:
                     device.emergency_off()
                 except Exception:

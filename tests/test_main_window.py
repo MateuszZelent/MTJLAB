@@ -16,6 +16,7 @@ from PySide6.QtTest import QTest
 
 from app.domain.models import DeviceCapabilities
 from app.devices.discovery import DiscoveredInstrument
+from app.devices.moke_box.models import MokeHallVoltageReading
 from app.devices.anritsu import (
     AdvancedSpectrumSnapshot,
     AnritsuConfigurationSnapshot,
@@ -200,20 +201,21 @@ class MainWindowTests(unittest.TestCase):
         window = MainWindow(".config/settings.yml", simulation=True)
         try:
             settings = window.settings_page
-            self.assertEqual(settings.tabs.count(), 7)
+            self.assertEqual(settings.tabs.count(), 8)
             self.assertEqual(
-                [settings.tabs.tabText(index) for index in range(7)],
+                [settings.tabs.tabText(index) for index in range(8)],
                 [
                     "General",
                     "Rigol",
                     "Keithley",
                     "Anritsu",
+                    "MOKE Box",
                     "Safety limits",
                     "Access roles",
                     "Diagnostics",
                 ],
             )
-            for name in ("general", "rigol", "keithley", "anritsu"):
+            for name in ("general", "rigol", "keithley", "anritsu", "moke_box"):
                 self.assertGreater(settings.trees[name].topLevelItemCount(), 0)
             self.assertGreater(settings.limits_table.rowCount(), 10)
         finally:
@@ -787,7 +789,7 @@ class MainWindowTests(unittest.TestCase):
         try:
             self.assertTrue(window.tabs.tabBar().isHidden())
             self.assertEqual([action.text() for action in window.ribbon_actions], [
-                "Dashboard", "Rigol", "Keithley", "Anritsu", "Sweeps", "Execution", "Results", "Settings"
+                "Dashboard", "Rigol", "Keithley", "Anritsu", "MOKE Box", "Sweeps", "Execution", "Results", "Settings"
             ])
             self.assertTrue(all(not action.icon().isNull() for action in window.ribbon_actions))
             window.ribbon_actions[2].trigger()
@@ -798,6 +800,121 @@ class MainWindowTests(unittest.TestCase):
             stop = window.menu_status_area.findChild(QPushButton, "compactEmergencyButton")
             self.assertIsNotNone(stop)
             self.assertLessEqual(stop.maximumWidth(), 74)
+        finally:
+            window.close()
+            self.application.processEvents()
+
+    def test_moke_page_exposes_read_only_full_value_overview(self) -> None:
+        window = MainWindow(".config/settings.yml", simulation=True)
+        try:
+            page = window.moke_box_page
+            self.assertEqual(page.views.count(), 3)
+            self.assertEqual(len(page.vout_values), 8)
+            self.assertFalse(page.read_vouts_button.isEnabled())
+            self.assertEqual(page.field_samples.value(), 1)
+            self.assertEqual(page.read_fields_button.text(), "Get Hall voltage (V)")
+
+            page._state_changed("verified")
+            self.assertTrue(page.read_vouts_button.isEnabled())
+            page._result("read_vouts", {channel: channel / 10 for channel in range(8)})
+            self.assertEqual(page.vout_values[0].text(), "+0.000000 V")
+            self.assertEqual(page.vout_values[7].text(), "+0.700000 V")
+            self.assertIn("VOUT-setting commands", page.safety_note.text())
+        finally:
+            window.close()
+            self.application.processEvents()
+
+    def test_moke_hall_live_window_tracks_page_reading_and_stops_for_run(self) -> None:
+        window = MainWindow(".config/settings.yml", simulation=True)
+        try:
+            page = window.moke_box_page
+            page._state_changed("verified")
+            page._open_hall_live_window()
+            popup = page._hall_live_window
+            self.assertIsNotNone(popup)
+            self.assertTrue(popup.isVisible())
+
+            reading = MokeHallVoltageReading(
+                voltage_v=-0.099453926,
+                stddev_v=0.0,
+                samples=1,
+                raw_codes=(0x7EBA1C,),
+                timestamp_utc=datetime.now(timezone.utc),
+            )
+            page._show_hall_reading(reading)
+            self.assertEqual(popup.voltage.text(), "-0.099454 V")
+            self.assertIn("mT", popup.field.text())
+
+            page.live_interval.setValue(750)
+            self.assertEqual(popup.interval.value(), 750)
+            page._live_timer.start()
+            page.stop_live("Recipe run owns the MOKE Box.")
+            self.assertFalse(page._live_timer.isActive())
+            self.assertFalse(page.live_hall.isChecked())
+            self.assertIn("Recipe run", popup.status.text())
+        finally:
+            window.close()
+            self.application.processEvents()
+
+    def test_known_moke_ip_can_be_tested_without_subnet_scan(self) -> None:
+        window = MainWindow(".config/settings.yml", simulation=True)
+        try:
+            page = window.dashboard
+            page._discovery_enabled = True
+            page.tcp_network.setText("131.246.221.33")
+            page.tcp_port.setValue(10001)
+            with patch.object(page, "_identify_selected_moke") as identify:
+                page._test_entered_moke_ip()
+            identify.assert_called_once_with()
+            self.assertEqual(page.tcp_discovery_table.item(0, 0).text(), "131.246.221.33:10001")
+            self.assertEqual(page.tcp_discovery_table.item(0, 1).text(), "Entered manually")
+            page.tcp_discovery_table.item(0, 2).setText("MOKE Box verified")
+            page._update_tcp_identify_enabled()
+            self.assertTrue(page.tcp_assign_moke_button.isEnabled())
+        finally:
+            window.close()
+            self.application.processEvents()
+
+    def test_verified_moke_assignment_persists_read_only_tcp_profile(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            settings_path = Path(temporary) / "settings.yml"
+            write_engineer_settings(settings_path)
+            window = MainWindow(
+                settings_path,
+                simulation=False,
+                authenticated_username=TEST_ENGINEER,
+            )
+            try:
+                with patch.object(
+                    QMessageBox,
+                    "question",
+                    return_value=QMessageBox.StandardButton.Yes,
+                ):
+                    window._save_moke_assignment("131.246.221.33:10001")
+                self.application.processEvents()
+                profile = SettingsRepository(settings_path).load().settings.moke_box
+                self.assertTrue(profile.enabled)
+                self.assertTrue(profile.protocol_qualified)
+                self.assertEqual(profile.endpoint, "131.246.221.33:10001")
+                self.assertFalse(profile.allow_vout_control)
+                self.assertEqual(profile.allowed_vout_channels, ())
+            finally:
+                window.close()
+                self.application.processEvents()
+
+    def test_moke_connection_failure_is_visible_in_panel_and_dialog(self) -> None:
+        window = MainWindow(".config/settings.yml", simulation=True)
+        try:
+            with patch.object(QMessageBox, "warning") as warning:
+                window._device_error(
+                    "moke_box", "connect", "MOKE endpoint did not answer"
+                )
+            panel = window.connection_panels["moke_box"]
+            self.assertIn("CONNECTION FAILED", panel.summary.text())
+            self.assertIn("did not answer", panel.summary.text())
+            self.assertEqual(panel.state.text(), "FAULT")
+            self.assertTrue(panel.connect_button.isEnabled())
+            warning.assert_called_once()
         finally:
             window.close()
             self.application.processEvents()

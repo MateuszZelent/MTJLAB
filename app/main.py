@@ -80,6 +80,7 @@ QLabel#pageTitle { font-size: 20pt; font-weight: 700; }
 QLabel#cardTitle { font-size: 14pt; font-weight: 700; }
 QLabel#sectionTitle { font-size: 13pt; font-weight: 700; color: #f2f6fa; }
 QLabel#muted { color: #91a0b2; }
+QLabel#muted[connectionState="error"] { color: #ff9baa; background: #3a1b24; border: 1px solid #8f2638; border-radius: 6px; padding: 7px 9px; font-weight: 600; }
 QLabel#readout { font-family: Consolas; font-size: 13pt; padding: 10px; background: #18212c; }
 QLabel#stateDisconnected { color: #91a0b2; font-weight: 700; }
 QLabel#stateVerified, QLabel#stateOutputOff { color: #38d996; font-weight: 700; }
@@ -93,6 +94,17 @@ QLabel#rigolLed { color: #91a0b2; font-size: 18pt; }
 QLabel#rigolState { color: #e8edf3; font-weight: 700; }
 QLabel#rigolBadge { color: #72b7f2; background: #13283a; border-radius: 8px; padding: 5px 9px; }
 QLabel#rigolWarning { color: #ffcc66; background: #302817; border-radius: 6px; padding: 9px; }
+QFrame#mokeHero, QFrame#mokeValueCard, QFrame#mokeFieldCard { background: #151f2b; border: 1px solid #304f4b; border-radius: 10px; padding: 9px; }
+QLabel#mokeEndpoint { color: #8fd8c4; font-family: Consolas; font-weight: 600; }
+QLabel#mokeProtocolBadge { color: #65e6bf; background: #15342d; border: 1px solid #28705c; border-radius: 9px; padding: 6px 10px; font-weight: 700; }
+QLabel#mokeSafetyNote { color: #ffcc66; background: #302817; border: 1px solid #76561b; border-radius: 7px; padding: 9px 11px; }
+QLabel#mokeChannelLabel { color: #a9c9c0; font-size: 9pt; font-weight: 700; }
+QLabel#mokeValue, QLabel#mokeFieldValue { color: #e9fff8; font-family: Consolas; font-size: 16pt; font-weight: 700; }
+QLabel#mokeMetricValue { color: #c7e9df; font-family: Consolas; font-size: 11pt; font-weight: 600; }
+QTabWidget#mokeViews::pane { border: 1px solid #30455b; border-radius: 9px; }
+QDialog#mokeHallLiveWindow { background: #101a24; border: 1px solid #2d7565; }
+QFrame#mokeLiveReadout { background: #132b2c; border: 1px solid #2c7968; border-radius: 9px; padding: 10px; }
+QLabel#mokeLiveVoltage, QLabel#mokeLiveField { color: #aaf4dc; font-family: Consolas; font-size: 15pt; font-weight: 700; }
 QFrame#keithleyHero, QFrame#keithleyChannelCard { background: #151f2b; border: 1px solid #30455b; border-radius: 10px; padding: 9px; }
 QLabel#keithleyPageTitle { font-size: 16pt; font-weight: 700; }
 QLabel#keithleyCardTitle { font-size: 11pt; font-weight: 700; }
@@ -209,6 +221,7 @@ QLabel#pageTitle { font-size: 20pt; font-weight: 700; }
 QLabel#cardTitle { font-size: 14pt; font-weight: 700; }
 QLabel#sectionTitle { font-size: 13pt; font-weight: 700; color: #17212b; }
 QLabel#muted { color: #607284; }
+QLabel#muted[connectionState="error"] { color: #a61e35; background: #fde7eb; border: 1px solid #e0a4af; border-radius: 6px; padding: 7px 9px; font-weight: 600; }
 QLabel#readout { font-family: Consolas; font-size: 13pt; padding: 10px; background: #ffffff; }
 QLabel#stateDisconnected { color: #6b7b8c; font-weight: 700; }
 QLabel#stateVerified, QLabel#stateOutputOff { color: #087f5b; font-weight: 700; }
@@ -222,6 +235,17 @@ QLabel#rigolLed { color: #6b7b8c; font-size: 18pt; }
 QLabel#rigolState { color: #17212b; font-weight: 700; }
 QLabel#rigolBadge { color: #0b5da7; background: #e2f1fc; border-radius: 8px; padding: 5px 9px; }
 QLabel#rigolWarning { color: #765500; background: #fff2c7; border-radius: 6px; padding: 9px; }
+QFrame#mokeHero, QFrame#mokeValueCard, QFrame#mokeFieldCard { background: #ffffff; border: 1px solid #b9d8cf; border-radius: 10px; padding: 9px; }
+QLabel#mokeEndpoint { color: #087f5b; font-family: Consolas; font-weight: 600; }
+QLabel#mokeProtocolBadge { color: #087f5b; background: #dff5eb; border: 1px solid #9ed8c4; border-radius: 9px; padding: 6px 10px; font-weight: 700; }
+QLabel#mokeSafetyNote { color: #765500; background: #fff2c7; border: 1px solid #e0c875; border-radius: 7px; padding: 9px 11px; }
+QLabel#mokeChannelLabel { color: #456f63; font-size: 9pt; font-weight: 700; }
+QLabel#mokeValue, QLabel#mokeFieldValue { color: #075f48; font-family: Consolas; font-size: 16pt; font-weight: 700; }
+QLabel#mokeMetricValue { color: #315f53; font-family: Consolas; font-size: 11pt; font-weight: 600; }
+QTabWidget#mokeViews::pane { border: 1px solid #c8d3df; border-radius: 9px; }
+QDialog#mokeHallLiveWindow { background: #f7fffb; border: 1px solid #8bcdb9; }
+QFrame#mokeLiveReadout { background: #e7f8f1; border: 1px solid #9ed8c4; border-radius: 9px; padding: 10px; }
+QLabel#mokeLiveVoltage, QLabel#mokeLiveField { color: #075f48; font-family: Consolas; font-size: 15pt; font-weight: 700; }
 QFrame#keithleyHero, QFrame#keithleyChannelCard { background: #ffffff; border: 1px solid #c8d3df; border-radius: 10px; padding: 9px; }
 QLabel#keithleyPageTitle { font-size: 16pt; font-weight: 700; }
 QLabel#keithleyCardTitle { font-size: 11pt; font-weight: 700; }
