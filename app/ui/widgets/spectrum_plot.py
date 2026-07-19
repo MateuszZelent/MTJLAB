@@ -19,6 +19,8 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
+from app.ui.design_system import plot_theme, tokens_for
+
 
 class SpectrumPlotWidget(QWidget):
     """Reusable live/results plot with markers, holds and data export."""
@@ -39,6 +41,7 @@ class SpectrumPlotWidget(QWidget):
         self._marker_x: float | None = None
         self._x_label = "Frequency"
         self._x_unit = "Hz"
+        self._theme_name = "dark"
 
         root = QVBoxLayout(self)
         root.setContentsMargins(0, 0, 0, 0)
@@ -99,6 +102,7 @@ class SpectrumPlotWidget(QWidget):
         )
         self.marker.sigPositionChanged.connect(self._marker_changed)
         self.delta_marker.sigPositionChanged.connect(self._marker_changed)
+        self.apply_theme(self._theme_name)
 
     def set_labels(
         self,
@@ -117,15 +121,17 @@ class SpectrumPlotWidget(QWidget):
         self.plot.setTitle(title)
 
     def apply_theme(self, theme: str) -> None:
-        foreground = "#17212b" if theme == "light" else "#dce6ef"
-        grid = "#607d8b"
-        self.plot.setBackground(None)
+        self._theme_name = theme
+        palette = plot_theme(tokens_for(theme))
+        self.plot.setBackground(palette.background)
         for axis in ("left", "bottom"):
             item = self.plot.getAxis(axis)
-            item.setPen(pg.mkPen(foreground))
-            item.setTextPen(pg.mkPen(foreground))
-        self.crosshair_x.setPen(pg.mkPen(grid, width=1))
-        self.crosshair_y.setPen(pg.mkPen(grid, width=1))
+            item.setPen(pg.mkPen(palette.axes))
+            item.setTextPen(pg.mkPen(palette.axes))
+        self.crosshair_x.setPen(pg.mkPen(palette.grid, width=1))
+        self.crosshair_y.setPen(pg.mkPen(palette.grid, width=1))
+        self.marker.setPen(pg.mkPen(palette.reference, width=2))
+        self.delta_marker.setPen(pg.mkPen(palette.reference, width=2))
 
     def set_trace(
         self,
@@ -133,10 +139,12 @@ class SpectrumPlotWidget(QWidget):
         x: object,
         y: object,
         *,
-        color: str = "#2196f3",
+        color: str | None = None,
         visible: bool = True,
         primary: bool = False,
     ) -> None:
+        if color is None:
+            color = plot_theme(tokens_for(self._theme_name)).measurement if primary else "#2196f3"
         x_values = np.asarray(x, dtype=float)
         y_values = np.asarray(y, dtype=float)
         if x_values.ndim != 1 or y_values.ndim != 1 or x_values.size != y_values.size:

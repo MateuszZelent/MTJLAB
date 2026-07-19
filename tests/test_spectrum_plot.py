@@ -54,6 +54,15 @@ class SpectrumPlotTests(unittest.TestCase):
         finally:
             plot.close()
 
+    def test_apply_theme_uses_design_system_plot_palette(self) -> None:
+        widget = SpectrumPlotWidget()
+        try:
+            widget.apply_theme("light")
+            self.assertEqual(widget._theme_name, "light")
+            self.assertEqual(widget.plot.backgroundBrush().color().name(), "#ffffff")
+        finally:
+            widget.close()
+
     def test_csv_export_contains_each_visible_trace_and_refuses_overwrite(self) -> None:
         plot = SpectrumPlotWidget()
         try:
