@@ -232,3 +232,24 @@ The command exits with code `0` only for `passed` or `simulation_passed`. A vali
 overall status is `failed`, `blocked` or `incomplete` is still written and verified, but the command
 returns code `1`; a failure before report completion returns code `2`. Automation must check both
 the exit code and the signed `overall_status`.
+
+## 8. THATEC result interoperability
+
+Open every generated result through **Results** before accepting a simulation
+or HIL run. The browser reads the public THATEC tree directly and does not
+require Lab Control's private `/run` or `/points` groups.
+
+1. Select the file and expand **Measurements**, **Devices**, **Labbook** and
+   **Post-process**.
+2. Select a spectrum row, select checkpoint zero, and confirm the plotted
+   trace has the row's declared number of frequency points.
+3. Select every device record and verify that the public `/devices` table
+   contains the complete flattened station configuration, including its
+   connection and safety settings.
+4. Confirm that selecting a measurement row exposes its THATEC definition,
+   shape, timestamps and axis metadata in the inspector.
+
+For interoperability qualification, repeat the same inspection with a real
+THATEC/eLab result. The two files must use the same Results workflow; the
+external file must not be labelled unreadable merely because it has no
+application-private metadata.

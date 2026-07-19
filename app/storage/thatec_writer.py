@@ -31,6 +31,7 @@ class ThatecHdf5Writer:
         expected_points: int | None = None,
         recipe_source: str = "",
         dut_limits_json: str = "{}",
+        settings_source: str = "",
     ) -> None:
         import h5py
         import numpy as np
@@ -62,22 +63,37 @@ class ThatecHdf5Writer:
         file.attrs["version information"] = "Lab Control 0.1"
 
         devices = file.create_group("devices")
+        device_settings = self._device_settings(settings_source)
         for stable_name, idn in sorted(device_idn.items()):
             dataset_name = self._device_name(stable_name, idn)
+            configuration = self._flatten(device_settings.get(stable_name, {}))
             devices.create_dataset(
                 dataset_name,
                 data=self._table(
                     (
                         ("VISA identity", json.dumps([idn])),
                         ("profile id", json.dumps([stable_name])),
-                    )
+                    ) + configuration
                 ),
                 dtype=self._text,
             )
 
         labbook = file.create_group("labbook")
         labbook.create_dataset("comments", shape=(0, 2), maxshape=(None, 2), dtype=self._text)
-        labbook.create_dataset("parameter", shape=(0, 2), maxshape=(None, 2), dtype=self._text)
+        # Preserve the declarative source in a standard public two-column
+        # labbook table.  Generic THATEC tools may ignore the names, while this
+        # application can restore the exact editable Sweep after reopening H5.
+        labbook.create_dataset(
+            "parameter",
+            data=self._table(
+                (
+                    ("Lab Control recipe YAML", recipe_source),
+                    ("Lab Control settings YAML", settings_source),
+                )
+            ),
+            maxshape=(None, 2),
+            dtype=self._text,
+        )
         labbook.create_dataset(
             "metadata",
             data=self._table(
@@ -551,6 +567,29 @@ class ThatecHdf5Writer:
         self._tree_view.resize((len(rows), 3))
         if rows:
             self._tree_view[:] = self._np.asarray(rows, dtype=object)
+
+    @staticmethod
+    def _device_settings(source: str) -> dict[str, Any]:
+        if not source.strip():
+            return {}
+        try:
+            from ruamel.yaml import YAML
+
+            decoded = YAML(typ="safe").load(source)
+        except Exception:
+            return {}
+        devices = decoded.get("devices", {}) if isinstance(decoded, dict) else {}
+        return devices if isinstance(devices, dict) else {}
+
+    @staticmethod
+    def _flatten(value: Any, prefix: str = "") -> tuple[tuple[str, str], ...]:
+        if isinstance(value, dict):
+            rows: list[tuple[str, str]] = []
+            for key, item in sorted(value.items(), key=lambda pair: str(pair[0])):
+                nested = f"{prefix}.{key}" if prefix else str(key)
+                rows.extend(ThatecHdf5Writer._flatten(item, nested))
+            return tuple(rows)
+        return ((prefix, value if isinstance(value, str) else json.dumps(value)),)
 
     def _create_axis_row(self, index: int, axis: ThatecSweepAxis) -> None:
         row_name = f"row_{index:02d}"

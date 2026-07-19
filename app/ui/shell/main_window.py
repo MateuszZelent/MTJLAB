@@ -259,6 +259,7 @@ class MainWindow(QMainWindow):
         self.recipe_page.run_requested.connect(self._start_run)
         self.recipe_page.plan_preflight_changed.connect(self.dashboard.update_plan_preflight)
         self.results_page.resume_requested.connect(self._resume_run)
+        self.results_page.open_sweep_requested.connect(self._open_historical_thatec_sweep)
         self.run_monitor.stop_requested.connect(self._run_controller.request_stop)
         self.run_monitor.pause_requested.connect(self._run_controller.request_pause)
         self.run_monitor.resume_requested.connect(self._run_controller.request_resume)
@@ -782,6 +783,19 @@ class MainWindow(QMainWindow):
         self._set_run_ui_locked(True)
         self.tabs.setCurrentWidget(self.run_monitor)
         self._log("Run Engine started")
+
+    def _open_historical_thatec_sweep(self, run: object, tree: object) -> None:
+        """Switch from Results to the immutable Sweep reconstructed from THATEC."""
+        if not hasattr(run, "rows") or not isinstance(tree, tuple):
+            self._log("THATEC Sweep reconstruction rejected: invalid public data")
+            return
+        try:
+            self.recipe_page.load_reconstructed_thatec_sweep(run, tree)
+        except Exception as exc:
+            QMessageBox.warning(self, "THATEC Sweep", f"Cannot reconstruct Sweep tree: {exc}")
+            return
+        self.tabs.setCurrentWidget(self.recipe_page)
+        self._log("Historical THATEC Sweep reconstructed in Sweeps")
 
     def _resume_run(self, selected: object) -> None:
         try:

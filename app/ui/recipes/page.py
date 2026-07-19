@@ -26,7 +26,7 @@ from app.recipes.parameter_registry import SWEEPABLE_PARAMETERS as _SWEEPABLE_PA
 from app.recipes.parameter_registry import sweep_default as _sweep_default
 from app.security import AccessPolicy, Permission
 from app.settings.models import StationSettings
-from app.storage import Hdf5RunReader
+from app.storage import Hdf5RunReader, ThatecDevice, ThatecRow, ThatecRun, ThatecRunReader, ThatecTreeNode
 from app.ui.common import human_bytes as _human_bytes
 from app.ui.common import human_duration as _human_duration
 from app.ui.common import line_edit as _line
@@ -72,6 +72,7 @@ class RecipePage(QWidget):
         device_registry: DeviceModuleRegistry | None = None,
     ) -> None:
         super().__init__(parent)
+        self._historical_sweep_active = False
         self._recipe_parameter_definitions = (
             device_registry.recipe_parameter_definitions()
             if device_registry is not None
@@ -304,6 +305,11 @@ class RecipePage(QWidget):
             QStyle.StandardPixmap.SP_DialogOpenButton,
             self.browse_recipe,
             shortcut=QKeySequence.StandardKey.Open,
+        )
+        self.open_hdf5_action = command_action(
+            "Open HDF5 result",
+            QStyle.StandardPixmap.SP_DialogOpenButton,
+            self.browse_hdf5_result,
         )
         self.save_recipe_action = command_action(
             "Save recipe",
@@ -1039,8 +1045,13 @@ class RecipePage(QWidget):
         self._autosave_timer.start()
 
     def load_editor(self, *, show_error: bool = True) -> None:
+        self._leave_historical_sweep_mode()
+        target = Path(self.path.text()).expanduser()
+        if target.suffix.lower() in {".h5", ".hdf5"}:
+            self.load_hdf5_result(target, show_error=show_error)
+            return
         try:
-            source = Path(self.path.text()).read_text(encoding="utf-8")
+            source = target.read_text(encoding="utf-8")
         except Exception as exc:
             if show_error:
                 QMessageBox.warning(self, "Recipe", f"Cannot load YAML: {exc}")
@@ -1074,6 +1085,146 @@ class RecipePage(QWidget):
         self._update_repository_state()
         self.status.emit("Recipe loaded into the editor")
 
+    @property
+    def historical_sweep_active(self) -> bool:
+        """Whether the tree represents an immutable, recorded THATEC execution."""
+        return self._historical_sweep_active
+
+    def load_historical_thatec_sweep(
+        self, run: ThatecRun, tree: tuple[ThatecTreeNode, ...]
+    ) -> None:
+        """Render the public THATEC execution hierarchy in the Sweep workspace.
+
+        A standard THATEC result stores what was executed, but not necessarily the
+        application's original safety policy or declarative YAML.  It is therefore
+        deliberately presented as a non-runnable historical sweep rather than a
+        guessed recipe.
+        """
+        self.cancel_preflight()
+        self._historical_sweep_active = True
+        self._plan = None
+        self.plan_preflight_changed.emit(None)
+        self.run_button.setEnabled(False)
+        self.compile_recipe_action.setEnabled(False)
+        self.editor.setReadOnly(True)
+        self.tree.setDragEnabled(False)
+        self.tree.setAcceptDrops(False)
+        self.tree.setDropIndicatorShown(False)
+        for button in (
+            self.add_node_button, self.add_controls_button, self.edit_device_button,
+            self.edit_generator_button, self.delete_node_button,
+            self.duplicate_node_button, self.move_up_button, self.move_down_button,
+            self.open_editor_button,
+        ):
+            button.setEnabled(False)
+        self.path.setText(str(run.path))
+        self._loading_source = True
+        self.editor.setPlainText(
+            "# Historical THATEC Sweep (read-only)\n"
+            f"# Source result: {run.path.name}\n"
+            "# The executed tree and recorded device settings are shown in the tree.\n"
+            "# A standard THATEC result does not contain enough information to\n"
+            "# reconstruct unrecorded safety policy as an executable YAML recipe.\n"
+        )
+        self._loading_source = False
+
+        root = QTreeWidgetItem([
+            f"Historical THATEC Sweep — {run.path.name}",
+            "Recorded execution tree",
+            "READ-ONLY",
+        ])
+        root.setToolTip(0, str(run.path))
+        root.setData(0, Qt.ItemDataRole.UserRole, "historical-thatec-root")
+
+        def add_node(parent: QTreeWidgetItem, node: ThatecTreeNode) -> None:
+            row = run.rows.get(node.id)
+            detail = node.kind or (row.function if row is not None else "recorded")
+            item = QTreeWidgetItem([node.label, detail, "RECORDED"])
+            item.setData(0, Qt.ItemDataRole.UserRole, row)
+            item.setData(1, Qt.ItemDataRole.UserRole, node.id)
+            if row is not None:
+                item.setToolTip(
+                    0,
+                    "\n".join((
+                        f"THATEC row: {row.id}",
+                        f"Device: {row.device_name or 'internal'}",
+                        f"Control: {row.control_name or 'internal'}",
+                        f"Function: {row.function or node.kind}",
+                    )),
+                )
+            parent.addChild(item)
+            for child in node.children:
+                add_node(item, child)
+
+        for node in tree:
+            add_node(root, node)
+        if run.devices:
+            devices_item = QTreeWidgetItem([
+                "Recorded device configuration", "THATEC /devices", "RECORDED",
+            ])
+            devices_item.setData(0, Qt.ItemDataRole.UserRole, "historical-thatec-devices")
+            root.addChild(devices_item)
+            for device in run.devices:
+                device_item = QTreeWidgetItem([device.name, "device settings", "RECORDED"])
+                device_item.setData(0, Qt.ItemDataRole.UserRole, device)
+                device_item.setToolTip(0, "All public THATEC settings recorded for this device.")
+                devices_item.addChild(device_item)
+        self.tree.clear()
+        self.tree.addTopLevelItem(root)
+        self.tree.expandAll()
+        self.tree.setCurrentItem(root)
+        self.inspector_summary.setText(
+            "<b>Historical THATEC Sweep</b><br>Read-only execution tree reconstructed from the HDF5 result."
+        )
+        self.inspector.setPlainText(
+            f"Result: {run.path}\nRows: {len(run.rows)}\nDevices: {len(run.devices)}\n\n"
+            "Select a recorded node to inspect its public definition, metadata and recorded dimensions."
+        )
+        self.summary.setText(
+            "Historical THATEC Sweep loaded. It is read-only because the source result "
+            "does not prove every safety and recipe field needed for re-execution."
+        )
+        self.status.emit("Historical THATEC Sweep reconstructed")
+
+    def load_reconstructed_thatec_sweep(
+        self, run: ThatecRun, tree: tuple[ThatecTreeNode, ...]
+    ) -> None:
+        """Restore an editable Sweep when its public THATEC labbook has YAML.
+
+        External THATEC results normally only contain an execution tree; those
+        remain available through the historical renderer.  Files written here
+        carry their validated source in ``labbook/parameter`` and can therefore
+        reopen as an ordinary Sweep without guessing action semantics.
+        """
+        source = run.recipe_source.strip()
+        if not source:
+            self.load_historical_thatec_sweep(run, tree)
+            return
+        self._leave_historical_sweep_mode()
+        self.path.setText(str(run.path))
+        self._apply_builder_source(source, "Restored Sweep from THATEC labbook")
+        self.summary.setText(
+            "Sweep restored from public THATEC labbook. Validate it against the current "
+            "station profile before running."
+        )
+        self.status.emit("Editable Sweep restored from THATEC labbook")
+
+    def _leave_historical_sweep_mode(self) -> None:
+        if not self._historical_sweep_active:
+            return
+        self._historical_sweep_active = False
+        self.editor.setReadOnly(False)
+        self.tree.setDragEnabled(True)
+        self.tree.setAcceptDrops(True)
+        self.tree.setDropIndicatorShown(True)
+        self.compile_recipe_action.setEnabled(True)
+        for button in (
+            self.add_node_button, self.add_controls_button, self.edit_device_button,
+            self.edit_generator_button, self.delete_node_button,
+            self.duplicate_node_button, self.move_up_button, self.move_down_button,
+        ):
+            button.setEnabled(True)
+
     def new_recipe(self, *, confirm: bool = True) -> None:
         """Start an empty, valid plan without touching the currently saved file."""
 
@@ -1087,6 +1238,7 @@ class RecipePage(QWidget):
             )
             if answer != QMessageBox.StandardButton.Yes:
                 return
+        self._leave_historical_sweep_mode()
         source = (
             "schema_version: 1\n"
             "name: Untitled sweep\n"
@@ -1121,6 +1273,35 @@ class RecipePage(QWidget):
             return
         self.path.setText(str(Path(selected)))
         self.load_editor()
+
+    def browse_hdf5_result(self) -> None:
+        """Choose a THATEC result and rebuild its tree in the Sweep workspace."""
+        current_text = self.path.text().strip()
+        current = Path(current_text).expanduser() if current_text else Path("measurements")
+        initial_location = current if current.is_dir() else current.parent
+        selected, _selected_filter = QFileDialog.getOpenFileName(
+            self,
+            "Open THATEC HDF5 result",
+            str(initial_location),
+            "HDF5 results (*.h5 *.hdf5);;All files (*)",
+        )
+        if selected:
+            self.load_hdf5_result(Path(selected))
+
+    def load_hdf5_result(
+        self, path: str | Path, *, show_error: bool = True
+    ) -> None:
+        """Load a THATEC HDF5 result without passing binary data to the YAML parser."""
+        target = Path(path).expanduser()
+        try:
+            run = ThatecRunReader.describe(target)
+            tree = ThatecRunReader.tree(target)
+            self.load_reconstructed_thatec_sweep(run, tree)
+        except Exception as exc:
+            if show_error:
+                QMessageBox.warning(self, "THATEC HDF5", f"Cannot load HDF5 result: {exc}")
+            else:
+                self.summary.setText(f"HDF5 result could not be loaded: {exc}")
 
     def save_recipe(self) -> None:
         source = self.editor.toPlainText()
@@ -2183,6 +2364,36 @@ class RecipePage(QWidget):
             )
             return
         node = item.data(0, Qt.ItemDataRole.UserRole)
+        if isinstance(node, ThatecDevice):
+            self.inspector_summary.setText(
+                f"<b>Recorded device configuration</b><br>{node.name}"
+            )
+            self.open_editor_button.setEnabled(False)
+            self.edit_device_button.setEnabled(False)
+            self.edit_generator_button.setEnabled(False)
+            self.inspector.setPlainText(
+                "\n".join(f"{key}: {value}" for key, value in node.values)
+                or "No public device parameters were saved."
+            )
+            return
+        if isinstance(node, ThatecRow):
+            definition = "\n".join(f"{key}: {value}" for key, value in node.definition)
+            metadata = "\n".join(f"{key}: {value}" for key, value in node.metadata)
+            self.inspector_summary.setText(
+                f"<b>Recorded {node.function or 'THATEC'} node</b><br>"
+                f"{node.device_name or 'internal'} • {node.control_name or 'internal'}"
+            )
+            self.open_editor_button.setEnabled(False)
+            self.edit_device_button.setEnabled(False)
+            self.edit_generator_button.setEnabled(False)
+            self.inspector.setPlainText(
+                f"THATEC row: {node.id}\n"
+                f"Recorded shape: {node.shape or 'no measurement data'}\n"
+                f"Timestamps: {node.timestamp_count}\n\n"
+                f"Definition\n{definition or '—'}\n\n"
+                f"Measurement metadata\n{metadata or '—'}"
+            )
+            return
         if not isinstance(node, RecipeNode):
             self.inspector_summary.setText("Safety cleanup runs after success, operator stop and faults.")
             self.open_editor_button.setEnabled(False)
@@ -2401,6 +2612,7 @@ class RecipePage(QWidget):
         self._update_tree_history_controls()
 
     def _apply_builder_source(self, source: str, status: str) -> None:
+        self._leave_historical_sweep_mode()
         previous = self.editor.toPlainText()
         previous_plan = self._plan
         try:

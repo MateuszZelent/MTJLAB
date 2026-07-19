@@ -14,7 +14,12 @@ import csv
 from app.devices.anritsu import SpectrumTrace
 from app.domain.models import MeasurementPoint
 from app.recipes import generate_sweep_points
-from app.storage import Hdf5RunReader, Hdf5RunWriter, read_pythat_run_data
+from app.storage import (
+    Hdf5RunReader,
+    Hdf5RunWriter,
+    ThatecRunReader,
+    read_pythat_run_data,
+)
 from app.storage.pythat_bridge import open_measurement_tree
 
 
@@ -142,6 +147,60 @@ class Hdf5WriterTests(unittest.TestCase):
             self.assertEqual(detail.simulation_metadata["seed"], 17)
             self.assertTrue(point.device_states["rigol"]["channel_1"]["output"])
             self.assertIn("moke_box", point.device_states)
+
+    def test_public_thatec_device_record_contains_full_station_configuration(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            path = Path(temporary) / "public-device-settings.h5"
+            writer = Hdf5RunWriter(
+                path,
+                recipe_source="schema_version: 1\n",
+                settings_source=(
+                    "devices:\n"
+                    "  rigol:\n"
+                    "    connection:\n"
+                    "      resource: SIM::RIGOL::INSTR\n"
+                    "    safety:\n"
+                    "      allow_output_enable: false\n"
+                ),
+                plan_hash="device-settings",
+                device_idn={"rigol": "RIGOL,DG1032Z,SIM,1.0"},
+            )
+            writer.close("completed")
+            with h5py.File(path, "r") as file:
+                device = next(iter(file["devices"].values()))
+                values = dict(device.asstr()[()])
+            self.assertEqual(values["connection.resource"], "SIM::RIGOL::INSTR")
+            self.assertEqual(values["safety.allow_output_enable"], "false")
+
+    def test_generated_file_remains_readable_after_private_extensions_are_removed(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            path = Path(temporary) / "public-only.h5"
+            writer = Hdf5RunWriter(
+                path,
+                recipe_source="schema_version: 1\n",
+                settings_source="devices: {rigol: {connection: {resource: SIM::RIGOL::INSTR}}}\n",
+                plan_hash="public-only",
+                device_idn={"rigol": "RIGOL,DG1032Z,SIM,1.0"},
+            )
+            writer.append(
+                MeasurementPoint(index=0, setpoints={}, measurements={}),
+                SpectrumTrace(
+                    frequencies_hz=(1e6, 2e6, 3e6),
+                    powers_dbm=(-60.0, -50.0, -55.0),
+                    acquired_at_utc=datetime.now(timezone.utc),
+                    trace_name="TRAC1",
+                ),
+            )
+            writer.close("completed")
+            with h5py.File(path, "r+") as file:
+                for name in ("run", "points", "spectra", "events", "_pending"):
+                    if name in file:
+                        del file[name]
+            run = ThatecRunReader.describe(path)
+            self.assertEqual(run.recipe_source, "schema_version: 1\n")
+            self.assertIn("SIM::RIGOL::INSTR", run.settings_source)
+            spectrum = next(row for row in run.rows.values() if len(row.shape) == 2)
+            self.assertEqual(ThatecRunReader.row_slice(path, spectrum.id, 0).values.shape, (3,))
 
     def test_generated_spectrum_round_trips_through_qualified_pythat(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
