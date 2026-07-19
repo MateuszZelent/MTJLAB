@@ -163,7 +163,12 @@ class _FluentSettingsSections(QWidget):
 
     def resizeEvent(self, event: QResizeEvent) -> None:
         super().resizeEvent(event)
-        compact = event.size().width() < 900
+        # The settings route has enough sections that its Pivot is wider than
+        # a typical 1360 px application content area.  Switch according to the
+        # navigation's real size hint instead of a fixed desktop breakpoint;
+        # otherwise the final routes are silently clipped inside the host.
+        required_width = max(900, self.navigation.sizeHint().width())
+        compact = event.size().width() < required_width
         self.navigation_scroll.setVisible(not compact)
         self.compact_navigation.setVisible(compact)
 
@@ -282,14 +287,14 @@ class SettingsPage(QWidget):
         limits_layout = QVBoxLayout(limits_page)
         limits_layout.setContentsMargins(18, 18, 18, 18)
         limits_layout.setSpacing(12)
-        limits_title = QLabel("Safety limits")
+        limits_title = StrongBodyLabel("Safety limits")
         limits_title.setObjectName("sectionTitle")
-        limits_description = QLabel(
+        limits_description = BodyLabel(
             "Approved laboratory boundaries. Enter values with units, for example 10 mA, 67 mV or 1 MHz."
         )
         limits_description.setObjectName("muted")
         limits_description.setWordWrap(True)
-        self.limits_validation_banner = QLabel()
+        self.limits_validation_banner = BodyLabel()
         self.limits_validation_banner.setObjectName("settingsValidationBanner")
         self.limits_validation_banner.setWordWrap(True)
         self.limits_validation_banner.hide()
@@ -334,9 +339,9 @@ class SettingsPage(QWidget):
         roles_layout = QVBoxLayout(roles_page)
         roles_layout.setContentsMargins(18, 18, 18, 18)
         roles_layout.setSpacing(12)
-        roles_title = QLabel("Access roles")
+        roles_title = StrongBodyLabel("Access roles")
         roles_title.setObjectName("sectionTitle")
-        self.roles_info = QLabel()
+        self.roles_info = BodyLabel()
         self.roles_info.setWordWrap(True)
         self.roles_info.setObjectName("muted")
         roles_card = CardWidget()
@@ -369,9 +374,9 @@ class SettingsPage(QWidget):
         diagnostics_layout = QVBoxLayout(diagnostics_page)
         diagnostics_layout.setContentsMargins(18, 18, 18, 18)
         diagnostics_layout.setSpacing(12)
-        diagnostics_title = QLabel("Configuration diagnostics")
+        diagnostics_title = StrongBodyLabel("Configuration diagnostics")
         diagnostics_title.setObjectName("sectionTitle")
-        diagnostics_description = QLabel("Read-only checks for the active station profile.")
+        diagnostics_description = BodyLabel("Read-only checks for the active station profile.")
         diagnostics_description.setObjectName("muted")
         diagnostics_card = CardWidget()
         diagnostics_card.setObjectName("settingsTableCard")
@@ -574,7 +579,7 @@ class SettingsPage(QWidget):
         dialog.setWindowTitle("Settings changes")
         dialog.resize(760, 480)
         layout = QVBoxLayout(dialog)
-        summary = QLabel(
+        summary = BodyLabel(
             f"{len(changes)} unsaved structural change(s). Saving any safety change revokes profile approval."
         )
         summary.setWordWrap(True)
@@ -709,7 +714,7 @@ class SettingsPage(QWidget):
                 return
             section = labels[0] if labels else "Station"
             label = " › ".join(labels[1:]) or section
-            label_widget = QLabel(label)
+            label_widget = BodyLabel(label)
             label_widget.setWordWrap(True)
             label_widget.setMinimumWidth(0)
             card_for(section).addRow(label_widget, self._form_editor(path, value))
@@ -764,7 +769,7 @@ class SettingsPage(QWidget):
         field_layout = QVBoxLayout(field)
         field_layout.setContentsMargins(0, 0, 0, 0)
         field_layout.setSpacing(3)
-        error = QLabel()
+        error = BodyLabel()
         error.setObjectName("settingsFieldError")
         error.setWordWrap(True)
         error.hide()
@@ -1016,12 +1021,12 @@ class SettingsPage(QWidget):
                 continue
             device = str(min_path[1]).capitalize() if len(min_path) > 1 else "Device"
             if device not in device_layouts:
-                card = QFrame()
+                card = CardWidget(self)
                 card.setObjectName("safetyDeviceCard")
                 card_layout = QVBoxLayout(card)
                 card_layout.setContentsMargins(18, 16, 18, 16)
                 card_layout.setSpacing(10)
-                heading = QLabel(device)
+                heading = BodyLabel(device)
                 heading.setObjectName("safetyDeviceTitle")
                 card_layout.addWidget(heading)
                 content_layout.addWidget(card)
@@ -1030,7 +1035,7 @@ class SettingsPage(QWidget):
             scope_item = self.limits_table.item(row, 0)
             parameter_item = self.limits_table.item(row, 1)
             unit_item = self.limits_table.item(row, 4)
-            row_widget = QFrame()
+            row_widget = CardWidget(self)
             row_widget.setObjectName("safetyLimitRow")
             row_layout = QVBoxLayout(row_widget)
             row_layout.setContentsMargins(12, 10, 12, 10)
@@ -1040,7 +1045,7 @@ class SettingsPage(QWidget):
             label_text = parameter_item.text().title() if parameter_item is not None else "Limit"
             if scope_item is not None and scope_item.text() != device.lower():
                 label_text = f"{label_text}  ·  {scope_item.text()}"
-            label = QLabel(label_text)
+            label = BodyLabel(label_text)
             label.setObjectName("safetyLimitLabel")
             label.setMinimumWidth(250)
             values_layout.addWidget(label, 1)
@@ -1050,12 +1055,12 @@ class SettingsPage(QWidget):
             values_layout.addWidget(self._safety_boundary_label("MAX"))
             maximum_editor = self._make_safety_limit_editor(max_path, maximum.text())
             values_layout.addWidget(maximum_editor)
-            unit = QLabel(unit_item.text() if unit_item is not None else "SI / explicit")
+            unit = BodyLabel(unit_item.text() if unit_item is not None else "SI / explicit")
             unit.setObjectName("safetyLimitUnit")
             unit.setMinimumWidth(84)
             values_layout.addWidget(unit)
             row_layout.addLayout(values_layout)
-            error = QLabel()
+            error = BodyLabel()
             error.setObjectName("settingsFieldError")
             error.setWordWrap(True)
             error.hide()
@@ -1069,7 +1074,7 @@ class SettingsPage(QWidget):
 
     @staticmethod
     def _safety_boundary_label(text: str) -> QLabel:
-        label = QLabel(text)
+        label = BodyLabel(text)
         label.setObjectName("safetyLimitTag")
         return label
 
@@ -1118,15 +1123,15 @@ class SettingsPage(QWidget):
         dialog.setWindowTitle("User access role")
         dialog.setMinimumWidth(420)
         layout = QVBoxLayout(dialog)
-        note = QLabel("Assign one or more station roles to an operating-system account.")
+        note = BodyLabel("Assign one or more station roles to an operating-system account.")
         note.setWordWrap(True)
         layout.addWidget(note)
-        layout.addWidget(QLabel("Operating-system account"))
+        layout.addWidget(BodyLabel("Operating-system account"))
         account = LineEdit(dialog)
         account.setText(username)
         account.setPlaceholderText("DOMAIN\\user")
         layout.addWidget(account)
-        layout.addWidget(QLabel("Roles"))
+        layout.addWidget(BodyLabel("Roles"))
         checkboxes: list[QCheckBox] = []
         for role in self._role_choices():
             check = CheckBox(role.capitalize(), dialog)

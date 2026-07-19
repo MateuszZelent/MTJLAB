@@ -694,6 +694,25 @@ class MainWindowTests(unittest.TestCase):
             )
         finally:
             window.close()
+
+    def test_event_log_can_filter_and_copy_exact_instrument_tx_rx(self) -> None:
+        window = MainWindow(".config/settings.yml", simulation=True)
+        try:
+            window._log("ordinary application status")
+            window._log("LAKESHORE_GAUSSMETER VISA TX QUERY 'UNIT?'")
+            window._log("LAKESHORE_GAUSSMETER VISA RX 'UNIT?' after 2.0 ms: '1'")
+
+            window.traffic_only_button.setChecked(True)
+            self.application.processEvents()
+
+            visible = window.log.toPlainText()
+            self.assertNotIn("ordinary application status", visible)
+            self.assertIn("TX QUERY 'UNIT?'", visible)
+            self.assertIn("VISA RX", visible)
+            window.copy_traffic_button.click()
+            self.assertEqual(QApplication.clipboard().text(), visible)
+        finally:
+            window.close()
             self.application.processEvents()
 
     def test_find_visa_scan_states_are_explicit(self) -> None:
@@ -852,7 +871,10 @@ class MainWindowTests(unittest.TestCase):
             row = window.dashboard.visa_results.rows[0]
             row_point = row.mapTo(window, QPoint(5, 5))
             shell_point = window.fluent_content.mapTo(window, QPoint(6, 400))
-            log_point = window.log.mapTo(window, QPoint(15, 15))
+            log_point = window.log.viewport().mapTo(
+                window,
+                QPoint(96, max(20, window.log.viewport().height() - 12)),
+            )
             nav_point = window.navigationInterface.panel.mapTo(window, QPoint(12, 500))
 
             window._set_theme_mode("dark", persist=False)

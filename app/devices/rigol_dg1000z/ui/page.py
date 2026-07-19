@@ -8,10 +8,11 @@ from dataclasses import dataclass
 from PySide6.QtCore import Qt, Signal
 from PySide6.QtWidgets import (
     QFormLayout, QFrame, QGridLayout, QHBoxLayout,
-    QLabel, QMessageBox, QPushButton, QSplitter,
+    QMessageBox, QPushButton, QSplitter,
     QVBoxLayout, QWidget,
 )
 from qfluentwidgets import (
+    BodyLabel,
     CaptionLabel, CardWidget, CheckBox, ComboBox, PrimaryPushButton,
     PushButton, ScrollArea, SpinBox, StrongBodyLabel, TitleLabel,
 )
@@ -76,13 +77,13 @@ class RigolPage(QWidget):
         heading = QVBoxLayout()
         title = TitleLabel("Rigol DG1032Z")
         title.setObjectName("pageTitle")
-        subtitle = QLabel("Function generator · channel control and safe output activation")
+        subtitle = CaptionLabel("Function generator · channel control and safe output activation")
         subtitle.setObjectName("muted")
         heading.addWidget(title)
         heading.addWidget(subtitle)
         header_layout.addLayout(heading, 1)
 
-        self.device_led = QLabel("●")
+        self.device_led = BodyLabel("●")
         self.device_led.setObjectName("rigolLed")
         self.device_state = StrongBodyLabel("DISCONNECTED")
         self.device_state.setObjectName("rigolState")
@@ -234,11 +235,11 @@ class RigolPage(QWidget):
         safety_title = StrongBodyLabel("Load safety")
         safety_title.setObjectName("sectionTitle")
         safety_layout.addWidget(safety_title)
-        self.estimate = QLabel("Estimated current: —")
+        self.estimate = BodyLabel("Estimated current: —")
         self.estimate.setObjectName("muted")
         self.estimate.setWordWrap(True)
         safety_layout.addWidget(self.estimate)
-        warning = QLabel("⚠ This estimate is not a measurement. Verify DUT impedance and profile limits before ARM.")
+        warning = BodyLabel("⚠ This estimate is not a measurement. Verify DUT impedance and profile limits before ARM.")
         warning.setObjectName("rigolWarning")
         warning.setWordWrap(True)
         safety_layout.addWidget(warning)
@@ -397,10 +398,10 @@ class RigolPage(QWidget):
         content_layout = QVBoxLayout(content)
         content_layout.setContentsMargins(18, 18, 18, 24)
         content_layout.setSpacing(12)
-        heading = QLabel(title)
+        heading = StrongBodyLabel(title)
         heading.setObjectName("sectionTitle")
         content_layout.addWidget(heading)
-        help_text = QLabel(description)
+        help_text = CaptionLabel(description)
         help_text.setObjectName("muted")
         help_text.setWordWrap(True)
         content_layout.addWidget(help_text)

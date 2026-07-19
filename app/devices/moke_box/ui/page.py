@@ -10,7 +10,7 @@ from PySide6.QtWidgets import (
     QVBoxLayout,
     QWidget,
 )
-from qfluentwidgets import CardWidget, CheckBox, PrimaryPushButton, PushButton, SpinBox
+from qfluentwidgets import BodyLabel, CaptionLabel, CardWidget, CheckBox, PrimaryPushButton, PushButton, SpinBox, StrongBodyLabel, TitleLabel
 from app.ui.dialogs import StationDialog
 
 from app.devices.moke_box.models import MokeHallVoltageReading, hall_field_from_voltage
@@ -38,10 +38,10 @@ class MokeHallLiveWindow(StationDialog):
         layout = QVBoxLayout(self)
         layout.setContentsMargins(16, 14, 16, 14)
         layout.setSpacing(10)
-        heading = QLabel("Hall 1 · live readout")
+        heading = StrongBodyLabel("Hall 1 · live readout")
         heading.setObjectName("sectionTitle")
         layout.addWidget(heading)
-        note = QLabel("Read-only AD7734 channel 0 · no VOUT, gain or field command")
+        note = CaptionLabel("Read-only AD7734 channel 0 · no VOUT, gain or field command")
         note.setObjectName("muted")
         note.setWordWrap(True)
         layout.addWidget(note)
@@ -49,12 +49,12 @@ class MokeHallLiveWindow(StationDialog):
         self.readout_card = CardWidget(self)
         self.readout_card.setObjectName("mokeLiveReadout")
         panel_layout = QGridLayout(self.readout_card)
-        panel_layout.addWidget(QLabel("Hall voltage"), 0, 0)
-        self.voltage = QLabel("— V")
+        panel_layout.addWidget(BodyLabel("Hall voltage"), 0, 0)
+        self.voltage = BodyLabel("— V")
         self.voltage.setObjectName("mokeLiveVoltage")
         panel_layout.addWidget(self.voltage, 0, 1)
-        panel_layout.addWidget(QLabel("Derived field"), 1, 0)
-        self.field = QLabel("— mT")
+        panel_layout.addWidget(BodyLabel("Derived field"), 1, 0)
+        self.field = BodyLabel("— mT")
         self.field.setObjectName("mokeLiveField")
         panel_layout.addWidget(self.field, 1, 1)
         layout.addWidget(self.readout_card)
@@ -71,7 +71,7 @@ class MokeHallLiveWindow(StationDialog):
         controls.addWidget(self.live)
         controls.addWidget(self.interval)
         layout.addLayout(controls)
-        self.status = QLabel("Open the MOKE Box connection to begin.")
+        self.status = BodyLabel("Open the MOKE Box connection to begin.")
         self.status.setObjectName("muted")
         self.status.setWordWrap(True)
         layout.addWidget(self.status)
@@ -144,22 +144,22 @@ class MokeBoxPage(QWidget):
         hero_layout = QHBoxLayout(self.hero_card)
         hero_layout.setContentsMargins(20, 16, 20, 16)
         heading = QVBoxLayout()
-        title = QLabel("MOKE Box")
+        title = TitleLabel("MOKE Box")
         title.setObjectName("pageTitle")
-        subtitle = QLabel("Binary TCP diagnostics · confirmed four-byte records")
+        subtitle = CaptionLabel("Binary TCP diagnostics · confirmed four-byte records")
         subtitle.setObjectName("muted")
-        self.endpoint = QLabel()
+        self.endpoint = BodyLabel()
         self.endpoint.setObjectName("mokeEndpoint")
         heading.addWidget(title)
         heading.addWidget(subtitle)
         heading.addWidget(self.endpoint)
         hero_layout.addLayout(heading, 1)
-        self.protocol_badge = QLabel("READ-ONLY")
+        self.protocol_badge = BodyLabel("READ-ONLY")
         self.protocol_badge.setObjectName("mokeProtocolBadge")
         hero_layout.addWidget(self.protocol_badge)
         outer.addWidget(self.hero_card)
 
-        self.safety_note = QLabel()
+        self.safety_note = BodyLabel()
         self.safety_note.setObjectName("mokeSafetyNote")
         self.safety_note.setWordWrap(True)
         outer.addWidget(self.safety_note)
@@ -180,9 +180,9 @@ class MokeBoxPage(QWidget):
         content.setContentsMargins(20, 16, 20, 16)
         header = QHBoxLayout()
         copy = QVBoxLayout()
-        title = QLabel("Eight-channel DAC readback")
+        title = StrongBodyLabel("Eight-channel DAC readback")
         title.setObjectName("sectionTitle")
-        hint = QLabel("One read-only request returns channels D0…D7 and validates every checksum.")
+        hint = CaptionLabel("One read-only request returns channels D0…D7 and validates every checksum.")
         hint.setObjectName("muted")
         copy.addWidget(title)
         copy.addWidget(hint)
@@ -201,9 +201,9 @@ class MokeBoxPage(QWidget):
             card = CardWidget(page)
             card.setObjectName("mokeValueCard")
             card_layout = QVBoxLayout(card)
-            channel_label = QLabel(f"VOUT {channel}")
+            channel_label = BodyLabel(f"VOUT {channel}")
             channel_label.setObjectName("mokeChannelLabel")
-            value = QLabel("— V")
+            value = BodyLabel("— V")
             value.setObjectName("mokeValue")
             value.setToolTip(f"Last validated MOKE AD5362 readback for channel {channel}.")
             card_layout.addWidget(channel_label)
@@ -224,9 +224,9 @@ class MokeBoxPage(QWidget):
         content.setContentsMargins(20, 16, 20, 16)
         header = QHBoxLayout()
         copy = QVBoxLayout()
-        title = QLabel("Hall voltage (read-only)")
+        title = StrongBodyLabel("Hall voltage (read-only)")
         title.setObjectName("sectionTitle")
-        hint = QLabel(
+        hint = BodyLabel(
             "Reads the physically verified MainBox AD7734 Hall-1 channel 0. "
             "The magnetic-field value is only a derived estimate from the confirmed base polynomial."
         )
@@ -235,7 +235,7 @@ class MokeBoxPage(QWidget):
         copy.addWidget(title)
         copy.addWidget(hint)
         header.addLayout(copy, 1)
-        header.addWidget(QLabel("Samples:"))
+        header.addWidget(BodyLabel("Samples:"))
         self.field_samples = SpinBox()
         self.field_samples.setRange(1, 1)
         self.field_samples.setValue(1)
@@ -280,7 +280,7 @@ class MokeBoxPage(QWidget):
             card = CardWidget(page)
             card.setObjectName("mokeFieldCard")
             card_layout = QGridLayout(card)
-            heading = QLabel(
+            heading = BodyLabel(
                 "Hall 1 · longitudinal (verified)"
                 if key == "hall1"
                 else "Hall 2 · transversal (not yet qualified)"
@@ -291,18 +291,18 @@ class MokeBoxPage(QWidget):
                 (("voltage", "Hall voltage"), ("stddev", "Std. deviation"), ("field", "Derived field")),
                 start=1,
             ):
-                card_layout.addWidget(QLabel(label), row, 0)
-                value = QLabel("—")
+                card_layout.addWidget(BodyLabel(label), row, 0)
+                value = BodyLabel("—")
                 value.setObjectName("mokeFieldValue" if suffix == "field" else "mokeMetricValue")
                 card_layout.addWidget(value, row, 1)
                 self.field_values[f"{key}_{suffix}"] = value
             cards.addWidget(card, 0, column)
         content.addLayout(cards)
-        self.field_status = QLabel("Connect MOKE Box, then read one Hall-voltage sample.")
+        self.field_status = BodyLabel("Connect MOKE Box, then read one Hall-voltage sample.")
         self.field_status.setObjectName("mokeHallStatus")
         self.field_status.setWordWrap(True)
         content.addWidget(self.field_status)
-        self.field_timestamp = QLabel("No Hall acquisition yet")
+        self.field_timestamp = BodyLabel("No Hall acquisition yet")
         self.field_timestamp.setObjectName("muted")
         content.addWidget(self.field_timestamp)
         content.addStretch(1)

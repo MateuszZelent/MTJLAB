@@ -65,7 +65,7 @@ def _supports_lazy_theme_update(application: QApplication) -> bool:
 
 
 class _DialogThemeFilter(QObject):
-    """Apply popup-only QSS when a native Qt dialog is actually shown."""
+    """Lazily apply station styling when a widget is actually shown."""
 
     def __init__(self, application: QApplication, tokens: ThemeTokens) -> None:
         super().__init__(application)
@@ -75,8 +75,8 @@ class _DialogThemeFilter(QObject):
         self._tokens = tokens
 
     def eventFilter(self, watched: QObject, event: QEvent) -> bool:
-        if event.type() == QEvent.Type.Show and isinstance(watched, QDialog):
-            watched.setStyleSheet(dialog_qss(self._tokens))
+        if event.type() == QEvent.Type.Show and isinstance(watched, QWidget):
+            _apply_station_control_style(watched, self._tokens)
         return False
 
 
@@ -167,29 +167,35 @@ def _settle_fluent_background_animations(application: QApplication) -> None:
 
 
 def _apply_station_control_styles(application: QApplication, tokens: ThemeTokens) -> None:
-    """Retheme station-owned surfaces without repolishing the entire widget tree."""
+    """Retheme visible station controls; hidden widgets are handled on Show."""
 
     for widget in application.allWidgets():
-        if widget.property("stationControlTheme") == tokens.background:
-            continue
-        if isinstance(widget, QDialog):
-            widget.setStyleSheet(dialog_qss(tokens))
-        _apply_station_surface(widget, tokens)
-        _apply_semantic_text(widget, tokens)
-        _apply_station_card_frame(widget, tokens)
-        _apply_station_button(widget, tokens)
-        if widget.objectName() == "eventLogText":
-            widget.setStyleSheet(event_log_qss(tokens))
-            viewport = getattr(widget, "viewport", lambda: None)()
-            if viewport is not None:
-                _set_widget_background(
-                    viewport, tokens.surface_raised, tokens.text_primary
-                )
-                viewport.setStyleSheet(
-                    f"background: {tokens.surface_raised}; color: {tokens.text_primary};"
-                )
-            widget.update()
-        widget.setProperty("stationControlTheme", tokens.background)
+        window = widget.window()
+        if window.isVisible() and widget.isVisibleTo(window):
+            _apply_station_control_style(widget, tokens)
+
+
+def _apply_station_control_style(widget: QWidget, tokens: ThemeTokens) -> None:
+    if widget.property("stationControlTheme") == tokens.background:
+        return
+    if isinstance(widget, QDialog):
+        widget.setStyleSheet(dialog_qss(tokens))
+    _apply_station_surface(widget, tokens)
+    _apply_semantic_text(widget, tokens)
+    _apply_station_card_frame(widget, tokens)
+    _apply_station_button(widget, tokens)
+    if widget.objectName() == "eventLogText":
+        widget.setStyleSheet(event_log_qss(tokens))
+        viewport = getattr(widget, "viewport", lambda: None)()
+        if viewport is not None:
+            _set_widget_background(
+                viewport, tokens.surface_raised, tokens.text_primary
+            )
+            viewport.setStyleSheet(
+                f"background: {tokens.surface_raised}; color: {tokens.text_primary};"
+            )
+        widget.update()
+    widget.setProperty("stationControlTheme", tokens.background)
 
 
 def _apply_station_button(widget: QWidget, tokens: ThemeTokens) -> None:

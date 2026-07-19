@@ -11,7 +11,8 @@ from PySide6.QtWidgets import (
     QHBoxLayout, QLabel, QLineEdit, QMessageBox, QPushButton, QSplitter, QVBoxLayout, QWidget,
 )
 from qfluentwidgets import (
-    CheckBox, ComboBox, PrimaryPushButton, PushButton,
+    BodyLabel,
+    CardWidget, CheckBox, ComboBox, PrimaryPushButton, PushButton,
 )
 
 from app.devices.rigol_dg1000z.ui.page import RigolConfigurationSnapshot
@@ -49,10 +50,10 @@ class RigolNodeEditorDialog(FluentRecipeDialog):
         self.setWindowTitle("Rigol DG1032Z — configure sweep node")
         self.resize(780, 640)
         layout = QVBoxLayout(self)
-        heading = QLabel("Rigol DG1032Z · Carrier and output")
+        heading = BodyLabel("Rigol DG1032Z · Carrier and output")
         heading.setObjectName("pageTitle")
         layout.addWidget(heading)
-        description = QLabel(
+        description = BodyLabel(
             "The complete carrier snapshot is stored in the recipe. Select one of "
             "Frequency, HighL or LowL as a local ROI axis when required."
         )
@@ -60,7 +61,7 @@ class RigolNodeEditorDialog(FluentRecipeDialog):
         description.setObjectName("recipeHint")
         layout.addWidget(description)
         content = QSplitter(Qt.Orientation.Horizontal)
-        carrier = QFrame()
+        carrier = CardWidget(self)
         form = QFormLayout(carrier)
         self.channel = ComboBox(self)
         self.channel.addItem("Channel 1", userData=1)
@@ -119,7 +120,7 @@ class RigolNodeEditorDialog(FluentRecipeDialog):
         ):
             form.addRow(label, widget)
         content.addWidget(carrier)
-        actions_frame = QFrame()
+        actions_frame = CardWidget(self)
         actions_layout = QFormLayout(actions_frame)
         self.parameter_selectors: dict[str, ComboBox] = {}
         for parameter_id, label in (
@@ -148,7 +149,7 @@ class RigolNodeEditorDialog(FluentRecipeDialog):
         content.setStretchFactor(0, 3)
         content.setStretchFactor(1, 2)
         layout.addWidget(content, 1)
-        note = QLabel(
+        note = BodyLabel(
             "Plan editing is offline. Hardware sweep/modulation/burst stay manual-only; "
             "recipe axes use validated point updates with readback."
         )

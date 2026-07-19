@@ -7,13 +7,12 @@ from pathlib import Path
 from PySide6.QtCore import Qt, Signal
 from PySide6.QtWidgets import (
     QHBoxLayout,
-    QLabel,
     QSplitter,
     QTreeWidgetItem,
     QVBoxLayout,
     QWidget,
 )
-from qfluentwidgets import PushButton, TreeWidget
+from qfluentwidgets import BodyLabel, PushButton, TreeWidget
 
 from app.storage import (
     Hdf5RunReader,
@@ -80,7 +79,7 @@ class SpectrumResultsTab(QWidget):
 
         layout.addWidget(splitter, 1)
 
-        self.spectrum_info = QLabel(
+        self.spectrum_info = BodyLabel(
             "Spectra are read from HDF5 without contacting instruments."
         )
         self.spectrum_info.setObjectName("muted")
@@ -276,3 +275,4 @@ class SpectrumResultsTab(QWidget):
             "device_states": point.device_states,
         }
         return json.dumps(payload, ensure_ascii=False, indent=2, sort_keys=True)
+

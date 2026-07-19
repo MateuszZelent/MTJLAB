@@ -12,7 +12,8 @@ from PySide6.QtWidgets import (
     QSplitter, QStackedWidget, QTabWidget, QVBoxLayout, QWidget,
 )
 from qfluentwidgets import (
-    CheckBox, ComboBox, LineEdit, PrimaryPushButton, PushButton, SegmentedWidget,
+    BodyLabel,
+    CardWidget, CheckBox, ComboBox, LineEdit, PrimaryPushButton, PushButton, SegmentedWidget,
 )
 
 from app.devices.anritsu_ms2830a import AnritsuConfigurationSnapshot, SignalGeneratorSnapshot
@@ -65,12 +66,12 @@ class AnritsuNodeEditorDialog(FluentRecipeDialog):
         self.resize(1180, 760)
         self.setMinimumSize(680, 480)
         layout = QVBoxLayout(self)
-        heading = QLabel("Anritsu MS2830A · Spectrum analyser")
+        heading = BodyLabel("Anritsu MS2830A · Spectrum analyser")
         heading.setObjectName("pageTitle")
         layout.addWidget(heading)
         self.content_splitter = QSplitter(Qt.Orientation.Horizontal)
         self.content_splitter.setChildrenCollapsible(False)
-        left = QFrame()
+        left = CardWidget(self)
         left.setObjectName("recipeEditorParameters")
         left_layout = QVBoxLayout(left)
         parameter_tabs = QStackedWidget(left)
@@ -101,17 +102,17 @@ class AnritsuNodeEditorDialog(FluentRecipeDialog):
         left_layout.addWidget(parameter_routes)
         left_layout.addWidget(parameter_tabs)
         self.content_splitter.addWidget(left)
-        right = QFrame()
+        right = CardWidget(self)
         right.setObjectName("recipeEditorParameters")
         right_layout = QGridLayout(right)
-        title = QLabel("Select what this node controls")
+        title = BodyLabel("Select what this node controls")
         title.setObjectName("sectionTitle")
         right_layout.addWidget(title, 0, 0, 1, 2)
         self.parameter_selectors: dict[str, ComboBox] = {}
         for row, (parameter_id, label, sweepable) in enumerate(
             self.parameter_specs, start=1
         ):
-            right_layout.addWidget(QLabel(label), row, 0)
+            right_layout.addWidget(BodyLabel(label), row, 0)
             selector = ComboBox(self)
             selector.addItem("Bez zmian", userData="unchanged")
             selector.addItem("Ustaw", userData="set")
@@ -127,7 +128,7 @@ class AnritsuNodeEditorDialog(FluentRecipeDialog):
         right_layout.addWidget(self.acquire_single, operation_row, 0, 1, 2)
         self.trace = ComboBox(self)
         self.trace.addItems(("TRAC1",))
-        self.trace_label = QLabel("Trace")
+        self.trace_label = BodyLabel("Trace")
         self.trace_label.setVisible(False)
         self.trace.setVisible(False)
         right_layout.addWidget(self.trace_label, operation_row + 1, 0)
@@ -138,7 +139,7 @@ class AnritsuNodeEditorDialog(FluentRecipeDialog):
         right_layout.addWidget(
             self.open_roi_button, operation_row + 2, 0, 1, 2
         )
-        note = QLabel(
+        note = BodyLabel(
             "Only selected parameters are stored. Unselected values remain exactly "
             "as currently configured in the Anritsu module. Spectrum acquisition "
             "is a separate Acquire spectrum once block placed inside the loop."
@@ -415,7 +416,7 @@ class AnritsuSignalGeneratorNodeEditorDialog(FluentRecipeDialog):
         self.setMinimumSize(520, 360)
         self._working_segments: dict[str, list[dict[str, object]]] = {}
         layout = QVBoxLayout(self)
-        heading = QLabel("Anritsu MS2830A · Signal generator")
+        heading = BodyLabel("Anritsu MS2830A · Signal generator")
         heading.setObjectName("pageTitle")
         layout.addWidget(heading)
         form = QGridLayout()
@@ -434,7 +435,7 @@ class AnritsuSignalGeneratorNodeEditorDialog(FluentRecipeDialog):
             selector.addItem("Sweep — ROI wymagane", userData="sweep")
             selector.currentIndexChanged.connect(self._selection_changed)
             self.parameter_selectors[parameter_id] = selector
-            form.addWidget(QLabel(label), row, 0)
+            form.addWidget(BodyLabel(label), row, 0)
             form.addWidget(field, row, 1)
             form.addWidget(selector, row, 2)
         layout.addLayout(form)
@@ -442,7 +443,7 @@ class AnritsuSignalGeneratorNodeEditorDialog(FluentRecipeDialog):
         self.open_roi_button.setEnabled(False)
         self.open_roi_button.clicked.connect(self._open_roi)
         layout.addWidget(self.open_roi_button)
-        note = QLabel(
+        note = BodyLabel(
             "Konfiguracja SG przy każdym punkcie pozostawia RF OFF. "
             "Włączenie RF wymaga osobnych, jawnych kroków ARM i OUTPUT ON "
             "wewnątrz pętli oraz przechodzi pełny preflight bezpieczeństwa."

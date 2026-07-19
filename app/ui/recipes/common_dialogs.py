@@ -8,7 +8,7 @@ from PySide6.QtCore import QMimeData, Qt, Signal
 from PySide6.QtGui import QDrag
 from PySide6.QtWidgets import (
     QAbstractItemView, QApplication, QFormLayout, QFrame, QHBoxLayout,
-    QLabel, QMessageBox, QTreeWidgetItem, QVBoxLayout, QWidget,
+    QMessageBox, QTreeWidgetItem, QVBoxLayout, QWidget,
 )
 from qfluentwidgets import (
     BodyLabel, CardWidget, CheckBox, ComboBox, LineEdit, PlainTextEdit,
@@ -48,11 +48,11 @@ class KeithleySweepBuilderDialog(SweepGeneratorDialog):
         super().__init__(dict(definition), parent, initial_segments=initial_segments)
         self.setWindowTitle("Keithley 2600 — sweep builder")
         self.resize(980, 650)
-        parameters = QFrame()
+        parameters = CardWidget(self)
         parameters.setObjectName("recipeEditorParameters")
         parameter_layout = QVBoxLayout(parameters)
         parameter_layout.setContentsMargins(10, 8, 10, 8)
-        title = QLabel("Keithley source settings")
+        title = BodyLabel("Keithley source settings")
         title.setObjectName("sectionTitle")
         parameter_layout.addWidget(title)
         form = QFormLayout()
@@ -73,14 +73,14 @@ class KeithleySweepBuilderDialog(SweepGeneratorDialog):
         form.addRow("Settling time", self.settle_time)
         form.addRow("Sense", self.sense_mode)
         parameter_layout.addLayout(form)
-        guidance = QLabel(
+        guidance = BodyLabel(
             "The source is configured at every generated point. This window only designs "
             "the recipe; it never enables OUTPUT."
         )
         guidance.setObjectName("muted")
         guidance.setWordWrap(True)
         parameter_layout.addWidget(guidance)
-        self.limit_status = QLabel()
+        self.limit_status = BodyLabel()
         self.limit_status.setObjectName("recipeLimitStatus")
         self.limit_status.setWordWrap(True)
         parameter_layout.addWidget(self.limit_status)
@@ -167,7 +167,7 @@ class FixedValueDialog(FluentRecipeDialog):
         self.setWindowTitle(f"Fixed value — {definition['label']}")
         layout = QVBoxLayout(self)
         layout.addWidget(
-            QLabel(
+            BodyLabel(
                 "This node configures one value at its position in the tree. It does not "
                 "create a measurement axis or enable an output."
             )
@@ -177,7 +177,7 @@ class FixedValueDialog(FluentRecipeDialog):
         self.value.setText(_sweep_default(definition["dimension"])[0])
         form.addRow(definition["label"], self.value)
         layout.addLayout(form)
-        self.preview = QLabel()
+        self.preview = BodyLabel()
         layout.addWidget(self.preview)
         footer = QHBoxLayout()
         footer.addStretch(1)
@@ -235,14 +235,14 @@ class AnritsuAcquisitionEditorDialog(FluentRecipeDialog):
         )
         self.setMinimumSize(480, 300)
         layout = QVBoxLayout(self)
-        heading = QLabel(
+        heading = BodyLabel(
             "Reference acquisition"
             if self._reference_only
             else "Spectrum and reference processing"
         )
         heading.setObjectName("pageTitle")
         layout.addWidget(heading)
-        note = QLabel(
+        note = BodyLabel(
             "This editor changes only the declarative plan. The selected trace "
             "and storage policy are validated again during preflight."
         )
@@ -349,7 +349,7 @@ class CommentEditorDialog(FluentRecipeDialog):
         hero.setObjectName("commentEditorHero")
         hero_layout = QHBoxLayout(hero)
         hero_layout.setContentsMargins(14, 12, 14, 12)
-        icon = QLabel("“")
+        icon = BodyLabel("“")
         icon.setObjectName("commentEditorIcon")
         icon.setAlignment(Qt.AlignmentFlag.AlignCenter)
         icon.setFixedSize(42, 42)
@@ -376,7 +376,7 @@ class CommentEditorDialog(FluentRecipeDialog):
         self.editor.setPlainText(text)
         layout.addWidget(self.editor, 1)
         footer = QHBoxLayout()
-        self.counter = QLabel()
+        self.counter = BodyLabel()
         self.counter.setObjectName("commentEditorCounter")
         footer.addWidget(self.counter)
         footer.addStretch(1)

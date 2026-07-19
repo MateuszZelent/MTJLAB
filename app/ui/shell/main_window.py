@@ -20,6 +20,7 @@ from PySide6.QtGui import (
 from PySide6.QtWidgets import (
     QApplication,
     QDialog,
+    QHBoxLayout,
     QLineEdit,
     QMessageBox,
     QPushButton,
@@ -33,6 +34,7 @@ from qfluentwidgets import (
     FluentWindow,
     NavigationItemPosition,
     PlainTextEdit,
+    PushButton,
     RoundMenu,
     SimpleCardWidget,
     TransparentDropDownToolButton,
@@ -380,14 +382,37 @@ class MainWindow(FluentWindow):
         self.log.setReadOnly(True)
         self.log.setMaximumBlockCount(500)
         self.log.setMinimumHeight(50)
+        self._event_log_entries: list[str] = []
         self.event_log_panel = SimpleCardWidget(self.fluent_content)
         self.event_log_panel.setObjectName("eventLogPanel")
         self.event_log_panel.setProperty("stationSurface", "surface")
         event_log_layout = QVBoxLayout(self.event_log_panel)
         event_log_layout.setContentsMargins(12, 8, 12, 8)
         event_log_layout.setSpacing(6)
-        event_log_layout.addWidget(CaptionLabel("Event log", self.event_log_panel))
+        event_log_header = QHBoxLayout()
+        event_log_header.setContentsMargins(0, 0, 0, 0)
+        event_log_header.addWidget(CaptionLabel("Event log", self.event_log_panel))
+        event_log_header.addStretch(1)
+        self.traffic_only_button = PushButton("TX/RX only", self.event_log_panel)
+        self.traffic_only_button.setCheckable(True)
+        self.traffic_only_button.setAccessibleName("Show VISA TX and RX traffic only")
+        self.traffic_only_button.setToolTip(
+            "Filter the visible log to exact instrument commands, responses and transport errors."
+        )
+        self.copy_traffic_button = PushButton("Copy TX/RX", self.event_log_panel)
+        self.copy_traffic_button.setToolTip(
+            "Copy all recorded instrument transport messages for diagnostics."
+        )
+        self.clear_log_button = PushButton("Clear", self.event_log_panel)
+        self.clear_log_button.setToolTip("Clear the visible in-memory event log.")
+        event_log_header.addWidget(self.traffic_only_button)
+        event_log_header.addWidget(self.copy_traffic_button)
+        event_log_header.addWidget(self.clear_log_button)
+        event_log_layout.addLayout(event_log_header)
         event_log_layout.addWidget(self.log)
+        self.traffic_only_button.toggled.connect(self._refresh_event_log_view)
+        self.copy_traffic_button.clicked.connect(self._copy_traffic_log)
+        self.clear_log_button.clicked.connect(self._clear_event_log)
         self.shell_splitter.addWidget(self.event_log_panel)
         self.shell_splitter.setStretchFactor(0, 1)
         self.shell_splitter.setStretchFactor(1, 0)
@@ -1403,7 +1428,42 @@ class MainWindow(FluentWindow):
             critical=critical,
             correlation_id=self._run_correlation_id,
         )
-        self.log.appendPlainText(message)
+        self._event_log_entries.append(message)
+        if not self.traffic_only_button.isChecked() or self._is_transport_log(message):
+            self.log.appendPlainText(message)
+
+    @staticmethod
+    def _is_transport_log(message: str) -> bool:
+        upper = f" {message.upper()} "
+        return any(
+            marker in upper
+            for marker in (
+                " VISA TX ",
+                " VISA RX ",
+                " VISA OPEN ",
+                " TCP TX ",
+                " TCP RX ",
+                " TCP OPEN ",
+            )
+        )
+
+    def _refresh_event_log_view(self, _checked: bool = False) -> None:
+        entries = self._event_log_entries
+        if self.traffic_only_button.isChecked():
+            entries = [message for message in entries if self._is_transport_log(message)]
+        self.log.setPlainText("\n".join(entries))
+        scrollbar = self.log.verticalScrollBar()
+        scrollbar.setValue(scrollbar.maximum())
+
+    def _copy_traffic_log(self) -> None:
+        traffic = [
+            message for message in self._event_log_entries if self._is_transport_log(message)
+        ]
+        QApplication.clipboard().setText("\n".join(traffic))
+
+    def _clear_event_log(self) -> None:
+        self._event_log_entries.clear()
+        self.log.clear()
 
     def showEvent(self, event: QShowEvent) -> None:
         super().showEvent(event)

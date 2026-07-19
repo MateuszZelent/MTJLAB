@@ -7,12 +7,11 @@ from pathlib import Path
 from PySide6.QtCore import Qt, Signal
 from PySide6.QtWidgets import (
     QHBoxLayout,
-    QLabel,
     QTreeWidgetItem,
     QVBoxLayout,
     QWidget,
 )
-from qfluentwidgets import PrimaryPushButton, PushButton, TreeWidget
+from qfluentwidgets import BodyLabel, PrimaryPushButton, PushButton, TreeWidget
 from app.ui.dialogs import StationFileDialog as QFileDialog
 
 from app.storage import Hdf5RunReader, ThatecRunReader
@@ -32,7 +31,7 @@ class FileBrowserPanel(QWidget):
         layout = QVBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
 
-        self.location = QLabel()
+        self.location = BodyLabel()
         self.location.setObjectName("muted")
         layout.addWidget(self.location)
 
@@ -147,3 +146,4 @@ class FileBrowserPanel(QWidget):
         item = self._find_item_by_path(self._selected_path)
         if item is not None:
             self.runs.setCurrentItem(item)
+

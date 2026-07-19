@@ -419,9 +419,9 @@ class RecipePage(QWidget):
         inspector_card.setObjectName("recipeInspector")
         inspector_card_layout = QVBoxLayout(inspector_card)
         inspector_card_layout.setContentsMargins(12, 12, 12, 12)
-        inspector_title = QLabel("Inspector")
+        inspector_title = BodyLabel("Inspector")
         inspector_title.setObjectName("sectionTitle")
-        self.inspector_summary = QLabel("Select a node to see its measurement role and configuration.")
+        self.inspector_summary = BodyLabel("Select a node to see its measurement role and configuration.")
         self.inspector_summary.setWordWrap(True)
         self.inspector_summary.setObjectName("muted")
         self.open_editor_button = PrimaryPushButton("Open parameter editor")
@@ -584,12 +584,12 @@ class RecipePage(QWidget):
         scroll.setWidgetResizable(True)
         scroll.setMinimumWidth(210)
         scroll.setMaximumWidth(400)
-        panel = QFrame()
+        panel = CardWidget(self)
         panel.setObjectName("recipeLibrary")
         layout = QVBoxLayout(panel)
         layout.setContentsMargins(12, 12, 12, 12)
         layout.setSpacing(7)
-        heading = QLabel("NODE LIBRARY")
+        heading = BodyLabel("NODE LIBRARY")
         heading.setObjectName("recipeLibraryHeading")
         layout.addWidget(heading)
         self.library_search = _line("", 24)
@@ -599,15 +599,15 @@ class RecipePage(QWidget):
         self._library_action_buttons: list[QToolButton] = []
 
         def group(title: str, badge: str) -> QVBoxLayout:
-            group_frame = QFrame()
+            group_frame = CardWidget(panel)
             group_frame.setObjectName("recipeLibraryGroup")
             group_layout = QVBoxLayout(group_frame)
             group_layout.setContentsMargins(7, 6, 7, 7)
             group_layout.setSpacing(2)
             caption = QHBoxLayout()
-            label = QLabel(title.upper())
+            label = BodyLabel(title.upper())
             label.setObjectName("recipeLibraryGroupTitle")
-            count = QLabel(badge)
+            count = BodyLabel(badge)
             count.setObjectName("recipeLibraryBadge")
             caption.addWidget(label)
             caption.addStretch(1)
@@ -749,7 +749,7 @@ class RecipePage(QWidget):
             drag_kind="flow:set_anritsu_sg_output_on",
         )
         layout.addStretch(1)
-        hint = QLabel(
+        hint = BodyLabel(
             "Drag a device or flow block into the measurement tree. "
             "Every device block must be configured before validation; incomplete "
             "blocks are rejected without executing their children."

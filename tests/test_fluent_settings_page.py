@@ -6,7 +6,7 @@ import unittest
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
-from PySide6.QtWidgets import QApplication, QTabWidget
+from PySide6.QtWidgets import QApplication, QBoxLayout, QTabWidget
 from qfluentwidgets import (
     CardWidget,
     CheckBox,
@@ -40,7 +40,8 @@ class FluentSettingsPageTests(unittest.TestCase):
             self.assertIsInstance(page.action_card, CardWidget)
             self.assertIsInstance(page.profile_card, CardWidget)
             self.assertIsInstance(page.save_button, PrimaryPushButton)
-            self.assertGreater(page.section_navigation.geometry().width(), 500)
+            self.assertFalse(page.tabs.navigation_scroll.isVisible())
+            self.assertTrue(page.tabs.compact_navigation.isVisible())
             self.assertTrue(page.page_stack.isVisible())
             self.assertGreater(page.page_stack.geometry().height(), 450)
             self.assertTrue(
@@ -72,6 +73,27 @@ class FluentSettingsPageTests(unittest.TestCase):
                 page.action_card.mapTo(window, page.action_card.rect().bottomRight()).x(),
                 window.rect().right(),
             )
+        finally:
+            window.close()
+
+    def test_embedded_settings_reflows_navigation_and_actions_at_minimum_size(self) -> None:
+        window = MainWindow(".config/settings.yml", simulation=True)
+        try:
+            window.resize(820, 560)
+            window.show()
+            window._navigate_to("settings")
+            self.application.processEvents()
+            page = window.settings_page
+            host = window.navigation_routes["settings"]
+
+            self.assertTrue(page.tabs.compact_navigation.isVisibleTo(window))
+            self.assertFalse(page.tabs.navigation_scroll.isVisible())
+            self.assertEqual(
+                page.action_layout.direction(),
+                QBoxLayout.Direction.TopToBottom,
+            )
+            self.assertEqual(host.scroll_area.horizontalScrollBar().maximum(), 0)
+            self.assertEqual(page.width(), host.scroll_area.viewport().width())
         finally:
             window.close()
 

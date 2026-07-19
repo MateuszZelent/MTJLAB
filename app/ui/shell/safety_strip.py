@@ -6,8 +6,8 @@ from dataclasses import dataclass
 
 from PySide6.QtCore import Signal
 from PySide6.QtGui import QResizeEvent
-from PySide6.QtWidgets import QGridLayout, QLabel, QSizePolicy, QWidget
-from qfluentwidgets import PrimaryPushButton
+from PySide6.QtWidgets import QGridLayout, QSizePolicy, QWidget
+from qfluentwidgets import BodyLabel, PrimaryPushButton
 
 
 @dataclass(frozen=True, slots=True)
@@ -31,11 +31,11 @@ class StationSafetyStrip(QWidget):
         super().__init__(parent)
         self.setObjectName("stationSafetyStrip")
 
-        self.readiness = QLabel()
-        self.outputs = QLabel()
-        self.profile = QLabel()
-        self.mode = QLabel()
-        self.actor = QLabel()
+        self.readiness = BodyLabel()
+        self.outputs = BodyLabel()
+        self.profile = BodyLabel()
+        self.mode = BodyLabel()
+        self.actor = BodyLabel()
         self.estop = PrimaryPushButton("E-STOP — disable all outputs")
         self.estop.setAccessibleName("Emergency stop and disable all outputs")
         self.estop.clicked.connect(self.estop_requested)
@@ -119,3 +119,4 @@ class StationSafetyStrip(QWidget):
         for widget in (self.readiness, self.outputs):
             widget.style().unpolish(widget)
             widget.style().polish(widget)
+

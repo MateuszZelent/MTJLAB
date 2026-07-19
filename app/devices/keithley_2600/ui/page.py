@@ -24,6 +24,7 @@ from PySide6.QtWidgets import (
     QVBoxLayout, QWidget,
 )
 from qfluentwidgets import (
+    BodyLabel,
     CaptionLabel, CardWidget, CheckBox, ComboBox, PrimaryPushButton, PushButton,
     ScrollArea, SpinBox, StrongBodyLabel, TitleLabel,
 )
@@ -177,7 +178,7 @@ class KeithleyConfigurationPanel(CardWidget):
             self.form.addRow(label, widget)
         layout.addLayout(self.form)
         if plan_mode:
-            note = QLabel(
+            note = BodyLabel(
                 "Plan editing is offline. Applying these values changes only the sweep document; "
                 "it never communicates with the instrument or enables OUTPUT."
             )
@@ -324,7 +325,7 @@ class KeithleyNodeEditorDialog(FluentRecipeDialog):
         self.setWindowTitle("Keithley 2600 — configure sweep node")
         self.resize(1120, 720)
         layout = QVBoxLayout(self)
-        heading = QLabel("Keithley 2600")
+        heading = BodyLabel("Keithley 2600")
         heading.setObjectName("recipePageTitle")
         layout.addWidget(heading)
         self.configuration_panel = KeithleyConfigurationPanel(
@@ -343,15 +344,15 @@ class KeithleyNodeEditorDialog(FluentRecipeDialog):
         self.nplc = self.configuration_panel.nplc
         self.settle = self.configuration_panel.settle
         self.sense_mode = self.configuration_panel.sense_mode
-        parameter_card = QFrame()
+        parameter_card = CardWidget(self)
         parameter_card.setObjectName("recipeEditorParameters")
         parameter_layout = QGridLayout(parameter_card)
         parameter_layout.setContentsMargins(10, 10, 10, 10)
-        selection_title = QLabel("Select what this node controls")
+        selection_title = BodyLabel("Select what this node controls")
         selection_title.setObjectName("sectionTitle")
         parameter_layout.addWidget(selection_title, 0, 0, 1, 2)
-        parameter_layout.addWidget(QLabel("Parameter"), 1, 0)
-        parameter_layout.addWidget(QLabel("Action"), 1, 1)
+        parameter_layout.addWidget(BodyLabel("Parameter"), 1, 0)
+        parameter_layout.addWidget(BodyLabel("Action"), 1, 1)
         self.parameter_selectors: dict[str, ComboBox] = {}
         definitions = (
             ("Source value", "source.level", True),
@@ -364,7 +365,7 @@ class KeithleyNodeEditorDialog(FluentRecipeDialog):
             ("Current measurement range", "measurement.current_range", False),
         )
         for row, (label, parameter_id, sweepable) in enumerate(definitions, start=2):
-            parameter_layout.addWidget(QLabel(label), row, 0)
+            parameter_layout.addWidget(BodyLabel(label), row, 0)
             selector = ComboBox(self)
             selector.setProperty("parameterId", parameter_id)
             selector.addItem("Bez zmian", userData="unchanged")
@@ -374,7 +375,7 @@ class KeithleyNodeEditorDialog(FluentRecipeDialog):
             parameter_layout.addWidget(selector, row, 1)
             self.parameter_selectors[parameter_id] = selector
         output_row = 2 + len(definitions)
-        parameter_layout.addWidget(QLabel("Output state"), output_row, 0)
+        parameter_layout.addWidget(BodyLabel("Output state"), output_row, 0)
         self.output_policy = ComboBox(self)
         self.output_policy.addItem("Bez zmian", userData="unchanged")
         self.output_policy.addItem("OUTPUT ON na początku", userData="on")
@@ -386,13 +387,13 @@ class KeithleyNodeEditorDialog(FluentRecipeDialog):
             "Open the interval and point editor for the single parameter marked Sweep."
         )
         parameter_layout.addWidget(self.open_roi_button, output_row + 1, 0, 1, 2)
-        self.roi_status = QLabel(
+        self.roi_status = BodyLabel(
             "Oznacz jeden parametr jako Sweep, aby zdefiniować ROI."
         )
         self.roi_status.setObjectName("muted")
         self.roi_status.setWordWrap(True)
         parameter_layout.addWidget(self.roi_status, output_row + 2, 0, 1, 2)
-        parameter_note = QLabel(
+        parameter_note = BodyLabel(
             "Only rows marked Ustaw or Sweep are stored. Bez zmian keeps the current value "
             "from the Keithley module. OUTPUT is only a plan declaration; this window never "
             "energizes the instrument."
@@ -693,13 +694,13 @@ class KeithleyPage(QWidget):
             "Interval between alternating A/B measurements. Each channel is sampled every "
             "approximately two intervals when both are enabled."
         )
-        self.last_update = QLabel("No measurements yet")
+        self.last_update = BodyLabel("No measurements yet")
         self.last_update.setObjectName("keithleyLastUpdate")
         self.last_update.setMinimumWidth(150)
         hero_layout.addWidget(self.live_measurements)
         hero_layout.addWidget(self.live_interval)
         hero_layout.addWidget(self.last_update)
-        self.device_led = QLabel("●")
+        self.device_led = BodyLabel("●")
         self.device_led.setObjectName("keithleyLed")
         self.device_state = StrongBodyLabel("DISCONNECTED")
         self.device_state.setObjectName("keithleyState")
@@ -745,7 +746,7 @@ class KeithleyPage(QWidget):
         workflow.setObjectName("keithleyOutputWorkflow")
         workflow_layout = QVBoxLayout(workflow)
         workflow_layout.setContentsMargins(7, 5, 7, 5)
-        self.output_readiness = QLabel()
+        self.output_readiness = BodyLabel()
         self.output_readiness.setWordWrap(True)
         self.output_readiness.setObjectName("keithleyInterlockStatus")
         self.output_readiness.setToolTip(
@@ -773,13 +774,13 @@ class KeithleyPage(QWidget):
                 ("Deadline", self.ramp_deadline),
             )
         ):
-            ramp_form.addWidget(QLabel(label), 0, column)
+            ramp_form.addWidget(BodyLabel(label), 0, column)
             ramp_form.addWidget(widget, 1, column)
         ramp_layout.addLayout(ramp_form)
         ramp_actions = QHBoxLayout()
         self.ramp_preview_button = PushButton("Preview ramp")
         self.ramp_execute_button = PrimaryPushButton("Ramp to target")
-        self.ramp_preview = QLabel("Preview the ramp before execution.")
+        self.ramp_preview = BodyLabel("Preview the ramp before execution.")
         self.ramp_preview.setWordWrap(True)
         self.ramp_preview.setObjectName("muted")
         ramp_actions.addWidget(self.ramp_preview_button)
@@ -795,7 +796,7 @@ class KeithleyPage(QWidget):
         self.output_toggle.setVisible(False)
         buttons.addWidget(measure)
         source_layout.addLayout(buttons)
-        self.readout = QLabel()
+        self.readout = BodyLabel()
         self.readout.hide()
         source_layout.addStretch(1)
         source_scroll = self._scroll_widget(source_tab)
@@ -899,7 +900,7 @@ class KeithleyPage(QWidget):
         header.addWidget(metric)
         header.addWidget(clear)
         panel_layout.addLayout(header)
-        note = QLabel("ROLLING 30 s  •  DC resistance |V/I|  •  not complex impedance")
+        note = BodyLabel("ROLLING 30 s  •  DC resistance |V/I|  •  not complex impedance")
         note.setObjectName("keithleyHistoryNote")
         panel_layout.addWidget(note)
         plot = SpectrumPlotWidget(legend=False, compact_toolbar=True)
@@ -953,9 +954,9 @@ class KeithleyPage(QWidget):
         header = QHBoxLayout()
         name = StrongBodyLabel(f"CHANNEL {channel}")
         name.setObjectName("keithleyCardTitle")
-        led = QLabel("●")
+        led = BodyLabel("●")
         led.setObjectName("keithleyOutputLed")
-        output = QLabel("OUTPUT OFF")
+        output = BodyLabel("OUTPUT OFF")
         output.setObjectName("keithleyOutputState")
         header.addWidget(name)
         header.addStretch(1)
@@ -986,7 +987,7 @@ class KeithleyPage(QWidget):
             values[key] = value
         card_layout.addLayout(meters)
         footer = QHBoxLayout()
-        compliance = QLabel("COMPLIANCE: clear")
+        compliance = BodyLabel("COMPLIANCE: clear")
         compliance.setObjectName("keithleyComplianceClear")
         select = PushButton(f"Select CH {channel}")
         select.setProperty("compact", True)

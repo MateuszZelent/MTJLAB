@@ -5,8 +5,8 @@ from __future__ import annotations
 import time
 
 from PySide6.QtCore import QTimer, Qt, Signal
-from PySide6.QtWidgets import QGridLayout, QHBoxLayout, QLabel, QSplitter, QVBoxLayout, QWidget
-from qfluentwidgets import CardWidget, PlainTextEdit, PrimaryPushButton, ProgressBar, PushButton, StrongBodyLabel
+from PySide6.QtWidgets import QGridLayout, QHBoxLayout, QSplitter, QVBoxLayout, QWidget
+from qfluentwidgets import BodyLabel, CardWidget, PlainTextEdit, PrimaryPushButton, ProgressBar, PushButton, StrongBodyLabel
 
 from app.ui.common import human_duration as _human_duration
 from app.ui.widgets import SpectrumPlotWidget
@@ -32,22 +32,22 @@ class RunMonitorPage(QWidget):
         self.state.setObjectName("readout")
         self.state.setProperty("deviceState", "compliance")
         hero_layout.addWidget(self.state)
-        self.heartbeat = QLabel("Heartbeat: —")
+        self.heartbeat = BodyLabel("Heartbeat: —")
         self.heartbeat.setObjectName("muted")
-        self.eta = QLabel("ETA: —")
+        self.eta = BodyLabel("ETA: —")
         self.eta.setObjectName("muted")
         self.monitor_card = CardWidget(self)
         monitor_layout = QVBoxLayout(self.monitor_card)
         monitor_layout.setContentsMargins(20, 16, 20, 16)
         monitor_layout.setSpacing(10)
         telemetry = QGridLayout()
-        self.current_path = QLabel("Current node: —")
+        self.current_path = BodyLabel("Current node: —")
         self.current_path.setWordWrap(True)
-        self.current_setpoints = QLabel("Setpoints (SI): —")
+        self.current_setpoints = BodyLabel("Setpoints (SI): —")
         self.current_setpoints.setWordWrap(True)
-        self.current_measurements = QLabel("Measurements (SI): —")
+        self.current_measurements = BodyLabel("Measurements (SI): —")
         self.current_measurements.setWordWrap(True)
-        self.storage_rate = QLabel("Storage: —")
+        self.storage_rate = BodyLabel("Storage: —")
         self.storage_rate.setWordWrap(True)
         telemetry.addWidget(self.current_path, 0, 0)
         telemetry.addWidget(self.storage_rate, 0, 1)
@@ -218,3 +218,4 @@ class RunMonitorPage(QWidget):
         self._eta_timer.stop()
         self.state.setText("FAULT")
         self.events.appendPlainText(error)
+

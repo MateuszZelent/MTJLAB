@@ -19,7 +19,8 @@ from PySide6.QtWidgets import (
     QSizePolicy, QToolButton, QVBoxLayout, QWidget,
 )
 from qfluentwidgets import (
-    CardWidget, CheckBox, ComboBox, LineEdit, PrimaryPushButton, ProgressBar, PushButton, ScrollArea, SpinBox,
+    BodyLabel,
+    CaptionLabel, CardWidget, CheckBox, ComboBox, LineEdit, PrimaryPushButton, ProgressBar, PushButton, ScrollArea, SpinBox, StrongBodyLabel, TitleLabel,
 )
 
 from app.devices.anritsu_ms2830a import (
@@ -85,8 +86,8 @@ class AnritsuSpectrumConfigurationPanel(CardWidget):
         self.stop = _line("10 MHz")
         self.reference = _line("0 dBm")
         self.points = ComboBox(self)
-        self.frequency_label_a = QLabel("Start")
-        self.frequency_label_b = QLabel("Stop")
+        self.frequency_label_a = BodyLabel("Start")
+        self.frequency_label_b = BodyLabel("Stop")
         form.addRow("Frequency representation", self.frequency_representation)
         form.addRow(
             self.frequency_label_a, self._bounded("frequency", self.start)
@@ -100,7 +101,7 @@ class AnritsuSpectrumConfigurationPanel(CardWidget):
         form.addRow("Points", self.points)
         layout.addLayout(form)
         if plan_mode:
-            note = QLabel(
+            note = BodyLabel(
                 "Plan editing is offline. Only selected overrides are stored; "
                 "no VISA command is sent to Anritsu."
             )
@@ -427,11 +428,11 @@ class AnritsuPage(QWidget):
         self.hero_card.setProperty("stationSurface", "card")
         title_row = QHBoxLayout(self.hero_card)
         title_row.setContentsMargins(20, 16, 20, 16)
-        title = QLabel("Anritsu MS2830A — Spectrum / Live")
+        title = TitleLabel("Anritsu MS2830A — Spectrum / Live")
         title.setObjectName("pageTitle")
         title_row.addWidget(title)
         title_row.addStretch(1)
-        self.live_indicator = QLabel("●  LIVE OFF")
+        self.live_indicator = BodyLabel("●  LIVE OFF")
         self.live_indicator.setObjectName("anritsuLiveIndicator")
         self.live_indicator.setProperty("liveState", "off")
         self.live_indicator.setToolTip(
@@ -468,7 +469,7 @@ class AnritsuPage(QWidget):
         right_layout.setContentsMargins(8, 8, 8, 8)
         right_layout.setSpacing(6)
         setup_header = QHBoxLayout()
-        setup_title = QLabel("Acquisition setup")
+        setup_title = StrongBodyLabel("Acquisition setup")
         setup_title.setObjectName("sectionTitle")
         setup_header.addWidget(setup_title)
         setup_header.addStretch(1)
@@ -513,8 +514,8 @@ class AnritsuPage(QWidget):
         refresh_form = QFormLayout()
         refresh_form.addRow("Live refresh interval", self.refresh)
         setup_layout.addLayout(refresh_form)
-        self.hardware_option_info = QLabel()
-        self.hardware_range_info = QLabel()
+        self.hardware_option_info = BodyLabel()
+        self.hardware_range_info = BodyLabel()
         self.hardware_option_info.hide()
         self.hardware_range_info.hide()
         self._hardware_details_text = ""
@@ -546,7 +547,7 @@ class AnritsuPage(QWidget):
         self.processing_card.setProperty("stationSurface", "card")
         processing_layout = QGridLayout(self.processing_card)
         processing_layout.setContentsMargins(20, 16, 20, 16)
-        processing_title = QLabel("Averaging and reference processing")
+        processing_title = StrongBodyLabel("Averaging and reference processing")
         processing_title.setObjectName("sectionTitle")
         processing_layout.setHorizontalSpacing(6)
         processing_layout.setVerticalSpacing(7)
@@ -564,15 +565,15 @@ class AnritsuPage(QWidget):
         self.average_progress.setRange(0, initial_average_count)
         self.average_progress.setValue(0)
         self.average_progress.setFormat(f"0 / {initial_average_count}")
-        processing_layout.addWidget(QLabel("Average count"), 1, 0)
+        processing_layout.addWidget(BodyLabel("Average count"), 1, 0)
         processing_layout.addWidget(self.average_count, 1, 1)
         processing_layout.addWidget(self.acquire_average, 2, 0)
         processing_layout.addWidget(self.cancel_average, 2, 1)
         processing_layout.addWidget(self.average_progress, 3, 0, 1, 2)
-        reference_title = QLabel("Reference")
+        reference_title = StrongBodyLabel("Reference")
         reference_title.setObjectName("subsectionTitle")
         processing_layout.addWidget(reference_title, 4, 0, 1, 2)
-        self.reference_status = QLabel("No reference")
+        self.reference_status = CaptionLabel("No reference")
         self.reference_status.setObjectName("muted")
         self.reference_status.setWordWrap(True)
         processing_layout.addWidget(self.reference_status, 5, 0, 1, 2)
@@ -606,7 +607,7 @@ class AnritsuPage(QWidget):
         processing_layout.addWidget(self.clear_reference, 7, 1)
         processing_layout.addWidget(self.load_reference, 8, 0)
         processing_layout.addWidget(self.save_reference, 8, 1)
-        processing_layout.addWidget(QLabel("Reference operation"), 9, 0)
+        processing_layout.addWidget(BodyLabel("Reference operation"), 9, 0)
         processing_layout.addWidget(self.reference_operation, 9, 1)
         self.show_raw = CheckBox("Raw")
         self.show_raw.setChecked(True)
@@ -630,7 +631,7 @@ class AnritsuPage(QWidget):
         self.spectrum_plot.setMinimumHeight(300)
         self.spectrum_plot.status_changed.connect(self.status.emit)
         right_layout.addWidget(self.spectrum_plot, 1)
-        self.info = QLabel("Live stopped. Each frame is a complete trace, not a push stream.")
+        self.info = CaptionLabel("Live stopped. Each frame is a complete trace, not a push stream.")
         self.info.setObjectName("muted")
         right_layout.addWidget(self.info)
         self.control_scroll = ScrollArea()
@@ -722,10 +723,10 @@ class AnritsuPage(QWidget):
         tab = QWidget()
         outer = QVBoxLayout(tab)
         outer.setContentsMargins(18, 14, 18, 14)
-        heading = QLabel("Optional vector signal generator")
+        heading = StrongBodyLabel("Optional vector signal generator")
         heading.setObjectName("sectionTitle")
         outer.addWidget(heading)
-        explanation = QLabel(
+        explanation = BodyLabel(
             "This panel is shown only when *OPT? reports option 020/120/021/121. "
             "Configuration explicitly enters SG mode and proves RF OUTPUT OFF. "
             "RF ON additionally requires a qualified protocol, approved limits, profile approval "
@@ -741,7 +742,7 @@ class AnritsuPage(QWidget):
         grid.setContentsMargins(20, 16, 20, 16)
         grid.setHorizontalSpacing(10)
         grid.setVerticalSpacing(9)
-        self.sg_status = QLabel("●  RF OUTPUT UNKNOWN")
+        self.sg_status = BodyLabel("●  RF OUTPUT UNKNOWN")
         self.sg_status.setObjectName("anritsuSgIndicator")
         self.sg_status.setProperty("liveState", "off")
         grid.addWidget(self.sg_status, 0, 0, 1, 4)
@@ -752,9 +753,9 @@ class AnritsuPage(QWidget):
         self.sg_frequency.setText(str(default_frequency))
         self.sg_power = LineEdit(self)
         self.sg_power.setText(str(default_power))
-        grid.addWidget(QLabel("Frequency"), 1, 0)
+        grid.addWidget(BodyLabel("Frequency"), 1, 0)
         grid.addWidget(self.sg_frequency, 1, 1, 1, 3)
-        grid.addWidget(QLabel("RF power"), 2, 0)
+        grid.addWidget(BodyLabel("RF power"), 2, 0)
         grid.addWidget(self.sg_power, 2, 1, 1, 3)
         self.sg_read = PushButton("Read current SG state")
         self.sg_configure = PrimaryPushButton("Configure while RF OFF")
@@ -776,7 +777,7 @@ class AnritsuPage(QWidget):
         grid.addWidget(self.sg_arm, 4, 0)
         grid.addWidget(self.sg_on, 4, 1)
         grid.addWidget(self.sg_off, 4, 2, 1, 2)
-        self.sg_limits = QLabel()
+        self.sg_limits = BodyLabel()
         self.sg_limits.setWordWrap(True)
         self.sg_limits.setObjectName("muted")
         grid.addWidget(self.sg_limits, 5, 0, 1, 4)
@@ -800,14 +801,14 @@ class AnritsuPage(QWidget):
         dialog.setModal(False)
         dialog.resize(620, 470)
         layout = QVBoxLayout(dialog)
-        explanation = QLabel(
+        explanation = BodyLabel(
             "These controls change bandwidth, detector and the RF input path. Readback is "
             "always available as an explicit diagnostic action. Apply remains locked until "
             "the exact firmware is qualified in the station profile."
         )
         explanation.setWordWrap(True)
         layout.addWidget(explanation)
-        self.advanced_protocol_status = QLabel()
+        self.advanced_protocol_status = BodyLabel()
         self.advanced_protocol_status.setWordWrap(True)
         layout.addWidget(self.advanced_protocol_status)
 
@@ -828,7 +829,7 @@ class AnritsuPage(QWidget):
         self.advanced_sweep_time = self.advanced_configuration_panel.sweep_time
         layout.addWidget(self.advanced_configuration_panel)
 
-        help_text = QLabel(
+        help_text = BodyLabel(
             "Documented limits: RBW 1 Hz–31.25 MHz; VBW 1 Hz–10 MHz or Off; "
             "attenuation 0–60 dB in 2 dB steps; frequency-domain sweep 1 ms–1000 s. "
             "Automatic attenuation is blocked when the safety profile defines a minimum."

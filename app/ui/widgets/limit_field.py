@@ -6,7 +6,6 @@ from PySide6.QtCore import Qt, Signal
 from PySide6.QtWidgets import (
     QFormLayout,
     QHBoxLayout,
-    QLabel,
     QLineEdit,
     QSpinBox,
     QVBoxLayout,
@@ -44,8 +43,8 @@ class LimitField(QWidget):
         row = QHBoxLayout()
         row.setSpacing(8)
         row.addWidget(editor, 1)
-        self.minimum = QLabel()
-        self.maximum = QLabel()
+        self.minimum = BodyLabel()
+        self.maximum = BodyLabel()
         for label in (self.minimum, self.maximum):
             label.setObjectName("limitBadge")
             label.setMinimumWidth(88)
@@ -60,7 +59,7 @@ class LimitField(QWidget):
         self.edit_button.clicked.connect(self.edit_requested)
         row.addWidget(self.edit_button)
         layout.addLayout(row)
-        self.validation_warning = QLabel()
+        self.validation_warning = BodyLabel()
         self.validation_warning.setObjectName("inlineValidationWarning")
         self.validation_warning.setStyleSheet("color: #d84343; font-weight: 600;")
         self.validation_warning.setWordWrap(True)
@@ -227,3 +226,4 @@ class LimitEditDialog(StationDialog):
         footer.addWidget(cancel)
         footer.addWidget(save)
         layout.addLayout(footer)
+

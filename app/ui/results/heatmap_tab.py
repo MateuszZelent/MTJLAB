@@ -12,11 +12,10 @@ from pyqtgraph.exporters import ImageExporter, SVGExporter
 from PySide6.QtCore import Signal
 from PySide6.QtWidgets import (
     QHBoxLayout,
-    QLabel,
     QVBoxLayout,
     QWidget,
 )
-from qfluentwidgets import ComboBox, PushButton
+from qfluentwidgets import BodyLabel, ComboBox, PushButton
 from app.ui.dialogs import StationFileDialog as QFileDialog
 
 from app.storage import ThatecRow, ThatecRun, ThatecRunReader
@@ -55,7 +54,7 @@ class HeatmapPlotWidget(QWidget):
             ["viridis", "inferno", "plasma", "magma", "cividis", "turbo", "hot"]
         )
         self.colormap_combo.setToolTip("Select color palette")
-        toolbar.addWidget(QLabel("Palette:"))
+        toolbar.addWidget(BodyLabel("Palette:"))
         toolbar.addWidget(self.colormap_combo)
 
         auto_range_btn = PushButton(parent=self)
@@ -73,7 +72,7 @@ class HeatmapPlotWidget(QWidget):
         toolbar.addWidget(export_btn)
 
         toolbar.addStretch(1)
-        self.readout = QLabel("X: —   Y: —   Z: —")
+        self.readout = BodyLabel("X: —   Y: —   Z: —")
         self.readout.setObjectName("plotReadout")
         toolbar.addWidget(self.readout)
         layout.addLayout(toolbar)
@@ -298,7 +297,7 @@ class HeatmapResultsTab(QWidget):
 
         # --- Row selector ---
         selector = QHBoxLayout()
-        selector.addWidget(QLabel("Spectrum row:"))
+        selector.addWidget(BodyLabel("Spectrum row:"))
         self.row_combo = ComboBox(self)
         self.row_combo.setMinimumWidth(300)
         self.row_combo.setToolTip("Select a THATEC row with 2-D spectral data")
@@ -316,7 +315,7 @@ class HeatmapResultsTab(QWidget):
         self.heatmap = HeatmapPlotWidget()
         layout.addWidget(self.heatmap, 1)
 
-        self.info_label = QLabel("Select a spectrum row and click 'Load heatmap'.")
+        self.info_label = BodyLabel("Select a spectrum row and click 'Load heatmap'.")
         self.info_label.setObjectName("muted")
         layout.addWidget(self.info_label)
 
@@ -437,3 +436,4 @@ class HeatmapResultsTab(QWidget):
         row_id = self.row_combo.currentData()
         if row_id is not None:
             self.checkpoint_clicked.emit(row_id, checkpoint)
+

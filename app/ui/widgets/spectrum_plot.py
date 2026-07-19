@@ -11,12 +11,11 @@ from pyqtgraph.exporters import ImageExporter, SVGExporter
 from PySide6.QtCore import Signal
 from PySide6.QtWidgets import (
     QHBoxLayout,
-    QLabel,
     QSizePolicy,
     QVBoxLayout,
     QWidget,
 )
-from qfluentwidgets import TransparentPushButton
+from qfluentwidgets import BodyLabel, TransparentPushButton
 from app.ui.dialogs import StationFileDialog as QFileDialog
 
 from app.ui.design_system import plot_theme, tokens_for
@@ -70,7 +69,7 @@ class SpectrumPlotWidget(QWidget):
             self.toolbar_buttons.append(button)
             toolbar.addWidget(button)
         toolbar.addStretch(1)
-        self.readout = QLabel("X: —   Y: —")
+        self.readout = BodyLabel("X: —   Y: —")
         self.readout.setObjectName("plotReadout")
         toolbar.addWidget(self.readout)
         root.addLayout(toolbar)
@@ -346,3 +345,4 @@ class SpectrumPlotWidget(QWidget):
             if magnitude >= scale:
                 return f"{value / scale:.9g} {prefix}{self._x_unit}"
         return f"{value:.9g} {self._x_unit}"
+

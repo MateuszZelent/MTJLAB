@@ -3,17 +3,17 @@
 from __future__ import annotations
 
 from PySide6.QtCore import QTimer
-from PySide6.QtWidgets import QFrame, QHBoxLayout, QLabel
-from qfluentwidgets import FluentIcon, TransparentToolButton
+from PySide6.QtWidgets import QHBoxLayout
+from qfluentwidgets import BodyLabel, CardWidget, FluentIcon, TransparentToolButton
 
 
-class NotificationBanner(QFrame):
+class NotificationBanner(CardWidget):
     def __init__(self, parent=None) -> None:
         super().__init__(parent)
         self.setObjectName("notificationBanner")
         layout = QHBoxLayout(self)
         layout.setContentsMargins(10, 7, 7, 7)
-        self.label = QLabel()
+        self.label = BodyLabel()
         self.label.setWordWrap(True)
         self.close_button = TransparentToolButton(FluentIcon.CLOSE, self)
         self.close_button.setAccessibleName("Dismiss notification")

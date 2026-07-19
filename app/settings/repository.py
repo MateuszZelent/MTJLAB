@@ -15,7 +15,7 @@ from pydantic import ValidationError
 from ruamel.yaml import YAML
 
 from app.domain.errors import ConfigurationError
-from app.settings.models import MokeBoxSettings, StationSettings
+from app.settings.models import StationSettings
 
 
 @dataclass(slots=True)
@@ -47,28 +47,53 @@ class SettingsRepository:
             raise ConfigurationError(f"Cannot read YAML: {exc}") from exc
         if not isinstance(raw, dict):
             raise ConfigurationError("The root settings.yml element must be a mapping.")
-        # Version-1 profiles created before RBAC are upgraded in memory to a
-        # safe operator-only policy. The next explicit save persists it.
-        raw.setdefault(
-            "access_control",
-            {
-                "identity_provider": "operating_system",
-                "default_roles": ["operator"],
-                "user_roles": {},
-            },
-        )
-        devices = raw.setdefault("devices", {})
-        if isinstance(devices, dict):
-            # Version-1 profiles predating the MOKE module receive an explicit,
-            # disabled and fail-closed profile that can be edited in the UI.
-            devices.setdefault(
-                "moke_box", MokeBoxSettings().model_dump(mode="json")
-            )
+        # Upgrade every older profile from the packaged production template.
+        # The recursive merge only fills absent keys: station-specific values,
+        # comments and ordering remain intact, while new devices and newly
+        # introduced nested fields arrive without per-device migration code.
+        defaults = self._template_raw()
+        migrated = self._merge_missing_defaults(raw, defaults)
         try:
             settings = StationSettings.model_validate(raw)
         except ValidationError as exc:
             raise ConfigurationError(f"Invalid settings.yml:\n{exc}") from exc
+        if migrated:
+            # Persist only after the merged document validates.  This is a
+            # schema upgrade, not an operator configuration change, so existing
+            # approval metadata is preserved. _atomic_dump also keeps a .bak.
+            self._atomic_dump(raw)
         return LoadedSettings(settings=settings, raw=raw, source=self.path)
+
+    def _template_raw(self) -> dict[str, Any]:
+        try:
+            text = files("app").joinpath("resources/settings.template.yml").read_text(
+                encoding="utf-8"
+            )
+            defaults = self._yaml.load(text)
+        except (FileNotFoundError, ModuleNotFoundError, OSError) as exc:
+            raise ConfigurationError("The packaged settings template is missing.") from exc
+        if not isinstance(defaults, dict):
+            raise ConfigurationError("The packaged settings template root must be a mapping.")
+        return defaults
+
+    @classmethod
+    def _merge_missing_defaults(
+        cls,
+        target: dict[str, Any],
+        defaults: dict[str, Any],
+    ) -> bool:
+        """Recursively add absent schema defaults without replacing user data."""
+
+        changed = False
+        for key, default in defaults.items():
+            if key not in target:
+                target[key] = deepcopy(default)
+                changed = True
+                continue
+            current = target[key]
+            if isinstance(current, dict) and isinstance(default, dict):
+                changed = cls._merge_missing_defaults(current, default) or changed
+        return changed
 
     def ensure_exists(self) -> bool:
         """Create an unverified local profile from the packaged template once."""

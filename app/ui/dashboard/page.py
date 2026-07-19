@@ -9,7 +9,6 @@ from PySide6.QtGui import QResizeEvent
 from PySide6.QtWidgets import (
     QGridLayout,
     QHBoxLayout,
-    QLabel,
     QMessageBox,
     QSizePolicy,
     QStackedWidget,
@@ -136,7 +135,7 @@ class DashboardPage(QWidget):
                     lambda payload, device=device: self._card_assignment_requested(device, payload)
                 )
         overview_layout.addLayout(grid)
-        self.checklist = QLabel()
+        self.checklist = BodyLabel()
         self.checklist.setObjectName("checklist")
         self.checklist.setWordWrap(True)
         overview_layout.addWidget(self.checklist)
@@ -891,10 +890,10 @@ class DashboardPage(QWidget):
         dialog.setMinimumSize(680, 460)
         layout = QVBoxLayout(dialog)
 
-        result = QLabel("MOKE Box verified" if verified else "MOKE verification failed")
+        result = BodyLabel("MOKE Box verified" if verified else "MOKE verification failed")
         result.setObjectName("sectionTitle")
         layout.addWidget(result)
-        detail_label = QLabel(detail)
+        detail_label = BodyLabel(detail)
         detail_label.setWordWrap(True)
         layout.addWidget(detail_label)
 
@@ -1072,3 +1071,4 @@ class DashboardPage(QWidget):
         )
         self.visa_results.set_results(states)
         self.visa_results.set_assignment_allowed(self._assignment_allowed)
+

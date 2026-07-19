@@ -4,9 +4,9 @@ from __future__ import annotations
 
 from PySide6.QtCore import Qt
 from PySide6.QtWidgets import (
-    QLabel, QListWidgetItem, QMessageBox, QHBoxLayout, QVBoxLayout, QWidget,
+    QListWidgetItem, QMessageBox, QHBoxLayout, QVBoxLayout, QWidget,
 )
-from qfluentwidgets import ComboBox, ListWidget, PrimaryPushButton, PushButton
+from qfluentwidgets import BodyLabel, ComboBox, ListWidget, PrimaryPushButton, PushButton
 
 from collections.abc import Mapping, Sequence
 
@@ -30,7 +30,7 @@ class DeviceParameterDialog(FluentRecipeDialog):
         self.setWindowTitle("Add device controls")
         self.setMinimumSize(460, 420)
         layout = QVBoxLayout(self)
-        layout.addWidget(QLabel("Choose an instrument, then select one or more fields to sweep."))
+        layout.addWidget(BodyLabel("Choose an instrument, then select one or more fields to sweep."))
         self.device = ComboBox(self)
         devices = tuple(dict.fromkeys(definition["device"] for definition in self._definitions))
         self.device.addItems(devices)
@@ -81,3 +81,4 @@ class DeviceParameterDialog(FluentRecipeDialog):
             QMessageBox.information(self, "Device controls", "Select at least one controllable field.")
             return
         super().accept()
+
