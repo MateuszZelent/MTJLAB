@@ -6,23 +6,20 @@ from copy import deepcopy
 from pathlib import Path
 from typing import Any
 
-from PySide6.QtCore import QSize, QSettings, Qt, Signal
-from PySide6.QtGui import QAction, QActionGroup, QCloseEvent, QIcon, QKeySequence, QShortcut
+from PySide6.QtCore import QObject, QSettings, Qt, Signal
+from PySide6.QtGui import QAction, QActionGroup, QCloseEvent, QKeySequence, QShortcut
 from PySide6.QtWidgets import (
     QApplication,
     QDialog,
-    QHBoxLayout,
-    QLabel,
     QLineEdit,
     QMainWindow,
     QMessageBox,
     QPlainTextEdit,
     QPushButton,
-    QScrollArea,
-    QTabWidget,
-    QToolBar,
+    QVBoxLayout,
     QWidget,
 )
+from qfluentwidgets import FluentIcon, FluentWindow, NavigationItemPosition
 
 from app.audit import AuditLogger
 from app.bootstrap import StationComposition
@@ -49,9 +46,68 @@ from app.ui.recipes.page import (  # noqa: F401
     AnritsuAcquisitionEditorDialog, CommentEditorDialog, FixedValueDialog,
     KeithleySweepBuilderDialog, RecipePage, RecipeTreeWidget, SweepLibraryButton,
 )
+from app.ui.shell.page_host import FluentPageHost
+from app.ui.shell.safety_strip import StationSafetySnapshot, StationSafetyStrip
 from app.ui.widgets import LimitEditDialog, LimitField, SpectrumPlotWidget
 
-class MainWindow(QMainWindow):
+
+class _NavigationTabsAdapter(QObject):
+    """Temporary QTabWidget-shaped facade for legacy shell consumers."""
+
+    currentChanged = Signal(int)
+
+    def __init__(
+        self,
+        window: "MainWindow",
+        routes: tuple[str, ...],
+        labels: tuple[str, ...],
+    ) -> None:
+        super().__init__(window)
+        self._window = window
+        self._routes = routes
+        self._labels = labels
+        window.stackedWidget.currentChanged.connect(self.currentChanged)
+
+    def count(self) -> int:
+        return len(self._routes)
+
+    def currentIndex(self) -> int:
+        current = self._window.stackedWidget.currentWidget()
+        try:
+            return tuple(self._window.navigation_routes.values()).index(current)
+        except ValueError:
+            return -1
+
+    def currentWidget(self) -> QWidget | None:
+        return self._window.stackedWidget.currentWidget()
+
+    def setCurrentIndex(self, index: int) -> None:
+        if 0 <= index < len(self._routes):
+            self._window._navigate_to(self._routes[index])
+
+    def setCurrentWidget(self, widget: QWidget) -> None:
+        for route, host in self._window.navigation_routes.items():
+            if widget in {host, host.scroll_area, host.content}:
+                self._window._navigate_to(route)
+                return
+
+    def setTabEnabled(self, index: int, enabled: bool) -> None:
+        if 0 <= index < len(self._routes):
+            self._window._set_route_enabled(self._routes[index], enabled)
+
+    def isTabEnabled(self, index: int) -> bool:
+        if not 0 <= index < len(self._routes):
+            return False
+        return self._window.navigation_routes[self._routes[index]].isEnabled()
+
+    def tabText(self, index: int) -> str:
+        return self._labels[index]
+
+    def setAccessibleName(self, name: str) -> None:
+        self._window.stackedWidget.setAccessibleName(name)
+
+
+class MainWindow(FluentWindow):
     """Local Qt client with manual control, live spectrum and safe settings."""
 
     theme_changed = Signal(str)
@@ -115,9 +171,35 @@ class MainWindow(QMainWindow):
         )
 
     def _build(self) -> None:
-        self.tabs = QTabWidget()
-        self.tabs.setDocumentMode(True)
-        self.setCentralWidget(self.tabs)
+        self._content_window = QMainWindow(self)
+        self._content_window.setObjectName("fluentContentWindow")
+        content = QWidget(self._content_window)
+        content.setObjectName("fluentShellContent")
+        content_layout = QVBoxLayout(content)
+        content_layout.setContentsMargins(12, 8, 12, 8)
+        content_layout.setSpacing(8)
+        self.safety_strip = StationSafetyStrip(content)
+        self.safety_strip.estop.setText("E-STOP")
+        self.safety_strip.estop.setMaximumWidth(96)
+        self.safety_strip.estop.setFixedHeight(28)
+        self.safety_strip.estop.setProperty("visualPriority", "low")
+        self.safety_strip.estop.setToolTip(
+            "Confirm and disable every instrument output and abort acquisition."
+        )
+        self.safety_strip.estop.setStyleSheet(
+            "background: transparent; border: 1px solid palette(mid); "
+            "border-radius: 6px; color: palette(text); padding: 3px 10px;"
+        )
+        content_layout.addWidget(self.safety_strip)
+        self.widgetLayout.removeWidget(self.stackedWidget)
+        content_layout.addWidget(self.stackedWidget, 1)
+        self._content_window.setCentralWidget(content)
+        self.widgetLayout.addWidget(self._content_window)
+        self._content_window.show()
+        self.navigationInterface.setExpandWidth(248)
+        self.navigationInterface.setMinimumExpandWidth(1000)
+        self.navigationInterface.expand(useAni=False)
+
         registry = self._composition.registry
         self.dashboard = DashboardPage(
             self._settings,
@@ -238,29 +320,81 @@ class MainWindow(QMainWindow):
         for field in self.anritsu_page.findChildren(LimitField):
             configure_limit_button(field, device="Anritsu")
             field.edit_requested.connect(lambda field=field: self._edit_device_limit("anritsu", field))
-        self._tab_indices: dict[str, int] = {}
-        for widget, key, display_name in (
-            (self.dashboard, "Dashboard", "Dashboard"),
-            (self.rigol_page, "Rigol", registry.get("rigol").display_name),
-            (self.keithley_page, "Keithley", registry.get("keithley").display_name),
-            (self.anritsu_page, "Anritsu", registry.get("anritsu").display_name),
-            (self.moke_box_page, "MOKE Box", registry.get("moke_box").display_name),
+        route_icons = {
+            "dashboard": FluentIcon.HOME,
+            "rigol": FluentIcon.SPEED_HIGH,
+            "keithley": FluentIcon.CALORIES,
+            "anritsu": FluentIcon.WIFI,
+            "moke_box": FluentIcon.SYNC,
+            "lakeshore_gaussmeter": FluentIcon.FLAG,
+            "sweeps": FluentIcon.DOCUMENT,
+            "execution": FluentIcon.PLAY,
+            "results": FluentIcon.FOLDER,
+            "settings": FluentIcon.SETTING,
+        }
+        route_specs = (
+            (self.dashboard, "dashboard", "Dashboard", "Dashboard"),
+            (
+                self.rigol_page,
+                "rigol",
+                "Rigol",
+                registry.get("rigol").display_name,
+            ),
+            (
+                self.keithley_page,
+                "keithley",
+                "Keithley",
+                registry.get("keithley").display_name,
+            ),
+            (
+                self.anritsu_page,
+                "anritsu",
+                "Anritsu",
+                registry.get("anritsu").display_name,
+            ),
+            (
+                self.moke_box_page,
+                "moke_box",
+                "MOKE Box",
+                registry.get("moke_box").display_name,
+            ),
             (
                 self.lakeshore_gaussmeter_page,
+                "lakeshore_gaussmeter",
                 "Lake Shore 475",
                 registry.get("lakeshore_gaussmeter").display_name,
             ),
-            (self.recipe_page, "Sweeps", "Sweeps"),
-            (self.run_monitor, "Execution", "Execution"),
-            (self.results_page, "Results", "Results"),
-            (self.settings_page, "Settings", "Settings"),
-        ):
-            scroll = QScrollArea()
-            scroll.setWidgetResizable(True)
-            scroll.setWidget(widget)
-            scroll.setFrameShape(QScrollArea.Shape.NoFrame)
-            widget._scroll_area = scroll
-            self._tab_indices[key] = self.tabs.addTab(scroll, display_name)
+            (self.recipe_page, "sweeps", "Sweeps", "Sweeps"),
+            (self.run_monitor, "execution", "Execution", "Execution"),
+            (self.results_page, "results", "Results", "Results"),
+            (self.settings_page, "settings", "Settings", "Settings"),
+        )
+        self.navigation_routes: dict[str, FluentPageHost] = {}
+        self._route_for_widget: dict[QWidget, str] = {}
+        self._tab_indices: dict[str, int] = {}
+        for index, (widget, route, legacy_label, display_name) in enumerate(route_specs):
+            host = FluentPageHost(widget, self)
+            host.setObjectName(f"{route}PageHost")
+            self.navigation_routes[route] = host
+            self._route_for_widget[widget] = route
+            self._tab_indices[legacy_label] = index
+            position = (
+                NavigationItemPosition.BOTTOM
+                if route == "settings"
+                else NavigationItemPosition.TOP
+            )
+            self.addSubInterface(
+                host,
+                route_icons[route],
+                display_name,
+                position=position,
+            )
+            widget._scroll_area = host.scroll_area
+        self.tabs = _NavigationTabsAdapter(
+            self,
+            tuple(self.navigation_routes),
+            tuple(spec[3] for spec in route_specs),
+        )
         self.log = QPlainTextEdit()
         self.log.setReadOnly(True)
         self.log.setMaximumBlockCount(500)
@@ -324,89 +458,63 @@ class MainWindow(QMainWindow):
         self.estop_shortcut.activated.connect(self._emergency_off_all)
         self.scan_shortcut = QShortcut(QKeySequence("F5"), self)
         self.scan_shortcut.activated.connect(self.dashboard._scan_visa)
-        self._build_top_chrome()
+        self.safety_strip.estop_requested.connect(self._emergency_off_all)
+        self._refresh_safety_strip()
 
     def _set_current_tab_widget(self, widget: QWidget) -> None:
-        scroll = getattr(widget, "_scroll_area", widget)
-        self.tabs.setCurrentWidget(scroll)
+        route = self._route_for_widget.get(widget)
+        if route is not None:
+            self._navigate_to(route)
 
-    def _build_top_chrome(self) -> None:
-        """Build a compact menu status area and icon-based application ribbon."""
+    def _navigate_to(self, route: str) -> None:
+        self.switchTo(self.navigation_routes[route])
 
-        self.tabs.tabBar().hide()
-        ribbon = QToolBar("Application ribbon", self)
-        ribbon.setObjectName("applicationRibbon")
-        ribbon.setMovable(False)
-        ribbon.setFloatable(False)
-        ribbon.setIconSize(QSize(24, 24))
-        ribbon.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonTextUnderIcon)
-        self.ribbon_group = QActionGroup(self)
-        self.ribbon_group.setExclusive(True)
-        self.ribbon_actions: list[QAction] = []
-        icon_dir = Path(__file__).resolve().parents[1] / "assets" / "icons"
-        registry = self._composition.registry
-        icon_files = {
-            "Dashboard": "dashboard.svg",
-            registry.get("rigol").display_name: "rigol.svg",
-            registry.get("keithley").display_name: "keithley.svg",
-            registry.get("anritsu").display_name: "anritsu.svg",
-            registry.get("moke_box").display_name: "moke_box.svg",
-            registry.get("lakeshore_gaussmeter").display_name: "lakeshore.svg",
-            "Sweeps": "recipes.svg",
-            "Execution": "execution.svg",
-            "Results": "results.svg",
-            "Settings": "settings.svg",
-        }
-        labels = tuple(self.tabs.tabText(index) for index in range(self.tabs.count()))
-        for index, label in enumerate(labels):
-            if label in {"Sweeps", "Results"}:
-                ribbon.addSeparator()
-            action = QAction(QIcon(str(icon_dir / icon_files[label])), label, self)
-            action.setCheckable(True)
-            action.setChecked(index == self.tabs.currentIndex())
-            action.setToolTip(f"Open {label}")
-            action.triggered.connect(lambda checked=False, index=index: checked and self.tabs.setCurrentIndex(index))
-            self.ribbon_group.addAction(action)
-            ribbon.addAction(action)
-            self.ribbon_actions.append(action)
-        self.tabs.currentChanged.connect(
-            lambda index: 0 <= index < len(self.ribbon_actions) and self.ribbon_actions[index].setChecked(True)
+    def _set_route_enabled(self, route: str, enabled: bool) -> None:
+        host = self.navigation_routes[route]
+        host.setEnabled(enabled)
+        item = self.navigationInterface.widget(host.objectName())
+        if item is not None:
+            item.setEnabled(enabled)
+
+    def _refresh_safety_strip(self) -> None:
+        active_outputs = sum(
+            state == "output_on" for state in self._device_states.values()
         )
-        self.addToolBar(Qt.ToolBarArea.TopToolBarArea, ribbon)
-        self.ribbon = ribbon
-
-        corner = QWidget()
-        corner.setObjectName("menuStatusArea")
-        status_layout = QHBoxLayout(corner)
-        status_layout.setContentsMargins(6, 1, 6, 1)
-        status_layout.setSpacing(8)
-        profile_state = "LOCKED" if self._settings.outputs_locked else "APPROVED"
-        self.profile_status = QLabel(f"Profile: {profile_state}")
-        self.profile_status.setObjectName("profileLocked" if self._settings.outputs_locked else "profileApproved")
-        status_layout.addWidget(self.profile_status)
-        self.identity_status = QLabel(f"User: {self._access.identity.display_name}")
-        self.identity_status.setObjectName("compactIdentityStatus")
-        self.identity_status.setToolTip(
-            "Authenticated operating-system identity and effective Lab Control role(s)."
+        self.safety_strip.update_snapshot(
+            StationSafetySnapshot(
+                ready=self.dashboard.evaluate_readiness().ready,
+                active_outputs=active_outputs,
+                profile_state=(
+                    "LOCKED" if self._settings.outputs_locked else "APPROVED"
+                ),
+                simulation=self._simulation,
+                actor=self._access.identity.username,
+                roles=tuple(
+                    sorted(role.value for role in self._access.identity.roles)
+                ),
+            )
         )
-        status_layout.addWidget(self.identity_status)
-        self.toolbar_device_status: dict[str, QLabel] = {}
-        for device in ("rigol", "keithley", "anritsu", "moke_box", "lakeshore_gaussmeter"):
-            display = {"moke_box": "MOKE", "lakeshore_gaussmeter": "Lake Shore"}.get(device, device.title())
-            label = QLabel(f"● {display}: OFFLINE")
-            label.setObjectName("compactDeviceStatus")
-            label.setAccessibleName(f"{display} connection and output state")
-            status_layout.addWidget(label)
-            self.toolbar_device_status[device] = label
-        stop = QPushButton("E-STOP")
-        stop.setObjectName("compactEmergencyButton")
-        stop.setMaximumWidth(74)
-        stop.setMaximumHeight(24)
-        stop.setToolTip("Confirm and disable every output and abort acquisition.")
-        stop.clicked.connect(self._emergency_off_all)
-        status_layout.addWidget(stop)
-        self.menuBar().setCornerWidget(corner, Qt.Corner.TopRightCorner)
-        self.menu_status_area = corner
+
+    def menuBar(self):
+        return self._content_window.menuBar()
+
+    def statusBar(self):
+        return self._content_window.statusBar()
+
+    def setStatusBar(self, status_bar) -> None:
+        self._content_window.setStatusBar(status_bar)
+
+    def addDockWidget(self, area, dock_widget) -> None:
+        self._content_window.addDockWidget(area, dock_widget)
+
+    def resizeDocks(self, docks, sizes, orientation) -> None:
+        self._content_window.resizeDocks(docks, sizes, orientation)
+
+    def saveState(self, version: int = 0):
+        return self._content_window.saveState(version)
+
+    def restoreState(self, state, version: int = 0) -> bool:
+        return self._content_window.restoreState(state, version)
 
     def _apply_accessibility(self) -> None:
         """Ensure controls expose text as well as colour and have screen-reader metadata."""
@@ -671,13 +779,7 @@ class MainWindow(QMainWindow):
     def _set_device_state(self, device: str, state: str) -> None:
         self._device_states[device] = state
         self.dashboard.update_device_state(device, state)
-        label = self.toolbar_device_status.get(device)
-        if label is not None:
-            display = {"moke_box": "MOKE", "lakeshore_gaussmeter": "Lake Shore"}.get(device, device.title())
-            label.setText(f"● {display}: {state.replace('_', ' ').upper()}")
-            label.setProperty("deviceState", state)
-            label.style().unpolish(label)
-            label.style().polish(label)
+        self._refresh_safety_strip()
 
     def _guard_manual_operation(self, operation: str, payload: object) -> None:
         """Fail closed for new energy-producing operations after audit I/O failure."""
@@ -1000,11 +1102,6 @@ class MainWindow(QMainWindow):
             resource, backend = self._device_connection_details(self._settings, name)
             panel.update_resource(resource, backend)
         self.recipe_page.set_settings(self._settings)
-        profile_state = "LOCKED" if self._settings.outputs_locked else "APPROVED"
-        self.profile_status.setText(f"Profile: {profile_state}")
-        self.profile_status.setObjectName("profileLocked" if self._settings.outputs_locked else "profileApproved")
-        self.profile_status.style().unpolish(self.profile_status)
-        self.profile_status.style().polish(self.profile_status)
         for name, controller in self._controllers.items():
             self.dashboard.cards[name].set_reconfiguring(True)
             self.connection_panels[name].set_reconfiguring(True)
@@ -1016,6 +1113,7 @@ class MainWindow(QMainWindow):
             controller.reconfigure(self._composition.create_adapter(name, settings=self._settings))
             self._device_states[name] = "disconnected"
             self.dashboard.cards[name].update_state("disconnected")
+        self._refresh_safety_strip()
         self._log("Profile changed. VISA sessions were safely switched OFF and disconnected; new limits apply on the next connection.")
 
     def _save_discovered_assignments(self, payload: object) -> None:
@@ -1148,7 +1246,6 @@ class MainWindow(QMainWindow):
         for label in ("Rigol", "Keithley", "Anritsu", "MOKE Box", "Lake Shore 475", "Sweeps", "Settings"):
             index = self._tab_indices[label]
             self.tabs.setTabEnabled(index, not locked)
-            self.ribbon_actions[index].setEnabled(not locked)
 
     def _require_permission(
         self,

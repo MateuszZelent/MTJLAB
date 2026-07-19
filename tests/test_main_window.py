@@ -418,8 +418,8 @@ class MainWindowTests(unittest.TestCase):
                 authenticated_username="LAB\\operator",
             )
             try:
-                self.assertIn("LAB\\operator", window.identity_status.text())
-                self.assertIn("operator", window.identity_status.text())
+                self.assertIn("LAB\\operator", window.safety_strip.actor.text())
+                self.assertIn("operator", window.safety_strip.actor.text())
                 # Operators may save only the dedicated Rigol manual-output
                 # permission; general station configuration stays read-only.
                 self.assertTrue(window.settings_page.save_button.isEnabled())
@@ -818,27 +818,6 @@ class MainWindowTests(unittest.TestCase):
             self.assertIn("TEST PASS", card.identity.text())
             self.assertIn("KEITHLEY", card.identity.text().upper())
             self.assertEqual(window._controllers["keithley"]._worker._adapter.state.value, "disconnected")
-        finally:
-            window.close()
-            self.application.processEvents()
-
-    def test_top_ribbon_replaces_side_tabs_and_status_lives_in_menu_corner(self) -> None:
-        window = MainWindow(".config/settings.yml", simulation=True)
-        try:
-            self.assertTrue(window.tabs.tabBar().isHidden())
-            self.assertEqual([action.text() for action in window.ribbon_actions], [
-                "Dashboard", "Rigol DG1032Z", "Keithley 2600", "Anritsu MS2830A",
-                "MOKE Box", "Lake Shore 475", "Sweeps", "Execution", "Results", "Settings"
-            ])
-            self.assertTrue(all(not action.icon().isNull() for action in window.ribbon_actions))
-            window.ribbon_actions[2].trigger()
-            self.application.processEvents()
-            self.assertEqual(window.tabs.currentIndex(), 2)
-            self.assertTrue(window.ribbon_actions[2].isChecked())
-            self.assertIs(window.menuBar().cornerWidget(Qt.Corner.TopRightCorner), window.menu_status_area)
-            stop = window.menu_status_area.findChild(QPushButton, "compactEmergencyButton")
-            self.assertIsNotNone(stop)
-            self.assertLessEqual(stop.maximumWidth(), 74)
         finally:
             window.close()
             self.application.processEvents()

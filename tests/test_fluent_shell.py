@@ -3,7 +3,9 @@ from __future__ import annotations
 import unittest
 
 from PySide6.QtWidgets import QApplication, QLabel, QVBoxLayout, QWidget
+from qfluentwidgets import FluentWindow
 
+from app.ui.main_window import MainWindow
 from app.ui.shell import FluentPageHost, StationSafetySnapshot, StationSafetyStrip
 
 
@@ -66,3 +68,42 @@ class StationSafetyStripTests(unittest.TestCase):
         strip.estop_requested.connect(lambda: emissions.append(True))
         strip.estop.click()
         self.assertEqual(emissions, [True])
+
+
+class MainWindowFluentShellTests(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls) -> None:
+        cls.application = QApplication.instance() or QApplication([])
+
+    def test_main_window_uses_fluent_navigation_and_all_routes_exist(self) -> None:
+        window = MainWindow(".config/settings.yml", simulation=True)
+        try:
+            self.assertIsInstance(window, FluentWindow)
+            self.assertEqual(tuple(window.navigation_routes), (
+                "dashboard", "rigol", "keithley", "anritsu",
+                "moke_box", "lakeshore_gaussmeter", "sweeps", "execution",
+                "results", "settings",
+            ))
+            self.assertIsNotNone(window.safety_strip)
+            self.assertEqual(window.safety_strip.estop.text(), "E-STOP")
+            self.assertLessEqual(window.safety_strip.estop.maximumWidth(), 96)
+            self.assertEqual(
+                window.safety_strip.estop.property("visualPriority"),
+                "low",
+            )
+            self.assertFalse(hasattr(window, "ribbon"))
+        finally:
+            window.close()
+
+    def test_navigation_changes_current_page_without_recreating_controller(self) -> None:
+        window = MainWindow(".config/settings.yml", simulation=True)
+        try:
+            controller = window._controllers["keithley"]
+            window._navigate_to("keithley")
+            self.assertIs(window._controllers["keithley"], controller)
+            self.assertIs(
+                window.stackedWidget.currentWidget(),
+                window.navigation_routes["keithley"],
+            )
+        finally:
+            window.close()
