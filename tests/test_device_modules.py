@@ -1,7 +1,9 @@
 from __future__ import annotations
 
+from dataclasses import replace
 import unittest
 
+from app.contracts import DeviceModuleRegistry
 from app.devices.lakeshore_gaussmeter import (
     GaussmeterConfig,
     LakeShore475Adapter,
@@ -43,6 +45,40 @@ class _OfficialModel425Bridge:
 
 
 class DeviceModuleTests(unittest.TestCase):
+    def test_registry_exposes_unique_concrete_implementation_keys(self) -> None:
+        modules = built_in_device_registry().all_modules()
+        self.assertEqual(
+            {module.implementation_key for module in modules},
+            {
+                "rigol_dg1000z",
+                "keithley_2600",
+                "anritsu_ms2830a",
+                "moke_box",
+                "lakeshore_475",
+            },
+        )
+        self.assertEqual(
+            {module.key for module in modules},
+            {"rigol", "keithley", "anritsu", "moke_box", "lakeshore_gaussmeter"},
+        )
+
+    def test_registry_rejects_duplicate_implementation_keys(self) -> None:
+        first = replace(
+            built_in_device_registry().get("rigol"),
+            key="first",
+            implementation_key="same_family",
+            recipe_extension=None,
+        )
+        second = replace(
+            first,
+            key="second",
+            implementation_key="same_family",
+        )
+        with self.assertRaisesRegex(
+            ValueError, "implementation keys must be unique"
+        ):
+            DeviceModuleRegistry((first, second))
+
     def test_registry_exposes_current_and_prepared_modules(self) -> None:
         registry = built_in_device_registry()
         self.assertEqual(

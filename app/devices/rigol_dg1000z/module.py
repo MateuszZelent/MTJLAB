@@ -44,6 +44,7 @@ def _page(controller: object, settings: StationSettings) -> object:
 
 MODULE = DeviceModule(
     key="rigol",
+    implementation_key="rigol_dg1000z",
     display_name="Rigol DG1032Z",
     settings_key="rigol",
     adapter_factory=_adapter,

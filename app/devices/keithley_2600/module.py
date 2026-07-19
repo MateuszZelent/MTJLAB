@@ -40,6 +40,7 @@ def _page(controller: object, settings: StationSettings) -> object:
 
 MODULE = DeviceModule(
     key="keithley",
+    implementation_key="keithley_2600",
     display_name="Keithley 2600",
     settings_key="keithley",
     adapter_factory=_adapter,

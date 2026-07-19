@@ -48,6 +48,7 @@ class DeviceModule:
     """
 
     key: str
+    implementation_key: str
     display_name: str
     settings_key: str | None
     adapter_factory: AdapterFactory
@@ -76,6 +77,13 @@ class DeviceModuleRegistry:
             raise ValueError("At least one device module must be registered.")
         if len(indexed) != len(module_list):
             raise ValueError("Device module keys must be unique.")
+        implementation_keys = [module.implementation_key for module in module_list]
+        if len(implementation_keys) != len(set(implementation_keys)):
+            raise ValueError("Device module implementation keys must be unique.")
+        if any(not key or not key.isidentifier() for key in implementation_keys):
+            raise ValueError(
+                "Device module implementation keys must be valid Python identifiers."
+            )
         for module in module_list:
             extension = module.recipe_extension
             if extension is not None and extension.module_key != module.key:

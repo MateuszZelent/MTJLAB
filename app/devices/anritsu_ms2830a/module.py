@@ -51,6 +51,7 @@ def _page(controller: object, settings: StationSettings) -> object:
 
 MODULE = DeviceModule(
     key="anritsu",
+    implementation_key="anritsu_ms2830a",
     display_name="Anritsu MS2830A",
     settings_key="anritsu",
     adapter_factory=_adapter,

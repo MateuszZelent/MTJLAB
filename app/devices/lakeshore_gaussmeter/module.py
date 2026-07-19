@@ -54,6 +54,7 @@ def _page(controller: object, settings: StationSettings) -> object:
 
 MODULE = DeviceModule(
     key="lakeshore_gaussmeter",
+    implementation_key="lakeshore_475",
     display_name="Lake Shore 475",
     settings_key="lakeshore_gaussmeter",
     adapter_factory=_adapter,

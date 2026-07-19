@@ -67,6 +67,7 @@ def _page(controller: object, settings: StationSettings) -> object:
 
 MODULE = DeviceModule(
     key="moke_box",
+    implementation_key="moke_box",
     display_name="MOKE Box",
     settings_key="moke_box",
     adapter_factory=_adapter,
