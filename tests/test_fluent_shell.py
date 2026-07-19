@@ -4,7 +4,7 @@ import unittest
 
 from PySide6.QtWidgets import QApplication, QLabel, QVBoxLayout, QWidget
 
-from app.ui.shell import FluentPageHost
+from app.ui.shell import FluentPageHost, StationSafetySnapshot, StationSafetyStrip
 
 
 class FluentDependencyTests(unittest.TestCase):
@@ -36,3 +36,33 @@ class FluentPageHostTests(unittest.TestCase):
         self.assertIs(host.scroll_area.widget(), content)
         self.assertTrue(host.scroll_area.widgetResizable())
         self.assertEqual(host.objectName(), "fluentPageHost")
+
+
+class StationSafetyStripTests(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls) -> None:
+        cls.application = QApplication.instance() or QApplication([])
+
+    def test_snapshot_updates_text_and_semantic_properties(self) -> None:
+        strip = StationSafetyStrip()
+        strip.update_snapshot(
+            StationSafetySnapshot(
+                ready=False,
+                active_outputs=2,
+                profile_state="LOCKED",
+                simulation=True,
+                actor="operator",
+                roles=("operator",),
+            )
+        )
+        self.assertIn("2 outputs active", strip.outputs.text())
+        self.assertEqual(strip.outputs.property("outputState"), "active")
+        self.assertEqual(strip.readiness.property("safetyState"), "danger")
+        self.assertIn("SIMULATION", strip.mode.text())
+
+    def test_estop_button_emits_without_animation_or_delay(self) -> None:
+        strip = StationSafetyStrip()
+        emissions: list[bool] = []
+        strip.estop_requested.connect(lambda: emissions.append(True))
+        strip.estop.click()
+        self.assertEqual(emissions, [True])
