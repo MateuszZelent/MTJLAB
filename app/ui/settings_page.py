@@ -96,6 +96,7 @@ class _FluentSettingsSections(QWidget):
 
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
+        self.setProperty("stationSurface", "page")
         layout = QVBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
         layout.setSpacing(8)
@@ -103,9 +104,13 @@ class _FluentSettingsSections(QWidget):
         self.navigation.setItemFontSize(13)
         self.compact_navigation = ComboBox(self)
         self.compact_navigation.setAccessibleName("Settings section")
-        self.compact_navigation.hide()
+        # Start compact so Pivot's wide size hint cannot inflate the page
+        # before its first real resize.  resizeEvent selects the proper mode.
+        self.navigation.hide()
+        self.compact_navigation.show()
         self.compact_navigation.currentIndexChanged.connect(self.setCurrentIndex)
         self.stack = QStackedWidget(self)
+        self.stack.setProperty("stationSurface", "page")
         self.stack.setSizePolicy(
             QSizePolicy.Policy.Ignored,
             QSizePolicy.Policy.Expanding,
@@ -154,12 +159,11 @@ class _FluentSettingsSections(QWidget):
 
     def resizeEvent(self, event: QResizeEvent) -> None:
         super().resizeEvent(event)
-        # The settings route has enough sections that its Pivot is wider than
-        # a typical 1360 px application content area.  Switch according to the
-        # navigation's real size hint instead of a fixed desktop breakpoint;
-        # otherwise the final routes are silently clipped inside the host.
-        required_width = max(900, self.navigation.sizeHint().width())
-        compact = event.size().width() < required_width
+        # Nine station routes need a genuinely wide workspace.  A stable
+        # breakpoint avoids font/platform-dependent size hints making the
+        # Pivot flicker between itself and the compact selector after a theme
+        # change.
+        compact = event.size().width() < 1500
         self.navigation.setVisible(not compact)
         self.compact_navigation.setVisible(compact)
 
@@ -269,12 +273,15 @@ class SettingsPage(QWidget):
             self.trees[key] = tree
             form = ScrollArea()
             form.setObjectName("settingsForm")
+            form.setProperty("stationSurface", "page")
+            form.viewport().setProperty("stationSurface", "page")
             form.setWidgetResizable(True)
             form.setFrameShape(QFrame.Shape.NoFrame)
             self.forms[key] = form
             self.tabs.addTab(form, label)
         limits_page = QWidget()
         limits_page.setObjectName("settingsSpecialPage")
+        limits_page.setProperty("stationSurface", "page")
         limits_layout = QVBoxLayout(limits_page)
         limits_layout.setContentsMargins(18, 18, 18, 18)
         limits_layout.setSpacing(12)
@@ -327,6 +334,7 @@ class SettingsPage(QWidget):
         self.tabs.addTab(limits_page, "Safety limits")
         roles_page = QWidget()
         roles_page.setObjectName("settingsSpecialPage")
+        roles_page.setProperty("stationSurface", "page")
         roles_layout = QVBoxLayout(roles_page)
         roles_layout.setContentsMargins(18, 18, 18, 18)
         roles_layout.setSpacing(12)
@@ -362,6 +370,7 @@ class SettingsPage(QWidget):
         self.tabs.addTab(roles_page, "Access roles")
         diagnostics_page = QWidget()
         diagnostics_page.setObjectName("settingsSpecialPage")
+        diagnostics_page.setProperty("stationSurface", "page")
         diagnostics_layout = QVBoxLayout(diagnostics_page)
         diagnostics_layout.setContentsMargins(18, 18, 18, 18)
         diagnostics_layout.setSpacing(12)

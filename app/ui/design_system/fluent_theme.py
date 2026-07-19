@@ -28,6 +28,11 @@ class AppliedTheme:
 def apply_application_theme(application: QApplication, mode: str) -> AppliedTheme:
     name = effective_theme(mode)
     tokens = tokens_for(name)
+    # Application properties describe the last requested theme, not proof
+    # that Qt's palette is still synchronized (tests, dialogs and QFluent
+    # repolishing can alter it independently). Always establish the native
+    # palette before considering the fast path.
+    _apply_application_palette(application, tokens, name)
     fluent_matches = isDarkTheme() == (name == "dark")
     accent_matches = application.property("stationAppliedAccent") == tokens.accent
     if (
@@ -176,8 +181,10 @@ def _apply_station_control_styles(application: QApplication, tokens: ThemeTokens
 
 
 def _apply_station_control_style(widget: QWidget, tokens: ThemeTokens) -> None:
-    if widget.property("stationControlTheme") == tokens.background:
-        return
+    # Do not skip a widget merely because it saw this token before. QFluent
+    # can repolish controls after that point (notably hidden Settings routes),
+    # so the palette and semantic surfaces must be reasserted on every global
+    # theme application and Show event.
     if isinstance(widget, QDialog):
         widget.setStyleSheet(dialog_qss(tokens))
     _apply_station_surface(widget, tokens)

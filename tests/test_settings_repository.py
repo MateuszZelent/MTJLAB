@@ -11,6 +11,25 @@ from tests.helpers import SETTINGS_TEMPLATE
 
 
 class SettingsRepositoryTests(unittest.TestCase):
+    def test_legacy_profile_gets_explicit_disabled_moke_box_section(self) -> None:
+        raw = deepcopy(SettingsRepository(SETTINGS_TEMPLATE).load().raw)
+        raw["devices"].pop("moke_box", None)
+        with tempfile.TemporaryDirectory() as temporary:
+            path = Path(temporary) / "settings.yml"
+            repository = SettingsRepository(path)
+            repository._atomic_dump(raw)
+
+            loaded = repository.load()
+
+            profile = loaded.raw["devices"]["moke_box"]
+            self.assertFalse(profile["enabled"])
+            self.assertIsNone(profile["endpoint"])
+            self.assertFalse(profile["protocol_qualified"])
+            self.assertFalse(profile["allow_vout_control"])
+            self.assertEqual(profile["allowed_vout_channels"], [])
+            persisted = repository._yaml.load(path.read_text(encoding="utf-8"))
+            self.assertIn("moke_box", persisted["devices"])
+
     def test_legacy_profile_gets_explicit_disabled_lakeshore_section_in_raw_yaml(self) -> None:
         raw = deepcopy(SettingsRepository(SETTINGS_TEMPLATE).load().raw)
         raw["devices"].pop("lakeshore_gaussmeter")

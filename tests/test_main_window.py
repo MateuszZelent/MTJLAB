@@ -1160,6 +1160,36 @@ class MainWindowTests(unittest.TestCase):
                 window.close()
                 self.application.processEvents()
 
+    def test_verified_moke_assignment_upgrades_profile_without_moke_section(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            settings_path = Path(temporary) / "settings.yml"
+            write_engineer_settings(settings_path)
+            repository = SettingsRepository(settings_path)
+            raw = repository.load().raw
+            raw["devices"].pop("moke_box", None)
+            repository._atomic_dump(raw)
+            window = MainWindow(
+                settings_path,
+                simulation=False,
+                authenticated_username=TEST_ENGINEER,
+            )
+            try:
+                with patch.object(
+                    QMessageBox,
+                    "question",
+                    return_value=QMessageBox.StandardButton.Yes,
+                ), patch.object(QMessageBox, "critical") as critical:
+                    window._save_moke_assignment("131.246.221.33:10001")
+
+                critical.assert_not_called()
+                profile = SettingsRepository(settings_path).load().settings.devices.moke_box
+                self.assertTrue(profile.enabled)
+                self.assertEqual(profile.endpoint, "131.246.221.33:10001")
+                self.assertTrue(profile.protocol_qualified)
+            finally:
+                window.close()
+                self.application.processEvents()
+
     def test_moke_connection_failure_is_visible_in_panel_and_dialog(self) -> None:
         window = MainWindow(".config/settings.yml", simulation=True)
         try:
