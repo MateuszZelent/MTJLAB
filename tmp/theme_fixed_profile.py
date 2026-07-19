@@ -17,6 +17,18 @@ window = MainWindow(".config/settings.yml", simulation=True)
 window.resize(1360, 880)
 window.show()
 app.processEvents()
+all_widgets = app.allWidgets()
+print(
+    "visibility",
+    len(all_widgets),
+    sum(widget.isVisible() for widget in all_widgets),
+    sum(widget.window().isVisible() and widget.isVisibleTo(widget.window()) for widget in all_widgets),
+    sum(not widget.visibleRegion().isNull() for widget in all_widgets),
+)
+if os.environ.get("THEME_PROFILE_VISIBILITY_ONLY") == "1":
+    window.close()
+    app.processEvents()
+    raise SystemExit(0)
 
 samples: dict[str, list[float]] = {}
 

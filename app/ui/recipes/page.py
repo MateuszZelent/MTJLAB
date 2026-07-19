@@ -23,6 +23,7 @@ from qfluentwidgets import (
     PlainTextEdit,
     PrimaryPushButton,
     PushButton,
+    RoundMenu,
     ScrollArea,
     SegmentedWidget,
     StrongBodyLabel,
@@ -4151,21 +4152,28 @@ class RecipePage(QWidget):
         item = self.tree.itemAt(point)
         if item is not None:
             self.tree.setCurrentItem(item)
-        menu = QMenu(self.tree)
-        menu.addAction("New empty sweep", self.new_recipe)
+        menu = RoundMenu(parent=self.tree)
+
+        def add_action(text: str, callback: Callable[[], None]) -> QAction:
+            action = QAction(text, menu)
+            action.triggered.connect(callback)
+            menu.addAction(action)
+            return action
+
+        add_action("New empty sweep", self.new_recipe)
         menu.addSeparator()
-        menu.addAction("Add node", self._add_basic_node)
-        menu.addAction("Add device control / point generator", self._add_device_controls)
+        add_action("Add node", self._add_basic_node)
+        add_action("Add device control / point generator", self._add_device_controls)
         menu.addSeparator()
-        edit_device = menu.addAction(
+        edit_device = add_action(
             "Device settings", self._edit_selected_device_settings
         )
-        edit_roi = menu.addAction("Edit ROI", self._edit_selected_roi)
-        edit_comment = menu.addAction("Edit comment", self._edit_selected_node)
-        edit_acquisition = menu.addAction(
+        edit_roi = add_action("Edit ROI", self._edit_selected_roi)
+        edit_comment = add_action("Edit comment", self._edit_selected_node)
+        edit_acquisition = add_action(
             "Acquisition settings", self._edit_selected_node
         )
-        toggle_enabled = menu.addAction(
+        toggle_enabled = add_action(
             "Enable selected node"
             if isinstance(node := (
                 self.tree.currentItem().data(0, Qt.ItemDataRole.UserRole)
@@ -4176,10 +4184,10 @@ class RecipePage(QWidget):
             else "Disable selected node",
             self._toggle_selected_node_disabled,
         )
-        duplicate = menu.addAction("Duplicate selected node", self._duplicate_selected_node)
-        delete = menu.addAction("Delete selected node", self._delete_selected_node)
-        move_up = menu.addAction("Move selected node up", lambda: self._move_selected_sibling(-1))
-        move_down = menu.addAction("Move selected node down", lambda: self._move_selected_sibling(1))
+        duplicate = add_action("Duplicate selected node", self._duplicate_selected_node)
+        delete = add_action("Delete selected node", self._delete_selected_node)
+        move_up = add_action("Move selected node up", lambda: self._move_selected_sibling(-1))
+        move_down = add_action("Move selected node down", lambda: self._move_selected_sibling(1))
         selected = self.tree.currentItem()
         node = selected.data(0, Qt.ItemDataRole.UserRole) if selected is not None else None
         operator_row = (

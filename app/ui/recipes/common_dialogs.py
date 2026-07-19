@@ -7,7 +7,7 @@ from typing import Any
 from PySide6.QtCore import QMimeData, Qt, Signal
 from PySide6.QtGui import QDrag
 from PySide6.QtWidgets import (
-    QAbstractItemView, QApplication, QFormLayout, QFrame, QHBoxLayout,
+    QAbstractItemView, QApplication, QFormLayout, QHBoxLayout,
     QMessageBox, QTreeWidgetItem, QVBoxLayout, QWidget,
 )
 from qfluentwidgets import (
