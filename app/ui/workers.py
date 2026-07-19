@@ -12,7 +12,7 @@ from PySide6.QtCore import QEventLoop, QMetaObject, QObject, QThread, QTimer, Qt
 
 from app.devices.anritsu.adapter import AnritsuAdapter
 from app.devices.base import DeviceAdapter
-from app.devices.keithley.adapter import KeithleyAdapter
+from app.devices.keithley_2600.adapter import KeithleyAdapter
 from app.devices.rigol_dg1000z.adapter import RigolAdapter
 from app.contracts import OperationDispatcher
 from app.engine.compiler import RecipeCompiler

@@ -23,7 +23,7 @@ def _imports(path: Path) -> tuple[str, ...]:
 
 class ArchitectureTests(unittest.TestCase):
     def test_generic_device_packages_do_not_exist(self) -> None:
-        for package in ("rigol",):
+        for package in ("rigol", "keithley"):
             self.assertFalse(
                 (ROOT / "app" / "devices" / package).exists(),
                 f"generic device package app.devices.{package} must not exist",

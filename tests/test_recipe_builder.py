@@ -39,7 +39,7 @@ from app.ui.main_window import (
     SweepGeneratorDialog,
 )
 from app.ui.workers import DeviceController
-from app.devices.keithley import KeithleyAdapter
+from app.devices.keithley_2600 import KeithleyAdapter
 from app.devices.anritsu import SignalGeneratorSnapshot
 from app.devices.simulators import SimulatedVisaFactory
 from app.storage import Hdf5RunWriter

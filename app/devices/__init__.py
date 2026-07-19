@@ -15,7 +15,7 @@ def __getattr__(name: str) -> Any:
 
         return AnritsuAdapter
     if name == "KeithleyAdapter":
-        from app.devices.keithley.adapter import KeithleyAdapter
+        from app.devices.keithley_2600.adapter import KeithleyAdapter
 
         return KeithleyAdapter
     if name == "RigolAdapter":

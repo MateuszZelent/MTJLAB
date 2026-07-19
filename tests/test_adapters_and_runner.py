@@ -13,7 +13,7 @@ from app.devices.anritsu import (
     SignalGeneratorConfig,
     SpectrumConfig,
 )
-from app.devices.keithley import (
+from app.devices.keithley_2600 import (
     KeithleyAdapter,
     KeithleyRampRequest,
     KeithleySourceRequest,

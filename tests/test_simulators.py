@@ -6,7 +6,7 @@ import tempfile
 import unittest
 
 from app.devices.anritsu import AnritsuAdapter, SpectrumConfig
-from app.devices.keithley import KeithleyAdapter, KeithleySourceRequest
+from app.devices.keithley_2600 import KeithleyAdapter, KeithleySourceRequest
 from app.devices.rigol_dg1000z import RigolAdapter, RigolChannelConfig, RigolOutputConfig
 from app.devices.simulators import SimulatorFault, SimulatedVisaFactory, simulated_station_settings
 from app.domain.errors import ConnectionError, DeviceError, SafetyViolation

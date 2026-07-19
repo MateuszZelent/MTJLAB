@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from app.contracts import DeviceModule, RecipeExtension
 from app.devices.base import DeviceAdapter
-from app.devices.keithley import KeithleyAdapter
+from app.devices.keithley_2600 import KeithleyAdapter
 from app.devices.keithley_2600.ui import KeithleyPage
 from app.devices.simulators import SimulatedVisaFactory
 from app.settings.models import StationSettings

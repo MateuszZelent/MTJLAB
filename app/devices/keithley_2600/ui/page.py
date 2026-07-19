@@ -24,7 +24,7 @@ from PySide6.QtWidgets import (
     QVBoxLayout, QWidget,
 )
 
-from app.devices.keithley import (
+from app.devices.keithley_2600 import (
     KeithleyRampRequest, KeithleySourceRequest, build_keithley_ramp_levels,
 )
 from app.domain.errors import ConfigurationError

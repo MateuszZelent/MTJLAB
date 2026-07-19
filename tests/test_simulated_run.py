@@ -10,8 +10,8 @@ import h5py
 
 from app.devices.anritsu import AnritsuAdapter
 from app.devices.anritsu.adapter import SpectrumConfig
-from app.devices.keithley import KeithleyAdapter
-from app.devices.keithley import KeithleySourceRequest
+from app.devices.keithley_2600 import KeithleyAdapter
+from app.devices.keithley_2600 import KeithleySourceRequest
 from app.devices.moke_box import MokeBoxAdapter, MokeBoxConfig
 from app.devices.moke_box.simulator import SimulatedMokeBoxTransport
 from app.devices.registry import built_in_device_registry
