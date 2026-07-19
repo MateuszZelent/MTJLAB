@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+import os
 
 from PySide6.QtCore import QEvent, QObject
 from PySide6.QtGui import QColor, QPalette
@@ -55,7 +56,12 @@ def apply_application_theme(application: QApplication, mode: str) -> AppliedThem
 def _supports_lazy_theme_update(application: QApplication) -> bool:
     """Use QFluent's visible-widget fast path only on a real window system."""
 
-    return application.platformName().strip().lower() not in {"offscreen", "minimal"}
+    configured = os.environ.get("QT_QPA_PLATFORM", "").strip().lower()
+    active = application.platformName().strip().lower()
+    return configured not in {"offscreen", "minimal"} and active not in {
+        "offscreen",
+        "minimal",
+    }
 
 
 class _DialogThemeFilter(QObject):
@@ -164,6 +170,8 @@ def _apply_station_control_styles(application: QApplication, tokens: ThemeTokens
     """Retheme station-owned surfaces without repolishing the entire widget tree."""
 
     for widget in application.allWidgets():
+        if widget.property("stationControlTheme") == tokens.background:
+            continue
         if isinstance(widget, QDialog):
             widget.setStyleSheet(dialog_qss(tokens))
         _apply_station_surface(widget, tokens)
@@ -181,6 +189,7 @@ def _apply_station_control_styles(application: QApplication, tokens: ThemeTokens
                     f"background: {tokens.surface_raised}; color: {tokens.text_primary};"
                 )
             widget.update()
+        widget.setProperty("stationControlTheme", tokens.background)
 
 
 def _apply_station_button(widget: QWidget, tokens: ThemeTokens) -> None:

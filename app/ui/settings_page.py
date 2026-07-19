@@ -13,17 +13,16 @@ from pydantic import BaseModel, ValidationError
 from PySide6.QtCore import QTimer, Qt, Signal
 from PySide6.QtGui import QResizeEvent
 from PySide6.QtWidgets import (
+    QBoxLayout,
     QHBoxLayout,
     QHeaderView,
     QDialog,
-    QDialogButtonBox,
     QCheckBox,
     QComboBox,
     QInputDialog,
     QLabel,
     QLineEdit,
     QMessageBox,
-    QPlainTextEdit,
     QFormLayout,
     QFrame,
     QGridLayout,
@@ -48,12 +47,15 @@ from qfluentwidgets import (
     FluentIcon,
     LineEdit,
     Pivot,
+    PlainTextEdit,
     PrimaryPushButton,
     PushButton,
     ScrollArea,
     SpinBox,
     StrongBodyLabel,
     SubtitleLabel,
+    TableWidget,
+    TreeWidget,
 )
 
 from app.domain.errors import AuthorizationError, ConfigurationError
@@ -264,7 +266,7 @@ class SettingsPage(QWidget):
             ("moke_box", "MOKE Box"),
             ("lakeshore_gaussmeter", "Lake Shore 475"),
         ):
-            tree = QTreeWidget()
+            tree = TreeWidget(self)
             tree.setHeaderLabels(["Parameter", "Value"])
             tree.setAlternatingRowColors(True)
             tree.itemChanged.connect(self._changed)
@@ -295,7 +297,8 @@ class SettingsPage(QWidget):
         limits_card.setObjectName("settingsTableCard")
         limits_card_layout = QVBoxLayout(limits_card)
         limits_card_layout.setContentsMargins(14, 14, 14, 14)
-        self.limits_table = QTableWidget(0, 7)
+        self.limits_table = TableWidget(self)
+        self.limits_table.setColumnCount(7)
         self.limits_table.setHorizontalHeaderLabels(
             ["Device / scope", "Parameter", "Minimum", "Maximum", "Unit", "Default", "Source"]
         )
@@ -340,7 +343,8 @@ class SettingsPage(QWidget):
         roles_card.setObjectName("settingsTableCard")
         roles_card_layout = QVBoxLayout(roles_card)
         roles_card_layout.setContentsMargins(10, 10, 10, 10)
-        self.role_table = QTableWidget(0, 2)
+        self.role_table = TableWidget(self)
+        self.role_table.setColumnCount(2)
         self.role_table.setHorizontalHeaderLabels(["Operating-system account", "Assigned role(s)"])
         self.role_table.setSelectionBehavior(QTableWidget.SelectionBehavior.SelectRows)
         self.role_table.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
@@ -373,7 +377,7 @@ class SettingsPage(QWidget):
         diagnostics_card.setObjectName("settingsTableCard")
         diagnostics_card_layout = QVBoxLayout(diagnostics_card)
         diagnostics_card_layout.setContentsMargins(10, 10, 10, 10)
-        self.diagnostics_text = QPlainTextEdit()
+        self.diagnostics_text = PlainTextEdit(self)
         self.diagnostics_text.setReadOnly(True)
         diagnostics_buttons = QHBoxLayout()
         refresh_diagnostics = PushButton("Refresh diagnostics")
@@ -391,7 +395,8 @@ class SettingsPage(QWidget):
         layout.addWidget(self.tabs, 1)
 
         self.action_card = CardWidget(self)
-        action_layout = QHBoxLayout(self.action_card)
+        self.action_layout = QHBoxLayout(self.action_card)
+        action_layout = self.action_layout
         action_layout.setContentsMargins(16, 12, 16, 12)
         action_layout.setSpacing(20)
         action_copy = QVBoxLayout()
@@ -426,6 +431,7 @@ class SettingsPage(QWidget):
             buttons.addWidget(button, index // 3, index % 3)
         action_layout.addLayout(buttons, 3)
         layout.insertWidget(1, self.action_card)
+        self._compact_layout: bool | None = None
         self.reload_button.clicked.connect(self.reload)
         self.discard_button.clicked.connect(self.discard_draft)
         self.diff_button.clicked.connect(self.show_changes)
@@ -445,6 +451,18 @@ class SettingsPage(QWidget):
             not self._base_read_only and self._access.allows(Permission.APPROVE_PROFILE)
         )
         self._update_role_controls()
+
+    def resizeEvent(self, event: QResizeEvent) -> None:
+        super().resizeEvent(event)
+        compact = event.size().width() < 900
+        if self._compact_layout == compact:
+            return
+        self._compact_layout = compact
+        self.action_layout.setDirection(
+            QBoxLayout.Direction.TopToBottom
+            if compact
+            else QBoxLayout.Direction.LeftToRight
+        )
 
     def set_access_policy(self, access_policy: AccessPolicy) -> None:
         self._access = access_policy
@@ -560,14 +578,17 @@ class SettingsPage(QWidget):
             f"{len(changes)} unsaved structural change(s). Saving any safety change revokes profile approval."
         )
         summary.setWordWrap(True)
-        text = QPlainTextEdit()
+        text = PlainTextEdit(dialog)
         text.setReadOnly(True)
         text.setPlainText("\n".join(changes) if changes else "No unsaved changes.")
-        buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Close)
-        buttons.rejected.connect(dialog.reject)
         layout.addWidget(summary)
         layout.addWidget(text, 1)
-        layout.addWidget(buttons)
+        footer = QHBoxLayout()
+        footer.addStretch(1)
+        close = PushButton("Close", dialog)
+        close.clicked.connect(dialog.reject)
+        footer.addWidget(close)
+        layout.addLayout(footer)
         dialog.exec()
 
     def export_redacted_configuration(self) -> None:
@@ -720,7 +741,7 @@ class SettingsPage(QWidget):
         elif choices:
             editor = ComboBox()
             for label, data in choices:
-                editor.addItem(label, data)
+                editor.addItem(label, userData=data)
             editor.setCurrentIndex(max(0, editor.findData(self._format_scalar(value))))
             editor.currentIndexChanged.connect(lambda _index, path=path: self._form_changed(path))
         elif isinstance(value, int) and not isinstance(value, bool):
@@ -729,7 +750,8 @@ class SettingsPage(QWidget):
             editor.setValue(value)
             editor.valueChanged.connect(lambda _number, path=path: self._form_changed(path))
         else:
-            editor = QLineEdit(self._format_scalar(value))
+            editor = LineEdit()
+            editor.setText(self._format_scalar(value))
             editor.editingFinished.connect(lambda path=path: self._form_changed(path))
         editor.setEnabled(editable)
         editor.setToolTip(" · ".join(str(part) for part in path))
@@ -899,9 +921,9 @@ class SettingsPage(QWidget):
         path: tuple[str | int, ...],
         choices: tuple[tuple[str, str], ...],
     ) -> None:
-        editor = QComboBox(tree)
+        editor = ComboBox(tree)
         for label, data in choices:
-            editor.addItem(label, data)
+            editor.addItem(label, userData=data)
         index = editor.findData(self._format_scalar(self._get_path(self._raw, path)))
         editor.setCurrentIndex(max(index, 0))
         editor.setToolTip("Select a validated value from the list.")
@@ -1054,7 +1076,8 @@ class SettingsPage(QWidget):
     def _make_safety_limit_editor(
         self, path: tuple[str | int, ...], value: str
     ) -> QLineEdit:
-        editor = QLineEdit(value)
+        editor = LineEdit()
+        editor.setText(value)
         editor.setObjectName("safetyLimitInput")
         editor.setMinimumWidth(156)
         editor.setReadOnly(self._read_only)
@@ -1099,23 +1122,27 @@ class SettingsPage(QWidget):
         note.setWordWrap(True)
         layout.addWidget(note)
         layout.addWidget(QLabel("Operating-system account"))
-        account = QLineEdit(username)
+        account = LineEdit(dialog)
+        account.setText(username)
         account.setPlaceholderText("DOMAIN\\user")
         layout.addWidget(account)
         layout.addWidget(QLabel("Roles"))
         checkboxes: list[QCheckBox] = []
         for role in self._role_choices():
-            check = QCheckBox(role.capitalize())
+            check = CheckBox(role.capitalize(), dialog)
             check.setProperty("role", role)
             check.setChecked(role in roles)
             layout.addWidget(check)
             checkboxes.append(check)
-        buttons = QDialogButtonBox(
-            QDialogButtonBox.StandardButton.Save | QDialogButtonBox.StandardButton.Cancel
-        )
-        buttons.accepted.connect(dialog.accept)
-        buttons.rejected.connect(dialog.reject)
-        layout.addWidget(buttons)
+        footer = QHBoxLayout()
+        footer.addStretch(1)
+        cancel = PushButton("Cancel", dialog)
+        save = PrimaryPushButton("Save roles", dialog)
+        cancel.clicked.connect(dialog.reject)
+        save.clicked.connect(dialog.accept)
+        footer.addWidget(cancel)
+        footer.addWidget(save)
+        layout.addLayout(footer)
         if dialog.exec() != QDialog.DialogCode.Accepted:
             return None
         selected = tuple(str(check.property("role")) for check in checkboxes if check.isChecked())

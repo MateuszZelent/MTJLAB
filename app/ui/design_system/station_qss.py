@@ -7,11 +7,15 @@ def event_log_qss(tokens: ThemeTokens) -> str:
     """Direct token styling for Fluent's locally styled event-log editor."""
 
     return f"""
-PlainTextEdit {{
+QPlainTextEdit, PlainTextEdit {{
     background: {tokens.surface_raised};
     color: {tokens.text_primary};
     border: 1px solid {tokens.border};
     border-radius: 6px;
+}}
+QPlainTextEdit QWidget, PlainTextEdit QWidget {{
+    background: {tokens.surface_raised};
+    color: {tokens.text_primary};
 }}
 """
 
@@ -22,7 +26,7 @@ def dialog_qss(tokens: ThemeTokens) -> str:
     accent = tokens.accent.lstrip("#")
     red, green, blue = (int(accent[index:index + 2], 16) for index in (0, 2, 4))
     accent_luma = (0.2126 * red + 0.7152 * green + 0.0722 * blue) / 255
-    default_text = tokens.background if accent_luma > 0.36 else "#ffffff"
+    default_text = tokens.background if accent_luma > 0.55 else "#ffffff"
     return f"""
 QDialog, QMessageBox, QInputDialog, QFileDialog {{
     background: {tokens.background};

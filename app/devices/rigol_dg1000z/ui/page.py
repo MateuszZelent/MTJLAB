@@ -7,13 +7,13 @@ from dataclasses import dataclass
 
 from PySide6.QtCore import Qt, Signal
 from PySide6.QtWidgets import (
-    QCheckBox, QFormLayout, QFrame, QGridLayout, QHBoxLayout,
-    QLabel, QMessageBox, QPushButton, QSpinBox, QSplitter,
-    QTabWidget, QVBoxLayout, QWidget,
+    QFormLayout, QFrame, QGridLayout, QHBoxLayout,
+    QLabel, QMessageBox, QPushButton, QSplitter,
+    QVBoxLayout, QWidget,
 )
 from qfluentwidgets import (
-    CaptionLabel, CardWidget, ComboBox, PrimaryPushButton,
-    PushButton, ScrollArea, StrongBodyLabel, TitleLabel,
+    CaptionLabel, CardWidget, CheckBox, ComboBox, PrimaryPushButton,
+    PushButton, ScrollArea, SpinBox, StrongBodyLabel, TitleLabel,
 )
 
 from app.devices.rigol_dg1000z import (
@@ -27,7 +27,7 @@ from app.domain.quantities import (
 from app.safety.rigol_current import validate_rigol_frequency_sweep, validate_rigol_waveform
 from app.settings.models import StationSettings
 from app.ui.common import line_edit as _line
-from app.ui.widgets import LimitField, NotificationBanner, SpectrumPlotWidget
+from app.ui.widgets import FluentTabView, LimitField, NotificationBanner, SpectrumPlotWidget
 from app.ui.workers import DeviceController
 
 
@@ -122,7 +122,7 @@ class RigolPage(QWidget):
         self.output_mode.addItems(["NORM", "GAT"])
         self.gate_polarity = ComboBox()
         self.gate_polarity.addItems(["NORM", "INV"])
-        self.sync_enabled = QCheckBox("SYNC enabled")
+        self.sync_enabled = CheckBox("SYNC enabled", self)
         self.sync_polarity = ComboBox()
         self.sync_polarity.addItems(["NORM", "INV"])
         self.sync_delay = _line("0 s")
@@ -138,7 +138,7 @@ class RigolPage(QWidget):
 
         splitter = QSplitter(Qt.Orientation.Horizontal)
         splitter.setChildrenCollapsible(False)
-        self.control_tabs = QTabWidget()
+        self.control_tabs = FluentTabView(self)
         self.control_tabs.setObjectName("rigolControlTabs")
 
         configure = PrimaryPushButton("Validate and apply waveform")
@@ -204,7 +204,7 @@ class RigolPage(QWidget):
             ),
         )
 
-        self.advanced = QTabWidget()
+        self.advanced = FluentTabView(self)
         self.advanced.setObjectName("rigolAdvancedTabs")
         self.advanced.addTab(self._modulation_tab(), "Modulation")
         self.advanced.addTab(self._sweep_tab(), "Sweep")
@@ -696,7 +696,7 @@ class RigolPage(QWidget):
     def _modulation_tab(self) -> QWidget:
         tab = QWidget()
         form = QFormLayout(tab)
-        self.mod_enabled = QCheckBox("Modulation enabled")
+        self.mod_enabled = CheckBox("Modulation enabled", self)
         self.mod_type = ComboBox()
         self.mod_type.addItems(["AM", "FM", "PM", "ASK", "FSK", "PSK", "PWM"])
         self.mod_source = ComboBox()
@@ -726,7 +726,7 @@ class RigolPage(QWidget):
     def _sweep_tab(self) -> QWidget:
         tab = QWidget()
         form = QFormLayout(tab)
-        self.sweep_enabled = QCheckBox("Sweep enabled")
+        self.sweep_enabled = CheckBox("Sweep enabled", self)
         self.sweep_start = _line("100 Hz")
         self.sweep_stop = _line("1 kHz")
         self.sweep_duration = _line("1 s")
@@ -735,14 +735,14 @@ class RigolPage(QWidget):
         self.sweep_return_time = _line("0 s")
         self.sweep_spacing = ComboBox()
         self.sweep_spacing.addItems(["LIN", "LOG", "STEP"])
-        self.sweep_steps = QSpinBox()
+        self.sweep_steps = SpinBox(self)
         self.sweep_steps.setRange(2, 1_000_000)
         self.sweep_steps.setValue(10)
         self.sweep_trigger = ComboBox()
         self.sweep_trigger.addItems(["INT", "EXT", "MAN"])
         self.sweep_trigger_slope = ComboBox()
         self.sweep_trigger_slope.addItems(["POS", "NEG"])
-        self.sweep_trigger_out = QCheckBox("Trigger output")
+        self.sweep_trigger_out = CheckBox("Trigger output", self)
         apply = PrimaryPushButton("Apply sweep while OUTPUT is OFF")
         trigger = PushButton("Trigger sweep")
         for label, widget in (
@@ -771,10 +771,10 @@ class RigolPage(QWidget):
     def _burst_tab(self) -> QWidget:
         tab = QWidget()
         form = QFormLayout(tab)
-        self.burst_enabled = QCheckBox("Burst enabled")
+        self.burst_enabled = CheckBox("Burst enabled", self)
         self.burst_mode = ComboBox()
         self.burst_mode.addItems(["TRIG", "GAT"])
-        self.burst_cycles = QSpinBox()
+        self.burst_cycles = SpinBox(self)
         self.burst_cycles.setRange(1, 1_000_000)
         self.burst_cycles.setValue(1)
         self.burst_phase = _line("0")
@@ -784,7 +784,7 @@ class RigolPage(QWidget):
         self.burst_trigger.addItems(["INT", "EXT", "MAN"])
         self.burst_trigger_slope = ComboBox()
         self.burst_trigger_slope.addItems(["POS", "NEG"])
-        self.burst_trigger_out = QCheckBox("Trigger output")
+        self.burst_trigger_out = CheckBox("Trigger output", self)
         self.burst_gate_polarity = ComboBox()
         self.burst_gate_polarity.addItems(["POS", "NEG"])
         self.burst_idle = ComboBox()

@@ -15,11 +15,11 @@ from PySide6.QtGui import QResizeEvent
 from PySide6.QtWidgets import (
     QComboBox, QDialog, QDialogButtonBox,
     QFormLayout, QFrame, QGridLayout, QHBoxLayout, QLabel, QLineEdit,
-    QMessageBox, QProgressBar, QSplitter, QSpinBox, QTabWidget,
+    QMessageBox, QProgressBar, QSplitter, QSpinBox,
     QSizePolicy, QToolButton, QVBoxLayout, QWidget,
 )
 from qfluentwidgets import (
-    CardWidget, CheckBox, ComboBox, PrimaryPushButton, PushButton, ScrollArea, SpinBox,
+    CardWidget, CheckBox, ComboBox, LineEdit, PrimaryPushButton, ProgressBar, PushButton, ScrollArea, SpinBox,
 )
 
 from app.devices.anritsu_ms2830a import (
@@ -40,7 +40,7 @@ from app.storage import ReferenceHdf5Store
 from app.ui.common import line_edit as _line
 from app.ui.dialogs import StationFileDialog as QFileDialog
 from app.ui.dialogs import StationDialog
-from app.ui.widgets import LimitField, NotificationBanner, SpectrumPlotWidget
+from app.ui.widgets import FluentTabView, LimitField, NotificationBanner, SpectrumPlotWidget
 from app.ui.workers import DeviceController
 
 
@@ -502,7 +502,7 @@ class AnritsuPage(QWidget):
         self.frequency_label_b = self.configuration_panel.frequency_label_b
         self._limit_fields = self.configuration_panel.limit_fields
         setup_layout.addWidget(self.configuration_panel)
-        self.refresh = QSpinBox()
+        self.refresh = SpinBox(self)
         self.refresh.setRange(10, 5000)
         self.refresh.setValue(500)
         self.refresh.setSuffix(" ms")
@@ -551,7 +551,7 @@ class AnritsuPage(QWidget):
         processing_layout.setHorizontalSpacing(6)
         processing_layout.setVerticalSpacing(7)
         processing_layout.addWidget(processing_title, 0, 0, 1, 2)
-        self.average_count = QSpinBox()
+        self.average_count = SpinBox(self)
         self.average_count.setRange(1, 9999)
         self.average_count.setValue(self._station_settings.anritsu.acquisition.application_average_count)
         self.acquire_average = PrimaryPushButton("Acquire averaged spectrum")
@@ -559,7 +559,7 @@ class AnritsuPage(QWidget):
         self.acquire_average.setProperty("compact", True)
         self.cancel_average.setProperty("compact", True)
         self.cancel_average.setEnabled(False)
-        self.average_progress = QProgressBar()
+        self.average_progress = ProgressBar(self)
         initial_average_count = self.average_count.value()
         self.average_progress.setRange(0, initial_average_count)
         self.average_progress.setValue(0)
@@ -593,13 +593,13 @@ class AnritsuPage(QWidget):
             button.setProperty("compact", True)
         self.use_current_reference.setEnabled(False)
         self.clear_reference.setEnabled(False)
-        self.reference_operation = QComboBox()
-        self.reference_operation.addItem("No processing", "none")
-        self.reference_operation.addItem("Signal − reference [dB]", "difference_db")
-        self.reference_operation.addItem("Signal ÷ reference [linear ratio]", "ratio_linear")
-        self.reference_operation.addItem("Signal + reference [linear power]", "add_power")
-        self.reference_operation.addItem("Signal − reference [linear power]", "subtract_power")
-        self.reference_operation.addItem("Signal × reference [linear mW²]", "multiply_linear")
+        self.reference_operation = ComboBox(self)
+        self.reference_operation.addItem("No processing", userData="none")
+        self.reference_operation.addItem("Signal − reference [dB]", userData="difference_db")
+        self.reference_operation.addItem("Signal ÷ reference [linear ratio]", userData="ratio_linear")
+        self.reference_operation.addItem("Signal + reference [linear power]", userData="add_power")
+        self.reference_operation.addItem("Signal − reference [linear power]", userData="subtract_power")
+        self.reference_operation.addItem("Signal × reference [linear mW²]", userData="multiply_linear")
         processing_layout.addWidget(self.acquire_single_reference, 6, 0)
         processing_layout.addWidget(self.use_current_reference, 6, 1)
         processing_layout.addWidget(self.capture_reference, 7, 0)
@@ -648,7 +648,7 @@ class AnritsuPage(QWidget):
         self.workspace_splitter.setStretchFactor(1, 1)
         self.workspace_splitter.setSizes([680, 1100])
         self._workspace_compact: bool | None = None
-        self.mode_tabs = QTabWidget()
+        self.mode_tabs = FluentTabView(self)
         self.mode_tabs.setObjectName("anritsuModeTabs")
         self.mode_tabs.setProperty("stationSurface", "page")
         spectrum_tab = QWidget()
@@ -748,8 +748,10 @@ class AnritsuPage(QWidget):
         generator = self._station_settings.anritsu.signal_generator
         default_frequency = generator.frequency.min or "1 GHz"
         default_power = generator.power.min or "-30 dBm"
-        self.sg_frequency = QLineEdit(str(default_frequency))
-        self.sg_power = QLineEdit(str(default_power))
+        self.sg_frequency = LineEdit(self)
+        self.sg_frequency.setText(str(default_frequency))
+        self.sg_power = LineEdit(self)
+        self.sg_power.setText(str(default_power))
         grid.addWidget(QLabel("Frequency"), 1, 0)
         grid.addWidget(self.sg_frequency, 1, 1, 1, 3)
         grid.addWidget(QLabel("RF power"), 2, 0)

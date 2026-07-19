@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 import unittest
 from unittest.mock import patch
 
@@ -100,6 +101,7 @@ class ThemeBridgeTests(unittest.TestCase):
 
     def test_real_window_system_uses_lazy_theme_update(self) -> None:
         with (
+            patch.dict(os.environ, {"QT_QPA_PLATFORM": ""}),
             patch.object(self.application, "platformName", return_value="windows"),
             patch("app.ui.design_system.fluent_theme.setTheme") as set_theme,
             patch("app.ui.design_system.fluent_theme.setThemeColor") as set_color,

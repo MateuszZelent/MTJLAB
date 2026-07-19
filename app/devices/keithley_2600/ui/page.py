@@ -15,7 +15,7 @@ from PySide6.QtCore import QMimeData, QSize, QTimer, Qt, Signal
 from PySide6.QtGui import QAction, QColor, QDrag, QIcon, QKeySequence, QPainter, QPalette, QPixmap, QResizeEvent, QShortcut
 from PySide6.QtWidgets import (
     QAbstractItemView, QApplication, QCheckBox, QComboBox, QDialog,
-    QDialogButtonBox, QFileDialog, QFormLayout, QFrame, QGridLayout,
+    QDialogButtonBox, QFormLayout, QFrame, QGridLayout,
     QBoxLayout, QHBoxLayout, QHeaderView, QLabel, QLineEdit, QListWidget,
     QListWidgetItem, QMainWindow, QMenu, QMessageBox, QPlainTextEdit,
     QProgressBar, QPushButton, QSplitter, QSpinBox,
@@ -25,7 +25,7 @@ from PySide6.QtWidgets import (
 )
 from qfluentwidgets import (
     CaptionLabel, CardWidget, CheckBox, ComboBox, PrimaryPushButton, PushButton,
-    ScrollArea, StrongBodyLabel, TitleLabel,
+    ScrollArea, SpinBox, StrongBodyLabel, TitleLabel,
 )
 
 from app.devices.keithley_2600 import (
@@ -680,11 +680,11 @@ class KeithleyPage(QWidget):
         title.setObjectName("keithleyPageTitle")
         hero_layout.addWidget(title)
         hero_layout.addStretch(1)
-        self.live_measurements = QCheckBox("Live A/B")
+        self.live_measurements = CheckBox("Live A/B", self)
         self.live_measurements.setToolTip(
             "Alternately measures channels A and B. This never enables an output."
         )
-        self.live_interval = QSpinBox()
+        self.live_interval = SpinBox(self)
         self.live_interval.setRange(100, 60_000)
         self.live_interval.setValue(1000)
         self.live_interval.setSuffix(" ms")

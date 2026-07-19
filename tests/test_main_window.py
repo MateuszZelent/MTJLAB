@@ -12,7 +12,7 @@ from types import SimpleNamespace
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 from PySide6.QtCore import QPoint, QTimer, Qt
-from PySide6.QtWidgets import QApplication, QComboBox, QLabel, QMessageBox, QPushButton, QScrollArea, QTabWidget, QTreeWidgetItemIterator
+from PySide6.QtWidgets import QApplication, QLabel, QMessageBox, QPushButton, QScrollArea, QTabWidget, QTreeWidgetItemIterator
 from PySide6.QtTest import QTest
 
 from app.domain.models import DeviceCapabilities
@@ -29,7 +29,7 @@ from app.devices.anritsu_ms2830a.ui import AnritsuPageState
 from app.ui.shell import MainWindow
 from app.ui.dashboard.device_card import DeviceCard
 from app.ui.design_system import tokens_for
-from qfluentwidgets import CardWidget, PlainTextEdit
+from qfluentwidgets import CardWidget, ComboBox, PlainTextEdit
 from app.ui.widgets import LimitEditDialog
 from tests.helpers import SETTINGS_TEMPLATE
 
@@ -315,7 +315,7 @@ class MainWindowTests(unittest.TestCase):
             try:
                 page = window.settings_page
                 editor = page.editor_for_path(("devices", "rigol", "enabled"))
-                self.assertIsInstance(editor, QComboBox)
+                self.assertIsInstance(editor, ComboBox)
                 self.assertEqual(editor.currentText(), "Yes")
                 self.assertTrue(page.add_role_button.isEnabled())
                 self.assertTrue(page.edit_role_button.isEnabled())
@@ -616,6 +616,7 @@ class MainWindowTests(unittest.TestCase):
             themes: list[str] = []
             window.theme_changed.connect(themes.append)
             try:
+                self.application.setProperty("stationAppliedTheme", None)
                 with patch(
                     "app.ui.shell.main_window.apply_application_theme",
                     wraps=__import__(

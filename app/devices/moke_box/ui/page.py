@@ -7,7 +7,6 @@ from PySide6.QtWidgets import (
     QGridLayout,
     QHBoxLayout,
     QLabel,
-    QTabWidget,
     QVBoxLayout,
     QWidget,
 )
@@ -16,6 +15,7 @@ from app.ui.dialogs import StationDialog
 
 from app.devices.moke_box.models import MokeHallVoltageReading, hall_field_from_voltage
 from app.settings.models import StationSettings
+from app.ui.widgets import FluentTabView
 from app.ui.workers import DeviceController
 
 
@@ -164,7 +164,7 @@ class MokeBoxPage(QWidget):
         self.safety_note.setWordWrap(True)
         outer.addWidget(self.safety_note)
 
-        self.views = QTabWidget()
+        self.views = FluentTabView(self)
         self.views.setObjectName("mokeViews")
         self.views.addTab(self._build_vout_view(), "VOUT 0–7")
         self.views.addTab(self._build_field_view(), "Hall field")
