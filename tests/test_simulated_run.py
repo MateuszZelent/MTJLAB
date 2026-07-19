@@ -15,8 +15,8 @@ from app.devices.keithley import KeithleySourceRequest
 from app.devices.moke_box import MokeBoxAdapter, MokeBoxConfig
 from app.devices.moke_box.simulator import SimulatedMokeBoxTransport
 from app.devices.registry import built_in_device_registry
-from app.devices.rigol import RigolAdapter
-from app.devices.rigol.adapter import RigolChannelConfig
+from app.devices.rigol_dg1000z import RigolAdapter
+from app.devices.rigol_dg1000z.adapter import RigolChannelConfig
 from app.devices.simulators import SimulatedVisaFactory, simulated_station_settings
 from app.devices.simulation import SimulationContext
 from app.engine import RecipeCompiler, RecipeRunner
@@ -735,3 +735,4 @@ root:
 
 if __name__ == "__main__":
     unittest.main()
+

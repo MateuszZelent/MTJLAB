@@ -12,7 +12,7 @@ from PySide6.QtWidgets import (
     QTabWidget, QVBoxLayout, QWidget,
 )
 
-from app.devices.rigol import (
+from app.devices.rigol_dg1000z import (
     RigolBurstConfig, RigolChannelConfig, RigolFrequencySweepConfig,
     RigolModulationConfig, RigolOutputConfig,
 )
@@ -71,13 +71,13 @@ class RigolPage(QWidget):
         heading = QVBoxLayout()
         title = QLabel("Rigol DG1032Z")
         title.setObjectName("pageTitle")
-        subtitle = QLabel("Function generator · channel control and safe output activation")
+        subtitle = QLabel("Function generator Â· channel control and safe output activation")
         subtitle.setObjectName("muted")
         heading.addWidget(title)
         heading.addWidget(subtitle)
         header_layout.addLayout(heading, 1)
 
-        self.device_led = QLabel("●")
+        self.device_led = QLabel("â—")
         self.device_led.setObjectName("rigolLed")
         self.device_state = QLabel("DISCONNECTED")
         self.device_state.setObjectName("rigolState")
@@ -164,11 +164,11 @@ class RigolPage(QWidget):
             "Waveform shape",
             "Only parameters applicable to the selected waveform are shown.",
             (
-                ("Duty [%] · SQU", self.duty),
-                ("Symmetry [%] · RAMP", self.ramp_symmetry),
-                ("Pulse width · PULS", self.pulse_width),
-                ("Pulse leading edge · PULS", self.pulse_leading),
-                ("Pulse trailing edge · PULS", self.pulse_trailing),
+                ("Duty [%] Â· SQU", self.duty),
+                ("Symmetry [%] Â· RAMP", self.ramp_symmetry),
+                ("Pulse width Â· PULS", self.pulse_width),
+                ("Pulse leading edge Â· PULS", self.pulse_leading),
+                ("Pulse trailing edge Â· PULS", self.pulse_trailing),
             ),
             (shape_apply,),
         )
@@ -232,11 +232,11 @@ class RigolPage(QWidget):
         safety_title = QLabel("Load safety")
         safety_title.setObjectName("sectionTitle")
         safety_layout.addWidget(safety_title)
-        self.estimate = QLabel("Estimated current: —")
+        self.estimate = QLabel("Estimated current: â€”")
         self.estimate.setObjectName("muted")
         self.estimate.setWordWrap(True)
         safety_layout.addWidget(self.estimate)
-        warning = QLabel("⚠ This estimate is not a measurement. Verify DUT impedance and profile limits before ARM.")
+        warning = QLabel("âš  This estimate is not a measurement. Verify DUT impedance and profile limits before ARM.")
         warning.setObjectName("rigolWarning")
         warning.setWordWrap(True)
         safety_layout.addWidget(warning)
@@ -307,11 +307,11 @@ class RigolPage(QWidget):
             self.period: ("Period", "Duration of one complete waveform cycle. Period equals 1/frequency."),
             self.level_mode: ("Level representation", "HighL/LowL defines the upper and lower levels directly. Amplitude/Offset defines Vpp and the vertical center; both describe the same signal."),
             self.high_level: ("HighL", "Highest programmed waveform voltage. This is a generator setting/read-back, not a measured DUT voltage."),
-            self.low_level: ("LowL", "Lowest programmed waveform voltage. Vpp = HighL − LowL."),
-            self.vpp: ("Amplitude (Vpp)", "Peak-to-peak voltage: the difference between maximum and minimum level. A 2 mVpp sine at 0 V offset spans −1 mV to +1 mV."),
+            self.low_level: ("LowL", "Lowest programmed waveform voltage. Vpp = HighL âˆ’ LowL."),
+            self.vpp: ("Amplitude (Vpp)", "Peak-to-peak voltage: the difference between maximum and minimum level. A 2 mVpp sine at 0 V offset spans âˆ’1 mV to +1 mV."),
             self.offset: ("Offset / DC level", "Moves the waveform vertically around zero. In DC mode this is the constant programmed output voltage."),
             self.dut_impedance: ("Minimum DUT impedance", "Safety declaration used to estimate worst-case current. The Rigol does not measure DUT impedance; enter the lowest credible load impedance."),
-            self.phase: ("Phase", "Starting angular position of the waveform in degrees. The safe default is 0°. It matters mainly when comparing or synchronizing channels."),
+            self.phase: ("Phase", "Starting angular position of the waveform in degrees. The safe default is 0Â°. It matters mainly when comparing or synchronizing channels."),
             self.duty: ("Square duty cycle", "Percentage of each period for which a square wave remains at HighL. 50% gives equal high and low durations."),
             self.ramp_symmetry: ("Ramp symmetry", "Percentage of the period spent on the rising part of a ramp. 50% produces a symmetric triangle."),
             self.pulse_width: ("Pulse width", "Time for which a pulse remains at its active/high level. It must fit within the selected period."),
@@ -489,7 +489,7 @@ class RigolPage(QWidget):
         for index in range(self.advanced.count()):
             self.advanced.setTabEnabled(index, True)
         self.sync_phases_button.setEnabled(bool(supports("phase_sync")))
-        self.capability_badge.setText("Capabilities: " + (" · ".join(supported) if supported else "no extensions"))
+        self.capability_badge.setText("Capabilities: " + (" Â· ".join(supported) if supported else "no extensions"))
 
     def _device_state_changed(self, state: str) -> None:
         normalized = str(state).strip().lower()
@@ -597,9 +597,9 @@ class RigolPage(QWidget):
             y_values.append(value)
         self.preview_plot.set_trace("Waveform", x_values, y_values, color="#2196f3", primary=True)
         if waveform == "DC":
-            title = f"CH{self.channel.currentText()} · DC · Offset {high:.6g} V"
+            title = f"CH{self.channel.currentText()} Â· DC Â· Offset {high:.6g} V"
         else:
-            title = f"CH{self.channel.currentText()} · {waveform} · HighL {high:.6g} V · LowL {low:.6g} V"
+            title = f"CH{self.channel.currentText()} Â· {waveform} Â· HighL {high:.6g} V Â· LowL {low:.6g} V"
         self.preview_plot.set_title(title)
 
     @staticmethod
@@ -1025,5 +1025,6 @@ class RigolPage(QWidget):
                 self._pending_output_enable = False
                 self.output_on.setEnabled(True)
             QMessageBox.warning(self, "Rigol", error)
+
 
 

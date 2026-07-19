@@ -15,7 +15,7 @@ from app.devices.anritsu.adapter import (
     SignalGeneratorConfig,
     SpectrumConfig,
 )
-from app.devices.rigol.adapter import RigolChannelConfig, RigolOutputConfig
+from app.devices.rigol_dg1000z.adapter import RigolChannelConfig, RigolOutputConfig
 from app.domain.dut import ExperimentDutLimits
 from app.domain.errors import ConfigurationError, SafetyViolation
 from app.domain.quantities import (
@@ -1465,7 +1465,7 @@ class RecipeCompiler:
         elif node.type == "wait":
             duration = self._resolve_quantity(data.get("duration"), DIMENSION_TIME, context).si_value
             if duration < 0 or duration > 3600:
-                raise SafetyViolation("Wait duration must be in the range 0–3600 s.")
+                raise SafetyViolation("Wait duration must be in the range 0â€“3600 s.")
             payload = {"duration_s": duration}
         elif node.type == "set_rigol_output":
             channel = int(data.get("channel", 0))
@@ -1862,3 +1862,4 @@ class RecipeCompiler:
             dut_max_expected_input_dbm=config.dut_max_expected_input_dbm,
         )
         return {"config": config}
+

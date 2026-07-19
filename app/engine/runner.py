@@ -15,7 +15,7 @@ from app.devices.keithley.adapter import KeithleyAdapter
 from app.devices.moke_box.adapter import MokeBoxAdapter
 from app.devices.moke_box.models import hall_field_from_voltage
 from app.devices.lakeshore_gaussmeter.adapter import LakeShore475Adapter
-from app.devices.rigol.adapter import RigolAdapter
+from app.devices.rigol_dg1000z.adapter import RigolAdapter
 from app.domain.errors import DeviceError, ExecutionError
 from app.domain.models import ApplicationState, DeviceState, MeasurementPoint
 from app.engine.compiler import ExecutionPlan, PlanAction, required_devices_for_actions
@@ -1124,3 +1124,4 @@ class RecipeRunner:
             # A storage failure is itself already the originating fault.  The
             # hardware must still receive every emergency-off command.
             pass
+

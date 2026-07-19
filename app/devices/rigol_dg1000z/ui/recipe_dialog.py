@@ -12,7 +12,7 @@ from PySide6.QtWidgets import (
 )
 
 from app.devices.rigol_dg1000z.ui.page import RigolConfigurationSnapshot
-from app.devices.rigol import RigolChannelConfig
+from app.devices.rigol_dg1000z import RigolChannelConfig
 from app.domain.errors import ConfigurationError
 from app.domain.quantities import DIMENSION_FREQUENCY, DIMENSION_RESISTANCE, DIMENSION_TIME, DIMENSION_VOLTAGE, parse_quantity
 from app.recipes import RecipeNode
@@ -41,10 +41,10 @@ class RigolNodeEditorDialog(QDialog):
         self._working_segments: dict[str, list[dict[str, object]]] = {}
         self.plan_mode = True
         self.hardware_actions_enabled = False
-        self.setWindowTitle("Rigol DG1032Z — configure sweep node")
+        self.setWindowTitle("Rigol DG1032Z â€” configure sweep node")
         self.resize(780, 640)
         layout = QVBoxLayout(self)
-        heading = QLabel("Rigol DG1032Z · Carrier and output")
+        heading = QLabel("Rigol DG1032Z Â· Carrier and output")
         heading.setObjectName("pageTitle")
         layout.addWidget(heading)
         description = QLabel(
@@ -124,11 +124,11 @@ class RigolNodeEditorDialog(QDialog):
         ):
             selector = QComboBox()
             selector.addItem("Set fixed", "set")
-            selector.addItem("Sweep — ROI required", "sweep")
+            selector.addItem("Sweep â€” ROI required", "sweep")
             selector.currentIndexChanged.connect(self._selection_changed)
             self.parameter_selectors[parameter_id] = selector
             actions_layout.addRow(label, selector)
-        self.open_roi_button = QPushButton("Edit selected ROI…")
+        self.open_roi_button = QPushButton("Edit selected ROIâ€¦")
         self.open_roi_button.setEnabled(False)
         self.open_roi_button.clicked.connect(self._open_roi)
         actions_layout.addRow(self.open_roi_button)
@@ -333,4 +333,5 @@ class RigolNodeEditorDialog(QDialog):
                 QMessageBox.warning(self, "Rigol configuration", str(exc))
                 return
         super().accept()
+
 

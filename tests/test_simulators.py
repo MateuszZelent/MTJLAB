@@ -7,7 +7,7 @@ import unittest
 
 from app.devices.anritsu import AnritsuAdapter, SpectrumConfig
 from app.devices.keithley import KeithleyAdapter, KeithleySourceRequest
-from app.devices.rigol import RigolAdapter, RigolChannelConfig, RigolOutputConfig
+from app.devices.rigol_dg1000z import RigolAdapter, RigolChannelConfig, RigolOutputConfig
 from app.devices.simulators import SimulatorFault, SimulatedVisaFactory, simulated_station_settings
 from app.domain.errors import ConnectionError, DeviceError, SafetyViolation
 from app.domain.models import DeviceState
@@ -316,3 +316,4 @@ class SimulatorTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+

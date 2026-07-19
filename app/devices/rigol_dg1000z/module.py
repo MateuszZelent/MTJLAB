@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from app.contracts import DeviceModule, RecipeExtension
 from app.devices.base import DeviceAdapter
-from app.devices.rigol import RigolAdapter
+from app.devices.rigol_dg1000z import RigolAdapter
 from app.devices.rigol_dg1000z.ui import RigolPage
 from app.devices.simulators import SimulatedVisaFactory
 from app.settings.models import StationSettings
@@ -57,3 +57,4 @@ MODULE = DeviceModule(
     ),
     page_factory=_page,
 )
+

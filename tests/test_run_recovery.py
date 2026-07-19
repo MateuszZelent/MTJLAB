@@ -9,7 +9,7 @@ import h5py
 
 from app.devices.anritsu import AnritsuAdapter
 from app.devices.keithley import KeithleyAdapter
-from app.devices.rigol import RigolAdapter
+from app.devices.rigol_dg1000z import RigolAdapter
 from app.devices.simulators import SimulatedVisaFactory, simulated_station_settings
 from app.domain.errors import ExecutionError
 from app.engine import RecipeCompiler, RecipeRunner, RunRecoveryManager
@@ -172,3 +172,4 @@ class RunRecoveryTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+

@@ -19,8 +19,9 @@ def __getattr__(name: str) -> Any:
 
         return KeithleyAdapter
     if name == "RigolAdapter":
-        from app.devices.rigol.adapter import RigolAdapter
+        from app.devices.rigol_dg1000z.adapter import RigolAdapter
 
         return RigolAdapter
     raise AttributeError(name)
+
 

@@ -19,7 +19,7 @@ from app.devices.keithley import (
     KeithleySourceRequest,
     build_keithley_ramp_levels,
 )
-from app.devices.rigol import (
+from app.devices.rigol_dg1000z import (
     RigolAdapter,
     RigolBurstConfig,
     RigolChannelConfig,
@@ -1495,3 +1495,4 @@ root:
 
 if __name__ == "__main__":
     unittest.main()
+

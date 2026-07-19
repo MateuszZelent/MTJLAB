@@ -13,7 +13,7 @@ from PySide6.QtCore import QEventLoop, QMetaObject, QObject, QThread, QTimer, Qt
 from app.devices.anritsu.adapter import AnritsuAdapter
 from app.devices.base import DeviceAdapter
 from app.devices.keithley.adapter import KeithleyAdapter
-from app.devices.rigol.adapter import RigolAdapter
+from app.devices.rigol_dg1000z.adapter import RigolAdapter
 from app.contracts import OperationDispatcher
 from app.engine.compiler import RecipeCompiler
 from app.engine.estimation import PlanEstimator
@@ -236,7 +236,7 @@ class InstrumentWorker(QObject):
 
 
 class DeviceController(QObject):
-    """Thread-safe façade used by pages in the main window."""
+    """Thread-safe faÃ§ade used by pages in the main window."""
 
     request = Signal(str, object)
     result = Signal(str, object)
@@ -300,3 +300,4 @@ class DeviceController(QObject):
         self._thread.finished.connect(self._worker.deleteLater)
         self._thread.quit()
         self._thread.wait(1_000)
+

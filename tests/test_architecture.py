@@ -22,6 +22,13 @@ def _imports(path: Path) -> tuple[str, ...]:
 
 
 class ArchitectureTests(unittest.TestCase):
+    def test_generic_device_packages_do_not_exist(self) -> None:
+        for package in ("rigol",):
+            self.assertFalse(
+                (ROOT / "app" / "devices" / package).exists(),
+                f"generic device package app.devices.{package} must not exist",
+            )
+
     def test_device_domain_layers_do_not_import_ui(self) -> None:
         """Adapters/models/safety stay usable without Qt or the application shell."""
 

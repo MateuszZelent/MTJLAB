@@ -19,7 +19,7 @@ from app.devices.moke_box import MokeBoxAdapter
 from app.devices.moke_box.models import MokeBoxConfig
 from app.devices.moke_box.simulator import SimulatedMokeBoxTransport
 from app.devices.lakeshore_gaussmeter import LakeShore475Adapter
-from app.devices.rigol import RigolAdapter
+from app.devices.rigol_dg1000z import RigolAdapter
 from app.devices.simulators import SimulatedVisaFactory
 from app.devices.simulation import SimulationContext
 from app.engine.compiler import ExecutionPlan, required_devices_for_actions
@@ -456,3 +456,4 @@ class RunController(QObject):
             self._emergency_thread.wait(5_000)
             self._emergency_worker = None
             self._emergency_thread = None
+
