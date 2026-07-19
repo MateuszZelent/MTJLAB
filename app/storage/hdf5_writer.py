@@ -105,6 +105,7 @@ class Hdf5RunWriter:
             expected_points=expected_points,
             recipe_source=recipe_source,
             dut_limits_json=dut_limits_json,
+            settings_source=settings_source,
         )
         self._point_count = 0
         self._closed = False

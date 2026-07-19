@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+import tempfile
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
@@ -41,6 +42,7 @@ from app.ui.workers import DeviceController
 from app.devices.keithley import KeithleyAdapter
 from app.devices.anritsu import SignalGeneratorSnapshot
 from app.devices.simulators import SimulatedVisaFactory
+from app.storage import Hdf5RunWriter
 from tests.helpers import simulation_settings
 
 
@@ -62,6 +64,8 @@ class RecipeBuilderTests(unittest.TestCase):
             self.assertEqual(page.duplicate_node_button.text(), "Duplicate")
             self.assertEqual(page.move_up_button.text(), "Up")
             self.assertEqual(page.move_down_button.text(), "Down")
+            self.assertEqual(page.load_recipe_action.text(), "Load recipe")
+            self.assertEqual(page.open_hdf5_action.text(), "Open HDF5 result")
             self.assertEqual(page.tree.topLevelItem(0).text(0), "Measurement sequence")
         finally:
             page.close()
@@ -77,6 +81,27 @@ class RecipeBuilderTests(unittest.TestCase):
             self.assertEqual(page.tree.topLevelItem(0).childCount(), 0)
         finally:
             page.close()
+
+    def test_load_editor_routes_h5_result_to_reconstructed_sweep(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            path = Path(temporary) / "historical-result.h5"
+            writer = Hdf5RunWriter(
+                path,
+                recipe_source="",
+                settings_source="schema_version: 1\n",
+                plan_hash="h5-import",
+                device_idn={"rigol": "RIGOL,DG1032Z,SIM,1.0"},
+            )
+            writer.close("completed")
+            page = RecipePage(simulation_settings())
+            try:
+                page.path.setText(str(path))
+                page.load_editor(show_error=False)
+                self.assertTrue(page.historical_sweep_active)
+                self.assertIn("Historical THATEC Sweep", page.tree.topLevelItem(0).text(0))
+                self.assertIn("Historical THATEC Sweep loaded", page.summary.text())
+            finally:
+                page.close()
 
     def test_tree_builder_can_add_read_only_moke_hall_checkpoint(self) -> None:
         page = RecipePage(simulation_settings())

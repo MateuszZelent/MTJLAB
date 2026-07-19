@@ -86,19 +86,36 @@ class Hdf5RunReader:
             try:
                 summaries.append(Hdf5RunReader.summary(path))
             except ExecutionError:
-                # Keep an unreadable result visible to the operator so it can
-                # be recovered externally, rather than silently hiding it.
-                summaries.append(
-                    RunSummary(
-                        path=path,
-                        created_at_utc=None,
-                        status="unreadable",
-                        point_count=0,
-                        spectrum_count=0,
-                        plan_sha256=None,
-                        application_version=None,
+                try:
+                    from app.storage.thatec_reader import ThatecRunReader
+
+                    run = ThatecRunReader.describe(path)
+                    shapes = [row.shape[0] for row in run.rows.values() if row.shape]
+                    summaries.append(
+                        RunSummary(
+                            path=path,
+                            created_at_utc=None,
+                            status="THATEC",
+                            point_count=max(shapes, default=0),
+                            spectrum_count=sum(len(row.shape) == 2 for row in run.rows.values()),
+                            plan_sha256=None,
+                            application_version=None,
+                        )
                     )
-                )
+                except ExecutionError:
+                    # Keep a genuinely unreadable result visible to the operator so it can
+                    # be recovered externally, rather than silently hiding it.
+                    summaries.append(
+                        RunSummary(
+                            path=path,
+                            created_at_utc=None,
+                            status="unreadable",
+                            point_count=0,
+                            spectrum_count=0,
+                            plan_sha256=None,
+                            application_version=None,
+                        )
+                    )
         return tuple(summaries)
 
     @staticmethod
