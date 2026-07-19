@@ -98,6 +98,7 @@ class _ManagedVisaSession:
     @read_termination.setter
     def read_termination(self, value: str | None) -> None:
         self._session.read_termination = value
+        self._emit(f"CONFIG read_termination={value!r}")
 
     @property
     def write_termination(self) -> str | None:
@@ -106,6 +107,43 @@ class _ManagedVisaSession:
     @write_termination.setter
     def write_termination(self, value: str | None) -> None:
         self._session.write_termination = value
+        self._emit(f"CONFIG write_termination={value!r}")
+
+    @property
+    def baud_rate(self) -> int:
+        return int(getattr(self._session, "baud_rate"))
+
+    @baud_rate.setter
+    def baud_rate(self, value: int) -> None:
+        setattr(self._session, "baud_rate", value)
+        self._emit(f"CONFIG baud_rate={value}")
+
+    @property
+    def data_bits(self) -> int:
+        return int(getattr(self._session, "data_bits"))
+
+    @data_bits.setter
+    def data_bits(self, value: int) -> None:
+        setattr(self._session, "data_bits", value)
+        self._emit(f"CONFIG data_bits={value}")
+
+    @property
+    def parity(self) -> object:
+        return getattr(self._session, "parity")
+
+    @parity.setter
+    def parity(self, value: object) -> None:
+        setattr(self._session, "parity", value)
+        self._emit(f"CONFIG parity={value!r}")
+
+    @property
+    def stop_bits(self) -> object:
+        return getattr(self._session, "stop_bits")
+
+    @stop_bits.setter
+    def stop_bits(self, value: object) -> None:
+        setattr(self._session, "stop_bits", value)
+        self._emit(f"CONFIG stop_bits={value!r}")
 
     def write(self, command: str) -> object:
         self._emit(f"TX WRITE {command!r}")

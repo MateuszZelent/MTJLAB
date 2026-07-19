@@ -46,7 +46,6 @@ def timed(name, function):
 
 fluent_theme._supports_lazy_theme_update = lambda _application: True
 fluent_theme.setTheme = timed("setTheme", fluent_theme.setTheme)
-fluent_theme.setThemeColor = timed("setThemeColor", fluent_theme.setThemeColor)
 fluent_theme._apply_station_control_styles = timed(
     "station control styles", fluent_theme._apply_station_control_styles
 )
@@ -62,9 +61,22 @@ fluent_theme._apply_station_button = timed(
 fluent_theme._apply_station_card_frame = timed(
     "station card", fluent_theme._apply_station_card_frame
 )
-fluent_theme._apply_station_surface = timed(
-    "station surface", fluent_theme._apply_station_surface
-)
+surface_details = []
+original_surface = fluent_theme._apply_station_surface
+
+
+def measured_surface(widget, tokens):
+    started = time.perf_counter()
+    try:
+        return original_surface(widget, tokens)
+    finally:
+        elapsed = (time.perf_counter() - started) * 1000
+        samples.setdefault("station surface", []).append(elapsed)
+        if elapsed > 1:
+            surface_details.append((elapsed, type(widget).__name__, widget.objectName()))
+
+
+fluent_theme._apply_station_surface = measured_surface
 fluent_theme._apply_semantic_text = timed(
     "semantic text", fluent_theme._apply_semantic_text
 )
@@ -85,7 +97,11 @@ print(f"widgets={len(app.allWidgets())}")
 print(f"switch_ms={totals} median={statistics.median(totals):.1f}")
 print(f"same_theme_noop_ms={noop:.1f}")
 for name, values in samples.items():
-    print(f"{name}: calls={len(values)} median={statistics.median(values):.1f}")
+    print(
+        f"{name}: calls={len(values)} median={statistics.median(values):.1f} "
+        f"total={sum(values):.1f}"
+    )
+print("slow_surfaces", sorted(surface_details, reverse=True)[:12])
 
 window.close()
 app.processEvents()

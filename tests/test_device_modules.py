@@ -193,6 +193,8 @@ class DeviceModuleTests(unittest.TestCase):
 
         self.assertEqual(identity.model, "MODEL475")
         self.assertEqual(reading.mode, MeasurementMode.DC)
+        self.assertEqual(reading.snapshot.mode_code, "1")
+        self.assertEqual(reading.snapshot.dc_resolution_code, "3")
         self.assertEqual(reading.field_t, 0.03125)
         self.assertIsNone(reading.frequency_hz)
         self.assertEqual(len(bridge), 1)

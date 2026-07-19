@@ -18,6 +18,7 @@ from app.devices.lakeshore_475.models import (
     MeasurementMode,
     field_unit_from_code,
     measurement_mode_from_code,
+    parse_measurement_mode_response,
 )
 from app.devices.visa import PyVisaSessionFactory
 from app.domain.errors import ConnectionError, DeviceError, SafetyViolation
@@ -180,7 +181,14 @@ class LakeShore475Adapter(DeviceAdapter):
     def read_snapshot(self) -> GaussmeterSnapshot:
         connection = self._require_connection()
         try:
-            mode_code = connection.query("RDGMODE?").strip()
+            mode_response = connection.query("RDGMODE?").strip()
+            (
+                mode_code,
+                dc_resolution_code,
+                rms_filter_mode_code,
+                peak_mode_code,
+                peak_display_code,
+            ) = parse_measurement_mode_response(mode_response)
             unit_code = connection.query("UNIT?").strip()
             auto = connection.query("AUTO?").strip()
             if auto not in {"0", "1"}:
@@ -194,6 +202,10 @@ class LakeShore475Adapter(DeviceAdapter):
                 autorange_enabled=auto == "1",
                 probe_type_code=connection.query("TYPE?").strip(),
                 timestamp_utc=datetime.now(timezone.utc),
+                dc_resolution_code=dc_resolution_code,
+                rms_filter_mode_code=rms_filter_mode_code,
+                peak_mode_code=peak_mode_code,
+                peak_display_code=peak_display_code,
             )
         except (DeviceError, ValueError) as exc:
             self._state = DeviceState.FAULT
@@ -214,7 +226,9 @@ class LakeShore475Adapter(DeviceAdapter):
                     if len(values) != 2:
                         raise DeviceError("Lake Shore RDGPEAK? must return negative and positive values.")
                     reading = GaussmeterReading.now(mode=snapshot.mode, unit=snapshot.unit, snapshot=snapshot, negative_peak_t=self._tesla(values[0], snapshot.unit), positive_peak_t=self._tesla(values[1], snapshot.unit))
-                end_mode = connection.query("RDGMODE?").strip()
+                end_mode = parse_measurement_mode_response(
+                    connection.query("RDGMODE?").strip()
+                )[0]
                 end_unit = connection.query("UNIT?").strip()
                 if end_mode == snapshot.mode_code and end_unit == snapshot.unit_code:
                     self._state = DeviceState.VERIFIED

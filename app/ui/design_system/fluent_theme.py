@@ -11,8 +11,8 @@ from qfluentwidgets import (
     CardWidget,
     Theme,
     isDarkTheme,
+    qconfig,
     setTheme,
-    setThemeColor,
 )
 
 from .station_qss import dialog_qss, event_log_qss
@@ -40,8 +40,8 @@ def apply_application_theme(application: QApplication, mode: str) -> AppliedThem
         _apply_station_control_styles(application, tokens)
         return AppliedTheme(name=name, tokens=tokens)
     lazy = _supports_lazy_theme_update(application)
+    _stage_fluent_accent(tokens)
     setTheme(Theme.DARK if name == "dark" else Theme.LIGHT, lazy=lazy)
-    setThemeColor(tokens.accent, save=False, lazy=lazy)
     # QFluent's QSS refresh can touch the application palette;
     # native item views must receive the station palette after that refresh.
     _apply_application_palette(application, tokens, name)
@@ -51,6 +51,12 @@ def apply_application_theme(application: QApplication, mode: str) -> AppliedThem
     _settle_fluent_background_animations(application)
     _apply_station_control_styles(application, tokens)
     return AppliedTheme(name=name, tokens=tokens)
+
+
+def _stage_fluent_accent(tokens: ThemeTokens) -> None:
+    """Update QFluent's accent before the single theme QSS refresh."""
+
+    qconfig.set(qconfig.themeColor, QColor(tokens.accent), save=False)
 
 
 def _supports_lazy_theme_update(application: QApplication) -> bool:
@@ -113,6 +119,8 @@ def _apply_application_palette(
         QPalette.ColorRole.Text: tokens.text_primary,
         QPalette.ColorRole.Button: tokens.surface_raised,
         QPalette.ColorRole.ButtonText: tokens.text_primary,
+        QPalette.ColorRole.Mid: tokens.border,
+        QPalette.ColorRole.Midlight: tokens.border,
         QPalette.ColorRole.BrightText: tokens.danger,
         QPalette.ColorRole.Highlight: tokens.accent,
         QPalette.ColorRole.HighlightedText: (
@@ -204,13 +212,15 @@ def _apply_station_button(widget: QWidget, tokens: ThemeTokens) -> None:
     if not isinstance(widget, QPushButton):
         return
     marker = "/* station-disabled-button */"
+    if marker in widget.styleSheet():
+        return
     base = widget.styleSheet().split(marker, 1)[0].rstrip()
     widget.setStyleSheet(
         f"{base}\n{marker}\n"
         "QPushButton:disabled, PushButton:disabled, PrimaryPushButton:disabled {"
-        f"color: {tokens.text_muted};"
-        f"background-color: {tokens.surface_raised};"
-        f"border: 1px solid {tokens.border};"
+        "color: palette(placeholder-text);"
+        "background-color: palette(alternate-base);"
+        "border: 1px solid palette(mid);"
         "}"
     )
 
@@ -221,15 +231,17 @@ def _apply_station_card_frame(widget: QWidget, tokens: ThemeTokens) -> None:
     if not isinstance(widget, CardWidget):
         return
     marker = "/* station-card-frame */"
-    base = widget.styleSheet().split(marker, 1)[0].rstrip()
     set_background = getattr(widget, "setBackgroundColor", None)
     if callable(set_background):
         set_background(QColor(tokens.surface))
+    if marker in widget.styleSheet():
+        return
+    base = widget.styleSheet().split(marker, 1)[0].rstrip()
     widget.setStyleSheet(
         f"{base}\n{marker}\n"
         "CardWidget {"
-        f"background-color: {tokens.surface};"
-        f"border: 1px solid {tokens.border};"
+        "background-color: palette(base);"
+        "border: 1px solid palette(mid);"
         "border-radius: 8px;"
         "}"
     )
@@ -247,27 +259,6 @@ def _apply_station_surface(widget: QWidget, tokens: ThemeTokens) -> None:
         color = tokens.background
     if color is not None:
         _set_widget_background(widget, color, tokens.text_primary)
-    if widget.objectName() == "fluentShellSplitter":
-        widget.setStyleSheet(
-            "QSplitter#fluentShellSplitter::handle {"
-            "background: transparent; "
-            f"border-top: 1px solid {tokens.border};"
-            "}"
-            "QSplitter#fluentShellSplitter::handle:hover {"
-            f"border-top-color: {tokens.focus};"
-            "}"
-        )
-    if widget.objectName() == "fluentApplicationStack":
-        marker = "/* station-borderless-stack */"
-        base = widget.styleSheet().split(marker, 1)[0].rstrip()
-        widget.setStyleSheet(
-            f"{base}\n{marker}\n"
-            "QStackedWidget#fluentApplicationStack {"
-            "border: none; border-radius: 0; background: transparent;"
-            "}"
-        )
-
-
 def _set_widget_background(
     widget: QWidget, color: str, text_color: str | None = None
 ) -> None:

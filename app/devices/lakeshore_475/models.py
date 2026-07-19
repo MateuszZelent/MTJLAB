@@ -44,6 +44,29 @@ def measurement_mode_from_code(value: str) -> MeasurementMode:
         raise ValueError(f"Unknown Lake Shore RDGMODE? code {value!r}.") from exc
 
 
+def parse_measurement_mode_response(value: str) -> tuple[str, str, str, str, str]:
+    """Parse the five fields returned by a Model 475 ``RDGMODE?`` query."""
+
+    fields = tuple(part.strip() for part in value.split(","))
+    if len(fields) != 5:
+        raise ValueError(
+            "Lake Shore RDGMODE? must return mode, DC resolution, RMS filter, "
+            f"peak mode and peak display; received {value!r}."
+        )
+    allowed = (
+        {"1", "2", "3"},
+        {"1", "2", "3"},
+        {"1", "2", "3"},
+        {"1", "2"},
+        {"1", "2", "3"},
+    )
+    labels = ("mode", "DC resolution", "RMS filter", "peak mode", "peak display")
+    for field, accepted, label in zip(fields, allowed, labels, strict=True):
+        if field not in accepted:
+            raise ValueError(f"Unknown Lake Shore RDGMODE? {label} code {field!r}.")
+    return fields  # type: ignore[return-value]
+
+
 @dataclass(frozen=True, slots=True)
 class GaussmeterConfig:
     """VISA profile for one Model 475; it contains no writable settings."""
@@ -76,6 +99,10 @@ class GaussmeterSnapshot:
     autorange_enabled: bool
     probe_type_code: str
     timestamp_utc: datetime
+    dc_resolution_code: str = ""
+    rms_filter_mode_code: str = ""
+    peak_mode_code: str = ""
+    peak_display_code: str = ""
 
 
 @dataclass(frozen=True, slots=True)

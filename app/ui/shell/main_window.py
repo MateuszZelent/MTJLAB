@@ -698,6 +698,8 @@ class MainWindow(FluentWindow):
         """Restore the borderless station stack after QFluent's first-show QSS."""
 
         marker = "/* station-borderless-stack */"
+        if marker in self.stackedWidget.styleSheet():
+            return
         base = self.stackedWidget.styleSheet().split(marker, 1)[0].rstrip()
         self.stackedWidget.setStyleSheet(
             f"{base}\n{marker}\n"
@@ -1441,9 +1443,11 @@ class MainWindow(FluentWindow):
                 " VISA TX ",
                 " VISA RX ",
                 " VISA OPEN ",
+                " VISA CONFIG ",
                 " TCP TX ",
                 " TCP RX ",
                 " TCP OPEN ",
+                " TCP CONFIG ",
             )
         )
 

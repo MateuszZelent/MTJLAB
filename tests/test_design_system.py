@@ -79,14 +79,12 @@ class ThemeBridgeTests(unittest.TestCase):
         with (
             patch.object(self.application, "platformName", return_value="offscreen"),
             patch("app.ui.design_system.fluent_theme.setTheme") as set_theme,
-            patch("app.ui.design_system.fluent_theme.setThemeColor") as set_color,
+            patch("app.ui.design_system.fluent_theme._stage_fluent_accent") as set_accent,
             patch.object(self.application, "setStyleSheet") as set_stylesheet,
         ):
             applied = apply_application_theme(self.application, "dark")
         set_theme.assert_called_once_with(Theme.DARK, lazy=False)
-        set_color.assert_called_once_with(
-            tokens_for("dark").accent, save=False, lazy=False
-        )
+        set_accent.assert_called_once_with(tokens_for("dark"))
         set_stylesheet.assert_not_called()
         self.assertEqual(applied.name, "dark")
 
@@ -104,13 +102,11 @@ class ThemeBridgeTests(unittest.TestCase):
             patch.dict(os.environ, {"QT_QPA_PLATFORM": ""}),
             patch.object(self.application, "platformName", return_value="windows"),
             patch("app.ui.design_system.fluent_theme.setTheme") as set_theme,
-            patch("app.ui.design_system.fluent_theme.setThemeColor") as set_color,
+            patch("app.ui.design_system.fluent_theme._stage_fluent_accent") as set_accent,
         ):
             apply_application_theme(self.application, "dark")
         set_theme.assert_called_once_with(Theme.DARK, lazy=True)
-        set_color.assert_called_once_with(
-            tokens_for("dark").accent, save=False, lazy=True
-        )
+        set_accent.assert_called_once_with(tokens_for("dark"))
 
     def test_offscreen_platform_disables_motion(self) -> None:
         with patch.dict("os.environ", {"QT_QPA_PLATFORM": "offscreen"}):
@@ -144,8 +140,7 @@ class ThemeBridgeTests(unittest.TestCase):
         apply_application_theme(self.application, "light")
 
         patch_qss = button.styleSheet().split("/* station-disabled-button */", 1)[1]
-        tokens = tokens_for("light")
-        self.assertIn(f"color: {tokens.text_muted}", patch_qss)
-        self.assertIn(f"background-color: {tokens.surface_raised}", patch_qss)
+        self.assertIn("color: palette(placeholder-text)", patch_qss)
+        self.assertIn("background-color: palette(alternate-base)", patch_qss)
         self.assertNotIn("rgba(255, 255, 255, 0.9)", patch_qss)
         button.deleteLater()

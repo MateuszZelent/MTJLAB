@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import unittest
 
+from pyvisa.constants import Parity, StopBits
+
 from app.devices.visa import FakeVisaSession, _ManagedVisaSession
 
 
@@ -11,6 +13,29 @@ class _ManagerStub:
 
 
 class VisaTrafficLoggingTests(unittest.TestCase):
+    def test_serial_configuration_is_applied_to_underlying_visa_session_and_logged(self) -> None:
+        messages: list[str] = []
+        raw = FakeVisaSession()
+        session = _ManagedVisaSession(raw, _ManagerStub(), messages.append)
+
+        session.read_termination = "\r\n"
+        session.write_termination = "\r\n"
+        session.baud_rate = 57_600
+        session.data_bits = 7
+        session.parity = Parity.odd
+        session.stop_bits = StopBits.one
+
+        self.assertEqual(raw.read_termination, "\r\n")
+        self.assertEqual(raw.write_termination, "\r\n")
+        self.assertEqual(raw.baud_rate, 57_600)
+        self.assertEqual(raw.data_bits, 7)
+        self.assertEqual(raw.parity, Parity.odd)
+        self.assertEqual(raw.stop_bits, StopBits.one)
+        log = "\n".join(messages)
+        self.assertIn("CONFIG baud_rate=57600", log)
+        self.assertIn("CONFIG data_bits=7", log)
+        self.assertIn("CONFIG parity=", log)
+
     def test_spectrum_payload_is_suppressed_but_summary_is_logged(self) -> None:
         payload = "-80.125,-79.5,-81.75"
         messages: list[str] = []

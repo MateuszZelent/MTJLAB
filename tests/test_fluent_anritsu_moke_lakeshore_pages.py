@@ -127,15 +127,14 @@ class FluentLakeShorePageTests(unittest.TestCase):
                 self.assertIsInstance(label, QLabel)
                 foreground = label.palette().color(QPalette.ColorRole.WindowText)
                 self.assertLess(foreground.lightness(), 180)
-        tokens = tokens_for("light")
         for button in (panel.connect_button, panel.disconnect_button, page.read_now):
             with self.subTest(button=button.text()):
                 disabled_qss = button.styleSheet().split(
                     "/* station-disabled-button */", 1
                 )[1]
-                self.assertIn(f"color: {tokens.text_muted}", disabled_qss)
+                self.assertIn("color: palette(placeholder-text)", disabled_qss)
                 self.assertIn(
-                    f"background-color: {tokens.surface_raised}", disabled_qss
+                    "background-color: palette(alternate-base)", disabled_qss
                 )
 
     def test_lakeshore_plot_uses_elapsed_time_and_prunes_to_selected_window(self) -> None:

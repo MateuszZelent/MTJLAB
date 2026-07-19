@@ -240,7 +240,10 @@ class ResultsPage(QWidget):
 
     def resizeEvent(self, event: QResizeEvent) -> None:
         super().resizeEvent(event)
-        compact = event.size().width() < 900
+        # The expanded Fluent navigation leaves roughly 1000 px of content at
+        # a 1280 px station window.  Switch before action labels and the file
+        # browser start imposing a horizontal minimum on the page host.
+        compact = event.size().width() < 1100
         if self._compact_layout == compact:
             return
         self._compact_layout = compact
