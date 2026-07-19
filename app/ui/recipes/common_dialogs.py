@@ -7,10 +7,13 @@ from typing import Any
 from PySide6.QtCore import QMimeData, Qt, Signal
 from PySide6.QtGui import QDrag
 from PySide6.QtWidgets import (
-    QAbstractItemView, QApplication, QCheckBox, QComboBox, QDialog,
-    QDialogButtonBox, QFormLayout, QFrame, QHBoxLayout, QLabel,
-    QMessageBox, QPlainTextEdit, QSpinBox, QToolButton, QTreeWidget,
-    QTreeWidgetItem, QVBoxLayout, QWidget,
+    QAbstractItemView, QApplication, QFormLayout, QFrame, QHBoxLayout,
+    QLabel, QMessageBox, QTreeWidgetItem, QVBoxLayout, QWidget,
+)
+from qfluentwidgets import (
+    BodyLabel, CardWidget, CheckBox, ComboBox, LineEdit, PlainTextEdit,
+    PrimaryPushButton, PushButton, SpinBox, StrongBodyLabel,
+    TreeWidget,
 )
 
 from app.domain.errors import ConfigurationError
@@ -21,6 +24,7 @@ from app.recipes.parameter_registry import sweep_default as _sweep_default
 from app.settings.models import StationSettings
 from app.ui.common import line_edit as _line
 from app.ui.recipes.sweep_editor import SweepGeneratorDialog
+from app.ui.recipes.fluent_dialog import FluentRecipeDialog
 
 __all__ = [
     "AnritsuAcquisitionEditorDialog",
@@ -52,15 +56,15 @@ class KeithleySweepBuilderDialog(SweepGeneratorDialog):
         title.setObjectName("sectionTitle")
         parameter_layout.addWidget(title)
         form = QFormLayout()
-        self.channel = QComboBox()
+        self.channel = ComboBox(self)
         self.channel.addItems(("A", "B"))
         self.channel.setCurrentText("B")
-        self.mode = QComboBox()
+        self.mode = ComboBox(self)
         self.mode.addItems(("current", "voltage"))
         self.compliance = _line("67 mV")
         self.nplc = _line("1")
         self.settle_time = _line("100 ms")
-        self.sense_mode = QComboBox()
+        self.sense_mode = ComboBox(self)
         self.sense_mode.addItems(("2wire", "4wire"))
         form.addRow("Channel", self.channel)
         form.addRow("Source mode", self.mode)
@@ -153,11 +157,12 @@ class KeithleySweepBuilderDialog(SweepGeneratorDialog):
         super().accept()
 
 
-class FixedValueDialog(QDialog):
+class FixedValueDialog(FluentRecipeDialog):
     """Create an auditable single setpoint without pretending it is a sweep."""
 
     def __init__(self, definition: dict[str, str], parent: QWidget | None = None) -> None:
         super().__init__(parent)
+        self.setProperty("stationSurface", "page")
         self.definition = definition
         self.setWindowTitle(f"Fixed value — {definition['label']}")
         layout = QVBoxLayout(self)
@@ -168,19 +173,22 @@ class FixedValueDialog(QDialog):
             )
         )
         form = QFormLayout()
-        self.value = _line(_sweep_default(definition["dimension"])[0], 24)
+        self.value = LineEdit(self)
+        self.value.setText(_sweep_default(definition["dimension"])[0])
         form.addRow(definition["label"], self.value)
         layout.addLayout(form)
         self.preview = QLabel()
         layout.addWidget(self.preview)
-        buttons = QDialogButtonBox(
-            QDialogButtonBox.StandardButton.Cancel | QDialogButtonBox.StandardButton.Ok
-        )
-        buttons.button(QDialogButtonBox.StandardButton.Ok).setText("Create fixed setting")
-        layout.addWidget(buttons)
+        footer = QHBoxLayout()
+        footer.addStretch(1)
+        self.cancel_button = PushButton("Cancel", self)
+        self.create_button = PrimaryPushButton("Create fixed setting", self)
+        footer.addWidget(self.cancel_button)
+        footer.addWidget(self.create_button)
+        layout.addLayout(footer)
         self.value.textChanged.connect(self._validate)
-        buttons.accepted.connect(self.accept)
-        buttons.rejected.connect(self.reject)
+        self.create_button.clicked.connect(self.accept)
+        self.cancel_button.clicked.connect(self.reject)
         self._validate()
 
     def _validate(self) -> None:
@@ -200,7 +208,7 @@ class FixedValueDialog(QDialog):
         super().accept()
 
 
-class AnritsuAcquisitionEditorDialog(QDialog):
+class AnritsuAcquisitionEditorDialog(FluentRecipeDialog):
     """Edit trace and reference-processing policy without touching VISA."""
 
     operations = (
@@ -218,6 +226,7 @@ class AnritsuAcquisitionEditorDialog(QDialog):
         parent: QWidget | None = None,
     ) -> None:
         super().__init__(parent)
+        self.setProperty("stationSurface", "page")
         self._reference_only = node.type == "acquire_reference"
         self.setWindowTitle(
             "Anritsu reference acquisition"
@@ -241,26 +250,26 @@ class AnritsuAcquisitionEditorDialog(QDialog):
         note.setObjectName("muted")
         layout.addWidget(note)
         form = QFormLayout()
-        self.trace = QComboBox()
+        self.trace = ComboBox(self)
         self.trace.addItems(("TRAC1",))
         self.trace.setCurrentText(str(node.data.get("trace", "TRAC1")))
         form.addRow("Trace", self.trace)
-        self.average_count = QSpinBox()
+        self.average_count = SpinBox(self)
         self.average_count.setRange(1, 9999)
         self.average_count.setValue(int(node.data.get("average_count", 1)))
         self.average_count.setToolTip(
             "Complete spectra are averaged in linear mW, never directly in dBm."
         )
         form.addRow("Average complete spectra", self.average_count)
-        self.reference_operation = QComboBox()
+        self.reference_operation = ComboBox(self)
         for label, value in self.operations:
-            self.reference_operation.addItem(label, value)
+            self.reference_operation.addItem(label, userData=value)
         operation = str(node.data.get("reference_operation", "none"))
         index = self.reference_operation.findData(operation)
         self.reference_operation.setCurrentIndex(index if index >= 0 else 0)
-        self.store_raw = QCheckBox("Store raw spectrum")
+        self.store_raw = CheckBox("Store raw spectrum", self)
         self.store_raw.setChecked(bool(node.data.get("store_raw", True)))
-        self.store_processed = QCheckBox("Store processed spectrum")
+        self.store_processed = CheckBox("Store processed spectrum", self)
         self.store_processed.setChecked(
             bool(node.data.get("store_processed", operation != "none"))
         )
@@ -270,16 +279,15 @@ class AnritsuAcquisitionEditorDialog(QDialog):
             form.addRow("", self.store_processed)
         layout.addLayout(form)
         layout.addStretch(1)
-        buttons = QDialogButtonBox(
-            QDialogButtonBox.StandardButton.Cancel
-            | QDialogButtonBox.StandardButton.Apply
-        )
-        buttons.button(QDialogButtonBox.StandardButton.Apply).setText(
-            "Apply acquisition settings"
-        )
-        buttons.accepted.connect(self.accept)
-        buttons.rejected.connect(self.reject)
-        layout.addWidget(buttons)
+        footer = QHBoxLayout()
+        footer.addStretch(1)
+        self.cancel_button = PushButton("Cancel", self)
+        self.apply_button = PrimaryPushButton("Apply acquisition settings", self)
+        footer.addWidget(self.cancel_button)
+        footer.addWidget(self.apply_button)
+        self.apply_button.clicked.connect(self.accept)
+        self.cancel_button.clicked.connect(self.reject)
+        layout.addLayout(footer)
         self.reference_operation.currentIndexChanged.connect(
             self._operation_changed
         )
@@ -323,50 +331,21 @@ class AnritsuAcquisitionEditorDialog(QDialog):
         super().accept()
 
 
-class CommentEditorDialog(QDialog):
+class CommentEditorDialog(FluentRecipeDialog):
     """Focused editor for human-readable notes embedded in a sweep tree."""
 
     def __init__(self, text: str = "", parent: QWidget | None = None) -> None:
         super().__init__(parent)
+        self.setProperty("stationSurface", "page")
         self.setObjectName("commentEditorDialog")
         self.setWindowTitle("Edit comment")
         self.resize(680, 460)
         self.setMinimumSize(500, 360)
-        self.setStyleSheet(
-            """
-            QDialog#commentEditorDialog { background: #f5f8fc; color: #17212b; }
-            QFrame#commentEditorHero {
-                background: #ffffff;
-                border: 1px solid #d9e2ec;
-                border-radius: 10px;
-            }
-            QLabel#commentEditorIcon {
-                color: #7253a6;
-                background: #eee9fb;
-                border-radius: 8px;
-                font-size: 18pt;
-                font-weight: 700;
-            }
-            QLabel#commentEditorTitle { font-size: 15pt; font-weight: 700; }
-            QLabel#commentEditorHint, QLabel#commentEditorCounter { color: #647588; }
-            QPlainTextEdit#commentEditorText {
-                background: #ffffff;
-                color: #17212b;
-                border: 1px solid #cbd7e3;
-                border-radius: 9px;
-                padding: 10px;
-                selection-background-color: #dceeff;
-                font-size: 10pt;
-            }
-            QPlainTextEdit#commentEditorText:focus { border: 2px solid #4a90d9; }
-            QPushButton { min-width: 92px; padding: 7px 14px; border-radius: 6px; }
-            """
-        )
         layout = QVBoxLayout(self)
         layout.setContentsMargins(18, 18, 18, 16)
         layout.setSpacing(12)
 
-        hero = QFrame()
+        hero = CardWidget(self)
         hero.setObjectName("commentEditorHero")
         hero_layout = QHBoxLayout(hero)
         hero_layout.setContentsMargins(14, 12, 14, 12)
@@ -376,9 +355,9 @@ class CommentEditorDialog(QDialog):
         icon.setFixedSize(42, 42)
         hero_layout.addWidget(icon)
         heading = QVBoxLayout()
-        title = QLabel("Comment in measurement sequence")
+        title = StrongBodyLabel("Comment in measurement sequence", hero)
         title.setObjectName("commentEditorTitle")
-        hint = QLabel(
+        hint = BodyLabel(
             "Describe the purpose of this step, sample preparation or an operator note. "
             "The comment does not send commands to any instrument."
         )
@@ -389,7 +368,7 @@ class CommentEditorDialog(QDialog):
         hero_layout.addLayout(heading, 1)
         layout.addWidget(hero)
 
-        self.editor = QPlainTextEdit()
+        self.editor = PlainTextEdit(self)
         self.editor.setObjectName("commentEditorText")
         self.editor.setPlaceholderText(
             "For example: Wait until the sample temperature is stable before acquisition…"
@@ -401,15 +380,14 @@ class CommentEditorDialog(QDialog):
         self.counter.setObjectName("commentEditorCounter")
         footer.addWidget(self.counter)
         footer.addStretch(1)
-        self.buttons = QDialogButtonBox(
-            QDialogButtonBox.StandardButton.Cancel | QDialogButtonBox.StandardButton.Save
-        )
-        self.buttons.button(QDialogButtonBox.StandardButton.Save).setText("Save comment")
-        footer.addWidget(self.buttons)
+        self.cancel_button = PushButton("Cancel", self)
+        self.save_button = PrimaryPushButton("Save comment", self)
+        footer.addWidget(self.cancel_button)
+        footer.addWidget(self.save_button)
         layout.addLayout(footer)
         self.editor.textChanged.connect(self._update_counter)
-        self.buttons.accepted.connect(self.accept)
-        self.buttons.rejected.connect(self.reject)
+        self.save_button.clicked.connect(self.accept)
+        self.cancel_button.clicked.connect(self.reject)
         self._update_counter()
         self.editor.setFocus()
 
@@ -419,11 +397,10 @@ class CommentEditorDialog(QDialog):
     def _update_counter(self) -> None:
         count = len(self.editor.toPlainText())
         self.counter.setText(f"{count:,} characters")
-        save = self.buttons.button(QDialogButtonBox.StandardButton.Save)
-        save.setEnabled(bool(self.comment_text()))
+        self.save_button.setEnabled(bool(self.comment_text()))
 
 
-class SweepLibraryButton(QToolButton):
+class SweepLibraryButton(PushButton):
     """Clickable library card that also exposes a stable drag payload."""
 
     mime_type = "application/x-lab-control-sweep-block"
@@ -459,7 +436,7 @@ class SweepLibraryButton(QToolButton):
         super().mouseMoveEvent(event)
 
 
-class RecipeTreeWidget(QTreeWidget):
+class RecipeTreeWidget(TreeWidget):
     """Tree that requests a validated YAML move instead of mutating Qt items."""
 
     move_requested = Signal(str, str, str, int)
@@ -544,5 +521,3 @@ class RecipeTreeWidget(QTreeWidget):
             return (owner.id, "else", index) if isinstance(owner, RecipeNode) else None
         owner = parent.data(0, Qt.ItemDataRole.UserRole)
         return (owner.id, "children", index) if isinstance(owner, RecipeNode) else None
-
-

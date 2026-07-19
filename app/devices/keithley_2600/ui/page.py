@@ -24,7 +24,7 @@ from PySide6.QtWidgets import (
     QVBoxLayout, QWidget,
 )
 from qfluentwidgets import (
-    CaptionLabel, CardWidget, ComboBox, PrimaryPushButton, PushButton,
+    CaptionLabel, CardWidget, CheckBox, ComboBox, PrimaryPushButton, PushButton,
     StrongBodyLabel, TitleLabel,
 )
 
@@ -42,6 +42,7 @@ from app.safety.keithley import validate_keithley_source
 from app.settings.models import StationSettings
 from app.ui.common import line_edit as _line
 from app.ui.widgets import LimitField, NotificationBanner, SpectrumPlotWidget
+from app.ui.recipes.fluent_dialog import FluentRecipeDialog
 from app.ui.workers import DeviceController
 
 
@@ -140,13 +141,13 @@ class KeithleyConfigurationPanel(CardWidget):
         self.settle = _line("100 ms")
         self.sense_mode = ComboBox()
         self.sense_mode.addItems(["2wire", "4wire"])
-        self.source_autorange = QCheckBox("Source autorange")
+        self.source_autorange = CheckBox("Source autorange", self)
         self.source_autorange.setChecked(True)
         self.source_range = _line("AUTO")
-        self.measure_voltage_autorange = QCheckBox("Measure V autorange")
+        self.measure_voltage_autorange = CheckBox("Measure V autorange", self)
         self.measure_voltage_autorange.setChecked(True)
         self.measure_voltage_range = _line("AUTO")
-        self.measure_current_autorange = QCheckBox("Measure I autorange")
+        self.measure_current_autorange = CheckBox("Measure I autorange", self)
         self.measure_current_autorange.setChecked(True)
         self.measure_current_range = _line("AUTO")
         self.level_field = self._bounded("level", self.level)
@@ -302,7 +303,7 @@ class KeithleyConfigurationPanel(CardWidget):
         self.refresh_limits()
 
 
-class KeithleyNodeEditorDialog(QDialog):
+class KeithleyNodeEditorDialog(FluentRecipeDialog):
     """Offline host for the shared Keithley configuration component."""
 
     hardware_actions_enabled = False
@@ -315,6 +316,7 @@ class KeithleyNodeEditorDialog(QDialog):
         snapshot: KeithleyConfigurationSnapshot | None = None,
     ) -> None:
         super().__init__(parent)
+        self.setProperty("stationSurface", "page")
         self._settings = settings
         self._loaded_segments_by_parameter: dict[
             str, list[dict[str, object]]
@@ -350,7 +352,7 @@ class KeithleyNodeEditorDialog(QDialog):
         parameter_layout.addWidget(selection_title, 0, 0, 1, 2)
         parameter_layout.addWidget(QLabel("Parameter"), 1, 0)
         parameter_layout.addWidget(QLabel("Action"), 1, 1)
-        self.parameter_selectors: dict[str, QComboBox] = {}
+        self.parameter_selectors: dict[str, ComboBox] = {}
         definitions = (
             ("Source value", "source.level", True),
             ("Compliance", "source.compliance", True),
@@ -363,23 +365,22 @@ class KeithleyNodeEditorDialog(QDialog):
         )
         for row, (label, parameter_id, sweepable) in enumerate(definitions, start=2):
             parameter_layout.addWidget(QLabel(label), row, 0)
-            selector = QComboBox()
+            selector = ComboBox(self)
             selector.setProperty("parameterId", parameter_id)
-            selector.addItem("Bez zmian", "unchanged")
-            selector.addItem("Ustaw", "set")
+            selector.addItem("Bez zmian", userData="unchanged")
+            selector.addItem("Ustaw", userData="set")
             if sweepable:
-                selector.addItem("Sweep — ROI wymagane", "sweep")
+                selector.addItem("Sweep — ROI wymagane", userData="sweep")
             parameter_layout.addWidget(selector, row, 1)
             self.parameter_selectors[parameter_id] = selector
         output_row = 2 + len(definitions)
         parameter_layout.addWidget(QLabel("Output state"), output_row, 0)
-        self.output_policy = QComboBox()
-        self.output_policy.addItem("Bez zmian", "unchanged")
-        self.output_policy.addItem("OUTPUT ON na początku", "on")
-        self.output_policy.addItem("OUTPUT OFF", "off")
+        self.output_policy = ComboBox(self)
+        self.output_policy.addItem("Bez zmian", userData="unchanged")
+        self.output_policy.addItem("OUTPUT ON na początku", userData="on")
+        self.output_policy.addItem("OUTPUT OFF", userData="off")
         parameter_layout.addWidget(self.output_policy, output_row, 1)
-        self.open_roi_button = QPushButton("Przejdź do ROI…")
-        self.open_roi_button.setObjectName("primaryButton")
+        self.open_roi_button = PrimaryPushButton("Przejdź do ROI…", self)
         self.open_roi_button.setEnabled(False)
         self.open_roi_button.setToolTip(
             "Open the interval and point editor for the single parameter marked Sweep."
@@ -408,16 +409,18 @@ class KeithleyNodeEditorDialog(QDialog):
         workspace.setStretchFactor(1, 2)
         workspace.setSizes([660, 430])
         layout.addWidget(workspace, 1)
-        buttons = QDialogButtonBox(
-            QDialogButtonBox.StandardButton.Cancel
-            | QDialogButtonBox.StandardButton.Apply
-            | QDialogButtonBox.StandardButton.Ok
-        )
-        buttons.button(QDialogButtonBox.StandardButton.Ok).setText("Apply selected actions")
-        layout.addWidget(buttons)
-        buttons.accepted.connect(self.accept)
-        buttons.rejected.connect(self.reject)
-        buttons.button(QDialogButtonBox.StandardButton.Apply).clicked.connect(self._validate)
+        footer = QHBoxLayout()
+        footer.addStretch(1)
+        self.cancel_button = PushButton("Cancel", self)
+        self.validate_button = PushButton("Validate", self)
+        self.apply_button = PrimaryPushButton("Apply selected actions", self)
+        footer.addWidget(self.cancel_button)
+        footer.addWidget(self.validate_button)
+        footer.addWidget(self.apply_button)
+        layout.addLayout(footer)
+        self.apply_button.clicked.connect(self.accept)
+        self.cancel_button.clicked.connect(self.reject)
+        self.validate_button.clicked.connect(self._validate)
         self.mode.currentTextChanged.connect(self._source_mode_changed)
         self.open_roi_button.clicked.connect(self._open_selected_roi)
         for selector in self.parameter_selectors.values():

@@ -10,16 +10,20 @@ import pyqtgraph as pg
 from PySide6.QtCore import QTimer, Qt
 from PySide6.QtGui import QColor, QPalette
 from PySide6.QtWidgets import (
-    QAbstractItemView, QApplication, QComboBox, QDialog, QDialogButtonBox, QFormLayout, QHBoxLayout,
-    QHeaderView, QLabel, QLineEdit, QPushButton, QSpinBox, QSplitter,
-    QStyledItemDelegate, QTableWidget, QTableWidgetItem, QVBoxLayout, QWidget, QMessageBox,
+    QAbstractItemView, QApplication, QDialog, QFormLayout, QHBoxLayout,
+    QHeaderView, QLineEdit, QSplitter, QStyledItemDelegate,
+    QTableWidgetItem, QVBoxLayout, QWidget, QMessageBox,
+)
+from qfluentwidgets import (
+    BodyLabel, ComboBox, LineEdit, PrimaryPushButton, PushButton, TableWidget,
 )
 
 from app.recipes.parameter_registry import sweep_default as _sweep_default
 from app.domain.errors import ConfigurationError
 from app.recipes import estimate_sweep_point_count, generate_sweep_points, generate_sweep_stage_points
 from app.ui.common import line_edit as _line
-from app.ui.design_system import effective_theme
+from app.ui.design_system import effective_theme, plot_theme, tokens_for
+from app.ui.recipes.fluent_dialog import FluentRecipeDialog
 
 
 class SeamlessRoiCellDelegate(QStyledItemDelegate):
@@ -29,22 +33,13 @@ class SeamlessRoiCellDelegate(QStyledItemDelegate):
         super().__init__(parent)
         self.setObjectName("seamlessRoiCellDelegate")
 
-    def createEditor(self, parent: QWidget, _option: Any, _index: Any) -> QLineEdit:
-        editor = QLineEdit(parent)
+    def createEditor(self, parent: QWidget, _option: Any, _index: Any) -> LineEdit:
+        editor = LineEdit(parent)
         editor.setFrame(False)
         editor.setContentsMargins(0, 0, 0, 0)
         editor.setStyleSheet(
-            """
-            QLineEdit {
-                border: none;
-                border-radius: 0;
-                background: #ffffff;
-                color: #17212b;
-                padding: 0 7px;
-                selection-background-color: #cfe8ff;
-                selection-color: #17212b;
-            }
-            """
+            "LineEdit { border: none; border-radius: 0; "
+            "background: transparent; padding: 0 7px; }"
         )
         return editor
 
@@ -52,7 +47,7 @@ class SeamlessRoiCellDelegate(QStyledItemDelegate):
         editor.setGeometry(option.rect)
 
 
-class SweepGeneratorDialog(QDialog):
+class SweepGeneratorDialog(FluentRecipeDialog):
     """Dynamic interval editor with an exact point scatter preview."""
 
     def __init__(
@@ -63,6 +58,7 @@ class SweepGeneratorDialog(QDialog):
         initial_segments: list[dict[str, object]] | None = None,
     ) -> None:
         super().__init__(parent)
+        self.setProperty("stationSurface", "page")
         self.definition = definition
         self.setWindowTitle(f"Point generator — {definition['label']}")
         self.setMinimumSize(640, 560)
@@ -70,7 +66,7 @@ class SweepGeneratorDialog(QDialog):
         layout = QVBoxLayout(self)
         layout.setContentsMargins(14, 12, 14, 12)
         layout.setSpacing(10)
-        heading = QLabel(
+        heading = BodyLabel(
             "Build any number of inclusive intervals. Each interval uses either a point count "
             "or a physical step; the scatter plot always shows the exact generated points."
         )
@@ -82,57 +78,14 @@ class SweepGeneratorDialog(QDialog):
         self.segment_panel.setMinimumWidth(0)
         left_layout = QVBoxLayout(self.segment_panel)
         left_layout.setContentsMargins(0, 0, 6, 0)
-        self.segments = QTableWidget(0, 5)
-        roi_palette = self.segments.palette()
-        roi_palette.setColor(QPalette.ColorRole.Base, QColor("#ffffff"))
-        roi_palette.setColor(QPalette.ColorRole.AlternateBase, QColor("#f7f9fc"))
-        roi_palette.setColor(QPalette.ColorRole.Text, QColor("#17212b"))
-        roi_palette.setColor(QPalette.ColorRole.Window, QColor("#ffffff"))
-        roi_palette.setColor(QPalette.ColorRole.WindowText, QColor("#17212b"))
-        roi_palette.setColor(QPalette.ColorRole.Button, QColor("#ffffff"))
-        roi_palette.setColor(QPalette.ColorRole.ButtonText, QColor("#17212b"))
-        roi_palette.setColor(QPalette.ColorRole.Highlight, QColor("#e8f3fd"))
-        roi_palette.setColor(QPalette.ColorRole.HighlightedText, QColor("#17212b"))
-        self.segments.setPalette(roi_palette)
-        self.segments.viewport().setPalette(roi_palette)
-        self.segments.viewport().setAutoFillBackground(True)
+        self.segments = TableWidget(self.segment_panel)
+        self.segments.setRowCount(0)
+        self.segments.setColumnCount(5)
         self.segments.setHorizontalScrollBarPolicy(
             Qt.ScrollBarPolicy.ScrollBarAlwaysOff
         )
         self.segments.setHorizontalHeaderLabels(
             ("Start / value", "Stop", "Method", "Points / step", "Spacing")
-        )
-        self.segments.setStyleSheet(
-            """
-            QTableWidget {
-                border: 1px solid #cbd7e3;
-                border-radius: 8px;
-                background-color: #ffffff;
-                color: #17212b;
-                gridline-color: #dce4ec;
-            }
-            QTableWidget QTableCornerButton::section {
-                background-color: #f5f8fb;
-                border: none;
-                border-bottom: 1px solid #dce4ec;
-            }
-            QTableWidget::item {
-                padding: 0 7px;
-                background-color: #ffffff;
-                color: #17212b;
-            }
-            QTableWidget::item:selected {
-                background: #e8f3fd;
-                color: #17212b;
-            }
-            QHeaderView::section {
-                background-color: #f5f8fb;
-                color: #17212b;
-                border: none;
-                border-bottom: 1px solid #dce4ec;
-                padding: 6px;
-            }
-            """
         )
         self.segments.setEditTriggers(
             QAbstractItemView.EditTrigger.SelectedClicked
@@ -156,8 +109,8 @@ class SweepGeneratorDialog(QDialog):
         self.segments.setMinimumHeight(190)
         left_layout.addWidget(self.segments, 1)
         actions = QHBoxLayout()
-        self.add_segment = QPushButton("+ Add interval")
-        self.remove_segment = QPushButton("Remove interval")
+        self.add_segment = PushButton("+ Add interval", self.segment_panel)
+        self.remove_segment = PushButton("Remove interval", self.segment_panel)
         actions.addWidget(self.add_segment)
         actions.addWidget(self.remove_segment)
         left_layout.addLayout(actions)
@@ -169,12 +122,13 @@ class SweepGeneratorDialog(QDialog):
         self.plot = pg.PlotWidget()
         self.plot.setMinimumHeight(280)
         self.plot_theme = self._resolved_plot_theme()
+        self._apply_table_theme()
         self._apply_plot_theme()
         self.plot.showGrid(x=True, y=True, alpha=0.25)
         self.legend = self.plot.addLegend(offset=(10, 10))
         self._set_plot_labels()
         right_layout.addWidget(self.plot, 1)
-        self.preview = QLabel("Add an interval to generate points.")
+        self.preview = BodyLabel("Add an interval to generate points.", self.plot_panel)
         self.preview.setWordWrap(True)
         right_layout.addWidget(self.preview)
         self.splitter.addWidget(self.plot_panel)
@@ -182,16 +136,18 @@ class SweepGeneratorDialog(QDialog):
         self.splitter.setStretchFactor(1, 3)
         self.splitter.setSizes([450, 700])
         layout.addWidget(self.splitter, 1)
-        buttons = QDialogButtonBox(
-            QDialogButtonBox.StandardButton.Cancel | QDialogButtonBox.StandardButton.Ok
-        )
-        buttons.button(QDialogButtonBox.StandardButton.Ok).setText("Create sweep node")
-        layout.addWidget(buttons)
+        footer = QHBoxLayout()
+        footer.addStretch(1)
+        self.cancel_button = PushButton("Cancel", self)
+        self.create_button = PrimaryPushButton("Create sweep node", self)
+        footer.addWidget(self.cancel_button)
+        footer.addWidget(self.create_button)
+        layout.addLayout(footer)
         self.add_segment.clicked.connect(self.add_interval)
         self.remove_segment.clicked.connect(self.remove_interval)
         self.segments.cellChanged.connect(self._refresh_preview)
-        buttons.accepted.connect(self.accept)
-        buttons.rejected.connect(self.reject)
+        self.create_button.clicked.connect(self.accept)
+        self.cancel_button.clicked.connect(self.reject)
         if initial_segments:
             for segment in initial_segments:
                 self.add_interval(segment)
@@ -229,32 +185,54 @@ class SweepGeneratorDialog(QDialog):
         if resolved == self.plot_theme:
             return
         self.plot_theme = resolved
+        self._apply_table_theme()
         self._apply_plot_theme()
         self._set_plot_labels()
         self._style_plot_legend()
 
     def _apply_plot_theme(self) -> None:
-        background = "#ffffff" if self.plot_theme == "light" else "#101419"
-        foreground = "#243447" if self.plot_theme == "light" else "#e6edf3"
-        grid = "#9aa8b6" if self.plot_theme == "light" else "#52606d"
-        self.plot.setBackground(background)
+        palette = plot_theme(tokens_for(self.plot_theme))
+        self.plot.setBackground(palette.background)
         plot_item = self.plot.getPlotItem()
         for name in ("left", "bottom"):
             axis = plot_item.getAxis(name)
-            axis.setPen(pg.mkPen(foreground, width=1))
-            axis.setTextPen(pg.mkPen(foreground))
-        plot_item.getViewBox().setBorder(pg.mkPen(grid, width=1))
+            axis.setPen(pg.mkPen(palette.axes, width=1))
+            axis.setTextPen(pg.mkPen(palette.axes))
+        plot_item.getViewBox().setBorder(pg.mkPen(palette.grid, width=1))
+
+    def _apply_table_theme(self) -> None:
+        """Map QFluent's transparent table viewport onto station tokens."""
+
+        tokens = tokens_for(self.plot_theme)
+        for widget in (self.segments, self.segments.viewport()):
+            palette = widget.palette()
+            for role, color in (
+                (QPalette.ColorRole.Window, tokens.surface),
+                (QPalette.ColorRole.Base, tokens.surface),
+                (QPalette.ColorRole.AlternateBase, tokens.surface_raised),
+                (QPalette.ColorRole.Text, tokens.text_primary),
+                (QPalette.ColorRole.WindowText, tokens.text_primary),
+                (QPalette.ColorRole.Highlight, tokens.accent),
+            ):
+                palette.setColor(role, QColor(color))
+            palette.setColor(
+                QPalette.ColorRole.HighlightedText,
+                QColor(tokens.background if self.plot_theme == "dark" else "#ffffff"),
+            )
+            widget.setPalette(palette)
+            widget.setAutoFillBackground(True)
+            widget.update()
 
     def _set_plot_labels(self) -> None:
-        foreground = "#243447" if self.plot_theme == "light" else "#e6edf3"
+        foreground = tokens_for(self.plot_theme).plot_axes
         self.plot.setLabel("bottom", "Generated point index", color=foreground)
         self.plot.setLabel("left", self.definition["label"], color=foreground)
 
     def _style_plot_legend(self) -> None:
-        foreground = "#243447" if self.plot_theme == "light" else "#e6edf3"
-        background = "#ffffffdd" if self.plot_theme == "light" else "#101419dd"
-        self.legend.setBrush(pg.mkBrush(background))
-        self.legend.setPen(pg.mkPen("#cbd5df" if self.plot_theme == "light" else "#52606d"))
+        tokens = tokens_for(self.plot_theme)
+        foreground = tokens.plot_axes
+        self.legend.setBrush(pg.mkBrush(tokens.surface))
+        self.legend.setPen(pg.mkPen(tokens.border))
         for _sample, label in self.legend.items:
             try:
                 label.setText(label.text, color=foreground)
@@ -270,13 +248,15 @@ class SweepGeneratorDialog(QDialog):
             self.splitter.setOrientation(orientation)
         if narrow:
             self.segment_panel.setMinimumWidth(0)
+            self.segments.setMinimumWidth(0)
             self.plot_panel.setMinimumWidth(0)
             self.splitter.setSizes([260, 350])
         else:
-            self.segment_panel.setMinimumWidth(540)
+            self.segment_panel.setMinimumWidth(600)
+            self.segments.setMinimumWidth(580)
             self.plot_panel.setMinimumWidth(420)
             available = max(960, self.splitter.width())
-            table_width = max(540, min(620, round(available * 0.5)))
+            table_width = max(600, min(640, round(available * 0.52)))
             self.splitter.setSizes([table_width, max(420, available - table_width)])
         self._resize_segment_columns()
         QTimer.singleShot(0, self._resize_segment_columns)
@@ -292,7 +272,7 @@ class SweepGeneratorDialog(QDialog):
         method_width = 118
         value_width = 122
         spacing_width = 122
-        flexible = max(176, viewport_width - method_width - value_width - spacing_width - 2)
+        flexible = max(176, viewport_width - method_width - value_width - spacing_width - 12)
         start_width = flexible // 2
         stop_width = flexible - start_width
         for column, width in (
@@ -327,34 +307,14 @@ class SweepGeneratorDialog(QDialog):
             (3, point_value),
         ):
             self.segments.setItem(row, column, QTableWidgetItem(value))
-        method = QComboBox()
+        method = ComboBox(self.segments)
         method.setObjectName("roiCellCombo")
         method.addItems(("Points", "Step", "Single value"))
         method.setMinimumWidth(112)
-        spacing = QComboBox()
+        spacing = ComboBox(self.segments)
         spacing.setObjectName("roiCellCombo")
         spacing.addItems(("Linear", "Logarithmic"))
         spacing.setMinimumWidth(112)
-        cell_combo_style = """
-            QComboBox#roiCellCombo {
-                border: none;
-                border-radius: 0;
-                background: #ffffff;
-                color: #17212b;
-                padding: 0 22px 0 7px;
-            }
-            QComboBox#roiCellCombo:hover { background: rgba(47, 130, 198, 18); }
-            QComboBox#roiCellCombo:disabled { color: #8a98a8; }
-            QComboBox#roiCellCombo::drop-down { border: none; width: 20px; }
-            QComboBox#roiCellCombo QAbstractItemView {
-                background: #ffffff;
-                color: #17212b;
-                selection-background-color: #e8f3fd;
-                selection-color: #17212b;
-            }
-        """
-        method.setStyleSheet(cell_combo_style)
-        spacing.setStyleSheet(cell_combo_style)
         method.setCurrentText(method_value)
         spacing.setCurrentText("Logarithmic" if values.get("spacing") == "log" else "Linear")
         method.currentIndexChanged.connect(
@@ -367,7 +327,7 @@ class SweepGeneratorDialog(QDialog):
         self._update_row_method(method)
         self._refresh_preview()
 
-    def _update_row_method(self, method: QComboBox) -> None:
+    def _update_row_method(self, method: ComboBox) -> None:
         row = next(
             (
                 index
@@ -396,9 +356,7 @@ class SweepGeneratorDialog(QDialog):
                 item.setText("—")
                 item.setFlags(item.flags() & ~Qt.ItemFlag.ItemIsEditable)
                 item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
-                item.setData(
-                    Qt.ItemDataRole.ForegroundRole, QColor("#8a98a8")
-                )
+                item.setData(Qt.ItemDataRole.ForegroundRole, None)
                 item.setToolTip("Not used by a Single value stage")
             else:
                 stored = item.data(Qt.ItemDataRole.UserRole)
@@ -415,7 +373,7 @@ class SweepGeneratorDialog(QDialog):
                     else "Number of points or physical step"
                 )
         spacing = self.segments.cellWidget(row, 4)
-        if isinstance(spacing, QComboBox):
+        if isinstance(spacing, ComboBox):
             spacing.setEnabled(not single)
         self._refresh_preview()
 
@@ -443,7 +401,7 @@ class SweepGeneratorDialog(QDialog):
             value = self.segments.item(row, 3)
             method = self.segments.cellWidget(row, 2)
             spacing = self.segments.cellWidget(row, 4)
-            if not all((start, stop, value)) or not isinstance(method, QComboBox) or not isinstance(spacing, QComboBox):
+            if not all((start, stop, value)) or not isinstance(method, ComboBox) or not isinstance(spacing, ComboBox):
                 raise ConfigurationError("Every interval needs start, stop and point data.")
             if method.currentText() == "Single value":
                 result.append({"value": start.text().strip()})
@@ -532,4 +490,3 @@ class SweepGeneratorDialog(QDialog):
             QMessageBox.warning(self, "Point generator", "The generator exceeds the 100,000 point safety preview limit.")
             return
         super().accept()
-

@@ -8,8 +8,11 @@ from typing import Any
 from PySide6.QtCore import Qt
 from PySide6.QtWidgets import (
     QCheckBox, QComboBox, QDialog, QDialogButtonBox, QFormLayout, QFrame,
-    QGridLayout, QLabel, QLineEdit, QMessageBox, QPushButton, QSplitter,
-    QTabWidget, QVBoxLayout, QWidget,
+    QGridLayout, QHBoxLayout, QLabel, QLineEdit, QMessageBox, QPushButton,
+    QSplitter, QStackedWidget, QTabWidget, QVBoxLayout, QWidget,
+)
+from qfluentwidgets import (
+    CheckBox, ComboBox, LineEdit, PrimaryPushButton, PushButton, SegmentedWidget,
 )
 
 from app.devices.anritsu_ms2830a import AnritsuConfigurationSnapshot, SignalGeneratorSnapshot
@@ -23,9 +26,10 @@ from app.recipes import RecipeNode
 from app.settings.models import StationSettings
 from app.ui.common import line_edit as _line
 from app.ui.recipes.sweep_editor import SweepGeneratorDialog
+from app.ui.recipes.fluent_dialog import FluentRecipeDialog
 
 
-class AnritsuNodeEditorDialog(QDialog):
+class AnritsuNodeEditorDialog(FluentRecipeDialog):
     """Offline Anritsu spectrum DeviceNode editor using the shared panel."""
 
     parameter_specs = (
@@ -53,6 +57,7 @@ class AnritsuNodeEditorDialog(QDialog):
         snapshot: AnritsuConfigurationSnapshot | None = None,
     ) -> None:
         super().__init__(parent)
+        self.setProperty("stationSurface", "page")
         self.plan_mode = True
         self.hardware_actions_enabled = False
         self._working_segments: dict[str, list[dict[str, object]]] = {}
@@ -68,7 +73,8 @@ class AnritsuNodeEditorDialog(QDialog):
         left = QFrame()
         left.setObjectName("recipeEditorParameters")
         left_layout = QVBoxLayout(left)
-        parameter_tabs = QTabWidget()
+        parameter_tabs = QStackedWidget(left)
+        parameter_routes = SegmentedWidget(left)
         self.configuration_panel = AnritsuSpectrumConfigurationPanel(
             settings, parameter_tabs, plan_mode=True
         )
@@ -84,8 +90,15 @@ class AnritsuNodeEditorDialog(QDialog):
             "The selected state is validated against detected Anritsu hardware "
             "options before execution."
         )
-        parameter_tabs.addTab(self.configuration_panel, "Spectrum setup")
-        parameter_tabs.addTab(self.advanced_panel, "Bandwidth & input path")
+        parameter_tabs.addWidget(self.configuration_panel)
+        parameter_tabs.addWidget(self.advanced_panel)
+        parameter_routes.addItem("spectrum", "Spectrum setup")
+        parameter_routes.addItem("advanced", "Bandwidth & input path")
+        parameter_routes.setCurrentItem("spectrum")
+        parameter_routes.currentItemChanged.connect(
+            lambda route: parameter_tabs.setCurrentIndex(0 if route == "spectrum" else 1)
+        )
+        left_layout.addWidget(parameter_routes)
         left_layout.addWidget(parameter_tabs)
         self.content_splitter.addWidget(left)
         right = QFrame()
@@ -94,32 +107,32 @@ class AnritsuNodeEditorDialog(QDialog):
         title = QLabel("Select what this node controls")
         title.setObjectName("sectionTitle")
         right_layout.addWidget(title, 0, 0, 1, 2)
-        self.parameter_selectors: dict[str, QComboBox] = {}
+        self.parameter_selectors: dict[str, ComboBox] = {}
         for row, (parameter_id, label, sweepable) in enumerate(
             self.parameter_specs, start=1
         ):
             right_layout.addWidget(QLabel(label), row, 0)
-            selector = QComboBox()
-            selector.addItem("Bez zmian", "unchanged")
-            selector.addItem("Ustaw", "set")
+            selector = ComboBox(self)
+            selector.addItem("Bez zmian", userData="unchanged")
+            selector.addItem("Ustaw", userData="set")
             if sweepable:
-                selector.addItem("Sweep — ROI wymagane", "sweep")
+                selector.addItem("Sweep — ROI wymagane", userData="sweep")
             selector.currentIndexChanged.connect(self._selection_changed)
             self.parameter_selectors[parameter_id] = selector
             right_layout.addWidget(selector, row, 1)
         operation_row = len(self.parameter_specs) + 1
-        self.acquire_single = QCheckBox("Acquire single spectrum at this tree position")
+        self.acquire_single = CheckBox("Acquire single spectrum at this tree position", self)
         self.acquire_single.setChecked(False)
         self.acquire_single.setVisible(False)
         right_layout.addWidget(self.acquire_single, operation_row, 0, 1, 2)
-        self.trace = QComboBox()
+        self.trace = ComboBox(self)
         self.trace.addItems(("TRAC1",))
         self.trace_label = QLabel("Trace")
         self.trace_label.setVisible(False)
         self.trace.setVisible(False)
         right_layout.addWidget(self.trace_label, operation_row + 1, 0)
         right_layout.addWidget(self.trace, operation_row + 1, 1)
-        self.open_roi_button = QPushButton("Przejdź do ROI…")
+        self.open_roi_button = PrimaryPushButton("Przejdź do ROI…", self)
         self.open_roi_button.setEnabled(False)
         self.open_roi_button.clicked.connect(self._open_roi)
         right_layout.addWidget(
@@ -137,16 +150,15 @@ class AnritsuNodeEditorDialog(QDialog):
         self.content_splitter.addWidget(right)
         self.content_splitter.setSizes([570, 390])
         layout.addWidget(self.content_splitter, 1)
-        buttons = QDialogButtonBox(
-            QDialogButtonBox.StandardButton.Cancel
-            | QDialogButtonBox.StandardButton.Apply
-        )
-        buttons.button(QDialogButtonBox.StandardButton.Apply).setText(
-            "Apply Anritsu node"
-        )
-        buttons.accepted.connect(self.accept)
-        buttons.rejected.connect(self.reject)
-        layout.addWidget(buttons)
+        footer = QHBoxLayout()
+        footer.addStretch(1)
+        self.cancel_button = PushButton("Cancel", self)
+        self.apply_button = PrimaryPushButton("Apply Anritsu node", self)
+        footer.addWidget(self.cancel_button)
+        footer.addWidget(self.apply_button)
+        self.apply_button.clicked.connect(self.accept)
+        self.cancel_button.clicked.connect(self.reject)
+        layout.addLayout(footer)
 
     def resizeEvent(self, event: object) -> None:
         super().resizeEvent(event)  # type: ignore[arg-type]
@@ -380,7 +392,7 @@ class AnritsuNodeEditorDialog(QDialog):
         super().accept()
 
 
-class AnritsuSignalGeneratorNodeEditorDialog(QDialog):
+class AnritsuSignalGeneratorNodeEditorDialog(FluentRecipeDialog):
     """Offline editor for an Anritsu SG DeviceNode and its single local ROI."""
 
     parameter_specs = (
@@ -397,6 +409,7 @@ class AnritsuSignalGeneratorNodeEditorDialog(QDialog):
         parameter_actions: list[dict[str, object]] | None = None,
     ) -> None:
         super().__init__(parent)
+        self.setProperty("stationSurface", "page")
         self.setWindowTitle("Anritsu MS2830A — signal generator sweep node")
         self.resize(620, 420)
         self.setMinimumSize(520, 360)
@@ -406,24 +419,26 @@ class AnritsuSignalGeneratorNodeEditorDialog(QDialog):
         heading.setObjectName("pageTitle")
         layout.addWidget(heading)
         form = QGridLayout()
-        self.frequency = QLineEdit(frequency)
-        self.power = QLineEdit(power)
-        self.parameter_selectors: dict[str, QComboBox] = {}
+        self.frequency = LineEdit(self)
+        self.frequency.setText(frequency)
+        self.power = LineEdit(self)
+        self.power.setText(power)
+        self.parameter_selectors: dict[str, ComboBox] = {}
         for row, (parameter_id, label, _dimension) in enumerate(
             self.parameter_specs
         ):
             field = self.frequency if parameter_id == "sg.frequency" else self.power
-            selector = QComboBox()
-            selector.addItem("Bez zmian", "unchanged")
-            selector.addItem("Ustaw", "set")
-            selector.addItem("Sweep — ROI wymagane", "sweep")
+            selector = ComboBox(self)
+            selector.addItem("Bez zmian", userData="unchanged")
+            selector.addItem("Ustaw", userData="set")
+            selector.addItem("Sweep — ROI wymagane", userData="sweep")
             selector.currentIndexChanged.connect(self._selection_changed)
             self.parameter_selectors[parameter_id] = selector
             form.addWidget(QLabel(label), row, 0)
             form.addWidget(field, row, 1)
             form.addWidget(selector, row, 2)
         layout.addLayout(form)
-        self.open_roi_button = QPushButton("Edytuj ROI…")
+        self.open_roi_button = PrimaryPushButton("Edytuj ROI…", self)
         self.open_roi_button.setEnabled(False)
         self.open_roi_button.clicked.connect(self._open_roi)
         layout.addWidget(self.open_roi_button)
@@ -436,16 +451,15 @@ class AnritsuSignalGeneratorNodeEditorDialog(QDialog):
         note.setWordWrap(True)
         layout.addWidget(note)
         layout.addStretch(1)
-        buttons = QDialogButtonBox(
-            QDialogButtonBox.StandardButton.Cancel
-            | QDialogButtonBox.StandardButton.Apply
-        )
-        buttons.button(QDialogButtonBox.StandardButton.Apply).setText(
-            "Apply Anritsu SG node"
-        )
-        buttons.accepted.connect(self.accept)
-        buttons.rejected.connect(self.reject)
-        layout.addWidget(buttons)
+        footer = QHBoxLayout()
+        footer.addStretch(1)
+        self.cancel_button = PushButton("Cancel", self)
+        self.apply_button = PrimaryPushButton("Apply Anritsu SG node", self)
+        footer.addWidget(self.cancel_button)
+        footer.addWidget(self.apply_button)
+        self.apply_button.clicked.connect(self.accept)
+        self.cancel_button.clicked.connect(self.reject)
+        layout.addLayout(footer)
         self.load_plan_actions(parameter_actions or [])
 
     def _selected_sweep_parameter(self) -> str | None:
@@ -553,5 +567,3 @@ class AnritsuSignalGeneratorNodeEditorDialog(QDialog):
             )
             return
         super().accept()
-
-

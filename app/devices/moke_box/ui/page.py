@@ -4,7 +4,6 @@ from __future__ import annotations
 
 from PySide6.QtCore import QTimer, Qt, Signal
 from PySide6.QtWidgets import (
-    QDialog,
     QGridLayout,
     QHBoxLayout,
     QLabel,
@@ -13,13 +12,14 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 from qfluentwidgets import CardWidget, CheckBox, PrimaryPushButton, PushButton, SpinBox
+from app.ui.recipes.fluent_dialog import StationDialog
 
 from app.devices.moke_box.models import MokeHallVoltageReading, hall_field_from_voltage
 from app.settings.models import StationSettings
 from app.ui.workers import DeviceController
 
 
-class MokeHallLiveWindow(QDialog):
+class MokeHallLiveWindow(StationDialog):
     """Modeless, always-on-top read-only view backed by the page's single timer."""
 
     read_requested = Signal()

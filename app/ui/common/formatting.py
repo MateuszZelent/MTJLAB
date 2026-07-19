@@ -3,10 +3,12 @@
 from __future__ import annotations
 
 from PySide6.QtWidgets import QLineEdit
+from qfluentwidgets import LineEdit
 
 
 def line_edit(value: str, width: int = 14) -> QLineEdit:
-    edit = QLineEdit(value)
+    edit = LineEdit()
+    edit.setText(value)
     edit.setMinimumWidth(width * 8)
     return edit
 

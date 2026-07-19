@@ -4,17 +4,17 @@ from __future__ import annotations
 
 from PySide6.QtCore import Qt, Signal
 from PySide6.QtWidgets import (
-    QDialog,
     QDialogButtonBox,
     QFormLayout,
     QHBoxLayout,
     QLabel,
     QLineEdit,
-    QPushButton,
     QSpinBox,
     QVBoxLayout,
     QWidget,
 )
+from qfluentwidgets import PushButton
+from app.ui.recipes.fluent_dialog import StationDialog
 
 from app.domain.quantities import (
     DIMENSION_CURRENT,
@@ -53,7 +53,7 @@ class LimitField(QWidget):
             label.setAlignment(Qt.AlignmentFlag.AlignCenter)
         row.addWidget(self.minimum)
         row.addWidget(self.maximum)
-        self.edit_button = QPushButton("Edit…")
+        self.edit_button = PushButton("Edit…", self)
         self.edit_button.setObjectName("limitEditButton")
         self.edit_button.setToolTip(
             "Edit this safety range in a popup window. Saving revokes profile approval."
@@ -179,7 +179,7 @@ class LimitField(QWidget):
             self._last_valid = str(value)
 
 
-class LimitEditDialog(QDialog):
+class LimitEditDialog(StationDialog):
     """Small focused editor for one safety range."""
 
     def __init__(
@@ -221,6 +221,4 @@ class LimitEditDialog(QDialog):
         buttons.accepted.connect(self.accept)
         buttons.rejected.connect(self.reject)
         layout.addWidget(buttons)
-
-
 

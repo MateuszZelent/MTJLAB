@@ -4,7 +4,8 @@ from __future__ import annotations
 
 import ipaddress
 
-from PySide6.QtCore import Signal
+from PySide6.QtCore import Qt, Signal
+from PySide6.QtGui import QResizeEvent
 from PySide6.QtWidgets import (
     QDialog,
     QGridLayout,
@@ -32,22 +33,29 @@ from app.settings.models import StationSettings
 from qfluentwidgets import (
     BodyLabel,
     CardWidget,
+    CaptionLabel,
+    FluentIcon,
+    IconWidget,
     IndeterminateProgressBar,
     InfoBar,
     LineEdit,
-    Pivot,
     PlainTextEdit,
     PrimaryPushButton,
     ProgressBar,
     PushButton,
+    SegmentedWidget,
+    SimpleCardWidget,
     SpinBox,
+    StrongBodyLabel,
     SubtitleLabel,
+    TitleLabel,
 )
 
 from app.ui.dashboard.device_card import DeviceCard
 from app.ui.dashboard.discovery_surfaces import SavedInstrumentsView, TcpDiscoveryResultsView
 from app.ui.dashboard.visa_results import VisaResultState, VisaResultsView
 from app.ui.discovery_worker import MokeIdentificationWorker, TcpDiscoveryWorker, VisaDiscoveryWorker
+from app.ui.recipes.fluent_dialog import StationDialog
 
 
 class DashboardPage(QWidget):
@@ -137,30 +145,66 @@ class DashboardPage(QWidget):
         self.discovery_page = QWidget(self)
         self.discovery_page.setProperty("stationSurface", "page")
         discovery_layout = QVBoxLayout(self.discovery_page)
-        discovery_layout.setContentsMargins(0, 0, 0, 0)
-        discovery_layout.setSpacing(12)
-        discovery_layout.addWidget(SubtitleLabel("Instrument discovery", self.discovery_page))
+        discovery_layout.setContentsMargins(24, 20, 24, 24)
+        discovery_layout.setSpacing(16)
+        discovery_header = QHBoxLayout()
+        discovery_header.setSpacing(16)
+        discovery_heading = QVBoxLayout()
+        discovery_heading.setSpacing(4)
+        discovery_title = TitleLabel("Instrument discovery", self.discovery_page)
+        discovery_title.setObjectName("pageTitle")
+        discovery_heading.addWidget(discovery_title)
         discovery_subtitle = BodyLabel(
-            "Find station instruments safely, then save only deliberate assignments.",
+            "Find, identify and assign station instruments from one controlled workspace.",
             self.discovery_page,
         )
         discovery_subtitle.setWordWrap(True)
-        discovery_layout.addWidget(discovery_subtitle)
-        self.discovery_pivot = Pivot(self.discovery_page)
-        discovery_layout.addWidget(self.discovery_pivot)
+        discovery_heading.addWidget(discovery_subtitle)
+        discovery_header.addLayout(discovery_heading, 1)
+        discovery_layout.addLayout(discovery_header)
+
+        self.discovery_safety_card = SimpleCardWidget(self.discovery_page)
+        self.discovery_safety_card.setProperty("stationSurface", "raised")
+        safety_layout = QHBoxLayout(self.discovery_safety_card)
+        safety_layout.setContentsMargins(16, 12, 16, 12)
+        safety_layout.setSpacing(12)
+        safety_icon = IconWidget(FluentIcon.INFO, self.discovery_safety_card)
+        safety_icon.setFixedSize(22, 22)
+        safety_layout.addWidget(safety_icon, 0, Qt.AlignmentFlag.AlignTop)
+        safety_copy = QVBoxLayout()
+        safety_copy.setSpacing(2)
+        safety_copy.addWidget(StrongBodyLabel("Read-only discovery", self.discovery_safety_card))
+        safety_hint = CaptionLabel(
+            "Scans never enable outputs. Saving an assignment is a separate, deliberate action and revokes safety-profile approval.",
+            self.discovery_safety_card,
+        )
+        safety_hint.setWordWrap(True)
+        safety_copy.addWidget(safety_hint)
+        safety_layout.addLayout(safety_copy, 1)
+        discovery_layout.addWidget(self.discovery_safety_card)
+
+        self.discovery_workspace = SimpleCardWidget(self.discovery_page)
+        self.discovery_workspace.setProperty("stationSurface", "surface")
+        workspace_layout = QVBoxLayout(self.discovery_workspace)
+        workspace_layout.setContentsMargins(20, 16, 20, 20)
+        workspace_layout.setSpacing(16)
+        self.discovery_pivot = SegmentedWidget(self.discovery_workspace)
+        self.discovery_pivot.setSizePolicy(QSizePolicy.Policy.Maximum, QSizePolicy.Policy.Fixed)
+        workspace_layout.addWidget(self.discovery_pivot, 0, Qt.AlignmentFlag.AlignLeft)
         self.discovery_stack = QStackedWidget(self.discovery_page)
         self.discovery_stack.setSizePolicy(
             QSizePolicy.Policy.Ignored,
             QSizePolicy.Policy.Expanding,
         )
-        discovery_layout.addWidget(self.discovery_stack, 1)
+        workspace_layout.addWidget(self.discovery_stack, 1)
+        discovery_layout.addWidget(self.discovery_workspace, 1)
 
         self.visa_discovery_page = QWidget(self.discovery_stack)
         visa_layout = QVBoxLayout(self.visa_discovery_page)
         visa_layout.setContentsMargins(0, 0, 0, 0)
         visa_layout.setSpacing(12)
         discovery_header = QHBoxLayout()
-        discovery_title = SubtitleLabel("VISA instrument discovery", self.visa_discovery_page)
+        discovery_title = StrongBodyLabel("VISA instruments", self.visa_discovery_page)
         discovery_header.addWidget(discovery_title)
         discovery_header.addStretch(1)
         self.scan_button = PrimaryPushButton("Scan VISA", self.visa_discovery_page)
@@ -176,7 +220,7 @@ class DashboardPage(QWidget):
         discovery_header.addWidget(self.scan_button)
         discovery_header.addWidget(self.save_assignments)
         visa_layout.addLayout(discovery_header)
-        self.discovery_info = BodyLabel(
+        self.discovery_info = CaptionLabel(
             "No scan performed. USB/GPIB resources are normally discoverable; LAN discovery depends on the VISA backend.",
             self.visa_discovery_page,
         )
@@ -203,7 +247,7 @@ class DashboardPage(QWidget):
         tcp_layout = QVBoxLayout(self.tcp_discovery_page)
         tcp_layout.setContentsMargins(0, 0, 0, 0)
         tcp_header = QHBoxLayout()
-        tcp_title = SubtitleLabel("TCP/IP port discovery", self.tcp_discovery_page)
+        tcp_title = StrongBodyLabel("TCP/IP endpoints", self.tcp_discovery_page)
         tcp_header.addWidget(tcp_title)
         tcp_header.addStretch(1)
         self.tcp_network = LineEdit(self.tcp_discovery_page)
@@ -251,27 +295,19 @@ class DashboardPage(QWidget):
         self.tcp_stop_button.setEnabled(False)
         self.tcp_stop_button.setToolTip("Stop scheduling further TCP connection attempts.")
         tcp_layout.addLayout(tcp_header)
-        tcp_controls = QGridLayout()
-        tcp_controls.setHorizontalSpacing(8)
-        tcp_controls.setVerticalSpacing(8)
-        tcp_controls.addWidget(BodyLabel("CIDR / IP / from:", self.tcp_discovery_page), 0, 0)
-        tcp_controls.addWidget(self.tcp_network, 0, 1)
-        tcp_controls.addWidget(BodyLabel("to:", self.tcp_discovery_page), 0, 2)
-        tcp_controls.addWidget(self.tcp_range_end, 0, 3)
-        tcp_controls.addWidget(BodyLabel("Port:", self.tcp_discovery_page), 0, 4)
-        tcp_controls.addWidget(self.tcp_port, 0, 5)
-        tcp_controls.addWidget(BodyLabel("Timeout:", self.tcp_discovery_page), 0, 6)
-        tcp_controls.addWidget(self.tcp_timeout_ms, 0, 7)
-        tcp_controls.addWidget(self.tcp_detect_button, 1, 0, 1, 2)
-        tcp_controls.addWidget(self.tcp_scan_button, 1, 2, 1, 2)
-        tcp_controls.addWidget(self.tcp_stop_button, 1, 4)
-        tcp_controls.addWidget(self.tcp_test_entered_button, 1, 5)
-        tcp_controls.addWidget(self.tcp_identify_button, 1, 6)
-        tcp_controls.addWidget(self.tcp_assign_moke_button, 1, 7)
-        tcp_controls.setColumnStretch(1, 3)
-        tcp_controls.setColumnStretch(3, 2)
-        tcp_layout.addLayout(tcp_controls)
-        self.tcp_discovery_info = BodyLabel(
+        self.tcp_controls = QGridLayout()
+        self.tcp_controls.setHorizontalSpacing(8)
+        self.tcp_controls.setVerticalSpacing(8)
+        self.tcp_network_label = BodyLabel("CIDR / IP / from", self.tcp_discovery_page)
+        self.tcp_range_label = BodyLabel("To", self.tcp_discovery_page)
+        self.tcp_port_label = BodyLabel("Port", self.tcp_discovery_page)
+        self.tcp_timeout_label = BodyLabel("Timeout", self.tcp_discovery_page)
+        tcp_layout.addLayout(self.tcp_controls)
+        self._tcp_controls_compact: bool | None = None
+        # Start from the narrow-safe arrangement so the wide grid cannot set a
+        # minimum page width before the Fluent host receives its geometry.
+        self._layout_tcp_controls(compact=True)
+        self.tcp_discovery_info = CaptionLabel(
             "No TCP/IP scan performed. The reconstructed MOKE Box protocol uses TCP port 10001.",
             self.tcp_discovery_page,
         )
@@ -292,7 +328,7 @@ class DashboardPage(QWidget):
         self.saved_page = QWidget(self.discovery_stack)
         saved_layout = QVBoxLayout(self.saved_page)
         saved_layout.setContentsMargins(0, 0, 0, 0)
-        saved_title = SubtitleLabel("Saved instruments", self.saved_page)
+        saved_title = StrongBodyLabel("Saved instruments", self.saved_page)
         saved_layout.addWidget(saved_title)
         saved_hint = BodyLabel(
             "Configured resources are kept here for quick orientation. Connection controls live on each instrument page.",
@@ -342,6 +378,75 @@ class DashboardPage(QWidget):
         }
         self.discovery_stack.setCurrentWidget(pages[route])
         self.discovery_pivot.setCurrentItem(route)
+
+    def resizeEvent(self, event: QResizeEvent) -> None:
+        super().resizeEvent(event)
+        self._layout_tcp_controls(compact=event.size().width() < 980)
+
+    def _layout_tcp_controls(self, *, compact: bool) -> None:
+        if getattr(self, "_tcp_controls_compact", None) == compact:
+            return
+        self._tcp_controls_compact = compact
+        controls = (
+            self.tcp_network_label,
+            self.tcp_network,
+            self.tcp_range_label,
+            self.tcp_range_end,
+            self.tcp_port_label,
+            self.tcp_port,
+            self.tcp_timeout_label,
+            self.tcp_timeout_ms,
+            self.tcp_detect_button,
+            self.tcp_scan_button,
+            self.tcp_stop_button,
+            self.tcp_test_entered_button,
+            self.tcp_identify_button,
+            self.tcp_assign_moke_button,
+        )
+        for control in controls:
+            self.tcp_controls.removeWidget(control)
+        if compact:
+            fields = (
+                (self.tcp_network_label, self.tcp_network),
+                (self.tcp_range_label, self.tcp_range_end),
+                (self.tcp_port_label, self.tcp_port),
+                (self.tcp_timeout_label, self.tcp_timeout_ms),
+            )
+            for row, (label, field) in enumerate(fields):
+                self.tcp_controls.addWidget(label, row, 0)
+                self.tcp_controls.addWidget(field, row, 1, 1, 3)
+            for field in (self.tcp_network, self.tcp_range_end):
+                field.setMaximumWidth(16777215)
+            for index, button in enumerate((
+                self.tcp_detect_button,
+                self.tcp_scan_button,
+                self.tcp_stop_button,
+                self.tcp_test_entered_button,
+                self.tcp_identify_button,
+                self.tcp_assign_moke_button,
+            )):
+                self.tcp_controls.addWidget(button, 4 + index // 2, index % 2 * 2, 1, 2)
+            self.tcp_controls.setColumnStretch(1, 1)
+            self.tcp_controls.setColumnStretch(3, 1)
+        else:
+            for column, (label, field) in enumerate((
+                (self.tcp_network_label, self.tcp_network),
+                (self.tcp_range_label, self.tcp_range_end),
+                (self.tcp_port_label, self.tcp_port),
+                (self.tcp_timeout_label, self.tcp_timeout_ms),
+            )):
+                self.tcp_controls.addWidget(label, 0, column * 2)
+                self.tcp_controls.addWidget(field, 0, column * 2 + 1)
+            self.tcp_network.setMaximumWidth(170)
+            self.tcp_range_end.setMaximumWidth(135)
+            self.tcp_controls.addWidget(self.tcp_detect_button, 1, 0, 1, 2)
+            self.tcp_controls.addWidget(self.tcp_scan_button, 1, 2, 1, 2)
+            self.tcp_controls.addWidget(self.tcp_stop_button, 1, 4)
+            self.tcp_controls.addWidget(self.tcp_test_entered_button, 1, 5)
+            self.tcp_controls.addWidget(self.tcp_identify_button, 1, 6)
+            self.tcp_controls.addWidget(self.tcp_assign_moke_button, 1, 7)
+            self.tcp_controls.setColumnStretch(1, 3)
+            self.tcp_controls.setColumnStretch(3, 2)
 
     def update_settings(self, settings: StationSettings) -> None:
         previous_resources = {
@@ -489,7 +594,11 @@ class DashboardPage(QWidget):
         self.visa_progress.show()
         self.visa_progress.start()
         self.discovery_info.setText("Scanning VISA resources… only *IDN? will be sent.")
-        self._discovery_worker = VisaDiscoveryWorker(backends, self)
+        self._discovery_worker = VisaDiscoveryWorker(
+            backends,
+            self,
+            preferred_lakeshore_baud=self._settings.lakeshore_gaussmeter.baud_rate,
+        )
         self._discovery_worker.completed.connect(self._scan_completed)
         self._discovery_worker.failed.connect(self._scan_failed)
         self._discovery_worker.finished.connect(lambda: self.scan_button.setEnabled(self._discovery_enabled))
@@ -777,7 +886,7 @@ class DashboardPage(QWidget):
         tx_bytes: bytes,
         rx_bytes: bytes,
     ) -> None:
-        dialog = QDialog(self)
+        dialog = StationDialog(self)
         dialog.setObjectName("mokeProtocolTraceDialog")
         dialog.setWindowTitle(f"MOKE protocol test — {endpoint}")
         dialog.setMinimumSize(680, 460)
@@ -944,6 +1053,14 @@ class DashboardPage(QWidget):
             and lake_shore.visa_backend == result.backend
         ):
             return "lakeshore_gaussmeter"
+        return None
+
+    def discovered_serial_baud(self, resource: str, backend: str) -> int | None:
+        """Return the baud that produced IDN for one current scan result."""
+
+        for result in self._discovery_results:
+            if result.resource == resource and result.backend == backend:
+                return result.serial_baud
         return None
 
     def _refresh_visa_results(self) -> None:

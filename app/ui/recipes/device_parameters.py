@@ -4,16 +4,17 @@ from __future__ import annotations
 
 from PySide6.QtCore import Qt
 from PySide6.QtWidgets import (
-    QComboBox, QDialog, QDialogButtonBox, QLabel, QListWidget,
-    QListWidgetItem, QMessageBox, QVBoxLayout, QWidget,
+    QLabel, QListWidgetItem, QMessageBox, QHBoxLayout, QVBoxLayout, QWidget,
 )
+from qfluentwidgets import ComboBox, ListWidget, PrimaryPushButton, PushButton
 
 from collections.abc import Mapping, Sequence
 
 from app.recipes.parameter_registry import SWEEPABLE_PARAMETERS
+from app.ui.recipes.fluent_dialog import FluentRecipeDialog
 
 
-class DeviceParameterDialog(QDialog):
+class DeviceParameterDialog(FluentRecipeDialog):
     """Let an operator select every controllable field for one instrument."""
 
     def __init__(
@@ -24,29 +25,32 @@ class DeviceParameterDialog(QDialog):
         definitions: Sequence[Mapping[str, str]] | None = None,
     ) -> None:
         super().__init__(parent)
+        self.setProperty("stationSurface", "page")
         self._definitions = tuple(dict(definition) for definition in (definitions or SWEEPABLE_PARAMETERS))
         self.setWindowTitle("Add device controls")
         self.setMinimumSize(460, 420)
         layout = QVBoxLayout(self)
         layout.addWidget(QLabel("Choose an instrument, then select one or more fields to sweep."))
-        self.device = QComboBox()
+        self.device = ComboBox(self)
         devices = tuple(dict.fromkeys(definition["device"] for definition in self._definitions))
         self.device.addItems(devices)
         layout.addWidget(self.device)
-        self.operation = QComboBox()
-        self.operation.addItem("Create dynamic sweep", "sweep")
-        self.operation.addItem("Set one fixed value", "fixed")
+        self.operation = ComboBox(self)
+        self.operation.addItem("Create dynamic sweep", userData="sweep")
+        self.operation.addItem("Set one fixed value", userData="fixed")
         layout.addWidget(self.operation)
-        self.fields = QListWidget()
+        self.fields = ListWidget(self)
         layout.addWidget(self.fields, 1)
-        buttons = QDialogButtonBox(
-            QDialogButtonBox.StandardButton.Cancel | QDialogButtonBox.StandardButton.Ok
-        )
-        buttons.button(QDialogButtonBox.StandardButton.Ok).setText("Open point generators")
-        layout.addWidget(buttons)
+        footer = QHBoxLayout()
+        footer.addStretch(1)
+        self.open_button = PrimaryPushButton("Open point generators", self)
+        self.cancel_button = PushButton("Cancel", self)
+        footer.addWidget(self.cancel_button)
+        footer.addWidget(self.open_button)
+        layout.addLayout(footer)
         self.device.currentTextChanged.connect(self._refresh)
-        buttons.accepted.connect(self.accept)
-        buttons.rejected.connect(self.reject)
+        self.open_button.clicked.connect(self.accept)
+        self.cancel_button.clicked.connect(self.reject)
         if initial_device is not None:
             self.device.setCurrentText(initial_device)
         self._refresh()

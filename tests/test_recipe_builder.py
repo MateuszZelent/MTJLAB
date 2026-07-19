@@ -12,13 +12,17 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 from PySide6.QtWidgets import (
     QApplication,
     QDialog,
+    QDialogButtonBox,
     QFileDialog,
     QHeaderView,
     QMessageBox,
 )
 from PySide6.QtCore import Qt
-from PySide6.QtGui import QPalette
 from PySide6.QtTest import QTest
+from qfluentwidgets import (
+    ComboBox, LineEdit, PlainTextEdit, PrimaryPushButton, PushButton,
+    SpinBox, TableWidget,
+)
 
 from app.recipes import parse_recipe_text
 from app.devices.anritsu_ms2830a.ui import (
@@ -42,6 +46,7 @@ from app.ui.recipes.page import (
     RecipePage,
 )
 from app.ui.workers import DeviceController
+from app.ui.design_system import apply_application_theme, tokens_for
 from app.devices.keithley_2600 import KeithleyAdapter
 from app.devices.anritsu_ms2830a import SignalGeneratorSnapshot
 from app.devices.simulators import SimulatedVisaFactory
@@ -873,7 +878,8 @@ root:
         finally:
             dialog.close()
 
-    def test_roi_table_keeps_readable_light_palette_under_inherited_theme(self) -> None:
+    def test_roi_table_and_editor_follow_light_and_dark_fluent_theme(self) -> None:
+        apply_application_theme(self.application, "light")
         dialog = SweepGeneratorDialog(
             {
                 "device": "Keithley",
@@ -883,20 +889,27 @@ root:
             }
         )
         try:
-            palette = dialog.segments.viewport().palette()
-            self.assertEqual(
-                palette.color(QPalette.ColorRole.Base).name(), "#ffffff"
-            )
-            self.assertEqual(
-                palette.color(QPalette.ColorRole.Text).name(), "#17212b"
-            )
+            self.assertIsInstance(dialog.segments, TableWidget)
+            dialog.resize(900, 700)
+            dialog.show()
+            self.application.processEvents()
+            viewport = dialog.segments.viewport()
+            center = viewport.rect().center()
+            light = viewport.grab().toImage().pixelColor(center)
+            apply_application_theme(self.application, "dark")
+            self.application.processEvents()
+            dark = viewport.grab().toImage().pixelColor(center)
+            self.assertNotEqual(light.name(), dark.name())
             editor = dialog._roi_cell_delegate.createEditor(
                 dialog.segments.viewport(), None, None
             )
-            self.assertIn("background: #ffffff", editor.styleSheet())
-            self.assertIn("color: #17212b", editor.styleSheet())
+            self.assertIsInstance(editor, LineEdit)
+            self.assertIn("background: transparent", editor.styleSheet())
+            self.assertIsInstance(dialog.create_button, PrimaryPushButton)
+            self.assertIsInstance(dialog.cancel_button, PushButton)
         finally:
             dialog.close()
+            apply_application_theme(self.application, "light")
 
     def test_roi_plot_uses_active_application_theme_not_windows_theme(self) -> None:
         previous = self.application.property("activeTheme")
@@ -914,7 +927,10 @@ root:
             self.assertEqual(dialog.plot.backgroundBrush().color().name(), "#ffffff")
             dialog._set_plot_theme("dark")
             self.assertEqual(dialog.plot_theme, "dark")
-            self.assertEqual(dialog.plot.backgroundBrush().color().name(), "#101419")
+            self.assertEqual(
+                dialog.plot.backgroundBrush().color().name(),
+                tokens_for("dark").plot_background,
+            )
         finally:
             dialog.close()
             self.application.setProperty("activeTheme", previous)
@@ -1744,10 +1760,58 @@ root:
         try:
             self.assertIn(dialog.plot_theme, {"light", "dark"})
             background = dialog.plot.backgroundBrush().color().name().lower()
-            expected = "#ffffff" if dialog.plot_theme == "light" else "#101419"
+            expected = tokens_for(dialog.plot_theme).plot_background
             self.assertEqual(background, expected)
         finally:
             dialog.close()
+
+    def test_sweep_dialogs_use_fluent_interactive_controls(self) -> None:
+        sweep = SweepGeneratorDialog(
+            {
+                "device": "Keithley",
+                "label": "Channel B · source current",
+                "target": "keithley.B.current",
+                "dimension": "current",
+            }
+        )
+        fixed = FixedValueDialog(
+            {
+                "device": "Keithley",
+                "label": "Channel B · source current",
+                "target": "keithley.B.current",
+                "dimension": "current",
+            }
+        )
+        picker = DeviceParameterDialog()
+        comment = CommentEditorDialog("Operator note")
+        keithley = KeithleyNodeEditorDialog(simulation_settings())
+        rigol = RigolNodeEditorDialog(settings=simulation_settings())
+        anritsu = AnritsuNodeEditorDialog(simulation_settings())
+        anritsu_sg = AnritsuSignalGeneratorNodeEditorDialog()
+        dialogs = (sweep, fixed, picker, comment, keithley, rigol, anritsu, anritsu_sg)
+        try:
+            self.assertIsInstance(sweep.segments, TableWidget)
+            self.assertIsInstance(sweep.create_button, PrimaryPushButton)
+            self.assertIsInstance(fixed.value, LineEdit)
+            self.assertIsInstance(fixed.create_button, PrimaryPushButton)
+            self.assertIsInstance(picker.device, ComboBox)
+            self.assertIsInstance(picker.open_button, PrimaryPushButton)
+            self.assertIsInstance(comment.editor, PlainTextEdit)
+            self.assertIsInstance(comment.save_button, PrimaryPushButton)
+            self.assertIsInstance(keithley.open_roi_button, PrimaryPushButton)
+            self.assertIsInstance(keithley.configuration_panel.channel, ComboBox)
+            self.assertIsInstance(keithley.configuration_panel.level, LineEdit)
+            self.assertIsInstance(rigol.open_roi_button, PrimaryPushButton)
+            self.assertIsInstance(anritsu.open_roi_button, PrimaryPushButton)
+            self.assertIsInstance(anritsu.configuration_panel.frequency_representation, ComboBox)
+            self.assertIsInstance(anritsu.advanced_panel.attenuation, SpinBox)
+            self.assertIsInstance(anritsu_sg.open_roi_button, PrimaryPushButton)
+            for dialog in dialogs:
+                self.assertEqual(dialog.property("stationSurface"), "page")
+                self.assertFalse(dialog.findChildren(QDialogButtonBox))
+        finally:
+            for dialog in dialogs:
+                dialog.close()
 
     def test_keithley_library_dialog_combines_source_parameters_and_point_preview(self) -> None:
         dialog = KeithleySweepBuilderDialog(simulation_settings())

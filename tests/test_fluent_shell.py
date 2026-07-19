@@ -4,10 +4,10 @@ from pathlib import Path
 import tempfile
 import unittest
 
-from PySide6.QtCore import QSettings
+from PySide6.QtCore import QSettings, Qt
 from PySide6.QtTest import QTest
 from PySide6.QtWidgets import QApplication, QLabel, QMainWindow, QVBoxLayout, QWidget
-from qfluentwidgets import FluentWindow
+from qfluentwidgets import FluentWindow, ScrollArea
 
 from app.settings import SettingsRepository
 from app.ui.shell import FluentPageHost, StationSafetySnapshot, StationSafetyStrip
@@ -162,6 +162,13 @@ class MainWindowFluentShellTests(unittest.TestCase):
             self.assertEqual(window.width(), 1360)
             self.assertGreater(window.stackedWidget.width(), 600)
             self.assertTrue(window.stackedWidget.currentWidget().isVisible())
+            self.assertTrue(window.stackedWidget.property("isTransparent"))
+            host = window.navigation_routes["overview"]
+            self.assertIsInstance(host.scroll_area, ScrollArea)
+            self.assertEqual(
+                host.scroll_area.horizontalScrollBarPolicy(),
+                Qt.ScrollBarPolicy.ScrollBarAlwaysOff,
+            )
         finally:
             window.close()
 
@@ -292,3 +299,29 @@ class MainWindowFluentShellTests(unittest.TestCase):
                 settings.setValue(key, previous)
             else:
                 settings.remove(key)
+
+    def test_expanded_navigation_never_overlays_content_at_minimum_window_size(self) -> None:
+        window = MainWindow(".config/settings.yml", simulation=True)
+        try:
+            window.resize(820, 560)
+            window.show()
+            self.application.processEvents()
+
+            navigation = window.navigationInterface
+            panel = navigation.panel
+            self.assertFalse(panel.isCollapsed())
+            self.assertIs(panel.parentWidget(), navigation)
+            self.assertEqual(navigation.width(), 248)
+            self.assertGreaterEqual(window.fluent_content.geometry().left(), 248)
+            self.assertLess(
+                navigation.geometry().right(),
+                window.fluent_content.geometry().left(),
+            )
+            self.assertTrue(window.safety_strip._compact_layout)
+            self.assertGreater(
+                window.safety_strip.actor.geometry().top(),
+                window.safety_strip.readiness.geometry().top(),
+            )
+        finally:
+            window.close()
+            self.application.processEvents()

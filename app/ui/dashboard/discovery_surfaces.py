@@ -6,10 +6,43 @@ from collections.abc import Iterable
 
 from PySide6.QtCore import Qt, Signal
 from PySide6.QtGui import QKeyEvent, QMouseEvent
-from PySide6.QtWidgets import QHBoxLayout, QScrollArea, QSizePolicy, QVBoxLayout, QWidget
-from qfluentwidgets import BodyLabel, CaptionLabel, CardWidget, StrongBodyLabel
+from PySide6.QtWidgets import QHBoxLayout, QScrollArea, QSizePolicy, QStackedLayout, QVBoxLayout, QWidget
+from qfluentwidgets import BodyLabel, CaptionLabel, CardWidget, FluentIcon, IconWidget, StrongBodyLabel
 
 from app.ui.design_system.tokens import SPACING
+
+
+class DiscoveryEmptyState(CardWidget):
+    """A calm, directional empty state shared by discovery result surfaces."""
+
+    def __init__(
+        self,
+        *,
+        icon: FluentIcon,
+        title: str,
+        description: str,
+        accessible_name: str,
+        parent: QWidget | None = None,
+    ) -> None:
+        super().__init__(parent)
+        self.setProperty("stationSurface", "raised")
+        self.setAccessibleName(accessible_name)
+        self.setMinimumHeight(176)
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(SPACING["xl"], SPACING["xl"], SPACING["xl"], SPACING["xl"])
+        layout.setSpacing(SPACING["sm"])
+        layout.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        icon_widget = IconWidget(icon, self)
+        icon_widget.setFixedSize(30, 30)
+        layout.addWidget(icon_widget, 0, Qt.AlignmentFlag.AlignHCenter)
+        title_label = StrongBodyLabel(title, self)
+        title_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        layout.addWidget(title_label)
+        description_label = BodyLabel(description, self)
+        description_label.setWordWrap(True)
+        description_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        description_label.setMaximumWidth(560)
+        layout.addWidget(description_label, 0, Qt.AlignmentFlag.AlignHCenter)
 
 
 class TcpEndpointRow(CardWidget):
@@ -103,7 +136,7 @@ class TcpDiscoveryResultsView(QWidget):
         super().__init__(parent)
         self._rows_by_host: dict[str, TcpEndpointRow] = {}
         self._selected_host: str | None = None
-        layout = QVBoxLayout(self)
+        layout = QStackedLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
         self.scroll_area = QScrollArea(self)
         self.scroll_area.setWidgetResizable(True)
@@ -115,12 +148,17 @@ class TcpDiscoveryResultsView(QWidget):
         self.content_layout.setContentsMargins(0, 0, 0, 0)
         self.content_layout.setSpacing(SPACING["sm"])
         self.content_layout.setAlignment(Qt.AlignmentFlag.AlignTop)
-        self.empty_state = BodyLabel("No TCP endpoints discovered yet", self.content)
-        self.empty_state.setWordWrap(True)
-        self.empty_state.setAccessibleName("No TCP endpoints discovered")
-        self.content_layout.addWidget(self.empty_state)
+        self.empty_state = DiscoveryEmptyState(
+            icon=FluentIcon.GLOBE,
+            title="No TCP/IP endpoints yet",
+            description="Enter one private address or a bounded range, then scan the configured port. Open endpoints can be identified before assignment.",
+            accessible_name="No TCP endpoints discovered",
+            parent=self,
+        )
         self.scroll_area.setWidget(self.content)
+        layout.addWidget(self.empty_state)
         layout.addWidget(self.scroll_area)
+        layout.setCurrentWidget(self.empty_state)
 
     @property
     def row_count(self) -> int:
@@ -155,7 +193,7 @@ class TcpDiscoveryResultsView(QWidget):
             row.deleteLater()
         self._rows_by_host.clear()
         self._selected_host = None
-        self.empty_state.show()
+        self.layout().setCurrentWidget(self.empty_state)
         self.selection_changed.emit()
 
     def upsert_endpoint(
@@ -180,7 +218,7 @@ class TcpDiscoveryResultsView(QWidget):
             self.content_layout.addWidget(row)
         else:
             row.update_result(endpoint=endpoint, state=state, verification=verification)
-        self.empty_state.setVisible(False)
+        self.layout().setCurrentWidget(self.scroll_area)
         row.set_selected(host == self._selected_host)
 
     def row_for_host(self, host: str) -> TcpEndpointRow | None:
@@ -236,7 +274,7 @@ class SavedInstrumentsView(QWidget):
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
         self.cards: list[SavedInstrumentCard] = []
-        layout = QVBoxLayout(self)
+        layout = QStackedLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
         self.scroll_area = QScrollArea(self)
         self.scroll_area.setWidgetResizable(True)
@@ -248,11 +286,17 @@ class SavedInstrumentsView(QWidget):
         self.content_layout.setContentsMargins(0, 0, 0, 0)
         self.content_layout.setSpacing(SPACING["sm"])
         self.content_layout.setAlignment(Qt.AlignmentFlag.AlignTop)
-        self.empty_state = BodyLabel("No saved instrument resources", self.content)
-        self.empty_state.setWordWrap(True)
-        self.content_layout.addWidget(self.empty_state)
+        self.empty_state = DiscoveryEmptyState(
+            icon=FluentIcon.SAVE,
+            title="No saved instruments",
+            description="Verified VISA and TCP/IP assignments will appear here. Connection and output controls remain on each instrument page.",
+            accessible_name="No saved instrument resources",
+            parent=self,
+        )
         self.scroll_area.setWidget(self.content)
+        layout.addWidget(self.empty_state)
         layout.addWidget(self.scroll_area)
+        layout.setCurrentWidget(self.empty_state)
 
     @property
     def count(self) -> int:
@@ -264,7 +308,7 @@ class SavedInstrumentsView(QWidget):
             card.deleteLater()
         self.cards.clear()
         values = tuple(values)
-        self.empty_state.setVisible(not values)
+        self.layout().setCurrentWidget(self.scroll_area if values else self.empty_state)
         for value in values:
             card = SavedInstrumentCard(value, self.content)
             self.cards.append(card)

@@ -5,7 +5,8 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 from PySide6.QtCore import Signal
-from PySide6.QtWidgets import QHBoxLayout, QLabel, QSizePolicy, QWidget
+from PySide6.QtGui import QResizeEvent
+from PySide6.QtWidgets import QGridLayout, QLabel, QSizePolicy, QWidget
 from qfluentwidgets import PrimaryPushButton
 
 
@@ -39,7 +40,10 @@ class StationSafetyStrip(QWidget):
         self.estop.setAccessibleName("Emergency stop and disable all outputs")
         self.estop.clicked.connect(self.estop_requested)
 
-        layout = QHBoxLayout(self)
+        self._layout = QGridLayout(self)
+        self._layout.setContentsMargins(8, 4, 8, 4)
+        self._layout.setHorizontalSpacing(12)
+        self._layout.setVerticalSpacing(3)
         for widget in (
             self.readiness,
             self.outputs,
@@ -52,13 +56,44 @@ class StationSafetyStrip(QWidget):
                 QSizePolicy.Policy.Ignored,
                 QSizePolicy.Policy.Preferred,
             )
-            layout.addWidget(widget)
-        layout.setStretch(0, 1)
-        layout.setStretch(1, 1)
-        layout.setStretch(2, 1)
-        layout.setStretch(4, 2)
-        layout.addStretch(1)
-        layout.addWidget(self.estop)
+        self._compact_layout: bool | None = None
+        self._reflow(compact=True)
+
+    def resizeEvent(self, event: QResizeEvent) -> None:
+        super().resizeEvent(event)
+        self._reflow(compact=event.size().width() < 760)
+
+    def _reflow(self, *, compact: bool) -> None:
+        if self._compact_layout == compact:
+            return
+        self._compact_layout = compact
+        widgets = (
+            self.readiness,
+            self.outputs,
+            self.profile,
+            self.mode,
+            self.actor,
+            self.estop,
+        )
+        for widget in widgets:
+            self._layout.removeWidget(widget)
+        for column in range(6):
+            self._layout.setColumnStretch(column, 0)
+        if compact:
+            self._layout.addWidget(self.readiness, 0, 0)
+            self._layout.addWidget(self.outputs, 0, 1)
+            self._layout.addWidget(self.estop, 0, 2)
+            self._layout.addWidget(self.profile, 1, 0)
+            self._layout.addWidget(self.mode, 1, 1)
+            self._layout.addWidget(self.actor, 1, 2)
+            self._layout.setColumnStretch(0, 1)
+            self._layout.setColumnStretch(1, 1)
+            self._layout.setColumnStretch(2, 2)
+        else:
+            for column, widget in enumerate(widgets[:-1]):
+                self._layout.addWidget(widget, 0, column)
+                self._layout.setColumnStretch(column, 1 if column < 4 else 2)
+            self._layout.addWidget(self.estop, 0, 5)
 
     def update_snapshot(self, snapshot: StationSafetySnapshot) -> None:
         """Synchronously render ``snapshot`` without performing station actions."""

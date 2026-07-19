@@ -19,13 +19,23 @@ class VisaDiscoveryWorker(QThread):
     completed = Signal(object)
     failed = Signal(str)
 
-    def __init__(self, backends: Iterable[str], parent: object | None = None) -> None:
+    def __init__(
+        self,
+        backends: Iterable[str],
+        parent: object | None = None,
+        *,
+        preferred_lakeshore_baud: int | None = None,
+    ) -> None:
         super().__init__(parent)
         self._backends = tuple(backends)
+        self._preferred_lakeshore_baud = preferred_lakeshore_baud
 
     def run(self) -> None:
         try:
-            results: tuple[DiscoveredInstrument, ...] = discover_visa_resources(self._backends)
+            results: tuple[DiscoveredInstrument, ...] = discover_visa_resources(
+                self._backends,
+                preferred_lakeshore_baud=self._preferred_lakeshore_baud,
+            )
         except Exception as exc:
             self.failed.emit(str(exc))
         else:

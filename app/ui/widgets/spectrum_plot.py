@@ -14,10 +14,10 @@ from PySide6.QtWidgets import (
     QHBoxLayout,
     QLabel,
     QSizePolicy,
-    QToolButton,
     QVBoxLayout,
     QWidget,
 )
+from qfluentwidgets import TransparentPushButton
 
 from app.ui.design_system import plot_theme, tokens_for
 
@@ -43,6 +43,7 @@ class SpectrumPlotWidget(QWidget):
         self._x_label = "Frequency"
         self._x_unit = "Hz"
         self._theme_name = "dark"
+        self.toolbar_buttons: list[TransparentPushButton] = []
 
         root = QVBoxLayout(self)
         root.setContentsMargins(0, 0, 0, 0)
@@ -61,12 +62,12 @@ class SpectrumPlotWidget(QWidget):
         if compact_toolbar:
             actions = tuple(action for action in actions if action[0] in {"Reset", "Peak", "Export"})
         for text, tooltip, callback in actions:
-            button = QToolButton()
+            button = TransparentPushButton(text, self)
             button.setObjectName("plotToolButton")
-            button.setText(text)
             button.setToolTip(tooltip)
             button.setAccessibleName(text)
             button.clicked.connect(callback)
+            self.toolbar_buttons.append(button)
             toolbar.addWidget(button)
         toolbar.addStretch(1)
         self.readout = QLabel("X: —   Y: —")

@@ -41,25 +41,28 @@ class ThemeTokens:
 
 
 _LIGHT = ThemeTokens(
-    background="#f5f7fa", surface="#ffffff", surface_raised="#f9fafb",
-    border="#d6dce5", text_primary="#18202a", text_muted="#5f6b7a",
-    accent="#0067c0", focus="#005fb8", success="#0f7b4f",
-    caution="#8a5d00", danger="#b4233a", neutral="#667085",
-    output_active="#b4233a", compliance="#9a6700", interlock="#9a6700",
-    emergency="#a4262c", plot_background="#ffffff", plot_axes="#344054",
-    plot_grid="#d0d5dd", plot_reference="#7a5af8",
-    plot_measurement="#0067c0",
+    # Catppuccin Latte: every UI surface stays below pure white; only plotting
+    # canvases use white so dense measurement grids remain crisp.
+    background="#e6e9ef", surface="#eff1f5", surface_raised="#dce0e8",
+    border="#bcc0cc", text_primary="#4c4f69", text_muted="#6c6f85",
+    accent="#1e66f5", focus="#7287fd", success="#40a02b",
+    caution="#df8e1d", danger="#d20f39", neutral="#7c7f93",
+    output_active="#d20f39", compliance="#df8e1d", interlock="#df8e1d",
+    emergency="#d20f39", plot_background="#ffffff", plot_axes="#5c5f77",
+    plot_grid="#ccd0da", plot_reference="#8839ef",
+    plot_measurement="#1e66f5",
 )
 
 _DARK = ThemeTokens(
-    background="#111418", surface="#1b1f24", surface_raised="#22272e",
-    border="#343a43", text_primary="#f2f4f7", text_muted="#a6adbb",
-    accent="#60a5fa", focus="#7dd3fc", success="#43c58a",
-    caution="#f4c152", danger="#ff6b7d", neutral="#98a2b3",
-    output_active="#ff6b7d", compliance="#f4c152", interlock="#f4c152",
-    emergency="#e5484d", plot_background="#111418", plot_axes="#d0d5dd",
-    plot_grid="#343a43", plot_reference="#a78bfa",
-    plot_measurement="#60a5fa",
+    # Catppuccin Mocha.
+    background="#1e1e2e", surface="#181825", surface_raised="#313244",
+    border="#45475a", text_primary="#cdd6f4", text_muted="#a6adc8",
+    accent="#89b4fa", focus="#b4befe", success="#a6e3a1",
+    caution="#f9e2af", danger="#f38ba8", neutral="#9399b2",
+    output_active="#f38ba8", compliance="#f9e2af", interlock="#f9e2af",
+    emergency="#f38ba8", plot_background="#181825", plot_axes="#bac2de",
+    plot_grid="#45475a", plot_reference="#cba6f7",
+    plot_measurement="#89b4fa",
 )
 
 

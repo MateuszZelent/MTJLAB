@@ -7,6 +7,8 @@ import time
 from datetime import datetime, timezone
 from typing import Protocol
 
+from pyvisa.constants import Parity, StopBits
+
 from app.devices.base import DeviceAdapter, InstrumentSession, SessionFactory, parse_identity
 from app.devices.lakeshore_475.models import (
     FieldUnit,
@@ -100,7 +102,12 @@ class LakeShore475Adapter(DeviceAdapter):
         session.read_termination = "\r\n"
         session.write_termination = "\r\n"
         if self._is_asrl(self._config.resource):
-            for name, value in (("baud_rate", self._config.baud_rate), ("data_bits", 7), ("parity", "odd"), ("stop_bits", 1), ("flow_control", 0)):
+            for name, value in (
+                ("baud_rate", self._config.baud_rate),
+                ("data_bits", 7),
+                ("parity", Parity.odd),
+                ("stop_bits", StopBits.one),
+            ):
                 try:
                     setattr(session, name, value)
                 except (AttributeError, ValueError) as exc:

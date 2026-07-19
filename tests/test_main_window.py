@@ -12,8 +12,7 @@ from types import SimpleNamespace
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 from PySide6.QtCore import QPoint, QTimer, Qt
-from PySide6.QtGui import QPalette
-from PySide6.QtWidgets import QApplication, QComboBox, QHeaderView, QLabel, QMessageBox, QPushButton, QScrollArea, QTabWidget, QTreeWidgetItemIterator, QWidget
+from PySide6.QtWidgets import QApplication, QComboBox, QLabel, QMessageBox, QPushButton, QScrollArea, QTabWidget, QTreeWidgetItemIterator
 from PySide6.QtTest import QTest
 
 from app.domain.models import DeviceCapabilities
@@ -617,14 +616,21 @@ class MainWindowTests(unittest.TestCase):
             themes: list[str] = []
             window.theme_changed.connect(themes.append)
             try:
-                window.theme_actions["light"].trigger()
-                self.application.processEvents()
-                self.assertEqual(SettingsRepository(path).load().raw["ui"]["theme"], "light")
-                window.theme_actions["dark"].trigger()
-                self.application.processEvents()
-                self.assertEqual(SettingsRepository(path).load().raw["ui"]["theme"], "dark")
-                window.theme_actions["system"].trigger()
-                self.application.processEvents()
+                with patch(
+                    "app.ui.shell.main_window.apply_application_theme",
+                    wraps=__import__(
+                        "app.ui.shell.main_window", fromlist=["apply_application_theme"]
+                    ).apply_application_theme,
+                ) as apply_theme:
+                    window.theme_actions["light"].trigger()
+                    self.application.processEvents()
+                    self.assertEqual(SettingsRepository(path).load().raw["ui"]["theme"], "light")
+                    window.theme_actions["dark"].trigger()
+                    self.application.processEvents()
+                    self.assertEqual(SettingsRepository(path).load().raw["ui"]["theme"], "dark")
+                    window.theme_actions["system"].trigger()
+                    self.application.processEvents()
+                self.assertEqual(apply_theme.call_count, 3)
                 self.assertEqual(SettingsRepository(path).load().raw["ui"]["theme"], "system")
                 self.assertEqual(themes[:2], ["light", "dark"])
                 self.assertIn(themes[-1], {"light", "dark"})
@@ -758,6 +764,23 @@ class MainWindowTests(unittest.TestCase):
                 item_top = item.mapTo(window, QPoint()).y()
                 self.assertGreaterEqual(item_top, previous_bottom)
                 previous_bottom = item_top + item.geometry().height()
+        finally:
+            window.close()
+            self.application.processEvents()
+
+    def test_shell_title_is_pylab_without_transient_status_strip(self) -> None:
+        window = MainWindow(".config/settings.yml", simulation=True)
+        try:
+            window.show()
+            window._set_theme_mode("light", persist=False)
+            self.application.processEvents()
+
+            self.assertEqual(window.windowTitle(), "PyLab")
+            self.assertIsNone(window.findChild(QLabel, "shellStatusMessage"))
+            self.assertIs(window.fluent_content.layout().itemAt(0).widget(), window.safety_strip)
+            self.assertIs(window.fluent_content.layout().itemAt(1).widget(), window.shell_splitter)
+            self.assertGreater(window.shell_splitter.handleWidth(), 0)
+            self.assertIn("background: transparent", window.shell_splitter.styleSheet())
         finally:
             window.close()
             self.application.processEvents()
@@ -898,8 +921,8 @@ class MainWindowTests(unittest.TestCase):
                 self.application.processEvents()
                 observed[theme] = window.grab().toImage().pixelColor(viewport_point).name()
 
-            self.assertEqual(observed["dark"], "#22272e")
-            self.assertEqual(observed["light"], "#f9fafb")
+            self.assertEqual(observed["dark"], tokens_for("dark").surface_raised)
+            self.assertEqual(observed["light"], tokens_for("light").surface_raised)
         finally:
             window._set_theme_mode("system", persist=False)
             window.close()

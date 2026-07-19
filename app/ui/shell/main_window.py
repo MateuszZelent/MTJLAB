@@ -22,7 +22,6 @@ from PySide6.QtWidgets import (
     QDialog,
     QLineEdit,
     QMessageBox,
-    QPlainTextEdit,
     QPushButton,
     QSplitter,
     QVBoxLayout,
@@ -104,14 +103,10 @@ class MainWindow(FluentWindow):
         )
         self._audit_healthy = True
         self._run_correlation_id: str | None = None
-        suffix = " — SIMULATION" if simulation else ""
+        self.setMinimumSize(820, 560)
         self.resize(1360, 880)
         self._composition = StationComposition(self._settings, simulation=self._simulation)
-        concrete_device_names = " · ".join(
-            module.display_name
-            for module in self._composition.registry.all_modules()
-        )
-        self.setWindowTitle(f"Lab Control — {concrete_device_names}{suffix}")
+        self.setWindowTitle("PyLab")
         self._controllers = self._composition.create_controllers(
             ("rigol", "keithley", "anritsu", "moke_box", "lakeshore_gaussmeter"), self
         )
@@ -151,20 +146,27 @@ class MainWindow(FluentWindow):
             "border-radius: 6px; color: palette(text); padding: 3px 10px;"
         )
         content_layout.addWidget(self.safety_strip)
-        self.status_message = CaptionLabel(self.fluent_content)
-        self.status_message.setObjectName("shellStatusMessage")
-        content_layout.addWidget(self.status_message)
         self.shell_splitter = QSplitter(
             Qt.Orientation.Vertical,
             self.fluent_content,
         )
         self.shell_splitter.setObjectName("fluentShellSplitter")
         self.shell_splitter.setChildrenCollapsible(False)
+        self.shell_splitter.setHandleWidth(5)
         self.widgetLayout.removeWidget(self.stackedWidget)
+        # The stock Fluent window stack draws a framed, rounded content pane.
+        # Our station shell already owns the page hierarchy and its spacing;
+        # transparent mode prevents that stock edge from becoming a bright
+        # outline around dark pages.
+        self.stackedWidget.setProperty("isTransparent", True)
         self.shell_splitter.addWidget(self.stackedWidget)
         content_layout.addWidget(self.shell_splitter, 1)
         self.widgetLayout.addWidget(self.fluent_content)
         self.navigationInterface.setExpandWidth(248)
+        # Keep the expanded navigation in the layout at every supported window
+        # size. QFluentWidgets otherwise switches to MENU mode below ~934 px,
+        # reparents the panel to the window and overlays the measurement page.
+        self.navigationInterface.setMinimumExpandWidth(820)
 
         registry = self._composition.registry
         self.dashboard = DashboardPage(
@@ -514,9 +516,6 @@ class MainWindow(FluentWindow):
             )
         )
 
-    def _show_status_message(self, message: str) -> None:
-        self.status_message.setText(message)
-
     def _open_theme_navigation_menu(self) -> None:
         position = self.theme_navigation_item.mapToGlobal(
             self.theme_navigation_item.rect().topRight()
@@ -540,7 +539,6 @@ class MainWindow(FluentWindow):
                 editor.setAccessibleName(editor.placeholderText() or "Numeric or text parameter")
         self.stackedWidget.setAccessibleName("Application workspace")
         self.log.setAccessibleName("Event log")
-        self.status_message.setAccessibleName("Current application status")
 
     @staticmethod
     def _nested_value(payload: dict[str, Any], path: tuple[str, ...]) -> Any:
@@ -639,23 +637,23 @@ class MainWindow(FluentWindow):
 
         self.settings_page.reload()
         self._settings_saved(settings)
-        self._show_status_message(
-            f"Saved {title}; safety profile approval is now required."
-        )
         self._log(f"Safety limits saved: {title}")
 
     def _set_theme_mode(self, mode: str, *, persist: bool = True) -> None:
         theme = effective_theme(mode)
         application = QApplication.instance()
+        changed = application is None or application.property("stationAppliedTheme") != theme
         if application is not None:
             applied_theme = apply_application_theme(application, mode)
             self._apply_navigation_surface(applied_theme.tokens.surface)
             application.setProperty("activeTheme", theme)
-        for plot in self.findChildren(SpectrumPlotWidget):
-            plot.apply_theme(theme)
-        for heatmap in self.findChildren(HeatmapResultsTab):
-            heatmap.apply_theme(theme)
-        self.theme_changed.emit(theme)
+        if changed:
+            for plot in self.findChildren(SpectrumPlotWidget):
+                plot.apply_theme(theme)
+            for heatmap in self.findChildren(HeatmapResultsTab):
+                heatmap.apply_theme(theme)
+            self.theme_changed.emit(theme)
+        self._configured_theme_mode = mode
         if persist:
             self._persist_theme(mode)
         self._log(f"Theme changed to {mode} ({theme})" + (" and saved" if persist else ""))
@@ -1215,6 +1213,15 @@ class MainWindow(FluentWindow):
                 connection["visa_backend"] = backend
                 if device == "lakeshore_gaussmeter":
                     connection["enabled"] = True
+                    detected_baud = self.dashboard.discovered_serial_baud(
+                        resource, backend
+                    )
+                    if detected_baud is not None:
+                        connection["baud_rate"] = detected_baud
+                        self._log(
+                            "VISA ASSIGN LAKE SHORE SERIAL: "
+                            f"persisting detected baud_rate={detected_baud}"
+                        )
             settings = self._repository.save_raw(raw)
         except Exception as exc:
             self._log(f"VISA ASSIGN FAILED: {type(exc).__name__}: {exc}")
@@ -1384,7 +1391,6 @@ class MainWindow(FluentWindow):
             correlation_id=self._run_correlation_id,
         )
         self.log.appendPlainText(message)
-        self._show_status_message(message)
 
     def showEvent(self, event: QShowEvent) -> None:
         super().showEvent(event)

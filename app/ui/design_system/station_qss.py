@@ -16,6 +16,57 @@ PlainTextEdit {{
 """
 
 
+def dialog_qss(tokens: ThemeTokens) -> str:
+    """Theme native Qt popup infrastructure without overriding Fluent controls."""
+
+    return f"""
+QDialog, QMessageBox, QInputDialog, QFileDialog {{
+    background: {tokens.background};
+    color: {tokens.text_primary};
+}}
+QDialog QLabel, QMessageBox QLabel, QInputDialog QLabel, QFileDialog QLabel {{
+    color: {tokens.text_primary};
+}}
+QDialogButtonBox QPushButton {{
+    min-width: 88px;
+    min-height: 30px;
+    padding: 0 14px;
+    color: {tokens.text_primary};
+    background: {tokens.surface_raised};
+    border: 1px solid {tokens.border};
+    border-radius: 6px;
+}}
+QDialogButtonBox QPushButton:hover {{
+    background: {tokens.surface};
+    border-color: {tokens.focus};
+}}
+QDialogButtonBox QPushButton:pressed {{
+    background: {tokens.border};
+}}
+QDialogButtonBox QPushButton:disabled {{
+    color: {tokens.text_muted};
+    background: {tokens.surface_raised};
+    border-color: {tokens.border};
+}}
+QDialogButtonBox QPushButton:default {{
+    color: #ffffff;
+    background: {tokens.accent};
+    border-color: {tokens.accent};
+}}
+QDialogButtonBox QPushButton:default:hover {{
+    border-color: {tokens.focus};
+}}
+QFileDialog QTreeView, QFileDialog QListView, QFileDialog QLineEdit,
+QInputDialog QLineEdit, QInputDialog QComboBox {{
+    color: {tokens.text_primary};
+    background: {tokens.surface};
+    border: 1px solid {tokens.border};
+    selection-background-color: {tokens.accent};
+    selection-color: #ffffff;
+}}
+"""
+
+
 def station_qss(tokens: ThemeTokens) -> str:
     return f"""
 QWidget#fluentShellContent, QWidget#fluentShellSplitter {{

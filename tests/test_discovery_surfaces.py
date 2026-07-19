@@ -3,7 +3,7 @@ from __future__ import annotations
 import unittest
 
 from PySide6.QtWidgets import QApplication
-from qfluentwidgets import BodyLabel
+from qfluentwidgets import BodyLabel, CardWidget, SegmentedWidget, SimpleCardWidget
 
 from app.ui.dashboard.discovery_surfaces import SavedInstrumentsView, TcpDiscoveryResultsView
 from app.ui.shell import MainWindow
@@ -78,6 +78,57 @@ class DiscoverySurfaceTests(unittest.TestCase):
             self.assertIsInstance(window.dashboard.saved_instruments, SavedInstrumentsView)
             self.assertTrue(window.dashboard.saved_instruments.isVisibleTo(window))
             self.assertEqual(window.dashboard.saved_instruments.count, 5)
+        finally:
+            window.close()
+            self.application.processEvents()
+
+    def test_discovery_workspace_is_fluent_and_renders_directional_empty_state(self) -> None:
+        window = MainWindow(".config/settings.yml", simulation=True)
+        try:
+            window.resize(1360, 880)
+            window.show()
+            window._navigate_to("discovery")
+            self.application.processEvents()
+
+            page = window.dashboard
+            self.assertIsInstance(page.discovery_pivot, SegmentedWidget)
+            self.assertIsInstance(page.discovery_workspace, SimpleCardWidget)
+            self.assertIsInstance(page.discovery_safety_card, SimpleCardWidget)
+            self.assertIsInstance(page.visa_results.empty_state, CardWidget)
+            self.assertTrue(page.discovery_workspace.isVisibleTo(window))
+            self.assertGreater(page.discovery_workspace.width(), 700)
+            self.assertGreater(page.discovery_workspace.height(), 300)
+            self.assertGreater(page.visa_results.empty_state.height(), 150)
+            self.assertLess(
+                page.visa_results.empty_state.width(),
+                page.discovery_workspace.width(),
+            )
+        finally:
+            window.close()
+            self.application.processEvents()
+
+    def test_tcp_controls_reflow_without_horizontal_overflow(self) -> None:
+        window = MainWindow(".config/settings.yml", simulation=True)
+        try:
+            window.resize(900, 760)
+            window.show()
+            window._navigate_to("discovery")
+            window.dashboard._show_discovery_page("tcp")
+            self.application.processEvents()
+
+            page = window.dashboard
+            self.assertTrue(page._tcp_controls_compact)
+            scroll_area = page.discovery_page._scroll_area
+            viewport = scroll_area.viewport()
+            for control in (
+                page.tcp_network,
+                page.tcp_scan_button,
+                page.tcp_assign_moke_button,
+            ):
+                self.assertTrue(control.isVisibleTo(window))
+                right = control.mapTo(viewport, control.rect().bottomRight()).x()
+                self.assertLessEqual(right, viewport.width())
+            self.assertEqual(scroll_area.horizontalScrollBar().maximum(), 0)
         finally:
             window.close()
             self.application.processEvents()

@@ -8,7 +8,10 @@ from typing import Any
 from PySide6.QtCore import Qt
 from PySide6.QtWidgets import (
     QCheckBox, QComboBox, QDialog, QDialogButtonBox, QFormLayout, QFrame,
-    QLabel, QLineEdit, QMessageBox, QPushButton, QSplitter, QVBoxLayout, QWidget,
+    QHBoxLayout, QLabel, QLineEdit, QMessageBox, QPushButton, QSplitter, QVBoxLayout, QWidget,
+)
+from qfluentwidgets import (
+    CheckBox, ComboBox, PrimaryPushButton, PushButton,
 )
 
 from app.devices.rigol_dg1000z.ui.page import RigolConfigurationSnapshot
@@ -20,9 +23,10 @@ from app.safety.rigol_current import validate_rigol_waveform
 from app.settings.models import StationSettings
 from app.ui.common import line_edit as _line
 from app.ui.recipes import SweepGeneratorDialog
+from app.ui.recipes.fluent_dialog import FluentRecipeDialog
 
 
-class RigolNodeEditorDialog(QDialog):
+class RigolNodeEditorDialog(FluentRecipeDialog):
     """Offline carrier/output editor with one optional local sweep axis."""
 
     def __init__(
@@ -36,6 +40,7 @@ class RigolNodeEditorDialog(QDialog):
         output_policy: str = "unchanged",
     ) -> None:
         super().__init__(parent)
+        self.setProperty("stationSurface", "page")
         snapshot = snapshot or RigolConfigurationSnapshot(channel=channel)
         self._settings = settings
         self._working_segments: dict[str, list[dict[str, object]]] = {}
@@ -57,13 +62,13 @@ class RigolNodeEditorDialog(QDialog):
         content = QSplitter(Qt.Orientation.Horizontal)
         carrier = QFrame()
         form = QFormLayout(carrier)
-        self.channel = QComboBox()
-        self.channel.addItem("Channel 1", 1)
-        self.channel.addItem("Channel 2", 2)
+        self.channel = ComboBox(self)
+        self.channel.addItem("Channel 1", userData=1)
+        self.channel.addItem("Channel 2", userData=2)
         channel_index = self.channel.findData(snapshot.channel)
         self.channel.setCurrentIndex(channel_index if channel_index >= 0 else 0)
         form.addRow("Channel", self.channel)
-        self.waveform = QComboBox()
+        self.waveform = ComboBox(self)
         self.waveform.addItems(("SIN", "SQU", "RAMP", "PULS", "NOIS", "DC"))
         self.waveform.setCurrentText(snapshot.waveform)
         self.frequency = _line(snapshot.frequency)
@@ -77,18 +82,18 @@ class RigolNodeEditorDialog(QDialog):
         self.pulse_leading = _line(snapshot.pulse_leading)
         self.pulse_trailing = _line(snapshot.pulse_trailing)
         self.dut_impedance = _line(snapshot.dut_min_impedance)
-        self.output_polarity = QComboBox()
+        self.output_polarity = ComboBox(self)
         self.output_polarity.addItems(("NORM", "INV"))
         self.output_polarity.setCurrentText(snapshot.output_polarity)
-        self.output_mode = QComboBox()
+        self.output_mode = ComboBox(self)
         self.output_mode.addItems(("NORM", "GAT"))
         self.output_mode.setCurrentText(snapshot.output_mode)
-        self.gate_polarity = QComboBox()
+        self.gate_polarity = ComboBox(self)
         self.gate_polarity.addItems(("NORM", "INV"))
         self.gate_polarity.setCurrentText(snapshot.gate_polarity)
-        self.sync_enabled = QCheckBox("SYNC enabled")
+        self.sync_enabled = CheckBox("SYNC enabled", self)
         self.sync_enabled.setChecked(snapshot.sync_enabled)
-        self.sync_polarity = QComboBox()
+        self.sync_polarity = ComboBox(self)
         self.sync_polarity.addItems(("NORM", "INV"))
         self.sync_polarity.setCurrentText(snapshot.sync_polarity)
         self.sync_delay = _line(snapshot.sync_delay)
@@ -116,26 +121,26 @@ class RigolNodeEditorDialog(QDialog):
         content.addWidget(carrier)
         actions_frame = QFrame()
         actions_layout = QFormLayout(actions_frame)
-        self.parameter_selectors: dict[str, QComboBox] = {}
+        self.parameter_selectors: dict[str, ComboBox] = {}
         for parameter_id, label in (
             ("carrier.frequency", "Frequency"),
             ("carrier.high_level", "HighL"),
             ("carrier.low_level", "LowL"),
         ):
-            selector = QComboBox()
-            selector.addItem("Set fixed", "set")
-            selector.addItem("Sweep â€” ROI required", "sweep")
+            selector = ComboBox(self)
+            selector.addItem("Set fixed", userData="set")
+            selector.addItem("Sweep — ROI required", userData="sweep")
             selector.currentIndexChanged.connect(self._selection_changed)
             self.parameter_selectors[parameter_id] = selector
             actions_layout.addRow(label, selector)
-        self.open_roi_button = QPushButton("Edit selected ROIâ€¦")
+        self.open_roi_button = PrimaryPushButton("Edit selected ROI…", self)
         self.open_roi_button.setEnabled(False)
         self.open_roi_button.clicked.connect(self._open_roi)
         actions_layout.addRow(self.open_roi_button)
-        self.output_policy = QComboBox()
-        self.output_policy.addItem("Leave OUTPUT unchanged", "unchanged")
-        self.output_policy.addItem("Switch OUTPUT ON", "on")
-        self.output_policy.addItem("Switch OUTPUT OFF", "off")
+        self.output_policy = ComboBox(self)
+        self.output_policy.addItem("Leave OUTPUT unchanged", userData="unchanged")
+        self.output_policy.addItem("Switch OUTPUT ON", userData="on")
+        self.output_policy.addItem("Switch OUTPUT OFF", userData="off")
         output_index = self.output_policy.findData(output_policy)
         self.output_policy.setCurrentIndex(output_index if output_index >= 0 else 0)
         actions_layout.addRow("Output", self.output_policy)
@@ -150,16 +155,15 @@ class RigolNodeEditorDialog(QDialog):
         note.setWordWrap(True)
         note.setObjectName("recipeHint")
         layout.addWidget(note)
-        buttons = QDialogButtonBox(
-            QDialogButtonBox.StandardButton.Cancel
-            | QDialogButtonBox.StandardButton.Ok
-        )
-        buttons.button(QDialogButtonBox.StandardButton.Ok).setText(
-            "Apply Rigol configuration"
-        )
-        buttons.accepted.connect(self.accept)
-        buttons.rejected.connect(self.reject)
-        layout.addWidget(buttons)
+        footer = QHBoxLayout()
+        footer.addStretch(1)
+        self.apply_button = PrimaryPushButton("Apply Rigol configuration", self)
+        self.cancel_button = PushButton("Cancel", self)
+        footer.addWidget(self.cancel_button)
+        footer.addWidget(self.apply_button)
+        self.apply_button.clicked.connect(self.accept)
+        self.cancel_button.clicked.connect(self.reject)
+        layout.addLayout(footer)
         self.load_plan_actions(parameter_actions or [])
         self._selection_changed()
 

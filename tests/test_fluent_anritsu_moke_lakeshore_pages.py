@@ -10,10 +10,12 @@ from unittest.mock import patch
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 from PySide6.QtCore import QPoint
-from PySide6.QtWidgets import QApplication, QMessageBox
+from PySide6.QtGui import QPalette
+from PySide6.QtWidgets import QApplication, QLabel, QMessageBox
 from qfluentwidgets import CardWidget, CheckBox, PlainTextEdit, PrimaryPushButton, PushButton
 
 from app.ui.shell import MainWindow
+from app.ui.design_system import tokens_for
 from app.settings import SettingsRepository
 from app.devices.discovery import DiscoveredInstrument, identify_device
 from app.devices.lakeshore_475.models import FieldUnit, GaussmeterReading, GaussmeterSnapshot, MeasurementMode
@@ -56,10 +58,18 @@ class FluentLakeShorePageTests(unittest.TestCase):
         self.window._set_theme_mode("light", persist=False)
         self.application.processEvents()
         light = self.window.grab().toImage().pixelColor(point).name()
+        light_color = self.window.grab().toImage().pixelColor(point)
         self.window._set_theme_mode("dark", persist=False)
         self.application.processEvents()
         dark = self.window.grab().toImage().pixelColor(point).name()
         self.assertNotEqual(light, dark)
+        self.assertGreater(light_color.lightness(), 220)
+
+        page_point = page.mapTo(self.window, QPoint(2, 2))
+        self.window._set_theme_mode("light", persist=False)
+        self.application.processEvents()
+        page_color = self.window.grab().toImage().pixelColor(page_point)
+        self.assertGreater(page_color.lightness(), 220)
 
     def test_lakeshore_live_controls_separate_sampling_refresh_and_history(self) -> None:
         page = self.window.lakeshore_gaussmeter_page
@@ -77,6 +87,56 @@ class FluentLakeShorePageTests(unittest.TestCase):
         self.assertIn("10 min", page.plot_span.text())
         page._timer.stop()
         page._plot_timer.stop()
+
+    def test_lakeshore_reflows_without_horizontal_overflow_at_minimum_window_size(self) -> None:
+        self.window.resize(820, 560)
+        self.window._navigate_to("lakeshore_gaussmeter")
+        self.application.processEvents()
+
+        page = self.window.lakeshore_gaussmeter_page
+        host = self.window.navigation_routes["lakeshore_gaussmeter"]
+        self.assertTrue(page._compact_layout)
+        self.assertGreater(page.values_card.geometry().top(), page.hero_card.geometry().top())
+        self.assertEqual(host.scroll_area.horizontalScrollBar().maximum(), 0)
+        self.assertGreater(
+            page.sample_interval.geometry().top(),
+            page.read_now.geometry().top(),
+        )
+        self.assertTrue(page.history_plot.isVisibleTo(self.window))
+
+    def test_lakeshore_light_theme_keeps_every_visible_label_readable(self) -> None:
+        self.window._navigate_to("lakeshore_gaussmeter")
+        self.window._set_theme_mode("light", persist=False)
+        self.application.processEvents()
+
+        page = self.window.lakeshore_gaussmeter_page
+        panel = self.window.connection_panels["lakeshore_gaussmeter"]
+        form = page.values_card.layout()
+        required = (
+            panel.heading,
+            panel.summary,
+            panel.state,
+            form.labelForField(page.field),
+            form.labelForField(page.frequency),
+            form.labelForField(page.configuration),
+            self.window.safety_strip.profile,
+            self.window.safety_strip.actor,
+        )
+        for label in required:
+            with self.subTest(label=label.text()):
+                self.assertIsInstance(label, QLabel)
+                foreground = label.palette().color(QPalette.ColorRole.WindowText)
+                self.assertLess(foreground.lightness(), 180)
+        tokens = tokens_for("light")
+        for button in (panel.connect_button, panel.disconnect_button, page.read_now):
+            with self.subTest(button=button.text()):
+                disabled_qss = button.styleSheet().split(
+                    "/* station-disabled-button */", 1
+                )[1]
+                self.assertIn(f"color: {tokens.text_muted}", disabled_qss)
+                self.assertIn(
+                    f"background-color: {tokens.surface_raised}", disabled_qss
+                )
 
     def test_lakeshore_plot_uses_elapsed_time_and_prunes_to_selected_window(self) -> None:
         page = self.window.lakeshore_gaussmeter_page
@@ -116,10 +176,14 @@ class FluentLakeShorePageTests(unittest.TestCase):
             self.window = MainWindow(
                 path, simulation=False, authenticated_username=TEST_ENGINEER
             )
-            resource = "GPIB0::12::INSTR"
+            resource = "ASRL3::INSTR"
             identity = "LSCI,MODEL475,11272013,1.0"
             discovered = DiscoveredInstrument(
-                resource, "system", identity, identify_device(identity)
+                resource,
+                "system",
+                identity,
+                identify_device(identity),
+                serial_baud=9_600,
             )
             self.window.dashboard._scan_completed((discovered,))
             row = self.window.dashboard.visa_results.rows[0]
@@ -137,6 +201,7 @@ class FluentLakeShorePageTests(unittest.TestCase):
             self.assertTrue(saved.enabled)
             self.assertEqual(saved.resource, resource)
             self.assertEqual(saved.visa_backend, "system")
+            self.assertEqual(saved.baud_rate, 9_600)
             self.assertIn(resource, self.window.lakeshore_gaussmeter_page.resource.text())
             self.assertTrue(self.window.lakeshore_gaussmeter_page.read_now.isEnabled())
 
@@ -170,6 +235,27 @@ class FluentAnritsuAndMokePageTests(unittest.TestCase):
         self.assertIsInstance(page.live, PrimaryPushButton)
         self.assertTrue(page.hero_card.isVisibleTo(self.window))
         self.assertGreater(page.hero_card.geometry().width(), 300)
+
+    def test_anritsu_light_theme_uses_tokenized_surfaces_and_readable_connection_text(self) -> None:
+        self.window._navigate_to("anritsu")
+        self.window._set_theme_mode("light", persist=False)
+        self.application.processEvents()
+
+        page = self.window.anritsu_page
+        tokens = tokens_for("light")
+        self.assertEqual(page.hero_card.property("stationSurface"), "card")
+        self.assertEqual(page.setup_card.property("stationSurface"), "card")
+        self.assertEqual(page.processing_card.property("stationSurface"), "card")
+        self.assertEqual(page.spectrum_plot.property("stationSurface"), "raised")
+        self.assertIn(
+            f"border: 1px solid {tokens.border}", page.setup_card.styleSheet()
+        )
+        connection = self.window.connection_panels["anritsu"]
+        self.assertEqual(connection.property("stationSurface"), "surface")
+        self.assertEqual(
+            connection.palette().color(QPalette.ColorRole.WindowText).name(),
+            tokens.text_primary,
+        )
 
     def test_moke_workspace_and_live_dialog_use_fluent_cards(self) -> None:
         self.window._navigate_to("moke_box")

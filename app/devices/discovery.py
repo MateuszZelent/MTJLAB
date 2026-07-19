@@ -9,6 +9,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import Callable, Iterable
 
 import pyvisa
+from pyvisa.constants import Parity, StopBits
 
 from app.devices.moke_box.protocol import (
     MokeFrame,
@@ -25,6 +26,7 @@ class DiscoveredInstrument:
     idn: str | None
     device: str | None
     error: str | None = None
+    serial_baud: int | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -100,6 +102,7 @@ def discover_visa_resources(
     backends: Iterable[str] = ("system", "@py"),
     *,
     timeout_ms: int = 750,
+    preferred_lakeshore_baud: int | None = None,
     manager_factory: Callable[[str], object] | None = None,
 ) -> tuple[DiscoveredInstrument, ...]:
     """List resources and issue only ``*IDN?`` using a bounded timeout.
@@ -111,6 +114,19 @@ def discover_visa_resources(
 
     if timeout_ms < 50 or timeout_ms > 5_000:
         raise ValueError("VISA discovery timeout must be between 50 and 5000 ms.")
+    supported_lakeshore_bauds = (9_600, 19_200, 38_400, 57_600)
+    if (
+        preferred_lakeshore_baud is not None
+        and preferred_lakeshore_baud not in supported_lakeshore_bauds
+    ):
+        raise ValueError("Lake Shore discovery baud must be 9600, 19200, 38400, or 57600.")
+    lakeshore_bauds = tuple(
+        dict.fromkeys(
+            (preferred_lakeshore_baud, *supported_lakeshore_bauds)
+            if preferred_lakeshore_baud is not None
+            else supported_lakeshore_bauds
+        )
+    )
     factory = manager_factory or _resource_manager
     found: list[DiscoveredInstrument] = []
     seen: set[tuple[str, str]] = set()
@@ -128,25 +144,61 @@ def discover_visa_resources(
                 if key in seen:
                     continue
                 seen.add(key)
-                session = None
-                try:
-                    session = manager.open_resource(str(resource), open_timeout=timeout_ms)
-                    session.timeout = timeout_ms
-                    # IEEE-488.2 IDN is line-oriented. These settings improve
-                    # compatibility with serial VISA resources without sending
-                    # any state-changing command.
-                    session.read_termination = "\n"
-                    session.write_termination = "\n"
-                    idn = str(session.query("*IDN?")).strip()
-                    found.append(DiscoveredInstrument(str(resource), backend, idn, identify_device(idn)))
-                except Exception as exc:
-                    found.append(DiscoveredInstrument(str(resource), backend, None, None, str(exc)))
-                finally:
-                    if session is not None:
-                        try:
-                            session.close()
-                        except Exception:
-                            pass
+                attempts: tuple[tuple[int, int, Parity, StopBits, str], ...]
+                if str(resource).strip().upper().startswith("ASRL"):
+                    # Preserve the backend's normal serial framing first for
+                    # other supported instruments that use standard 8-N-1.
+                    # A failed neutral query is followed by the Model 475
+                    # profiles below, always on a freshly opened session.
+                    # Model 475 serial framing is fixed at 7-O-1 with CR/LF,
+                    # while baud is selectable. Try every documented baud so a
+                    # factory-default instrument (9600) remains discoverable
+                    # even when the saved station profile uses another rate.
+                    attempts = ((0, 0, Parity.none, StopBits.one, "\n"),) + tuple(
+                        (baud, 7, Parity.odd, StopBits.one, "\r\n")
+                        for baud in lakeshore_bauds
+                    )
+                else:
+                    attempts = ((0, 0, Parity.none, StopBits.one, "\n"),)
+
+                errors: list[str] = []
+                for baud, data_bits, parity, stop_bits, termination in attempts:
+                    session = None
+                    try:
+                        session = manager.open_resource(str(resource), open_timeout=timeout_ms)
+                        session.timeout = timeout_ms
+                        session.read_termination = termination
+                        session.write_termination = termination
+                        if baud:
+                            session.baud_rate = baud
+                            session.data_bits = data_bits
+                            session.parity = parity
+                            session.stop_bits = stop_bits
+                        idn = str(session.query("*IDN?")).strip()
+                        found.append(
+                            DiscoveredInstrument(
+                                str(resource),
+                                backend,
+                                idn,
+                                identify_device(idn),
+                                serial_baud=baud or None,
+                            )
+                        )
+                        break
+                    except Exception as exc:
+                        errors.append(f"{baud or 'default'} baud: {exc}")
+                    finally:
+                        if session is not None:
+                            try:
+                                session.close()
+                            except Exception:
+                                pass
+                else:
+                    found.append(
+                        DiscoveredInstrument(
+                            str(resource), backend, None, None, "; ".join(errors)
+                        )
+                    )
         finally:
             try:
                 manager.close()

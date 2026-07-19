@@ -8,7 +8,6 @@ from pathlib import Path
 
 from PySide6.QtWidgets import QApplication
 
-from app.ui.design_system import apply_application_theme
 from app.ui.shell import MainWindow
 
 
@@ -24,13 +23,9 @@ def parse_args() -> argparse.Namespace:
 def main() -> int:
     args = parse_args()
     app = QApplication(sys.argv)
-    app.setApplicationName("Lab Control")
+    app.setApplicationName("PyLab")
     window = MainWindow(Path(args.settings), simulation=args.simulate)
 
-    def apply_theme(mode: str) -> None:
-        apply_application_theme(app, mode)
-
-    window.theme_changed.connect(apply_theme)
     window._set_theme_mode(str(window._settings.ui.get("theme", "system")), persist=False)
     app.styleHints().colorSchemeChanged.connect(lambda _scheme: window.refresh_system_theme())
     window.show()

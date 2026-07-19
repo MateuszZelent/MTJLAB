@@ -8,8 +8,9 @@ from typing import TYPE_CHECKING
 
 import pyqtgraph as pg
 from PySide6.QtCore import QEvent, QTimer, Signal
-from PySide6.QtWidgets import QFormLayout, QHBoxLayout, QSizePolicy, QVBoxLayout, QWidget
-from qfluentwidgets import BodyLabel, CaptionLabel, CardWidget, CheckBox, ComboBox, PrimaryPushButton, StrongBodyLabel, SubtitleLabel, isDarkTheme
+from PySide6.QtGui import QResizeEvent, QShowEvent
+from PySide6.QtWidgets import QFormLayout, QGridLayout, QHBoxLayout, QSizePolicy, QVBoxLayout, QWidget
+from qfluentwidgets import BodyLabel, CaptionLabel, CardWidget, CheckBox, ComboBox, FluentIcon, IconWidget, PrimaryPushButton, StrongBodyLabel, SubtitleLabel, isDarkTheme
 
 from app.devices.lakeshore_475.models import GaussmeterReading
 from app.domain.quantities import DIMENSION_TIME, parse_quantity
@@ -27,10 +28,12 @@ class LakeShore475Page(QWidget):
 
     def __init__(self, controller: DeviceController, settings: StationSettings, parent: QWidget | None = None) -> None:
         super().__init__(parent)
+        self.setProperty("stationSurface", "page")
         self._controller, self._settings = controller, settings
         self._in_flight = False
         self._history: deque[GaussmeterReading] = deque()
         self._plot_dirty = False
+        self._window_filter_installed = False
         self._timer = QTimer(self)
         self._timer.timeout.connect(self._live_tick)
         self._plot_timer = QTimer(self)
@@ -50,9 +53,16 @@ class LakeShore475Page(QWidget):
         hero_layout = QHBoxLayout(self.hero_card)
         hero_layout.setContentsMargins(20, 16, 20, 16)
         copy = QVBoxLayout()
+        title_row = QHBoxLayout()
+        title_row.setSpacing(8)
+        self.device_icon = IconWidget(FluentIcon.PIN, self.hero_card)
+        self.device_icon.setFixedSize(18, 18)
+        title_row.addWidget(self.device_icon)
         title = StrongBodyLabel("Lake Shore 475", self.hero_card)
         title.setObjectName("pageTitle")
-        copy.addWidget(title)
+        title_row.addWidget(title)
+        title_row.addStretch(1)
+        copy.addLayout(title_row)
         note = CaptionLabel("Read-only gaussmeter · live magnetic-field monitor", self.hero_card)
         note.setObjectName("muted")
         note.setWordWrap(True)
@@ -74,6 +84,8 @@ class LakeShore475Page(QWidget):
         form = QFormLayout(self.values_card)
         form.setContentsMargins(20, 12, 20, 12)
         form.setVerticalSpacing(8)
+        form.setRowWrapPolicy(QFormLayout.RowWrapPolicy.WrapLongRows)
+        form.setFieldGrowthPolicy(QFormLayout.FieldGrowthPolicy.AllNonFixedFieldsGrow)
         self.field = SubtitleLabel("— T", self.values_card)
         self.frequency = BodyLabel("— Hz", self.values_card)
         self.peaks = BodyLabel("— / — T", self.values_card)
@@ -93,16 +105,27 @@ class LakeShore475Page(QWidget):
         live_copy = QVBoxLayout()
         live_copy.setSpacing(2)
         live_copy.addWidget(StrongBodyLabel("Live preview", self.live_card))
-        live_copy.addWidget(CaptionLabel("Sampling and drawing run independently to keep the trace responsive.", self.live_card))
+        self.live_description = CaptionLabel(
+            "Sampling and drawing run independently to keep the trace responsive.",
+            self.live_card,
+        )
+        self.live_description.setWordWrap(True)
+        self.live_description.setMinimumWidth(0)
+        self.live_description.setSizePolicy(
+            QSizePolicy.Policy.Ignored,
+            QSizePolicy.Policy.Preferred,
+        )
+        live_copy.addWidget(self.live_description)
         live_header.addLayout(live_copy, 1)
         self.live_state = CaptionLabel("STOPPED", self.live_card)
         self.live_state.setProperty("deviceState", "neutral")
         live_header.addWidget(self.live_state)
         live_layout.addLayout(live_header)
 
-        controls = QHBoxLayout()
-        controls.setSpacing(12)
-        self.read_now = PrimaryPushButton("Read now", self.live_card)
+        self.live_controls = QGridLayout()
+        self.live_controls.setHorizontalSpacing(10)
+        self.live_controls.setVerticalSpacing(8)
+        self.read_now = PrimaryPushButton(FluentIcon.SYNC, "Read now", self.live_card)
         self.read_now.clicked.connect(self._read)
         self.live = CheckBox("Live preview", self.live_card)
         self.live.toggled.connect(self._live_changed)
@@ -124,22 +147,25 @@ class LakeShore475Page(QWidget):
             "Recording window",
         )
         self.history_window.currentIndexChanged.connect(self._history_window_changed)
-        controls.addWidget(self.read_now)
-        controls.addWidget(self.live)
-        controls.addSpacing(8)
-        controls.addWidget(CaptionLabel("Sampling", self.live_card))
-        controls.addWidget(self.sample_interval)
-        controls.addWidget(CaptionLabel("Refresh", self.live_card))
-        controls.addWidget(self.refresh_interval)
-        controls.addWidget(CaptionLabel("History", self.live_card))
-        controls.addWidget(self.history_window)
-        controls.addStretch(1)
-        live_layout.addLayout(controls)
-        top_row = QHBoxLayout()
-        top_row.setSpacing(12)
-        top_row.addWidget(self.hero_card, 2)
-        top_row.addWidget(self.values_card, 3)
-        layout.addLayout(top_row)
+        self.sampling_label = CaptionLabel("Sampling", self.live_card)
+        self.refresh_label = CaptionLabel("Refresh", self.live_card)
+        self.history_label = CaptionLabel("History", self.live_card)
+        self._live_control_widgets = (
+            self.read_now,
+            self.live,
+            self.sampling_label,
+            self.sample_interval,
+            self.refresh_label,
+            self.refresh_interval,
+            self.history_label,
+            self.history_window,
+        )
+        live_layout.addLayout(self.live_controls)
+        self.top_cards = QGridLayout()
+        self.top_cards.setSpacing(12)
+        layout.addLayout(self.top_cards)
+        self._compact_layout: bool | None = None
+        self._reflow(compact=True)
         layout.addWidget(self.live_card)
 
         self.plot_card = CardWidget(self)
@@ -150,6 +176,12 @@ class LakeShore475Page(QWidget):
         plot_header.addWidget(StrongBodyLabel("Magnetic field history", self.plot_card))
         plot_header.addStretch(1)
         self.plot_span = CaptionLabel("Last 1 min · elapsed time", self.plot_card)
+        self.plot_span.setWordWrap(True)
+        self.plot_span.setMinimumWidth(0)
+        self.plot_span.setSizePolicy(
+            QSizePolicy.Policy.Ignored,
+            QSizePolicy.Policy.Preferred,
+        )
         plot_header.addWidget(self.plot_span)
         plot_layout.addLayout(plot_header)
         self.history_plot = pg.PlotWidget(self.plot_card)
@@ -169,6 +201,63 @@ class LakeShore475Page(QWidget):
         self.banner.setObjectName("muted")
         self.banner.setWordWrap(True)
         layout.addWidget(self.banner)
+
+    def resizeEvent(self, event: QResizeEvent) -> None:
+        super().resizeEvent(event)
+        self._reflow_for_window_width(self.window().width())
+
+    def showEvent(self, event: QShowEvent) -> None:
+        super().showEvent(event)
+        window = self.window()
+        if not self._window_filter_installed and window is not self:
+            window.installEventFilter(self)
+            self._window_filter_installed = True
+        self._reflow_for_window_width(window.width())
+
+    def eventFilter(self, watched: object, event: QEvent) -> bool:
+        if watched is self.window() and event.type() == QEvent.Type.Resize:
+            self._reflow_for_window_width(event.size().width())  # type: ignore[attr-defined]
+        return super().eventFilter(watched, event)
+
+    def _reflow_for_window_width(self, width: int) -> None:
+        # With the 248 px station navigation and shell margins, windows below
+        # this point provide less than ~850 px to a device page.
+        self._reflow(compact=width < 1_120)
+
+    def _reflow(self, *, compact: bool) -> None:
+        if self._compact_layout == compact:
+            return
+        self._compact_layout = compact
+        for widget in (self.hero_card, self.values_card):
+            self.top_cards.removeWidget(widget)
+        for widget in self._live_control_widgets:
+            self.live_controls.removeWidget(widget)
+        for column in range(8):
+            self.top_cards.setColumnStretch(column, 0)
+            self.live_controls.setColumnStretch(column, 0)
+        if compact:
+            self.top_cards.addWidget(self.hero_card, 0, 0)
+            self.top_cards.addWidget(self.values_card, 1, 0)
+            self.top_cards.setColumnStretch(0, 1)
+            self.live_controls.addWidget(self.read_now, 0, 0)
+            self.live_controls.addWidget(self.live, 0, 1, 1, 3)
+            pairs = (
+                (self.sampling_label, self.sample_interval),
+                (self.refresh_label, self.refresh_interval),
+                (self.history_label, self.history_window),
+            )
+            for row, (label, control) in enumerate(pairs, start=1):
+                self.live_controls.addWidget(label, row, 0)
+                self.live_controls.addWidget(control, row, 1, 1, 3)
+            self.live_controls.setColumnStretch(1, 1)
+        else:
+            self.top_cards.addWidget(self.hero_card, 0, 0)
+            self.top_cards.addWidget(self.values_card, 0, 1)
+            self.top_cards.setColumnStretch(0, 2)
+            self.top_cards.setColumnStretch(1, 3)
+            for column, widget in enumerate(self._live_control_widgets):
+                self.live_controls.addWidget(widget, 0, column)
+            self.live_controls.setColumnStretch(7, 1)
 
     def _time_combo(self, choices: tuple[tuple[str, int], ...], accessible_name: str) -> ComboBox:
         combo = ComboBox(self)

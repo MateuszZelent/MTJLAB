@@ -3,7 +3,9 @@ from __future__ import annotations
 import unittest
 from unittest.mock import patch
 
-from PySide6.QtWidgets import QApplication
+from PySide6.QtGui import QColor, QPalette
+from PySide6.QtWidgets import QApplication, QLabel
+from qfluentwidgets import PrimaryPushButton, Theme
 
 from app.ui.design_system import (
     SPACING,
@@ -31,6 +33,18 @@ class DesignSystemTests(unittest.TestCase):
             ):
                 self.assertRegex(getattr(tokens, name), r"^#[0-9a-fA-F]{6}$")
 
+    def test_global_tokens_use_catppuccin_latte_and_mocha_foundations(self) -> None:
+        light = tokens_for("light")
+        dark = tokens_for("dark")
+        self.assertEqual(
+            (light.background, light.text_primary, light.accent),
+            ("#e6e9ef", "#4c4f69", "#1e66f5"),
+        )
+        self.assertEqual(
+            (dark.background, dark.text_primary, dark.accent),
+            ("#1e1e2e", "#cdd6f4", "#89b4fa"),
+        )
+
     def test_spacing_scale_is_monotonic_and_shared(self) -> None:
         self.assertEqual(tuple(SPACING), ("xs", "sm", "md", "lg", "xl"))
         self.assertEqual(sorted(SPACING.values()), list(SPACING.values()))
@@ -57,12 +71,36 @@ class ThemeBridgeTests(unittest.TestCase):
     def setUpClass(cls) -> None:
         cls.application = QApplication.instance() or QApplication([])
 
-    def test_theme_bridge_applies_fluent_and_semantic_qss(self) -> None:
-        with patch("app.ui.design_system.fluent_theme.setTheme") as set_theme:
+    def setUp(self) -> None:
+        self.application.setProperty("stationAppliedTheme", None)
+
+    def test_theme_bridge_applies_fluent_without_global_stylesheet_repolish(self) -> None:
+        with (
+            patch("app.ui.design_system.fluent_theme.setTheme") as set_theme,
+            patch("app.ui.design_system.fluent_theme.setThemeColor") as set_color,
+            patch.object(self.application, "setStyleSheet") as set_stylesheet,
+        ):
             applied = apply_application_theme(self.application, "dark")
-        set_theme.assert_called_once()
+        set_theme.assert_called_once_with(Theme.DARK, lazy=False)
+        set_color.assert_called_once_with(
+            tokens_for("dark").accent, save=False, lazy=False
+        )
+        set_stylesheet.assert_not_called()
         self.assertEqual(applied.name, "dark")
-        self.assertIn('[safetyState="danger"]', self.application.styleSheet())
+
+    def test_reapplying_the_effective_theme_is_a_no_op(self) -> None:
+        with patch("app.ui.design_system.fluent_theme.setTheme") as set_theme:
+            apply_application_theme(self.application, "light")
+            apply_application_theme(self.application, "light")
+        set_theme.assert_called_once_with(Theme.LIGHT, lazy=False)
+
+    def test_real_window_system_also_uses_atomic_theme_update(self) -> None:
+        with (
+            patch.object(self.application, "platformName", return_value="windows"),
+            patch("app.ui.design_system.fluent_theme.setTheme") as set_theme,
+        ):
+            apply_application_theme(self.application, "dark")
+        set_theme.assert_called_once_with(Theme.DARK, lazy=False)
 
     def test_offscreen_platform_disables_motion(self) -> None:
         with patch.dict("os.environ", {"QT_QPA_PLATFORM": "offscreen"}):
@@ -73,3 +111,31 @@ class ThemeBridgeTests(unittest.TestCase):
         palette = plot_theme(tokens)
         self.assertEqual(palette.background, tokens.plot_background)
         self.assertEqual(palette.measurement, tokens.plot_measurement)
+
+    def test_light_theme_resets_plain_label_left_over_from_dark_palette(self) -> None:
+        label = QLabel("Field")
+        palette = label.palette()
+        palette.setColor(QPalette.ColorRole.WindowText, QColor("#ffffff"))
+        label.setPalette(palette)
+
+        apply_application_theme(self.application, "light")
+
+        self.assertEqual(
+            label.palette().color(QPalette.ColorRole.WindowText).name(),
+            tokens_for("light").text_primary,
+        )
+        label.deleteLater()
+
+    def test_light_theme_gives_disabled_primary_button_dark_readable_text(self) -> None:
+        button = PrimaryPushButton("Read now")
+        button.setEnabled(False)
+
+        apply_application_theme(self.application, "dark")
+        apply_application_theme(self.application, "light")
+
+        patch_qss = button.styleSheet().split("/* station-disabled-button */", 1)[1]
+        tokens = tokens_for("light")
+        self.assertIn(f"color: {tokens.text_muted}", patch_qss)
+        self.assertIn(f"background-color: {tokens.surface_raised}", patch_qss)
+        self.assertNotIn("rgba(255, 255, 255, 0.9)", patch_qss)
+        button.deleteLater()

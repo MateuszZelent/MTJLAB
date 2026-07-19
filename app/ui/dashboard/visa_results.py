@@ -7,15 +7,17 @@ from typing import Literal, Mapping
 
 from PySide6.QtCore import Qt, Signal
 from PySide6.QtGui import QGuiApplication, QResizeEvent
-from PySide6.QtWidgets import QBoxLayout, QScrollArea, QSizePolicy, QVBoxLayout, QWidget
+from PySide6.QtWidgets import QBoxLayout, QScrollArea, QSizePolicy, QStackedLayout, QVBoxLayout, QWidget
 from qfluentwidgets import (
     BodyLabel,
     CaptionLabel,
     CardWidget,
     ComboBox,
+    FluentIcon,
+    IconWidget,
     PrimaryPushButton,
     PushButton,
-    SubtitleLabel,
+    StrongBodyLabel,
 )
 
 from app.devices.discovery import DiscoveredInstrument
@@ -232,8 +234,32 @@ class VisaResultsView(QWidget):
         self._assignment_allowed = assignment_allowed
         self._assignment_targets = dict(assignment_targets or DEFAULT_ASSIGNMENT_TARGETS)
 
-        layout = QVBoxLayout(self)
+        layout = QStackedLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
+        self.empty_state = CardWidget(self)
+        self.empty_state.setProperty("stationSurface", "raised")
+        self.empty_state.setAccessibleName("No VISA scan results")
+        self.empty_state.setMinimumHeight(196)
+        self.empty_state.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
+        empty_layout = QVBoxLayout(self.empty_state)
+        empty_layout.setContentsMargins(SPACING["xl"], SPACING["xl"], SPACING["xl"], SPACING["xl"])
+        empty_layout.setSpacing(SPACING["sm"])
+        empty_layout.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.empty_icon = IconWidget(FluentIcon.SEARCH, self.empty_state)
+        self.empty_icon.setFixedSize(32, 32)
+        empty_layout.addWidget(self.empty_icon, 0, Qt.AlignmentFlag.AlignHCenter)
+        self.empty_title = StrongBodyLabel("Ready to discover VISA instruments", self.empty_state)
+        self.empty_title.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        empty_layout.addWidget(self.empty_title)
+        self.empty_description = BodyLabel(
+            "Start a scan to enumerate VISA resources. Only *IDN? is sent, with a short timeout; instrument outputs are not changed.",
+            self.empty_state,
+        )
+        self.empty_description.setWordWrap(True)
+        self.empty_description.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.empty_description.setMaximumWidth(560)
+        empty_layout.addWidget(self.empty_description, 0, Qt.AlignmentFlag.AlignHCenter)
+        layout.addWidget(self.empty_state)
         self.scroll_area = QScrollArea(self)
         self.scroll_area.setProperty("stationSurface", "surface")
         self.scroll_area.setWidgetResizable(True)
@@ -242,23 +268,19 @@ class VisaResultsView(QWidget):
         self.scroll_area.viewport().setProperty("stationSurface", "surface")
         self.content.setProperty("stationSurface", "surface")
         self.content_layout = QVBoxLayout(self.content)
-        self.content_layout.setContentsMargins(0, 0, 0, 0)
+        self.content_layout.setContentsMargins(0, SPACING["sm"], 0, 0)
         self.content_layout.setSpacing(SPACING["md"])
         self.content_layout.setAlignment(Qt.AlignmentFlag.AlignTop)
-        self.empty_state = SubtitleLabel("No VISA scan results", self.content)
-        self.empty_state.setWordWrap(True)
-        self.empty_state.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred)
-        self.empty_state.setAccessibleName("No VISA scan results")
-        self.content_layout.addWidget(self.empty_state)
         self.scroll_area.setWidget(self.content)
         layout.addWidget(self.scroll_area)
+        layout.setCurrentWidget(self.empty_state)
 
     def set_results(self, states: tuple[VisaResultState, ...]) -> None:
         for row in self.rows:
             self.content_layout.removeWidget(row)
             row.deleteLater()
         self.rows.clear()
-        self.empty_state.setVisible(not states)
+        self.layout().setCurrentWidget(self.scroll_area if states else self.empty_state)
         for state in states:
             row = VisaResultRow(
                 state,

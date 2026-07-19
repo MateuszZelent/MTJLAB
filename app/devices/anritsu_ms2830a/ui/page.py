@@ -14,10 +14,12 @@ from PySide6.QtCore import QTimer, Qt, Signal
 from PySide6.QtWidgets import (
     QComboBox, QDialog, QDialogButtonBox, QFileDialog,
     QFormLayout, QFrame, QGridLayout, QHBoxLayout, QLabel, QLineEdit,
-    QMessageBox, QProgressBar, QPushButton, QScrollArea, QSplitter, QSpinBox, QTabWidget,
+    QMessageBox, QProgressBar, QScrollArea, QSplitter, QSpinBox, QTabWidget,
     QToolButton, QVBoxLayout, QWidget,
 )
-from qfluentwidgets import CardWidget, CheckBox, PrimaryPushButton, PushButton
+from qfluentwidgets import (
+    CardWidget, CheckBox, ComboBox, PrimaryPushButton, PushButton, SpinBox,
+)
 
 from app.devices.anritsu_ms2830a import (
     ANRITSU_PREAMPLIFIER_OPTIONS, AdvancedSpectrumConfig, AdvancedSpectrumSnapshot,
@@ -35,6 +37,7 @@ from app.settings.models import StationSettings
 from app.spectrum import LinearPowerAverager, apply_reference_operation, frequency_grids_match
 from app.storage import ReferenceHdf5Store
 from app.ui.common import line_edit as _line
+from app.ui.recipes.fluent_dialog import StationDialog
 from app.ui.widgets import LimitField, NotificationBanner, SpectrumPlotWidget
 from app.ui.workers import DeviceController
 
@@ -52,7 +55,7 @@ class AnritsuPageState(StrEnum):
     ERROR = "error"
 
 
-class AnritsuSpectrumConfigurationPanel(QFrame):
+class AnritsuSpectrumConfigurationPanel(CardWidget):
     """Shared, hardware-neutral spectrum setup for manual and plan hosts."""
 
     def __init__(
@@ -73,13 +76,13 @@ class AnritsuSpectrumConfigurationPanel(QFrame):
         form = QFormLayout()
         form.setFieldGrowthPolicy(QFormLayout.FieldGrowthPolicy.AllNonFixedFieldsGrow)
         form.setVerticalSpacing(7)
-        self.frequency_representation = QComboBox()
-        self.frequency_representation.addItem("Start / Stop", "start_stop")
-        self.frequency_representation.addItem("Center / Span", "center_span")
+        self.frequency_representation = ComboBox(self)
+        self.frequency_representation.addItem("Start / Stop", userData="start_stop")
+        self.frequency_representation.addItem("Center / Span", userData="center_span")
         self.start = _line("1 MHz")
         self.stop = _line("10 MHz")
         self.reference = _line("0 dBm")
-        self.points = QComboBox()
+        self.points = ComboBox(self)
         self.frequency_label_a = QLabel("Start")
         self.frequency_label_b = QLabel("Stop")
         form.addRow("Frequency representation", self.frequency_representation)
@@ -126,7 +129,7 @@ class AnritsuSpectrumConfigurationPanel(QFrame):
         self.points.clear()
         for value in ANRITSU_SWEEP_POINT_COUNTS:
             if int(minimum) <= value <= int(maximum):
-                self.points.addItem(str(value), value)
+                self.points.addItem(str(value), userData=value)
         index = self.points.findData(current if current is not None else 1001)
         self.points.setCurrentIndex(index if index >= 0 else 0)
         for field in self.limit_fields.values():
@@ -195,7 +198,7 @@ class AnritsuSpectrumConfigurationPanel(QFrame):
             return
 
 
-class AnritsuAdvancedSpectrumPanel(QFrame):
+class AnritsuAdvancedSpectrumPanel(CardWidget):
     """Shared hardware-neutral RBW/VBW/input-path configuration panel."""
 
     def __init__(
@@ -210,27 +213,27 @@ class AnritsuAdvancedSpectrumPanel(QFrame):
         form.setContentsMargins(0, 0, 0, 0)
         form.setFieldGrowthPolicy(QFormLayout.FieldGrowthPolicy.AllNonFixedFieldsGrow)
 
-        self.rbw_mode = QComboBox()
-        self.rbw_mode.addItem("Automatic", "auto")
-        self.rbw_mode.addItem("Manual", "manual")
+        self.rbw_mode = ComboBox(self)
+        self.rbw_mode.addItem("Automatic", userData="auto")
+        self.rbw_mode.addItem("Manual", userData="manual")
         self.rbw = _line("1 kHz")
         form.addRow("RBW mode", self.rbw_mode)
         form.addRow("Resolution bandwidth", self.rbw)
 
-        self.vbw_mode = QComboBox()
-        self.vbw_mode.addItem("Automatic", "auto")
-        self.vbw_mode.addItem("Manual", "manual")
-        self.vbw_mode.addItem("Off", "off")
+        self.vbw_mode = ComboBox(self)
+        self.vbw_mode.addItem("Automatic", userData="auto")
+        self.vbw_mode.addItem("Manual", userData="manual")
+        self.vbw_mode.addItem("Off", userData="off")
         self.vbw = _line("1 kHz")
         form.addRow("VBW mode", self.vbw_mode)
         form.addRow("Video bandwidth", self.vbw)
 
-        self.detector = QComboBox()
+        self.detector = ComboBox(self)
         form.addRow("Detector", self.detector)
-        self.attenuation_mode = QComboBox()
-        self.attenuation_mode.addItem("Automatic", "auto")
-        self.attenuation_mode.addItem("Manual", "manual")
-        self.attenuation = QSpinBox()
+        self.attenuation_mode = ComboBox(self)
+        self.attenuation_mode.addItem("Automatic", userData="auto")
+        self.attenuation_mode.addItem("Manual", userData="manual")
+        self.attenuation = SpinBox(self)
         self.attenuation.setRange(0, 60)
         self.attenuation.setSingleStep(2)
         self.attenuation.setSuffix(" dB")
@@ -239,9 +242,9 @@ class AnritsuAdvancedSpectrumPanel(QFrame):
         self.preamplifier = CheckBox("Enable preamplifier")
         form.addRow("Input gain", self.preamplifier)
 
-        self.sweep_time_mode = QComboBox()
-        self.sweep_time_mode.addItem("Automatic", "auto")
-        self.sweep_time_mode.addItem("Manual", "manual")
+        self.sweep_time_mode = ComboBox(self)
+        self.sweep_time_mode.addItem("Automatic", userData="auto")
+        self.sweep_time_mode.addItem("Manual", userData="manual")
         self.sweep_time = _line("100 ms")
         form.addRow("Sweep-time mode", self.sweep_time_mode)
         form.addRow("Sweep time", self.sweep_time)
@@ -276,7 +279,7 @@ class AnritsuAdvancedSpectrumPanel(QFrame):
             )
         self.detector.clear()
         for label, value in detectors:
-            self.detector.addItem(label, value)
+            self.detector.addItem(label, userData=value)
         index = self.detector.findData(current or "NORM")
         self.detector.setCurrentIndex(max(index, 0))
 
@@ -419,6 +422,7 @@ class AnritsuPage(QWidget):
         layout.addWidget(self.banner)
         self.hero_card = CardWidget(self)
         self.hero_card.setObjectName("anritsuHeroCard")
+        self.hero_card.setProperty("stationSurface", "card")
         title_row = QHBoxLayout(self.hero_card)
         title_row.setContentsMargins(20, 16, 20, 16)
         title = QLabel("Anritsu MS2830A — Spectrum / Live")
@@ -436,18 +440,23 @@ class AnritsuPage(QWidget):
         layout.addWidget(self.hero_card)
         self.workspace_splitter = QSplitter(Qt.Orientation.Horizontal)
         self.workspace_splitter.setObjectName("anritsuWorkspaceSplitter")
+        self.workspace_splitter.setProperty("stationSurface", "page")
         left_panel = QWidget()
         left_panel.setObjectName("anritsuControlPanel")
+        left_panel.setProperty("stationSurface", "page")
         left_layout = QVBoxLayout(left_panel)
         left_layout.setContentsMargins(8, 8, 8, 8)
         left_layout.setSpacing(10)
         self.setup_card = CardWidget(left_panel)
         self.setup_card.setObjectName("anritsuSetupCard")
+        self.setup_card.setProperty("stationSurface", "card")
         setup_layout = QVBoxLayout(self.setup_card)
         setup_layout.setContentsMargins(20, 16, 20, 16)
         setup_layout.setSpacing(10)
         left_layout.addWidget(self.setup_card)
         right_panel = QWidget()
+        right_panel.setObjectName("anritsuPlotPanel")
+        right_panel.setProperty("stationSurface", "page")
         right_layout = QVBoxLayout(right_panel)
         right_layout.setContentsMargins(8, 8, 8, 8)
         right_layout.setSpacing(6)
@@ -527,6 +536,7 @@ class AnritsuPage(QWidget):
         setup_layout.addLayout(controls)
         self.processing_card = CardWidget(left_panel)
         self.processing_card.setObjectName("anritsuProcessingCard")
+        self.processing_card.setProperty("stationSurface", "card")
         processing_layout = QGridLayout(self.processing_card)
         processing_layout.setContentsMargins(20, 16, 20, 16)
         processing_title = QLabel("Averaging and reference processing")
@@ -605,6 +615,7 @@ class AnritsuPage(QWidget):
         left_layout.addWidget(self.processing_card)
         left_layout.addStretch(1)
         self.spectrum_plot = SpectrumPlotWidget(legend=True)
+        self.spectrum_plot.setProperty("stationSurface", "raised")
         self.spectrum_plot.set_title("Current spectrum")
         self.spectrum_plot.set_labels(
             x="Frequency", x_unit="Hz", y="Amplitude", y_unit="dBm"
@@ -617,6 +628,8 @@ class AnritsuPage(QWidget):
         right_layout.addWidget(self.info)
         left_scroll = QScrollArea()
         left_scroll.setObjectName("anritsuControlScroll")
+        left_scroll.setProperty("stationSurface", "page")
+        left_scroll.viewport().setProperty("stationSurface", "page")
         left_scroll.setWidgetResizable(True)
         left_scroll.setFrameShape(QFrame.Shape.NoFrame)
         left_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
@@ -629,7 +642,9 @@ class AnritsuPage(QWidget):
         self.workspace_splitter.setSizes([680, 1100])
         self.mode_tabs = QTabWidget()
         self.mode_tabs.setObjectName("anritsuModeTabs")
+        self.mode_tabs.setProperty("stationSurface", "page")
         spectrum_tab = QWidget()
+        spectrum_tab.setProperty("stationSurface", "page")
         spectrum_tab_layout = QVBoxLayout(spectrum_tab)
         spectrum_tab_layout.setContentsMargins(0, 0, 0, 0)
         spectrum_tab_layout.addWidget(self.workspace_splitter)
@@ -757,7 +772,7 @@ class AnritsuPage(QWidget):
         return tab
 
     def _build_advanced_spectrum_dialog(self) -> QDialog:
-        dialog = QDialog(self)
+        dialog = StationDialog(self)
         dialog.setWindowTitle("Anritsu advanced Spectrum settings")
         dialog.setModal(False)
         dialog.resize(620, 470)
@@ -798,10 +813,9 @@ class AnritsuPage(QWidget):
         help_text.setWordWrap(True)
         layout.addWidget(help_text)
         actions = QHBoxLayout()
-        self.advanced_read_button = QPushButton("Read from instrument")
-        self.advanced_apply_button = QPushButton("Apply and verify")
-        self.advanced_apply_button.setObjectName("primaryButton")
-        close_button = QPushButton("Close")
+        self.advanced_read_button = PushButton("Read from instrument", dialog)
+        self.advanced_apply_button = PrimaryPushButton("Apply and verify", dialog)
+        close_button = PushButton("Close", dialog)
         actions.addWidget(self.advanced_read_button)
         actions.addWidget(self.advanced_apply_button)
         actions.addStretch(1)

@@ -11,9 +11,22 @@ from typing import Any, Callable
 from uuid import uuid4
 
 from PySide6.QtCore import QMimeData, QSize, QSettings, QThread, QTimer, Qt, Signal
-from PySide6.QtGui import QAction, QActionGroup, QCloseEvent, QColor, QDrag, QIcon, QKeySequence, QPainter, QPixmap, QShortcut
+from PySide6.QtGui import QAction, QActionGroup, QBrush, QCloseEvent, QColor, QDrag, QIcon, QKeySequence, QPainter, QPixmap, QShortcut
 from PySide6.QtWidgets import QAbstractItemView, QApplication, QComboBox, QCheckBox, QDialog, QDialogButtonBox, QFormLayout, QFrame, QFileDialog, QHBoxLayout, QHeaderView, QLabel, QLineEdit, QMainWindow, QMenu, QMessageBox, QPlainTextEdit, QPushButton, QScrollArea, QSplitter, QSpinBox, QStackedWidget, QStyle, QToolButton, QTreeWidget, QTreeWidgetItem, QVBoxLayout, QWidget
-from qfluentwidgets import CardWidget, CommandBar, PrimaryPushButton, PushButton, SegmentedWidget
+from qfluentwidgets import (
+    BodyLabel,
+    CaptionLabel,
+    CardWidget,
+    CommandBar,
+    ComboBox,
+    LineEdit,
+    PlainTextEdit,
+    PrimaryPushButton,
+    PushButton,
+    SegmentedWidget,
+    StrongBodyLabel,
+    SubtitleLabel,
+)
 
 from app.audit import AuditLogger
 from app.contracts import DeviceModuleRegistry
@@ -105,24 +118,48 @@ class RecipePage(QWidget):
         self._autosave_timer.setInterval(750)
         self._autosave_timer.timeout.connect(self._autosave)
         layout = QVBoxLayout(self)
-        layout.setContentsMargins(14, 12, 14, 12)
-        layout.setSpacing(10)
-        self.hero_card = CardWidget()
+        layout.setContentsMargins(16, 14, 16, 14)
+        layout.setSpacing(12)
+        self.setProperty("stationSurface", "page")
+        self.hero_card = CardWidget(self)
         hero = self.hero_card
         hero.setObjectName("recipeHero")
-        hero_layout = QVBoxLayout(hero)
-        hero_layout.setContentsMargins(14, 10, 14, 10)
-        title = QLabel("Sweep builder")
+        hero_layout = QHBoxLayout(hero)
+        hero_layout.setContentsMargins(18, 14, 18, 14)
+        hero_layout.setSpacing(16)
+        hero_copy = QVBoxLayout()
+        hero_copy.setSpacing(3)
+        title = SubtitleLabel("Sweep builder", hero)
         title.setObjectName("recipePageTitle")
-        hero_layout.addWidget(title)
-        subtitle = QLabel(
-            "Build the measurement from instrument blocks. Select a device on the left, "
-            "then edit the selected block by double-clicking it in the plan."
+        hero_copy.addWidget(title)
+        subtitle = BodyLabel(
+            "Build a qualified measurement from instrument blocks, then validate it before execution.",
+            hero,
         )
         subtitle.setObjectName("muted")
         subtitle.setWordWrap(True)
-        hero_layout.addWidget(subtitle)
+        hero_copy.addWidget(subtitle)
+        hero_layout.addLayout(hero_copy, 1)
+        self.recipe_profile_badge = StrongBodyLabel(
+            "LOCKED PROFILE" if self._settings.outputs_locked else "APPROVED PROFILE",
+            hero,
+        )
+        self.recipe_profile_badge.setObjectName("recipeProfileBadge")
+        self.recipe_profile_badge.setProperty(
+            "safetyState", "caution" if self._settings.outputs_locked else "verified"
+        )
+        self.recipe_profile_badge.setToolTip(
+            "Outputs remain locked by station policy."
+            if self._settings.outputs_locked
+            else "The active station profile permits approved output operations."
+        )
+        hero_layout.addWidget(self.recipe_profile_badge, 0, Qt.AlignmentFlag.AlignVCenter)
         layout.addWidget(hero)
+        self.document_card = CardWidget(self)
+        self.document_card.setObjectName("recipeDocumentCard")
+        document_layout = QVBoxLayout(self.document_card)
+        document_layout.setContentsMargins(12, 10, 12, 12)
+        document_layout.setSpacing(8)
         self.recipe_command_bar = CommandBar()
         self.recipe_command_bar.setObjectName("recipeCommandBar")
         self.recipe_command_bar.setIconSize(QSize(18, 18))
@@ -130,7 +167,11 @@ class RecipePage(QWidget):
             Qt.ToolButtonStyle.ToolButtonTextBesideIcon
         )
         path_line = QHBoxLayout()
-        self.path = _line("recipes/example_nested_sweep.yml", 42)
+        path_line.setSpacing(8)
+        self.path = LineEdit(self.document_card)
+        self.path.setText("recipes/example_nested_sweep.yml")
+        self.path.setClearButtonEnabled(True)
+        self.path.setAccessibleName("Recipe file path")
         self.restore_button = PushButton("Restore autosave")
         self.restore_button.setEnabled(False)
         self.run_button = PrimaryPushButton("Run plan")
@@ -223,39 +264,52 @@ class RecipePage(QWidget):
             )
         )
         self.recipe_command_bar.addAction(self.inspector_visibility_action)
-        self.recipe_command_bar.addSeparator()
-        self.recipe_profile_badge = QLabel(
-            "Profile: LOCKED" if self._settings.outputs_locked else "Profile: APPROVED"
-        )
-        self.recipe_profile_badge.setObjectName("recipeProfileBadge")
-        self.recipe_command_bar.addWidget(self.recipe_profile_badge)
-        layout.addWidget(self.recipe_command_bar)
+        document_layout.addWidget(self.recipe_command_bar)
+        path_label = CaptionLabel("Recipe file", self.document_card)
+        path_label.setObjectName("recipePathLabel")
+        path_line.addWidget(path_label)
         path_line.addWidget(self.path, 1)
-        path_line.addWidget(QLabel("Recipe file"))
         path_line.addWidget(self.restore_button)
         path_line.addWidget(self.run_button)
-        layout.addLayout(path_line)
-        action_frame = CardWidget()
-        action_frame.setObjectName("recipeActionBar")
-        builder_actions = QHBoxLayout(action_frame)
-        builder_actions.setContentsMargins(10, 7, 10, 7)
-        builder_actions.setSpacing(6)
-        self.node_kind = QComboBox()
-        self.node_kind.addItem("Sequence group", "sequence")
-        self.node_kind.addItem("Repeat group", "repeat")
-        self.node_kind.addItem("If / else group", "if")
-        self.node_kind.addItem("Wait", "wait")
-        self.node_kind.addItem("Measure Keithley", "measure_keithley")
-        self.node_kind.addItem("Measure MOKE Hall (V + field)", "measure_moke_hall")
-        self.node_kind.addItem("Acquire Anritsu reference", "acquire_reference")
-        self.node_kind.addItem("Acquire Anritsu spectrum", "acquire_spectrum")
-        self.node_kind.addItem("Keithley ramp to zero", "ramp_keithley_to_zero")
-        self.node_kind.addItem("Keithley output OFF", "set_keithley_output")
-        self.node_kind.addItem("Rigol output OFF", "set_rigol_output")
-        self.node_kind.addItem("Anritsu SG ARM", "arm_anritsu_sg_output")
-        self.node_kind.addItem("Anritsu SG RF ON", "set_anritsu_sg_output_on")
-        self.node_kind.addItem("Anritsu SG output OFF", "set_anritsu_sg_output")
-        self.node_kind.addItem("Comment", "comment")
+        document_layout.addLayout(path_line)
+        layout.addWidget(self.document_card)
+        self.selection_card = CardWidget(self)
+        self.selection_card.setObjectName("recipeSelectionCard")
+        builder_actions = QHBoxLayout(self.selection_card)
+        builder_actions.setContentsMargins(12, 8, 12, 8)
+        builder_actions.setSpacing(8)
+        selection_summary = QWidget(self.selection_card)
+        selection_summary.setMinimumWidth(120)
+        selection_summary.setMaximumWidth(180)
+        selection_summary.setMinimumHeight(40)
+        selection_copy = QVBoxLayout(selection_summary)
+        selection_copy.setContentsMargins(0, 0, 0, 0)
+        selection_copy.setSpacing(2)
+        self.selection_title = StrongBodyLabel("Selected block", self.selection_card)
+        self.selection_title.setFixedHeight(18)
+        self.selection_context = CaptionLabel("Select a block in the measurement tree", self.selection_card)
+        self.selection_context.setObjectName("muted")
+        self.selection_context.setFixedHeight(16)
+        selection_copy.addWidget(self.selection_title)
+        selection_copy.addWidget(self.selection_context)
+        builder_actions.addWidget(selection_summary)
+        builder_actions.addStretch(1)
+        self.node_kind = ComboBox(self.selection_card)
+        self.node_kind.addItem("Sequence group", userData="sequence")
+        self.node_kind.addItem("Repeat group", userData="repeat")
+        self.node_kind.addItem("If / else group", userData="if")
+        self.node_kind.addItem("Wait", userData="wait")
+        self.node_kind.addItem("Measure Keithley", userData="measure_keithley")
+        self.node_kind.addItem("Measure MOKE Hall (V + field)", userData="measure_moke_hall")
+        self.node_kind.addItem("Acquire Anritsu reference", userData="acquire_reference")
+        self.node_kind.addItem("Acquire Anritsu spectrum", userData="acquire_spectrum")
+        self.node_kind.addItem("Keithley ramp to zero", userData="ramp_keithley_to_zero")
+        self.node_kind.addItem("Keithley output OFF", userData="set_keithley_output")
+        self.node_kind.addItem("Rigol output OFF", userData="set_rigol_output")
+        self.node_kind.addItem("Anritsu SG ARM", userData="arm_anritsu_sg_output")
+        self.node_kind.addItem("Anritsu SG RF ON", userData="set_anritsu_sg_output_on")
+        self.node_kind.addItem("Anritsu SG output OFF", userData="set_anritsu_sg_output")
+        self.node_kind.addItem("Comment", userData="comment")
         def tool_button(
             text: str, tooltip: str, icon: QStyle.StandardPixmap, *, primary: bool = False
         ) -> PushButton:
@@ -300,8 +354,7 @@ class RecipePage(QWidget):
         builder_actions.addWidget(self.duplicate_node_button)
         builder_actions.addWidget(self.move_up_button)
         builder_actions.addWidget(self.move_down_button)
-        builder_actions.addStretch(1)
-        layout.addWidget(action_frame)
+        layout.addWidget(self.selection_card)
         self.workspace_splitter = QSplitter(Qt.Orientation.Horizontal)
         self.workspace_splitter.setObjectName("recipeWorkspaceSplitter")
         self.workspace_splitter.setChildrenCollapsible(False)
@@ -312,7 +365,7 @@ class RecipePage(QWidget):
             "library": None,
             "inspector": None,
         }
-        self.editor = QPlainTextEdit()
+        self.editor = PlainTextEdit(self)
         self.editor.setPlaceholderText("Declarative YAML recipe — no Python code and no raw SCPI.")
         self.editor.setMinimumWidth(320)
         self.tree = RecipeTreeWidget()
@@ -371,7 +424,7 @@ class RecipePage(QWidget):
         self.inspector_summary.setObjectName("muted")
         self.open_editor_button = PrimaryPushButton("Open parameter editor")
         self.open_editor_button.setEnabled(False)
-        self.inspector = QPlainTextEdit()
+        self.inspector = PlainTextEdit(self.inspector_panel)
         self.inspector.setReadOnly(True)
         self.inspector.setPlaceholderText("Select a recipe node to inspect its fields and expansion.")
         inspector_card_layout.addWidget(inspector_title)
@@ -386,12 +439,18 @@ class RecipePage(QWidget):
         self.workspace_splitter.splitterMoved.connect(self._workspace_splitter_moved)
         layout.addWidget(self.workspace_splitter, 1)
         self._update_workspace_layout(force=True)
-        self.version_label = QLabel("No saved version history.")
+        self.status_card = CardWidget(self)
+        self.status_card.setObjectName("recipeStatusCard")
+        status_layout = QVBoxLayout(self.status_card)
+        status_layout.setContentsMargins(12, 8, 12, 8)
+        status_layout.setSpacing(2)
+        self.version_label = CaptionLabel("No saved version history.", self.status_card)
         self.version_label.setObjectName("muted")
-        layout.addWidget(self.version_label)
-        self.summary = QLabel("The recipe has not been compiled.")
+        status_layout.addWidget(self.version_label)
+        self.summary = BodyLabel("The recipe has not been compiled.", self.status_card)
         self.summary.setWordWrap(True)
-        layout.addWidget(self.summary)
+        status_layout.addWidget(self.summary)
+        layout.addWidget(self.status_card)
         self.restore_button.clicked.connect(self.restore_autosave)
         self.run_button.clicked.connect(self.request_run)
         self.editor.textChanged.connect(self._source_changed)
@@ -572,8 +631,7 @@ class RecipePage(QWidget):
             button.setToolTip(description)
             button.setIcon(self.style().standardIcon(icon))
             button.setIconSize(QSize(18, 18))
-            button.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonTextBesideIcon)
-            button.setSizePolicy(button.sizePolicy().horizontalPolicy(), button.sizePolicy().verticalPolicy())
+            button.setMinimumHeight(34)
             button.clicked.connect(callback)  # type: ignore[arg-type]
             target_layout.addWidget(button)
             self._library_action_buttons.append(button)
@@ -885,8 +943,18 @@ class RecipePage(QWidget):
         self._settings = settings
         self._update_lakeshore_library_availability()
         self.recipe_profile_badge.setText(
-            "Profile: LOCKED" if settings.outputs_locked else "Profile: APPROVED"
+            "LOCKED PROFILE" if settings.outputs_locked else "APPROVED PROFILE"
         )
+        self.recipe_profile_badge.setProperty(
+            "safetyState", "caution" if settings.outputs_locked else "verified"
+        )
+        self.recipe_profile_badge.setToolTip(
+            "Outputs remain locked by station policy."
+            if settings.outputs_locked
+            else "The active station profile permits approved output operations."
+        )
+        self.recipe_profile_badge.style().unpolish(self.recipe_profile_badge)
+        self.recipe_profile_badge.style().polish(self.recipe_profile_badge)
         self._plan = None
         self.run_button.setEnabled(False)
         self.plan_preflight_changed.emit(None)
@@ -1400,7 +1468,7 @@ class RecipePage(QWidget):
             item.setIcon(0, self._tree_node_icon(node, icon))
             item.setToolTip(0, f"{node.id}\nDouble-click to edit; right-click for actions.")
             item.setToolTip(2, status_text.title())
-            item.setData(2, Qt.ItemDataRole.ForegroundRole, QColor(status_color))
+            item.setData(2, Qt.ItemDataRole.ForegroundRole, QBrush(QColor(status_color)))
             status_font = item.font(2)
             status_font.setBold(True)
             status_font.setPointSize(8)
@@ -1518,7 +1586,7 @@ class RecipePage(QWidget):
                 link_font.setUnderline(True)
                 row.setFont(0, link_font)
                 row.setData(
-                    0, Qt.ItemDataRole.ForegroundRole, QColor("#1769aa")
+                    0, Qt.ItemDataRole.ForegroundRole, QBrush(QColor("#1769aa"))
                 )
             row.setIcon(0, self._tree_badge_icon("Operator control", color, badge))
             if metadata is None:
@@ -1526,7 +1594,7 @@ class RecipePage(QWidget):
                     0,
                     "Operator control summary. Double-click the parent device node to edit it.",
                 )
-            row.setData(2, Qt.ItemDataRole.ForegroundRole, QColor(color))
+            row.setData(2, Qt.ItemDataRole.ForegroundRole, QBrush(QColor(color)))
             status_font = row.font(2)
             status_font.setBold(True)
             status_font.setPointSize(8)
@@ -1655,10 +1723,10 @@ class RecipePage(QWidget):
                 stage_link_font.setUnderline(True)
                 stage.setFont(0, stage_link_font)
                 stage.setData(
-                    0, Qt.ItemDataRole.ForegroundRole, QColor("#1769aa")
+                    0, Qt.ItemDataRole.ForegroundRole, QBrush(QColor("#1769aa"))
                 )
-                stage.setForeground(1, QColor("#647588"))
-                stage.setForeground(2, QColor("#647588"))
+                stage.setForeground(1, QBrush(QColor("#647588")))
+                stage.setForeground(2, QBrush(QColor("#647588")))
                 stage.setToolTip(
                     0,
                     "Click to open this stage directly in the ROI editor.",
@@ -1785,9 +1853,9 @@ class RecipePage(QWidget):
             link_font = row.font(0)
             link_font.setUnderline(True)
             row.setFont(0, link_font)
-            row.setData(0, Qt.ItemDataRole.ForegroundRole, QColor("#1769aa"))
-            row.setForeground(1, QColor("#647588"))
-            row.setForeground(2, QColor("#647588"))
+            row.setData(0, Qt.ItemDataRole.ForegroundRole, QBrush(QColor("#1769aa")))
+            row.setForeground(1, QBrush(QColor("#647588")))
+            row.setForeground(2, QBrush(QColor("#647588")))
             row.setToolTip(0, "Click to edit this ROI without changing loop children.")
             parent.addChild(row)
 
@@ -2208,12 +2276,14 @@ class RecipePage(QWidget):
         _previous: QTreeWidgetItem | None,
     ) -> None:
         if item is None:
+            self.selection_context.setText("Select a block in the measurement tree")
             self.inspector.clear()
             self.inspector_summary.setText("Select a node to see its measurement role and configuration.")
             self.open_editor_button.setEnabled(False)
             self.edit_device_button.setEnabled(False)
             self.edit_generator_button.setEnabled(False)
             return
+        self.selection_context.setText(item.text(0).strip() or "Selected tree row")
         operator_row = item.data(0, self.operator_row_role)
         if isinstance(operator_row, dict):
             stage_index = operator_row.get("stage_index")

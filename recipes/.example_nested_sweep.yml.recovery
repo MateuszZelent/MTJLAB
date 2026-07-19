@@ -7,6 +7,13 @@ root:
   id: sequence-main
   type: sequence
   children:
+  - id: keithley-b-config
+    type: configure_keithley
+    channel: B
+    mode: current
+    level: ${keithley.B.current}
+    compliance: 67 mV
+    nplc: 1.0
   - id: anritsu-spectrum-setup
     type: configure_anritsu
     start_frequency: 1 MHz
@@ -21,13 +28,15 @@ root:
     points: 100
     spacing: linear
     children:
-    - id: keithley-b-config
-      type: configure_keithley
-      channel: B
-      mode: current
-      level: ${keithley.B.current}
-      compliance: 67 mV
-      nplc: 1.0
+    - id: anritsu-sg-5bf46dd2
+      type: sequence
+      text: Anritsu SG — configuration required · RF OFF
+      device_module: anritsu_sg
+      label: Anritsu MS2830A Signal Generator
+      operation: configure_selected_parameters
+      configuration_required: true
+      parameter_actions: []
+      children: []
     - id: rigol-high-level-sweep
       type: sweep
       target: rigol.1.high_level
@@ -55,16 +64,6 @@ root:
         type: acquire_spectrum
         trace: TRAC1
 
-  - id: rigol-10782fa4
-    type: sequence
-    text: Rigol DG1032Z — configuration required
-    device_module: rigol
-    label: Rigol DG1032Z
-    configuration_required: true
-    children:
-    - id: comment-04e60fe8
-      type: comment
-      text: Drop nested devices or flow actions here
 finally:
 - id: rigol-ch1-off-finally
   type: set_rigol_output

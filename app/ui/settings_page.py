@@ -66,6 +66,7 @@ from app.domain.quantities import (
     parse_quantity,
 )
 from app.security import AccessPolicy, Permission
+from app.ui.recipes.fluent_dialog import StationDialog
 from app.settings import SettingsRepository
 from app.settings.diagnostics import (
     configuration_diagnostics,
@@ -513,7 +514,7 @@ class SettingsPage(QWidget):
             QMessageBox.critical(self, "Cannot compare settings", str(exc))
             return
         changes = structural_diff(self._persisted_raw, draft)
-        dialog = QDialog(self)
+        dialog = StationDialog(self)
         dialog.setWindowTitle("Settings changes")
         dialog.resize(760, 480)
         layout = QVBoxLayout(dialog)
@@ -1017,7 +1018,7 @@ class SettingsPage(QWidget):
     def _choose_roles(
         self, *, username: str = "", roles: tuple[str, ...] = ()
     ) -> tuple[str, tuple[str, ...]] | None:
-        dialog = QDialog(self)
+        dialog = StationDialog(self)
         dialog.setWindowTitle("User access role")
         dialog.setMinimumWidth(420)
         layout = QVBoxLayout(dialog)

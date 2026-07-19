@@ -28,6 +28,7 @@ from app.storage import (
     ThatecRunReader,
     ThatecTreeNode,
 )
+from app.ui.recipes.fluent_dialog import StationDialog
 
 
 class SweepTreePanel(QWidget):
@@ -249,7 +250,7 @@ class SweepTreePanel(QWidget):
         return None
 
 
-class SweepTreeDialog(QDialog):
+class SweepTreeDialog(StationDialog):
     """Modal dialog wrapping a :class:`SweepTreePanel`."""
 
     def __init__(

@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import unittest
 
+from pyvisa.constants import Parity, StopBits
+
 from app.devices.discovery import (
     detect_local_ipv4_address,
     discover_tcp_endpoints,
@@ -42,6 +44,49 @@ class DiscoveryManager:
         if open_timeout != 250:
             raise AssertionError("unexpected discovery timeout")
         return self.resources[resource]
+
+    def close(self) -> None:
+        self.closed = True
+
+
+class LakeShoreSerialSession(DiscoverySession):
+    def __init__(self, *, expected_baud: int = 9_600) -> None:
+        super().__init__("LSCI,MODEL475,11272013,1.0")
+        self.expected_baud = expected_baud
+        self.baud_rate = 0
+        self.data_bits = 0
+        self.parity = Parity.none
+        self.stop_bits = StopBits.one
+
+    def query(self, command: str) -> str:
+        self.queries.append(command)
+        if (
+            self.baud_rate != self.expected_baud
+            or self.data_bits != 7
+            or self.parity != Parity.odd
+            or self.stop_bits != StopBits.one
+            or self.read_termination != "\r\n"
+            or self.write_termination != "\r\n"
+        ):
+            raise TimeoutError("serial framing mismatch")
+        return self.idn
+
+
+class LakeShoreSerialManager:
+    def __init__(self, *, expected_baud: int = 9_600) -> None:
+        self.expected_baud = expected_baud
+        self.sessions: list[LakeShoreSerialSession] = []
+        self.closed = False
+
+    def list_resources(self) -> tuple[str, ...]:
+        return ("ASRL3::INSTR",)
+
+    def open_resource(self, resource: str, *, open_timeout: int) -> LakeShoreSerialSession:
+        if resource != "ASRL3::INSTR" or open_timeout != 250:
+            raise AssertionError("unexpected serial discovery request")
+        session = LakeShoreSerialSession(expected_baud=self.expected_baud)
+        self.sessions.append(session)
+        return session
 
     def close(self) -> None:
         self.closed = True
@@ -108,6 +153,43 @@ class VisaDiscoveryTests(unittest.TestCase):
             self.assertEqual(session.queries, ["*IDN?"])
             self.assertEqual(session.timeout, 250)
             self.assertTrue(session.closed)
+
+    def test_lakeshore_serial_discovery_uses_documented_framing_and_finds_factory_baud(self) -> None:
+        manager = LakeShoreSerialManager(expected_baud=9_600)
+
+        results = discover_visa_resources(
+            ("system",),
+            timeout_ms=250,
+            preferred_lakeshore_baud=57_600,
+            manager_factory=lambda _backend: manager,
+        )
+
+        self.assertEqual(len(results), 1)
+        self.assertEqual(results[0].device, "lakeshore_gaussmeter")
+        self.assertEqual(results[0].idn, "LSCI,MODEL475,11272013,1.0")
+        self.assertEqual(results[0].serial_baud, 9_600)
+        self.assertEqual(
+            [session.baud_rate for session in manager.sessions],
+            [0, 57_600, 9_600],
+        )
+        self.assertTrue(manager.closed)
+        self.assertTrue(all(session.queries == ["*IDN?"] for session in manager.sessions))
+        self.assertTrue(all(session.closed for session in manager.sessions))
+
+    def test_serial_discovery_preserves_neutral_framing_for_other_instruments(self) -> None:
+        session = DiscoverySession("RIGOL TECHNOLOGIES,DG1032Z,SN,1")
+        manager = DiscoveryManager({"ASRL4::INSTR": session})
+
+        results = discover_visa_resources(
+            ("system",), timeout_ms=250, manager_factory=lambda _backend: manager
+        )
+
+        self.assertEqual(results[0].device, "rigol")
+        self.assertIsNone(results[0].serial_baud)
+        self.assertEqual(session.queries, ["*IDN?"])
+        self.assertEqual(session.read_termination, "\n")
+        self.assertEqual(session.write_termination, "\n")
+        self.assertTrue(session.closed)
 
     def test_unavailable_backend_is_reported_without_raising(self) -> None:
         results = discover_visa_resources(
