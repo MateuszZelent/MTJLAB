@@ -8,12 +8,12 @@ from dataclasses import dataclass
 from PySide6.QtCore import Qt, Signal
 from PySide6.QtWidgets import (
     QCheckBox, QFormLayout, QFrame, QGridLayout, QHBoxLayout,
-    QLabel, QMessageBox, QPushButton, QScrollArea, QSpinBox, QSplitter,
+    QLabel, QMessageBox, QPushButton, QSpinBox, QSplitter,
     QTabWidget, QVBoxLayout, QWidget,
 )
 from qfluentwidgets import (
     CaptionLabel, CardWidget, ComboBox, PrimaryPushButton,
-    PushButton, StrongBodyLabel, TitleLabel,
+    PushButton, ScrollArea, StrongBodyLabel, TitleLabel,
 )
 
 from app.devices.rigol_dg1000z import (
@@ -388,8 +388,8 @@ class RigolPage(QWidget):
         description: str,
         rows: tuple[tuple[str, QWidget], ...],
         actions: tuple[QPushButton, ...],
-    ) -> QScrollArea:
-        scroll = QScrollArea()
+    ) -> ScrollArea:
+        scroll = ScrollArea()
         scroll.setWidgetResizable(True)
         scroll.setFrameShape(QFrame.Shape.NoFrame)
         scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
@@ -814,8 +814,8 @@ class RigolPage(QWidget):
         return self._scroll_widget(tab)
 
     @staticmethod
-    def _scroll_widget(content: QWidget) -> QScrollArea:
-        scroll = QScrollArea()
+    def _scroll_widget(content: QWidget) -> ScrollArea:
+        scroll = ScrollArea()
         scroll.setWidgetResizable(True)
         scroll.setFrameShape(QFrame.Shape.NoFrame)
         scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)

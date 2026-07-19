@@ -8,18 +8,16 @@ from PySide6.QtCore import Qt, Signal
 from PySide6.QtWidgets import (
     QHBoxLayout,
     QLabel,
-    QPushButton,
     QSplitter,
-    QTreeWidget,
     QTreeWidgetItem,
     QVBoxLayout,
     QWidget,
 )
+from qfluentwidgets import PushButton, TreeWidget
 
 from app.storage import (
     Hdf5RunReader,
     StoredPoint,
-    ThatecRow,
     ThatecRun,
     ThatecRunReader,
 )
@@ -49,7 +47,7 @@ class SpectrumResultsTab(QWidget):
         splitter = QSplitter(Qt.Orientation.Vertical)
 
         # --- Points list ---
-        self.points = QTreeWidget()
+        self.points = TreeWidget(self)
         self.points.setHeaderLabels(["Point", "State", "UTC time", "Data"])
         self.points.setMinimumHeight(120)
         self.points.setColumnWidth(0, 70)
@@ -59,8 +57,8 @@ class SpectrumResultsTab(QWidget):
 
         # --- Navigation ---
         nav = QHBoxLayout()
-        self.prev_button = QPushButton("← Previous")
-        self.next_button = QPushButton("Next →")
+        self.prev_button = PushButton("← Previous", self)
+        self.next_button = PushButton("Next →", self)
         self.prev_button.setEnabled(False)
         self.next_button.setEnabled(False)
         nav.addWidget(self.prev_button)

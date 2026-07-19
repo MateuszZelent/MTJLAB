@@ -11,13 +11,12 @@ import pyqtgraph as pg
 from pyqtgraph.exporters import ImageExporter, SVGExporter
 from PySide6.QtCore import Signal
 from PySide6.QtWidgets import (
-    QComboBox,
     QHBoxLayout,
     QLabel,
-    QToolButton,
     QVBoxLayout,
     QWidget,
 )
+from qfluentwidgets import ComboBox, PushButton
 from app.ui.dialogs import StationFileDialog as QFileDialog
 
 from app.storage import ThatecRow, ThatecRun, ThatecRunReader
@@ -51,7 +50,7 @@ class HeatmapPlotWidget(QWidget):
         toolbar = QHBoxLayout()
         toolbar.setSpacing(4)
 
-        self.colormap_combo = QComboBox()
+        self.colormap_combo = ComboBox(self)
         self.colormap_combo.addItems(
             ["viridis", "inferno", "plasma", "magma", "cividis", "turbo", "hot"]
         )
@@ -59,14 +58,14 @@ class HeatmapPlotWidget(QWidget):
         toolbar.addWidget(QLabel("Palette:"))
         toolbar.addWidget(self.colormap_combo)
 
-        auto_range_btn = QToolButton()
+        auto_range_btn = PushButton(parent=self)
         auto_range_btn.setText("Auto range")
         auto_range_btn.setToolTip("Reset zoom and show all data")
         auto_range_btn.setObjectName("plotToolButton")
         auto_range_btn.clicked.connect(self.auto_range)
         toolbar.addWidget(auto_range_btn)
 
-        export_btn = QToolButton()
+        export_btn = PushButton(parent=self)
         export_btn.setText("Export")
         export_btn.setToolTip("Export heatmap to PNG, SVG or CSV")
         export_btn.setObjectName("plotToolButton")
@@ -300,12 +299,12 @@ class HeatmapResultsTab(QWidget):
         # --- Row selector ---
         selector = QHBoxLayout()
         selector.addWidget(QLabel("Spectrum row:"))
-        self.row_combo = QComboBox()
+        self.row_combo = ComboBox(self)
         self.row_combo.setMinimumWidth(300)
         self.row_combo.setToolTip("Select a THATEC row with 2-D spectral data")
         selector.addWidget(self.row_combo, 1)
 
-        self.load_button = QToolButton()
+        self.load_button = PushButton(parent=self)
         self.load_button.setText("Load heatmap")
         self.load_button.setToolTip("Read all checkpoints and render the heatmap")
         self.load_button.setObjectName("plotToolButton")

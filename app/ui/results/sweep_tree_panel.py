@@ -7,17 +7,14 @@ from pathlib import Path
 
 from PySide6.QtCore import Qt, Signal
 from PySide6.QtWidgets import (
-    QDialogButtonBox,
     QHBoxLayout,
     QLabel,
-    QPlainTextEdit,
-    QSpinBox,
     QSplitter,
-    QTreeWidget,
     QTreeWidgetItem,
     QVBoxLayout,
     QWidget,
 )
+from qfluentwidgets import BodyLabel, PlainTextEdit, PushButton, SpinBox, TreeWidget
 
 from app.storage import (
     ThatecDevice,
@@ -53,7 +50,7 @@ class SweepTreePanel(QWidget):
         splitter = QSplitter(Qt.Orientation.Vertical)
 
         # --- Tree ---
-        self.tree = QTreeWidget()
+        self.tree = TreeWidget(self)
         self.tree.setHeaderLabels(["THATEC experiment", "Type"])
         self.tree.setMinimumHeight(160)
         splitter.addWidget(self.tree)
@@ -63,20 +60,20 @@ class SweepTreePanel(QWidget):
         bottom_layout = QVBoxLayout(bottom)
         bottom_layout.setContentsMargins(0, 0, 0, 0)
 
-        self.inspector = QPlainTextEdit()
+        self.inspector = PlainTextEdit(self)
         self.inspector.setReadOnly(True)
         self.inspector.setMinimumHeight(100)
         bottom_layout.addWidget(self.inspector)
 
         checkpoint_bar = QHBoxLayout()
-        checkpoint_bar.addWidget(QLabel("THATEC checkpoint:"))
-        self.thatec_checkpoint = QSpinBox()
+        checkpoint_bar.addWidget(BodyLabel("THATEC checkpoint:", self))
+        self.thatec_checkpoint = SpinBox(self)
         self.thatec_checkpoint.setMinimum(0)
         checkpoint_bar.addWidget(self.thatec_checkpoint)
         checkpoint_bar.addStretch(1)
         bottom_layout.addLayout(checkpoint_bar)
 
-        self.values_tree = QTreeWidget()
+        self.values_tree = TreeWidget(self)
         self.values_tree.setHeaderLabels(["Checkpoint", "Value", "Timestamp UTC"])
         self.values_tree.setMaximumHeight(150)
         bottom_layout.addWidget(self.values_tree)
@@ -268,9 +265,12 @@ class SweepTreeDialog(StationDialog):
         self.panel.load(path, run, tree)
         layout.addWidget(self.panel, 1)
 
-        buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Close)
-        buttons.rejected.connect(self.reject)
-        layout.addWidget(buttons)
+        footer = QHBoxLayout()
+        footer.addStretch(1)
+        close = PushButton("Close", self)
+        close.clicked.connect(self.reject)
+        footer.addWidget(close)
+        layout.addLayout(footer)
 
 
 def _format_json(value: object) -> str:

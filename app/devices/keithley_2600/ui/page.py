@@ -18,14 +18,14 @@ from PySide6.QtWidgets import (
     QDialogButtonBox, QFileDialog, QFormLayout, QFrame, QGridLayout,
     QBoxLayout, QHBoxLayout, QHeaderView, QLabel, QLineEdit, QListWidget,
     QListWidgetItem, QMainWindow, QMenu, QMessageBox, QPlainTextEdit,
-    QProgressBar, QPushButton, QScrollArea, QSplitter, QSpinBox,
+    QProgressBar, QPushButton, QSplitter, QSpinBox,
     QSizePolicy, QStyledItemDelegate, QStyle, QTabWidget, QTableWidget,
     QTableWidgetItem, QToolButton, QTreeWidget, QTreeWidgetItem,
     QVBoxLayout, QWidget,
 )
 from qfluentwidgets import (
     CaptionLabel, CardWidget, CheckBox, ComboBox, PrimaryPushButton, PushButton,
-    StrongBodyLabel, TitleLabel,
+    ScrollArea, StrongBodyLabel, TitleLabel,
 )
 
 from app.devices.keithley_2600 import (
@@ -331,7 +331,7 @@ class KeithleyNodeEditorDialog(FluentRecipeDialog):
             settings, self, plan_mode=True
         )
         workspace = QSplitter(Qt.Orientation.Horizontal)
-        configuration_scroll = QScrollArea()
+        configuration_scroll = ScrollArea()
         configuration_scroll.setWidgetResizable(True)
         configuration_scroll.setFrameShape(QFrame.Shape.NoFrame)
         configuration_scroll.setWidget(self.configuration_panel)
@@ -400,7 +400,7 @@ class KeithleyNodeEditorDialog(FluentRecipeDialog):
         parameter_note.setObjectName("muted")
         parameter_note.setWordWrap(True)
         parameter_layout.addWidget(parameter_note, output_row + 3, 0, 1, 2)
-        parameter_scroll = QScrollArea()
+        parameter_scroll = ScrollArea()
         parameter_scroll.setWidgetResizable(True)
         parameter_scroll.setFrameShape(QFrame.Shape.NoFrame)
         parameter_scroll.setWidget(parameter_card)
@@ -846,13 +846,13 @@ class KeithleyPage(QWidget):
         )
 
     @staticmethod
-    def _scroll_widget(content: QWidget) -> QScrollArea:
+    def _scroll_widget(content: QWidget) -> ScrollArea:
         content.setMinimumWidth(0)
         content.setSizePolicy(
             QSizePolicy.Policy.Ignored,
             QSizePolicy.Policy.Preferred,
         )
-        scroll = QScrollArea()
+        scroll = ScrollArea()
         scroll.setWidgetResizable(True)
         scroll.setFrameShape(QFrame.Shape.NoFrame)
         scroll.setWidget(content)

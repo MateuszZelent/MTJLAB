@@ -116,14 +116,30 @@ class AccessPolicy:
         if not resolved_username:
             raise AuthorizationError("The operating-system identity could not be resolved.")
         normalized = cls.normalize_username(resolved_username)
-        assignment = next(
+        exact_assignment = next(
             (
                 roles
                 for candidate, roles in configured.user_roles.items()
                 if cls.normalize_username(candidate) == normalized
             ),
-            configured.default_roles,
+            None,
         )
+        assignment = exact_assignment
+        if assignment is None and "\\" not in normalized:
+            # Some Windows launchers omit USERDOMAIN even though getpass still
+            # returns the authenticated local account. Accept a domain-qualified
+            # configuration only when its account component is unambiguous;
+            # never guess when two domains configure the same username.
+            local_matches = [
+                roles
+                for candidate, roles in configured.user_roles.items()
+                if cls.normalize_username(candidate).rsplit("\\", 1)[-1]
+                == normalized
+            ]
+            if len(local_matches) == 1:
+                assignment = local_matches[0]
+        if assignment is None:
+            assignment = configured.default_roles
         roles = frozenset(Role(value) for value in assignment)
         return cls(
             AuthenticatedIdentity(

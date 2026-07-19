@@ -8,12 +8,11 @@ from PySide6.QtCore import Qt, Signal
 from PySide6.QtWidgets import (
     QHBoxLayout,
     QLabel,
-    QPushButton,
-    QTreeWidget,
     QTreeWidgetItem,
     QVBoxLayout,
     QWidget,
 )
+from qfluentwidgets import PrimaryPushButton, PushButton, TreeWidget
 from app.ui.dialogs import StationFileDialog as QFileDialog
 
 from app.storage import Hdf5RunReader, ThatecRunReader
@@ -38,14 +37,14 @@ class FileBrowserPanel(QWidget):
         layout.addWidget(self.location)
 
         actions = QHBoxLayout()
-        refresh = QPushButton("Refresh file list")
-        open_file = QPushButton("Open HDF5 file…")
+        refresh = PushButton("Refresh file list", self)
+        open_file = PrimaryPushButton("Open HDF5 file…", self)
         actions.addWidget(refresh)
         actions.addWidget(open_file)
         actions.addStretch(1)
         layout.addLayout(actions)
 
-        self.runs = QTreeWidget()
+        self.runs = TreeWidget(self)
         self.runs.setHeaderLabels(["File", "State", "Spectra", "Points"])
         self.runs.setMinimumWidth(240)
         self.runs.setColumnWidth(0, 220)

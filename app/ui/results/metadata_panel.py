@@ -7,13 +7,12 @@ from pathlib import Path
 
 from PySide6.QtGui import QResizeEvent
 from PySide6.QtWidgets import (
-    QPlainTextEdit,
     QSizePolicy,
     QStackedWidget,
     QVBoxLayout,
     QWidget,
 )
-from qfluentwidgets import ComboBox, Pivot
+from qfluentwidgets import ComboBox, Pivot, PlainTextEdit
 
 from app.storage import RunDetail, ThatecRun
 from app.storage.pythat_reader import PyThatRunData
@@ -87,11 +86,11 @@ class MetadataPanel(QWidget):
 
         self.tabs = _FluentMetadataSections(self)
         self.section_navigation = self.tabs.navigation
-        self.metadata = QPlainTextEdit()
-        self.recipe_snapshot = QPlainTextEdit()
-        self.settings_snapshot = QPlainTextEdit()
-        self.pythat_data = QPlainTextEdit()
-        self.device_state = QPlainTextEdit()
+        self.metadata = PlainTextEdit(self)
+        self.recipe_snapshot = PlainTextEdit(self)
+        self.settings_snapshot = PlainTextEdit(self)
+        self.pythat_data = PlainTextEdit(self)
+        self.device_state = PlainTextEdit(self)
 
         for widget in (
             self.metadata,

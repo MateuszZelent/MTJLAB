@@ -8,7 +8,15 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 from PySide6.QtCore import QPoint
 from PySide6.QtWidgets import QApplication, QTabWidget
-from qfluentwidgets import CardWidget, Pivot, PrimaryPushButton
+from qfluentwidgets import (
+    CardWidget,
+    CheckBox,
+    ComboBox,
+    LineEdit,
+    Pivot,
+    PrimaryPushButton,
+    SpinBox,
+)
 
 from app.settings import SettingsRepository
 from app.ui.settings_page import SettingsPage
@@ -31,10 +39,20 @@ class FluentSettingsPageTests(unittest.TestCase):
             self.assertNotIsInstance(page.tabs, QTabWidget)
             self.assertIsInstance(page.section_navigation, Pivot)
             self.assertIsInstance(page.action_card, CardWidget)
+            self.assertIsInstance(page.profile_card, CardWidget)
             self.assertIsInstance(page.save_button, PrimaryPushButton)
             self.assertGreater(page.section_navigation.geometry().width(), 500)
             self.assertTrue(page.page_stack.isVisible())
             self.assertGreater(page.page_stack.geometry().height(), 450)
+            self.assertTrue(
+                all(isinstance(card, CardWidget) for card in page.findChildren(CardWidget))
+            )
+            self.assertTrue(
+                all(
+                    isinstance(editor, (CheckBox, ComboBox, LineEdit, SpinBox))
+                    for editor in page._form_editors.values()
+                )
+            )
         finally:
             page.close()
 

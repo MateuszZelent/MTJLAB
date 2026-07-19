@@ -204,15 +204,19 @@ class VisaResultRow(CardWidget):
         self.assign_button.setEnabled(self._can_assign)
         if not allowed:
             message = "An engineer or service role is required to change VISA assignments."
+            self.status.setText("Assignment locked · engineer or service role required")
             self.assignment.setToolTip(message)
             self.assign_button.setToolTip(message)
         elif self.state.status == "assigned":
+            self.status.setText(self._status_text)
             self.assignment.setToolTip("This VISA resource is already assigned.")
             self.assign_button.setToolTip("This VISA resource is already assigned.")
         elif self.state.status == "unavailable":
+            self.status.setText(self._status_text)
             self.assignment.setToolTip("An unresponsive VISA resource cannot be assigned.")
             self.assign_button.setToolTip("An unresponsive VISA resource cannot be assigned.")
         else:
+            self.status.setText(self._status_text)
             self.assignment.setToolTip("")
             self.assign_button.setToolTip("Save this VISA resource as the selected instrument connection")
 

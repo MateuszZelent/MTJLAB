@@ -98,8 +98,7 @@ class _FluentSettingsSections(QWidget):
         layout.setContentsMargins(0, 0, 0, 0)
         layout.setSpacing(8)
         self.navigation = Pivot(self)
-        self.navigation.setItemFontSize(14)
-        self.navigation.setMinimumWidth(1080)
+        self.navigation.setItemFontSize(13)
         self.compact_navigation = ComboBox(self)
         self.compact_navigation.setAccessibleName("Settings section")
         self.compact_navigation.hide()
@@ -637,6 +636,11 @@ class SettingsPage(QWidget):
         self, name: str, data: Any, prefix: tuple[str | int, ...]
     ) -> None:
         host = QWidget()
+        host.setMinimumWidth(0)
+        host.setSizePolicy(
+            QSizePolicy.Policy.Ignored,
+            QSizePolicy.Policy.Preferred,
+        )
         layout = QVBoxLayout(host)
         layout.setContentsMargins(18, 18, 18, 18)
         layout.setSpacing(14)
@@ -646,6 +650,7 @@ class SettingsPage(QWidget):
             if section not in cards:
                 card = CardWidget(host)
                 card.setObjectName("settingsCard")
+                card.setMinimumWidth(0)
                 card_layout = QVBoxLayout(card)
                 card_layout.setContentsMargins(16, 14, 16, 16)
                 card_layout.setSpacing(10)
@@ -653,12 +658,18 @@ class SettingsPage(QWidget):
                 heading.setObjectName("settingsSectionTitle")
                 card_layout.addWidget(heading)
                 form_host = QWidget(card)
+                form_host.setMinimumWidth(0)
+                form_host.setSizePolicy(
+                    QSizePolicy.Policy.Ignored,
+                    QSizePolicy.Policy.Preferred,
+                )
                 form = QFormLayout(form_host)
                 form.setContentsMargins(0, 0, 0, 0)
                 form.setLabelAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
                 form.setHorizontalSpacing(18)
                 form.setVerticalSpacing(10)
                 form.setFieldGrowthPolicy(QFormLayout.FieldGrowthPolicy.AllNonFixedFieldsGrow)
+                form.setRowWrapPolicy(QFormLayout.RowWrapPolicy.WrapLongRows)
                 card_layout.addWidget(form_host)
                 layout.addWidget(card)
                 cards[section] = form
@@ -677,7 +688,10 @@ class SettingsPage(QWidget):
                 return
             section = labels[0] if labels else "Station"
             label = " › ".join(labels[1:]) or section
-            card_for(section).addRow(QLabel(label), self._form_editor(path, value))
+            label_widget = QLabel(label)
+            label_widget.setWordWrap(True)
+            label_widget.setMinimumWidth(0)
+            card_for(section).addRow(label_widget, self._form_editor(path, value))
 
         walk(data, prefix, ())
         layout.addStretch(1)
@@ -720,6 +734,11 @@ class SettingsPage(QWidget):
         editor.setEnabled(editable)
         editor.setToolTip(" · ".join(str(part) for part in path))
         field = QWidget()
+        field.setMinimumWidth(0)
+        field.setSizePolicy(
+            QSizePolicy.Policy.Ignored,
+            QSizePolicy.Policy.Preferred,
+        )
         field_layout = QVBoxLayout(field)
         field_layout.setContentsMargins(0, 0, 0, 0)
         field_layout.setSpacing(3)
@@ -954,6 +973,11 @@ class SettingsPage(QWidget):
         self._safety_limit_editors.clear()
         self._safety_limit_error_labels.clear()
         content = QWidget()
+        content.setMinimumWidth(0)
+        content.setSizePolicy(
+            QSizePolicy.Policy.Ignored,
+            QSizePolicy.Policy.Preferred,
+        )
         content_layout = QVBoxLayout(content)
         content_layout.setContentsMargins(4, 4, 4, 4)
         content_layout.setSpacing(14)

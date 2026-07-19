@@ -90,6 +90,7 @@ class _FluentResultSections(QWidget):
 
     def setTabVisible(self, index: int, visible: bool) -> None:
         self.navigation.widget(self._routes[index]).setVisible(visible)
+        self.compact_navigation.setItemEnabled(index, visible)
         if not visible and self.stack.currentIndex() == index:
             self.setCurrentIndex(0)
 

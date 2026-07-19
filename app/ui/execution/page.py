@@ -5,8 +5,8 @@ from __future__ import annotations
 import time
 
 from PySide6.QtCore import QTimer, Qt, Signal
-from PySide6.QtWidgets import QGridLayout, QHBoxLayout, QLabel, QPlainTextEdit, QSplitter, QVBoxLayout, QWidget
-from qfluentwidgets import BodyLabel, CaptionLabel, CardWidget, PrimaryPushButton, ProgressBar, PushButton, StrongBodyLabel
+from PySide6.QtWidgets import QGridLayout, QHBoxLayout, QLabel, QSplitter, QVBoxLayout, QWidget
+from qfluentwidgets import CardWidget, PlainTextEdit, PrimaryPushButton, ProgressBar, PushButton, StrongBodyLabel
 
 from app.ui.common import human_duration as _human_duration
 from app.ui.widgets import SpectrumPlotWidget
@@ -64,10 +64,10 @@ class RunMonitorPage(QWidget):
         controls.addWidget(self.resume_button)
         controls.addStretch(1)
         controls.addWidget(self.stop_button)
-        self.events = QPlainTextEdit()
+        self.events = PlainTextEdit(self)
         self.events.setReadOnly(True)
         self.events.setProperty("stationSurface", "raised")
-        self.warnings = QPlainTextEdit()
+        self.warnings = PlainTextEdit(self)
         self.warnings.setReadOnly(True)
         self.warnings.setProperty("stationSurface", "raised")
         self.warnings.setMaximumHeight(95)

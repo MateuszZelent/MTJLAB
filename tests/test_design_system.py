@@ -76,6 +76,7 @@ class ThemeBridgeTests(unittest.TestCase):
 
     def test_theme_bridge_never_repolishes_the_application_stylesheet(self) -> None:
         with (
+            patch.object(self.application, "platformName", return_value="offscreen"),
             patch("app.ui.design_system.fluent_theme.setTheme") as set_theme,
             patch("app.ui.design_system.fluent_theme.setThemeColor") as set_color,
             patch.object(self.application, "setStyleSheet") as set_stylesheet,
@@ -89,7 +90,10 @@ class ThemeBridgeTests(unittest.TestCase):
         self.assertEqual(applied.name, "dark")
 
     def test_reapplying_the_effective_theme_is_a_no_op(self) -> None:
-        with patch("app.ui.design_system.fluent_theme.setTheme") as set_theme:
+        with (
+            patch.object(self.application, "platformName", return_value="offscreen"),
+            patch("app.ui.design_system.fluent_theme.setTheme") as set_theme,
+        ):
             apply_application_theme(self.application, "light")
             apply_application_theme(self.application, "light")
         set_theme.assert_called_once_with(Theme.LIGHT, lazy=False)

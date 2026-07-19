@@ -15,11 +15,11 @@ from PySide6.QtGui import QResizeEvent
 from PySide6.QtWidgets import (
     QComboBox, QDialog, QDialogButtonBox,
     QFormLayout, QFrame, QGridLayout, QHBoxLayout, QLabel, QLineEdit,
-    QMessageBox, QProgressBar, QScrollArea, QSplitter, QSpinBox, QTabWidget,
+    QMessageBox, QProgressBar, QSplitter, QSpinBox, QTabWidget,
     QSizePolicy, QToolButton, QVBoxLayout, QWidget,
 )
 from qfluentwidgets import (
-    CardWidget, CheckBox, ComboBox, PrimaryPushButton, PushButton, SpinBox,
+    CardWidget, CheckBox, ComboBox, PrimaryPushButton, PushButton, ScrollArea, SpinBox,
 )
 
 from app.devices.anritsu_ms2830a import (
@@ -633,7 +633,7 @@ class AnritsuPage(QWidget):
         self.info = QLabel("Live stopped. Each frame is a complete trace, not a push stream.")
         self.info.setObjectName("muted")
         right_layout.addWidget(self.info)
-        self.control_scroll = QScrollArea()
+        self.control_scroll = ScrollArea()
         self.control_scroll.setObjectName("anritsuControlScroll")
         self.control_scroll.setProperty("stationSurface", "page")
         self.control_scroll.viewport().setProperty("stationSurface", "page")

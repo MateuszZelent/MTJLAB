@@ -35,6 +35,8 @@ def apply_application_theme(application: QApplication, mode: str) -> AppliedThem
         and fluent_matches
         and accent_matches
     ):
+        _install_dialog_theme_filter(application, tokens)
+        _apply_station_control_styles(application, tokens)
         return AppliedTheme(name=name, tokens=tokens)
     lazy = _supports_lazy_theme_update(application)
     setTheme(Theme.DARK if name == "dark" else Theme.LIGHT, lazy=lazy)

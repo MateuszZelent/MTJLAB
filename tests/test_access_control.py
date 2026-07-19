@@ -36,6 +36,27 @@ class AccessControlTests(unittest.TestCase):
         self.assertTrue(policy.allows(Permission.MANAGE_ROLES))
         self.assertFalse(policy.allows(Permission.SERVICE_DIAGNOSTICS))
 
+    def test_unique_domain_account_matches_when_windows_omits_userdomain(self) -> None:
+        policy = AccessPolicy.from_settings(
+            self._settings({"MZELENTRPTU\\mateuszz": ["engineer"]}),
+            username="mateuszz",
+        )
+        self.assertEqual(policy.identity.roles, frozenset({Role.ENGINEER}))
+        self.assertTrue(policy.allows(Permission.ASSIGN_VISA))
+
+    def test_unqualified_account_does_not_guess_between_domains(self) -> None:
+        policy = AccessPolicy.from_settings(
+            self._settings(
+                {
+                    "LAB-A\\alice": ["engineer"],
+                    "LAB-B\\alice": ["service"],
+                }
+            ),
+            username="alice",
+        )
+        self.assertEqual(policy.identity.roles, frozenset({Role.OPERATOR}))
+        self.assertFalse(policy.allows(Permission.ASSIGN_VISA))
+
     def test_simulation_identity_has_all_roles_but_estop_is_never_denied(self) -> None:
         policy = AccessPolicy.from_settings(self._settings(), simulation=True)
         self.assertEqual(policy.identity.roles, frozenset(Role))
