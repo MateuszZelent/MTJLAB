@@ -156,7 +156,7 @@ class DashboardPage(QWidget):
         header.setSectionResizeMode(4, QHeaderView.ResizeMode.ResizeToContents)
         header.setSectionResizeMode(5, QHeaderView.ResizeMode.Stretch)
         self.discovery_table.setMinimumHeight(190)
-        discovery_layout.addWidget(self.discovery_table)
+        discovery_layout.addWidget(self.discovery_table, 1)
         self.workspace.addTab(discovery, "Find VISA")
 
         tcp_discovery = QFrame()

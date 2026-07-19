@@ -11,7 +11,7 @@ from types import SimpleNamespace
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 from PySide6.QtCore import QTimer, Qt
-from PySide6.QtWidgets import QApplication, QComboBox, QLabel, QMessageBox, QPushButton, QScrollArea, QTreeWidgetItemIterator
+from PySide6.QtWidgets import QApplication, QComboBox, QHeaderView, QLabel, QMessageBox, QPushButton, QScrollArea, QTreeWidgetItemIterator, QWidget
 from PySide6.QtTest import QTest
 
 from app.domain.models import DeviceCapabilities
@@ -674,6 +674,28 @@ class MainWindowTests(unittest.TestCase):
             self.assertEqual(
                 emitted,
                 [{"keithley": ("GPIB0::22::INSTR", "system", result.idn)}],
+            )
+        finally:
+            window.close()
+            self.application.processEvents()
+
+    def test_find_visa_table_fills_remaining_tab_height(self) -> None:
+        window = MainWindow(".config/settings.yml", simulation=True)
+        try:
+            page = window.dashboard
+            discovery = page.workspace.widget(1)
+            layout = discovery.layout()
+            table_index = layout.indexOf(page.discovery_table)
+            self.assertGreaterEqual(table_index, 0)
+            self.assertGreater(layout.stretch(table_index), 0)
+            self.assertEqual(
+                page.discovery_table.maximumHeight(),
+                QWidget().maximumHeight(),
+            )
+            header = page.discovery_table.horizontalHeader()
+            self.assertEqual(
+                header.sectionResizeMode(2),
+                QHeaderView.ResizeMode.ResizeToContents,
             )
         finally:
             window.close()
