@@ -35,6 +35,7 @@ class SpectrumPlotWidget(QWidget):
         self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
         self._traces: dict[str, tuple[np.ndarray, np.ndarray]] = {}
         self._curves: dict[str, pg.PlotDataItem] = {}
+        self._token_owned_primary_curves: set[str] = set()
         self._hold_source: str | None = None
         self._max_hold: np.ndarray | None = None
         self._min_hold: np.ndarray | None = None
@@ -132,6 +133,10 @@ class SpectrumPlotWidget(QWidget):
         self.crosshair_y.setPen(pg.mkPen(palette.grid, width=1))
         self.marker.setPen(pg.mkPen(palette.reference, width=2))
         self.delta_marker.setPen(pg.mkPen(palette.reference, width=2))
+        for name in self._token_owned_primary_curves:
+            curve = self._curves.get(name)
+            if curve is not None:
+                curve.setPen(pg.mkPen(palette.measurement, width=1.6))
 
     def set_trace(
         self,
@@ -143,6 +148,8 @@ class SpectrumPlotWidget(QWidget):
         visible: bool = True,
         primary: bool = False,
     ) -> None:
+        caller_supplied_color = color is not None
+        token_owned_primary = not caller_supplied_color and primary
         if color is None:
             color = plot_theme(tokens_for(self._theme_name)).measurement if primary else "#2196f3"
         x_values = np.asarray(x, dtype=float)
@@ -158,6 +165,12 @@ class SpectrumPlotWidget(QWidget):
             curve.setDownsampling(auto=True, method="peak")
             curve.setClipToView(True)
             self._curves[name] = curve
+        elif token_owned_primary:
+            curve.setPen(pg.mkPen(color, width=1.6))
+        if token_owned_primary:
+            self._token_owned_primary_curves.add(name)
+        elif caller_supplied_color:
+            self._token_owned_primary_curves.discard(name)
         curve.setData(x_values, y_values)
         curve.setVisible(visible)
         if primary or self._hold_source is None:
@@ -166,6 +179,7 @@ class SpectrumPlotWidget(QWidget):
 
     def clear_trace(self, name: str) -> None:
         self._traces.pop(name, None)
+        self._token_owned_primary_curves.discard(name)
         if name in self._curves:
             self._curves[name].clear()
             self._curves[name].hide()

@@ -10,6 +10,7 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 from PySide6.QtWidgets import QApplication
 
+from app.ui.design_system import plot_theme, tokens_for
 from app.ui.widgets import SpectrumPlotWidget
 
 
@@ -60,6 +61,24 @@ class SpectrumPlotTests(unittest.TestCase):
             widget.apply_theme("light")
             self.assertEqual(widget._theme_name, "light")
             self.assertEqual(widget.plot.backgroundBrush().color().name(), "#ffffff")
+        finally:
+            widget.close()
+
+    def test_apply_theme_rethemes_token_owned_plot_items(self) -> None:
+        widget = SpectrumPlotWidget()
+        try:
+            widget.apply_theme("dark")
+            widget.set_trace("Raw", [1, 2], [-10, -20], primary=True)
+            widget.set_trace("Reference", [1, 2], [-11, -21], color="#123456")
+            widget.apply_theme("light")
+            palette = plot_theme(tokens_for("light"))
+            self.assertEqual(widget._curves["Raw"].opts["pen"].color().name(), palette.measurement)
+            self.assertEqual(widget._curves["Reference"].opts["pen"].color().name(), "#123456")
+            self.assertEqual(widget.marker.pen.color().name(), palette.reference)
+            self.assertEqual(widget.crosshair_x.pen.color().name(), palette.grid)
+            self.assertEqual(widget.crosshair_y.pen.color().name(), palette.grid)
+            self.assertEqual(widget.plot.getAxis("left").pen().color().name(), palette.axes)
+            self.assertEqual(widget.plot.getAxis("bottom").textPen().color().name(), palette.axes)
         finally:
             widget.close()
 
