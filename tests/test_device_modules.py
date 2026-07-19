@@ -4,12 +4,12 @@ from dataclasses import replace
 import unittest
 
 from app.contracts import DeviceModuleRegistry
-from app.devices.lakeshore_gaussmeter import (
+from app.devices.lakeshore_475 import (
     GaussmeterConfig,
     LakeShore475Adapter,
     MeasurementMode,
 )
-from app.devices.lakeshore_gaussmeter.simulator import simulated_475_session
+from app.devices.lakeshore_475.simulator import simulated_475_session
 from app.devices.moke_box import MokeBoxAdapter, MokeBoxConfig
 from app.devices.moke_box.module import MODULE as MOKE_MODULE
 from app.devices.registry import built_in_device_registry

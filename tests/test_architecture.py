@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import ast
+from importlib import import_module
 from pathlib import Path
 import unittest
 
@@ -28,6 +29,15 @@ class ArchitectureTests(unittest.TestCase):
                 (ROOT / "app" / "devices" / package).exists(),
                 f"generic device package app.devices.{package} must not exist",
             )
+
+    def test_registered_manifests_are_owned_by_their_concrete_packages(self) -> None:
+        from app.devices.registry import built_in_device_registry
+
+        for module in built_in_device_registry().all_modules():
+            owner = import_module(
+                f"app.devices.{module.implementation_key}.module"
+            )
+            self.assertIs(owner.MODULE, module)
 
     def test_device_domain_layers_do_not_import_ui(self) -> None:
         """Adapters/models/safety stay usable without Qt or the application shell."""

@@ -4,10 +4,10 @@ from __future__ import annotations
 
 from app.contracts import DeviceModule, RecipeExtension
 from app.devices.base import DeviceAdapter
-from app.devices.lakeshore_gaussmeter.adapter import LakeShore475Adapter, UnavailableLakeShoreAdapter
-from app.devices.lakeshore_gaussmeter.models import GaussmeterConfig
-from app.devices.lakeshore_gaussmeter.simulator import simulated_475_session
-from app.devices.lakeshore_gaussmeter.ui import LakeShore475Page
+from app.devices.lakeshore_475.adapter import LakeShore475Adapter, UnavailableLakeShoreAdapter
+from app.devices.lakeshore_475.models import GaussmeterConfig
+from app.devices.lakeshore_475.simulator import simulated_475_session
+from app.devices.lakeshore_475.ui import LakeShore475Page
 from app.devices.visa import FakeVisaSessionFactory
 from app.domain.errors import ConfigurationError
 from app.domain.quantities import DIMENSION_TIME, parse_quantity

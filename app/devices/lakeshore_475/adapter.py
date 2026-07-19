@@ -8,7 +8,7 @@ from datetime import datetime, timezone
 from typing import Protocol
 
 from app.devices.base import DeviceAdapter, InstrumentSession, SessionFactory, parse_identity
-from app.devices.lakeshore_gaussmeter.models import (
+from app.devices.lakeshore_475.models import (
     FieldUnit,
     GaussmeterConfig,
     GaussmeterReading,

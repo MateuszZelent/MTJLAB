@@ -14,7 +14,7 @@ from app.devices.anritsu_ms2830a.adapter import AnritsuAdapter, SpectrumTrace
 from app.devices.keithley_2600.adapter import KeithleyAdapter
 from app.devices.moke_box.adapter import MokeBoxAdapter
 from app.devices.moke_box.models import hall_field_from_voltage
-from app.devices.lakeshore_gaussmeter.adapter import LakeShore475Adapter
+from app.devices.lakeshore_475.adapter import LakeShore475Adapter
 from app.devices.rigol_dg1000z.adapter import RigolAdapter
 from app.domain.errors import DeviceError, ExecutionError
 from app.domain.models import ApplicationState, DeviceState, MeasurementPoint

@@ -27,7 +27,7 @@ from app.devices.rigol_dg1000z import (
     RigolModulationConfig,
 )
 from app.devices.moke_box.models import MokeHallVoltageReading, hall_field_from_voltage
-from app.devices.lakeshore_gaussmeter.models import (
+from app.devices.lakeshore_475.models import (
     FieldUnit, GaussmeterReading, GaussmeterSnapshot, MeasurementMode,
 )
 from app.devices.visa import FakeVisaSession, FakeVisaSessionFactory

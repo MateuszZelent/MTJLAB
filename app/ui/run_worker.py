@@ -18,7 +18,7 @@ from app.devices.keithley_2600 import KeithleyAdapter
 from app.devices.moke_box import MokeBoxAdapter
 from app.devices.moke_box.models import MokeBoxConfig
 from app.devices.moke_box.simulator import SimulatedMokeBoxTransport
-from app.devices.lakeshore_gaussmeter import LakeShore475Adapter
+from app.devices.lakeshore_475 import LakeShore475Adapter
 from app.devices.rigol_dg1000z import RigolAdapter
 from app.devices.simulators import SimulatedVisaFactory
 from app.devices.simulation import SimulationContext

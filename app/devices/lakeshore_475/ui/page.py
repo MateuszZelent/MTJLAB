@@ -9,7 +9,7 @@ import pyqtgraph as pg
 from PySide6.QtCore import QTimer, Signal
 from PySide6.QtWidgets import QCheckBox, QFormLayout, QFrame, QHBoxLayout, QLabel, QPushButton, QSpinBox, QVBoxLayout, QWidget
 
-from app.devices.lakeshore_gaussmeter.models import GaussmeterReading
+from app.devices.lakeshore_475.models import GaussmeterReading
 from app.domain.quantities import DIMENSION_TIME, parse_quantity
 from app.settings.models import StationSettings
 
