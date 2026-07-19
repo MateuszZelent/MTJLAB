@@ -38,6 +38,7 @@ from qfluentwidgets import (
     RoundMenu,
     SimpleCardWidget,
     TransparentDropDownToolButton,
+    setCustomStyleSheet,
 )
 
 from app.audit import AuditLogger
@@ -153,6 +154,14 @@ class MainWindow(FluentWindow):
             self.fluent_content,
         )
         self.shell_splitter.setObjectName("fluentShellSplitter")
+        self.shell_splitter.setStyleSheet(
+            "QSplitter#fluentShellSplitter::handle {"
+            "background: transparent; border-top: 1px solid palette(mid);"
+            "}"
+            "QSplitter#fluentShellSplitter::handle:hover {"
+            "border-top-color: palette(highlight);"
+            "}"
+        )
         self.shell_splitter.setChildrenCollapsible(False)
         self.shell_splitter.setHandleWidth(5)
         self.widgetLayout.removeWidget(self.stackedWidget)
@@ -161,6 +170,12 @@ class MainWindow(FluentWindow):
         # transparent mode prevents that stock edge from becoming a bright
         # outline around dark pages.
         self.stackedWidget.setObjectName("fluentApplicationStack")
+        stack_qss = (
+            "QStackedWidget#fluentApplicationStack {"
+            "border: none; border-radius: 0; background: transparent;"
+            "}"
+        )
+        setCustomStyleSheet(self.stackedWidget, stack_qss, stack_qss)
         self.stackedWidget.setProperty("isTransparent", True)
         self.shell_splitter.addWidget(self.stackedWidget)
         content_layout.addWidget(self.shell_splitter, 1)
@@ -693,20 +708,6 @@ class MainWindow(FluentWindow):
         panel.setPalette(palette)
         panel.setAutoFillBackground(True)
         panel.update()
-
-    def _apply_application_stack_surface(self) -> None:
-        """Restore the borderless station stack after QFluent's first-show QSS."""
-
-        marker = "/* station-borderless-stack */"
-        if marker in self.stackedWidget.styleSheet():
-            return
-        base = self.stackedWidget.styleSheet().split(marker, 1)[0].rstrip()
-        self.stackedWidget.setStyleSheet(
-            f"{base}\n{marker}\n"
-            "QStackedWidget#fluentApplicationStack {"
-            "border: none; border-radius: 0; background: transparent;"
-            "}"
-        )
 
     def refresh_system_theme(self) -> None:
         if self.theme_actions["system"].isChecked():
@@ -1474,9 +1475,6 @@ class MainWindow(FluentWindow):
         if self._navigation_layout_initialized:
             return
         self._navigation_layout_initialized = True
-        # QFluent installs the window stack stylesheet during the first show;
-        # restore only the station-owned stack rule, never the global theme.
-        self._apply_application_stack_surface()
         if self._navigation_expanded_preference:
             self.navigationInterface.expand(useAni=False)
         # Fluent recalculates a navigation tree's size hint while its parent
