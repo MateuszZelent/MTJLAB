@@ -18,6 +18,7 @@ from PySide6.QtWidgets import (
     QMessageBox,
     QPlainTextEdit,
     QPushButton,
+    QScrollArea,
     QTabWidget,
     QToolBar,
     QWidget,
@@ -86,9 +87,13 @@ class MainWindow(QMainWindow):
         self._audit_healthy = True
         self._run_correlation_id: str | None = None
         suffix = " — SIMULATION" if simulation else ""
-        self.setWindowTitle("Lab Control — Rigol · Keithley · Anritsu · MOKE Box · Lake Shore 475" + suffix)
         self.resize(1360, 880)
         self._composition = StationComposition(self._settings, simulation=self._simulation)
+        concrete_device_names = " · ".join(
+            module.display_name
+            for module in self._composition.registry.all_modules()
+        )
+        self.setWindowTitle(f"Lab Control — {concrete_device_names}{suffix}")
         self._controllers = self._composition.create_controllers(
             ("rigol", "keithley", "anritsu", "moke_box", "lakeshore_gaussmeter"), self
         )
@@ -113,7 +118,12 @@ class MainWindow(QMainWindow):
         self.tabs = QTabWidget()
         self.tabs.setDocumentMode(True)
         self.setCentralWidget(self.tabs)
-        self.dashboard = DashboardPage(self._settings, discovery_enabled=not self._simulation)
+        registry = self._composition.registry
+        self.dashboard = DashboardPage(
+            self._settings,
+            registry,
+            discovery_enabled=not self._simulation,
+        )
         self._device_pages = {
             key: self._composition.registry.get(key).create_page(
                 self._controllers[key], self._settings
@@ -127,9 +137,8 @@ class MainWindow(QMainWindow):
         self.lakeshore_gaussmeter_page = self._device_pages["lakeshore_gaussmeter"]
         self.connection_panels: dict[str, DeviceConnectionPanel] = {}
         for key, page in self._device_pages.items():
-            device = getattr(self._settings, key)
             resource, backend = self._device_connection_details(self._settings, key)
-            panel = DeviceConnectionPanel(device.display_name, resource)
+            panel = DeviceConnectionPanel(registry.get(key).display_name, resource)
             panel.update_resource(resource, backend)
             if key == "moke_box":
                 panel.test_button.setToolTip(
@@ -230,19 +239,28 @@ class MainWindow(QMainWindow):
             configure_limit_button(field, device="Anritsu")
             field.edit_requested.connect(lambda field=field: self._edit_device_limit("anritsu", field))
         self._tab_indices: dict[str, int] = {}
-        for widget, name in (
-            (self.dashboard, "Dashboard"),
-            (self.rigol_page, "Rigol"),
-            (self.keithley_page, "Keithley"),
-            (self.anritsu_page, "Anritsu"),
-            (self.moke_box_page, "MOKE Box"),
-            (self.lakeshore_gaussmeter_page, "Lake Shore 475"),
-            (self.recipe_page, "Sweeps"),
-            (self.run_monitor, "Execution"),
-            (self.results_page, "Results"),
-            (self.settings_page, "Settings"),
+        for widget, key, display_name in (
+            (self.dashboard, "Dashboard", "Dashboard"),
+            (self.rigol_page, "Rigol", registry.get("rigol").display_name),
+            (self.keithley_page, "Keithley", registry.get("keithley").display_name),
+            (self.anritsu_page, "Anritsu", registry.get("anritsu").display_name),
+            (self.moke_box_page, "MOKE Box", registry.get("moke_box").display_name),
+            (
+                self.lakeshore_gaussmeter_page,
+                "Lake Shore 475",
+                registry.get("lakeshore_gaussmeter").display_name,
+            ),
+            (self.recipe_page, "Sweeps", "Sweeps"),
+            (self.run_monitor, "Execution", "Execution"),
+            (self.results_page, "Results", "Results"),
+            (self.settings_page, "Settings", "Settings"),
         ):
-            self._tab_indices[name] = self.tabs.addTab(widget, name)
+            scroll = QScrollArea()
+            scroll.setWidgetResizable(True)
+            scroll.setWidget(widget)
+            scroll.setFrameShape(QScrollArea.Shape.NoFrame)
+            widget._scroll_area = scroll
+            self._tab_indices[key] = self.tabs.addTab(scroll, display_name)
         self.log = QPlainTextEdit()
         self.log.setReadOnly(True)
         self.log.setMaximumBlockCount(500)
@@ -308,6 +326,10 @@ class MainWindow(QMainWindow):
         self.scan_shortcut.activated.connect(self.dashboard._scan_visa)
         self._build_top_chrome()
 
+    def _set_current_tab_widget(self, widget: QWidget) -> None:
+        scroll = getattr(widget, "_scroll_area", widget)
+        self.tabs.setCurrentWidget(scroll)
+
     def _build_top_chrome(self) -> None:
         """Build a compact menu status area and icon-based application ribbon."""
 
@@ -322,13 +344,14 @@ class MainWindow(QMainWindow):
         self.ribbon_group.setExclusive(True)
         self.ribbon_actions: list[QAction] = []
         icon_dir = Path(__file__).resolve().parents[1] / "assets" / "icons"
+        registry = self._composition.registry
         icon_files = {
             "Dashboard": "dashboard.svg",
-            "Rigol": "rigol.svg",
-            "Keithley": "keithley.svg",
-            "Anritsu": "anritsu.svg",
-            "MOKE Box": "moke_box.svg",
-            "Lake Shore 475": "lakeshore.svg",
+            registry.get("rigol").display_name: "rigol.svg",
+            registry.get("keithley").display_name: "keithley.svg",
+            registry.get("anritsu").display_name: "anritsu.svg",
+            registry.get("moke_box").display_name: "moke_box.svg",
+            registry.get("lakeshore_gaussmeter").display_name: "lakeshore.svg",
             "Sweeps": "recipes.svg",
             "Execution": "execution.svg",
             "Results": "results.svg",
@@ -781,7 +804,7 @@ class MainWindow(QMainWindow):
             estimate.nominal_duration_s,
         )
         self._set_run_ui_locked(True)
-        self.tabs.setCurrentWidget(self.run_monitor)
+        self._set_current_tab_widget(self.run_monitor)
         self._log("Run Engine started")
 
     def _open_historical_thatec_sweep(self, run: object, tree: object) -> None:
@@ -794,7 +817,7 @@ class MainWindow(QMainWindow):
         except Exception as exc:
             QMessageBox.warning(self, "THATEC Sweep", f"Cannot reconstruct Sweep tree: {exc}")
             return
-        self.tabs.setCurrentWidget(self.recipe_page)
+        self._set_current_tab_widget(self.recipe_page)
         self._log("Historical THATEC Sweep reconstructed in Sweeps")
 
     def _resume_run(self, selected: object) -> None:
@@ -891,7 +914,7 @@ class MainWindow(QMainWindow):
             estimate.nominal_duration_s * remaining_fraction,
         )
         self._set_run_ui_locked(True)
-        self.tabs.setCurrentWidget(self.run_monitor)
+        self._set_current_tab_widget(self.run_monitor)
         self._log(
             f"Run recovery started at safe checkpoint {checkpoint.stored_points}; "
             f"discarding {discarded} unsafe tail point(s)"

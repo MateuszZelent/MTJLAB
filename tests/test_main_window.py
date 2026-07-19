@@ -701,6 +701,21 @@ class MainWindowTests(unittest.TestCase):
             window.close()
             self.application.processEvents()
 
+    def test_dashboard_uses_one_concrete_label_per_registered_device(self) -> None:
+        window = MainWindow(".config/settings.yml", simulation=True)
+        try:
+            registry = window._composition.registry
+            for module in registry.all_modules():
+                card = window.dashboard.cards[module.key]
+                labels = card.findChildren(QLabel)
+                self.assertTrue(
+                    any(label.text() == module.display_name for label in labels),
+                    module.implementation_key,
+                )
+        finally:
+            window.close()
+            self.application.processEvents()
+
     def test_discovery_marks_persisted_resource_assigned_and_disables_duplicate(self) -> None:
         window = MainWindow(".config/settings.yml", simulation=True)
         try:
@@ -1254,6 +1269,7 @@ class MainWindowTests(unittest.TestCase):
             keithley = window.keithley_page
             window.resize(1600, 900)
             window.show()
+            window._set_current_tab_widget(keithley)
             self.application.processEvents()
 
             self.assertEqual(keithley.workspace_splitter.count(), 2)

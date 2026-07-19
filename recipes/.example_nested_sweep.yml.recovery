@@ -55,7 +55,7 @@ root:
         type: acquire_spectrum
         trace: TRAC1
 
-  - id: wait-2e606988
+  - id: wait-84e86ba8
     type: wait
     duration: 100 ms
 finally:

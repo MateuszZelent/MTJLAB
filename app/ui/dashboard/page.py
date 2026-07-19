@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import ipaddress
 
-from PySide6.QtCore import Signal
+from PySide6.QtCore import QEvent, QObject, Signal
 from PySide6.QtWidgets import (
     QComboBox,
     QDialog,
@@ -27,6 +27,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
+from app.contracts import DeviceModuleRegistry
 from app.devices.discovery import (
     DiscoveredInstrument,
     DiscoveredTcpEndpoint,
@@ -42,6 +43,16 @@ from app.ui.dashboard.device_card import DeviceCard
 from app.ui.discovery_worker import MokeIdentificationWorker, TcpDiscoveryWorker, VisaDiscoveryWorker
 
 
+class _NoScrollTabBar(QObject):
+    """Event filter that blocks wheel events on a QTabBar."""
+
+    def eventFilter(self, watched: QObject, event: QEvent) -> bool:  # type: ignore[override]
+        if event.type() == QEvent.Type.Wheel:
+            event.ignore()
+            return True
+        return super().eventFilter(watched, event)
+
+
 class DashboardPage(QWidget):
     emergency_requested = Signal()
     assignments_requested = Signal(object)
@@ -50,7 +61,12 @@ class DashboardPage(QWidget):
     _DEVICE_KEYS = ("rigol", "keithley", "anritsu", "moke_box", "lakeshore_gaussmeter")
 
     def __init__(
-        self, settings: StationSettings, parent: QWidget | None = None, *, discovery_enabled: bool = True
+        self,
+        settings: StationSettings,
+        device_registry: DeviceModuleRegistry,
+        parent: QWidget | None = None,
+        *,
+        discovery_enabled: bool = True,
     ) -> None:
         super().__init__(parent)
         self._settings = settings
@@ -79,18 +95,33 @@ class DashboardPage(QWidget):
         self.workspace = QTabWidget()
         self.workspace.setObjectName("dashboardWorkspace")
         self.workspace.setDocumentMode(True)
+        self._ws_scroll_guard = _NoScrollTabBar(self.workspace)
+        self.workspace.tabBar().installEventFilter(self._ws_scroll_guard)
         overview = QWidget()
         overview_layout = QVBoxLayout(overview)
         overview_intro = QLabel("Connected instruments")
         overview_intro.setObjectName("sectionTitle")
         overview_layout.addWidget(overview_intro)
         grid = QGridLayout()
+        module_name = {
+            module.key: module.display_name
+            for module in device_registry.all_modules()
+        }
         self.cards = {
-            "rigol": DeviceCard(settings.rigol.display_name, settings.rigol.connection.resource),
-            "keithley": DeviceCard(settings.keithley.display_name, settings.keithley.connection.resource),
-            "anritsu": DeviceCard(settings.anritsu.display_name, settings.anritsu.connection.resource),
-            "moke_box": DeviceCard(settings.moke_box.display_name, settings.moke_box.endpoint),
-            "lakeshore_gaussmeter": DeviceCard(settings.lakeshore_gaussmeter.display_name, settings.lakeshore_gaussmeter.resource),
+            "rigol": DeviceCard(module_name["rigol"], settings.rigol.connection.resource),
+            "keithley": DeviceCard(
+                module_name["keithley"], settings.keithley.connection.resource
+            ),
+            "anritsu": DeviceCard(
+                module_name["anritsu"], settings.anritsu.connection.resource
+            ),
+            "moke_box": DeviceCard(
+                module_name["moke_box"], settings.moke_box.endpoint
+            ),
+            "lakeshore_gaussmeter": DeviceCard(
+                module_name["lakeshore_gaussmeter"],
+                settings.lakeshore_gaussmeter.resource,
+            ),
         }
         for index, (device, card) in enumerate(self.cards.items()):
             grid.addWidget(card, index // 2, index % 2)
@@ -147,11 +178,12 @@ class DashboardPage(QWidget):
         self.discovery_table.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
         self.discovery_table.setShowGrid(False)
         self.discovery_table.verticalHeader().setVisible(False)
-        self.discovery_table.verticalHeader().setDefaultSectionSize(38)
+        self.discovery_table.verticalHeader().setDefaultSectionSize(40)
         header = self.discovery_table.horizontalHeader()
         header.setSectionResizeMode(0, QHeaderView.ResizeMode.ResizeToContents)
         header.setSectionResizeMode(1, QHeaderView.ResizeMode.ResizeToContents)
         header.setSectionResizeMode(2, QHeaderView.ResizeMode.ResizeToContents)
+        header.setMinimumSectionSize(130)
         header.setSectionResizeMode(3, QHeaderView.ResizeMode.Stretch)
         header.setSectionResizeMode(4, QHeaderView.ResizeMode.ResizeToContents)
         header.setSectionResizeMode(5, QHeaderView.ResizeMode.Stretch)
@@ -290,7 +322,6 @@ class DashboardPage(QWidget):
         emergency_row.addStretch(1)
         emergency_row.addWidget(emergency)
         layout.addLayout(emergency_row)
-        layout.addStretch(1)
         emergency.clicked.connect(self.emergency_requested)
         self.scan_button.clicked.connect(self._scan_visa)
         self.tcp_detect_button.clicked.connect(self._detect_local_tcp_network)
@@ -479,9 +510,10 @@ class DashboardPage(QWidget):
             assignment.setEnabled(
                 self._assignment_allowed and result.resource != "—" and result.idn is not None
             )
+            assignment.setMinimumWidth(130)
             self.discovery_table.setCellWidget(row, 0, assignment)
-            assign_button = QPushButton("Assign")
-            assign_button.setProperty("compact", True)
+            assign_button = QPushButton("Assign →")
+            assign_button.setObjectName("assignButton")
             assign_button.setEnabled(
                 self._assignment_allowed and result.resource != "—" and result.idn is not None
             )

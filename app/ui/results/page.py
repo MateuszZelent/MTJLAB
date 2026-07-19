@@ -4,34 +4,76 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from PySide6.QtCore import Qt, Signal
-from PySide6.QtWidgets import QFileDialog, QHBoxLayout, QLabel, QPlainTextEdit, QPushButton, QSplitter, QSpinBox, QTabWidget, QTreeWidget, QTreeWidgetItem, QVBoxLayout, QWidget
+from PySide6.QtCore import QEvent, QObject, Qt, Signal
+from PySide6.QtWidgets import (
+    QHBoxLayout,
+    QLabel,
+    QPushButton,
+    QSplitter,
+    QTabWidget,
+    QVBoxLayout,
+    QWidget,
+)
 
-from app.storage import Hdf5RunReader, RunDetail, StoredPoint, ThatecDevice, ThatecRecord, ThatecRow, ThatecRunReader, ThatecTreeNode, read_pythat_run_data
-from app.ui.widgets import SpectrumPlotWidget
+
+class _NoScrollTabBar(QObject):
+    """Event filter that blocks wheel events on a QTabBar."""
+
+    def eventFilter(self, watched: QObject, event: QEvent) -> bool:  # type: ignore[override]
+        if event.type() == QEvent.Type.Wheel:
+            event.ignore()
+            return True
+        return super().eventFilter(watched, event)
+
+from app.storage import (
+    Hdf5RunReader,
+    ThatecRunReader,
+    read_pythat_run_data,
+)
+from app.ui.results.data_classifier import ResultDataKind, classify_result
+from app.ui.results.file_browser import FileBrowserPanel
+from app.ui.results.heatmap_tab import HeatmapResultsTab
+from app.ui.results.metadata_panel import MetadataPanel
+from app.ui.results.spectrum_tab import SpectrumResultsTab
+from app.ui.results.sweep_tree_panel import SweepTreePanel
 
 
 class ResultsPage(QWidget):
-    """Browse immutable run files without opening an instrument session."""
+    """Browse immutable run files without opening an instrument session.
+
+    The page is divided into three sections:
+
+    * **Left** — ``FileBrowserPanel`` listing HDF5 results in the output
+      directory.
+    * **Right** — a ``QTabWidget`` with sub-tabs:
+        - *Overview* — run metadata, recipe snapshot, settings and device
+          state (``MetadataPanel``).
+        - *Sweep Tree* — reconstructed THATEC experiment hierarchy
+          (``SweepTreePanel``).
+        - *Spectrum* — individual spectrum browser with navigation
+          (``SpectrumResultsTab``).
+        - *Heatmaps* — 2-D colourmap of all checkpoints for spectral rows
+          (``HeatmapResultsTab``).  Only visible when the result contains
+          2-D data.
+    """
 
     resume_requested = Signal(object)
     open_sweep_requested = Signal(object, object)
 
     def __init__(self, output_dir: str, parent: QWidget | None = None) -> None:
         super().__init__(parent)
-        self._output_dir = Path(output_dir)
         self._selected_path: Path | None = None
         self._thatec_run = None
+
         layout = QVBoxLayout(self)
+
+        # --- Title ---
         title = QLabel("Results")
         title.setObjectName("pageTitle")
         layout.addWidget(title)
-        self.location = QLabel()
-        self.location.setObjectName("muted")
-        layout.addWidget(self.location)
+
+        # --- Action buttons ---
         actions = QHBoxLayout()
-        refresh = QPushButton("Refresh file list")
-        open_file = QPushButton("Open HDF5 file…")
         self.open_sweep_button = QPushButton("Open reconstructed Sweep")
         self.open_sweep_button.setEnabled(False)
         self.open_sweep_button.setToolTip(
@@ -42,175 +84,143 @@ class ResultsPage(QWidget):
         self.resume_button.setToolTip(
             "Available only for interrupted runs containing a confirmed safe boundary."
         )
-        actions.addWidget(refresh)
-        actions.addWidget(open_file)
         actions.addWidget(self.open_sweep_button)
         actions.addWidget(self.resume_button)
         actions.addStretch(1)
         layout.addLayout(actions)
 
+        # --- Main splitter ---
         splitter = QSplitter(Qt.Orientation.Horizontal)
-        self.runs = QTreeWidget()
-        self.runs.setHeaderLabels(["File", "State", "Spectra", "Points"])
-        self.runs.setMinimumWidth(240)
-        self.runs.setColumnWidth(0, 220)
-        splitter.addWidget(self.runs)
 
-        right = QWidget()
-        right_layout = QVBoxLayout(right)
-        self.experiment_tree = QTreeWidget()
-        self.experiment_tree.setHeaderLabels(["THATEC experiment", "Type"])
-        self.experiment_tree.setMinimumHeight(180)
-        right_layout.addWidget(self.experiment_tree)
-        self.inspector = QPlainTextEdit()
-        self.inspector.setReadOnly(True)
-        self.inspector.setMinimumHeight(130)
-        right_layout.addWidget(self.inspector)
-        checkpoint_bar = QHBoxLayout()
-        checkpoint_bar.addWidget(QLabel("THATEC checkpoint:"))
-        self.thatec_checkpoint = QSpinBox()
-        self.thatec_checkpoint.setMinimum(0)
-        checkpoint_bar.addWidget(self.thatec_checkpoint)
-        checkpoint_bar.addStretch(1)
-        right_layout.addLayout(checkpoint_bar)
-        self.thatec_values = QTreeWidget()
-        self.thatec_values.setHeaderLabels(["Checkpoint", "Value", "Timestamp UTC"])
-        self.thatec_values.setMaximumHeight(150)
-        right_layout.addWidget(self.thatec_values)
-        self.details_tabs = QTabWidget()
-        self.metadata = QPlainTextEdit()
-        self.recipe_snapshot = QPlainTextEdit()
-        self.settings_snapshot = QPlainTextEdit()
-        self.pythat_data = QPlainTextEdit()
-        self.device_state = QPlainTextEdit()
-        for widget in (
-            self.metadata, self.recipe_snapshot, self.settings_snapshot,
-            self.pythat_data, self.device_state,
-        ):
-            widget.setReadOnly(True)
-        self.details_tabs.addTab(self.metadata, "Metadata")
-        self.details_tabs.addTab(self.recipe_snapshot, "Recipe")
-        self.details_tabs.addTab(self.settings_snapshot, "Settings")
-        self.details_tabs.addTab(self.pythat_data, "PyThat data")
-        self.details_tabs.addTab(self.device_state, "Device state")
-        right_layout.addWidget(self.details_tabs)
+        # Left: file browser
+        self.file_browser = FileBrowserPanel(output_dir)
+        splitter.addWidget(self.file_browser)
 
-        self.points = QTreeWidget()
-        self.points.setHeaderLabels(["Point", "State", "UTC time", "Data"])
-        self.points.setMinimumHeight(150)
-        self.points.setColumnWidth(0, 70)
-        self.points.setColumnWidth(1, 80)
-        self.points.setColumnWidth(2, 210)
-        right_layout.addWidget(self.points)
+        # Right: tabbed result views
+        self.result_tabs = QTabWidget()
+        self._tab_scroll_guard = _NoScrollTabBar(self.result_tabs)
+        self.result_tabs.tabBar().installEventFilter(self._tab_scroll_guard)
 
-        self.spectrum_plot = SpectrumPlotWidget(legend=False)
-        self.spectrum_plot.set_title("Select a point containing a stored spectrum")
-        self.spectrum_plot.setMinimumHeight(280)
-        right_layout.addWidget(self.spectrum_plot, 1)
-        self.spectrum_info = QLabel("Spectra are read from HDF5 without contacting instruments.")
-        self.spectrum_info.setObjectName("muted")
-        right_layout.addWidget(self.spectrum_info)
-        splitter.addWidget(right)
+        # Tab: Overview (metadata)
+        self.metadata_panel = MetadataPanel()
+        self._overview_index = self.result_tabs.addTab(
+            self.metadata_panel, "Overview"
+        )
+
+        # Tab: Sweep Tree
+        self.sweep_tree = SweepTreePanel()
+        self._tree_index = self.result_tabs.addTab(
+            self.sweep_tree, "Sweep Tree"
+        )
+
+        # Tab: Spectrum
+        self.spectrum_tab = SpectrumResultsTab()
+        self._spectrum_index = self.result_tabs.addTab(
+            self.spectrum_tab, "Spectrum"
+        )
+
+        # Tab: Heatmaps
+        self.heatmap_tab = HeatmapResultsTab()
+        self._heatmap_index = self.result_tabs.addTab(
+            self.heatmap_tab, "Heatmaps"
+        )
+
+        splitter.addWidget(self.result_tabs)
+        splitter.setStretchFactor(0, 0)
         splitter.setStretchFactor(1, 1)
         layout.addWidget(splitter, 1)
 
-        refresh.clicked.connect(self.refresh)
-        open_file.clicked.connect(self.browse_result_file)
+        # --- Connections ---
+        self.file_browser.file_selected.connect(self._on_file_selected)
         self.resume_button.clicked.connect(self._request_resume)
         self.open_sweep_button.clicked.connect(self._request_open_sweep)
-        self.runs.currentItemChanged.connect(self._run_selected)
-        self.points.currentItemChanged.connect(self._point_selected)
-        self.experiment_tree.currentItemChanged.connect(self._tree_selected)
-        self.thatec_checkpoint.valueChanged.connect(lambda _value: self._render_selected_thatec_row())
-        self.refresh()
+
+        # Cross-tab coordination: sweep tree → spectrum
+        self.sweep_tree.spectrum_requested.connect(
+            self.spectrum_tab.show_thatec_spectrum
+        )
+        self.sweep_tree.spectrum_requested.connect(self._switch_to_spectrum)
+
+        # Point selection → device state panel
+        self.spectrum_tab.device_state_changed.connect(
+            self.metadata_panel.show_device_state
+        )
+
+        # Cross-tab coordination: heatmap click → spectrum
+        self.heatmap_tab.checkpoint_clicked.connect(
+            self.spectrum_tab.show_thatec_spectrum
+        )
+        self.heatmap_tab.checkpoint_clicked.connect(self._switch_to_spectrum)
+
+        # Initial state
+        self._set_heatmap_visible(False)
+        self.file_browser.refresh()
+
+    # ------------------------------------------------------------------
+    # Public API (backwards-compatible)
+    # ------------------------------------------------------------------
 
     def refresh(self) -> None:
-        self.location.setText(f"Directory: {self._output_dir.resolve()}")
+        """Refresh the file list and clear result views."""
         self.resume_button.setEnabled(False)
         self.open_sweep_button.setEnabled(False)
-        self.runs.clear()
-        self.points.clear()
-        self.experiment_tree.clear()
-        self._clear_details()
-        for summary in Hdf5RunReader.list_runs(self._output_dir):
-            item = QTreeWidgetItem(
-                [
-                    summary.path.name,
-                    summary.status,
-                    str(summary.spectrum_count),
-                    str(summary.point_count),
-                ]
+        self.metadata_panel.clear()
+        self.sweep_tree.clear()
+        self.spectrum_tab.clear()
+        self.heatmap_tab.clear()
+        self._set_heatmap_visible(False)
+        self.file_browser.refresh()
+        if not self.file_browser.has_files():
+            self.metadata_panel.metadata.setPlainText(
+                "No HDF5 files in the results directory."
             )
-            item.setData(0, Qt.ItemDataRole.UserRole, str(summary.path))
-            item.setToolTip(0, str(summary.path.resolve()))
-            self.runs.addTopLevelItem(item)
-        if self.runs.topLevelItemCount() == 0:
-            self.metadata.setPlainText("No HDF5 files in the results directory.")
-        elif self._selected_path is not None:
-            for index in range(self.runs.topLevelItemCount()):
-                candidate = self.runs.topLevelItem(index)
-                if Path(str(candidate.data(0, Qt.ItemDataRole.UserRole))) == self._selected_path:
-                    self.runs.setCurrentItem(candidate)
-                    break
 
     def browse_result_file(self) -> None:
-        """Select a THATEC-compatible result without copying it to measurements."""
-        selected, _filter = QFileDialog.getOpenFileName(
-            self,
-            "Open THATEC HDF5 result",
-            str(self._output_dir),
-            "HDF5 results (*.h5 *.hdf5);;All files (*)",
-        )
-        if selected:
-            self.open_result_file(selected)
+        """Open a file dialog to select an HDF5 result file."""
+        self.file_browser.browse_file()
 
     def open_result_file(self, path: str | Path) -> None:
         """Add and open an arbitrary public THATEC result file in this session."""
-        target = Path(path)
-        try:
-            run = ThatecRunReader.describe(target)
-        except Exception as exc:
-            self.metadata.setPlainText(f"Cannot read result:\n{exc}")
-            return
-        existing = next(
-            (
-                self.runs.topLevelItem(index)
-                for index in range(self.runs.topLevelItemCount())
-                if Path(str(self.runs.topLevelItem(index).data(0, Qt.ItemDataRole.UserRole))) == target
-            ),
-            None,
-        )
-        if existing is None:
-            point_count = max((row.shape[0] for row in run.rows.values() if row.shape), default=0)
-            spectrum_count = sum(1 for row in run.rows.values() if len(row.shape) >= 2)
-            existing = QTreeWidgetItem([target.name, "THATEC", str(spectrum_count), str(point_count)])
-            existing.setData(0, Qt.ItemDataRole.UserRole, str(target))
-            existing.setToolTip(0, str(target.resolve()))
-            self.runs.addTopLevelItem(existing)
-        self.runs.setCurrentItem(existing)
+        self.file_browser.open_file(Path(path))
 
-    def _run_selected(self, item: QTreeWidgetItem | None, _previous: QTreeWidgetItem | None) -> None:
-        self.points.clear()
-        self._clear_spectrum()
-        if item is None:
-            self.resume_button.setEnabled(False)
-            self.open_sweep_button.setEnabled(False)
+    # ------------------------------------------------------------------
+    # File selection handler
+    # ------------------------------------------------------------------
+
+    def _on_file_selected(self, path_or_none: object) -> None:
+        """Handle file selection from the file browser."""
+        self.resume_button.setEnabled(False)
+        self.open_sweep_button.setEnabled(False)
+        self.metadata_panel.clear()
+        self.sweep_tree.clear()
+        self.spectrum_tab.clear()
+        self.heatmap_tab.clear()
+        self._set_heatmap_visible(False)
+
+        if path_or_none is None:
+            self._selected_path = None
+            self._thatec_run = None
             return
-        path = Path(str(item.data(0, Qt.ItemDataRole.UserRole)))
+
+        path = Path(str(path_or_none))
         self._selected_path = path
+
+        # --- Load THATEC tree ---
         try:
             self._thatec_run = ThatecRunReader.describe(path)
             tree = ThatecRunReader.tree(path)
         except Exception as exc:
-            self.resume_button.setEnabled(False)
-            self.metadata.setPlainText(f"Cannot read result:\n{exc}")
-            self.recipe_snapshot.clear()
-            self.settings_snapshot.clear()
-            self.pythat_data.clear()
-            self.device_state.clear()
+            self.metadata_panel.metadata.setPlainText(
+                f"Cannot read result:\n{exc}"
+            )
+            self._thatec_run = None
             return
-        self._populate_experiment_tree(tree)
+
+        # Sweep tree panel
+        self.sweep_tree.load(path, self._thatec_run, tree)
         self.open_sweep_button.setEnabled(True)
+
+        # --- Load private HDF5 detail (if available) ---
         try:
             detail = Hdf5RunReader.detail(path)
             points = Hdf5RunReader.points(path)
@@ -219,37 +229,53 @@ class ResultsPage(QWidget):
             detail = None
             points = ()
             pythat_data = None
-        self.resume_button.setEnabled(bool(detail and detail.summary.status in {"aborted", "faulted", "incomplete"}))
+
+        # Resume button
+        self.resume_button.setEnabled(
+            bool(
+                detail
+                and detail.summary.status
+                in {"aborted", "faulted", "incomplete"}
+            )
+        )
+
+        # Metadata panel
         if detail is not None:
-            self._show_detail(detail)
+            self.metadata_panel.show_detail(detail)
         else:
-            self.metadata.setPlainText(
-                f"Public THATEC file: {path}\nRows: {len(self._thatec_run.rows)}\n"
-                f"Devices: {len(self._thatec_run.devices)}"
-            )
-            self.recipe_snapshot.clear()
-            self.settings_snapshot.clear()
-        if pythat_data is not None:
-            self.pythat_data.setPlainText(
-                "Dimensions:\n" + self._format_json(pythat_data.dimensions)
-                + "\n\nVariables:\n" + "\n".join(pythat_data.variables)
-            )
+            self.metadata_panel.show_thatec_summary(path, self._thatec_run)
+        self.metadata_panel.show_pythat(pythat_data)
+
+        # Spectrum tab
+        self.spectrum_tab.load(path, self._thatec_run, points)
+
+        # Heatmap tab (only for results with 2-D spectral data)
+        data_kind = classify_result(self._thatec_run)
+        if data_kind in (ResultDataKind.SPECTRUM_SWEEP, ResultDataKind.MIXED):
+            self._set_heatmap_visible(True)
+            self.heatmap_tab.load(path, self._thatec_run)
         else:
-            self.pythat_data.setPlainText("Public THATEC tree loaded directly; no private application metadata required.")
-        for point in points:
-            fields = {**point.setpoints, **point.measurements}
-            suffix = " • spectrum" if point.has_spectrum else ""
-            point_item = QTreeWidgetItem(
-                [
-                    str(point.index),
-                    point.status,
-                    point.timestamp_utc or "—",
-                    f"{len(fields)} values{suffix}",
-                ]
-            )
-            point_item.setData(0, Qt.ItemDataRole.UserRole, point)
-            point_item.setToolTip(3, self._point_tooltip(point))
-            self.points.addTopLevelItem(point_item)
+            self._set_heatmap_visible(False)
+
+    # ------------------------------------------------------------------
+    # Tab management
+    # ------------------------------------------------------------------
+
+    def _set_heatmap_visible(self, visible: bool) -> None:
+        """Show or hide the Heatmaps tab."""
+        self.result_tabs.setTabVisible(self._heatmap_index, visible)
+
+    def _switch_to_spectrum(self, *_args: object) -> None:
+        """Switch to the Spectrum tab (called after cross-tab navigation)."""
+        self.result_tabs.setCurrentIndex(self._spectrum_index)
+
+    # ------------------------------------------------------------------
+    # Signal handlers
+    # ------------------------------------------------------------------
+
+    def _request_resume(self) -> None:
+        if self._selected_path is not None and self.resume_button.isEnabled():
+            self.resume_requested.emit(self._selected_path)
 
     def _request_open_sweep(self) -> None:
         """Open the public THATEC execution tree in the dedicated Sweep workspace."""
@@ -258,190 +284,77 @@ class ResultsPage(QWidget):
         try:
             tree = ThatecRunReader.tree(self._selected_path)
         except Exception as exc:
-            self.metadata.setPlainText(f"Cannot reconstruct THATEC Sweep:\n{exc}")
+            self.metadata_panel.metadata.setPlainText(
+                f"Cannot reconstruct THATEC Sweep:\n{exc}"
+            )
             return
         self.open_sweep_requested.emit(self._thatec_run, tree)
 
-    def _populate_experiment_tree(self, tree: tuple[ThatecTreeNode, ...]) -> None:
-        self.experiment_tree.clear()
-        measurements = QTreeWidgetItem(["Measurements", "THATEC tree"])
-        self.experiment_tree.addTopLevelItem(measurements)
-        for node in tree:
-            self._add_thatec_tree_node(measurements, node)
-        for title, records in (
-            ("Devices", self._thatec_run.devices),
-            ("Labbook", self._thatec_run.labbook),
-            ("Post-process", self._thatec_run.post_process),
-        ):
-            section = QTreeWidgetItem([title, "THATEC"])
-            self.experiment_tree.addTopLevelItem(section)
-            for record in records:
-                item = QTreeWidgetItem([record.name if isinstance(record, ThatecDevice) else record.id, "record"])
-                item.setData(0, Qt.ItemDataRole.UserRole, record)
-                section.addChild(item)
-        self.experiment_tree.expandToDepth(1)
+    # ------------------------------------------------------------------
+    # Backwards-compatibility aliases (used by existing tests and external
+    # code that accessed the old flat attribute API).
+    # ------------------------------------------------------------------
 
-    def _add_thatec_tree_node(self, parent: QTreeWidgetItem, node: ThatecTreeNode) -> None:
-        item = QTreeWidgetItem([node.label, node.kind])
-        item.setData(0, Qt.ItemDataRole.UserRole, self._thatec_run.rows.get(node.id))
-        item.setData(1, Qt.ItemDataRole.UserRole, node.id)
-        parent.addChild(item)
-        for child in node.children:
-            self._add_thatec_tree_node(item, child)
+    @property
+    def runs(self):
+        """Alias for ``file_browser.runs`` (backwards compat)."""
+        return self.file_browser.runs
 
-    def _find_tree_item(self, row_id: str) -> QTreeWidgetItem | None:
-        def walk(item: QTreeWidgetItem) -> QTreeWidgetItem | None:
-            if item.data(1, Qt.ItemDataRole.UserRole) == row_id:
-                return item
-            for index in range(item.childCount()):
-                found = walk(item.child(index))
-                if found is not None:
-                    return found
-            return None
-        for index in range(self.experiment_tree.topLevelItemCount()):
-            found = walk(self.experiment_tree.topLevelItem(index))
-            if found is not None:
-                return found
-        return None
+    @property
+    def metadata(self):
+        """Alias for ``metadata_panel.metadata`` (backwards compat)."""
+        return self.metadata_panel.metadata
 
-    def _tree_selected(self, item: QTreeWidgetItem | None, _previous: QTreeWidgetItem | None) -> None:
-        record = item.data(0, Qt.ItemDataRole.UserRole) if item is not None else None
-        if isinstance(record, ThatecRow) and self._selected_path is not None:
-            self._selected_thatec_row = record
-            if not record.shape:
-                self.inspector.setPlainText(
-                    self._format_json(
-                        {
-                            "definition": record.definition,
-                            "metadata": record.metadata,
-                            "recorded_data": "No measurement array for this THATEC control/internal node.",
-                        }
-                    )
-                )
-                self.thatec_values.clear()
-                self._clear_spectrum()
-                return
-            self.thatec_checkpoint.setMaximum(max(0, record.shape[0] - 1 if record.shape else 0))
-            self._render_selected_thatec_row()
-        elif isinstance(record, (ThatecDevice, ThatecRecord)):
-            self.inspector.setPlainText(self._format_json(dict(record.values)))
+    @property
+    def recipe_snapshot(self):
+        """Alias for ``metadata_panel.recipe_snapshot`` (backwards compat)."""
+        return self.metadata_panel.recipe_snapshot
 
-    def _render_selected_thatec_row(self) -> None:
-        record = getattr(self, "_selected_thatec_row", None)
-        if not isinstance(record, ThatecRow) or self._selected_path is None:
-            return
-        checkpoint = self.thatec_checkpoint.value()
-        self.inspector.setPlainText(self._format_json({"definition": record.definition, "metadata": record.metadata, "shape": record.shape, "timestamps": record.timestamp_count, "checkpoint": checkpoint}))
-        values = ThatecRunReader.row_slice(self._selected_path, record.id, checkpoint).values
-        if len(record.shape) == 2:
-            self.thatec_values.clear()
-            data = ThatecRunReader.row_slice(self._selected_path, record.id, checkpoint)
-            offset, multiplier = (data.scale[0], data.scale[1]) if len(data.scale) >= 2 else (0.0, 1.0)
-            x_values = tuple(offset + multiplier * index for index in range(len(data.values)))
-            self.spectrum_plot.set_trace("Selected THATEC spectrum", x_values, tuple(float(value) for value in data.values), primary=True)
-            self.spectrum_plot.set_title(f"{record.control_name or record.id} — checkpoint {checkpoint}")
-            self.spectrum_plot.auto_range()
-        else:
-            series, timestamps = ThatecRunReader.scalar_series(self._selected_path, record.id)
-            self.thatec_values.clear()
-            for index, value in enumerate(series):
-                timestamp = str(timestamps[index]) if index < len(timestamps) else ""
-                self.thatec_values.addTopLevelItem(
-                    QTreeWidgetItem([str(index), f"{float(value):.12g}", timestamp])
-                )
-            x_values = tuple(float(value) for value in (timestamps if len(timestamps) else range(len(series))))
-            self.spectrum_plot.set_trace("Selected THATEC scalar", x_values, tuple(float(value) for value in series), primary=True)
-            self.spectrum_plot.set_title(f"{record.control_name or record.id} — {len(series)} checkpoints")
-            self.spectrum_plot.auto_range()
-            self.inspector.append("\n\nSelected value:\n" + self._format_json([float(value) for value in values]))
+    @property
+    def settings_snapshot(self):
+        """Alias for ``metadata_panel.settings_snapshot`` (backwards compat)."""
+        return self.metadata_panel.settings_snapshot
 
-    def _request_resume(self) -> None:
-        if self._selected_path is not None and self.resume_button.isEnabled():
-            self.resume_requested.emit(self._selected_path)
+    @property
+    def pythat_data(self):
+        """Alias for ``metadata_panel.pythat_data`` (backwards compat)."""
+        return self.metadata_panel.pythat_data
 
-    def _show_detail(self, detail: RunDetail) -> None:
-        summary = detail.summary
-        lines = [
-            f"File: {summary.path}",
-            f"State: {summary.status}",
-            f"Created (UTC): {summary.created_at_utc or 'missing'}",
-            f"Application version: {summary.application_version or 'missing'}",
-            f"Plan hash: {summary.plan_sha256 or 'missing'}",
-            f"Checkpoints: {summary.point_count}; stored spectra: {summary.spectrum_count}",
-            "",
-            "Instrument identities:",
-        ]
-        lines.extend(f"  {name}: {idn}" for name, idn in sorted(detail.device_idn.items()))
-        lines.extend(("", "Authenticated operator:", self._format_json(detail.operator_context)))
-        lines.extend(("", "Capabilities (snapshot):", self._format_json(detail.capabilities)))
-        if detail.events:
-            lines.extend(("", f"Recent events ({len(detail.events)}):"))
-            lines.extend(
-                f"  {event.timestamp_utc} [{event.severity}] {event.name}"
-                for event in detail.events[-20:]
-            )
-        self.metadata.setPlainText("\n".join(lines))
-        self.recipe_snapshot.setPlainText(detail.recipe_yaml)
-        self.settings_snapshot.setPlainText(detail.settings_yaml)
+    @property
+    def device_state(self):
+        """Alias for ``metadata_panel.device_state`` (backwards compat)."""
+        return self.metadata_panel.device_state
 
-    @staticmethod
-    def _format_json(value: object) -> str:
-        import json
+    @property
+    def details_tabs(self):
+        """Alias for ``metadata_panel.tabs`` (backwards compat)."""
+        return self.metadata_panel.tabs
 
-        return json.dumps(value, ensure_ascii=False, indent=2, sort_keys=True)
+    @property
+    def points(self):
+        """Alias for ``spectrum_tab.points`` (backwards compat)."""
+        return self.spectrum_tab.points
 
-    def _point_selected(self, item: QTreeWidgetItem | None, _previous: QTreeWidgetItem | None) -> None:
-        self._clear_spectrum()
-        if item is None or self._selected_path is None:
-            self.device_state.clear()
-            return
-        point = item.data(0, Qt.ItemDataRole.UserRole)
-        if not isinstance(point, StoredPoint):
-            return
-        self.device_state.setPlainText(self._format_json(point.device_states))
-        if not point.has_spectrum:
-            self.spectrum_info.setText("This checkpoint contains no spectrum.")
-            return
-        try:
-            trace = Hdf5RunReader.spectrum(self._selected_path, point.index, max_points=2_000)
-        except Exception as exc:
-            self.spectrum_info.setText(f"Cannot read spectrum: {exc}")
-            return
-        if trace is None:
-            self.spectrum_info.setText("No spectrum for the selected checkpoint.")
-            return
-        self.spectrum_plot.set_trace(
-            "Stored spectrum",
-            trace.frequencies_hz,
-            trace.powers_dbm,
-            primary=True,
-        )
-        self.spectrum_plot.set_title(f"Spectrum at point {point.index} ({trace.trace_name})")
-        self.spectrum_plot.auto_range()
-        self.spectrum_info.setText(
-            f"{trace.source_point_count} points in file; interactive peak-preserving display • "
-            f"{trace.acquired_at_utc or 'missing time'} • max {max(trace.powers_dbm):.4g} dBm"
-        )
+    @property
+    def spectrum_plot(self):
+        """Alias for ``spectrum_tab.spectrum_plot`` (backwards compat)."""
+        return self.spectrum_tab.spectrum_plot
 
-    @staticmethod
-    def _point_tooltip(point: StoredPoint) -> str:
-        payload = {
-            "setpoints": point.setpoints,
-            "measurements": point.measurements,
-            "metadata": point.metadata,
-            "device_states": point.device_states,
-        }
-        return ResultsPage._format_json(payload)
+    @property
+    def spectrum_info(self):
+        """Alias for ``spectrum_tab.spectrum_info`` (backwards compat)."""
+        return self.spectrum_tab.spectrum_info
 
-    def _clear_details(self) -> None:
-        self.metadata.clear()
-        self.recipe_snapshot.clear()
-        self.settings_snapshot.clear()
-        self.pythat_data.clear()
-        self.device_state.clear()
-        self._clear_spectrum()
+    @property
+    def experiment_tree(self):
+        """Alias for ``sweep_tree.tree`` (backwards compat)."""
+        return self.sweep_tree.tree
 
-    def _clear_spectrum(self) -> None:
-        self.spectrum_plot.clear()
-        self.spectrum_plot.set_title("Select a point containing a stored spectrum")
-        self.spectrum_info.setText("Spectra are read from HDF5 without contacting instruments.")
+    @property
+    def inspector(self):
+        """Alias for ``sweep_tree.inspector`` (backwards compat)."""
+        return self.sweep_tree.inspector
+
+    def _find_tree_item(self, row_id: str):
+        """Alias for ``sweep_tree.find_tree_item`` (backwards compat)."""
+        return self.sweep_tree.find_tree_item(row_id)

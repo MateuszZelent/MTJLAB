@@ -1,0 +1,54 @@
+<h2>Wybierz kierunek dla „Find VISA”</h2>
+<p class="subtitle">Wszystkie warianty zachowują bezpieczne skanowanie i przypisywanie urządzeń. Różnią się sposobem prezentacji wyników.</p>
+
+<style>
+  #visa-layouts .layout-options { display: grid; gap: 16px; grid-template-columns: repeat(3, minmax(0, 1fr)); }
+  #visa-layouts .layout-choice { cursor: pointer; }
+  #visa-layouts .preview { min-height: 330px; padding: 14px; background: var(--muted); color: var(--foreground); display: flex; flex-direction: column; gap: 10px; }
+  #visa-layouts .preview-title { font-weight: 500; }
+  #visa-layouts .preview-status { color: var(--muted-foreground); font-size: .9em; }
+  #visa-layouts .summary { display: flex; gap: 8px; flex-wrap: wrap; }
+  #visa-layouts .mini-badge { padding: 4px 8px; border-radius: 999px; background: var(--secondary); color: var(--secondary-foreground); font-size: .8em; }
+  #visa-layouts .device-card { padding: 10px; border: 1px solid var(--border); background: var(--card); }
+  #visa-layouts .device-name { font-weight: 500; }
+  #visa-layouts .resource { font-family: monospace; font-size: .78em; margin-top: 5px; overflow-wrap: anywhere; }
+  #visa-layouts .line { display: flex; justify-content: space-between; gap: 8px; align-items: center; margin-top: 8px; font-size: .82em; }
+  #visa-layouts .row { border-bottom: 1px solid var(--border); padding: 9px 0; }
+  #visa-layouts .warning { color: var(--destructive); }
+  #visa-layouts .sidebar-preview { display: grid; grid-template-columns: 38% 1fr; gap: 10px; flex: 1; }
+  #visa-layouts .sidebar { padding: 10px; background: var(--card); border: 1px solid var(--border); }
+  #visa-layouts .side-item { padding: 9px 4px; border-bottom: 1px solid var(--border); font-size: .82em; }
+  #visa-layouts .detail { padding: 10px; background: var(--card); border: 1px solid var(--border); }
+  @media (max-width: 760px) { #visa-layouts .layout-options { grid-template-columns: 1fr; } }
+</style>
+
+<div id="visa-layouts" class="layout-options">
+  <div class="card layout-choice" data-choice="cards" onclick="toggleSelect(this)">
+    <div class="preview" aria-label="Karty urządzeń jako wynik skanowania">
+      <div class="preview-title">Wyniki skanowania <span class="mini-badge">3 gotowe</span></div>
+      <div class="preview-status">Ostatnie skanowanie: przed chwilą</div>
+      <div class="device-card"><div class="device-name">Rohde &amp; Schwarz SMA100B</div><div class="resource">TCPIP0::131.246.221.107::hislip0::INSTR</div><div class="line"><span class="mini-badge">Nierozpoznane</span><button class="btn btn-primary" type="button">Przypisz</button></div></div>
+      <div class="device-card"><div class="device-name">Lake Shore 475</div><div class="resource">GPIB0::12::INSTR</div><div class="line"><span class="mini-badge">Rozpoznane</span><button class="btn btn-primary" type="button">Przypisz</button></div></div>
+      <div class="device-card"><div class="device-name warning">Brak odpowiedzi</div><div class="resource">ASRL1::INSTR</div><div class="line"><span class="warning">Przekroczono limit czasu</span><span>—</span></div></div>
+    </div>
+    <h3>Karty urządzeń</h3><p>Najbardziej przyjazne dla kilku urządzeń; każda decyzja jest lokalna i czytelna.</p>
+  </div>
+  <div class="card layout-choice" data-choice="workspace" onclick="toggleSelect(this)">
+    <div class="preview" aria-label="Dwupanelowy obszar przypisywania urządzeń">
+      <div class="preview-title">Przypisywanie VISA</div>
+      <div class="sidebar-preview"><div class="sidebar"><div class="side-item">✓ Lake Shore 475</div><div class="side-item">SMA100B</div><div class="side-item warning">Brak odpowiedzi</div></div><div class="detail"><div class="device-name">Lake Shore 475</div><div class="resource">GPIB0::12::INSTR</div><div class="summary"><span class="mini-badge">system</span><span class="mini-badge">Rozpoznane</span></div><div class="line"><span>Przypisz do</span><button class="btn btn-primary" type="button">Lake Shore 475</button></div></div></div>
+      <div class="preview-status">Wybrano 1 z 3 odpowiedzi urządzeń</div>
+    </div>
+    <h3>Obszar roboczy</h3><p>Wyniki po lewej, pełne dane i decyzja po prawej. Najlepszy przy długich identyfikatorach i diagnostyce.</p>
+  </div>
+  <div class="card layout-choice" data-choice="compact" onclick="toggleSelect(this)">
+    <div class="preview" aria-label="Kompaktowa tabela z czytelnym statusem">
+      <div class="preview-title">Wyniki skanowania <span class="mini-badge">3 odpowiedzi</span></div>
+      <div class="summary"><button class="btn btn-primary" type="button">Skanuj ponownie</button><button class="btn" type="button">Zapisz zmiany</button></div>
+      <div class="row"><div class="device-name">Lake Shore 475 <span class="mini-badge">Rozpoznane</span></div><div class="resource">GPIB0::12::INSTR</div><div class="line"><span>system</span><button class="btn btn-primary" type="button">Przypisz</button></div></div>
+      <div class="row"><div class="device-name">Rohde &amp; Schwarz SMA100B <span class="mini-badge">Nierozpoznane</span></div><div class="resource">TCPIP0::131.246.221.107::inst0::INSTR</div><div class="line"><span>system</span><button class="btn btn-primary" type="button">Przypisz</button></div></div>
+      <div class="row"><div class="device-name warning">ASRL1::INSTR</div><div class="warning">Brak odpowiedzi — przekroczono limit czasu</div></div>
+    </div>
+    <h3>Lista „wiersz-karta”</h3><p>Najbardziej gęsty wariant: zachowuje szybkość tabeli, ale każde urządzenie ma czytelny blok informacji.</p>
+  </div>
+</div>

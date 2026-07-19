@@ -39,6 +39,24 @@ class ArchitectureTests(unittest.TestCase):
             )
             self.assertIs(owner.MODULE, module)
 
+    def test_source_does_not_import_removed_generic_device_packages(self) -> None:
+        forbidden = (
+            "app.devices.rigol",
+            "app.devices.keithley",
+            "app.devices.anritsu",
+        )
+        for root_name in ("app", "tests"):
+            for path in (ROOT / root_name).rglob("*.py"):
+                for imported in _imports(path):
+                    self.assertFalse(
+                        any(
+                            imported == prefix
+                            or imported.startswith(prefix + ".")
+                            for prefix in forbidden
+                        ),
+                        f"{path.relative_to(ROOT).as_posix()} imports {imported}",
+                    )
+
     def test_device_domain_layers_do_not_import_ui(self) -> None:
         """Adapters/models/safety stay usable without Qt or the application shell."""
 
