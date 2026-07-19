@@ -7,7 +7,7 @@ import unittest
 
 import h5py
 
-from app.devices.anritsu import AnritsuAdapter
+from app.devices.anritsu_ms2830a import AnritsuAdapter
 from app.devices.keithley_2600 import KeithleyAdapter
 from app.devices.rigol_dg1000z import RigolAdapter
 from app.devices.simulators import SimulatedVisaFactory, simulated_station_settings

@@ -40,7 +40,7 @@ from app.ui.main_window import (
 )
 from app.ui.workers import DeviceController
 from app.devices.keithley_2600 import KeithleyAdapter
-from app.devices.anritsu import SignalGeneratorSnapshot
+from app.devices.anritsu_ms2830a import SignalGeneratorSnapshot
 from app.devices.simulators import SimulatedVisaFactory
 from app.storage import Hdf5RunWriter
 from tests.helpers import simulation_settings

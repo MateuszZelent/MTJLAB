@@ -11,7 +11,7 @@ import warnings
 import h5py
 import csv
 
-from app.devices.anritsu import SpectrumTrace
+from app.devices.anritsu_ms2830a import SpectrumTrace
 from app.domain.models import MeasurementPoint
 from app.recipes import generate_sweep_points
 from app.storage import (

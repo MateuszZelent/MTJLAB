@@ -19,7 +19,7 @@ from PySide6.QtWidgets import (
     QToolButton, QVBoxLayout, QWidget,
 )
 
-from app.devices.anritsu import (
+from app.devices.anritsu_ms2830a import (
     ANRITSU_PREAMPLIFIER_OPTIONS, AdvancedSpectrumConfig, AdvancedSpectrumSnapshot,
     AnritsuConfigurationSnapshot, ReferenceSpectrum, SignalGeneratorConfig,
     SignalGeneratorSnapshot, SpectrumConfig, SpectrumTrace, frequency_option_for,

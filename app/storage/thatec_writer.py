@@ -14,7 +14,7 @@ import math
 import re
 from typing import Any
 
-from app.devices.anritsu.adapter import SpectrumTrace
+from app.devices.anritsu_ms2830a.adapter import SpectrumTrace
 from app.domain.models import MeasurementPoint
 from app.storage.thatec_schema_mapper import ThatecSchemaMapper, ThatecSweepAxis
 

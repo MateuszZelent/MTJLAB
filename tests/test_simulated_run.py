@@ -8,8 +8,8 @@ import json
 
 import h5py
 
-from app.devices.anritsu import AnritsuAdapter
-from app.devices.anritsu.adapter import SpectrumConfig
+from app.devices.anritsu_ms2830a import AnritsuAdapter
+from app.devices.anritsu_ms2830a.adapter import SpectrumConfig
 from app.devices.keithley_2600 import KeithleyAdapter
 from app.devices.keithley_2600 import KeithleySourceRequest
 from app.devices.moke_box import MokeBoxAdapter, MokeBoxConfig

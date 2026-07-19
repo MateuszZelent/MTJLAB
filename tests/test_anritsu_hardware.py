@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import unittest
 
-from app.devices.anritsu import frequency_option_for, parse_anritsu_option_response
+from app.devices.anritsu_ms2830a import frequency_option_for, parse_anritsu_option_response
 
 
 class AnritsuHardwareTests(unittest.TestCase):

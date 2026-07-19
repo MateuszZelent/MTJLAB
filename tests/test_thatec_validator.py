@@ -7,7 +7,7 @@ import unittest
 
 import h5py
 
-from app.devices.anritsu import SpectrumTrace
+from app.devices.anritsu_ms2830a import SpectrumTrace
 from app.domain.models import MeasurementPoint
 from app.storage import Hdf5RunWriter, ThatecCompatibilityValidator
 from tests.helpers import ROOT

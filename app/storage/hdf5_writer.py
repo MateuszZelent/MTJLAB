@@ -11,7 +11,7 @@ import hashlib
 import json
 from typing import TextIO
 
-from app.devices.anritsu.adapter import SpectrumTrace
+from app.devices.anritsu_ms2830a.adapter import SpectrumTrace
 from app.domain.errors import ExecutionError
 from app.domain.models import MeasurementPoint
 from app.storage.thatec_writer import ThatecHdf5Writer

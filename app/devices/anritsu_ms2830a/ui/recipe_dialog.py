@@ -12,7 +12,7 @@ from PySide6.QtWidgets import (
     QTabWidget, QVBoxLayout, QWidget,
 )
 
-from app.devices.anritsu import AnritsuConfigurationSnapshot, SignalGeneratorSnapshot
+from app.devices.anritsu_ms2830a import AnritsuConfigurationSnapshot, SignalGeneratorSnapshot
 from app.devices.anritsu_ms2830a.ui.page import (
     AnritsuAdvancedSpectrumPanel,
     AnritsuSpectrumConfigurationPanel,

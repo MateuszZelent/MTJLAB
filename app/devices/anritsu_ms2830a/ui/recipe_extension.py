@@ -1,6 +1,6 @@
 """Recipe-editor public surface owned by the Anritsu MS2830A module."""
 
-from app.devices.anritsu import AnritsuConfigurationSnapshot, SignalGeneratorSnapshot
+from app.devices.anritsu_ms2830a import AnritsuConfigurationSnapshot, SignalGeneratorSnapshot
 from app.devices.anritsu_ms2830a.ui.page import (
     AnritsuAdvancedSpectrumPanel,
     AnritsuPage,

@@ -7,7 +7,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any
 
-from app.devices.anritsu import ReferenceSpectrum, SpectrumTrace
+from app.devices.anritsu_ms2830a import ReferenceSpectrum, SpectrumTrace
 from app.domain.errors import ExecutionError
 from app.domain.models import MeasurementPoint
 from app.storage.hdf5_reader import Hdf5RunReader

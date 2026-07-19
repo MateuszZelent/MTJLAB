@@ -9,7 +9,7 @@ import math
 import time
 
 from app.devices.base import DeviceAdapter, InstrumentSession, SessionFactory, parse_identity, validate_identity
-from app.devices.anritsu.hardware import (
+from app.devices.anritsu_ms2830a.hardware import (
     ANRITSU_PREAMPLIFIER_OPTIONS,
     ANRITSU_SIGNAL_GENERATOR_OPTIONS,
     parse_anritsu_option_response,

@@ -17,7 +17,7 @@ from PySide6.QtTest import QTest
 from app.domain.models import DeviceCapabilities
 from app.devices.discovery import DiscoveredInstrument
 from app.devices.moke_box.models import MokeHallVoltageReading
-from app.devices.anritsu import (
+from app.devices.anritsu_ms2830a import (
     AdvancedSpectrumSnapshot,
     AnritsuConfigurationSnapshot,
     SpectrumTrace,

@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import math
 
-from app.devices.anritsu.hardware import ANRITSU_PREAMPLIFIER_OPTIONS
+from app.devices.anritsu_ms2830a.hardware import ANRITSU_PREAMPLIFIER_OPTIONS
 from app.domain.errors import SafetyViolation
 from app.domain.quantities import (
     DIMENSION_DB,

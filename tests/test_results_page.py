@@ -10,7 +10,7 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 from PySide6.QtWidgets import QApplication
 
-from app.devices.anritsu import SpectrumTrace
+from app.devices.anritsu_ms2830a import SpectrumTrace
 from app.domain.models import MeasurementPoint
 from app.storage import Hdf5RunWriter
 from app.storage.thatec_reader import ThatecRunReader

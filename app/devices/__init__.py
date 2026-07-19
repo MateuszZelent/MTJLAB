@@ -11,7 +11,7 @@ def __getattr__(name: str) -> Any:
     """Keep the convenience exports without eagerly importing every adapter."""
 
     if name == "AnritsuAdapter":
-        from app.devices.anritsu.adapter import AnritsuAdapter
+        from app.devices.anritsu_ms2830a.adapter import AnritsuAdapter
 
         return AnritsuAdapter
     if name == "KeithleyAdapter":

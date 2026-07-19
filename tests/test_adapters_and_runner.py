@@ -7,7 +7,7 @@ import threading
 import time
 import unittest
 
-from app.devices.anritsu import (
+from app.devices.anritsu_ms2830a import (
     AdvancedSpectrumConfig,
     AnritsuAdapter,
     SignalGeneratorConfig,

@@ -10,7 +10,7 @@ from typing import Callable
 from uuid import uuid4
 from enum import Enum
 
-from app.devices.anritsu.adapter import AnritsuAdapter, SpectrumTrace
+from app.devices.anritsu_ms2830a.adapter import AnritsuAdapter, SpectrumTrace
 from app.devices.keithley_2600.adapter import KeithleyAdapter
 from app.devices.moke_box.adapter import MokeBoxAdapter
 from app.devices.moke_box.models import hall_field_from_voltage

@@ -10,7 +10,7 @@ from collections.abc import Callable
 
 from PySide6.QtCore import QEventLoop, QMetaObject, QObject, QThread, QTimer, Qt, Signal, Slot
 
-from app.devices.anritsu.adapter import AnritsuAdapter
+from app.devices.anritsu_ms2830a.adapter import AnritsuAdapter
 from app.devices.base import DeviceAdapter
 from app.devices.keithley_2600.adapter import KeithleyAdapter
 from app.devices.rigol_dg1000z.adapter import RigolAdapter

@@ -5,7 +5,7 @@ from pathlib import Path
 import tempfile
 import unittest
 
-from app.devices.anritsu import ReferenceSpectrum, SpectrumTrace
+from app.devices.anritsu_ms2830a import ReferenceSpectrum, SpectrumTrace
 from app.storage import ReferenceHdf5Store
 from app.storage.pythat_bridge import open_measurement_tree
 

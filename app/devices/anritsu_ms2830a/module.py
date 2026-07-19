@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from app.contracts import DeviceModule, RecipeExtension
-from app.devices.anritsu import AnritsuAdapter
+from app.devices.anritsu_ms2830a import AnritsuAdapter
 from app.devices.anritsu_ms2830a.ui import AnritsuPage
 from app.devices.base import DeviceAdapter
 from app.devices.simulators import SimulatedVisaFactory

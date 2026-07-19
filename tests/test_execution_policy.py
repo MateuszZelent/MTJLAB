@@ -5,7 +5,7 @@ import time
 import unittest
 from uuid import UUID
 
-from app.devices.anritsu import SpectrumConfig
+from app.devices.anritsu_ms2830a import SpectrumConfig
 from app.domain.errors import DeviceError
 from app.domain.models import DeviceState
 from app.engine.compiler import ExecutionPlan, PlanAction

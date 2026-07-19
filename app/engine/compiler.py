@@ -10,7 +10,7 @@ import math
 import re
 from typing import Any, Callable, Final
 
-from app.devices.anritsu.adapter import (
+from app.devices.anritsu_ms2830a.adapter import (
     AdvancedSpectrumConfig,
     SignalGeneratorConfig,
     SpectrumConfig,
