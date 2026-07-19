@@ -23,6 +23,18 @@ def _imports(path: Path) -> tuple[str, ...]:
 
 
 class ArchitectureTests(unittest.TestCase):
+    def test_only_pyside6_fluent_distribution_is_declared(self) -> None:
+        root = Path(__file__).resolve().parents[1]
+        declarations = (
+            (root / "pyproject.toml").read_text(encoding="utf-8")
+            + (root / "requirements.txt").read_text(encoding="utf-8")
+            + (root / "requirements.lock.txt").read_text(encoding="utf-8")
+        ).lower()
+        self.assertIn("pyside6-fluent-widgets", declarations)
+        self.assertNotIn("pyqt-fluent-widgets", declarations)
+        self.assertNotIn("pyqt6-fluent-widgets", declarations)
+        self.assertNotIn("pyside2-fluent-widgets", declarations)
+
     def test_generic_device_packages_do_not_exist(self) -> None:
         for package in ("rigol", "keithley", "anritsu"):
             self.assertFalse(

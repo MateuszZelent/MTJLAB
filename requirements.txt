@@ -5,6 +5,7 @@ h5netcdf>=1.8,<2
 numpy>=1.26
 pydantic>=2.7,<3
 PySide6>=6.7
+PySide6-Fluent-Widgets==1.11.2
 pyqtgraph>=0.13.7,<0.14
 pyvisa>=1.14
 pyvisa-py>=0.7
