@@ -56,6 +56,18 @@ fluent_theme._settle_fluent_background_animations = timed(
 fluent_theme._apply_application_palette = timed(
     "application palette", fluent_theme._apply_application_palette
 )
+fluent_theme._apply_station_button = timed(
+    "station button", fluent_theme._apply_station_button
+)
+fluent_theme._apply_station_card_frame = timed(
+    "station card", fluent_theme._apply_station_card_frame
+)
+fluent_theme._apply_station_surface = timed(
+    "station surface", fluent_theme._apply_station_surface
+)
+fluent_theme._apply_semantic_text = timed(
+    "semantic text", fluent_theme._apply_semantic_text
+)
 app.setStyleSheet = timed("QApplication.setStyleSheet", app.setStyleSheet)
 
 totals = []
