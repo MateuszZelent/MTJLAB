@@ -40,7 +40,7 @@ class FluentSettingsPageTests(unittest.TestCase):
             self.assertIsInstance(page.action_card, CardWidget)
             self.assertIsInstance(page.profile_card, CardWidget)
             self.assertIsInstance(page.save_button, PrimaryPushButton)
-            self.assertFalse(page.tabs.navigation_scroll.isVisible())
+            self.assertFalse(page.tabs.navigation.isVisible())
             self.assertTrue(page.tabs.compact_navigation.isVisible())
             self.assertTrue(page.page_stack.isVisible())
             self.assertGreater(page.page_stack.geometry().height(), 450)
@@ -87,7 +87,7 @@ class FluentSettingsPageTests(unittest.TestCase):
             host = window.navigation_routes["settings"]
 
             self.assertTrue(page.tabs.compact_navigation.isVisibleTo(window))
-            self.assertFalse(page.tabs.navigation_scroll.isVisible())
+            self.assertFalse(page.tabs.navigation.isVisible())
             self.assertEqual(
                 page.action_layout.direction(),
                 QBoxLayout.Direction.TopToBottom,
@@ -101,6 +101,32 @@ class FluentSettingsPageTests(unittest.TestCase):
         source = inspect.getsource(_SafetyLimitValidationDelegate)
         self.assertNotIn("setStyleSheet", source)
         self.assertNotIn("#ffffff", source)
+
+    def test_wide_settings_rethemes_all_routes_without_navigation_artifacts(self) -> None:
+        window = MainWindow(".config/settings.yml", simulation=True)
+        try:
+            window.resize(1900, 1030)
+            window.show()
+            window._navigate_to("settings")
+            page = window.settings_page
+
+            window._set_theme_mode("dark", persist=False)
+            self.application.processEvents()
+            dark_surface = page.tabs.grab().toImage().pixelColor(4, 4).lightness()
+            window._set_theme_mode("light", persist=False)
+            self.application.processEvents()
+            light_surface = page.tabs.grab().toImage().pixelColor(4, 4).lightness()
+
+            self.assertTrue(page.tabs.navigation.isVisibleTo(window))
+            self.assertFalse(page.tabs.compact_navigation.isVisible())
+            self.assertGreater(light_surface, dark_surface + 40)
+            self.assertLess(
+                page.tabs.navigation.geometry().bottom(),
+                page.tabs.stack.geometry().top(),
+            )
+        finally:
+            window._set_theme_mode("system", persist=False)
+            window.close()
 
 
 if __name__ == "__main__":

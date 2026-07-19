@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-import os
 
 from PySide6.QtCore import QEvent, QObject
 from PySide6.QtGui import QColor, QPalette
@@ -39,9 +38,13 @@ def apply_application_theme(application: QApplication, mode: str) -> AppliedThem
         _install_dialog_theme_filter(application, tokens)
         _apply_station_control_styles(application, tokens)
         return AppliedTheme(name=name, tokens=tokens)
-    lazy = _supports_lazy_theme_update(application)
     _stage_fluent_accent(tokens)
-    setTheme(Theme.DARK if name == "dark" else Theme.LIGHT, lazy=lazy)
+    # Settings contains many routes that can be hidden during a theme switch.
+    # QFluent's lazy refresh only repolishes the currently visible subtree,
+    # leaving hidden Pivot pages and their navigation in the previous theme.
+    # Apply the global theme synchronously so every route is coherent when it
+    # becomes visible.
+    setTheme(Theme.DARK if name == "dark" else Theme.LIGHT, lazy=False)
     # QFluent's QSS refresh can touch the application palette;
     # native item views must receive the station palette after that refresh.
     _apply_application_palette(application, tokens, name)
@@ -57,17 +60,6 @@ def _stage_fluent_accent(tokens: ThemeTokens) -> None:
     """Update QFluent's accent before the single theme QSS refresh."""
 
     qconfig.set(qconfig.themeColor, QColor(tokens.accent), save=False)
-
-
-def _supports_lazy_theme_update(application: QApplication) -> bool:
-    """Use QFluent's visible-widget fast path only on a real window system."""
-
-    configured = os.environ.get("QT_QPA_PLATFORM", "").strip().lower()
-    active = application.platformName().strip().lower()
-    return configured not in {"offscreen", "minimal"} and active not in {
-        "offscreen",
-        "minimal",
-    }
 
 
 class _DialogThemeFilter(QObject):

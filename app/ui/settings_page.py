@@ -105,21 +105,12 @@ class _FluentSettingsSections(QWidget):
         self.compact_navigation.setAccessibleName("Settings section")
         self.compact_navigation.hide()
         self.compact_navigation.currentIndexChanged.connect(self.setCurrentIndex)
-        self.secondary_navigation = Pivot(self)
-        self.secondary_navigation.hide()
-        self.navigation_scroll = ScrollArea(self)
-        self.navigation_scroll.setObjectName("settingsNavigationScroll")
-        self.navigation_scroll.setWidgetResizable(True)
-        self.navigation_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
-        self.navigation_scroll.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
-        self.navigation_scroll.setFixedHeight(54)
-        self.navigation_scroll.setWidget(self.navigation)
         self.stack = QStackedWidget(self)
         self.stack.setSizePolicy(
             QSizePolicy.Policy.Ignored,
             QSizePolicy.Policy.Expanding,
         )
-        layout.addWidget(self.navigation_scroll)
+        layout.addWidget(self.navigation)
         layout.addWidget(self.compact_navigation)
         layout.addWidget(self.stack, 1)
         self._routes: list[str] = []
@@ -169,7 +160,7 @@ class _FluentSettingsSections(QWidget):
         # otherwise the final routes are silently clipped inside the host.
         required_width = max(900, self.navigation.sizeHint().width())
         compact = event.size().width() < required_width
-        self.navigation_scroll.setVisible(not compact)
+        self.navigation.setVisible(not compact)
         self.compact_navigation.setVisible(compact)
 
 

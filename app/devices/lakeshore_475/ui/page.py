@@ -7,18 +7,153 @@ from datetime import datetime, timedelta, timezone
 from typing import TYPE_CHECKING
 
 import pyqtgraph as pg
-from PySide6.QtCore import QEvent, QTimer, Signal
+from PySide6.QtCore import QEvent, QTimer, Qt, Signal
 from PySide6.QtGui import QResizeEvent, QShowEvent
 from PySide6.QtWidgets import QFormLayout, QGridLayout, QHBoxLayout, QSizePolicy, QVBoxLayout, QWidget
-from qfluentwidgets import BodyLabel, CaptionLabel, CardWidget, CheckBox, ComboBox, FluentIcon, IconWidget, PrimaryPushButton, StrongBodyLabel, SubtitleLabel, isDarkTheme
+from qfluentwidgets import BodyLabel, CaptionLabel, CardWidget, CheckBox, ComboBox, FluentIcon, IconWidget, PrimaryPushButton, PushButton, StrongBodyLabel, SubtitleLabel, isDarkTheme
 
 from app.devices.lakeshore_475.models import GaussmeterReading
 from app.domain.quantities import DIMENSION_TIME, parse_quantity
 from app.settings.models import StationSettings
 from app.ui.design_system import plot_theme, tokens_for
+from app.ui.dialogs import StationDialog
 
 if TYPE_CHECKING:
     from app.ui.workers import DeviceController
+
+
+class LakeShoreLiveWindow(StationDialog):
+    """Compact always-on-top view sharing the page's single VISA read loop."""
+
+    read_requested = Signal()
+    live_changed = Signal(bool)
+    closed = Signal()
+
+    def __init__(self, parent: QWidget) -> None:
+        super().__init__(parent)
+        self.setWindowTitle("Lake Shore 475 — floating live")
+        self.setObjectName("lakeshoreLiveWindow")
+        self.setWindowFlag(Qt.WindowType.WindowStaysOnTopHint, True)
+        self.setModal(False)
+        self.resize(540, 430)
+        self.setMinimumSize(380, 320)
+
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(16, 14, 16, 14)
+        layout.setSpacing(10)
+        header = QHBoxLayout()
+        copy = QVBoxLayout()
+        copy.addWidget(StrongBodyLabel("Magnetic field · live"))
+        note = CaptionLabel("Read-only view · shared instrument session")
+        note.setObjectName("muted")
+        copy.addWidget(note)
+        header.addLayout(copy, 1)
+        self.live_state = CaptionLabel("STOPPED")
+        self.live_state.setProperty("deviceState", "neutral")
+        header.addWidget(self.live_state)
+        layout.addLayout(header)
+
+        readout = CardWidget(self)
+        readout_layout = QGridLayout(readout)
+        readout_layout.setContentsMargins(16, 12, 16, 12)
+        readout_layout.addWidget(BodyLabel("Field"), 0, 0)
+        self.field = SubtitleLabel("— T")
+        self.field.setObjectName("lakeshoreFloatingField")
+        readout_layout.addWidget(self.field, 0, 1)
+        readout_layout.addWidget(BodyLabel("Mode"), 1, 0)
+        self.mode = BodyLabel("—")
+        readout_layout.addWidget(self.mode, 1, 1)
+        layout.addWidget(readout)
+
+        controls = QHBoxLayout()
+        self.read_now = PrimaryPushButton(FluentIcon.SYNC, "Read now")
+        self.live = CheckBox("Live")
+        controls.addWidget(self.read_now)
+        controls.addWidget(self.live)
+        controls.addStretch(1)
+        layout.addLayout(controls)
+
+        self.plot = pg.PlotWidget(self)
+        self.plot.setLabel("left", "Field", units="T")
+        self.plot.setLabel("bottom", "Elapsed time", units="s")
+        self.plot.showGrid(x=True, y=True, alpha=0.2)
+        self.field_curve = self.plot.plot()
+        self.negative_peak_curve = self.plot.plot()
+        self.positive_peak_curve = self.plot.plot()
+        layout.addWidget(self.plot, 1)
+        self.status = CaptionLabel("No reading received yet.")
+        self.status.setObjectName("muted")
+        layout.addWidget(self.status)
+        self._apply_plot_theme()
+
+        self.read_now.clicked.connect(self.read_requested)
+        self.live.toggled.connect(self.live_changed)
+
+    def event(self, event: QEvent) -> bool:
+        if event.type() in {QEvent.Type.PaletteChange, QEvent.Type.ApplicationPaletteChange}:
+            self._apply_plot_theme()
+        return super().event(event)
+
+    def _apply_plot_theme(self) -> None:
+        palette = plot_theme(tokens_for("dark" if isDarkTheme() else "light"))
+        self.plot.setBackground(palette.background)
+        for axis_name in ("left", "bottom"):
+            axis = self.plot.getAxis(axis_name)
+            axis.setPen(pg.mkPen(palette.axes))
+            axis.setTextPen(pg.mkPen(palette.axes))
+        self.field_curve.setPen(pg.mkPen(palette.measurement, width=2))
+        self.negative_peak_curve.setPen(pg.mkPen(palette.reference, width=1))
+        self.positive_peak_curve.setPen(pg.mkPen(palette.measurement, width=1))
+
+    def set_live(self, enabled: bool) -> None:
+        self.live.blockSignals(True)
+        self.live.setChecked(enabled)
+        self.live.blockSignals(False)
+        self.live_state.setText("LIVE" if enabled else "STOPPED")
+        self.live_state.setProperty("deviceState", "verified" if enabled else "neutral")
+        self.live_state.style().unpolish(self.live_state)
+        self.live_state.style().polish(self.live_state)
+
+    def set_reading(self, reading: GaussmeterReading) -> None:
+        if reading.field_t is not None:
+            value = f"{reading.field_t:+.8g} T"
+        else:
+            value = f"{reading.negative_peak_t:+.8g} / {reading.positive_peak_t:+.8g} T"
+        self.field.setText(value)
+        self.mode.setText(reading.mode.value.upper())
+        self.status.setText(
+            f"Updated {reading.timestamp_utc.astimezone().strftime('%H:%M:%S')} · "
+            f"UNIT {reading.snapshot.unit_code} · RANGE {reading.snapshot.range_code}"
+        )
+
+    def set_history(self, history: tuple[GaussmeterReading, ...], window_seconds: int) -> None:
+        if not history:
+            self.field_curve.setData([], [])
+            self.negative_peak_curve.setData([], [])
+            self.positive_peak_curve.setData([], [])
+            return
+        latest = history[-1].timestamp_utc
+        elapsed = [(item.timestamp_utc - latest).total_seconds() for item in history]
+        self.field_curve.setData(
+            elapsed,
+            [item.field_t if item.field_t is not None else float("nan") for item in history],
+        )
+        self.negative_peak_curve.setData(
+            elapsed,
+            [item.negative_peak_t if item.negative_peak_t is not None else float("nan") for item in history],
+        )
+        self.positive_peak_curve.setData(
+            elapsed,
+            [item.positive_peak_t if item.positive_peak_t is not None else float("nan") for item in history],
+        )
+        self.plot.setXRange(-window_seconds, 0, padding=0)
+
+    def set_status(self, message: str) -> None:
+        self.status.setText(message)
+
+    def closeEvent(self, event: object) -> None:
+        self.closed.emit()
+        super().closeEvent(event)  # type: ignore[arg-type]
 
 
 class LakeShore475Page(QWidget):
@@ -38,6 +173,7 @@ class LakeShore475Page(QWidget):
         self._timer.timeout.connect(self._live_tick)
         self._plot_timer = QTimer(self)
         self._plot_timer.timeout.connect(self._refresh_plot_if_needed)
+        self._live_window: LakeShoreLiveWindow | None = None
         self._build()
         controller.result.connect(self._result)
         controller.error.connect(self._error)
@@ -147,6 +283,11 @@ class LakeShore475Page(QWidget):
             "Recording window",
         )
         self.history_window.currentIndexChanged.connect(self._history_window_changed)
+        self.open_live_window_button = PushButton("Open floating window", self.live_card)
+        self.open_live_window_button.setToolTip(
+            "Open an always-on-top field readout and history plot using this page's live session."
+        )
+        self.open_live_window_button.clicked.connect(self._open_live_window)
         self.sampling_label = CaptionLabel("Sampling", self.live_card)
         self.refresh_label = CaptionLabel("Refresh", self.live_card)
         self.history_label = CaptionLabel("History", self.live_card)
@@ -159,6 +300,7 @@ class LakeShore475Page(QWidget):
             self.refresh_interval,
             self.history_label,
             self.history_window,
+            self.open_live_window_button,
         )
         live_layout.addLayout(self.live_controls)
         self.top_cards = QGridLayout()
@@ -232,7 +374,7 @@ class LakeShore475Page(QWidget):
             self.top_cards.removeWidget(widget)
         for widget in self._live_control_widgets:
             self.live_controls.removeWidget(widget)
-        for column in range(8):
+        for column in range(9):
             self.top_cards.setColumnStretch(column, 0)
             self.live_controls.setColumnStretch(column, 0)
         if compact:
@@ -249,6 +391,7 @@ class LakeShore475Page(QWidget):
             for row, (label, control) in enumerate(pairs, start=1):
                 self.live_controls.addWidget(label, row, 0)
                 self.live_controls.addWidget(control, row, 1, 1, 3)
+            self.live_controls.addWidget(self.open_live_window_button, 4, 0, 1, 4)
             self.live_controls.setColumnStretch(1, 1)
         else:
             self.top_cards.addWidget(self.hero_card, 0, 0)
@@ -257,7 +400,7 @@ class LakeShore475Page(QWidget):
             self.top_cards.setColumnStretch(1, 3)
             for column, widget in enumerate(self._live_control_widgets):
                 self.live_controls.addWidget(widget, 0, column)
-            self.live_controls.setColumnStretch(7, 1)
+            self.live_controls.setColumnStretch(8, 1)
 
     def _time_combo(self, choices: tuple[tuple[str, int], ...], accessible_name: str) -> ComboBox:
         combo = ComboBox(self)
@@ -296,6 +439,7 @@ class LakeShore475Page(QWidget):
         )
         self.sample_interval.setCurrentIndex(closest)
         self.read_now.setEnabled(profile.enabled and bool(profile.resource))
+        self.open_live_window_button.setEnabled(profile.enabled and bool(profile.resource))
 
     def stop_live(self, reason: str) -> None:
         self.live.setChecked(False)
@@ -306,6 +450,33 @@ class LakeShore475Page(QWidget):
         self.live_state.style().unpolish(self.live_state)
         self.live_state.style().polish(self.live_state)
         self.banner.setText(reason)
+        if self._live_window is not None:
+            self._live_window.set_live(False)
+            self._live_window.set_status(reason)
+
+    def _open_live_window(self) -> None:
+        if self._live_window is None:
+            window = LakeShoreLiveWindow(self)
+            window.read_requested.connect(self._read)
+            window.live_changed.connect(self.live.setChecked)
+            window.closed.connect(self._live_window_closed)
+            self._live_window = window
+        self._sync_live_window()
+        self._live_window.show()
+        self._live_window.raise_()
+        self._live_window.activateWindow()
+
+    def _live_window_closed(self) -> None:
+        if self._live_window is not None:
+            self._live_window.hide()
+
+    def _sync_live_window(self) -> None:
+        if self._live_window is None:
+            return
+        self._live_window.set_live(self.live.isChecked())
+        self._live_window.set_history(
+            tuple(self._history), self._selected_value(self.history_window)
+        )
 
     def _read(self) -> None:
         if self._in_flight:
@@ -332,6 +503,7 @@ class LakeShore475Page(QWidget):
             self._refresh_plot_if_needed()
         self.live_state.style().unpolish(self.live_state)
         self.live_state.style().polish(self.live_state)
+        self._sync_live_window()
 
     @staticmethod
     def _selected_value(combo: ComboBox) -> int:
@@ -366,6 +538,8 @@ class LakeShore475Page(QWidget):
         self._history.append(result)
         self._prune_history(result.timestamp_utc)
         self._plot_dirty = True
+        if self._live_window is not None:
+            self._live_window.set_reading(result)
         if not self.live.isChecked():
             self._refresh_plot_if_needed()
         self.banner.setText(f"Updated {result.timestamp_utc.astimezone().strftime('%H:%M:%S')}")
@@ -397,6 +571,7 @@ class LakeShore475Page(QWidget):
         self._positive_peak_curve.setData(elapsed, positive)
         window_seconds = self._selected_value(self.history_window)
         self.history_plot.setXRange(-window_seconds, 0, padding=0)
+        self._sync_live_window()
 
     def _error(self, operation: str, message: str) -> None:
         if operation == "read_measurement":
@@ -408,4 +583,10 @@ class LakeShore475Page(QWidget):
     def _state(self, state: str) -> None:
         if state == "disconnected":
             self._in_flight = False
-            self._timer.stop()
+            self.stop_live("Live readout stopped: reconnect Lake Shore 475 before reading again.")
+
+    def closeEvent(self, event: object) -> None:
+        self.stop_live("Live readout stopped because the Lake Shore page closed.")
+        if self._live_window is not None:
+            self._live_window.close()
+        super().closeEvent(event)  # type: ignore[arg-type]

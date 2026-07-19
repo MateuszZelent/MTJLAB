@@ -88,6 +88,54 @@ class FluentLakeShorePageTests(unittest.TestCase):
         page._timer.stop()
         page._plot_timer.stop()
 
+    def test_lakeshore_floating_window_shares_live_state_reading_and_history(self) -> None:
+        page = self.window.lakeshore_gaussmeter_page
+        page._open_live_window()
+        self.application.processEvents()
+        floating = page._live_window
+        self.assertIsNotNone(floating)
+        assert floating is not None
+        self.assertTrue(floating.isVisible())
+        self.assertTrue(
+            bool(floating.windowFlags() & Qt.WindowType.WindowStaysOnTopHint)
+        )
+
+        with patch.object(page, "_read"):
+            floating.live.setChecked(True)
+            self.assertTrue(page.live.isChecked())
+            floating.live.setChecked(False)
+            self.assertFalse(page.live.isChecked())
+
+        now = datetime.now(timezone.utc)
+        snapshot = GaussmeterSnapshot(
+            mode_code="1",
+            mode=MeasurementMode.DC,
+            unit_code="2",
+            unit=FieldUnit.TESLA,
+            range_code="3",
+            autorange_enabled=True,
+            probe_type_code="40",
+            timestamp_utc=now,
+            dc_resolution_code="3",
+            rms_filter_mode_code="1",
+            peak_mode_code="1",
+            peak_display_code="1",
+        )
+        result = GaussmeterReading.now(
+            mode=MeasurementMode.DC,
+            unit=FieldUnit.TESLA,
+            snapshot=snapshot,
+            field_t=0.0125,
+        )
+        page._result("read_measurement", result)
+        page._refresh_plot_if_needed()
+
+        self.assertIn("+0.0125 T", floating.field.text())
+        self.assertEqual(floating.mode.text(), "DC")
+        x_values, y_values = floating.field_curve.getData()
+        self.assertEqual(len(x_values), 1)
+        self.assertEqual(list(y_values), [0.0125])
+
     def test_lakeshore_reflows_without_horizontal_overflow_at_minimum_window_size(self) -> None:
         self.window.resize(820, 560)
         self.window._navigate_to("lakeshore_gaussmeter")
