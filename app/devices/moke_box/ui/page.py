@@ -4,18 +4,15 @@ from __future__ import annotations
 
 from PySide6.QtCore import QTimer, Qt, Signal
 from PySide6.QtWidgets import (
-    QCheckBox,
     QDialog,
-    QFrame,
     QGridLayout,
     QHBoxLayout,
     QLabel,
-    QPushButton,
-    QSpinBox,
     QTabWidget,
     QVBoxLayout,
     QWidget,
 )
+from qfluentwidgets import CardWidget, CheckBox, PrimaryPushButton, PushButton, SpinBox
 
 from app.devices.moke_box.models import MokeHallVoltageReading, hall_field_from_voltage
 from app.settings.models import StationSettings
@@ -49,9 +46,9 @@ class MokeHallLiveWindow(QDialog):
         note.setWordWrap(True)
         layout.addWidget(note)
 
-        panel = QFrame()
-        panel.setObjectName("mokeLiveReadout")
-        panel_layout = QGridLayout(panel)
+        self.readout_card = CardWidget(self)
+        self.readout_card.setObjectName("mokeLiveReadout")
+        panel_layout = QGridLayout(self.readout_card)
         panel_layout.addWidget(QLabel("Hall voltage"), 0, 0)
         self.voltage = QLabel("— V")
         self.voltage.setObjectName("mokeLiveVoltage")
@@ -60,13 +57,12 @@ class MokeHallLiveWindow(QDialog):
         self.field = QLabel("— mT")
         self.field.setObjectName("mokeLiveField")
         panel_layout.addWidget(self.field, 1, 1)
-        layout.addWidget(panel)
+        layout.addWidget(self.readout_card)
 
         controls = QHBoxLayout()
-        self.read_now = QPushButton("Read now")
-        self.read_now.setObjectName("primaryButton")
-        self.live = QCheckBox("Live")
-        self.interval = QSpinBox()
+        self.read_now = PrimaryPushButton("Read now")
+        self.live = CheckBox("Live")
+        self.interval = SpinBox()
         self.interval.setRange(500, 60_000)
         self.interval.setValue(1_000)
         self.interval.setSuffix(" ms")
@@ -121,6 +117,7 @@ class MokeBoxPage(QWidget):
         parent: QWidget | None = None,
     ) -> None:
         super().__init__(parent)
+        self.setProperty("stationSurface", "page")
         self._controller = controller
         self._settings = settings
         self._pending_operation: str | None = None
@@ -142,9 +139,10 @@ class MokeBoxPage(QWidget):
         outer.setContentsMargins(16, 14, 16, 14)
         outer.setSpacing(12)
 
-        hero = QFrame()
-        hero.setObjectName("mokeHero")
-        hero_layout = QHBoxLayout(hero)
+        self.hero_card = CardWidget(self)
+        self.hero_card.setObjectName("mokeHero")
+        hero_layout = QHBoxLayout(self.hero_card)
+        hero_layout.setContentsMargins(20, 16, 20, 16)
         heading = QVBoxLayout()
         title = QLabel("MOKE Box")
         title.setObjectName("pageTitle")
@@ -159,7 +157,7 @@ class MokeBoxPage(QWidget):
         self.protocol_badge = QLabel("READ-ONLY")
         self.protocol_badge.setObjectName("mokeProtocolBadge")
         hero_layout.addWidget(self.protocol_badge)
-        outer.addWidget(hero)
+        outer.addWidget(self.hero_card)
 
         self.safety_note = QLabel()
         self.safety_note.setObjectName("mokeSafetyNote")
@@ -175,6 +173,11 @@ class MokeBoxPage(QWidget):
     def _build_vout_view(self) -> QWidget:
         page = QWidget()
         layout = QVBoxLayout(page)
+        layout.setContentsMargins(0, 8, 0, 0)
+        self.vout_card = CardWidget(page)
+        layout.addWidget(self.vout_card)
+        content = QVBoxLayout(self.vout_card)
+        content.setContentsMargins(20, 16, 20, 16)
         header = QHBoxLayout()
         copy = QVBoxLayout()
         title = QLabel("Eight-channel DAC readback")
@@ -184,19 +187,18 @@ class MokeBoxPage(QWidget):
         copy.addWidget(title)
         copy.addWidget(hint)
         header.addLayout(copy, 1)
-        self.read_vouts_button = QPushButton("Read all VOUT")
-        self.read_vouts_button.setObjectName("primaryButton")
+        self.read_vouts_button = PrimaryPushButton("Read all VOUT")
         self.read_vouts_button.setToolTip(
             "Send the documented 18 00 00 18 readback frame and receive exactly 32 bytes."
         )
         self.read_vouts_button.clicked.connect(self._read_vouts)
         header.addWidget(self.read_vouts_button)
-        layout.addLayout(header)
+        content.addLayout(header)
 
         rack = QGridLayout()
         rack.setSpacing(10)
         for channel in range(8):
-            card = QFrame()
+            card = CardWidget(page)
             card.setObjectName("mokeValueCard")
             card_layout = QVBoxLayout(card)
             channel_label = QLabel(f"VOUT {channel}")
@@ -208,13 +210,18 @@ class MokeBoxPage(QWidget):
             card_layout.addWidget(value)
             rack.addWidget(card, channel // 4, channel % 4)
             self.vout_values[channel] = value
-        layout.addLayout(rack)
-        layout.addStretch(1)
+        content.addLayout(rack)
+        content.addStretch(1)
         return page
 
     def _build_field_view(self) -> QWidget:
         page = QWidget()
         layout = QVBoxLayout(page)
+        layout.setContentsMargins(0, 8, 0, 0)
+        self.hall_card = CardWidget(page)
+        layout.addWidget(self.hall_card)
+        content = QVBoxLayout(self.hall_card)
+        content.setContentsMargins(20, 16, 20, 16)
         header = QHBoxLayout()
         copy = QVBoxLayout()
         title = QLabel("Hall voltage (read-only)")
@@ -229,36 +236,35 @@ class MokeBoxPage(QWidget):
         copy.addWidget(hint)
         header.addLayout(copy, 1)
         header.addWidget(QLabel("Samples:"))
-        self.field_samples = QSpinBox()
+        self.field_samples = SpinBox()
         self.field_samples.setRange(1, 1)
         self.field_samples.setValue(1)
         self.field_samples.setToolTip(
             "One physical Hall-1 sample per request is verified on the connected MOKE Box."
         )
         header.addWidget(self.field_samples)
-        self.read_fields_button = QPushButton("Get Hall voltage (V)")
-        self.read_fields_button.setObjectName("primaryButton")
+        self.read_fields_button = PrimaryPushButton("Get Hall voltage (V)")
         self.read_fields_button.setToolTip(
             "Sends Send Data(N), then reads Hall 1 (channel 0) and Hall 2 (channel 2). "
             "It does not change VOUT, gain, or magnetic field."
         )
         self.read_fields_button.clicked.connect(self._read_fields)
         header.addWidget(self.read_fields_button)
-        layout.addLayout(header)
+        content.addLayout(header)
 
         live_controls = QHBoxLayout()
-        self.live_hall = QCheckBox("Live Hall")
+        self.live_hall = CheckBox("Live Hall")
         self.live_hall.setToolTip(
             "Poll one Hall-1 sample at a fixed interval. A new TCP request is not queued while the prior read is pending."
         )
         self.live_hall.toggled.connect(self._set_live_enabled)
-        self.live_interval = QSpinBox()
+        self.live_interval = SpinBox()
         self.live_interval.setRange(500, 60_000)
         self.live_interval.setValue(1_000)
         self.live_interval.setSuffix(" ms")
         self.live_interval.setToolTip("Minimum 500 ms avoids overlapping TCP reads.")
         self.live_interval.valueChanged.connect(self._set_live_interval)
-        self.open_live_window_button = QPushButton("Open floating Hall live")
+        self.open_live_window_button = PushButton("Open floating Hall live")
         self.open_live_window_button.setToolTip(
             "Open a compact always-on-top Hall readout that remains available while you work in other tabs."
         )
@@ -267,11 +273,11 @@ class MokeBoxPage(QWidget):
         live_controls.addWidget(self.live_interval)
         live_controls.addStretch(1)
         live_controls.addWidget(self.open_live_window_button)
-        layout.addLayout(live_controls)
+        content.addLayout(live_controls)
 
         cards = QGridLayout()
         for column, key in enumerate(("hall1", "hall2")):
-            card = QFrame()
+            card = CardWidget(page)
             card.setObjectName("mokeFieldCard")
             card_layout = QGridLayout(card)
             heading = QLabel(
@@ -291,15 +297,15 @@ class MokeBoxPage(QWidget):
                 card_layout.addWidget(value, row, 1)
                 self.field_values[f"{key}_{suffix}"] = value
             cards.addWidget(card, 0, column)
-        layout.addLayout(cards)
+        content.addLayout(cards)
         self.field_status = QLabel("Connect MOKE Box, then read one Hall-voltage sample.")
         self.field_status.setObjectName("mokeHallStatus")
         self.field_status.setWordWrap(True)
-        layout.addWidget(self.field_status)
+        content.addWidget(self.field_status)
         self.field_timestamp = QLabel("No Hall acquisition yet")
         self.field_timestamp.setObjectName("muted")
-        layout.addWidget(self.field_timestamp)
-        layout.addStretch(1)
+        content.addWidget(self.field_timestamp)
+        content.addStretch(1)
         return page
 
     def set_settings(self, settings: StationSettings) -> None:

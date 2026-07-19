@@ -9,7 +9,7 @@ from pathlib import Path
 from PySide6.QtWidgets import QApplication
 
 from app.ui.design_system import apply_application_theme
-from app.ui.main_window import MainWindow
+from app.ui.shell import MainWindow
 
 
 def parse_args() -> argparse.Namespace:

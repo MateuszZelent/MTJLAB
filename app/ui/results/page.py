@@ -4,26 +4,17 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from PySide6.QtCore import QEvent, QObject, Qt, Signal
+from PySide6.QtCore import Qt, Signal
 from PySide6.QtWidgets import (
     QHBoxLayout,
     QLabel,
-    QPushButton,
     QSplitter,
-    QTabWidget,
+    QSizePolicy,
+    QStackedWidget,
     QVBoxLayout,
     QWidget,
 )
-
-
-class _NoScrollTabBar(QObject):
-    """Event filter that blocks wheel events on a QTabBar."""
-
-    def eventFilter(self, watched: QObject, event: QEvent) -> bool:  # type: ignore[override]
-        if event.type() == QEvent.Type.Wheel:
-            event.ignore()
-            return True
-        return super().eventFilter(watched, event)
+from qfluentwidgets import BodyLabel, CardWidget, Pivot, PrimaryPushButton, PushButton, SubtitleLabel
 
 from app.storage import (
     Hdf5RunReader,
@@ -38,6 +29,54 @@ from app.ui.results.spectrum_tab import SpectrumResultsTab
 from app.ui.results.sweep_tree_panel import SweepTreePanel
 
 
+class _FluentResultSections(QWidget):
+    """Fluent Pivot navigation backed by a real page stack.
+
+    It deliberately provides the operator-facing Results navigation. The
+    small semantic page-management API stays local to this Fluent widget.
+    """
+
+    def __init__(self, parent: QWidget | None = None) -> None:
+        super().__init__(parent)
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(8)
+        self.navigation = Pivot(self)
+        self.stack = QStackedWidget(self)
+        self.stack.setSizePolicy(
+            QSizePolicy.Policy.Ignored,
+            QSizePolicy.Policy.Expanding,
+        )
+        layout.addWidget(self.navigation)
+        layout.addWidget(self.stack, 1)
+        self._routes: list[str] = []
+        self._labels: list[str] = []
+
+    def addTab(self, page: QWidget, label: str) -> int:
+        index = self.stack.addWidget(page)
+        route = f"result-section-{index}"
+        self._routes.append(route)
+        self._labels.append(label)
+        self.navigation.addItem(
+            route,
+            label,
+            onClick=lambda _checked=False, index=index: self.setCurrentIndex(index),
+        )
+        if index == 0:
+            self.setCurrentIndex(index)
+        return index
+
+    def setCurrentIndex(self, index: int) -> None:
+        self.stack.setCurrentIndex(index)
+        self.navigation.setCurrentItem(self._routes[index])
+
+    def setTabVisible(self, index: int, visible: bool) -> None:
+        self.navigation.widget(self._routes[index]).setVisible(visible)
+        if not visible and self.stack.currentIndex() == index:
+            self.setCurrentIndex(0)
+
+
+
 class ResultsPage(QWidget):
     """Browse immutable run files without opening an instrument session.
 
@@ -45,7 +84,7 @@ class ResultsPage(QWidget):
 
     * **Left** — ``FileBrowserPanel`` listing HDF5 results in the output
       directory.
-    * **Right** — a ``QTabWidget`` with sub-tabs:
+    * **Right** — Fluent section navigation for:
         - *Overview* — run metadata, recipe snapshot, settings and device
           state (``MetadataPanel``).
         - *Sweep Tree* — reconstructed THATEC experiment hierarchy
@@ -68,18 +107,36 @@ class ResultsPage(QWidget):
         layout = QVBoxLayout(self)
 
         # --- Title ---
-        title = QLabel("Results")
+        title = SubtitleLabel("Results", self)
         title.setObjectName("pageTitle")
         layout.addWidget(title)
+        subtitle = BodyLabel(
+            "Review recorded runs, reconstruct their executed Sweep, and resume only at "
+            "confirmed safe checkpoints.",
+            self,
+        )
+        subtitle.setWordWrap(True)
+        layout.addWidget(subtitle)
 
-        # --- Action buttons ---
-        actions = QHBoxLayout()
-        self.open_sweep_button = QPushButton("Open reconstructed Sweep")
+        # --- Deliberate operational actions ---
+        self.action_card = CardWidget(self)
+        actions = QHBoxLayout(self.action_card)
+        actions.setContentsMargins(16, 12, 16, 12)
+        action_copy = QVBoxLayout()
+        action_copy.addWidget(BodyLabel("Run actions", self.action_card))
+        action_note = BodyLabel(
+            "Actions are enabled only when the selected result proves they are safe.",
+            self.action_card,
+        )
+        action_note.setWordWrap(True)
+        action_copy.addWidget(action_note)
+        actions.addLayout(action_copy, 1)
+        self.open_sweep_button = PrimaryPushButton("Open reconstructed Sweep", self.action_card)
         self.open_sweep_button.setEnabled(False)
         self.open_sweep_button.setToolTip(
             "Build the executed THATEC measurement tree in the Sweeps workspace."
         )
-        self.resume_button = QPushButton("Resume from safe checkpoint")
+        self.resume_button = PushButton("Resume from safe checkpoint", self.action_card)
         self.resume_button.setEnabled(False)
         self.resume_button.setToolTip(
             "Available only for interrupted runs containing a confirmed safe boundary."
@@ -87,7 +144,7 @@ class ResultsPage(QWidget):
         actions.addWidget(self.open_sweep_button)
         actions.addWidget(self.resume_button)
         actions.addStretch(1)
-        layout.addLayout(actions)
+        layout.addWidget(self.action_card)
 
         # --- Main splitter ---
         splitter = QSplitter(Qt.Orientation.Horizontal)
@@ -97,9 +154,9 @@ class ResultsPage(QWidget):
         splitter.addWidget(self.file_browser)
 
         # Right: tabbed result views
-        self.result_tabs = QTabWidget()
-        self._tab_scroll_guard = _NoScrollTabBar(self.result_tabs)
-        self.result_tabs.tabBar().installEventFilter(self._tab_scroll_guard)
+        self.result_tabs = _FluentResultSections()
+        self.section_navigation = self.result_tabs.navigation
+        self.result_stack = self.result_tabs.stack
 
         # Tab: Overview (metadata)
         self.metadata_panel = MetadataPanel()
@@ -125,7 +182,11 @@ class ResultsPage(QWidget):
             self.heatmap_tab, "Heatmaps"
         )
 
-        splitter.addWidget(self.result_tabs)
+        result_card = CardWidget(self)
+        result_layout = QVBoxLayout(result_card)
+        result_layout.setContentsMargins(16, 12, 16, 16)
+        result_layout.addWidget(self.result_tabs)
+        splitter.addWidget(result_card)
         splitter.setStretchFactor(0, 0)
         splitter.setStretchFactor(1, 1)
         layout.addWidget(splitter, 1)

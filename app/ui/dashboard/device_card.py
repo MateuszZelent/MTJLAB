@@ -3,12 +3,13 @@
 from __future__ import annotations
 
 from PySide6.QtCore import Signal
-from PySide6.QtWidgets import QComboBox, QFrame, QHBoxLayout, QLabel, QPushButton, QVBoxLayout, QWidget
+from PySide6.QtWidgets import QFrame, QHBoxLayout, QLabel, QPushButton, QVBoxLayout, QWidget
+from qfluentwidgets import BodyLabel, CaptionLabel, CardWidget, ComboBox, PrimaryPushButton
 
 from app.devices.discovery import DiscoveredInstrument
 
 
-class DeviceCard(QFrame):
+class DeviceCard(CardWidget):
     connect_requested = Signal()
     disconnect_requested = Signal()
     test_requested = Signal()
@@ -17,31 +18,31 @@ class DeviceCard(QFrame):
     def __init__(self, title: str, resource: str | None, parent: QWidget | None = None) -> None:
         super().__init__(parent)
         self._assignment_allowed = True
-        self.setObjectName("deviceCard")
+        self.setObjectName("stationDeviceCard")
+        self.setMinimumHeight(190)
         layout = QVBoxLayout(self)
-        name = QLabel(title)
-        name.setObjectName("cardTitle")
-        self.state = QLabel("DISCONNECTED")
-        self.state.setObjectName("stateDisconnected")
-        self.resource = QLabel()
+        layout.setContentsMargins(16, 14, 16, 14)
+        layout.setSpacing(8)
+        name = BodyLabel(title, self)
+        name.setAccessibleName(f"Instrument {title}")
+        self.state = CaptionLabel("Disconnected", self)
+        self.state.setProperty("stationState", "disconnected")
+        self.state.setAccessibleName(f"{title} connection state")
+        self.resource = BodyLabel(parent=self)
         self.resource.setWordWrap(True)
-        self.resource.setObjectName("muted")
-        self.identity = QLabel("IDN: not connected")
+        self.identity = CaptionLabel("IDN: not connected", self)
         self.identity.setWordWrap(True)
-        self.identity.setObjectName("muted")
         assignment_row = QHBoxLayout()
-        self.detected_resources = QComboBox()
+        self.detected_resources = ComboBox(self)
         self.detected_resources.setPlaceholderText("Scan VISA to select a detected instrument")
         self.detected_resources.setEnabled(False)
         self.detected_resources.setAccessibleName(f"Detected VISA resources for {title}")
-        self.assign_button = QPushButton("Assign VISA")
-        self.assign_button.setProperty("compact", True)
+        self.assign_button = PrimaryPushButton("Assign VISA", self)
         self.assign_button.setEnabled(False)
         self.assign_button.setToolTip("Save the selected detected resource to this instrument card.")
         assignment_row.addWidget(self.detected_resources, 1)
         assignment_row.addWidget(self.assign_button)
-        self.assignment_hint = QLabel()
-        self.assignment_hint.setObjectName("assignmentPendingHint")
+        self.assignment_hint = CaptionLabel(parent=self)
         self.assignment_hint.setWordWrap(True)
         self.assignment_hint.hide()
         layout.addWidget(name)
@@ -56,8 +57,8 @@ class DeviceCard(QFrame):
         self.update_resource(resource)
 
     def update_state(self, state: str) -> None:
-        self.state.setText(state.upper())
-        self.state.setObjectName("state" + "".join(part.title() for part in state.split("_")))
+        self.state.setText(state.replace("_", " ").title())
+        self.state.setProperty("stationState", state)
         self.state.style().unpolish(self.state)
         self.state.style().polish(self.state)
 
@@ -73,11 +74,11 @@ class DeviceCard(QFrame):
 
     def set_reconfiguring(self, active: bool) -> None:
         if active:
-            self.state.setText("APPLYING NEW VISA ADDRESS…")
+            self.state.setText("Applying new VISA address…")
 
     def set_testing(self, active: bool) -> None:
         if active:
-            self.state.setText("TESTING COMMUNICATION…")
+            self.state.setText("Testing communication…")
 
     def set_discovered_resources(
         self,
@@ -91,7 +92,10 @@ class DeviceCard(QFrame):
         for result in instruments:
             label = f"{result.resource}  •  {result.idn or 'no IDN'}"
             payload = (result.resource, result.backend, result.idn)
-            self.detected_resources.addItem(label, payload)
+            # Fluent ComboBox reserves its second positional argument for an
+            # icon.  Assignment metadata must be passed explicitly or the
+            # selected resource cannot be emitted from the top-card action.
+            self.detected_resources.addItem(label, userData=payload)
             if result.resource == configured_resource and result.backend == configured_backend:
                 assigned_index = self.detected_resources.count() - 1
         if self.detected_resources.count() == 0:
@@ -101,18 +105,12 @@ class DeviceCard(QFrame):
             self.assign_button.setEnabled(False)
             self.assign_button.setText("Assign VISA")
             self.assignment_hint.hide()
-            if hasattr(self, "connect_button"):
-                self.connect_button.setEnabled(True)
-                self.test_button.setEnabled(True)
         elif assigned_index >= 0:
             self.detected_resources.setCurrentIndex(assigned_index)
             self.detected_resources.setEnabled(False)
             self.assign_button.setEnabled(False)
             self.assign_button.setText("Assigned ✓")
             self.assignment_hint.hide()
-            if hasattr(self, "connect_button"):
-                self.connect_button.setEnabled(True)
-                self.test_button.setEnabled(True)
         else:
             self.detected_resources.setCurrentIndex(0)
             self.detected_resources.setEnabled(True)
@@ -152,9 +150,6 @@ class DeviceCard(QFrame):
             f"⚠ {resource} is selected but not active. Click Assign VISA before Connect or Test."
         )
         self.assignment_hint.show()
-        if hasattr(self, "connect_button"):
-            self.connect_button.setEnabled(False)
-            self.test_button.setEnabled(False)
 
 
 class DeviceConnectionPanel(QFrame):

@@ -1,0 +1,177 @@
+# Review package: 562721a^..562721a
+
+## Commits
+562721a feat: add persistent station safety strip
+
+## Files changed
+ app/ui/shell/__init__.py     |  8 ++++-
+ app/ui/shell/safety_strip.py | 77 ++++++++++++++++++++++++++++++++++++++++++++
+ tests/test_fluent_shell.py   | 32 +++++++++++++++++-
+ 3 files changed, 115 insertions(+), 2 deletions(-)
+
+## Diff
+diff --git a/app/ui/shell/__init__.py b/app/ui/shell/__init__.py
+index 9ec2f00..0e53f5b 100644
+--- a/app/ui/shell/__init__.py
++++ b/app/ui/shell/__init__.py
+@@ -1,6 +1,12 @@
+ """Application shell public API."""
+ 
+ from app.ui.shell.main_window import MainWindow
+ from app.ui.shell.page_host import FluentPageHost
++from app.ui.shell.safety_strip import StationSafetySnapshot, StationSafetyStrip
+ 
+-__all__ = ["FluentPageHost", "MainWindow"]
++__all__ = [
++    "FluentPageHost",
++    "MainWindow",
++    "StationSafetySnapshot",
++    "StationSafetyStrip",
++]
+diff --git a/app/ui/shell/safety_strip.py b/app/ui/shell/safety_strip.py
+new file mode 100644
+index 0000000..a3eafc7
+--- /dev/null
++++ b/app/ui/shell/safety_strip.py
+@@ -0,0 +1,77 @@
++"""Persistent, presentation-only station safety status strip."""
++
++from __future__ import annotations
++
++from dataclasses import dataclass
++
++from PySide6.QtCore import Signal
++from PySide6.QtWidgets import QHBoxLayout, QLabel, QWidget
++from qfluentwidgets import PrimaryPushButton
++
++
++@dataclass(frozen=True, slots=True)
++class StationSafetySnapshot:
++    """The station safety state displayed by :class:`StationSafetyStrip`."""
++
++    ready: bool
++    active_outputs: int
++    profile_state: str
++    simulation: bool
++    actor: str
++    roles: tuple[str, ...]
++
++
++class StationSafetyStrip(QWidget):
++    """Display station safety state and immediately request an E-STOP."""
++
++    estop_requested = Signal()
++
++    def __init__(self, parent: QWidget | None = None) -> None:
++        super().__init__(parent)
++        self.setObjectName("stationSafetyStrip")
++
++        self.readiness = QLabel()
++        self.outputs = QLabel()
++        self.profile = QLabel()
++        self.mode = QLabel()
++        self.actor = QLabel()
++        self.estop = PrimaryPushButton("E-STOP — disable all outputs")
++        self.estop.setAccessibleName("Emergency stop and disable all outputs")
++        self.estop.clicked.connect(self.estop_requested)
++
++        layout = QHBoxLayout(self)
++        for widget in (
++            self.readiness,
++            self.outputs,
++            self.profile,
++            self.mode,
++            self.actor,
++        ):
++            layout.addWidget(widget)
++        layout.addStretch(1)
++        layout.addWidget(self.estop)
++
++    def update_snapshot(self, snapshot: StationSafetySnapshot) -> None:
++        """Synchronously render ``snapshot`` without performing station actions."""
++        self.readiness.setText(
++            "Station ready" if snapshot.ready else "Station blocked"
++        )
++        self.readiness.setProperty(
++            "safetyState", "ready" if snapshot.ready else "danger"
++        )
++        self.outputs.setText(
++            "Outputs off"
++            if snapshot.active_outputs == 0
++            else f"{snapshot.active_outputs} outputs active"
++        )
++        self.outputs.setProperty(
++            "outputState", "off" if snapshot.active_outputs == 0 else "active"
++        )
++        self.profile.setText(f"Profile {snapshot.profile_state}")
++        self.mode.setText("SIMULATION" if snapshot.simulation else "HARDWARE")
++        roles = ", ".join(snapshot.roles) or "no role"
++        self.actor.setText(f"{snapshot.actor} · {roles}")
++
++        for widget in (self.readiness, self.outputs):
++            widget.style().unpolish(widget)
++            widget.style().polish(widget)
+diff --git a/tests/test_fluent_shell.py b/tests/test_fluent_shell.py
+index c037690..fdc556f 100644
+--- a/tests/test_fluent_shell.py
++++ b/tests/test_fluent_shell.py
+@@ -1,17 +1,17 @@
+ from __future__ import annotations
+ 
+ import unittest
+ 
+ from PySide6.QtWidgets import QApplication, QLabel, QVBoxLayout, QWidget
+ 
+-from app.ui.shell import FluentPageHost
++from app.ui.shell import FluentPageHost, StationSafetySnapshot, StationSafetyStrip
+ 
+ 
+ class FluentDependencyTests(unittest.TestCase):
+     def test_required_pyside6_fluent_surface_is_importable(self) -> None:
+         from qfluentwidgets import (
+             FluentWindow,
+             NavigationItemPosition,
+             Theme,
+             setTheme,
+         )
+@@ -29,10 +29,40 @@ class FluentPageHostTests(unittest.TestCase):
+ 
+     def test_host_preserves_legacy_widget_and_exposes_scroll_area(self) -> None:
+         content = QWidget()
+         layout = QVBoxLayout(content)
+         layout.addWidget(QLabel("Legacy page"))
+         host = FluentPageHost(content)
+         self.assertIs(host.content, content)
+         self.assertIs(host.scroll_area.widget(), content)
+         self.assertTrue(host.scroll_area.widgetResizable())
+         self.assertEqual(host.objectName(), "fluentPageHost")
++
++
++class StationSafetyStripTests(unittest.TestCase):
++    @classmethod
++    def setUpClass(cls) -> None:
++        cls.application = QApplication.instance() or QApplication([])
++
++    def test_snapshot_updates_text_and_semantic_properties(self) -> None:
++        strip = StationSafetyStrip()
++        strip.update_snapshot(
++            StationSafetySnapshot(
++                ready=False,
++                active_outputs=2,
++                profile_state="LOCKED",
++                simulation=True,
++                actor="operator",
++                roles=("operator",),
++            )
++        )
++        self.assertIn("2 outputs active", strip.outputs.text())
++        self.assertEqual(strip.outputs.property("outputState"), "active")
++        self.assertEqual(strip.readiness.property("safetyState"), "danger")
++        self.assertIn("SIMULATION", strip.mode.text())
++
++    def test_estop_button_emits_without_animation_or_delay(self) -> None:
++        strip = StationSafetyStrip()
++        emissions: list[bool] = []
++        strip.estop_requested.connect(lambda: emissions.append(True))
++        strip.estop.click()
++        self.assertEqual(emissions, [True])

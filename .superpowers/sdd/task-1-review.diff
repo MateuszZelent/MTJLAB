@@ -1,0 +1,286 @@
+# Review package: 0339707..HEAD
+
+## Commits
+0689d36 build: add qualified PySide6 Fluent dependency
+5a557f4 fix: update wait ID in example_nested_sweep and correct measure_moke_hall ID in untitled_sweep
+1f62428 docs: design UI mojibake repair
+
+## Files changed
+ .../specs/2026-07-19-ui-mojibake-repair-design.md  | 60 ++++++++++++++++++++++
+ pyproject.toml                                     |  1 +
+ recipes/.example_nested_sweep.yml.recovery         |  2 +-
+ recipes/.untitled_sweep.yml.recovery               |  2 +-
+ requirements.lock.txt                              |  3 ++
+ requirements.txt                                   |  1 +
+ tests/test_architecture.py                         | 12 +++++
+ tests/test_fluent_shell.py                         | 18 +++++++
+ 8 files changed, 97 insertions(+), 2 deletions(-)
+
+## Diff
+diff --git a/docs/superpowers/specs/2026-07-19-ui-mojibake-repair-design.md b/docs/superpowers/specs/2026-07-19-ui-mojibake-repair-design.md
+new file mode 100644
+index 0000000..6c00ffc
+--- /dev/null
++++ b/docs/superpowers/specs/2026-07-19-ui-mojibake-repair-design.md
+@@ -0,0 +1,60 @@
++# UI Mojibake Repair
++
++## Goal
++
++Restore corrupted UTF-8 characters in production source files and prevent
++mojibake from reaching the UI again.
++
++## Confirmed scope
++
++The repository scan found corrupted text in exactly four production files:
++
++- `app/devices/rigol_dg1000z/ui/page.py`
++- `app/devices/rigol_dg1000z/ui/recipe_dialog.py`
++- `app/engine/compiler.py`
++- `app/ui/workers.py`
++
++The visible Rigol problems include plot titles, the page subtitle, the device
++status symbol, warnings, degree/minus signs, dialog labels, and ellipses.
++Compiler and worker text contain the same encoding defect even though those
++strings were not shown in the screenshots.
++
++## Repair
++
++Replace only confirmed mojibake sequences with their intended Unicode text:
++
++- `Â·` → `·`
++- `â€”` → `—`
++- `â€¦` → `…`
++- corrupted black-circle bytes → `●`
++- corrupted warning-sign bytes → `⚠`
++- `âˆ’` → `−`
++- `Â°` → `°`
++- `â€“` → `–`
++- `faÃ§ade` → `façade`
++
++No labels, behavior, layout, safety limits, device commands, or persisted keys
++change.
++
++## Prevention
++
++An architecture test scans Python source files under `app/` and fails when it
++finds common mojibake markers: `Â`, `Ã`, `â`, or the replacement character
++`�`. The failure identifies the exact repository-relative path.
++
++This deliberately checks source text rather than rendered widgets so it covers
++UI labels, exceptions, documentation strings, and dynamically constructed plot
++titles.
++
++## Verification
++
++- Run the new architecture test red before repairing source.
++- Repair the four files.
++- Run architecture, Rigol UI, compiler, and worker-related tests.
++- Scan all Python sources under `app/` for mojibake markers.
++- Run the full test suite before completion.
++
++## Completion criteria
++
++The repository-wide scan reports no corrupted markers, Rigol labels contain the
++intended symbols, focused tests pass, and the full test suite has no failures.
+diff --git a/pyproject.toml b/pyproject.toml
+index e73c1b3..bfc900c 100644
+--- a/pyproject.toml
++++ b/pyproject.toml
+@@ -6,20 +6,21 @@ build-backend = "setuptools.build_meta"
+ name = "lab-control"
+ version = "0.1.0"
+ description = "Safe local control software for a Rigol, Keithley and Anritsu measurement station."
+ requires-python = ">=3.11"
+ dependencies = [
+   "h5py>=3.11",
+   "h5netcdf>=1.8,<2",
+   "numpy>=1.26",
+   "pydantic>=2.7,<3",
+   "PySide6>=6.7",
++  "PySide6-Fluent-Widgets==1.11.2",
+   "pyqtgraph>=0.13.7,<0.14",
+   "PyThat==0.2.14",
+   "pyvisa>=1.14",
+   "pyvisa-py>=0.7",
+   "lakeshore==1.10.0",
+   "ruamel.yaml>=0.18",
+ ]
+ 
+ [project.optional-dependencies]
+ dev = ["pytest>=8.0", "ruff>=0.6"]
+diff --git a/recipes/.example_nested_sweep.yml.recovery b/recipes/.example_nested_sweep.yml.recovery
+index 81dd7b3..3d16e7c 100644
+--- a/recipes/.example_nested_sweep.yml.recovery
++++ b/recipes/.example_nested_sweep.yml.recovery
+@@ -48,21 +48,21 @@ root:
+       - id: wait-for-settle
+         type: wait
+         duration: 100 ms
+       - id: measure-keithley-b
+         type: measure_keithley
+         channel: B
+       - id: acquire-spectrum
+         type: acquire_spectrum
+         trace: TRAC1
+ 
+-  - id: wait-84e86ba8
++  - id: wait-c0c429a1
+     type: wait
+     duration: 100 ms
+ finally:
+ - id: rigol-ch1-off-finally
+   type: set_rigol_output
+   channel: 1
+   enabled: false
+ - id: keithley-b-ramp-zero-finally
+   type: ramp_keithley_to_zero
+   channel: B
+diff --git a/recipes/.untitled_sweep.yml.recovery b/recipes/.untitled_sweep.yml.recovery
+index 98fb68e..4d69077 100644
+--- a/recipes/.untitled_sweep.yml.recovery
++++ b/recipes/.untitled_sweep.yml.recovery
+@@ -1,9 +1,9 @@
+ schema_version: 1
+ name: Untitled sweep
+ root:
+   id: sequence-main
+   type: sequence
+   children:
+-  - id: measure_moke_hall-c2b1ba8d
++  - id: measure_moke_hall-268262b5
+     type: measure_moke_hall
+ finally: []
+diff --git a/requirements.lock.txt b/requirements.lock.txt
+index a2c87f8..4c1ae85 100644
+--- a/requirements.lock.txt
++++ b/requirements.lock.txt
+@@ -2,20 +2,21 @@
+ # python==3.14.6
+ annotated-types==0.6.0
+ certifi==2026.6.17
+ cftime==1.6.5
+ click==8.4.1
+ cloudpickle==3.1.2
+ colorama==0.4.6
+ contourpy==1.3.3
+ cycler==0.12.1
+ dask==2026.7.1
++darkdetect==0.8.0
+ fonttools==4.63.0
+ fsspec==2026.6.0
+ h5netcdf==1.8.1
+ h5py==3.16.0
+ iso8601==2.1.0
+ kiwisolver==1.5.0
+ lakeshore==1.10.0
+ locket==1.0.0
+ matplotlib==3.11.0
+ netCDF4==1.7.4
+@@ -25,20 +26,22 @@ pandas==3.0.3
+ partd==1.4.2
+ pillow==12.3.0
+ pydantic==2.13.4
+ pydantic_core==2.46.4
+ pyparsing==3.3.2
+ pyqtgraph==0.13.7
+ pyserial==3.5
+ PySide6==6.11.1
+ PySide6_Addons==6.11.1
+ PySide6_Essentials==6.11.1
++PySide6-Fluent-Widgets==1.11.2
++PySideSix-Frameless-Window==0.8.1
+ PyThat==0.2.14
+ python-dateutil==2.9.0.post0
+ PyVISA==1.16.2
+ PyVISA-py==0.8.1
+ PyYAML==6.0.3
+ ruamel.yaml==0.18.16
+ scipy==1.18.0
+ shiboken6==6.11.1
+ six==1.17.0
+ toolz==1.1.0
+diff --git a/requirements.txt b/requirements.txt
+index 56b1257..2e33dfc 100644
+--- a/requirements.txt
++++ b/requirements.txt
+@@ -1,17 +1,18 @@
+ # Runtime dependencies for Lab Control.
+ # Install with: python -m pip install -r requirements.txt
+ h5py>=3.11
+ h5netcdf>=1.8,<2
+ numpy>=1.26
+ pydantic>=2.7,<3
+ PySide6>=6.7
++PySide6-Fluent-Widgets==1.11.2
+ pyqtgraph>=0.13.7,<0.14
+ pyvisa>=1.14
+ pyvisa-py>=0.7
+ lakeshore==1.10.0
+ ruamel.yaml>=0.18
+ 
+ # Qualified reader used to validate thaTEC:OS-compatible HDF5 output.
+ PyThat==0.2.14
+ 
+ # Development and verification tools.
+diff --git a/tests/test_architecture.py b/tests/test_architecture.py
+index 4aeffee..f946a09 100644
+--- a/tests/test_architecture.py
++++ b/tests/test_architecture.py
+@@ -16,20 +16,32 @@ def _imports(path: Path) -> tuple[str, ...]:
+     imported: list[str] = []
+     for node in ast.walk(tree):
+         if isinstance(node, ast.Import):
+             imported.extend(alias.name for alias in node.names)
+         elif isinstance(node, ast.ImportFrom) and node.module is not None:
+             imported.append(node.module)
+     return tuple(imported)
+ 
+ 
+ class ArchitectureTests(unittest.TestCase):
++    def test_only_pyside6_fluent_distribution_is_declared(self) -> None:
++        root = Path(__file__).resolve().parents[1]
++        declarations = (
++            (root / "pyproject.toml").read_text(encoding="utf-8")
++            + (root / "requirements.txt").read_text(encoding="utf-8")
++            + (root / "requirements.lock.txt").read_text(encoding="utf-8")
++        ).lower()
++        self.assertIn("pyside6-fluent-widgets", declarations)
++        self.assertNotIn("pyqt-fluent-widgets", declarations)
++        self.assertNotIn("pyqt6-fluent-widgets", declarations)
++        self.assertNotIn("pyside2-fluent-widgets", declarations)
++
+     def test_generic_device_packages_do_not_exist(self) -> None:
+         for package in ("rigol", "keithley", "anritsu"):
+             self.assertFalse(
+                 (ROOT / "app" / "devices" / package).exists(),
+                 f"generic device package app.devices.{package} must not exist",
+             )
+ 
+     def test_registered_manifests_are_owned_by_their_concrete_packages(self) -> None:
+         from app.devices.registry import built_in_device_registry
+ 
+diff --git a/tests/test_fluent_shell.py b/tests/test_fluent_shell.py
+new file mode 100644
+index 0000000..0c2e5c9
+--- /dev/null
++++ b/tests/test_fluent_shell.py
+@@ -0,0 +1,18 @@
++from __future__ import annotations
++
++import unittest
++
++
++class FluentDependencyTests(unittest.TestCase):
++    def test_required_pyside6_fluent_surface_is_importable(self) -> None:
++        from qfluentwidgets import (
++            FluentWindow,
++            NavigationItemPosition,
++            Theme,
++            setTheme,
++        )
++
++        self.assertTrue(issubclass(FluentWindow, object))
++        self.assertTrue(hasattr(NavigationItemPosition, "BOTTOM"))
++        self.assertTrue(hasattr(Theme, "LIGHT"))
++        self.assertTrue(callable(setTheme))

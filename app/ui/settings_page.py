@@ -11,7 +11,6 @@ from typing import Any, Literal, Union, get_args, get_origin
 from pydantic import BaseModel, ValidationError
 
 from PySide6.QtCore import QTimer, Qt, Signal
-from PySide6.QtGui import QColor, QPalette, QPen
 from PySide6.QtWidgets import (
     QHBoxLayout,
     QHeaderView,
@@ -25,16 +24,16 @@ from PySide6.QtWidgets import (
     QLineEdit,
     QMessageBox,
     QPlainTextEdit,
-    QPushButton,
     QFormLayout,
     QFrame,
+    QGridLayout,
     QGroupBox,
     QScrollArea,
     QSpinBox,
-    QStyle,
     QStyledItemDelegate,
     QStyleOptionViewItem,
-    QTabWidget,
+    QSizePolicy,
+    QStackedWidget,
     QTableWidget,
     QTableWidgetItem,
     QTreeWidget,
@@ -42,6 +41,15 @@ from PySide6.QtWidgets import (
     QTreeWidgetItemIterator,
     QVBoxLayout,
     QWidget,
+)
+from qfluentwidgets import (
+    BodyLabel,
+    CardWidget,
+    LineEdit,
+    Pivot,
+    PrimaryPushButton,
+    PushButton,
+    SubtitleLabel,
 )
 
 from app.domain.errors import AuthorizationError, ConfigurationError
@@ -70,34 +78,77 @@ from app.settings.models import StationSettings
 _LIMIT_VALIDATION_MESSAGE_ROLE = int(Qt.ItemDataRole.UserRole) + 101
 
 
+class _FluentSettingsSections(QWidget):
+    """Fluent route picker and page stack for the Settings workspace.
+
+    This is the interactive navigation itself, rather than a hidden legacy
+    tab control.  Its small familiar API keeps the Settings workflow code
+    focused on settings instead of navigation plumbing.
+    """
+
+    def __init__(self, parent: QWidget | None = None) -> None:
+        super().__init__(parent)
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(8)
+        self.navigation = Pivot(self)
+        self.navigation.setItemFontSize(14)
+        self.secondary_navigation = Pivot(self)
+        self.secondary_navigation.setItemFontSize(14)
+        self.stack = QStackedWidget(self)
+        self.stack.setSizePolicy(
+            QSizePolicy.Policy.Ignored,
+            QSizePolicy.Policy.Expanding,
+        )
+        layout.addWidget(self.navigation)
+        layout.addWidget(self.secondary_navigation)
+        layout.addWidget(self.stack, 1)
+        self._routes: list[str] = []
+        self._labels: list[str] = []
+
+    def addTab(self, page: QWidget, label: str) -> int:
+        index = self.stack.addWidget(page)
+        route = f"settings-section-{index}"
+        self._routes.append(route)
+        self._labels.append(label)
+        navigation = self.navigation if index < 6 else self.secondary_navigation
+        navigation.addItem(
+            route,
+            label,
+            onClick=lambda _checked=False, index=index: self.setCurrentIndex(index),
+        )
+        if index == 0:
+            self.setCurrentIndex(0)
+        return index
+
+    def count(self) -> int:
+        return self.stack.count()
+
+    def tabText(self, index: int) -> str:
+        return self._labels[index]
+
+    def currentWidget(self) -> QWidget:
+        return self.stack.currentWidget()
+
+    def setCurrentWidget(self, page: QWidget) -> None:
+        self.setCurrentIndex(self.stack.indexOf(page))
+
+    def setCurrentIndex(self, index: int) -> None:
+        self.stack.setCurrentIndex(index)
+        route = self._routes[index]
+        navigation = self.navigation if route in self.navigation.items else self.secondary_navigation
+        navigation.setCurrentItem(route)
+
+
 class _SafetyLimitValidationDelegate(QStyledItemDelegate):
-    """Paint validation failures above stylesheet-driven table selection colours."""
+    """Use the shared validation-state contract for inline limit edits."""
 
     def createEditor(self, parent: QWidget, option: QStyleOptionViewItem, index: Any) -> QWidget:
-        editor = QLineEdit(parent)
+        editor = LineEdit(parent)
         editor.setPlaceholderText("e.g. 10 mA")
-        editor.setStyleSheet(
-            "QLineEdit { background: #ffffff; color: #101820; border: 2px solid #1976bd; "
-            "border-radius: 4px; padding: 2px 5px; selection-background-color: #1976bd; "
-            "selection-color: #ffffff; }"
-        )
+        if index.data(_LIMIT_VALIDATION_MESSAGE_ROLE):
+            editor.setProperty("validationState", "error")
         return editor
-
-    def paint(self, painter: Any, option: QStyleOptionViewItem, index: Any) -> None:
-        message = index.data(_LIMIT_VALIDATION_MESSAGE_ROLE)
-        if not message:
-            super().paint(painter, option, index)
-            return
-        highlighted = QStyleOptionViewItem(option)
-        highlighted.state &= ~QStyle.StateFlag.State_Selected
-        highlighted.palette.setColor(QPalette.ColorRole.Base, QColor("#ffe1e6"))
-        highlighted.palette.setColor(QPalette.ColorRole.AlternateBase, QColor("#ffe1e6"))
-        highlighted.palette.setColor(QPalette.ColorRole.Text, QColor("#8d1024"))
-        super().paint(painter, highlighted, index)
-        painter.save()
-        painter.setPen(QPen(QColor("#d32645"), 2))
-        painter.drawRect(option.rect.adjusted(1, 1, -2, -2))
-        painter.restore()
 
 
 class SettingsPage(QWidget):
@@ -155,14 +206,18 @@ class SettingsPage(QWidget):
 
     def _build(self) -> None:
         layout = QVBoxLayout(self)
-        title = QLabel("Station settings")
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(12)
+        title = SubtitleLabel("Station settings", self)
         title.setObjectName("pageTitle")
-        self._subtitle = QLabel()
+        self._subtitle = BodyLabel(self)
         self._subtitle.setWordWrap(True)
         layout.addWidget(title)
         layout.addWidget(self._subtitle)
 
-        self.tabs = QTabWidget()
+        self.tabs = _FluentSettingsSections(self)
+        self.section_navigation = self.tabs.navigation
+        self.page_stack = self.tabs.stack
         self.trees: dict[str, QTreeWidget] = {}
         self.forms: dict[str, QScrollArea] = {}
         for key, label in (
@@ -200,7 +255,7 @@ class SettingsPage(QWidget):
         self.limits_validation_banner.setObjectName("settingsValidationBanner")
         self.limits_validation_banner.setWordWrap(True)
         self.limits_validation_banner.hide()
-        limits_card = QFrame()
+        limits_card = CardWidget()
         limits_card.setObjectName("settingsTableCard")
         limits_card_layout = QVBoxLayout(limits_card)
         limits_card_layout.setContentsMargins(14, 14, 14, 14)
@@ -245,7 +300,7 @@ class SettingsPage(QWidget):
         self.roles_info = QLabel()
         self.roles_info.setWordWrap(True)
         self.roles_info.setObjectName("muted")
-        roles_card = QFrame()
+        roles_card = CardWidget()
         roles_card.setObjectName("settingsTableCard")
         roles_card_layout = QVBoxLayout(roles_card)
         roles_card_layout.setContentsMargins(10, 10, 10, 10)
@@ -256,9 +311,9 @@ class SettingsPage(QWidget):
         self.role_table.horizontalHeader().setSectionResizeMode(0, QHeaderView.ResizeMode.Stretch)
         self.role_table.horizontalHeader().setSectionResizeMode(1, QHeaderView.ResizeMode.Stretch)
         role_buttons = QHBoxLayout()
-        self.add_role_button = QPushButton("Add user…")
-        self.edit_role_button = QPushButton("Edit selected…")
-        self.remove_role_button = QPushButton("Remove selected")
+        self.add_role_button = PrimaryPushButton("Add user…")
+        self.edit_role_button = PushButton("Edit selected…")
+        self.remove_role_button = PushButton("Remove selected")
         role_buttons.addWidget(self.add_role_button)
         role_buttons.addWidget(self.edit_role_button)
         role_buttons.addWidget(self.remove_role_button)
@@ -278,15 +333,15 @@ class SettingsPage(QWidget):
         diagnostics_title.setObjectName("sectionTitle")
         diagnostics_description = QLabel("Read-only checks for the active station profile.")
         diagnostics_description.setObjectName("muted")
-        diagnostics_card = QFrame()
+        diagnostics_card = CardWidget()
         diagnostics_card.setObjectName("settingsTableCard")
         diagnostics_card_layout = QVBoxLayout(diagnostics_card)
         diagnostics_card_layout.setContentsMargins(10, 10, 10, 10)
         self.diagnostics_text = QPlainTextEdit()
         self.diagnostics_text.setReadOnly(True)
         diagnostics_buttons = QHBoxLayout()
-        refresh_diagnostics = QPushButton("Refresh diagnostics")
-        export_diagnostics = QPushButton("Export redacted configuration…")
+        refresh_diagnostics = PushButton("Refresh diagnostics")
+        export_diagnostics = PushButton("Export redacted configuration…")
         diagnostics_buttons.addWidget(refresh_diagnostics)
         diagnostics_buttons.addWidget(export_diagnostics)
         diagnostics_buttons.addStretch(1)
@@ -299,24 +354,39 @@ class SettingsPage(QWidget):
         self.tree = self.trees["general"]
         layout.addWidget(self.tabs, 1)
 
-        buttons = QHBoxLayout()
-        self.reload_button = QPushButton("Reload")
-        self.discard_button = QPushButton("Discard draft")
-        self.diff_button = QPushButton("Show changes…")
-        self.validate_button = QPushButton("Validate")
-        self.save_button = QPushButton("Save changes")
-        self.approve_button = QPushButton("Approve profile…")
-        for button in (
+        self.action_card = CardWidget(self)
+        action_layout = QVBoxLayout(self.action_card)
+        action_layout.setContentsMargins(16, 12, 16, 12)
+        action_layout.setSpacing(8)
+        action_copy = QVBoxLayout()
+        action_copy.addWidget(BodyLabel("Configuration workflow", self.action_card))
+        action_note = BodyLabel(
+            "Validate before saving. Any safety-impacting change revokes profile approval.",
+            self.action_card,
+        )
+        action_note.setWordWrap(True)
+        action_copy.addWidget(action_note)
+        action_layout.addLayout(action_copy)
+        buttons = QGridLayout()
+        buttons.setHorizontalSpacing(8)
+        buttons.setVerticalSpacing(8)
+        self.reload_button = PushButton("Reload")
+        self.discard_button = PushButton("Discard draft")
+        self.diff_button = PushButton("Show changes…")
+        self.validate_button = PushButton("Validate")
+        self.save_button = PrimaryPushButton("Save changes")
+        self.approve_button = PrimaryPushButton("Approve profile…")
+        for index, button in enumerate((
             self.reload_button,
             self.discard_button,
             self.diff_button,
             self.validate_button,
             self.save_button,
             self.approve_button,
-        ):
-            buttons.addWidget(button)
-        buttons.addStretch(1)
-        layout.addLayout(buttons)
+        )):
+            buttons.addWidget(button, index // 3, index % 3)
+        action_layout.addLayout(buttons)
+        layout.insertWidget(2, self.action_card)
         self.reload_button.clicked.connect(self.reload)
         self.discard_button.clicked.connect(self.discard_draft)
         self.diff_button.clicked.connect(self.show_changes)

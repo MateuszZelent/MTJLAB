@@ -1,0 +1,697 @@
+# Review package: 12b2db9^..12b2db9
+
+## Commits
+12b2db9 feat: replace application ribbon with Fluent navigation
+
+## Files changed
+ app/ui/shell/main_window.py | 339 ++++++++++++++++++++++++++++----------------
+ tests/test_fluent_shell.py  |  41 ++++++
+ tests/test_main_window.py   |  25 +---
+ 3 files changed, 261 insertions(+), 144 deletions(-)
+
+## Diff
+diff --git a/app/ui/shell/main_window.py b/app/ui/shell/main_window.py
+index 0df29bf..f464f6e 100644
+--- a/app/ui/shell/main_window.py
++++ b/app/ui/shell/main_window.py
+@@ -1,35 +1,32 @@
+ """Application shell and lifecycle orchestration."""
+ 
+ from __future__ import annotations
+ 
+ from copy import deepcopy
+ from pathlib import Path
+ from typing import Any
+ 
+-from PySide6.QtCore import QSize, QSettings, Qt, Signal
+-from PySide6.QtGui import QAction, QActionGroup, QCloseEvent, QIcon, QKeySequence, QShortcut
++from PySide6.QtCore import QObject, QSettings, Qt, Signal
++from PySide6.QtGui import QAction, QActionGroup, QCloseEvent, QKeySequence, QShortcut
+ from PySide6.QtWidgets import (
+     QApplication,
+     QDialog,
+-    QHBoxLayout,
+-    QLabel,
+     QLineEdit,
+     QMainWindow,
+     QMessageBox,
+     QPlainTextEdit,
+     QPushButton,
+-    QScrollArea,
+-    QTabWidget,
+-    QToolBar,
++    QVBoxLayout,
+     QWidget,
+ )
++from qfluentwidgets import FluentIcon, FluentWindow, NavigationItemPosition
+ 
+ from app.audit import AuditLogger
+ from app.bootstrap import StationComposition
+ from app.domain.errors import AuthorizationError, ConfigurationError
+ from app.devices.simulators import simulated_station_settings
+ from app.engine.compiler import RecipeCompiler
+ from app.engine.estimation import PlanEstimator
+ from app.engine.recovery import RunRecoveryManager
+ from app.recipes import (
+     parse_recipe_text,
+@@ -42,23 +39,82 @@ from app.ui.settings_page import SettingsPage
+ from app.ui.run_worker import RunController, serialize_settings_snapshot
+ from app.ui.dashboard import DashboardPage, DeviceConnectionPanel
+ from app.ui.execution import RunMonitorPage
+ from app.ui.results import ResultsPage
+ from app.ui.design_system import effective_theme
+ from app.ui.recipes import DeviceParameterDialog, SweepGeneratorDialog  # noqa: F401
+ from app.ui.recipes.page import (  # noqa: F401
+     AnritsuAcquisitionEditorDialog, CommentEditorDialog, FixedValueDialog,
+     KeithleySweepBuilderDialog, RecipePage, RecipeTreeWidget, SweepLibraryButton,
+ )
++from app.ui.shell.page_host import FluentPageHost
++from app.ui.shell.safety_strip import StationSafetySnapshot, StationSafetyStrip
+ from app.ui.widgets import LimitEditDialog, LimitField, SpectrumPlotWidget
+ 
+-class MainWindow(QMainWindow):
++
++class _NavigationTabsAdapter(QObject):
++    """Temporary QTabWidget-shaped facade for legacy shell consumers."""
++
++    currentChanged = Signal(int)
++
++    def __init__(
++        self,
++        window: "MainWindow",
++        routes: tuple[str, ...],
++        labels: tuple[str, ...],
++    ) -> None:
++        super().__init__(window)
++        self._window = window
++        self._routes = routes
++        self._labels = labels
++        window.stackedWidget.currentChanged.connect(self.currentChanged)
++
++    def count(self) -> int:
++        return len(self._routes)
++
++    def currentIndex(self) -> int:
++        current = self._window.stackedWidget.currentWidget()
++        try:
++            return tuple(self._window.navigation_routes.values()).index(current)
++        except ValueError:
++            return -1
++
++    def currentWidget(self) -> QWidget | None:
++        return self._window.stackedWidget.currentWidget()
++
++    def setCurrentIndex(self, index: int) -> None:
++        if 0 <= index < len(self._routes):
++            self._window._navigate_to(self._routes[index])
++
++    def setCurrentWidget(self, widget: QWidget) -> None:
++        for route, host in self._window.navigation_routes.items():
++            if widget in {host, host.scroll_area, host.content}:
++                self._window._navigate_to(route)
++                return
++
++    def setTabEnabled(self, index: int, enabled: bool) -> None:
++        if 0 <= index < len(self._routes):
++            self._window._set_route_enabled(self._routes[index], enabled)
++
++    def isTabEnabled(self, index: int) -> bool:
++        if not 0 <= index < len(self._routes):
++            return False
++        return self._window.navigation_routes[self._routes[index]].isEnabled()
++
++    def tabText(self, index: int) -> str:
++        return self._labels[index]
++
++    def setAccessibleName(self, name: str) -> None:
++        self._window.stackedWidget.setAccessibleName(name)
++
++
++class MainWindow(FluentWindow):
+     """Local Qt client with manual control, live spectrum and safe settings."""
+ 
+     theme_changed = Signal(str)
+ 
+     def __init__(
+         self,
+         settings_path: str | Path = ".config/settings.yml",
+         *,
+         simulation: bool = False,
+         authenticated_username: str | None = None,
+@@ -108,23 +164,49 @@ class MainWindow(QMainWindow):
+         self._connect_controllers()
+         self._restore_workspace()
+         self._audit.record(
+             "Main window initialized",
+             category="application",
+             event_type="ui_ready",
+             context={"settings_path": str(self._repository.path)},
+         )
+ 
+     def _build(self) -> None:
+-        self.tabs = QTabWidget()
+-        self.tabs.setDocumentMode(True)
+-        self.setCentralWidget(self.tabs)
++        self._content_window = QMainWindow(self)
++        self._content_window.setObjectName("fluentContentWindow")
++        content = QWidget(self._content_window)
++        content.setObjectName("fluentShellContent")
++        content_layout = QVBoxLayout(content)
++        content_layout.setContentsMargins(12, 8, 12, 8)
++        content_layout.setSpacing(8)
++        self.safety_strip = StationSafetyStrip(content)
++        self.safety_strip.estop.setText("E-STOP")
++        self.safety_strip.estop.setMaximumWidth(96)
++        self.safety_strip.estop.setFixedHeight(28)
++        self.safety_strip.estop.setProperty("visualPriority", "low")
++        self.safety_strip.estop.setToolTip(
++            "Confirm and disable every instrument output and abort acquisition."
++        )
++        self.safety_strip.estop.setStyleSheet(
++            "background: transparent; border: 1px solid palette(mid); "
++            "border-radius: 6px; color: palette(text); padding: 3px 10px;"
++        )
++        content_layout.addWidget(self.safety_strip)
++        self.widgetLayout.removeWidget(self.stackedWidget)
++        content_layout.addWidget(self.stackedWidget, 1)
++        self._content_window.setCentralWidget(content)
++        self.widgetLayout.addWidget(self._content_window)
++        self._content_window.show()
++        self.navigationInterface.setExpandWidth(248)
++        self.navigationInterface.setMinimumExpandWidth(1000)
++        self.navigationInterface.expand(useAni=False)
++
+         registry = self._composition.registry
+         self.dashboard = DashboardPage(
+             self._settings,
+             registry,
+             discovery_enabled=not self._simulation,
+         )
+         self._device_pages = {
+             key: self._composition.registry.get(key).create_page(
+                 self._controllers[key], self._settings
+             )
+@@ -231,43 +313,95 @@ class MainWindow(QMainWindow):
+                 device="Keithley",
+                 fixed_instrument_range=(
+                     str(field.property("limitKey")) == "nplc"
+                 ),
+             )
+             if editable:
+                 field.edit_requested.connect(lambda field=field: self._edit_device_limit("keithley", field))
+         for field in self.anritsu_page.findChildren(LimitField):
+             configure_limit_button(field, device="Anritsu")
+             field.edit_requested.connect(lambda field=field: self._edit_device_limit("anritsu", field))
+-        self._tab_indices: dict[str, int] = {}
+-        for widget, key, display_name in (
+-            (self.dashboard, "Dashboard", "Dashboard"),
+-            (self.rigol_page, "Rigol", registry.get("rigol").display_name),
+-            (self.keithley_page, "Keithley", registry.get("keithley").display_name),
+-            (self.anritsu_page, "Anritsu", registry.get("anritsu").display_name),
+-            (self.moke_box_page, "MOKE Box", registry.get("moke_box").display_name),
++        route_icons = {
++            "dashboard": FluentIcon.HOME,
++            "rigol": FluentIcon.SPEED_HIGH,
++            "keithley": FluentIcon.CALORIES,
++            "anritsu": FluentIcon.WIFI,
++            "moke_box": FluentIcon.SYNC,
++            "lakeshore_gaussmeter": FluentIcon.FLAG,
++            "sweeps": FluentIcon.DOCUMENT,
++            "execution": FluentIcon.PLAY,
++            "results": FluentIcon.FOLDER,
++            "settings": FluentIcon.SETTING,
++        }
++        route_specs = (
++            (self.dashboard, "dashboard", "Dashboard", "Dashboard"),
++            (
++                self.rigol_page,
++                "rigol",
++                "Rigol",
++                registry.get("rigol").display_name,
++            ),
++            (
++                self.keithley_page,
++                "keithley",
++                "Keithley",
++                registry.get("keithley").display_name,
++            ),
++            (
++                self.anritsu_page,
++                "anritsu",
++                "Anritsu",
++                registry.get("anritsu").display_name,
++            ),
++            (
++                self.moke_box_page,
++                "moke_box",
++                "MOKE Box",
++                registry.get("moke_box").display_name,
++            ),
+             (
+                 self.lakeshore_gaussmeter_page,
++                "lakeshore_gaussmeter",
+                 "Lake Shore 475",
+                 registry.get("lakeshore_gaussmeter").display_name,
+             ),
+-            (self.recipe_page, "Sweeps", "Sweeps"),
+-            (self.run_monitor, "Execution", "Execution"),
+-            (self.results_page, "Results", "Results"),
+-            (self.settings_page, "Settings", "Settings"),
+-        ):
+-            scroll = QScrollArea()
+-            scroll.setWidgetResizable(True)
+-            scroll.setWidget(widget)
+-            scroll.setFrameShape(QScrollArea.Shape.NoFrame)
+-            widget._scroll_area = scroll
+-            self._tab_indices[key] = self.tabs.addTab(scroll, display_name)
++            (self.recipe_page, "sweeps", "Sweeps", "Sweeps"),
++            (self.run_monitor, "execution", "Execution", "Execution"),
++            (self.results_page, "results", "Results", "Results"),
++            (self.settings_page, "settings", "Settings", "Settings"),
++        )
++        self.navigation_routes: dict[str, FluentPageHost] = {}
++        self._route_for_widget: dict[QWidget, str] = {}
++        self._tab_indices: dict[str, int] = {}
++        for index, (widget, route, legacy_label, display_name) in enumerate(route_specs):
++            host = FluentPageHost(widget, self)
++            host.setObjectName(f"{route}PageHost")
++            self.navigation_routes[route] = host
++            self._route_for_widget[widget] = route
++            self._tab_indices[legacy_label] = index
++            position = (
++                NavigationItemPosition.BOTTOM
++                if route == "settings"
++                else NavigationItemPosition.TOP
++            )
++            self.addSubInterface(
++                host,
++                route_icons[route],
++                display_name,
++                position=position,
++            )
++            widget._scroll_area = host.scroll_area
++        self.tabs = _NavigationTabsAdapter(
++            self,
++            tuple(self.navigation_routes),
++            tuple(spec[3] for spec in route_specs),
++        )
+         self.log = QPlainTextEdit()
+         self.log.setReadOnly(True)
+         self.log.setMaximumBlockCount(500)
+         self.log.setMinimumHeight(50)
+         self.setStatusBar(self.statusBar())
+         self.event_log_dock = self._log_dock()
+         self.addDockWidget(Qt.DockWidgetArea.BottomDockWidgetArea, self.event_log_dock)
+         self.resizeDocks([self.event_log_dock], [120], Qt.Orientation.Vertical)
+         self.dashboard.emergency_requested.connect(self._emergency_off_all)
+         self.dashboard.assignments_requested.connect(self._save_discovered_assignments)
+@@ -317,103 +451,77 @@ class MainWindow(QMainWindow):
+         menu.addAction(self.event_log_dock.toggleViewAction())
+         menu.addSeparator()
+         quit_action = QAction("Safe shutdown", self)
+         quit_action.triggered.connect(self.close)
+         menu.addAction(quit_action)
+         self.estop_shortcut = QShortcut(QKeySequence("Ctrl+Shift+E"), self)
+         self.estop_shortcut.setContext(Qt.ShortcutContext.ApplicationShortcut)
+         self.estop_shortcut.activated.connect(self._emergency_off_all)
+         self.scan_shortcut = QShortcut(QKeySequence("F5"), self)
+         self.scan_shortcut.activated.connect(self.dashboard._scan_visa)
+-        self._build_top_chrome()
++        self.safety_strip.estop_requested.connect(self._emergency_off_all)
++        self._refresh_safety_strip()
+ 
+     def _set_current_tab_widget(self, widget: QWidget) -> None:
+-        scroll = getattr(widget, "_scroll_area", widget)
+-        self.tabs.setCurrentWidget(scroll)
+-
+-    def _build_top_chrome(self) -> None:
+-        """Build a compact menu status area and icon-based application ribbon."""
+-
+-        self.tabs.tabBar().hide()
+-        ribbon = QToolBar("Application ribbon", self)
+-        ribbon.setObjectName("applicationRibbon")
+-        ribbon.setMovable(False)
+-        ribbon.setFloatable(False)
+-        ribbon.setIconSize(QSize(24, 24))
+-        ribbon.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonTextUnderIcon)
+-        self.ribbon_group = QActionGroup(self)
+-        self.ribbon_group.setExclusive(True)
+-        self.ribbon_actions: list[QAction] = []
+-        icon_dir = Path(__file__).resolve().parents[1] / "assets" / "icons"
+-        registry = self._composition.registry
+-        icon_files = {
+-            "Dashboard": "dashboard.svg",
+-            registry.get("rigol").display_name: "rigol.svg",
+-            registry.get("keithley").display_name: "keithley.svg",
+-            registry.get("anritsu").display_name: "anritsu.svg",
+-            registry.get("moke_box").display_name: "moke_box.svg",
+-            registry.get("lakeshore_gaussmeter").display_name: "lakeshore.svg",
+-            "Sweeps": "recipes.svg",
+-            "Execution": "execution.svg",
+-            "Results": "results.svg",
+-            "Settings": "settings.svg",
+-        }
+-        labels = tuple(self.tabs.tabText(index) for index in range(self.tabs.count()))
+-        for index, label in enumerate(labels):
+-            if label in {"Sweeps", "Results"}:
+-                ribbon.addSeparator()
+-            action = QAction(QIcon(str(icon_dir / icon_files[label])), label, self)
+-            action.setCheckable(True)
+-            action.setChecked(index == self.tabs.currentIndex())
+-            action.setToolTip(f"Open {label}")
+-            action.triggered.connect(lambda checked=False, index=index: checked and self.tabs.setCurrentIndex(index))
+-            self.ribbon_group.addAction(action)
+-            ribbon.addAction(action)
+-            self.ribbon_actions.append(action)
+-        self.tabs.currentChanged.connect(
+-            lambda index: 0 <= index < len(self.ribbon_actions) and self.ribbon_actions[index].setChecked(True)
++        route = self._route_for_widget.get(widget)
++        if route is not None:
++            self._navigate_to(route)
++
++    def _navigate_to(self, route: str) -> None:
++        self.switchTo(self.navigation_routes[route])
++
++    def _set_route_enabled(self, route: str, enabled: bool) -> None:
++        host = self.navigation_routes[route]
++        host.setEnabled(enabled)
++        item = self.navigationInterface.widget(host.objectName())
++        if item is not None:
++            item.setEnabled(enabled)
++
++    def _refresh_safety_strip(self) -> None:
++        active_outputs = sum(
++            state == "output_on" for state in self._device_states.values()
+         )
+-        self.addToolBar(Qt.ToolBarArea.TopToolBarArea, ribbon)
+-        self.ribbon = ribbon
+-
+-        corner = QWidget()
+-        corner.setObjectName("menuStatusArea")
+-        status_layout = QHBoxLayout(corner)
+-        status_layout.setContentsMargins(6, 1, 6, 1)
+-        status_layout.setSpacing(8)
+-        profile_state = "LOCKED" if self._settings.outputs_locked else "APPROVED"
+-        self.profile_status = QLabel(f"Profile: {profile_state}")
+-        self.profile_status.setObjectName("profileLocked" if self._settings.outputs_locked else "profileApproved")
+-        status_layout.addWidget(self.profile_status)
+-        self.identity_status = QLabel(f"User: {self._access.identity.display_name}")
+-        self.identity_status.setObjectName("compactIdentityStatus")
+-        self.identity_status.setToolTip(
+-            "Authenticated operating-system identity and effective Lab Control role(s)."
++        self.safety_strip.update_snapshot(
++            StationSafetySnapshot(
++                ready=self.dashboard.evaluate_readiness().ready,
++                active_outputs=active_outputs,
++                profile_state=(
++                    "LOCKED" if self._settings.outputs_locked else "APPROVED"
++                ),
++                simulation=self._simulation,
++                actor=self._access.identity.username,
++                roles=tuple(
++                    sorted(role.value for role in self._access.identity.roles)
++                ),
++            )
+         )
+-        status_layout.addWidget(self.identity_status)
+-        self.toolbar_device_status: dict[str, QLabel] = {}
+-        for device in ("rigol", "keithley", "anritsu", "moke_box", "lakeshore_gaussmeter"):
+-            display = {"moke_box": "MOKE", "lakeshore_gaussmeter": "Lake Shore"}.get(device, device.title())
+-            label = QLabel(f"● {display}: OFFLINE")
+-            label.setObjectName("compactDeviceStatus")
+-            label.setAccessibleName(f"{display} connection and output state")
+-            status_layout.addWidget(label)
+-            self.toolbar_device_status[device] = label
+-        stop = QPushButton("E-STOP")
+-        stop.setObjectName("compactEmergencyButton")
+-        stop.setMaximumWidth(74)
+-        stop.setMaximumHeight(24)
+-        stop.setToolTip("Confirm and disable every output and abort acquisition.")
+-        stop.clicked.connect(self._emergency_off_all)
+-        status_layout.addWidget(stop)
+-        self.menuBar().setCornerWidget(corner, Qt.Corner.TopRightCorner)
+-        self.menu_status_area = corner
++
++    def menuBar(self):
++        return self._content_window.menuBar()
++
++    def statusBar(self):
++        return self._content_window.statusBar()
++
++    def setStatusBar(self, status_bar) -> None:
++        self._content_window.setStatusBar(status_bar)
++
++    def addDockWidget(self, area, dock_widget) -> None:
++        self._content_window.addDockWidget(area, dock_widget)
++
++    def resizeDocks(self, docks, sizes, orientation) -> None:
++        self._content_window.resizeDocks(docks, sizes, orientation)
++
++    def saveState(self, version: int = 0):
++        return self._content_window.saveState(version)
++
++    def restoreState(self, state, version: int = 0) -> bool:
++        return self._content_window.restoreState(state, version)
+ 
+     def _apply_accessibility(self) -> None:
+         """Ensure controls expose text as well as colour and have screen-reader metadata."""
+ 
+         for button in self.findChildren(QPushButton):
+             if not button.accessibleName():
+                 button.setAccessibleName(button.text().replace("&", ""))
+             if not button.accessibleDescription() and button.toolTip():
+                 button.setAccessibleDescription(button.toolTip())
+         for editor in self.findChildren(QLineEdit):
+@@ -664,27 +772,21 @@ class MainWindow(QMainWindow):
+                 self,
+                 f"{getattr(self._settings, device).display_name} — {action} failed",
+                 error,
+             )
+         self._log(f"{device}/{operation}: {error}")
+         self.dashboard.record_device_error(device, error)
+ 
+     def _set_device_state(self, device: str, state: str) -> None:
+         self._device_states[device] = state
+         self.dashboard.update_device_state(device, state)
+-        label = self.toolbar_device_status.get(device)
+-        if label is not None:
+-            display = {"moke_box": "MOKE", "lakeshore_gaussmeter": "Lake Shore"}.get(device, device.title())
+-            label.setText(f"● {display}: {state.replace('_', ' ').upper()}")
+-            label.setProperty("deviceState", state)
+-            label.style().unpolish(label)
+-            label.style().polish(label)
++        self._refresh_safety_strip()
+ 
+     def _guard_manual_operation(self, operation: str, payload: object) -> None:
+         """Fail closed for new energy-producing operations after audit I/O failure."""
+ 
+         # De-energising and disconnecting are never blocked by RBAC or audit
+         # health. This invariant is stronger than any normal user permission.
+         if operation in {"emergency_off", "ramp_to_zero", "stop_live", "disconnect"}:
+             return
+         if operation == "set_signal_generator_output" and not bool(payload):
+             return
+@@ -993,36 +1095,32 @@ class MainWindow(QMainWindow):
+         self.dashboard.update_settings(self._settings)
+         self.rigol_page.set_settings(self._settings)
+         self.keithley_page.set_settings(self._settings)
+         self.anritsu_page.set_settings(self._settings)
+         self.moke_box_page.set_settings(self._settings)
+         self.lakeshore_gaussmeter_page.set_settings(self._settings)
+         for name, panel in self.connection_panels.items():
+             resource, backend = self._device_connection_details(self._settings, name)
+             panel.update_resource(resource, backend)
+         self.recipe_page.set_settings(self._settings)
+-        profile_state = "LOCKED" if self._settings.outputs_locked else "APPROVED"
+-        self.profile_status.setText(f"Profile: {profile_state}")
+-        self.profile_status.setObjectName("profileLocked" if self._settings.outputs_locked else "profileApproved")
+-        self.profile_status.style().unpolish(self.profile_status)
+-        self.profile_status.style().polish(self.profile_status)
+         for name, controller in self._controllers.items():
+             self.dashboard.cards[name].set_reconfiguring(True)
+             self.connection_panels[name].set_reconfiguring(True)
+             resource, backend = self._device_connection_details(self._settings, name)
+             self._log(
+                 f"DEVICE ADAPTER REPLACE QUEUED [{name}]: resource={resource!r}, "
+                 f"backend={backend!r}"
+             )
+             controller.reconfigure(self._composition.create_adapter(name, settings=self._settings))
+             self._device_states[name] = "disconnected"
+             self.dashboard.cards[name].update_state("disconnected")
++        self._refresh_safety_strip()
+         self._log("Profile changed. VISA sessions were safely switched OFF and disconnected; new limits apply on the next connection.")
+ 
+     def _save_discovered_assignments(self, payload: object) -> None:
+         self._log(f"VISA ASSIGN RECEIVED: payload={payload!r}")
+         try:
+             self._require_permission(
+                 Permission.ASSIGN_VISA,
+                 "changing VISA assignments",
+                 audit=True,
+             )
+@@ -1141,21 +1239,20 @@ class MainWindow(QMainWindow):
+         if locked:
+             self.moke_box_page.stop_live(
+                 "Live Hall readout paused while a recipe run owns the MOKE Box."
+             )
+             self.lakeshore_gaussmeter_page.stop_live(
+                 "Live field readout paused while a recipe run owns the Lake Shore 475."
+             )
+         for label in ("Rigol", "Keithley", "Anritsu", "MOKE Box", "Lake Shore 475", "Sweeps", "Settings"):
+             index = self._tab_indices[label]
+             self.tabs.setTabEnabled(index, not locked)
+-            self.ribbon_actions[index].setEnabled(not locked)
+ 
+     def _require_permission(
+         self,
+         permission: Permission,
+         action: str,
+         *,
+         audit: bool,
+     ) -> None:
+         try:
+             self._access.require(permission, action=action)
+diff --git a/tests/test_fluent_shell.py b/tests/test_fluent_shell.py
+index fdc556f..341a1ec 100644
+--- a/tests/test_fluent_shell.py
++++ b/tests/test_fluent_shell.py
+@@ -1,16 +1,18 @@
+ from __future__ import annotations
+ 
+ import unittest
+ 
+ from PySide6.QtWidgets import QApplication, QLabel, QVBoxLayout, QWidget
++from qfluentwidgets import FluentWindow
+ 
++from app.ui.main_window import MainWindow
+ from app.ui.shell import FluentPageHost, StationSafetySnapshot, StationSafetyStrip
+ 
+ 
+ class FluentDependencyTests(unittest.TestCase):
+     def test_required_pyside6_fluent_surface_is_importable(self) -> None:
+         from qfluentwidgets import (
+             FluentWindow,
+             NavigationItemPosition,
+             Theme,
+             setTheme,
+@@ -59,10 +61,49 @@ class StationSafetyStripTests(unittest.TestCase):
+         self.assertEqual(strip.outputs.property("outputState"), "active")
+         self.assertEqual(strip.readiness.property("safetyState"), "danger")
+         self.assertIn("SIMULATION", strip.mode.text())
+ 
+     def test_estop_button_emits_without_animation_or_delay(self) -> None:
+         strip = StationSafetyStrip()
+         emissions: list[bool] = []
+         strip.estop_requested.connect(lambda: emissions.append(True))
+         strip.estop.click()
+         self.assertEqual(emissions, [True])
++
++
++class MainWindowFluentShellTests(unittest.TestCase):
++    @classmethod
++    def setUpClass(cls) -> None:
++        cls.application = QApplication.instance() or QApplication([])
++
++    def test_main_window_uses_fluent_navigation_and_all_routes_exist(self) -> None:
++        window = MainWindow(".config/settings.yml", simulation=True)
++        try:
++            self.assertIsInstance(window, FluentWindow)
++            self.assertEqual(tuple(window.navigation_routes), (
++                "dashboard", "rigol", "keithley", "anritsu",
++                "moke_box", "lakeshore_gaussmeter", "sweeps", "execution",
++                "results", "settings",
++            ))
++            self.assertIsNotNone(window.safety_strip)
++            self.assertEqual(window.safety_strip.estop.text(), "E-STOP")
++            self.assertLessEqual(window.safety_strip.estop.maximumWidth(), 96)
++            self.assertEqual(
++                window.safety_strip.estop.property("visualPriority"),
++                "low",
++            )
++            self.assertFalse(hasattr(window, "ribbon"))
++        finally:
++            window.close()
++
++    def test_navigation_changes_current_page_without_recreating_controller(self) -> None:
++        window = MainWindow(".config/settings.yml", simulation=True)
++        try:
++            controller = window._controllers["keithley"]
++            window._navigate_to("keithley")
++            self.assertIs(window._controllers["keithley"], controller)
++            self.assertIs(
++                window.stackedWidget.currentWidget(),
++                window.navigation_routes["keithley"],
++            )
++        finally:
++            window.close()
+diff --git a/tests/test_main_window.py b/tests/test_main_window.py
+index 603836a..aa2e288 100644
+--- a/tests/test_main_window.py
++++ b/tests/test_main_window.py
+@@ -411,22 +411,22 @@ class MainWindowTests(unittest.TestCase):
+             settings_path = Path(temporary) / "settings.yml"
+             settings_path.write_text(
+                 SETTINGS_TEMPLATE.read_text(encoding="utf-8"), encoding="utf-8"
+             )
+             window = MainWindow(
+                 settings_path,
+                 simulation=False,
+                 authenticated_username="LAB\\operator",
+             )
+             try:
+-                self.assertIn("LAB\\operator", window.identity_status.text())
+-                self.assertIn("operator", window.identity_status.text())
++                self.assertIn("LAB\\operator", window.safety_strip.actor.text())
++                self.assertIn("operator", window.safety_strip.actor.text())
+                 # Operators may save only the dedicated Rigol manual-output
+                 # permission; general station configuration stays read-only.
+                 self.assertTrue(window.settings_page.save_button.isEnabled())
+                 self.assertFalse(window.settings_page.approve_button.isEnabled())
+                 rigol_enabled = None
+                 iterator = QTreeWidgetItemIterator(
+                     window.settings_page.trees["rigol"]
+                 )
+                 while iterator.value() is not None:
+                     candidate = iterator.value()
+@@ -815,41 +815,20 @@ class MainWindowTests(unittest.TestCase):
+             self.application.processEvents()
+             self.assertTrue(card.test_button.isEnabled())
+             self.assertEqual(card.test_button.text(), "Test")
+             self.assertIn("TEST PASS", card.identity.text())
+             self.assertIn("KEITHLEY", card.identity.text().upper())
+             self.assertEqual(window._controllers["keithley"]._worker._adapter.state.value, "disconnected")
+         finally:
+             window.close()
+             self.application.processEvents()
+ 
+-    def test_top_ribbon_replaces_side_tabs_and_status_lives_in_menu_corner(self) -> None:
+-        window = MainWindow(".config/settings.yml", simulation=True)
+-        try:
+-            self.assertTrue(window.tabs.tabBar().isHidden())
+-            self.assertEqual([action.text() for action in window.ribbon_actions], [
+-                "Dashboard", "Rigol DG1032Z", "Keithley 2600", "Anritsu MS2830A",
+-                "MOKE Box", "Lake Shore 475", "Sweeps", "Execution", "Results", "Settings"
+-            ])
+-            self.assertTrue(all(not action.icon().isNull() for action in window.ribbon_actions))
+-            window.ribbon_actions[2].trigger()
+-            self.application.processEvents()
+-            self.assertEqual(window.tabs.currentIndex(), 2)
+-            self.assertTrue(window.ribbon_actions[2].isChecked())
+-            self.assertIs(window.menuBar().cornerWidget(Qt.Corner.TopRightCorner), window.menu_status_area)
+-            stop = window.menu_status_area.findChild(QPushButton, "compactEmergencyButton")
+-            self.assertIsNotNone(stop)
+-            self.assertLessEqual(stop.maximumWidth(), 74)
+-        finally:
+-            window.close()
+-            self.application.processEvents()
+-
+     def test_moke_page_exposes_read_only_full_value_overview(self) -> None:
+         window = MainWindow(".config/settings.yml", simulation=True)
+         try:
+             page = window.moke_box_page
+             self.assertEqual(page.views.count(), 2)
+             self.assertEqual(len(page.vout_values), 8)
+             self.assertFalse(hasattr(page, "acquire_button"))
+             self.assertFalse(page.read_vouts_button.isEnabled())
+             self.assertEqual(page.field_samples.value(), 1)
+             self.assertEqual(page.read_fields_button.text(), "Get Hall voltage (V)")

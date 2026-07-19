@@ -5,7 +5,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 from PySide6.QtCore import Signal
-from PySide6.QtWidgets import QHBoxLayout, QLabel, QWidget
+from PySide6.QtWidgets import QHBoxLayout, QLabel, QSizePolicy, QWidget
 from qfluentwidgets import PrimaryPushButton
 
 
@@ -47,7 +47,16 @@ class StationSafetyStrip(QWidget):
             self.mode,
             self.actor,
         ):
+            widget.setMinimumWidth(0)
+            widget.setSizePolicy(
+                QSizePolicy.Policy.Ignored,
+                QSizePolicy.Policy.Preferred,
+            )
             layout.addWidget(widget)
+        layout.setStretch(0, 1)
+        layout.setStretch(1, 1)
+        layout.setStretch(2, 1)
+        layout.setStretch(4, 2)
         layout.addStretch(1)
         layout.addWidget(self.estop)
 

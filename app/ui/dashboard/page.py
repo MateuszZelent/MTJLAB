@@ -4,25 +4,15 @@ from __future__ import annotations
 
 import ipaddress
 
-from PySide6.QtCore import QEvent, QObject, Signal
+from PySide6.QtCore import Signal
 from PySide6.QtWidgets import (
-    QComboBox,
     QDialog,
-    QDialogButtonBox,
-    QFrame,
     QGridLayout,
     QHBoxLayout,
-    QHeaderView,
     QLabel,
-    QLineEdit,
     QMessageBox,
-    QPlainTextEdit,
-    QProgressBar,
-    QPushButton,
-    QSpinBox,
-    QTableWidget,
-    QTableWidgetItem,
-    QTabWidget,
+    QSizePolicy,
+    QStackedWidget,
     QVBoxLayout,
     QWidget,
 )
@@ -39,24 +29,32 @@ from app.domain.readiness import ReadinessLevel, StationReadiness, evaluate_stat
 from app.engine.compiler import ExecutionPlan
 from app.engine.estimation import PlanEstimate
 from app.settings.models import StationSettings
+from qfluentwidgets import (
+    BodyLabel,
+    CardWidget,
+    IndeterminateProgressBar,
+    InfoBar,
+    LineEdit,
+    Pivot,
+    PlainTextEdit,
+    PrimaryPushButton,
+    ProgressBar,
+    PushButton,
+    SpinBox,
+    SubtitleLabel,
+)
+
 from app.ui.dashboard.device_card import DeviceCard
+from app.ui.dashboard.discovery_surfaces import SavedInstrumentsView, TcpDiscoveryResultsView
+from app.ui.dashboard.visa_results import VisaResultState, VisaResultsView
 from app.ui.discovery_worker import MokeIdentificationWorker, TcpDiscoveryWorker, VisaDiscoveryWorker
-
-
-class _NoScrollTabBar(QObject):
-    """Event filter that blocks wheel events on a QTabBar."""
-
-    def eventFilter(self, watched: QObject, event: QEvent) -> bool:  # type: ignore[override]
-        if event.type() == QEvent.Type.Wheel:
-            event.ignore()
-            return True
-        return super().eventFilter(watched, event)
 
 
 class DashboardPage(QWidget):
     emergency_requested = Signal()
     assignments_requested = Signal(object)
     moke_assignment_requested = Signal(str)
+    readiness_changed = Signal(bool)
     status = Signal(str)
     _DEVICE_KEYS = ("rigol", "keithley", "anritsu", "moke_box", "lakeshore_gaussmeter")
 
@@ -76,7 +74,6 @@ class DashboardPage(QWidget):
         self._moke_identification_worker: MokeIdentificationWorker | None = None
         self._identifying_host: str | None = None
         self._identifying_port: int | None = None
-        self._tcp_rows_by_host: dict[str, int] = {}
         self._discovery_results: tuple[DiscoveredInstrument, ...] = ()
         self._device_states = {name: "disconnected" for name in self._DEVICE_KEYS}
         self._verified_resources: dict[str, str] = {}
@@ -85,22 +82,19 @@ class DashboardPage(QWidget):
         self._assignment_allowed = True
         self._compiled_plan = None
         self._plan_estimate = None
-        layout = QVBoxLayout(self)
-        title = QLabel("Station overview")
-        title.setObjectName("pageTitle")
-        subtitle = QLabel("Discover, identify and organize instruments from one calm workspace.")
-        subtitle.setObjectName("muted")
-        layout.addWidget(title)
-        layout.addWidget(subtitle)
-        self.workspace = QTabWidget()
-        self.workspace.setObjectName("dashboardWorkspace")
-        self.workspace.setDocumentMode(True)
-        self._ws_scroll_guard = _NoScrollTabBar(self.workspace)
-        self.workspace.tabBar().installEventFilter(self._ws_scroll_guard)
-        overview = QWidget()
-        overview_layout = QVBoxLayout(overview)
-        overview_intro = QLabel("Connected instruments")
-        overview_intro.setObjectName("sectionTitle")
+        self.overview_page = QWidget(self)
+        self.overview_page.setProperty("stationSurface", "page")
+        overview_layout = QVBoxLayout(self.overview_page)
+        overview_layout.setContentsMargins(0, 0, 0, 0)
+        overview_layout.setSpacing(12)
+        overview_layout.addWidget(SubtitleLabel("Station overview", self.overview_page))
+        overview_subtitle = BodyLabel(
+            "Discover, identify and organize instruments from one calm workspace.",
+            self.overview_page,
+        )
+        overview_subtitle.setWordWrap(True)
+        overview_layout.addWidget(overview_subtitle)
+        overview_intro = SubtitleLabel("Connected instruments", self.overview_page)
         overview_layout.addWidget(overview_intro)
         grid = QGridLayout()
         module_name = {
@@ -140,190 +134,187 @@ class DashboardPage(QWidget):
         self.checklist.setWordWrap(True)
         overview_layout.addWidget(self.checklist)
         overview_layout.addStretch(1)
-        self.workspace.addTab(overview, "Overview")
+        self.discovery_page = QWidget(self)
+        self.discovery_page.setProperty("stationSurface", "page")
+        discovery_layout = QVBoxLayout(self.discovery_page)
+        discovery_layout.setContentsMargins(0, 0, 0, 0)
+        discovery_layout.setSpacing(12)
+        discovery_layout.addWidget(SubtitleLabel("Instrument discovery", self.discovery_page))
+        discovery_subtitle = BodyLabel(
+            "Find station instruments safely, then save only deliberate assignments.",
+            self.discovery_page,
+        )
+        discovery_subtitle.setWordWrap(True)
+        discovery_layout.addWidget(discovery_subtitle)
+        self.discovery_pivot = Pivot(self.discovery_page)
+        discovery_layout.addWidget(self.discovery_pivot)
+        self.discovery_stack = QStackedWidget(self.discovery_page)
+        self.discovery_stack.setSizePolicy(
+            QSizePolicy.Policy.Ignored,
+            QSizePolicy.Policy.Expanding,
+        )
+        discovery_layout.addWidget(self.discovery_stack, 1)
 
-        discovery = QFrame()
-        discovery.setObjectName("discoveryCard")
-        discovery_layout = QVBoxLayout(discovery)
+        self.visa_discovery_page = QWidget(self.discovery_stack)
+        visa_layout = QVBoxLayout(self.visa_discovery_page)
+        visa_layout.setContentsMargins(0, 0, 0, 0)
+        visa_layout.setSpacing(12)
         discovery_header = QHBoxLayout()
-        discovery_title = QLabel("VISA instrument discovery")
-        discovery_title.setObjectName("sectionTitle")
+        discovery_title = SubtitleLabel("VISA instrument discovery", self.visa_discovery_page)
         discovery_header.addWidget(discovery_title)
         discovery_header.addStretch(1)
-        self.scan_button = QPushButton("Scan VISA")
+        self.scan_button = PrimaryPushButton("Scan VISA", self.visa_discovery_page)
         self.scan_button.setToolTip(
             "Enumerate VISA resources and send only *IDN? with a short timeout. No output is enabled."
         )
         self.scan_button.setAccessibleName("Scan VISA instruments")
-        self.save_assignments = QPushButton("Save assignments")
+        self.save_assignments = PushButton("Save assignments", self.visa_discovery_page)
         self.save_assignments.setEnabled(False)
         self.save_assignments.setToolTip(
             "Persist selected VISA addresses. This changes the safety profile and revokes its approval."
         )
         discovery_header.addWidget(self.scan_button)
         discovery_header.addWidget(self.save_assignments)
-        discovery_layout.addLayout(discovery_header)
-        self.discovery_info = QLabel(
-            "No scan performed. USB/GPIB resources are normally discoverable; LAN discovery depends on the VISA backend."
+        visa_layout.addLayout(discovery_header)
+        self.discovery_info = BodyLabel(
+            "No scan performed. USB/GPIB resources are normally discoverable; LAN discovery depends on the VISA backend.",
+            self.visa_discovery_page,
         )
-        self.discovery_info.setObjectName("muted")
         self.discovery_info.setWordWrap(True)
-        discovery_layout.addWidget(self.discovery_info)
-        self.discovery_table = QTableWidget(0, 6)
-        self.discovery_table.setHorizontalHeaderLabels(
-            ["Assignment", "Action", "Status", "VISA resource", "Backend", "Identity / error"]
+        visa_layout.addWidget(self.discovery_info)
+        self.visa_progress = IndeterminateProgressBar(self.visa_discovery_page)
+        self.visa_progress.setFixedHeight(4)
+        self.visa_progress.hide()
+        visa_layout.addWidget(self.visa_progress)
+        self.visa_results = VisaResultsView(
+            assignment_allowed=self._assignment_allowed,
+            parent=self.visa_discovery_page,
         )
-        self.discovery_table.setAlternatingRowColors(True)
-        self.discovery_table.setSelectionBehavior(QTableWidget.SelectionBehavior.SelectRows)
-        self.discovery_table.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
-        self.discovery_table.setShowGrid(False)
-        self.discovery_table.verticalHeader().setVisible(False)
-        self.discovery_table.verticalHeader().setDefaultSectionSize(40)
-        header = self.discovery_table.horizontalHeader()
-        header.setSectionResizeMode(0, QHeaderView.ResizeMode.ResizeToContents)
-        header.setSectionResizeMode(1, QHeaderView.ResizeMode.ResizeToContents)
-        header.setSectionResizeMode(2, QHeaderView.ResizeMode.ResizeToContents)
-        header.setMinimumSectionSize(130)
-        header.setSectionResizeMode(3, QHeaderView.ResizeMode.Stretch)
-        header.setSectionResizeMode(4, QHeaderView.ResizeMode.ResizeToContents)
-        header.setSectionResizeMode(5, QHeaderView.ResizeMode.Stretch)
-        self.discovery_table.setMinimumHeight(190)
-        discovery_layout.addWidget(self.discovery_table, 1)
-        self.workspace.addTab(discovery, "Find VISA")
+        self.visa_results.setMinimumHeight(220)
+        visa_layout.addWidget(self.visa_results, 1)
+        self.visa_state = "empty"
+        self.discovery_stack.addWidget(self.visa_discovery_page)
 
-        tcp_discovery = QFrame()
-        tcp_discovery.setObjectName("discoveryCard")
-        tcp_layout = QVBoxLayout(tcp_discovery)
+        self.tcp_discovery_page = QWidget(self.discovery_stack)
+        self.tcp_discovery_page.setSizePolicy(
+            QSizePolicy.Policy.Ignored,
+            QSizePolicy.Policy.Expanding,
+        )
+        tcp_layout = QVBoxLayout(self.tcp_discovery_page)
+        tcp_layout.setContentsMargins(0, 0, 0, 0)
         tcp_header = QHBoxLayout()
-        tcp_title = QLabel("TCP/IP port discovery")
-        tcp_title.setObjectName("sectionTitle")
+        tcp_title = SubtitleLabel("TCP/IP port discovery", self.tcp_discovery_page)
         tcp_header.addWidget(tcp_title)
         tcp_header.addStretch(1)
-        self.tcp_network = QLineEdit(self._moke_network_default(settings))
+        self.tcp_network = LineEdit(self.tcp_discovery_page)
+        self.tcp_network.setText(self._moke_network_default(settings))
         self.tcp_network.setPlaceholderText("192.168.1.0/24 or start IP")
         self.tcp_network.setAccessibleName("Network CIDR or first IP for TCP port scan")
         self.tcp_network.setMaximumWidth(170)
-        self.tcp_range_end = QLineEdit()
+        self.tcp_range_end = LineEdit(self.tcp_discovery_page)
         self.tcp_range_end.setPlaceholderText("optional end IP")
         self.tcp_range_end.setAccessibleName("Last IP for TCP port scan range")
         self.tcp_range_end.setMaximumWidth(135)
-        self.tcp_port = QSpinBox()
+        self.tcp_port = SpinBox(self.tcp_discovery_page)
         self.tcp_port.setRange(1, 65_535)
         self.tcp_port.setValue(10_001)
         self.tcp_port.setAccessibleName("TCP port for MOKE Box discovery")
-        self.tcp_timeout_ms = QSpinBox()
+        self.tcp_timeout_ms = SpinBox(self.tcp_discovery_page)
         self.tcp_timeout_ms.setRange(50, 2_000)
         self.tcp_timeout_ms.setSingleStep(50)
         self.tcp_timeout_ms.setValue(150)
         self.tcp_timeout_ms.setSuffix(" ms")
         self.tcp_timeout_ms.setAccessibleName("TCP timeout per host")
-        self.tcp_detect_button = QPushButton("Detect local IP")
+        self.tcp_detect_button = PushButton("Detect local IP")
         self.tcp_detect_button.setToolTip(
             "Detect the IPv4 address chosen by the active network route and prefill a /24 scan range."
         )
-        self.tcp_identify_button = QPushButton("Test selected")
+        self.tcp_identify_button = PushButton("Test selected")
         self.tcp_identify_button.setEnabled(False)
         self.tcp_identify_button.setToolTip(
             "Test only the selected open endpoint and show the raw MOKE TX/RX exchange."
         )
-        self.tcp_test_entered_button = QPushButton("Test entered IP")
+        self.tcp_test_entered_button = PushButton("Test entered IP")
         self.tcp_test_entered_button.setToolTip(
             "Test the single IPv4 address entered in CIDR / IP / from without scanning a subnet."
         )
-        self.tcp_assign_moke_button = QPushButton("Assign MOKE Box")
+        self.tcp_assign_moke_button = PrimaryPushButton("Assign MOKE Box")
         self.tcp_assign_moke_button.setEnabled(False)
         self.tcp_assign_moke_button.setToolTip(
             "Save the selected verified TCP endpoint as the read-only MOKE Box connection."
         )
-        self.tcp_scan_button = QPushButton("Scan TCP/IP")
+        self.tcp_scan_button = PrimaryPushButton("Scan TCP/IP")
         self.tcp_scan_button.setToolTip(
             "Test one port on each host in the supplied private subnet. No MOKE command is sent."
         )
-        self.tcp_stop_button = QPushButton("Stop scan")
+        self.tcp_stop_button = PushButton("Stop scan")
         self.tcp_stop_button.setEnabled(False)
         self.tcp_stop_button.setToolTip("Stop scheduling further TCP connection attempts.")
-        tcp_header.addWidget(QLabel("CIDR / IP / from:"))
-        tcp_header.addWidget(self.tcp_network)
-        tcp_header.addWidget(QLabel("to:"))
-        tcp_header.addWidget(self.tcp_range_end)
-        tcp_header.addWidget(QLabel("Port:"))
-        tcp_header.addWidget(self.tcp_port)
-        tcp_header.addWidget(QLabel("Timeout:"))
-        tcp_header.addWidget(self.tcp_timeout_ms)
-        tcp_header.addWidget(self.tcp_detect_button)
-        tcp_header.addWidget(self.tcp_scan_button)
-        tcp_header.addWidget(self.tcp_stop_button)
-        tcp_header.addWidget(self.tcp_test_entered_button)
-        tcp_header.addWidget(self.tcp_identify_button)
-        tcp_header.addWidget(self.tcp_assign_moke_button)
         tcp_layout.addLayout(tcp_header)
-        self.tcp_discovery_info = QLabel(
-            "No TCP/IP scan performed. The reconstructed MOKE Box protocol uses TCP port 10001."
+        tcp_controls = QGridLayout()
+        tcp_controls.setHorizontalSpacing(8)
+        tcp_controls.setVerticalSpacing(8)
+        tcp_controls.addWidget(BodyLabel("CIDR / IP / from:", self.tcp_discovery_page), 0, 0)
+        tcp_controls.addWidget(self.tcp_network, 0, 1)
+        tcp_controls.addWidget(BodyLabel("to:", self.tcp_discovery_page), 0, 2)
+        tcp_controls.addWidget(self.tcp_range_end, 0, 3)
+        tcp_controls.addWidget(BodyLabel("Port:", self.tcp_discovery_page), 0, 4)
+        tcp_controls.addWidget(self.tcp_port, 0, 5)
+        tcp_controls.addWidget(BodyLabel("Timeout:", self.tcp_discovery_page), 0, 6)
+        tcp_controls.addWidget(self.tcp_timeout_ms, 0, 7)
+        tcp_controls.addWidget(self.tcp_detect_button, 1, 0, 1, 2)
+        tcp_controls.addWidget(self.tcp_scan_button, 1, 2, 1, 2)
+        tcp_controls.addWidget(self.tcp_stop_button, 1, 4)
+        tcp_controls.addWidget(self.tcp_test_entered_button, 1, 5)
+        tcp_controls.addWidget(self.tcp_identify_button, 1, 6)
+        tcp_controls.addWidget(self.tcp_assign_moke_button, 1, 7)
+        tcp_controls.setColumnStretch(1, 3)
+        tcp_controls.setColumnStretch(3, 2)
+        tcp_layout.addLayout(tcp_controls)
+        self.tcp_discovery_info = BodyLabel(
+            "No TCP/IP scan performed. The reconstructed MOKE Box protocol uses TCP port 10001.",
+            self.tcp_discovery_page,
         )
-        self.tcp_discovery_info.setObjectName("muted")
         self.tcp_discovery_info.setWordWrap(True)
         tcp_layout.addWidget(self.tcp_discovery_info)
-        self.tcp_scan_progress = QProgressBar()
-        self.tcp_scan_progress.setObjectName("tcpScanProgress")
-        self.tcp_scan_progress.setFixedHeight(24)
-        self.tcp_scan_progress.setTextVisible(True)
+        self.tcp_scan_progress = ProgressBar(self.tcp_discovery_page)
+        self.tcp_scan_progress.setFixedHeight(6)
         self.tcp_scan_progress.setFormat("Ready")
         self.tcp_scan_progress.setValue(0)
-        self.tcp_scan_progress.setStyleSheet(
-            "QProgressBar#tcpScanProgress { min-height: 24px; color: #153a5b; "
-            "background: #edf3f8; border: 1px solid #aac0d1; border-radius: 5px; "
-            "text-align: center; font-weight: 600; } "
-            "QProgressBar#tcpScanProgress::chunk { background: #2879b8; "
-            "border-radius: 4px; margin: 1px; }"
-        )
         self.tcp_scan_progress.hide()
         tcp_layout.addWidget(self.tcp_scan_progress)
-        self.tcp_discovery_table = QTableWidget(0, 3)
-        self.tcp_discovery_table.setHorizontalHeaderLabels(
-            ["Open endpoint", "TCP result", "MOKE verification"]
-        )
-        self.tcp_discovery_table.setAlternatingRowColors(True)
-        self.tcp_discovery_table.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
-        self.tcp_discovery_table.setSelectionBehavior(QTableWidget.SelectionBehavior.SelectRows)
-        self.tcp_discovery_table.verticalHeader().setVisible(False)
-        tcp_table_header = self.tcp_discovery_table.horizontalHeader()
-        tcp_table_header.setSectionResizeMode(0, QHeaderView.ResizeMode.Stretch)
-        tcp_table_header.setSectionResizeMode(1, QHeaderView.ResizeMode.Stretch)
-        tcp_table_header.setSectionResizeMode(2, QHeaderView.ResizeMode.Stretch)
-        self.tcp_discovery_table.setMinimumHeight(110)
-        self.tcp_discovery_table.itemSelectionChanged.connect(self._update_tcp_identify_enabled)
-        tcp_layout.addWidget(self.tcp_discovery_table)
-        self.workspace.addTab(tcp_discovery, "Find TCP/IP")
+        self.tcp_results = TcpDiscoveryResultsView(self.tcp_discovery_page)
+        self.tcp_results.setMinimumHeight(180)
+        self.tcp_results.selection_changed.connect(self._update_tcp_identify_enabled)
+        tcp_layout.addWidget(self.tcp_results, 1)
+        self.discovery_stack.addWidget(self.tcp_discovery_page)
 
-        saved = QFrame()
-        saved.setObjectName("discoveryCard")
-        saved_layout = QVBoxLayout(saved)
-        saved_title = QLabel("Saved instruments")
-        saved_title.setObjectName("sectionTitle")
+        self.saved_page = QWidget(self.discovery_stack)
+        saved_layout = QVBoxLayout(self.saved_page)
+        saved_layout.setContentsMargins(0, 0, 0, 0)
+        saved_title = SubtitleLabel("Saved instruments", self.saved_page)
         saved_layout.addWidget(saved_title)
-        saved_hint = QLabel("Configured resources are kept here for quick orientation. Connection controls live on each instrument page.")
-        saved_hint.setObjectName("muted")
+        saved_hint = BodyLabel(
+            "Configured resources are kept here for quick orientation. Connection controls live on each instrument page.",
+            self.saved_page,
+        )
         saved_hint.setWordWrap(True)
         saved_layout.addWidget(saved_hint)
-        self.saved_table = QTableWidget(0, 4)
-        self.saved_table.setHorizontalHeaderLabels(["Instrument", "Resource", "Backend", "Status"])
-        self.saved_table.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
-        self.saved_table.setSelectionBehavior(QTableWidget.SelectionBehavior.SelectRows)
-        self.saved_table.verticalHeader().setVisible(False)
-        self.saved_table.horizontalHeader().setSectionResizeMode(1, QHeaderView.ResizeMode.Stretch)
-        saved_layout.addWidget(self.saved_table)
-        self.workspace.addTab(saved, "Saved")
-        layout.addWidget(self.workspace, 1)
-        emergency = QPushButton("E-STOP — disable all outputs")
-        emergency.setObjectName("emergencyButton")
-        emergency.setProperty("compact", True)
-        emergency.setMaximumWidth(250)
-        emergency_row = QHBoxLayout()
-        emergency_row.addStretch(1)
-        emergency_row.addWidget(emergency)
-        layout.addLayout(emergency_row)
-        emergency.clicked.connect(self.emergency_requested)
+        self.saved_instruments = SavedInstrumentsView(self.saved_page)
+        self.saved_instruments.setMinimumHeight(180)
+        saved_layout.addWidget(self.saved_instruments, 1)
+        self.discovery_stack.addWidget(self.saved_page)
+        self.discovery_pivot.addItem("visa", "Find VISA", lambda: self._show_discovery_page("visa"))
+        self.discovery_pivot.addItem("tcp", "Find TCP/IP", lambda: self._show_discovery_page("tcp"))
+        self.discovery_pivot.addItem("saved", "Saved", lambda: self._show_discovery_page("saved"))
+        self._show_discovery_page("visa")
+        self.navigation_pages = {
+            "overview": self.overview_page,
+            "discovery": self.discovery_page,
+        }
+        # The persistent Fluent safety strip owns the emergency action.
         self.scan_button.clicked.connect(self._scan_visa)
+        self.visa_results.assignment_requested.connect(self.assignments_requested)
         self.tcp_detect_button.clicked.connect(self._detect_local_tcp_network)
         self.tcp_scan_button.clicked.connect(self._scan_tcp)
         self.tcp_stop_button.clicked.connect(self._stop_tcp_scan)
@@ -342,6 +333,15 @@ class DashboardPage(QWidget):
             self.tcp_assign_moke_button.setEnabled(False)
             self.tcp_detect_button.setEnabled(False)
         self.update_settings(settings)
+
+    def _show_discovery_page(self, route: str) -> None:
+        pages = {
+            "visa": self.visa_discovery_page,
+            "tcp": self.tcp_discovery_page,
+            "saved": self.saved_page,
+        }
+        self.discovery_stack.setCurrentWidget(pages[route])
+        self.discovery_pivot.setCurrentItem(route)
 
     def update_settings(self, settings: StationSettings) -> None:
         previous_resources = {
@@ -371,14 +371,13 @@ class DashboardPage(QWidget):
             self._device_errors.pop("moke_box", None)
         self._refresh_saved_devices()
         self._refresh_card_resource_choices()
+        self._refresh_visa_results()
         self._refresh_readiness()
 
     def _refresh_saved_devices(self) -> None:
-        self.saved_table.setRowCount(0)
+        saved_devices: list[tuple[str, str, str, str]] = []
         for name in self._DEVICE_KEYS:
             device = getattr(self._settings, name)
-            row = self.saved_table.rowCount()
-            self.saved_table.insertRow(row)
             if name == "moke_box":
                 resource = device.endpoint or "Not assigned"
                 backend = "TCP/IP"
@@ -389,17 +388,17 @@ class DashboardPage(QWidget):
                 else:
                     resource = device.connection.resource or "Not assigned"
                     backend = device.connection.visa_backend
-            values = (
+            saved_devices.append((
                 device.display_name,
                 resource,
                 backend,
                 self._device_states.get(name, "disconnected").replace("_", " ").title(),
-            )
-            for column, value in enumerate(values):
-                self.saved_table.setItem(row, column, QTableWidgetItem(value))
+            ))
+        self.saved_instruments.set_instruments(saved_devices)
 
     def set_assignment_allowed(self, allowed: bool) -> None:
         self._assignment_allowed = allowed
+        self.visa_results.set_assignment_allowed(allowed)
         self.save_assignments.setToolTip(
             "Persist selected VISA addresses. This changes the safety profile and revokes its approval."
             if allowed
@@ -454,6 +453,7 @@ class DashboardPage(QWidget):
             f"{icon[item.level]} {item.label}: {item.detail}" for item in readiness.items
         )
         self.checklist.setText("\n".join(lines))
+        self.readiness_changed.emit(readiness.ready)
 
     def evaluate_readiness(
         self,
@@ -485,6 +485,9 @@ class DashboardPage(QWidget):
         )
         self.scan_button.setEnabled(False)
         self.save_assignments.setEnabled(False)
+        self.visa_state = "scanning"
+        self.visa_progress.show()
+        self.visa_progress.start()
         self.discovery_info.setText("Scanning VISA resources… only *IDN? will be sent.")
         self._discovery_worker = VisaDiscoveryWorker(backends, self)
         self._discovery_worker.completed.connect(self._scan_completed)
@@ -494,50 +497,19 @@ class DashboardPage(QWidget):
 
     def _scan_completed(self, payload: object) -> None:
         self._discovery_results = tuple(payload) if isinstance(payload, tuple) else ()
-        self.discovery_table.setRowCount(0)
-        usable = 0
-        assignable = 0
-        for result in self._discovery_results:
-            row = self.discovery_table.rowCount()
-            self.discovery_table.insertRow(row)
-            assignment = QComboBox()
-            assignment.addItem("Do not assign", None)
-            assignment.addItem("Rigol", "rigol")
-            assignment.addItem("Keithley", "keithley")
-            assignment.addItem("Anritsu", "anritsu")
-            if result.device:
-                assignment.setCurrentIndex(assignment.findData(result.device))
-            assignment.setEnabled(
-                self._assignment_allowed and result.resource != "—" and result.idn is not None
+        states = tuple(
+            VisaResultState.from_result(
+                result,
+                configured_device=self._configured_device_for(result),
             )
-            assignment.setMinimumWidth(130)
-            self.discovery_table.setCellWidget(row, 0, assignment)
-            assign_button = QPushButton("Assign →")
-            assign_button.setObjectName("assignButton")
-            assign_button.setEnabled(
-                self._assignment_allowed and result.resource != "—" and result.idn is not None
-            )
-            assign_button.setToolTip(
-                "Assign this VISA resource to the device selected in the first column and save it immediately."
-            )
-            assign_button.clicked.connect(
-                lambda _checked=False, instrument=result, combo=assignment: self._emit_single_assignment(
-                    instrument, combo
-                )
-            )
-            self.discovery_table.setCellWidget(row, 1, assign_button)
-            status = "Recognized" if result.device else ("Unknown" if result.idn else "Unavailable")
-            self.discovery_table.setItem(row, 2, QTableWidgetItem(status))
-            self.discovery_table.setItem(row, 3, QTableWidgetItem(result.resource))
-            self.discovery_table.setItem(row, 4, QTableWidgetItem(result.backend))
-            self.discovery_table.setItem(row, 5, QTableWidgetItem(result.idn or result.error or "No response"))
-            if result.idn:
-                usable += 1
-            assigned_device = self._configured_device_for(result)
-            if assigned_device is not None:
-                self._set_row_assigned(row, assigned_device)
-            elif result.idn:
-                assignable += 1
+            for result in self._discovery_results
+        )
+        self.visa_results.set_results(states)
+        self.visa_state = "success" if states else "empty"
+        self.visa_progress.stop()
+        self.visa_progress.hide()
+        usable = sum(result.idn is not None for result in self._discovery_results)
+        assignable = sum(state.status in {"recognized", "unknown"} for state in states)
         self.save_assignments.setEnabled(self._assignment_allowed and assignable > 0)
         self.discovery_info.setText(
             f"Scan complete: {usable} responding instrument(s), {assignable} available for assignment."
@@ -546,7 +518,16 @@ class DashboardPage(QWidget):
         self._refresh_card_resource_choices()
 
     def _scan_failed(self, error: str) -> None:
+        self.visa_state = "failed"
+        self.visa_progress.stop()
+        self.visa_progress.hide()
         self.discovery_info.setText(f"VISA scan failed: {error}")
+        InfoBar.error(
+            title="VISA scan failed",
+            content=error,
+            parent=self.visa_discovery_page,
+            duration=4_000,
+        )
         self.status.emit(f"VISA discovery failed: {error}")
 
     @staticmethod
@@ -592,8 +573,7 @@ class DashboardPage(QWidget):
         self.tcp_scan_button.setEnabled(False)
         self.tcp_test_entered_button.setEnabled(False)
         self.tcp_stop_button.setEnabled(True)
-        self.tcp_discovery_table.setRowCount(0)
-        self._tcp_rows_by_host.clear()
+        self.tcp_results.clear()
         self.tcp_identify_button.setEnabled(False)
         self.tcp_assign_moke_button.setEnabled(False)
         total_hosts = self._tcp_scan_host_count(network, range_end)
@@ -655,56 +635,25 @@ class DashboardPage(QWidget):
             return None
 
     def _tcp_host_activity(self, host: str, state: str, verification: str) -> None:
-        row = self._tcp_rows_by_host.get(host)
-        if row is None:
-            row = self.tcp_discovery_table.rowCount()
-            self._tcp_rows_by_host[host] = row
-            self.tcp_discovery_table.insertRow(row)
-            self.tcp_discovery_table.setItem(
-                row, 0, QTableWidgetItem(f"{host}:{self.tcp_port.value()}")
-            )
-        label = {
-            "scanning": "Scanning…",
-            "closed": "Closed",
-            "open": "TCP port open",
-            "cancelled": "Cancelled",
-        }[state]
-        self.tcp_discovery_table.setItem(row, 1, QTableWidgetItem(label))
-        self.tcp_discovery_table.setItem(
-            row,
-            2,
-            QTableWidgetItem(verification or ("Pending…" if state == "scanning" else "—")),
+        self.tcp_results.upsert_endpoint(
+            host=host,
+            endpoint=f"{host}:{self.tcp_port.value()}",
+            state=state,
+            verification=verification or ("Pending…" if state == "scanning" else "—"),
         )
 
     def _update_tcp_identify_enabled(self) -> None:
-        selected = self.tcp_discovery_table.selectedItems()
-        enabled = False
-        if selected:
-            row = selected[0].row()
-            state = self.tcp_discovery_table.item(row, 1)
-            enabled = state is not None and state.text() in {"TCP port open", "Entered manually"}
+        state = self.tcp_results.selected_state
+        enabled = state in {"open", "entered"}
         self.tcp_identify_button.setEnabled(enabled and self._discovery_enabled)
-        verified = False
-        if selected:
-            row = selected[0].row()
-            verification = self.tcp_discovery_table.item(row, 2)
-            verified = verification is not None and verification.text() == "MOKE Box verified"
+        verified = self.tcp_results.selected_verification == "MOKE Box verified"
         self.tcp_assign_moke_button.setEnabled(verified and self._discovery_enabled)
 
     def _assign_selected_moke(self) -> None:
-        selected = self.tcp_discovery_table.selectedItems()
-        if not selected:
+        endpoint = self.tcp_results.selected_endpoint
+        if endpoint is None or self.tcp_results.selected_verification != "MOKE Box verified":
             return
-        row = selected[0].row()
-        endpoint = self.tcp_discovery_table.item(row, 0)
-        verification = self.tcp_discovery_table.item(row, 2)
-        if (
-            endpoint is None
-            or verification is None
-            or verification.text() != "MOKE Box verified"
-        ):
-            return
-        self.moke_assignment_requested.emit(endpoint.text())
+        self.moke_assignment_requested.emit(endpoint)
 
     def _identify_selected_moke(self) -> None:
         if (
@@ -712,19 +661,10 @@ class DashboardPage(QWidget):
             and self._moke_identification_worker.isRunning()
         ):
             return
-        selected = self.tcp_discovery_table.selectedItems()
-        if not selected:
+        endpoint = self.tcp_results.selected_endpoint
+        if endpoint is None or self.tcp_results.selected_state not in {"open", "entered"}:
             return
-        row = selected[0].row()
-        endpoint_item = self.tcp_discovery_table.item(row, 0)
-        state_item = self.tcp_discovery_table.item(row, 1)
-        if (
-            endpoint_item is None
-            or state_item is None
-            or state_item.text() not in {"TCP port open", "Entered manually"}
-        ):
-            return
-        host, separator, port_text = endpoint_item.text().rpartition(":")
+        host, separator, port_text = endpoint.rpartition(":")
         if not separator:
             return
         try:
@@ -747,7 +687,12 @@ class DashboardPage(QWidget):
         self._identifying_port = port
         self.tcp_identify_button.setEnabled(False)
         self.tcp_test_entered_button.setEnabled(False)
-        self.tcp_discovery_table.setItem(row, 2, QTableWidgetItem("Verifying MOKE…"))
+        self.tcp_results.upsert_endpoint(
+            host=host,
+            endpoint=endpoint,
+            state=self.tcp_results.selected_state or "open",
+            verification="Verifying MOKE…",
+        )
         self._moke_identification_worker = MokeIdentificationWorker(
             host, port, max(0.2, self.tcp_timeout_ms.value() / 1_000), self
         )
@@ -773,17 +718,13 @@ class DashboardPage(QWidget):
         except ValueError as exc:
             self.tcp_discovery_info.setText(f"Cannot test entered MOKE IP: {exc}.")
             return
-        row = self._tcp_rows_by_host.get(host)
-        if row is None:
-            row = self.tcp_discovery_table.rowCount()
-            self._tcp_rows_by_host[host] = row
-            self.tcp_discovery_table.insertRow(row)
-        self.tcp_discovery_table.setItem(
-            row, 0, QTableWidgetItem(f"{host}:{self.tcp_port.value()}")
+        self.tcp_results.upsert_endpoint(
+            host=host,
+            endpoint=f"{host}:{self.tcp_port.value()}",
+            state="entered",
+            verification="Pending test",
         )
-        self.tcp_discovery_table.setItem(row, 1, QTableWidgetItem("Entered manually"))
-        self.tcp_discovery_table.setItem(row, 2, QTableWidgetItem("Pending test"))
-        self.tcp_discovery_table.selectRow(row)
+        self.tcp_results.select_host(host)
         self._identify_selected_moke()
 
     def _moke_identification_completed(self, payload: object) -> None:
@@ -837,6 +778,7 @@ class DashboardPage(QWidget):
         rx_bytes: bytes,
     ) -> None:
         dialog = QDialog(self)
+        dialog.setObjectName("mokeProtocolTraceDialog")
         dialog.setWindowTitle(f"MOKE protocol test — {endpoint}")
         dialog.setMinimumSize(680, 460)
         layout = QVBoxLayout(dialog)
@@ -848,15 +790,15 @@ class DashboardPage(QWidget):
         detail_label.setWordWrap(True)
         layout.addWidget(detail_label)
 
-        trace = QPlainTextEdit()
+        trace_card = CardWidget(dialog)
+        trace_card.setObjectName("mokeProtocolTraceCard")
+        trace_layout = QVBoxLayout(trace_card)
+        trace_layout.setContentsMargins(12, 12, 12, 12)
+        trace = PlainTextEdit(trace_card)
+        trace.setObjectName("mokeProtocolTrace")
         trace.setReadOnly(True)
-        trace.setLineWrapMode(QPlainTextEdit.LineWrapMode.NoWrap)
+        trace.setLineWrapMode(PlainTextEdit.LineWrapMode.NoWrap)
         trace.setAccessibleName("MOKE TCP transmit and receive trace")
-        trace.setStyleSheet(
-            "QPlainTextEdit { font-family: Consolas, 'Courier New', monospace; "
-            "font-size: 11pt; background: #101820; color: #e7f1f8; "
-            "border: 1px solid #5d7485; border-radius: 5px; padding: 8px; }"
-        )
         trace.setPlainText(
             f"Endpoint: {endpoint}\n"
             f"Result: {'VERIFIED' if verified else 'FAILED'}\n\n"
@@ -865,11 +807,15 @@ class DashboardPage(QWidget):
             f"RX ← MOKE ({len(rx_bytes)} bytes)\n"
             f"{self._format_protocol_bytes(rx_bytes)}"
         )
-        layout.addWidget(trace, 1)
+        trace_layout.addWidget(trace)
+        layout.addWidget(trace_card, 1)
 
-        buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Close)
-        buttons.rejected.connect(dialog.reject)
-        layout.addWidget(buttons)
+        actions = QHBoxLayout()
+        actions.addStretch(1)
+        close_button = PushButton("Close", dialog)
+        close_button.clicked.connect(dialog.accept)
+        actions.addWidget(close_button)
+        layout.addLayout(actions)
         dialog.exec()
 
     def _detect_local_tcp_network(self) -> None:
@@ -902,7 +848,7 @@ class DashboardPage(QWidget):
         )
         self.tcp_scan_progress.setFormat("Scan complete — %v / %m")
         self.status.emit(
-            f"TCP/IP discovery completed: {self.tcp_discovery_table.rowCount()} host(s) accepted port {self.tcp_port.value()}"
+            f"TCP/IP discovery completed: {self.tcp_results.row_count} host(s) accepted port {self.tcp_port.value()}"
         )
 
     def _tcp_scan_failed(self, error: str) -> None:
@@ -917,11 +863,11 @@ class DashboardPage(QWidget):
 
     def _emit_assignments(self) -> None:
         assignments: dict[str, tuple[str, str, str]] = {}
-        for row, result in enumerate(self._discovery_results):
-            combo = self.discovery_table.cellWidget(row, 0)
-            if not isinstance(combo, QComboBox) or combo.currentData() is None or result.idn is None:
+        for row in self.visa_results.rows:
+            result = row.state.result
+            device = row.assignment.currentData()
+            if not isinstance(device, str) or result.idn is None or not row.assignment.isEnabled():
                 continue
-            device = str(combo.currentData())
             if device in assignments:
                 self.discovery_info.setText(f"Cannot save: more than one resource is assigned to {device.title()}.")
                 return
@@ -930,19 +876,6 @@ class DashboardPage(QWidget):
             self.discovery_info.setText("Select at least one responding instrument assignment.")
             return
         self.assignments_requested.emit(assignments)
-
-    def _emit_single_assignment(self, result: DiscoveredInstrument, combo: QComboBox) -> None:
-        device = combo.currentData()
-        if device is None:
-            self.discovery_info.setText("Select Rigol, Keithley or Anritsu before clicking Assign.")
-            combo.setFocus()
-            return
-        if result.idn is None or result.resource == "—":
-            self.discovery_info.setText("This VISA resource did not answer *IDN? and cannot be assigned.")
-            return
-        self.assignments_requested.emit(
-            {str(device): (result.resource, result.backend, result.idn)}
-        )
 
     def _card_assignment_requested(self, device: str, payload: object) -> None:
         if not isinstance(payload, tuple) or len(payload) != 3:
@@ -961,8 +894,9 @@ class DashboardPage(QWidget):
             "rigol": self._settings.rigol.connection,
             "keithley": self._settings.keithley.connection,
             "anritsu": self._settings.anritsu.connection,
+            "lakeshore_gaussmeter": self._settings.lakeshore_gaussmeter,
         }
-        for device in ("rigol", "keithley", "anritsu"):
+        for device in ("rigol", "keithley", "anritsu", "lakeshore_gaussmeter"):
             card = self.cards[device]
             matches = tuple(
                 result
@@ -987,10 +921,7 @@ class DashboardPage(QWidget):
     def mark_assignments_saved(self, assignments: dict[str, tuple[str, str, str]]) -> None:
         """Lock rows whose resource was successfully persisted by MainWindow."""
 
-        for row, result in enumerate(self._discovery_results):
-            for device, (resource, backend, _idn) in assignments.items():
-                if result.resource == resource and result.backend == backend:
-                    self._set_row_assigned(row, device)
+        self._refresh_visa_results()
         names = ", ".join(device.title() for device in sorted(assignments))
         self.discovery_info.setText(
             f"✓ Assignment saved for {names}. Connection cards above now use the selected VISA resources."
@@ -1007,19 +938,21 @@ class DashboardPage(QWidget):
                 and device.connection.visa_backend == result.backend
             ):
                 return name
+        lake_shore = self._settings.lakeshore_gaussmeter
+        if (
+            lake_shore.resource == result.resource
+            and lake_shore.visa_backend == result.backend
+        ):
+            return "lakeshore_gaussmeter"
         return None
 
-    def _set_row_assigned(self, row: int, device: str) -> None:
-        badge = QLabel(f"✓ Assigned to {device.title()}")
-        badge.setObjectName("assignmentConfirmed")
-        badge.setAccessibleName(f"Assigned to {device.title()}")
-        badge.setToolTip("This VISA resource is already saved. Change it in Settings or assign another resource.")
-        self.discovery_table.setCellWidget(row, 0, badge)
-        button = QPushButton("Assigned ✓")
-        button.setObjectName("assignmentCompleteButton")
-        button.setEnabled(False)
-        button.setToolTip(f"Already assigned to {device.title()}; duplicate assignment is disabled.")
-        self.discovery_table.setCellWidget(row, 1, button)
-        status_item = self.discovery_table.item(row, 2)
-        if status_item is not None:
-            status_item.setText("Assigned")
+    def _refresh_visa_results(self) -> None:
+        states = tuple(
+            VisaResultState.from_result(
+                result,
+                configured_device=self._configured_device_for(result),
+            )
+            for result in self._discovery_results
+        )
+        self.visa_results.set_results(states)
+        self.visa_results.set_assignment_allowed(self._assignment_allowed)

@@ -84,13 +84,30 @@ class ArchitectureTests(unittest.TestCase):
             )
         self.assertTrue(checked)
 
-    def test_legacy_main_window_is_only_a_small_facade(self) -> None:
+    def test_legacy_main_window_facades_are_removed(self) -> None:
         facade = ROOT / "app" / "ui" / "main_window.py"
         shell = ROOT / "app" / "ui" / "shell" / "main_window.py"
+        ui_init = ROOT / "app" / "ui" / "__init__.py"
 
-        self.assertLessEqual(len(facade.read_text(encoding="utf-8").splitlines()), 100)
+        self.assertFalse(facade.exists())
         self.assertTrue(shell.is_file())
         self.assertIn("class MainWindow", shell.read_text(encoding="utf-8"))
+        self.assertNotIn("MainWindow", ui_init.read_text(encoding="utf-8"))
+
+    def test_shell_does_not_alias_device_page_buttons_onto_dashboard_cards(self) -> None:
+        shell = (
+            ROOT / "app" / "ui" / "shell" / "main_window.py"
+        ).read_text(encoding="utf-8")
+        for name in ("connect_button", "disconnect_button", "test_button"):
+            self.assertNotIn(f"card.{name} =", shell)
+
+    def test_shell_uses_native_navigation_sizing_and_theme_actions(self) -> None:
+        shell = (
+            ROOT / "app" / "ui" / "shell" / "main_window.py"
+        ).read_text(encoding="utf-8")
+
+        self.assertNotIn("navigationInterface.setFixedWidth", shell)
+        self.assertNotIn("self.theme_action =", shell)
 
     def test_recipe_page_uses_the_recipe_extension_boundary(self) -> None:
         page = ROOT / "app" / "ui" / "recipes" / "page.py"

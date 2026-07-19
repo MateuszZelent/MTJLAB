@@ -1,0 +1,173 @@
+# Review package: 0689d36^..0689d36
+
+## Commits
+0689d36 build: add qualified PySide6 Fluent dependency
+
+## Files changed
+ pyproject.toml             |  1 +
+ requirements.lock.txt      |  3 +++
+ requirements.txt           |  1 +
+ tests/test_architecture.py | 12 ++++++++++++
+ tests/test_fluent_shell.py | 18 ++++++++++++++++++
+ 5 files changed, 35 insertions(+)
+
+## Diff
+diff --git a/pyproject.toml b/pyproject.toml
+index e73c1b3..bfc900c 100644
+--- a/pyproject.toml
++++ b/pyproject.toml
+@@ -6,20 +6,21 @@ build-backend = "setuptools.build_meta"
+ name = "lab-control"
+ version = "0.1.0"
+ description = "Safe local control software for a Rigol, Keithley and Anritsu measurement station."
+ requires-python = ">=3.11"
+ dependencies = [
+   "h5py>=3.11",
+   "h5netcdf>=1.8,<2",
+   "numpy>=1.26",
+   "pydantic>=2.7,<3",
+   "PySide6>=6.7",
++  "PySide6-Fluent-Widgets==1.11.2",
+   "pyqtgraph>=0.13.7,<0.14",
+   "PyThat==0.2.14",
+   "pyvisa>=1.14",
+   "pyvisa-py>=0.7",
+   "lakeshore==1.10.0",
+   "ruamel.yaml>=0.18",
+ ]
+ 
+ [project.optional-dependencies]
+ dev = ["pytest>=8.0", "ruff>=0.6"]
+diff --git a/requirements.lock.txt b/requirements.lock.txt
+index a2c87f8..4c1ae85 100644
+--- a/requirements.lock.txt
++++ b/requirements.lock.txt
+@@ -2,20 +2,21 @@
+ # python==3.14.6
+ annotated-types==0.6.0
+ certifi==2026.6.17
+ cftime==1.6.5
+ click==8.4.1
+ cloudpickle==3.1.2
+ colorama==0.4.6
+ contourpy==1.3.3
+ cycler==0.12.1
+ dask==2026.7.1
++darkdetect==0.8.0
+ fonttools==4.63.0
+ fsspec==2026.6.0
+ h5netcdf==1.8.1
+ h5py==3.16.0
+ iso8601==2.1.0
+ kiwisolver==1.5.0
+ lakeshore==1.10.0
+ locket==1.0.0
+ matplotlib==3.11.0
+ netCDF4==1.7.4
+@@ -25,20 +26,22 @@ pandas==3.0.3
+ partd==1.4.2
+ pillow==12.3.0
+ pydantic==2.13.4
+ pydantic_core==2.46.4
+ pyparsing==3.3.2
+ pyqtgraph==0.13.7
+ pyserial==3.5
+ PySide6==6.11.1
+ PySide6_Addons==6.11.1
+ PySide6_Essentials==6.11.1
++PySide6-Fluent-Widgets==1.11.2
++PySideSix-Frameless-Window==0.8.1
+ PyThat==0.2.14
+ python-dateutil==2.9.0.post0
+ PyVISA==1.16.2
+ PyVISA-py==0.8.1
+ PyYAML==6.0.3
+ ruamel.yaml==0.18.16
+ scipy==1.18.0
+ shiboken6==6.11.1
+ six==1.17.0
+ toolz==1.1.0
+diff --git a/requirements.txt b/requirements.txt
+index 56b1257..2e33dfc 100644
+--- a/requirements.txt
++++ b/requirements.txt
+@@ -1,17 +1,18 @@
+ # Runtime dependencies for Lab Control.
+ # Install with: python -m pip install -r requirements.txt
+ h5py>=3.11
+ h5netcdf>=1.8,<2
+ numpy>=1.26
+ pydantic>=2.7,<3
+ PySide6>=6.7
++PySide6-Fluent-Widgets==1.11.2
+ pyqtgraph>=0.13.7,<0.14
+ pyvisa>=1.14
+ pyvisa-py>=0.7
+ lakeshore==1.10.0
+ ruamel.yaml>=0.18
+ 
+ # Qualified reader used to validate thaTEC:OS-compatible HDF5 output.
+ PyThat==0.2.14
+ 
+ # Development and verification tools.
+diff --git a/tests/test_architecture.py b/tests/test_architecture.py
+index 4aeffee..f946a09 100644
+--- a/tests/test_architecture.py
++++ b/tests/test_architecture.py
+@@ -16,20 +16,32 @@ def _imports(path: Path) -> tuple[str, ...]:
+     imported: list[str] = []
+     for node in ast.walk(tree):
+         if isinstance(node, ast.Import):
+             imported.extend(alias.name for alias in node.names)
+         elif isinstance(node, ast.ImportFrom) and node.module is not None:
+             imported.append(node.module)
+     return tuple(imported)
+ 
+ 
+ class ArchitectureTests(unittest.TestCase):
++    def test_only_pyside6_fluent_distribution_is_declared(self) -> None:
++        root = Path(__file__).resolve().parents[1]
++        declarations = (
++            (root / "pyproject.toml").read_text(encoding="utf-8")
++            + (root / "requirements.txt").read_text(encoding="utf-8")
++            + (root / "requirements.lock.txt").read_text(encoding="utf-8")
++        ).lower()
++        self.assertIn("pyside6-fluent-widgets", declarations)
++        self.assertNotIn("pyqt-fluent-widgets", declarations)
++        self.assertNotIn("pyqt6-fluent-widgets", declarations)
++        self.assertNotIn("pyside2-fluent-widgets", declarations)
++
+     def test_generic_device_packages_do_not_exist(self) -> None:
+         for package in ("rigol", "keithley", "anritsu"):
+             self.assertFalse(
+                 (ROOT / "app" / "devices" / package).exists(),
+                 f"generic device package app.devices.{package} must not exist",
+             )
+ 
+     def test_registered_manifests_are_owned_by_their_concrete_packages(self) -> None:
+         from app.devices.registry import built_in_device_registry
+ 
+diff --git a/tests/test_fluent_shell.py b/tests/test_fluent_shell.py
+new file mode 100644
+index 0000000..0c2e5c9
+--- /dev/null
++++ b/tests/test_fluent_shell.py
+@@ -0,0 +1,18 @@
++from __future__ import annotations
++
++import unittest
++
++
++class FluentDependencyTests(unittest.TestCase):
++    def test_required_pyside6_fluent_surface_is_importable(self) -> None:
++        from qfluentwidgets import (
++            FluentWindow,
++            NavigationItemPosition,
++            Theme,
++            setTheme,
++        )
++
++        self.assertTrue(issubclass(FluentWindow, object))
++        self.assertTrue(hasattr(NavigationItemPosition, "BOTTOM"))
++        self.assertTrue(hasattr(Theme, "LIGHT"))
++        self.assertTrue(callable(setTheme))

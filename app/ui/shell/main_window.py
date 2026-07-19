@@ -6,20 +6,38 @@ from copy import deepcopy
 from pathlib import Path
 from typing import Any
 
-from PySide6.QtCore import QObject, QSettings, Qt, Signal
-from PySide6.QtGui import QAction, QActionGroup, QCloseEvent, QKeySequence, QShortcut
+from PySide6.QtCore import QSettings, Qt, Signal
+from PySide6.QtGui import (
+    QAction,
+    QActionGroup,
+    QCloseEvent,
+    QColor,
+    QKeySequence,
+    QPalette,
+    QShortcut,
+    QShowEvent,
+)
 from PySide6.QtWidgets import (
     QApplication,
     QDialog,
     QLineEdit,
-    QMainWindow,
     QMessageBox,
     QPlainTextEdit,
     QPushButton,
+    QSplitter,
     QVBoxLayout,
     QWidget,
 )
-from qfluentwidgets import FluentIcon, FluentWindow, NavigationItemPosition
+from qfluentwidgets import (
+    CaptionLabel,
+    FluentIcon,
+    FluentWindow,
+    NavigationItemPosition,
+    PlainTextEdit,
+    RoundMenu,
+    SimpleCardWidget,
+    TransparentDropDownToolButton,
+)
 
 from app.audit import AuditLogger
 from app.bootstrap import StationComposition
@@ -39,8 +57,8 @@ from app.ui.settings_page import SettingsPage
 from app.ui.run_worker import RunController, serialize_settings_snapshot
 from app.ui.dashboard import DashboardPage, DeviceConnectionPanel
 from app.ui.execution import RunMonitorPage
-from app.ui.results import ResultsPage
-from app.ui.design_system import effective_theme
+from app.ui.results import HeatmapResultsTab, ResultsPage
+from app.ui.design_system import apply_application_theme, effective_theme
 from app.ui.recipes import DeviceParameterDialog, SweepGeneratorDialog  # noqa: F401
 from app.ui.recipes.page import (  # noqa: F401
     AnritsuAcquisitionEditorDialog, CommentEditorDialog, FixedValueDialog,
@@ -49,62 +67,6 @@ from app.ui.recipes.page import (  # noqa: F401
 from app.ui.shell.page_host import FluentPageHost
 from app.ui.shell.safety_strip import StationSafetySnapshot, StationSafetyStrip
 from app.ui.widgets import LimitEditDialog, LimitField, SpectrumPlotWidget
-
-
-class _NavigationTabsAdapter(QObject):
-    """Temporary QTabWidget-shaped facade for legacy shell consumers."""
-
-    currentChanged = Signal(int)
-
-    def __init__(
-        self,
-        window: "MainWindow",
-        routes: tuple[str, ...],
-        labels: tuple[str, ...],
-    ) -> None:
-        super().__init__(window)
-        self._window = window
-        self._routes = routes
-        self._labels = labels
-        window.stackedWidget.currentChanged.connect(self.currentChanged)
-
-    def count(self) -> int:
-        return len(self._routes)
-
-    def currentIndex(self) -> int:
-        current = self._window.stackedWidget.currentWidget()
-        try:
-            return tuple(self._window.navigation_routes.values()).index(current)
-        except ValueError:
-            return -1
-
-    def currentWidget(self) -> QWidget | None:
-        return self._window.stackedWidget.currentWidget()
-
-    def setCurrentIndex(self, index: int) -> None:
-        if 0 <= index < len(self._routes):
-            self._window._navigate_to(self._routes[index])
-
-    def setCurrentWidget(self, widget: QWidget) -> None:
-        for route, host in self._window.navigation_routes.items():
-            if widget in {host, host.scroll_area, host.content}:
-                self._window._navigate_to(route)
-                return
-
-    def setTabEnabled(self, index: int, enabled: bool) -> None:
-        if 0 <= index < len(self._routes):
-            self._window._set_route_enabled(self._routes[index], enabled)
-
-    def isTabEnabled(self, index: int) -> bool:
-        if not 0 <= index < len(self._routes):
-            return False
-        return self._window.navigation_routes[self._routes[index]].isEnabled()
-
-    def tabText(self, index: int) -> str:
-        return self._labels[index]
-
-    def setAccessibleName(self, name: str) -> None:
-        self._window.stackedWidget.setAccessibleName(name)
 
 
 class MainWindow(FluentWindow):
@@ -171,14 +133,12 @@ class MainWindow(FluentWindow):
         )
 
     def _build(self) -> None:
-        self._content_window = QMainWindow(self)
-        self._content_window.setObjectName("fluentContentWindow")
-        content = QWidget(self._content_window)
-        content.setObjectName("fluentShellContent")
-        content_layout = QVBoxLayout(content)
+        self.fluent_content = QWidget(self)
+        self.fluent_content.setObjectName("fluentShellContent")
+        content_layout = QVBoxLayout(self.fluent_content)
         content_layout.setContentsMargins(12, 8, 12, 8)
         content_layout.setSpacing(8)
-        self.safety_strip = StationSafetyStrip(content)
+        self.safety_strip = StationSafetyStrip(self.fluent_content)
         self.safety_strip.estop.setText("E-STOP")
         self.safety_strip.estop.setMaximumWidth(96)
         self.safety_strip.estop.setFixedHeight(28)
@@ -191,14 +151,20 @@ class MainWindow(FluentWindow):
             "border-radius: 6px; color: palette(text); padding: 3px 10px;"
         )
         content_layout.addWidget(self.safety_strip)
+        self.status_message = CaptionLabel(self.fluent_content)
+        self.status_message.setObjectName("shellStatusMessage")
+        content_layout.addWidget(self.status_message)
+        self.shell_splitter = QSplitter(
+            Qt.Orientation.Vertical,
+            self.fluent_content,
+        )
+        self.shell_splitter.setObjectName("fluentShellSplitter")
+        self.shell_splitter.setChildrenCollapsible(False)
         self.widgetLayout.removeWidget(self.stackedWidget)
-        content_layout.addWidget(self.stackedWidget, 1)
-        self._content_window.setCentralWidget(content)
-        self.widgetLayout.addWidget(self._content_window)
-        self._content_window.show()
+        self.shell_splitter.addWidget(self.stackedWidget)
+        content_layout.addWidget(self.shell_splitter, 1)
+        self.widgetLayout.addWidget(self.fluent_content)
         self.navigationInterface.setExpandWidth(248)
-        self.navigationInterface.setMinimumExpandWidth(1000)
-        self.navigationInterface.expand(useAni=False)
 
         registry = self._composition.registry
         self.dashboard = DashboardPage(
@@ -229,13 +195,6 @@ class MainWindow(FluentWindow):
                 )
             page.layout().insertWidget(0, panel)
             self.connection_panels[key] = panel
-            # Compatibility facade for integrations that accessed connection
-            # controls through the dashboard card. The buttons themselves are
-            # parented and rendered only on the device page.
-            card = self.dashboard.cards[key]
-            card.connect_button = panel.connect_button
-            card.disconnect_button = panel.disconnect_button
-            card.test_button = panel.test_button
         self.recipe_page = RecipePage(
             self._settings,
             device_registry=self._composition.registry,
@@ -321,63 +280,81 @@ class MainWindow(FluentWindow):
             configure_limit_button(field, device="Anritsu")
             field.edit_requested.connect(lambda field=field: self._edit_device_limit("anritsu", field))
         route_icons = {
-            "dashboard": FluentIcon.HOME,
-            "rigol": FluentIcon.SPEED_HIGH,
-            "keithley": FluentIcon.CALORIES,
-            "anritsu": FluentIcon.WIFI,
-            "moke_box": FluentIcon.SYNC,
-            "lakeshore_gaussmeter": FluentIcon.FLAG,
+            "overview": FluentIcon.HOME,
+            "discovery": FluentIcon.SEARCH,
+            "rigol": FluentIcon.MEDIA,
+            "keithley": FluentIcon.POWER_BUTTON,
+            "anritsu": FluentIcon.PROJECTOR,
+            "moke_box": FluentIcon.IOT,
+            "lakeshore_gaussmeter": FluentIcon.PIN,
             "sweeps": FluentIcon.DOCUMENT,
             "execution": FluentIcon.PLAY,
             "results": FluentIcon.FOLDER,
             "settings": FluentIcon.SETTING,
         }
         route_specs = (
-            (self.dashboard, "dashboard", "Dashboard", "Dashboard"),
+            (self.dashboard.navigation_pages["overview"], "overview", "Overview"),
+            (self.dashboard.navigation_pages["discovery"], "discovery", "Discovery"),
             (
                 self.rigol_page,
                 "rigol",
-                "Rigol",
                 registry.get("rigol").display_name,
             ),
             (
                 self.keithley_page,
                 "keithley",
-                "Keithley",
                 registry.get("keithley").display_name,
             ),
             (
                 self.anritsu_page,
                 "anritsu",
-                "Anritsu",
                 registry.get("anritsu").display_name,
             ),
             (
                 self.moke_box_page,
                 "moke_box",
-                "MOKE Box",
                 registry.get("moke_box").display_name,
             ),
             (
                 self.lakeshore_gaussmeter_page,
                 "lakeshore_gaussmeter",
-                "Lake Shore 475",
                 registry.get("lakeshore_gaussmeter").display_name,
             ),
-            (self.recipe_page, "sweeps", "Sweeps", "Sweeps"),
-            (self.run_monitor, "execution", "Execution", "Execution"),
-            (self.results_page, "results", "Results", "Results"),
-            (self.settings_page, "settings", "Settings", "Settings"),
+            (self.recipe_page, "sweeps", "Sweeps"),
+            (self.run_monitor, "execution", "Execution"),
+            (self.results_page, "results", "Results"),
+            (self.settings_page, "settings", "Settings"),
         )
         self.navigation_routes: dict[str, FluentPageHost] = {}
-        self._route_for_widget: dict[QWidget, str] = {}
-        self._tab_indices: dict[str, int] = {}
-        for index, (widget, route, legacy_label, display_name) in enumerate(route_specs):
+        self.apparatus_navigation_item = self.navigationInterface.addItem(
+            routeKey="apparatusMenu",
+            icon=FluentIcon.DEVELOPER_TOOLS,
+            text="Aparatura",
+            selectable=False,
+            position=NavigationItemPosition.TOP,
+            tooltip="Sterowanie podłączoną aparaturą pomiarową",
+        )
+        apparatus_routes = {
+            "rigol",
+            "keithley",
+            "anritsu",
+            "moke_box",
+            "lakeshore_gaussmeter",
+        }
+        for widget, route, display_name in route_specs:
+            if route == "settings":
+                self.theme_navigation_item = self.navigationInterface.addItem(
+                    routeKey="themeMenu",
+                    icon=FluentIcon.BRUSH,
+                    text="Theme",
+                    onClick=self._open_theme_navigation_menu,
+                    selectable=False,
+                    position=NavigationItemPosition.BOTTOM,
+                    tooltip="Choose application theme",
+                )
             host = FluentPageHost(widget, self)
             host.setObjectName(f"{route}PageHost")
             self.navigation_routes[route] = host
-            self._route_for_widget[widget] = route
-            self._tab_indices[legacy_label] = index
             position = (
                 NavigationItemPosition.BOTTOM
                 if route == "settings"
@@ -388,22 +365,34 @@ class MainWindow(FluentWindow):
                 route_icons[route],
                 display_name,
                 position=position,
+                parent="apparatusMenu" if route in apparatus_routes else None,
             )
             widget._scroll_area = host.scroll_area
-        self.tabs = _NavigationTabsAdapter(
-            self,
-            tuple(self.navigation_routes),
-            tuple(spec[3] for spec in route_specs),
-        )
-        self.log = QPlainTextEdit()
+        # Keep the equipment group open on launch: device controls remain a
+        # single click away while the navigation still communicates hierarchy.
+        self.apparatus_navigation_item.setExpanded(True, ani=False)
+        self.log = PlainTextEdit()
+        self.log.setObjectName("eventLogText")
+        self.log.setProperty("stationSurface", "raised")
         self.log.setReadOnly(True)
         self.log.setMaximumBlockCount(500)
         self.log.setMinimumHeight(50)
-        self.setStatusBar(self.statusBar())
-        self.event_log_dock = self._log_dock()
-        self.addDockWidget(Qt.DockWidgetArea.BottomDockWidgetArea, self.event_log_dock)
-        self.resizeDocks([self.event_log_dock], [120], Qt.Orientation.Vertical)
+        self.event_log_panel = SimpleCardWidget(self.fluent_content)
+        self.event_log_panel.setObjectName("eventLogPanel")
+        self.event_log_panel.setProperty("stationSurface", "surface")
+        event_log_layout = QVBoxLayout(self.event_log_panel)
+        event_log_layout.setContentsMargins(12, 8, 12, 8)
+        event_log_layout.setSpacing(6)
+        event_log_layout.addWidget(CaptionLabel("Event log", self.event_log_panel))
+        event_log_layout.addWidget(self.log)
+        self.shell_splitter.addWidget(self.event_log_panel)
+        self.shell_splitter.setStretchFactor(0, 1)
+        self.shell_splitter.setStretchFactor(1, 0)
+        self.shell_splitter.setSizes([700, 120])
         self.dashboard.emergency_requested.connect(self._emergency_off_all)
+        self.dashboard.readiness_changed.connect(
+            lambda _ready: self._refresh_safety_strip()
+        )
         self.dashboard.assignments_requested.connect(self._save_discovered_assignments)
         self.dashboard.moke_assignment_requested.connect(self._save_moke_assignment)
         self.dashboard.status.connect(self._log)
@@ -429,30 +418,54 @@ class MainWindow(FluentWindow):
             self.settings_page,
         ):
             page.status.connect(self._log)
-        menu = self.menuBar().addMenu("Application")
-        theme_menu = menu.addMenu("Theme")
         self.theme_group = QActionGroup(self)
         self.theme_group.setExclusive(True)
         self.theme_actions: dict[str, QAction] = {}
         configured_theme = str(self._settings.ui.get("theme", "system")).lower()
         if configured_theme not in {"light", "dark", "system"}:
             configured_theme = "system"
+        self._configured_theme_mode = configured_theme
         for mode, label in (("system", "System"), ("light", "Light"), ("dark", "Dark")):
             action = QAction(label, self)
             action.setCheckable(True)
             action.setData(mode)
             action.setChecked(mode == configured_theme)
-            action.triggered.connect(lambda checked=False, mode=mode: checked and self._set_theme_mode(mode))
+            action.triggered.connect(
+                lambda checked=False, mode=mode: (
+                    checked and self._activate_theme_mode(mode)
+                )
+            )
             self.theme_group.addAction(action)
-            theme_menu.addAction(action)
+            self.addAction(action)
             self.theme_actions[mode] = action
-        # Compatibility alias for integrations that used the former action.
-        self.theme_action = self.theme_actions["light"]
-        menu.addAction(self.event_log_dock.toggleViewAction())
-        menu.addSeparator()
+        self.theme_navigation_menu = RoundMenu("Theme", self)
+        self.theme_navigation_menu.addActions(
+            tuple(self.theme_actions.values())
+        )
+        self.event_log_action = QAction("Event log", self)
+        self.event_log_action.setCheckable(True)
+        self.event_log_action.setChecked(True)
+        self.event_log_action.toggled.connect(self.event_log_panel.setVisible)
+        self.addAction(self.event_log_action)
         quit_action = QAction("Safe shutdown", self)
         quit_action.triggered.connect(self.close)
-        menu.addAction(quit_action)
+        self.addAction(quit_action)
+        application_menu = RoundMenu("Application", self)
+        application_menu.addAction(self.event_log_action)
+        application_menu.addAction(quit_action)
+        self.application_menu_button = TransparentDropDownToolButton(
+            FluentIcon.MENU,
+            self.titleBar,
+        )
+        self.application_menu_button.setAccessibleName("Application menu")
+        self.application_menu_button.setToolTip("Application menu")
+        self.application_menu_button.setMenu(application_menu)
+        self.titleBar.hBoxLayout.insertWidget(
+            self.titleBar.hBoxLayout.count() - 1,
+            self.application_menu_button,
+            0,
+            Qt.AlignmentFlag.AlignVCenter,
+        )
         self.estop_shortcut = QShortcut(QKeySequence("Ctrl+Shift+E"), self)
         self.estop_shortcut.setContext(Qt.ShortcutContext.ApplicationShortcut)
         self.estop_shortcut.activated.connect(self._emergency_off_all)
@@ -461,13 +474,19 @@ class MainWindow(FluentWindow):
         self.safety_strip.estop_requested.connect(self._emergency_off_all)
         self._refresh_safety_strip()
 
-    def _set_current_tab_widget(self, widget: QWidget) -> None:
-        route = self._route_for_widget.get(widget)
-        if route is not None:
-            self._navigate_to(route)
-
     def _navigate_to(self, route: str) -> None:
         self.switchTo(self.navigation_routes[route])
+
+    def _current_route(self) -> str:
+        current = self.stackedWidget.currentWidget()
+        return next(
+            (
+                route
+                for route, host in self.navigation_routes.items()
+                if host is current
+            ),
+            "overview",
+        )
 
     def _set_route_enabled(self, route: str, enabled: bool) -> None:
         host = self.navigation_routes[route]
@@ -495,26 +514,18 @@ class MainWindow(FluentWindow):
             )
         )
 
-    def menuBar(self):
-        return self._content_window.menuBar()
+    def _show_status_message(self, message: str) -> None:
+        self.status_message.setText(message)
 
-    def statusBar(self):
-        return self._content_window.statusBar()
+    def _open_theme_navigation_menu(self) -> None:
+        position = self.theme_navigation_item.mapToGlobal(
+            self.theme_navigation_item.rect().topRight()
+        )
+        self.theme_navigation_menu.exec(position)
 
-    def setStatusBar(self, status_bar) -> None:
-        self._content_window.setStatusBar(status_bar)
-
-    def addDockWidget(self, area, dock_widget) -> None:
-        self._content_window.addDockWidget(area, dock_widget)
-
-    def resizeDocks(self, docks, sizes, orientation) -> None:
-        self._content_window.resizeDocks(docks, sizes, orientation)
-
-    def saveState(self, version: int = 0):
-        return self._content_window.saveState(version)
-
-    def restoreState(self, state, version: int = 0) -> bool:
-        return self._content_window.restoreState(state, version)
+    def _activate_theme_mode(self, mode: str) -> None:
+        self.theme_actions[mode].setChecked(True)
+        self._set_theme_mode(mode)
 
     def _apply_accessibility(self) -> None:
         """Ensure controls expose text as well as colour and have screen-reader metadata."""
@@ -527,9 +538,9 @@ class MainWindow(FluentWindow):
         for editor in self.findChildren(QLineEdit):
             if not editor.accessibleName():
                 editor.setAccessibleName(editor.placeholderText() or "Numeric or text parameter")
-        self.tabs.setAccessibleName("Application workspace")
+        self.stackedWidget.setAccessibleName("Application workspace")
         self.log.setAccessibleName("Event log")
-        self.statusBar().setAccessibleName("Current application status")
+        self.status_message.setAccessibleName("Current application status")
 
     @staticmethod
     def _nested_value(payload: dict[str, Any], path: tuple[str, ...]) -> Any:
@@ -628,20 +639,36 @@ class MainWindow(FluentWindow):
 
         self.settings_page.reload()
         self._settings_saved(settings)
-        self.statusBar().showMessage(f"Saved {title}; safety profile approval is now required.", 12_000)
+        self._show_status_message(
+            f"Saved {title}; safety profile approval is now required."
+        )
         self._log(f"Safety limits saved: {title}")
 
     def _set_theme_mode(self, mode: str, *, persist: bool = True) -> None:
         theme = effective_theme(mode)
         application = QApplication.instance()
         if application is not None:
+            applied_theme = apply_application_theme(application, mode)
+            self._apply_navigation_surface(applied_theme.tokens.surface)
             application.setProperty("activeTheme", theme)
         for plot in self.findChildren(SpectrumPlotWidget):
             plot.apply_theme(theme)
+        for heatmap in self.findChildren(HeatmapResultsTab):
+            heatmap.apply_theme(theme)
         self.theme_changed.emit(theme)
         if persist:
             self._persist_theme(mode)
         self._log(f"Theme changed to {mode} ({theme})" + (" and saved" if persist else ""))
+
+    def _apply_navigation_surface(self, color: str) -> None:
+        """Keep Fluent's translucent navigation panel opaque across theme swaps."""
+
+        panel = self.navigationInterface.panel
+        palette = panel.palette()
+        palette.setColor(QPalette.ColorRole.Window, QColor(color))
+        panel.setPalette(palette)
+        panel.setAutoFillBackground(True)
+        panel.update()
 
     def refresh_system_theme(self) -> None:
         if self.theme_actions["system"].isChecked():
@@ -662,32 +689,35 @@ class MainWindow(FluentWindow):
             return
         self.settings_page.reload()
 
-    def _log_dock(self):
-        from PySide6.QtWidgets import QDockWidget
-
-        dock = QDockWidget("Event log", self)
-        dock.setObjectName("eventLogDock")
-        dock.setWidget(self.log)
-        return dock
-
     def _restore_workspace(self) -> None:
         settings = QSettings("LabControl", "LabControl")
         geometry = settings.value("main_window/geometry")
-        state = settings.value("main_window/state")
+        content_splitter = settings.value("main_window/content_splitter")
         splitter = settings.value("anritsu/splitter")
         if geometry is not None:
             self.restoreGeometry(geometry)
-        if state is not None:
-            self.restoreState(state, 1)
+        # Navigation is deliberately expanded at every launch. Collapsing it is
+        # an operator's current-session preference, never a persisted default.
+        self._navigation_expanded_preference = True
+        self._navigation_layout_initialized = False
+        if content_splitter is not None:
+            self.shell_splitter.restoreState(content_splitter)
         if splitter is not None:
             self.anritsu_page.workspace_splitter.restoreState(splitter)
-        self.tabs.setCurrentIndex(int(settings.value("main_window/current_tab", 0)))
+        route = str(settings.value("main_window/current_route", "overview"))
+        if route not in self.navigation_routes:
+            route = "overview"
+        self._navigate_to(route)
 
     def _save_workspace(self) -> None:
         settings = QSettings("LabControl", "LabControl")
         settings.setValue("main_window/geometry", self.saveGeometry())
-        settings.setValue("main_window/state", self.saveState(1))
-        settings.setValue("main_window/current_tab", self.tabs.currentIndex())
+        settings.setValue(
+            "main_window/content_splitter",
+            self.shell_splitter.saveState(),
+        )
+        settings.remove("main_window/navigation_expanded")
+        settings.setValue("main_window/current_route", self._current_route())
         settings.setValue("anritsu/splitter", self.anritsu_page.workspace_splitter.saveState())
 
     def _connect_controllers(self) -> None:
@@ -906,7 +936,7 @@ class MainWindow(FluentWindow):
             estimate.nominal_duration_s,
         )
         self._set_run_ui_locked(True)
-        self._set_current_tab_widget(self.run_monitor)
+        self._navigate_to("execution")
         self._log("Run Engine started")
 
     def _open_historical_thatec_sweep(self, run: object, tree: object) -> None:
@@ -919,7 +949,7 @@ class MainWindow(FluentWindow):
         except Exception as exc:
             QMessageBox.warning(self, "THATEC Sweep", f"Cannot reconstruct Sweep tree: {exc}")
             return
-        self._set_current_tab_widget(self.recipe_page)
+        self._navigate_to("sweeps")
         self._log("Historical THATEC Sweep reconstructed in Sweeps")
 
     def _resume_run(self, selected: object) -> None:
@@ -1016,7 +1046,7 @@ class MainWindow(FluentWindow):
             estimate.nominal_duration_s * remaining_fraction,
         )
         self._set_run_ui_locked(True)
-        self._set_current_tab_widget(self.run_monitor)
+        self._navigate_to("execution")
         self._log(
             f"Run recovery started at safe checkpoint {checkpoint.stored_points}; "
             f"discarding {discarded} unsafe tail point(s)"
@@ -1137,7 +1167,7 @@ class MainWindow(FluentWindow):
         assignments = {
             str(device): value
             for device, value in payload.items()
-            if device in {"rigol", "keithley", "anritsu"}
+            if device in {"rigol", "keithley", "anritsu", "lakeshore_gaussmeter"}
             and isinstance(value, tuple)
             and len(value) == 3
         }
@@ -1170,14 +1200,21 @@ class MainWindow(FluentWindow):
             loaded = self._repository.load()
             raw = deepcopy(loaded.raw)
             for device, (resource, backend, _idn) in assignments.items():
-                old = raw["devices"][device]["connection"]
+                profile = raw["devices"][device]
+                old = (
+                    profile
+                    if device == "lakeshore_gaussmeter"
+                    else profile["connection"]
+                )
                 self._log(
                     f"VISA ASSIGN WRITE [{device}]: {old.get('resource')!r}/{old.get('visa_backend')!r} "
                     f"-> {resource!r}/{backend!r}"
                 )
-                connection = raw["devices"][device]["connection"]
+                connection = old
                 connection["resource"] = resource
                 connection["visa_backend"] = backend
+                if device == "lakeshore_gaussmeter":
+                    connection["enabled"] = True
             settings = self._repository.save_raw(raw)
         except Exception as exc:
             self._log(f"VISA ASSIGN FAILED: {type(exc).__name__}: {exc}")
@@ -1243,9 +1280,16 @@ class MainWindow(FluentWindow):
             self.lakeshore_gaussmeter_page.stop_live(
                 "Live field readout paused while a recipe run owns the Lake Shore 475."
             )
-        for label in ("Rigol", "Keithley", "Anritsu", "MOKE Box", "Lake Shore 475", "Sweeps", "Settings"):
-            index = self._tab_indices[label]
-            self.tabs.setTabEnabled(index, not locked)
+        for route in (
+            "rigol",
+            "keithley",
+            "anritsu",
+            "moke_box",
+            "lakeshore_gaussmeter",
+            "sweeps",
+            "settings",
+        ):
+            self._set_route_enabled(route, not locked)
 
     def _require_permission(
         self,
@@ -1340,7 +1384,20 @@ class MainWindow(FluentWindow):
             correlation_id=self._run_correlation_id,
         )
         self.log.appendPlainText(message)
-        self.statusBar().showMessage(message, 8_000)
+        self._show_status_message(message)
+
+    def showEvent(self, event: QShowEvent) -> None:
+        super().showEvent(event)
+        if self._navigation_layout_initialized:
+            return
+        self._navigation_layout_initialized = True
+        if self._navigation_expanded_preference:
+            self.navigationInterface.expand(useAni=False)
+        # Fluent recalculates a navigation tree's size hint while its parent
+        # panel is laid out. Re-toggling here prevents child rows from keeping
+        # their pre-layout geometry and overlapping the group heading.
+        self.apparatus_navigation_item.setExpanded(False, ani=False)
+        self.apparatus_navigation_item.setExpanded(True, ani=False)
 
     def closeEvent(self, event: QCloseEvent) -> None:
         self._audit_record(

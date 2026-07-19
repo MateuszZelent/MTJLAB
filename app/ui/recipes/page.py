@@ -12,7 +12,8 @@ from uuid import uuid4
 
 from PySide6.QtCore import QMimeData, QSize, QSettings, QThread, QTimer, Qt, Signal
 from PySide6.QtGui import QAction, QActionGroup, QCloseEvent, QColor, QDrag, QIcon, QKeySequence, QPainter, QPixmap, QShortcut
-from PySide6.QtWidgets import QAbstractItemView, QApplication, QComboBox, QCheckBox, QDialog, QDialogButtonBox, QFormLayout, QFrame, QFileDialog, QHBoxLayout, QHeaderView, QLabel, QLineEdit, QMainWindow, QMenu, QMessageBox, QPlainTextEdit, QPushButton, QScrollArea, QSplitter, QSpinBox, QTabWidget, QStyle, QToolBar, QToolButton, QTreeWidget, QTreeWidgetItem, QVBoxLayout, QWidget
+from PySide6.QtWidgets import QAbstractItemView, QApplication, QComboBox, QCheckBox, QDialog, QDialogButtonBox, QFormLayout, QFrame, QFileDialog, QHBoxLayout, QHeaderView, QLabel, QLineEdit, QMainWindow, QMenu, QMessageBox, QPlainTextEdit, QPushButton, QScrollArea, QSplitter, QSpinBox, QStackedWidget, QStyle, QToolButton, QTreeWidget, QTreeWidgetItem, QVBoxLayout, QWidget
+from qfluentwidgets import CardWidget, CommandBar, PrimaryPushButton, PushButton, SegmentedWidget
 
 from app.audit import AuditLogger
 from app.contracts import DeviceModuleRegistry
@@ -86,149 +87,11 @@ class RecipePage(QWidget):
                     if item["target"].startswith("moke_box.")
                 )
             )
-        self.setStyleSheet(
-            """
-            QFrame#recipeHero { border: 0; background: transparent; }
-            QLabel#recipePageTitle { font-size: 16pt; font-weight: 700; }
-            QToolBar#recipeCommandBar {
-                background: transparent;
-                border: 0;
-                spacing: 5px;
-                padding: 0;
-            }
-            QToolBar#recipeCommandBar QToolButton {
-                border: 0;
-                border-radius: 5px;
-                padding: 5px 8px;
-                background: transparent;
-            }
-            QToolBar#recipeCommandBar QToolButton:hover { background: rgba(40, 130, 210, 22); }
-            QToolBar#recipeCommandBar::separator { width: 1px; background: rgba(122, 145, 167, 80); margin: 5px 7px; }
-            QLabel#recipeProfileBadge {
-                color: #18844c;
-                border: 1px solid rgba(24, 132, 76, 100);
-                border-radius: 11px;
-                padding: 3px 9px;
-                font-weight: 700;
-            }
-            QFrame#recipeActionBar { border: 0; background: transparent; }
-            QFrame#recipeLibrary { border: 0; background: transparent; }
-            QFrame#recipeInspector, QFrame#recipeEditorParameters {
-                border: 1px solid rgba(122, 145, 167, 80);
-                border-radius: 10px;
-                background: palette(base);
-            }
-            QToolButton#recipeToolButton, QToolButton#recipePrimaryToolButton {
-                border: 0;
-                border-radius: 6px;
-                padding: 6px 8px;
-                background: transparent;
-            }
-            QToolButton#recipeToolButton:hover { background: rgba(40, 130, 210, 24); }
-            QToolButton#recipePrimaryToolButton {
-                background: rgba(23, 105, 170, 28);
-                color: #1769aa;
-            }
-            QToolButton#recipePrimaryToolButton:hover { background: rgba(23, 105, 170, 48); }
-            QToolButton#recipeLibraryButton {
-                border: 0;
-                border-radius: 7px;
-                padding: 8px;
-                min-height: 44px;
-                text-align: left;
-                background: palette(base);
-            }
-            QToolButton#recipeLibraryButton:hover {
-                border-color: #2f82c6;
-                background: rgba(40, 130, 210, 28);
-            }
-            QLabel#recipeLibraryHeading { font-weight: 800; font-size: 9pt; letter-spacing: 0.6px; }
-            QFrame#recipeLibraryGroup { border: 0; background: transparent; }
-            QLabel#recipeLibraryGroupTitle { font-weight: 700; font-size: 9pt; color: palette(mid); }
-            QLabel#recipeLibraryBadge {
-                border-radius: 7px;
-                padding: 1px 5px;
-                background: rgba(100, 130, 160, 20);
-                font-size: 8pt;
-            }
-            QToolButton#recipeLibraryAction {
-                border: 1px solid #e1e8ef;
-                border-radius: 8px;
-                padding: 9px 10px;
-                min-height: 32px;
-                text-align: left;
-                background: #ffffff;
-            }
-            QToolButton#recipeLibraryAction:hover {
-                border-color: #8cc4f2;
-                background: #f1f7fc;
-            }
-            QToolButton#recipeLibraryAction[deviceKind="structure"] { color: #3479c9; }
-            QToolButton#recipeLibraryAction[deviceKind="keithley"] { color: #c63e42; }
-            QToolButton#recipeLibraryAction[deviceKind="rigol"] { color: #9a7100; }
-            QToolButton#recipeLibraryAction[deviceKind="anritsu"] { color: #18844c; }
-            QToolButton#recipeLibraryAction[deviceKind="timing"] { color: #7645bb; }
-            QLabel#recipeHint {
-                border-radius: 6px;
-                padding: 7px;
-                color: palette(mid);
-                background: rgba(100, 130, 160, 12);
-            }
-            QTreeWidget#recipeTree { border: 0; background: palette(base); alternate-background-color: transparent; }
-            QTreeWidget#recipeTree::item { min-height: 28px; padding: 3px 5px; border: 0; }
-            QTreeWidget#recipeTree::item:hover { background: rgba(40, 130, 210, 16); }
-            QTreeWidget#recipeTree::item:selected { background: rgba(40, 130, 210, 22); color: palette(text); border: 1px solid rgba(40, 130, 210, 110); }
-            QHeaderView::section { background: transparent; border: 0; border-bottom: 1px solid rgba(122, 145, 167, 80); padding: 6px; font-size: 8pt; }
-            QLabel#recipeLimitStatus[severity="ok"] {
-                color: #19805c;
-                background: rgba(25, 128, 92, 28);
-                border-radius: 6px;
-                padding: 7px;
-            }
-            QLabel#recipeLimitStatus[severity="blocker"] {
-                color: #b4233a;
-                background: rgba(180, 35, 58, 24);
-                border-radius: 6px;
-                padding: 7px;
-            }
-            """
-        )
         self._settings = settings
         self._keithley_snapshot_provider = None
         self._rigol_snapshot_provider = None
         self._anritsu_snapshot_provider = None
         self._anritsu_sg_snapshot_provider = None
-        # The Recipe Builder owns a high-density workspace.  Do not use
-        # palette(base) here: on Windows it may resolve to a stale dark system
-        # palette after the application has switched to the light stylesheet.
-        self.setStyleSheet(
-            self.styleSheet()
-            + """
-            QFrame#recipeInspector, QFrame#recipeEditorParameters {
-                background: #ffffff;
-                color: #17212b;
-                border-color: #d9e2ec;
-            }
-            QTreeWidget#recipeTree {
-                background: #ffffff;
-                color: #17212b;
-                border: 1px solid #d9e2ec;
-                alternate-background-color: #f8fafc;
-            }
-            QTreeWidget#recipeTree::item { color: #17212b; }
-            QTreeWidget#recipeTree::item:hover { background: #f1f7fc; }
-            QTreeWidget#recipeTree::item:selected {
-                background: #e8f3fd;
-                color: #102a43;
-                border: 1px solid #8cc4f2;
-            }
-            QTreeWidget#recipeTree QHeaderView::section {
-                background: #f8fafc;
-                color: #526273;
-                border-bottom: 1px solid #d9e2ec;
-            }
-            """
-        )
         self._plan = None
         self._preflight_thread: QThread | None = None
         self._preflight_worker: RecipePreflightWorker | None = None
@@ -244,7 +107,8 @@ class RecipePage(QWidget):
         layout = QVBoxLayout(self)
         layout.setContentsMargins(14, 12, 14, 12)
         layout.setSpacing(10)
-        hero = QFrame()
+        self.hero_card = CardWidget()
+        hero = self.hero_card
         hero.setObjectName("recipeHero")
         hero_layout = QVBoxLayout(hero)
         hero_layout.setContentsMargins(14, 10, 14, 10)
@@ -259,18 +123,17 @@ class RecipePage(QWidget):
         subtitle.setWordWrap(True)
         hero_layout.addWidget(subtitle)
         layout.addWidget(hero)
-        self.recipe_command_bar = QToolBar()
+        self.recipe_command_bar = CommandBar()
         self.recipe_command_bar.setObjectName("recipeCommandBar")
-        self.recipe_command_bar.setMovable(False)
         self.recipe_command_bar.setIconSize(QSize(18, 18))
         self.recipe_command_bar.setToolButtonStyle(
             Qt.ToolButtonStyle.ToolButtonTextBesideIcon
         )
         path_line = QHBoxLayout()
         self.path = _line("recipes/example_nested_sweep.yml", 42)
-        self.restore_button = QPushButton("Restore autosave")
+        self.restore_button = PushButton("Restore autosave")
         self.restore_button.setEnabled(False)
-        self.run_button = QPushButton("Run plan")
+        self.run_button = PrimaryPushButton("Run plan")
         self.run_button.setEnabled(False)
 
         def command_action(
@@ -372,7 +235,7 @@ class RecipePage(QWidget):
         path_line.addWidget(self.restore_button)
         path_line.addWidget(self.run_button)
         layout.addLayout(path_line)
-        action_frame = QFrame()
+        action_frame = CardWidget()
         action_frame.setObjectName("recipeActionBar")
         builder_actions = QHBoxLayout(action_frame)
         builder_actions.setContentsMargins(10, 7, 10, 7)
@@ -395,13 +258,11 @@ class RecipePage(QWidget):
         self.node_kind.addItem("Comment", "comment")
         def tool_button(
             text: str, tooltip: str, icon: QStyle.StandardPixmap, *, primary: bool = False
-        ) -> QToolButton:
-            button = QToolButton()
+        ) -> PushButton:
+            button = PrimaryPushButton() if primary else PushButton()
             button.setText(text)
             button.setToolTip(tooltip)
             button.setIcon(self.style().standardIcon(icon))
-            button.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonTextBesideIcon)
-            button.setObjectName("recipePrimaryToolButton" if primary else "recipeToolButton")
             return button
 
         self.add_node_button = tool_button(
@@ -471,19 +332,35 @@ class RecipePage(QWidget):
             "Drag a non-root node to reorder it or place it inside Sequence, Sweep, Repeat or If. "
             "The YAML is re-parsed immediately; nodes cannot cross the finally boundary."
         )
-        self.builder_tabs = QTabWidget()
-        self.builder_tabs.setMinimumWidth(390)
-        self.builder_tabs.addTab(self.tree, "Measurement tree")
-        self.builder_tabs.addTab(self.editor, "YAML source")
+        self.builder_container = CardWidget()
+        builder_layout = QVBoxLayout(self.builder_container)
+        builder_layout.setContentsMargins(12, 10, 12, 12)
+        builder_layout.setSpacing(8)
+        self.workflow_tabs = SegmentedWidget(self.builder_container)
+        self.workflow_tabs.addItem("tree", "Measurement tree")
+        self.workflow_tabs.addItem("yaml", "YAML source")
+        builder_layout.addWidget(self.workflow_tabs)
+        self.builder_stack = QStackedWidget()
+        self.builder_stack.setMinimumWidth(390)
+        self.builder_stack.addWidget(self.tree)
+        self.builder_stack.addWidget(self.editor)
+        self.workflow_tabs.setCurrentItem("tree")
+        self.workflow_tabs.currentItemChanged.connect(
+            lambda route: self.builder_stack.setCurrentIndex(0 if route == "tree" else 1)
+        )
+        self.builder_stack.currentChanged.connect(
+            lambda index: self.workflow_tabs.setCurrentItem("tree" if index == 0 else "yaml")
+        )
+        builder_layout.addWidget(self.builder_stack, 1)
         self.library_panel = self._build_device_library()
         self.workspace_splitter.addWidget(self.library_panel)
-        self.workspace_splitter.addWidget(self.builder_tabs)
+        self.workspace_splitter.addWidget(self.builder_container)
         self.inspector_panel = QWidget()
         self.inspector_panel.setMinimumWidth(280)
         self.inspector_panel.setMaximumWidth(620)
         inspector_layout = QVBoxLayout(self.inspector_panel)
         inspector_layout.setContentsMargins(0, 0, 0, 0)
-        inspector_card = QFrame()
+        inspector_card = CardWidget()
         inspector_card.setObjectName("recipeInspector")
         inspector_card_layout = QVBoxLayout(inspector_card)
         inspector_card_layout.setContentsMargins(12, 12, 12, 12)
@@ -492,8 +369,7 @@ class RecipePage(QWidget):
         self.inspector_summary = QLabel("Select a node to see its measurement role and configuration.")
         self.inspector_summary.setWordWrap(True)
         self.inspector_summary.setObjectName("muted")
-        self.open_editor_button = QPushButton("Open parameter editor")
-        self.open_editor_button.setObjectName("primaryButton")
+        self.open_editor_button = PrimaryPushButton("Open parameter editor")
         self.open_editor_button.setEnabled(False)
         self.inspector = QPlainTextEdit()
         self.inspector.setReadOnly(True)

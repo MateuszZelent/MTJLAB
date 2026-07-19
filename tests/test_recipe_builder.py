@@ -21,22 +21,25 @@ from PySide6.QtGui import QPalette
 from PySide6.QtTest import QTest
 
 from app.recipes import parse_recipe_text
-from app.ui.main_window import (
-    AnritsuAcquisitionEditorDialog,
+from app.devices.anritsu_ms2830a.ui import (
+    AnritsuAdvancedSpectrumPanel,
     AnritsuNodeEditorDialog,
     AnritsuSignalGeneratorNodeEditorDialog,
-    AnritsuAdvancedSpectrumPanel,
     AnritsuSpectrumConfigurationPanel,
-    CommentEditorDialog,
-    DeviceParameterDialog,
-    FixedValueDialog,
+)
+from app.devices.keithley_2600.ui import (
     KeithleyConfigurationPanel,
     KeithleyNodeEditorDialog,
     KeithleyPage,
+)
+from app.devices.rigol_dg1000z.ui import RigolNodeEditorDialog
+from app.ui.recipes import DeviceParameterDialog, SweepGeneratorDialog
+from app.ui.recipes.page import (
+    AnritsuAcquisitionEditorDialog,
+    CommentEditorDialog,
+    FixedValueDialog,
     KeithleySweepBuilderDialog,
     RecipePage,
-    RigolNodeEditorDialog,
-    SweepGeneratorDialog,
 )
 from app.ui.workers import DeviceController
 from app.devices.keithley_2600 import KeithleyAdapter
@@ -54,8 +57,9 @@ class RecipeBuilderTests(unittest.TestCase):
     def test_tree_builder_exposes_node_actions_and_yaml_as_secondary_tab(self) -> None:
         page = RecipePage(simulation_settings())
         try:
-            self.assertEqual(page.builder_tabs.tabText(0), "Measurement tree")
-            self.assertEqual(page.builder_tabs.tabText(1), "YAML source")
+            self.assertEqual(page.workflow_tabs.currentRouteKey(), "tree")
+            self.assertIs(page.builder_stack.widget(0), page.tree)
+            self.assertIs(page.builder_stack.widget(1), page.editor)
             self.assertTrue(page.add_node_button.text().startswith("+ Add"))
             self.assertIn("point generator", page.add_controls_button.text())
             self.assertEqual(page.edit_device_button.text(), "Device settings")

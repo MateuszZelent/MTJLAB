@@ -91,6 +91,8 @@ def identify_device(idn: str) -> str | None:
         return "keithley"
     if "ANRITSU" in value and "MS2830" in value:
         return "anritsu"
+    if ("LSCI" in value or "LAKE SHORE" in value) and "MODEL475" in value:
+        return "lakeshore_gaussmeter"
     return None
 
 

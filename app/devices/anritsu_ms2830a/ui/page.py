@@ -11,13 +11,13 @@ from pathlib import Path
 
 import pyqtgraph as pg
 from PySide6.QtCore import QTimer, Qt, Signal
-from PySide6.QtGui import QColor, QPalette
 from PySide6.QtWidgets import (
-    QCheckBox, QComboBox, QDialog, QDialogButtonBox, QFileDialog,
+    QComboBox, QDialog, QDialogButtonBox, QFileDialog,
     QFormLayout, QFrame, QGridLayout, QHBoxLayout, QLabel, QLineEdit,
     QMessageBox, QProgressBar, QPushButton, QScrollArea, QSplitter, QSpinBox, QTabWidget,
     QToolButton, QVBoxLayout, QWidget,
 )
+from qfluentwidgets import CardWidget, CheckBox, PrimaryPushButton, PushButton
 
 from app.devices.anritsu_ms2830a import (
     ANRITSU_PREAMPLIFIER_OPTIONS, AdvancedSpectrumConfig, AdvancedSpectrumSnapshot,
@@ -236,7 +236,7 @@ class AnritsuAdvancedSpectrumPanel(QFrame):
         self.attenuation.setSuffix(" dB")
         form.addRow("RF attenuation mode", self.attenuation_mode)
         form.addRow("RF attenuation", self.attenuation)
-        self.preamplifier = QCheckBox("Enable preamplifier")
+        self.preamplifier = CheckBox("Enable preamplifier")
         form.addRow("Input gain", self.preamplifier)
 
         self.sweep_time_mode = QComboBox()
@@ -374,6 +374,7 @@ class AnritsuPage(QWidget):
         parent: QWidget | None = None,
     ) -> None:
         super().__init__(parent)
+        self.setProperty("stationSurface", "page")
         self._controller = controller
         self._station_settings = settings
         self._limit_fields: dict[str, LimitField] = {}
@@ -412,9 +413,14 @@ class AnritsuPage(QWidget):
         self._timer.setInterval(500)
         self._timer.timeout.connect(self.fetch_live)
         layout = QVBoxLayout(self)
+        layout.setContentsMargins(16, 14, 16, 14)
+        layout.setSpacing(12)
         self.banner = NotificationBanner()
         layout.addWidget(self.banner)
-        title_row = QHBoxLayout()
+        self.hero_card = CardWidget(self)
+        self.hero_card.setObjectName("anritsuHeroCard")
+        title_row = QHBoxLayout(self.hero_card)
+        title_row.setContentsMargins(20, 16, 20, 16)
         title = QLabel("Anritsu MS2830A — Spectrum / Live")
         title.setObjectName("pageTitle")
         title_row.addWidget(title)
@@ -427,7 +433,7 @@ class AnritsuPage(QWidget):
             "instrument accepts Live startup."
         )
         title_row.addWidget(self.live_indicator)
-        layout.addLayout(title_row)
+        layout.addWidget(self.hero_card)
         self.workspace_splitter = QSplitter(Qt.Orientation.Horizontal)
         self.workspace_splitter.setObjectName("anritsuWorkspaceSplitter")
         left_panel = QWidget()
@@ -435,6 +441,12 @@ class AnritsuPage(QWidget):
         left_layout = QVBoxLayout(left_panel)
         left_layout.setContentsMargins(8, 8, 8, 8)
         left_layout.setSpacing(10)
+        self.setup_card = CardWidget(left_panel)
+        self.setup_card.setObjectName("anritsuSetupCard")
+        setup_layout = QVBoxLayout(self.setup_card)
+        setup_layout.setContentsMargins(20, 16, 20, 16)
+        setup_layout.setSpacing(10)
+        left_layout.addWidget(self.setup_card)
         right_panel = QWidget()
         right_layout = QVBoxLayout(right_panel)
         right_layout.setContentsMargins(8, 8, 8, 8)
@@ -444,13 +456,13 @@ class AnritsuPage(QWidget):
         setup_title.setObjectName("sectionTitle")
         setup_header.addWidget(setup_title)
         setup_header.addStretch(1)
-        self.advanced_spectrum_button = QPushButton("Advanced…")
+        self.advanced_spectrum_button = PushButton("Advanced…")
         self.advanced_spectrum_button.setToolTip(
             "Open qualified RBW, VBW, detector, attenuation, preamplifier and sweep-time controls."
         )
         self.advanced_spectrum_button.clicked.connect(self._show_advanced_spectrum_dialog)
         setup_header.addWidget(self.advanced_spectrum_button)
-        self.hardware_info_button = QPushButton("ⓘ")
+        self.hardware_info_button = PushButton("ⓘ")
         self.hardware_info_button.setObjectName("infoButton")
         self.hardware_info_button.setFixedSize(28, 28)
         self.hardware_info_button.setToolTip(
@@ -459,7 +471,7 @@ class AnritsuPage(QWidget):
         self.hardware_info_button.clicked.connect(self._show_anritsu_hardware_info)
         setup_header.addWidget(self.hardware_info_button)
         self._advanced_dialog = self._build_advanced_spectrum_dialog()
-        left_layout.addLayout(setup_header)
+        setup_layout.addLayout(setup_header)
         self.configuration_panel = AnritsuSpectrumConfigurationPanel(
             settings, self
         )
@@ -473,7 +485,7 @@ class AnritsuPage(QWidget):
         self.frequency_label_a = self.configuration_panel.frequency_label_a
         self.frequency_label_b = self.configuration_panel.frequency_label_b
         self._limit_fields = self.configuration_panel.limit_fields
-        left_layout.addWidget(self.configuration_panel)
+        setup_layout.addWidget(self.configuration_panel)
         self.refresh = QSpinBox()
         self.refresh.setRange(10, 5000)
         self.refresh.setValue(500)
@@ -484,7 +496,7 @@ class AnritsuPage(QWidget):
         )
         refresh_form = QFormLayout()
         refresh_form.addRow("Live refresh interval", self.refresh)
-        left_layout.addLayout(refresh_form)
+        setup_layout.addLayout(refresh_form)
         self.hardware_option_info = QLabel()
         self.hardware_range_info = QLabel()
         self.hardware_option_info.hide()
@@ -493,12 +505,11 @@ class AnritsuPage(QWidget):
         self._update_anritsu_hardware_limits(())
         controls = QGridLayout()
         controls.setSpacing(6)
-        self.read_configuration = QPushButton("Read from instrument")
-        self.configure_button = QPushButton("Apply configuration")
-        self.single = QPushButton("Read current spectrum")
-        self.live = QPushButton("Start Live")
-        self.abort_button = QPushButton("Abort acquisition")
-        self.configure_button.setObjectName("primaryButton")
+        self.read_configuration = PushButton("Read from instrument")
+        self.configure_button = PrimaryPushButton("Apply configuration")
+        self.single = PushButton("Read current spectrum")
+        self.live = PrimaryPushButton("Start Live")
+        self.abort_button = PushButton("Abort acquisition")
         self.abort_button.setObjectName("warningButton")
         for button in (
             self.read_configuration,
@@ -513,10 +524,11 @@ class AnritsuPage(QWidget):
         controls.addWidget(self.single, 1, 1)
         controls.addWidget(self.live, 2, 0)
         controls.addWidget(self.abort_button, 2, 1)
-        left_layout.addLayout(controls)
-        processing = QFrame()
-        processing.setObjectName("anritsuProcessingCard")
-        processing_layout = QGridLayout(processing)
+        setup_layout.addLayout(controls)
+        self.processing_card = CardWidget(left_panel)
+        self.processing_card.setObjectName("anritsuProcessingCard")
+        processing_layout = QGridLayout(self.processing_card)
+        processing_layout.setContentsMargins(20, 16, 20, 16)
         processing_title = QLabel("Averaging and reference processing")
         processing_title.setObjectName("sectionTitle")
         processing_layout.setHorizontalSpacing(6)
@@ -525,8 +537,8 @@ class AnritsuPage(QWidget):
         self.average_count = QSpinBox()
         self.average_count.setRange(1, 9999)
         self.average_count.setValue(self._station_settings.anritsu.acquisition.application_average_count)
-        self.acquire_average = QPushButton("Acquire averaged spectrum")
-        self.cancel_average = QPushButton("Cancel averaging")
+        self.acquire_average = PrimaryPushButton("Acquire averaged spectrum")
+        self.cancel_average = PushButton("Cancel averaging")
         self.acquire_average.setProperty("compact", True)
         self.cancel_average.setProperty("compact", True)
         self.cancel_average.setEnabled(False)
@@ -547,12 +559,12 @@ class AnritsuPage(QWidget):
         self.reference_status.setObjectName("muted")
         self.reference_status.setWordWrap(True)
         processing_layout.addWidget(self.reference_status, 5, 0, 1, 2)
-        self.acquire_single_reference = QPushButton("Acquire 1× reference")
-        self.use_current_reference = QPushButton("Use current trace")
-        self.capture_reference = QPushButton("Acquire N× reference")
-        self.clear_reference = QPushButton("Clear reference")
-        self.load_reference = QPushButton("Load reference…")
-        self.save_reference = QPushButton("Save reference…")
+        self.acquire_single_reference = PushButton("Acquire 1× reference")
+        self.use_current_reference = PushButton("Use current trace")
+        self.capture_reference = PrimaryPushButton("Acquire N× reference")
+        self.clear_reference = PushButton("Clear reference")
+        self.load_reference = PushButton("Load reference…")
+        self.save_reference = PushButton("Save reference…")
         for button in (
             self.acquire_single_reference,
             self.use_current_reference,
@@ -579,18 +591,18 @@ class AnritsuPage(QWidget):
         processing_layout.addWidget(self.save_reference, 8, 1)
         processing_layout.addWidget(QLabel("Reference operation"), 9, 0)
         processing_layout.addWidget(self.reference_operation, 9, 1)
-        self.show_raw = QCheckBox("Raw")
+        self.show_raw = CheckBox("Raw")
         self.show_raw.setChecked(True)
-        self.show_average = QCheckBox("Averaged")
-        self.show_reference = QCheckBox("Reference")
-        self.show_processed = QCheckBox("Processed")
+        self.show_average = CheckBox("Averaged")
+        self.show_reference = CheckBox("Reference")
+        self.show_processed = CheckBox("Processed")
         trace_toggles = QHBoxLayout()
         trace_toggles.setSpacing(10)
         for checkbox in (self.show_raw, self.show_average, self.show_reference, self.show_processed):
             trace_toggles.addWidget(checkbox)
         trace_toggles.addStretch(1)
         processing_layout.addLayout(trace_toggles, 10, 0, 1, 2)
-        left_layout.addWidget(processing)
+        left_layout.addWidget(self.processing_card)
         left_layout.addStretch(1)
         self.spectrum_plot = SpectrumPlotWidget(legend=True)
         self.spectrum_plot.set_title("Current spectrum")
@@ -687,9 +699,10 @@ class AnritsuPage(QWidget):
         explanation.setObjectName("muted")
         outer.addWidget(explanation)
 
-        card = QFrame()
-        card.setObjectName("anritsuProcessingCard")
+        card = CardWidget(tab)
+        card.setObjectName("anritsuSignalGeneratorCard")
         grid = QGridLayout(card)
+        grid.setContentsMargins(20, 16, 20, 16)
         grid.setHorizontalSpacing(10)
         grid.setVerticalSpacing(9)
         self.sg_status = QLabel("●  RF OUTPUT UNKNOWN")
@@ -705,12 +718,11 @@ class AnritsuPage(QWidget):
         grid.addWidget(self.sg_frequency, 1, 1, 1, 3)
         grid.addWidget(QLabel("RF power"), 2, 0)
         grid.addWidget(self.sg_power, 2, 1, 1, 3)
-        self.sg_read = QPushButton("Read current SG state")
-        self.sg_configure = QPushButton("Configure while RF OFF")
-        self.sg_arm = QPushButton("ARM RF output")
-        self.sg_on = QPushButton("RF OUTPUT ON")
-        self.sg_off = QPushButton("RF OUTPUT OFF")
-        self.sg_configure.setObjectName("primaryButton")
+        self.sg_read = PushButton("Read current SG state")
+        self.sg_configure = PrimaryPushButton("Configure while RF OFF")
+        self.sg_arm = PushButton("ARM RF output")
+        self.sg_on = PrimaryPushButton("RF OUTPUT ON")
+        self.sg_off = PushButton("RF OUTPUT OFF")
         self.sg_on.setObjectName("outputOnButton")
         self.sg_off.setObjectName("outputOffButton")
         for button in (
@@ -1915,4 +1927,3 @@ class AnritsuPage(QWidget):
 
 _SWEEPABLE_PARAMETERS = SWEEPABLE_PARAMETERS
 _sweep_default = sweep_default
-

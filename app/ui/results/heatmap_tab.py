@@ -21,6 +21,7 @@ from PySide6.QtWidgets import (
 )
 
 from app.storage import ThatecRow, ThatecRun, ThatecRunReader
+from app.ui.design_system import plot_theme, tokens_for
 from app.ui.results.data_classifier import find_spectrum_rows
 
 
@@ -40,6 +41,7 @@ class HeatmapPlotWidget(QWidget):
         self._data: np.ndarray | None = None  # shape (checkpoints, freq_points)
         self._x_values: np.ndarray | None = None
         self._y_values: np.ndarray | None = None
+        self._theme_name = "dark"
 
         layout = QVBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
@@ -101,10 +103,10 @@ class HeatmapPlotWidget(QWidget):
 
         # --- Crosshair ---
         self.crosshair_x = pg.InfiniteLine(
-            angle=90, movable=False, pen=pg.mkPen("#78909c", width=1)
+            angle=90, movable=False
         )
         self.crosshair_y = pg.InfiniteLine(
-            angle=0, movable=False, pen=pg.mkPen("#78909c", width=1)
+            angle=0, movable=False
         )
         self.plot.addItem(self.crosshair_x, ignoreBounds=True)
         self.plot.addItem(self.crosshair_y, ignoreBounds=True)
@@ -114,6 +116,7 @@ class HeatmapPlotWidget(QWidget):
         )
         self.plot.scene().sigMouseClicked.connect(self._mouse_clicked)
         self.colormap_combo.currentTextChanged.connect(self._apply_colormap)
+        self.apply_theme(self._theme_name)
 
     # ------------------------------------------------------------------
     # Public API
@@ -184,12 +187,15 @@ class HeatmapPlotWidget(QWidget):
         self.plot.autoRange()
 
     def apply_theme(self, theme: str) -> None:
-        foreground = "#17212b" if theme == "light" else "#dce6ef"
-        self.plot.setBackground(None)
+        self._theme_name = theme
+        palette = plot_theme(tokens_for(theme))
+        self.plot.setBackground(palette.background)
         for axis in ("left", "bottom"):
             item = self.plot.getAxis(axis)
-            item.setPen(pg.mkPen(foreground))
-            item.setTextPen(pg.mkPen(foreground))
+            item.setPen(pg.mkPen(palette.axes))
+            item.setTextPen(pg.mkPen(palette.axes))
+        self.crosshair_x.setPen(pg.mkPen(palette.grid, width=1))
+        self.crosshair_y.setPen(pg.mkPen(palette.grid, width=1))
 
     def export(self) -> None:
         path, selected = QFileDialog.getSaveFileName(
@@ -318,6 +324,11 @@ class HeatmapResultsTab(QWidget):
         # --- Connections ---
         self.load_button.clicked.connect(self._load_selected_row)
         self.heatmap.checkpoint_clicked.connect(self._on_checkpoint_clicked)
+
+    def apply_theme(self, theme: str) -> None:
+        """Retheme the visible pyqtgraph scene with the application tokens."""
+
+        self.heatmap.apply_theme(theme)
 
     # ------------------------------------------------------------------
     # Public API

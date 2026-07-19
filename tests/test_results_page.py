@@ -8,13 +8,15 @@ import unittest
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
-from PySide6.QtWidgets import QApplication
+from PySide6.QtWidgets import QApplication, QTabWidget
+from qfluentwidgets import CardWidget, Pivot, PrimaryPushButton
 
 from app.devices.anritsu_ms2830a import SpectrumTrace
 from app.domain.models import MeasurementPoint
 from app.storage import Hdf5RunWriter
 from app.storage.thatec_reader import ThatecRunReader
-from app.ui.main_window import ResultsPage
+from app.ui.results import ResultsPage
+from app.ui.shell import MainWindow
 from app.ui.recipes.page import RecipePage
 from tests.helpers import ROOT, simulation_settings
 
@@ -234,6 +236,48 @@ class ResultsPageTests(unittest.TestCase):
                 self.assertTrue(page.open_sweep_button.isEnabled())
             finally:
                 page.close()
+
+    def test_results_page_renders_fluent_navigation_and_action_card_at_desktop_size(self) -> None:
+        """The operational Results route must be a visible Fluent surface, not legacy tabs."""
+        with tempfile.TemporaryDirectory() as temporary:
+            page = ResultsPage(temporary)
+            try:
+                page.resize(1280, 720)
+                page.show()
+                self.application.processEvents()
+
+                self.assertIsInstance(page.section_navigation, Pivot)
+                self.assertIsInstance(page.action_card, CardWidget)
+                self.assertIsInstance(page.open_sweep_button, PrimaryPushButton)
+                self.assertGreater(page.section_navigation.geometry().width(), 200)
+                self.assertTrue(page.result_stack.isVisible())
+                self.assertGreater(page.result_stack.geometry().height(), 300)
+            finally:
+                page.close()
+
+    def test_metadata_details_use_fluent_navigation_not_legacy_tabs(self) -> None:
+        page = ResultsPage(".")
+        try:
+            self.assertNotIsInstance(page.metadata_panel.tabs, QTabWidget)
+            self.assertIsInstance(page.metadata_panel.section_navigation, Pivot)
+        finally:
+            page.close()
+
+    def test_embedded_results_actions_fit_and_remain_reachable_at_1280_by_720(self) -> None:
+        window = MainWindow(".config/settings.yml", simulation=True)
+        try:
+            window.resize(1280, 720)
+            window.show()
+            window._navigate_to("results")
+            self.application.processEvents()
+            page = window.results_page
+            host = window.navigation_routes["results"]
+
+            self.assertLessEqual(page.minimumSizeHint().width(), host.scroll_area.viewport().width())
+            self.assertTrue(page.open_sweep_button.isVisibleTo(window))
+            self.assertTrue(page.resume_button.isVisibleTo(window))
+        finally:
+            window.close()
 
 
 if __name__ == "__main__":

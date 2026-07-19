@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+import inspect
 from datetime import datetime, timezone
 from pathlib import Path
 import tempfile
@@ -10,8 +11,9 @@ from types import SimpleNamespace
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
-from PySide6.QtCore import QTimer, Qt
-from PySide6.QtWidgets import QApplication, QComboBox, QHeaderView, QLabel, QMessageBox, QPushButton, QScrollArea, QTreeWidgetItemIterator, QWidget
+from PySide6.QtCore import QPoint, QTimer, Qt
+from PySide6.QtGui import QPalette
+from PySide6.QtWidgets import QApplication, QComboBox, QHeaderView, QLabel, QMessageBox, QPushButton, QScrollArea, QTabWidget, QTreeWidgetItemIterator, QWidget
 from PySide6.QtTest import QTest
 
 from app.domain.models import DeviceCapabilities
@@ -24,7 +26,12 @@ from app.devices.anritsu_ms2830a import (
 )
 from app.domain.quantities import DIMENSION_DBM, DIMENSION_FREQUENCY, parse_quantity
 from app.settings.repository import SettingsRepository
-from app.ui.main_window import AnritsuPageState, LimitEditDialog, MainWindow
+from app.devices.anritsu_ms2830a.ui import AnritsuPageState
+from app.ui.shell import MainWindow
+from app.ui.dashboard.device_card import DeviceCard
+from app.ui.design_system import tokens_for
+from qfluentwidgets import CardWidget, PlainTextEdit
+from app.ui.widgets import LimitEditDialog
 from tests.helpers import SETTINGS_TEMPLATE
 
 
@@ -646,7 +653,9 @@ class MainWindowTests(unittest.TestCase):
                 loaded = SettingsRepository(path).load().settings
                 self.assertEqual(loaded.rigol.connection.resource, resource)
                 self.assertIn(resource, window.dashboard.cards["rigol"].resource.text())
-                self.assertTrue(window.dashboard.cards["rigol"].connect_button.isEnabled())
+                self.assertTrue(
+                    window.connection_panels["rigol"].connect_button.isEnabled()
+                )
                 worker_adapter = window._controllers["rigol"]._worker._adapter
                 self.assertEqual(worker_adapter._settings.connection.resource, resource)
                 self.assertIn("VISA ASSIGN SUCCESS [rigol]", window.log.toPlainText())
@@ -654,7 +663,7 @@ class MainWindowTests(unittest.TestCase):
                 window.close()
                 self.application.processEvents()
 
-    def test_discovery_row_assign_button_emits_selected_resource_immediately(self) -> None:
+    def test_find_visa_uses_result_cards_and_preserves_assignment_payload(self) -> None:
         window = MainWindow(".config/settings.yml", simulation=True)
         try:
             page = window.dashboard
@@ -668,9 +677,10 @@ class MainWindowTests(unittest.TestCase):
             page.assignments_requested.disconnect(window._save_discovered_assignments)
             page.assignments_requested.connect(emitted.append)
             page._scan_completed((result,))
-            button = page.discovery_table.cellWidget(0, 1)
-            self.assertIsInstance(button, QPushButton)
-            button.click()
+            self.assertEqual(len(page.visa_results.rows), 1)
+            row = page.visa_results.rows[0]
+            row.assignment.setCurrentIndex(row.assignment.findData("keithley"))
+            row.assign_button.click()
             self.assertEqual(
                 emitted,
                 [{"keithley": ("GPIB0::22::INSTR", "system", result.idn)}],
@@ -679,24 +689,75 @@ class MainWindowTests(unittest.TestCase):
             window.close()
             self.application.processEvents()
 
-    def test_find_visa_table_fills_remaining_tab_height(self) -> None:
+    def test_find_visa_scan_states_are_explicit(self) -> None:
         window = MainWindow(".config/settings.yml", simulation=True)
         try:
             page = window.dashboard
-            discovery = page.workspace.widget(1)
-            layout = discovery.layout()
-            table_index = layout.indexOf(page.discovery_table)
-            self.assertGreaterEqual(table_index, 0)
-            self.assertGreater(layout.stretch(table_index), 0)
-            self.assertEqual(
-                page.discovery_table.maximumHeight(),
-                QWidget().maximumHeight(),
+            self.assertEqual(page.visa_state, "empty")
+            page._scan_completed(())
+            self.assertEqual(page.visa_state, "empty")
+            page._scan_failed("backend unavailable")
+            self.assertEqual(page.visa_state, "failed")
+            self.assertIn("backend unavailable", page.discovery_info.text())
+        finally:
+            window.close()
+            self.application.processEvents()
+
+    def test_dashboard_exposes_separate_overview_and_discovery_routes(self) -> None:
+        window = MainWindow(".config/settings.yml", simulation=True)
+        try:
+            self.assertEqual(tuple(window.dashboard.navigation_pages), ("overview", "discovery"))
+            self.assertIs(
+                window.navigation_routes["overview"].content,
+                window.dashboard.navigation_pages["overview"],
             )
-            header = page.discovery_table.horizontalHeader()
-            self.assertEqual(
-                header.sectionResizeMode(2),
-                QHeaderView.ResizeMode.ResizeToContents,
+            self.assertIs(
+                window.navigation_routes["discovery"].content,
+                window.dashboard.navigation_pages["discovery"],
             )
+            self.assertFalse(window.dashboard.findChildren(QTabWidget))
+            window.resize(1360, 880)
+            window.show()
+            window._navigate_to("discovery")
+            self.application.processEvents()
+            discovery = window.dashboard.navigation_pages["discovery"]
+            self.assertTrue(discovery.isVisible())
+            self.assertGreater(discovery.width(), 600)
+            self.assertTrue(window.dashboard.visa_results.isVisible())
+            self.assertGreater(window.dashboard.visa_results.height(), 200)
+        finally:
+            window.close()
+            self.application.processEvents()
+
+    def test_instruments_are_visible_children_of_the_apparatus_navigation_group(self) -> None:
+        window = MainWindow(".config/settings.yml", simulation=True)
+        try:
+            window.resize(1360, 880)
+            window.show()
+            self.application.processEvents()
+
+            apparatus = window.navigationInterface.widget("apparatusMenu")
+            self.assertIsNotNone(apparatus)
+            self.assertTrue(apparatus.isVisible())
+            self.assertGreater(apparatus.width(), 100)
+            previous_bottom = apparatus.mapTo(window, QPoint()).y() + 36
+            for route in (
+                "rigol",
+                "keithley",
+                "anritsu",
+                "moke_box",
+                "lakeshore_gaussmeter",
+            ):
+                item = window.navigationInterface.widget(
+                    window.navigation_routes[route].objectName()
+                )
+                self.assertIsNotNone(item)
+                self.assertTrue(item.isVisible())
+                self.assertIs(item.parent(), apparatus)
+                self.assertGreater(item.geometry().height(), 0)
+                item_top = item.mapTo(window, QPoint()).y()
+                self.assertGreaterEqual(item_top, previous_bottom)
+                previous_bottom = item_top + item.geometry().height()
         finally:
             window.close()
             self.application.processEvents()
@@ -716,6 +777,134 @@ class MainWindowTests(unittest.TestCase):
             window.close()
             self.application.processEvents()
 
+    def test_overview_uses_fluent_cards_with_visible_actions_in_both_themes(self) -> None:
+        source = inspect.getsource(DeviceCard)
+        for legacy_type in ("QFrame", "QLabel", "QComboBox", "QPushButton"):
+            self.assertNotIn(legacy_type, source)
+
+        window = MainWindow(".config/settings.yml", simulation=True)
+        try:
+            window.resize(1360, 880)
+            window.show()
+            window._navigate_to("overview")
+            self.application.processEvents()
+            cards = tuple(window.dashboard.cards.values())
+            self.assertTrue(all(isinstance(card, CardWidget) for card in cards))
+            self.assertTrue(
+                all(
+                    card.assign_button.isVisibleTo(window)
+                    for device, card in window.dashboard.cards.items()
+                    if device != "moke_box"
+                )
+            )
+            window._set_theme_mode("light", persist=False)
+            self.application.processEvents()
+            card = window.dashboard.cards["rigol"]
+            point = card.mapTo(window, QPoint(5, 5))
+            light = window.grab().toImage().pixelColor(point).name()
+            window._set_theme_mode("dark", persist=False)
+            self.application.processEvents()
+            dark = window.grab().toImage().pixelColor(point).name()
+            self.assertNotEqual(light, dark)
+        finally:
+            window._set_theme_mode("system", persist=False)
+            window.close()
+            self.application.processEvents()
+
+    def test_live_theme_switch_rethemes_shell_and_visa_result_surfaces(self) -> None:
+        window = MainWindow(".config/settings.yml", simulation=True)
+        try:
+            window.resize(1360, 880)
+            window.show()
+            window._navigate_to("discovery")
+            result = DiscoveredInstrument(
+                "GPIB0::22::INSTR",
+                "system",
+                "Keithley Instruments Inc., Model 2602A, 1291342, 2.1.6",
+                "keithley",
+            )
+            window.dashboard._scan_completed((result,))
+            self.application.processEvents()
+            row = window.dashboard.visa_results.rows[0]
+            row_point = row.mapTo(window, QPoint(5, 5))
+            shell_point = window.fluent_content.mapTo(window, QPoint(6, 400))
+            log_point = window.log.mapTo(window, QPoint(15, 15))
+            nav_point = window.navigationInterface.panel.mapTo(window, QPoint(12, 500))
+
+            window._set_theme_mode("dark", persist=False)
+            self.application.processEvents()
+            dark_image = window.grab().toImage()
+            dark = {
+                "shell": dark_image.pixelColor(shell_point).name(),
+                "visa": dark_image.pixelColor(row_point).name(),
+                "log": dark_image.pixelColor(log_point).name(),
+                "nav": dark_image.pixelColor(nav_point).name(),
+                "nav_qss": window.navigationInterface.panel.styleSheet(),
+            }
+            window._set_theme_mode("light", persist=False)
+            self.application.processEvents()
+            light_image = window.grab().toImage()
+            light = {
+                "shell": light_image.pixelColor(shell_point).name(),
+                "visa": light_image.pixelColor(row_point).name(),
+                "log": light_image.pixelColor(log_point).name(),
+                "nav": light_image.pixelColor(nav_point).name(),
+                "nav_qss": window.navigationInterface.panel.styleSheet(),
+            }
+            self.assertNotEqual(dark["shell"], light["shell"])
+            self.assertNotEqual(dark["visa"], light["visa"])
+            self.assertNotEqual(dark["log"], light["log"])
+            self.assertNotEqual(dark["nav"], light["nav"])
+            self.assertLess(dark_image.pixelColor(row_point).lightness(), 80)
+            self.assertGreater(light_image.pixelColor(row_point).lightness(), 160)
+            self.assertLess(dark_image.pixelColor(log_point).lightness(), 80)
+            self.assertGreater(light_image.pixelColor(log_point).lightness(), 160)
+            self.assertEqual(
+                dark_image.pixelColor(log_point).name(),
+                tokens_for("dark").surface_raised,
+            )
+            self.assertEqual(
+                light_image.pixelColor(log_point).name(),
+                tokens_for("light").surface_raised,
+            )
+            self.assertLess(dark_image.pixelColor(nav_point).lightness(), 80)
+            self.assertGreater(light_image.pixelColor(nav_point).lightness(), 160)
+            self.assertIn("rgb(32, 32, 32)", dark["nav_qss"])
+            self.assertIn("rgb(243, 243, 243)", light["nav_qss"])
+        finally:
+            window._set_theme_mode("system", persist=False)
+            window.close()
+            self.application.processEvents()
+
+    def test_event_log_is_a_fluent_surface_after_live_theme_switch(self) -> None:
+        """The fixed log area must never retain the previous theme's canvas."""
+        window = MainWindow(".config/settings.yml", simulation=True)
+        try:
+            window.resize(1360, 880)
+            window.show()
+            window._log("A rendered event log entry")
+            self.application.processEvents()
+
+            self.assertIsInstance(window.log, PlainTextEdit)
+            self.assertEqual(window.event_log_panel.property("stationSurface"), "surface")
+            self.assertEqual(window.log.property("stationSurface"), "raised")
+
+            viewport_point = window.log.viewport().mapTo(
+                window, QPoint(96, max(20, window.log.viewport().height() - 12))
+            )
+            observed: dict[str, str] = {}
+            for theme in ("dark", "light"):
+                window._set_theme_mode(theme, persist=False)
+                self.application.processEvents()
+                observed[theme] = window.grab().toImage().pixelColor(viewport_point).name()
+
+            self.assertEqual(observed["dark"], "#22272e")
+            self.assertEqual(observed["light"], "#f9fafb")
+        finally:
+            window._set_theme_mode("system", persist=False)
+            window.close()
+            self.application.processEvents()
+
     def test_discovery_marks_persisted_resource_assigned_and_disables_duplicate(self) -> None:
         window = MainWindow(".config/settings.yml", simulation=True)
         try:
@@ -727,13 +916,10 @@ class MainWindowTests(unittest.TestCase):
                 "rigol",
             )
             window.dashboard._scan_completed((result,))
-            badge = window.dashboard.discovery_table.cellWidget(0, 0)
-            button = window.dashboard.discovery_table.cellWidget(0, 1)
-            self.assertIsInstance(badge, QLabel)
-            self.assertIn("Assigned to Rigol", badge.text())
-            self.assertIsInstance(button, QPushButton)
-            self.assertFalse(button.isEnabled())
-            self.assertEqual(button.text(), "Assigned ✓")
+            row = window.dashboard.visa_results.rows[0]
+            self.assertEqual(row.status.text(), "Assigned to rigol")
+            self.assertFalse(row.assignment.isEnabled())
+            self.assertFalse(row.assign_button.isEnabled())
             self.assertFalse(window.dashboard.save_assignments.isEnabled())
         finally:
             window.close()
@@ -756,8 +942,8 @@ class MainWindowTests(unittest.TestCase):
             card = page.cards["anritsu"]
             self.assertTrue(card.detected_resources.isEnabled())
             self.assertIn("GPIB0::23::INSTR", card.detected_resources.currentText())
-            self.assertFalse(card.test_button.isEnabled())
-            self.assertFalse(card.connect_button.isEnabled())
+            self.assertFalse(hasattr(card, "test_button"))
+            self.assertFalse(hasattr(card, "connect_button"))
             self.assertIn("not active", card.assignment_hint.text())
             card.assign_button.click()
             self.assertEqual(
@@ -785,7 +971,6 @@ class MainWindowTests(unittest.TestCase):
                 )
                 window.dashboard._scan_completed((result,))
                 card = window.dashboard.cards["anritsu"]
-                self.assertFalse(card.test_button.isEnabled())
                 with patch.object(
                     QMessageBox, "question", return_value=int(QMessageBox.StandardButton.Yes)
                 ):
@@ -796,7 +981,9 @@ class MainWindowTests(unittest.TestCase):
                 self.assertIn("GPIB0::23::INSTR", card.resource.text())
                 self.assertFalse(card.detected_resources.isEnabled())
                 self.assertEqual(card.assign_button.text(), "Assigned ✓")
-                self.assertTrue(card.test_button.isEnabled())
+                self.assertTrue(
+                    window.connection_panels["anritsu"].test_button.isEnabled()
+                )
                 self.assertEqual(
                     SettingsRepository(path).load().settings.anritsu.connection.resource,
                     "GPIB0::23::INSTR",
@@ -810,11 +997,12 @@ class MainWindowTests(unittest.TestCase):
         window = MainWindow(".config/settings.yml", simulation=True)
         try:
             card = window.dashboard.cards["keithley"]
-            card.test_button.click()
+            panel = window.connection_panels["keithley"]
+            panel.test_button.click()
             QTest.qWait(150)
             self.application.processEvents()
-            self.assertTrue(card.test_button.isEnabled())
-            self.assertEqual(card.test_button.text(), "Test")
+            self.assertTrue(panel.test_button.isEnabled())
+            self.assertEqual(panel.test_button.text(), "Test")
             self.assertIn("TEST PASS", card.identity.text())
             self.assertIn("KEITHLEY", card.identity.text().upper())
             self.assertEqual(window._controllers["keithley"]._worker._adapter.state.value, "disconnected")
@@ -885,9 +1073,14 @@ class MainWindowTests(unittest.TestCase):
             with patch.object(page, "_identify_selected_moke") as identify:
                 page._test_entered_moke_ip()
             identify.assert_called_once_with()
-            self.assertEqual(page.tcp_discovery_table.item(0, 0).text(), "131.246.221.33:10001")
-            self.assertEqual(page.tcp_discovery_table.item(0, 1).text(), "Entered manually")
-            page.tcp_discovery_table.item(0, 2).setText("MOKE Box verified")
+            self.assertEqual(page.tcp_results.selected_endpoint, "131.246.221.33:10001")
+            self.assertEqual(page.tcp_results.selected_state, "entered")
+            page.tcp_results.upsert_endpoint(
+                host="131.246.221.33",
+                endpoint="131.246.221.33:10001",
+                state="entered",
+                verification="MOKE Box verified",
+            )
             page._update_tcp_identify_enabled()
             self.assertTrue(page.tcp_assign_moke_button.isEnabled())
         finally:
@@ -1249,7 +1442,7 @@ class MainWindowTests(unittest.TestCase):
             keithley = window.keithley_page
             window.resize(1600, 900)
             window.show()
-            window._set_current_tab_widget(keithley)
+            window._navigate_to("keithley")
             self.application.processEvents()
 
             self.assertEqual(keithley.workspace_splitter.count(), 2)
@@ -1844,11 +2037,13 @@ class MainWindowTests(unittest.TestCase):
             self.assertEqual(splitter.count(), 2)
             self.assertGreater(splitter.widget(0).minimumWidth(), 0)
             self.assertGreater(window.log.maximumHeight(), 10000)
-            self.assertTrue(
-                window.event_log_dock.features()
-                & window.event_log_dock.DockWidgetFeature.DockWidgetMovable
+            self.assertEqual(
+                window.shell_splitter.orientation(),
+                Qt.Orientation.Vertical,
             )
-            self.assertIsNotNone(window.event_log_dock.toggleViewAction())
+            self.assertIs(window.shell_splitter.widget(1), window.event_log_panel)
+            self.assertFalse(window.event_log_panel.isWindow())
+            self.assertTrue(window.event_log_action.isCheckable())
         finally:
             window.close()
             self.application.processEvents()
@@ -1880,7 +2075,10 @@ class MainWindowTests(unittest.TestCase):
                 limits = loaded.raw["devices"]["keithley"]["safety"]["channels"]["B"]["lab_limits"]
                 self.assertEqual(limits["source_current"]["max"], "9 mA")
                 self.assertEqual(field.maximum.text(), "MAX  9 mA")
-                self.assertIsNot(window.tabs.currentWidget(), window.settings_page)
+                self.assertIsNot(
+                    window.stackedWidget.currentWidget(),
+                    window.navigation_routes["settings"],
+                )
             finally:
                 window.close()
                 self.application.processEvents()

@@ -23,6 +23,10 @@ from PySide6.QtWidgets import (
     QTableWidgetItem, QToolButton, QTreeWidget, QTreeWidgetItem,
     QVBoxLayout, QWidget,
 )
+from qfluentwidgets import (
+    CaptionLabel, CardWidget, ComboBox, PrimaryPushButton, PushButton,
+    StrongBodyLabel, TitleLabel,
+)
 
 from app.devices.keithley_2600 import (
     KeithleyRampRequest, KeithleySourceRequest, build_keithley_ramp_levels,
@@ -101,7 +105,7 @@ def _keithley_roi_definition(
     return {"device": "Keithley", **definitions[parameter_id]}
 
 
-class KeithleyConfigurationPanel(QFrame):
+class KeithleyConfigurationPanel(CardWidget):
     """Reusable source/measurement form with no hardware side effects."""
 
     def __init__(
@@ -119,22 +123,22 @@ class KeithleyConfigurationPanel(QFrame):
         layout = QVBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
         layout.setSpacing(6)
-        title = QLabel("Source and measurement configuration")
+        title = StrongBodyLabel("Source and measurement configuration")
         title.setObjectName("sectionTitle")
         layout.addWidget(title)
         self.form = QFormLayout()
         self.form.setVerticalSpacing(4)
         self.form.setHorizontalSpacing(8)
-        self.channel = QComboBox()
+        self.channel = ComboBox()
         self.channel.addItems(["A", "B"])
         self.channel.setCurrentText("B")
-        self.mode = QComboBox()
+        self.mode = ComboBox()
         self.mode.addItems(["current", "voltage", "measure_only"])
         self.level = _line("1 mA")
         self.compliance = _line("67 mV")
         self.nplc = _line("1")
         self.settle = _line("100 ms")
-        self.sense_mode = QComboBox()
+        self.sense_mode = ComboBox()
         self.sense_mode.addItems(["2wire", "4wire"])
         self.source_autorange = QCheckBox("Source autorange")
         self.source_autorange.setChecked(True)
@@ -665,10 +669,11 @@ class KeithleyPage(QWidget):
         layout.addWidget(self.banner)
         layout.setContentsMargins(10, 8, 10, 8)
         layout.setSpacing(8)
-        hero = QFrame()
+        self.hero_card = CardWidget()
+        hero = self.hero_card
         hero.setObjectName("keithleyHero")
         hero_layout = QHBoxLayout(hero)
-        title = QLabel("Keithley 2600 — Dual-channel SMU")
+        title = TitleLabel("Keithley 2600 — Dual-channel SMU")
         title.setObjectName("keithleyPageTitle")
         hero_layout.addWidget(title)
         hero_layout.addStretch(1)
@@ -693,7 +698,7 @@ class KeithleyPage(QWidget):
         hero_layout.addWidget(self.last_update)
         self.device_led = QLabel("●")
         self.device_led.setObjectName("keithleyLed")
-        self.device_state = QLabel("DISCONNECTED")
+        self.device_state = StrongBodyLabel("DISCONNECTED")
         self.device_state.setObjectName("keithleyState")
         hero_layout.addWidget(self.device_led)
         hero_layout.addWidget(self.device_state)
@@ -733,7 +738,7 @@ class KeithleyPage(QWidget):
         self.source_range_field = self.configuration_panel.source_range_field
         self.keithley_form = self.configuration_panel.form
         self._limit_fields = self.configuration_panel.limit_fields
-        workflow = QFrame()
+        workflow = CardWidget()
         workflow.setObjectName("keithleyOutputWorkflow")
         workflow_layout = QVBoxLayout(workflow)
         workflow_layout.setContentsMargins(7, 5, 7, 5)
@@ -745,11 +750,11 @@ class KeithleyPage(QWidget):
         )
         workflow_layout.addWidget(self.output_readiness)
         source_layout.addWidget(workflow)
-        ramp_panel = QFrame()
+        ramp_panel = CardWidget()
         ramp_panel.setObjectName("keithleyRampPanel")
         ramp_layout = QVBoxLayout(ramp_panel)
         ramp_layout.setContentsMargins(7, 5, 7, 5)
-        ramp_title = QLabel("Manual source ramp — OUTPUT must already be ON")
+        ramp_title = StrongBodyLabel("Manual source ramp — OUTPUT must already be ON")
         ramp_title.setObjectName("sectionTitle")
         ramp_layout.addWidget(ramp_title)
         ramp_form = QGridLayout()
@@ -769,9 +774,8 @@ class KeithleyPage(QWidget):
             ramp_form.addWidget(widget, 1, column)
         ramp_layout.addLayout(ramp_form)
         ramp_actions = QHBoxLayout()
-        self.ramp_preview_button = QPushButton("Preview ramp")
-        self.ramp_execute_button = QPushButton("Ramp to target")
-        self.ramp_execute_button.setObjectName("outputOnButton")
+        self.ramp_preview_button = PushButton("Preview ramp")
+        self.ramp_execute_button = PrimaryPushButton("Ramp to target")
         self.ramp_preview = QLabel("Preview the ramp before execution.")
         self.ramp_preview.setWordWrap(True)
         self.ramp_preview.setObjectName("muted")
@@ -781,8 +785,8 @@ class KeithleyPage(QWidget):
         ramp_layout.addLayout(ramp_actions)
         source_layout.addWidget(ramp_panel)
         buttons = QHBoxLayout()
-        measure = QPushButton("Measure selected channel")
-        self.output_toggle = QPushButton("OUTPUT OFF")
+        measure = PushButton("Measure selected channel")
+        self.output_toggle = PushButton("OUTPUT OFF")
         self.output_toggle.setCheckable(True)
         self.output_toggle.setObjectName("outputOffButton")
         self.output_toggle.setVisible(False)
@@ -845,21 +849,21 @@ class KeithleyPage(QWidget):
         scroll.setWidget(content)
         return scroll
 
-    def _build_keithley_history_panel(self, channel: str) -> QFrame:
-        panel = QFrame()
+    def _build_keithley_history_panel(self, channel: str) -> CardWidget:
+        panel = CardWidget()
         panel.setObjectName("keithleyChannelCard")
         panel_layout = QVBoxLayout(panel)
         panel_layout.setContentsMargins(7, 6, 7, 6)
         panel_layout.setSpacing(4)
         header = QHBoxLayout()
-        title = QLabel(f"CHANNEL {channel} — rolling 30 s history")
+        title = StrongBodyLabel(f"CHANNEL {channel} — rolling 30 s history")
         title.setObjectName("keithleyHistoryTitle")
-        metric = QComboBox()
-        metric.addItem("DC resistance |V/I|", ("resistance", "Resistance", "Ω"))
-        metric.addItem("Voltage", ("voltage", "Voltage", "V"))
-        metric.addItem("Current", ("current", "Current", "A"))
-        metric.addItem("Power V×I", ("power", "Power", "W"))
-        clear = QPushButton("Clear history")
+        metric = ComboBox()
+        metric.addItem("DC resistance |V/I|", userData=("resistance", "Resistance", "Ω"))
+        metric.addItem("Voltage", userData=("voltage", "Voltage", "V"))
+        metric.addItem("Current", userData=("current", "Current", "A"))
+        metric.addItem("Power V×I", userData=("power", "Power", "W"))
+        clear = PushButton("Clear history")
         clear.setProperty("compact", True)
         metric.setFixedHeight(28)
         clear.setFixedHeight(28)
@@ -890,7 +894,7 @@ class KeithleyPage(QWidget):
         controls = self.history_widgets[channel]
         plot = controls["plot"]
         metric = controls["metric"]
-        if not isinstance(plot, SpectrumPlotWidget) or not isinstance(metric, QComboBox):
+        if not isinstance(plot, SpectrumPlotWidget) or not isinstance(metric, ComboBox):
             return
         key, caption, unit = metric.currentData()
         history = self._measurement_history[channel]
@@ -911,8 +915,8 @@ class KeithleyPage(QWidget):
             plot.clear()
         self.status.emit(f"Keithley CH {channel} measurement history cleared")
 
-    def _build_channel_card(self, channel: str) -> QFrame:
-        card = QFrame()
+    def _build_channel_card(self, channel: str) -> CardWidget:
+        card = CardWidget()
         card.setObjectName("keithleyChannelCard")
         card.setProperty("selected", False)
         card.setMaximumHeight(154)
@@ -920,7 +924,7 @@ class KeithleyPage(QWidget):
         card_layout.setContentsMargins(8, 6, 8, 6)
         card_layout.setSpacing(4)
         header = QHBoxLayout()
-        name = QLabel(f"CHANNEL {channel}")
+        name = StrongBodyLabel(f"CHANNEL {channel}")
         name.setObjectName("keithleyCardTitle")
         led = QLabel("●")
         led.setObjectName("keithleyOutputLed")
@@ -940,14 +944,14 @@ class KeithleyPage(QWidget):
             ("power", "POWER (derived V×I)", "W"),
         )
         for index, (key, caption, unit) in enumerate(definitions):
-            tile = QFrame()
+            tile = CardWidget()
             tile.setObjectName("keithleyMeterTile")
             tile_layout = QVBoxLayout(tile)
             tile_layout.setContentsMargins(7, 3, 7, 3)
             tile_layout.setSpacing(1)
-            caption_label = QLabel(caption)
+            caption_label = CaptionLabel(caption)
             caption_label.setObjectName("muted")
-            value = QLabel(f"— {unit}")
+            value = StrongBodyLabel(f"— {unit}")
             value.setObjectName("keithleyMeterValue")
             tile_layout.addWidget(caption_label)
             tile_layout.addWidget(value)
@@ -957,13 +961,13 @@ class KeithleyPage(QWidget):
         footer = QHBoxLayout()
         compliance = QLabel("COMPLIANCE: clear")
         compliance.setObjectName("keithleyComplianceClear")
-        select = QPushButton(f"Select CH {channel}")
+        select = PushButton(f"Select CH {channel}")
         select.setProperty("compact", True)
         select.clicked.connect(lambda _checked=False, ch=channel: self.channel.setCurrentText(ch))
-        measure = QPushButton(f"Measure CH {channel}")
+        measure = PushButton(f"Measure CH {channel}")
         measure.setProperty("compact", True)
         measure.clicked.connect(lambda _checked=False, ch=channel: self.request_measurement(ch))
-        output_action = QPushButton("OUTPUT OFF")
+        output_action = PushButton("OUTPUT OFF")
         output_action.setProperty("compact", True)
         output_action.setObjectName("outputOffButton")
         output_action.clicked.connect(
@@ -1101,16 +1105,18 @@ class KeithleyPage(QWidget):
     def _device_state_changed(self, state: str) -> None:
         normalized = state.upper()
         self.device_state.setText(normalized.replace("_", " "))
-        color = {
-            "DISCONNECTED": "#91a0b2",
-            "VERIFIED": "#38d996",
-            "OUTPUT_OFF": "#38d996",
-            "OUTPUT_ON": "#ffcc66",
-            "COMPLIANCE": "#ff657a",
-            "FAULT": "#ff657a",
-            "UNKNOWN": "#ff657a",
-        }.get(normalized, "#91a0b2")
-        self.device_led.setStyleSheet(f"color: {color};")
+        semantic_state = {
+            "VERIFIED": "verified",
+            "OUTPUT_OFF": "verified",
+            "OUTPUT_ON": "active",
+            "COMPLIANCE": "compliance",
+            "FAULT": "fault",
+            "UNKNOWN": "fault",
+        }.get(normalized, "neutral")
+        for widget in (self.device_led, self.device_state):
+            widget.setProperty("deviceState", semantic_state)
+            widget.style().unpolish(widget)
+            widget.style().polish(widget)
         if normalized == "DISCONNECTED":
             self._live_timer.stop()
             self.live_measurements.setChecked(False)
@@ -1122,7 +1128,9 @@ class KeithleyPage(QWidget):
             for channel in ("A", "B"):
                 widgets = self.channel_cards[channel]
                 widgets["output"].setText("OUTPUT UNKNOWN")
-                widgets["led"].setStyleSheet("color: #91a0b2;")
+                widgets["led"].setProperty("outputState", "neutral")
+                widgets["led"].style().unpolish(widgets["led"])
+                widgets["led"].style().polish(widgets["led"])
         elif normalized == "VERIFIED":
             # Connection qualification explicitly forces and verifies both outputs OFF.
             self._set_channel_output("A", False)
@@ -1181,7 +1189,9 @@ class KeithleyPage(QWidget):
         self._output_states[channel] = enabled
         widgets = self.channel_cards[channel]
         widgets["output"].setText("OUTPUT ON" if enabled else "OUTPUT OFF")
-        widgets["led"].setStyleSheet(f"color: {'#ffcc66' if enabled else '#38d996'};")
+        widgets["led"].setProperty("outputState", "active" if enabled else "off")
+        widgets["led"].style().unpolish(widgets["led"])
+        widgets["led"].style().polish(widgets["led"])
         action = widgets["output_action"]
         action.setText("OUTPUT ON" if enabled else "OUTPUT OFF")
         action.setObjectName("outputOnButton" if enabled else "outputOffButton")
@@ -1671,4 +1681,3 @@ class KeithleyPage(QWidget):
             "arm",
         }:
             QMessageBox.warning(self, "Keithley", error)
-

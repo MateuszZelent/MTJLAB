@@ -11,6 +11,10 @@ from PySide6.QtWidgets import (
     QLabel, QMessageBox, QPushButton, QScrollArea, QSpinBox, QSplitter,
     QTabWidget, QVBoxLayout, QWidget,
 )
+from qfluentwidgets import (
+    CaptionLabel, CardWidget, ComboBox, PrimaryPushButton,
+    PushButton, StrongBodyLabel, TitleLabel,
+)
 
 from app.devices.rigol_dg1000z import (
     RigolBurstConfig, RigolChannelConfig, RigolFrequencySweepConfig,
@@ -65,11 +69,12 @@ class RigolPage(QWidget):
         layout.setContentsMargins(18, 18, 18, 18)
         layout.setSpacing(14)
 
-        header = QFrame()
+        self.hero_card = CardWidget()
+        header = self.hero_card
         header.setObjectName("rigolHero")
         header_layout = QHBoxLayout(header)
         heading = QVBoxLayout()
-        title = QLabel("Rigol DG1032Z")
+        title = TitleLabel("Rigol DG1032Z")
         title.setObjectName("pageTitle")
         subtitle = QLabel("Function generator Â· channel control and safe output activation")
         subtitle.setObjectName("muted")
@@ -79,14 +84,14 @@ class RigolPage(QWidget):
 
         self.device_led = QLabel("â—")
         self.device_led.setObjectName("rigolLed")
-        self.device_state = QLabel("DISCONNECTED")
+        self.device_state = StrongBodyLabel("DISCONNECTED")
         self.device_state.setObjectName("rigolState")
         state_box = QVBoxLayout()
         state_line = QHBoxLayout()
         state_line.addWidget(self.device_led)
         state_line.addWidget(self.device_state)
         state_box.addLayout(state_line)
-        self.capability_badge = QLabel("Capabilities: awaiting identification")
+        self.capability_badge = CaptionLabel("Capabilities: awaiting identification")
         self.capability_badge.setObjectName("rigolBadge")
         state_box.addWidget(self.capability_badge)
         header_layout.addLayout(state_box)
@@ -94,16 +99,16 @@ class RigolPage(QWidget):
         self.banner = NotificationBanner()
         layout.addWidget(self.banner)
 
-        self.channel = QComboBox()
+        self.channel = ComboBox()
         self.channel.addItems(["1", "2"])
-        self.waveform = QComboBox()
+        self.waveform = ComboBox()
         self.waveform.addItems(["SIN", "SQU", "RAMP", "PULS", "NOIS", "DC"])
         self.waveform.setCurrentText("SIN")
-        self.time_mode = QComboBox()
+        self.time_mode = ComboBox()
         self.time_mode.addItems(["Frequency", "Period"])
         self.frequency = _line("1 kHz")
         self.period = _line("1 ms")
-        self.level_mode = QComboBox()
+        self.level_mode = ComboBox()
         self.level_mode.addItems(["HighL / LowL", "Amplitude / Offset"])
         self.level_mode.setCurrentText("Amplitude / Offset")
         self.high_level = _line("1 mV")
@@ -111,14 +116,14 @@ class RigolPage(QWidget):
         self.vpp = _line("2 mV")
         self.offset = _line("0 V")
         self.load = _line("HIGHZ")
-        self.output_polarity = QComboBox()
+        self.output_polarity = ComboBox()
         self.output_polarity.addItems(["NORM", "INV"])
-        self.output_mode = QComboBox()
+        self.output_mode = ComboBox()
         self.output_mode.addItems(["NORM", "GAT"])
-        self.gate_polarity = QComboBox()
+        self.gate_polarity = ComboBox()
         self.gate_polarity.addItems(["NORM", "INV"])
         self.sync_enabled = QCheckBox("SYNC enabled")
-        self.sync_polarity = QComboBox()
+        self.sync_polarity = ComboBox()
         self.sync_polarity.addItems(["NORM", "INV"])
         self.sync_delay = _line("0 s")
         self.dut_impedance = _line("50 ohm")
@@ -136,8 +141,8 @@ class RigolPage(QWidget):
         self.control_tabs = QTabWidget()
         self.control_tabs.setObjectName("rigolControlTabs")
 
-        configure = QPushButton("Validate and apply waveform")
-        configure.setObjectName("primaryButton")
+        configure = PrimaryPushButton("Validate and apply waveform")
+        self.waveform_apply_button = configure
         self.basic_scroll = self._form_page(
             "Basic parameters",
             "For a standard sine wave, change only Frequency and Amplitude. Other fields already contain safe defaults.",
@@ -158,8 +163,7 @@ class RigolPage(QWidget):
             (configure,),
         )
         self.basic_form = self.basic_scroll.widget().findChild(QFormLayout)
-        shape_apply = QPushButton("Apply shape parameters")
-        shape_apply.setObjectName("primaryButton")
+        shape_apply = PrimaryPushButton("Apply shape parameters")
         self.shape_scroll = self._form_page(
             "Waveform shape",
             "Only parameters applicable to the selected waveform are shown.",
@@ -174,14 +178,11 @@ class RigolPage(QWidget):
         )
         self.shape_form = self.shape_scroll.widget().findChild(QFormLayout)
 
-        configure_output = QPushButton("Apply output path")
-        configure_output.setObjectName("primaryButton")
-        self.sync_phases_button = QPushButton("Synchronize CH1/CH2 phases")
+        configure_output = PrimaryPushButton("Apply output path")
+        self.sync_phases_button = PushButton("Synchronize CH1/CH2 phases")
         self.sync_phases_button.setEnabled(False)
-        self.output_on = QPushButton("OUTPUT ON")
-        self.output_on.setObjectName("outputOnButton")
-        self.output_off = QPushButton("OUTPUT OFF")
-        self.output_off.setObjectName("outputOffButton")
+        self.output_on = PrimaryPushButton("OUTPUT ON")
+        self.output_off = PushButton("OUTPUT OFF")
         self.output_scroll = self._form_page(
             "Output path and SYNC",
             "OUTPUT ON validates the visible channel settings, performs an internal "
@@ -218,7 +219,7 @@ class RigolPage(QWidget):
         insight = QWidget()
         insight_layout = QVBoxLayout(insight)
         insight_layout.setContentsMargins(10, 0, 0, 0)
-        preview_title = QLabel("Waveform preview")
+        preview_title = StrongBodyLabel("Waveform preview")
         preview_title.setObjectName("sectionTitle")
         insight_layout.addWidget(preview_title)
         self.preview_plot = SpectrumPlotWidget(legend=False)
@@ -226,10 +227,11 @@ class RigolPage(QWidget):
         self.preview_plot.setMinimumHeight(260)
         insight_layout.addWidget(self.preview_plot, 1)
 
-        safety = QFrame()
+        self.safety_card = CardWidget()
+        safety = self.safety_card
         safety.setObjectName("rigolSafetyCard")
         safety_layout = QVBoxLayout(safety)
-        safety_title = QLabel("Load safety")
+        safety_title = StrongBodyLabel("Load safety")
         safety_title.setObjectName("sectionTitle")
         safety_layout.addWidget(safety_title)
         self.estimate = QLabel("Estimated current: â€”")
@@ -391,7 +393,7 @@ class RigolPage(QWidget):
         scroll.setWidgetResizable(True)
         scroll.setFrameShape(QFrame.Shape.NoFrame)
         scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
-        content = QWidget()
+        content = CardWidget()
         content_layout = QVBoxLayout(content)
         content_layout.setContentsMargins(18, 18, 18, 24)
         content_layout.setSpacing(12)
@@ -493,17 +495,18 @@ class RigolPage(QWidget):
 
     def _device_state_changed(self, state: str) -> None:
         normalized = str(state).strip().lower()
-        colors = {
-            "verified": "#38d996",
-            "output_off": "#38d996",
-            "output_on": "#ffcc66",
-            "connecting": "#66b3ff",
-            "fault": "#ff657a",
-            "unknown": "#ff657a",
-            "disconnected": "#91a0b2",
-        }
         self.device_state.setText(normalized.replace("_", " ").upper())
-        self.device_led.setStyleSheet(f"color: {colors.get(normalized, '#91a0b2')};")
+        semantic_state = {
+            "verified": "verified",
+            "output_off": "verified",
+            "output_on": "active",
+            "fault": "fault",
+            "unknown": "fault",
+        }.get(normalized, "neutral")
+        for widget in (self.device_led, self.device_state):
+            widget.setProperty("deviceState", semantic_state)
+            widget.style().unpolish(widget)
+            widget.style().polish(widget)
 
     def _update_dynamic_controls(self, *_args: object) -> None:
         waveform = self.waveform.currentText()
@@ -694,17 +697,17 @@ class RigolPage(QWidget):
         tab = QWidget()
         form = QFormLayout(tab)
         self.mod_enabled = QCheckBox("Modulation enabled")
-        self.mod_type = QComboBox()
+        self.mod_type = ComboBox()
         self.mod_type.addItems(["AM", "FM", "PM", "ASK", "FSK", "PSK", "PWM"])
-        self.mod_source = QComboBox()
+        self.mod_source = ComboBox()
         self.mod_source.addItems(["INT", "EXT"])
         self.mod_rate = _line("1 kHz")
         self.mod_parameter = _line("50")
-        self.mod_shape = QComboBox()
+        self.mod_shape = ComboBox()
         self.mod_shape.addItems(["SIN", "SQU", "RAMP", "NOIS", "ARB"])
-        self.mod_polarity = QComboBox()
+        self.mod_polarity = ComboBox()
         self.mod_polarity.addItems(["POS", "NEG"])
-        apply = QPushButton("Apply modulation while OUTPUT is OFF")
+        apply = PrimaryPushButton("Apply modulation while OUTPUT is OFF")
         for label, widget in (
             ("State", self.mod_enabled),
             ("Typ", self.mod_type),
@@ -730,18 +733,18 @@ class RigolPage(QWidget):
         self.sweep_start_hold = _line("0 s")
         self.sweep_stop_hold = _line("0 s")
         self.sweep_return_time = _line("0 s")
-        self.sweep_spacing = QComboBox()
+        self.sweep_spacing = ComboBox()
         self.sweep_spacing.addItems(["LIN", "LOG", "STEP"])
         self.sweep_steps = QSpinBox()
         self.sweep_steps.setRange(2, 1_000_000)
         self.sweep_steps.setValue(10)
-        self.sweep_trigger = QComboBox()
+        self.sweep_trigger = ComboBox()
         self.sweep_trigger.addItems(["INT", "EXT", "MAN"])
-        self.sweep_trigger_slope = QComboBox()
+        self.sweep_trigger_slope = ComboBox()
         self.sweep_trigger_slope.addItems(["POS", "NEG"])
         self.sweep_trigger_out = QCheckBox("Trigger output")
-        apply = QPushButton("Apply sweep while OUTPUT is OFF")
-        trigger = QPushButton("Trigger sweep")
+        apply = PrimaryPushButton("Apply sweep while OUTPUT is OFF")
+        trigger = PushButton("Trigger sweep")
         for label, widget in (
             ("State", self.sweep_enabled),
             ("Start", self._bounded(self.sweep_start, "frequency")),
@@ -769,7 +772,7 @@ class RigolPage(QWidget):
         tab = QWidget()
         form = QFormLayout(tab)
         self.burst_enabled = QCheckBox("Burst enabled")
-        self.burst_mode = QComboBox()
+        self.burst_mode = ComboBox()
         self.burst_mode.addItems(["TRIG", "GAT"])
         self.burst_cycles = QSpinBox()
         self.burst_cycles.setRange(1, 1_000_000)
@@ -777,17 +780,17 @@ class RigolPage(QWidget):
         self.burst_phase = _line("0")
         self.burst_period = _line("1 ms")
         self.burst_delay = _line("0 s")
-        self.burst_trigger = QComboBox()
+        self.burst_trigger = ComboBox()
         self.burst_trigger.addItems(["INT", "EXT", "MAN"])
-        self.burst_trigger_slope = QComboBox()
+        self.burst_trigger_slope = ComboBox()
         self.burst_trigger_slope.addItems(["POS", "NEG"])
         self.burst_trigger_out = QCheckBox("Trigger output")
-        self.burst_gate_polarity = QComboBox()
+        self.burst_gate_polarity = ComboBox()
         self.burst_gate_polarity.addItems(["POS", "NEG"])
-        self.burst_idle = QComboBox()
+        self.burst_idle = ComboBox()
         self.burst_idle.addItems(["FPT", "TOP", "CENT", "BOT"])
-        apply = QPushButton("Apply burst while OUTPUT is OFF")
-        trigger = QPushButton("Trigger burst")
+        apply = PrimaryPushButton("Apply burst while OUTPUT is OFF")
+        trigger = PushButton("Trigger burst")
         for label, widget in (
             ("State", self.burst_enabled),
             ("Mode", self.burst_mode),

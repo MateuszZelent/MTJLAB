@@ -7,24 +7,69 @@ from pathlib import Path
 
 from PySide6.QtWidgets import (
     QPlainTextEdit,
-    QTabWidget,
+    QSizePolicy,
+    QStackedWidget,
     QVBoxLayout,
     QWidget,
 )
+from qfluentwidgets import Pivot
 
 from app.storage import RunDetail, ThatecRun
 from app.storage.pythat_reader import PyThatRunData
 
 
+class _FluentMetadataSections(QWidget):
+    """Compact Fluent navigation for the immutable run-detail documents."""
+
+    def __init__(self, parent: QWidget | None = None) -> None:
+        super().__init__(parent)
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(8)
+        self.navigation = Pivot(self)
+        self.navigation.setItemFontSize(14)
+        self.stack = QStackedWidget(self)
+        self.stack.setSizePolicy(
+            QSizePolicy.Policy.Ignored,
+            QSizePolicy.Policy.Expanding,
+        )
+        layout.addWidget(self.navigation)
+        layout.addWidget(self.stack, 1)
+        self._routes: list[str] = []
+        self._labels: list[str] = []
+
+    def addTab(self, page: QWidget, label: str) -> int:
+        index = self.stack.addWidget(page)
+        route = f"metadata-section-{index}"
+        self._routes.append(route)
+        self._labels.append(label)
+        self.navigation.addItem(
+            route,
+            label,
+            onClick=lambda _checked=False, index=index: self.setCurrentIndex(index),
+        )
+        if index == 0:
+            self.setCurrentIndex(index)
+        return index
+
+    def setCurrentIndex(self, index: int) -> None:
+        self.stack.setCurrentIndex(index)
+        self.navigation.setCurrentItem(self._routes[index])
+
+    def tabText(self, index: int) -> str:
+        return self._labels[index]
+
+
 class MetadataPanel(QWidget):
-    """QTabWidget showing Metadata, Recipe, Settings, PyThat data and Device state."""
+    """Fluent detail navigation for metadata, snapshots and device state."""
 
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
         layout = QVBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
 
-        self.tabs = QTabWidget()
+        self.tabs = _FluentMetadataSections(self)
+        self.section_navigation = self.tabs.navigation
         self.metadata = QPlainTextEdit()
         self.recipe_snapshot = QPlainTextEdit()
         self.settings_snapshot = QPlainTextEdit()
