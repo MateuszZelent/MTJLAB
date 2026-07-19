@@ -8,6 +8,7 @@ from PySide6.QtCore import QSettings, Qt
 from PySide6.QtTest import QTest
 from PySide6.QtWidgets import QApplication, QLabel, QMainWindow, QVBoxLayout, QWidget
 from qfluentwidgets import FluentWindow, ScrollArea
+from qfluentwidgets.common.style_sheet import styleSheetManager
 
 from app.settings import SettingsRepository
 from app.ui.shell import FluentPageHost, StationSafetySnapshot, StationSafetyStrip
@@ -149,6 +150,15 @@ class MainWindowFluentShellTests(unittest.TestCase):
                     for widget in visible_top_levels
                 )
             )
+        finally:
+            window.close()
+
+    def test_station_page_stack_is_not_globally_repolished_by_qfluent(self) -> None:
+        window = MainWindow(".config/settings.yml", simulation=True)
+        try:
+            managed = {widget for widget, _source in styleSheetManager.items()}
+            self.assertNotIn(window.stackedWidget, managed)
+            self.assertIn("background: transparent", window.stackedWidget.styleSheet())
         finally:
             window.close()
 

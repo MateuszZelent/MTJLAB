@@ -123,6 +123,8 @@ class ThemeBridgeTests(unittest.TestCase):
         palette = label.palette()
         palette.setColor(QPalette.ColorRole.WindowText, QColor("#ffffff"))
         label.setPalette(palette)
+        label.show()
+        self.application.processEvents()
 
         apply_application_theme(self.application, "light")
 
@@ -130,6 +132,7 @@ class ThemeBridgeTests(unittest.TestCase):
             label.palette().color(QPalette.ColorRole.WindowText).name(),
             tokens_for("light").text_primary,
         )
+        label.close()
         label.deleteLater()
 
     def test_light_theme_gives_disabled_primary_button_dark_readable_text(self) -> None:
@@ -137,10 +140,13 @@ class ThemeBridgeTests(unittest.TestCase):
         button.setEnabled(False)
 
         apply_application_theme(self.application, "dark")
+        button.show()
+        self.application.processEvents()
         apply_application_theme(self.application, "light")
 
         patch_qss = button.styleSheet().split("/* station-disabled-button */", 1)[1]
         self.assertIn("color: palette(placeholder-text)", patch_qss)
         self.assertIn("background-color: palette(alternate-base)", patch_qss)
         self.assertNotIn("rgba(255, 255, 255, 0.9)", patch_qss)
+        button.close()
         button.deleteLater()

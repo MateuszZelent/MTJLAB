@@ -38,8 +38,8 @@ from qfluentwidgets import (
     RoundMenu,
     SimpleCardWidget,
     TransparentDropDownToolButton,
-    setCustomStyleSheet,
 )
+from qfluentwidgets.common.style_sheet import styleSheetManager
 
 from app.audit import AuditLogger
 from app.bootstrap import StationComposition
@@ -175,7 +175,8 @@ class MainWindow(FluentWindow):
             "border: none; border-radius: 0; background: transparent;"
             "}"
         )
-        setCustomStyleSheet(self.stackedWidget, stack_qss, stack_qss)
+        styleSheetManager.deregister(self.stackedWidget)
+        self.stackedWidget.setStyleSheet(stack_qss)
         self.stackedWidget.setProperty("isTransparent", True)
         self.shell_splitter.addWidget(self.stackedWidget)
         content_layout.addWidget(self.shell_splitter, 1)
