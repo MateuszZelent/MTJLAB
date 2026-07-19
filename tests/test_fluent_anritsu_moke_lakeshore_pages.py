@@ -9,7 +9,7 @@ from unittest.mock import patch
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
-from PySide6.QtCore import QPoint
+from PySide6.QtCore import QPoint, Qt
 from PySide6.QtGui import QPalette
 from PySide6.QtWidgets import QApplication, QLabel, QMessageBox
 from qfluentwidgets import CardWidget, CheckBox, PlainTextEdit, PrimaryPushButton, PushButton
@@ -235,6 +235,17 @@ class FluentAnritsuAndMokePageTests(unittest.TestCase):
         self.assertIsInstance(page.live, PrimaryPushButton)
         self.assertTrue(page.hero_card.isVisibleTo(self.window))
         self.assertGreater(page.hero_card.geometry().width(), 300)
+
+    def test_anritsu_workspace_stacks_without_clipping_at_minimum_window_size(self) -> None:
+        self.window.resize(820, 560)
+        self.window._navigate_to("anritsu")
+        self.application.processEvents()
+
+        page = self.window.anritsu_page
+        host = self.window.navigation_routes["anritsu"]
+        self.assertEqual(page.workspace_splitter.orientation(), Qt.Orientation.Vertical)
+        self.assertEqual(host.scroll_area.horizontalScrollBar().maximum(), 0)
+        self.assertEqual(page.width(), host.scroll_area.viewport().width())
 
     def test_anritsu_light_theme_uses_tokenized_surfaces_and_readable_connection_text(self) -> None:
         self.window._navigate_to("anritsu")

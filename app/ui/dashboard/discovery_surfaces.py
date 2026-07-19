@@ -6,8 +6,8 @@ from collections.abc import Iterable
 
 from PySide6.QtCore import Qt, Signal
 from PySide6.QtGui import QKeyEvent, QMouseEvent
-from PySide6.QtWidgets import QHBoxLayout, QScrollArea, QSizePolicy, QStackedLayout, QVBoxLayout, QWidget
-from qfluentwidgets import BodyLabel, CaptionLabel, CardWidget, FluentIcon, IconWidget, StrongBodyLabel
+from PySide6.QtWidgets import QHBoxLayout, QSizePolicy, QStackedLayout, QVBoxLayout, QWidget
+from qfluentwidgets import BodyLabel, CaptionLabel, CardWidget, FluentIcon, IconWidget, ScrollArea, StrongBodyLabel
 
 from app.ui.design_system.tokens import SPACING
 
@@ -138,9 +138,9 @@ class TcpDiscoveryResultsView(QWidget):
         self._selected_host: str | None = None
         layout = QStackedLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
-        self.scroll_area = QScrollArea(self)
+        self.scroll_area = ScrollArea(self)
         self.scroll_area.setWidgetResizable(True)
-        self.scroll_area.setFrameShape(QScrollArea.Shape.NoFrame)
+        self.scroll_area.setFrameShape(ScrollArea.Shape.NoFrame)
         self.scroll_area.setProperty("stationSurface", "surface")
         self.content = QWidget(self.scroll_area)
         self.content.setProperty("stationSurface", "surface")
@@ -276,9 +276,9 @@ class SavedInstrumentsView(QWidget):
         self.cards: list[SavedInstrumentCard] = []
         layout = QStackedLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
-        self.scroll_area = QScrollArea(self)
+        self.scroll_area = ScrollArea(self)
         self.scroll_area.setWidgetResizable(True)
-        self.scroll_area.setFrameShape(QScrollArea.Shape.NoFrame)
+        self.scroll_area.setFrameShape(ScrollArea.Shape.NoFrame)
         self.scroll_area.setProperty("stationSurface", "surface")
         self.content = QWidget(self.scroll_area)
         self.content.setProperty("stationSurface", "surface")

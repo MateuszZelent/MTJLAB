@@ -2,8 +2,9 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
+from PySide6.QtCore import QEvent, QObject
 from PySide6.QtGui import QColor, QPalette
-from PySide6.QtWidgets import QApplication, QLabel, QPushButton, QWidget
+from PySide6.QtWidgets import QApplication, QDialog, QLabel, QPushButton, QWidget
 from qfluentwidgets import (
     CaptionLabel,
     CardWidget,
@@ -27,8 +28,6 @@ class AppliedTheme:
 def apply_application_theme(application: QApplication, mode: str) -> AppliedTheme:
     name = effective_theme(mode)
     tokens = tokens_for(name)
-    _apply_application_palette(application, tokens, name)
-    application.setStyleSheet(dialog_qss(tokens))
     fluent_matches = isDarkTheme() == (name == "dark")
     accent_matches = application.property("stationAppliedAccent") == tokens.accent
     if (
@@ -36,20 +35,53 @@ def apply_application_theme(application: QApplication, mode: str) -> AppliedThem
         and fluent_matches
         and accent_matches
     ):
-        _apply_station_control_styles(application, tokens)
         return AppliedTheme(name=name, tokens=tokens)
-    # A synchronous swap prevents stale dark text/icons and avoids QFluent's
-    # stock disabled-button QSS overwriting the station contrast patch later.
-    setTheme(Theme.DARK if name == "dark" else Theme.LIGHT, lazy=False)
-    setThemeColor(tokens.accent, save=False, lazy=False)
-    # QFluent's synchronous QSS refresh can touch the application palette;
+    lazy = _supports_lazy_theme_update(application)
+    setTheme(Theme.DARK if name == "dark" else Theme.LIGHT, lazy=lazy)
+    setThemeColor(tokens.accent, save=False, lazy=lazy)
+    # QFluent's QSS refresh can touch the application palette;
     # native item views must receive the station palette after that refresh.
     _apply_application_palette(application, tokens, name)
     application.setProperty("stationAppliedTheme", name)
     application.setProperty("stationAppliedAccent", tokens.accent)
+    _install_dialog_theme_filter(application, tokens)
     _settle_fluent_background_animations(application)
     _apply_station_control_styles(application, tokens)
     return AppliedTheme(name=name, tokens=tokens)
+
+
+def _supports_lazy_theme_update(application: QApplication) -> bool:
+    """Use QFluent's visible-widget fast path only on a real window system."""
+
+    return application.platformName().strip().lower() not in {"offscreen", "minimal"}
+
+
+class _DialogThemeFilter(QObject):
+    """Apply popup-only QSS when a native Qt dialog is actually shown."""
+
+    def __init__(self, application: QApplication, tokens: ThemeTokens) -> None:
+        super().__init__(application)
+        self._tokens = tokens
+
+    def set_tokens(self, tokens: ThemeTokens) -> None:
+        self._tokens = tokens
+
+    def eventFilter(self, watched: QObject, event: QEvent) -> bool:
+        if event.type() == QEvent.Type.Show and isinstance(watched, QDialog):
+            watched.setStyleSheet(dialog_qss(self._tokens))
+        return False
+
+
+def _install_dialog_theme_filter(
+    application: QApplication, tokens: ThemeTokens
+) -> None:
+    theme_filter = getattr(application, "_station_dialog_theme_filter", None)
+    if not isinstance(theme_filter, _DialogThemeFilter):
+        theme_filter = _DialogThemeFilter(application, tokens)
+        application.installEventFilter(theme_filter)
+        application._station_dialog_theme_filter = theme_filter
+    else:
+        theme_filter.set_tokens(tokens)
 
 
 def _apply_application_palette(
@@ -130,6 +162,8 @@ def _apply_station_control_styles(application: QApplication, tokens: ThemeTokens
     """Retheme station-owned surfaces without repolishing the entire widget tree."""
 
     for widget in application.allWidgets():
+        if isinstance(widget, QDialog):
+            widget.setStyleSheet(dialog_qss(tokens))
         _apply_station_surface(widget, tokens)
         _apply_semantic_text(widget, tokens)
         _apply_station_card_frame(widget, tokens)
@@ -204,6 +238,15 @@ def _apply_station_surface(widget: QWidget, tokens: ThemeTokens) -> None:
             "}"
             "QSplitter#fluentShellSplitter::handle:hover {"
             f"border-top-color: {tokens.focus};"
+            "}"
+        )
+    if widget.objectName() == "fluentApplicationStack":
+        marker = "/* station-borderless-stack */"
+        base = widget.styleSheet().split(marker, 1)[0].rstrip()
+        widget.setStyleSheet(
+            f"{base}\n{marker}\n"
+            "QStackedWidget#fluentApplicationStack {"
+            "border: none; border-radius: 0; background: transparent;"
             "}"
         )
 

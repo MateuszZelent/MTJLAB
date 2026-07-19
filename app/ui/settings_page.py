@@ -11,6 +11,7 @@ from typing import Any, Literal, Union, get_args, get_origin
 from pydantic import BaseModel, ValidationError
 
 from PySide6.QtCore import QTimer, Qt, Signal
+from PySide6.QtGui import QResizeEvent
 from PySide6.QtWidgets import (
     QHBoxLayout,
     QHeaderView,
@@ -18,7 +19,6 @@ from PySide6.QtWidgets import (
     QDialogButtonBox,
     QCheckBox,
     QComboBox,
-    QFileDialog,
     QInputDialog,
     QLabel,
     QLineEdit,
@@ -27,8 +27,6 @@ from PySide6.QtWidgets import (
     QFormLayout,
     QFrame,
     QGridLayout,
-    QGroupBox,
-    QScrollArea,
     QSpinBox,
     QStyledItemDelegate,
     QStyleOptionViewItem,
@@ -45,10 +43,16 @@ from PySide6.QtWidgets import (
 from qfluentwidgets import (
     BodyLabel,
     CardWidget,
+    CheckBox,
+    ComboBox,
+    FluentIcon,
     LineEdit,
     Pivot,
     PrimaryPushButton,
     PushButton,
+    ScrollArea,
+    SpinBox,
+    StrongBodyLabel,
     SubtitleLabel,
 )
 
@@ -66,7 +70,8 @@ from app.domain.quantities import (
     parse_quantity,
 )
 from app.security import AccessPolicy, Permission
-from app.ui.recipes.fluent_dialog import StationDialog
+from app.ui.dialogs import StationFileDialog as QFileDialog
+from app.ui.dialogs import StationDialog
 from app.settings import SettingsRepository
 from app.settings.diagnostics import (
     configuration_diagnostics,
@@ -94,15 +99,27 @@ class _FluentSettingsSections(QWidget):
         layout.setSpacing(8)
         self.navigation = Pivot(self)
         self.navigation.setItemFontSize(14)
+        self.navigation.setMinimumWidth(1080)
+        self.compact_navigation = ComboBox(self)
+        self.compact_navigation.setAccessibleName("Settings section")
+        self.compact_navigation.hide()
+        self.compact_navigation.currentIndexChanged.connect(self.setCurrentIndex)
         self.secondary_navigation = Pivot(self)
-        self.secondary_navigation.setItemFontSize(14)
+        self.secondary_navigation.hide()
+        self.navigation_scroll = ScrollArea(self)
+        self.navigation_scroll.setObjectName("settingsNavigationScroll")
+        self.navigation_scroll.setWidgetResizable(True)
+        self.navigation_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
+        self.navigation_scroll.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        self.navigation_scroll.setFixedHeight(54)
+        self.navigation_scroll.setWidget(self.navigation)
         self.stack = QStackedWidget(self)
         self.stack.setSizePolicy(
             QSizePolicy.Policy.Ignored,
             QSizePolicy.Policy.Expanding,
         )
-        layout.addWidget(self.navigation)
-        layout.addWidget(self.secondary_navigation)
+        layout.addWidget(self.navigation_scroll)
+        layout.addWidget(self.compact_navigation)
         layout.addWidget(self.stack, 1)
         self._routes: list[str] = []
         self._labels: list[str] = []
@@ -112,8 +129,8 @@ class _FluentSettingsSections(QWidget):
         route = f"settings-section-{index}"
         self._routes.append(route)
         self._labels.append(label)
-        navigation = self.navigation if index < 6 else self.secondary_navigation
-        navigation.addItem(
+        self.compact_navigation.addItem(label, userData=index)
+        self.navigation.addItem(
             route,
             label,
             onClick=lambda _checked=False, index=index: self.setCurrentIndex(index),
@@ -137,8 +154,17 @@ class _FluentSettingsSections(QWidget):
     def setCurrentIndex(self, index: int) -> None:
         self.stack.setCurrentIndex(index)
         route = self._routes[index]
-        navigation = self.navigation if route in self.navigation.items else self.secondary_navigation
-        navigation.setCurrentItem(route)
+        self.navigation.setCurrentItem(route)
+        if self.compact_navigation.currentIndex() != index:
+            self.compact_navigation.blockSignals(True)
+            self.compact_navigation.setCurrentIndex(index)
+            self.compact_navigation.blockSignals(False)
+
+    def resizeEvent(self, event: QResizeEvent) -> None:
+        super().resizeEvent(event)
+        compact = event.size().width() < 900
+        self.navigation_scroll.setVisible(not compact)
+        self.compact_navigation.setVisible(compact)
 
 
 class _SafetyLimitValidationDelegate(QStyledItemDelegate):
@@ -206,21 +232,31 @@ class SettingsPage(QWidget):
         self.reload()
 
     def _build(self) -> None:
+        self.setProperty("stationSurface", "page")
+        self.setObjectName("settingsPage")
         layout = QVBoxLayout(self)
-        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setContentsMargins(16, 14, 16, 16)
         layout.setSpacing(12)
-        title = SubtitleLabel("Station settings", self)
+
+        self.profile_card = CardWidget(self)
+        self.profile_card.setObjectName("settingsProfileCard")
+        profile_layout = QVBoxLayout(self.profile_card)
+        profile_layout.setContentsMargins(18, 14, 18, 14)
+        profile_layout.setSpacing(4)
+        title = SubtitleLabel("Station settings", self.profile_card)
         title.setObjectName("pageTitle")
-        self._subtitle = BodyLabel(self)
+        self._subtitle = BodyLabel(self.profile_card)
+        self._subtitle.setObjectName("settingsProfileSummary")
         self._subtitle.setWordWrap(True)
-        layout.addWidget(title)
-        layout.addWidget(self._subtitle)
+        profile_layout.addWidget(title)
+        profile_layout.addWidget(self._subtitle)
+        layout.addWidget(self.profile_card)
 
         self.tabs = _FluentSettingsSections(self)
         self.section_navigation = self.tabs.navigation
         self.page_stack = self.tabs.stack
         self.trees: dict[str, QTreeWidget] = {}
-        self.forms: dict[str, QScrollArea] = {}
+        self.forms: dict[str, ScrollArea] = {}
         for key, label in (
             ("general", "General"),
             ("rigol", "Rigol"),
@@ -234,10 +270,10 @@ class SettingsPage(QWidget):
             tree.setAlternatingRowColors(True)
             tree.itemChanged.connect(self._changed)
             self.trees[key] = tree
-            form = QScrollArea()
+            form = ScrollArea()
             form.setObjectName("settingsForm")
             form.setWidgetResizable(True)
-            form.setFrameShape(QScrollArea.Shape.NoFrame)
+            form.setFrameShape(QFrame.Shape.NoFrame)
             self.forms[key] = form
             self.tabs.addTab(form, label)
         limits_page = QWidget()
@@ -280,10 +316,10 @@ class SettingsPage(QWidget):
         # Retained as the draft model for compatibility with the profile editor.
         # The operator-facing editor below is intentionally card based.
         self.limits_table.hide()
-        self.limits_scroll = QScrollArea()
+        self.limits_scroll = ScrollArea()
         self.limits_scroll.setObjectName("settingsForm")
         self.limits_scroll.setWidgetResizable(True)
-        self.limits_scroll.setFrameShape(QScrollArea.Shape.NoFrame)
+        self.limits_scroll.setFrameShape(QFrame.Shape.NoFrame)
         limits_card_layout.addWidget(self.limits_scroll)
         limits_layout.addWidget(limits_title)
         limits_layout.addWidget(limits_description)
@@ -356,26 +392,28 @@ class SettingsPage(QWidget):
         layout.addWidget(self.tabs, 1)
 
         self.action_card = CardWidget(self)
-        action_layout = QVBoxLayout(self.action_card)
+        action_layout = QHBoxLayout(self.action_card)
         action_layout.setContentsMargins(16, 12, 16, 12)
-        action_layout.setSpacing(8)
+        action_layout.setSpacing(20)
         action_copy = QVBoxLayout()
-        action_copy.addWidget(BodyLabel("Configuration workflow", self.action_card))
+        workflow_title = StrongBodyLabel("Configuration workflow", self.action_card)
+        action_copy.addWidget(workflow_title)
         action_note = BodyLabel(
             "Validate before saving. Any safety-impacting change revokes profile approval.",
             self.action_card,
         )
         action_note.setWordWrap(True)
         action_copy.addWidget(action_note)
-        action_layout.addLayout(action_copy)
+        action_copy.addStretch(1)
+        action_layout.addLayout(action_copy, 2)
         buttons = QGridLayout()
         buttons.setHorizontalSpacing(8)
         buttons.setVerticalSpacing(8)
-        self.reload_button = PushButton("Reload")
+        self.reload_button = PushButton(FluentIcon.SYNC, "Reload")
         self.discard_button = PushButton("Discard draft")
-        self.diff_button = PushButton("Show changes…")
+        self.diff_button = PushButton(FluentIcon.DOCUMENT, "Show changes…")
         self.validate_button = PushButton("Validate")
-        self.save_button = PrimaryPushButton("Save changes")
+        self.save_button = PrimaryPushButton(FluentIcon.SAVE, "Save changes")
         self.approve_button = PrimaryPushButton("Approve profile…")
         for index, button in enumerate((
             self.reload_button,
@@ -385,9 +423,10 @@ class SettingsPage(QWidget):
             self.save_button,
             self.approve_button,
         )):
+            button.setMinimumWidth(136)
             buttons.addWidget(button, index // 3, index % 3)
-        action_layout.addLayout(buttons)
-        layout.insertWidget(2, self.action_card)
+        action_layout.addLayout(buttons, 3)
+        layout.insertWidget(1, self.action_card)
         self.reload_button.clicked.connect(self.reload)
         self.discard_button.clicked.connect(self.discard_draft)
         self.diff_button.clicked.connect(self.show_changes)
@@ -605,12 +644,22 @@ class SettingsPage(QWidget):
 
         def card_for(section: str) -> QFormLayout:
             if section not in cards:
-                card = QGroupBox(section)
+                card = CardWidget(host)
                 card.setObjectName("settingsCard")
-                form = QFormLayout(card)
+                card_layout = QVBoxLayout(card)
+                card_layout.setContentsMargins(16, 14, 16, 16)
+                card_layout.setSpacing(10)
+                heading = StrongBodyLabel(section, card)
+                heading.setObjectName("settingsSectionTitle")
+                card_layout.addWidget(heading)
+                form_host = QWidget(card)
+                form = QFormLayout(form_host)
+                form.setContentsMargins(0, 0, 0, 0)
                 form.setLabelAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
                 form.setHorizontalSpacing(18)
                 form.setVerticalSpacing(10)
+                form.setFieldGrowthPolicy(QFormLayout.FieldGrowthPolicy.AllNonFixedFieldsGrow)
+                card_layout.addWidget(form_host)
                 layout.addWidget(card)
                 cards[section] = form
             return cards[section]
@@ -651,17 +700,17 @@ class SettingsPage(QWidget):
         editable = self._form_editable(path)
         choices = self._choices_for_path(path, value)
         if isinstance(value, bool):
-            editor = QCheckBox("Enabled")
+            editor = CheckBox("Enabled")
             editor.setChecked(value)
             editor.toggled.connect(lambda _checked, path=path: self._form_changed(path))
         elif choices:
-            editor = QComboBox()
+            editor = ComboBox()
             for label, data in choices:
                 editor.addItem(label, data)
             editor.setCurrentIndex(max(0, editor.findData(self._format_scalar(value))))
             editor.currentIndexChanged.connect(lambda _index, path=path: self._form_changed(path))
         elif isinstance(value, int) and not isinstance(value, bool):
-            editor = QSpinBox()
+            editor = SpinBox()
             editor.setRange(-1_000_000_000, 1_000_000_000)
             editor.setValue(value)
             editor.valueChanged.connect(lambda _number, path=path: self._form_changed(path))

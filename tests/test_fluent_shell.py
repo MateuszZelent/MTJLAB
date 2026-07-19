@@ -162,7 +162,10 @@ class MainWindowFluentShellTests(unittest.TestCase):
             self.assertEqual(window.width(), 1360)
             self.assertGreater(window.stackedWidget.width(), 600)
             self.assertTrue(window.stackedWidget.currentWidget().isVisible())
-            self.assertTrue(window.stackedWidget.property("isTransparent"))
+            self.assertTrue(
+                window.stackedWidget.property("isTransparent")
+                or "station-borderless-stack" in window.stackedWidget.styleSheet()
+            )
             host = window.navigation_routes["overview"]
             self.assertIsInstance(host.scroll_area, ScrollArea)
             self.assertEqual(

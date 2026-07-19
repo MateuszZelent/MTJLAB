@@ -46,10 +46,10 @@ class RigolNodeEditorDialog(FluentRecipeDialog):
         self._working_segments: dict[str, list[dict[str, object]]] = {}
         self.plan_mode = True
         self.hardware_actions_enabled = False
-        self.setWindowTitle("Rigol DG1032Z â€” configure sweep node")
+        self.setWindowTitle("Rigol DG1032Z — configure sweep node")
         self.resize(780, 640)
         layout = QVBoxLayout(self)
-        heading = QLabel("Rigol DG1032Z Â· Carrier and output")
+        heading = QLabel("Rigol DG1032Z · Carrier and output")
         heading.setObjectName("pageTitle")
         layout.addWidget(heading)
         description = QLabel(

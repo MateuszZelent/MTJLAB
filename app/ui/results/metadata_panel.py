@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
+from PySide6.QtGui import QResizeEvent
 from PySide6.QtWidgets import (
     QPlainTextEdit,
     QSizePolicy,
@@ -12,7 +13,7 @@ from PySide6.QtWidgets import (
     QVBoxLayout,
     QWidget,
 )
-from qfluentwidgets import Pivot
+from qfluentwidgets import ComboBox, Pivot
 
 from app.storage import RunDetail, ThatecRun
 from app.storage.pythat_reader import PyThatRunData
@@ -28,12 +29,17 @@ class _FluentMetadataSections(QWidget):
         layout.setSpacing(8)
         self.navigation = Pivot(self)
         self.navigation.setItemFontSize(14)
+        self.compact_navigation = ComboBox(self)
+        self.compact_navigation.setAccessibleName("Result detail section")
+        self.compact_navigation.hide()
+        self.compact_navigation.currentIndexChanged.connect(self.setCurrentIndex)
         self.stack = QStackedWidget(self)
         self.stack.setSizePolicy(
             QSizePolicy.Policy.Ignored,
             QSizePolicy.Policy.Expanding,
         )
         layout.addWidget(self.navigation)
+        layout.addWidget(self.compact_navigation)
         layout.addWidget(self.stack, 1)
         self._routes: list[str] = []
         self._labels: list[str] = []
@@ -43,6 +49,7 @@ class _FluentMetadataSections(QWidget):
         route = f"metadata-section-{index}"
         self._routes.append(route)
         self._labels.append(label)
+        self.compact_navigation.addItem(label, userData=index)
         self.navigation.addItem(
             route,
             label,
@@ -55,6 +62,16 @@ class _FluentMetadataSections(QWidget):
     def setCurrentIndex(self, index: int) -> None:
         self.stack.setCurrentIndex(index)
         self.navigation.setCurrentItem(self._routes[index])
+        if self.compact_navigation.currentIndex() != index:
+            self.compact_navigation.blockSignals(True)
+            self.compact_navigation.setCurrentIndex(index)
+            self.compact_navigation.blockSignals(False)
+
+    def resizeEvent(self, event: QResizeEvent) -> None:
+        super().resizeEvent(event)
+        compact = event.size().width() < 720
+        self.navigation.setVisible(not compact)
+        self.compact_navigation.setVisible(compact)
 
     def tabText(self, index: int) -> str:
         return self._labels[index]

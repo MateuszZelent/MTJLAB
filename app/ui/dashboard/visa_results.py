@@ -7,7 +7,7 @@ from typing import Literal, Mapping
 
 from PySide6.QtCore import Qt, Signal
 from PySide6.QtGui import QGuiApplication, QResizeEvent
-from PySide6.QtWidgets import QBoxLayout, QScrollArea, QSizePolicy, QStackedLayout, QVBoxLayout, QWidget
+from PySide6.QtWidgets import QBoxLayout, QSizePolicy, QStackedLayout, QVBoxLayout, QWidget
 from qfluentwidgets import (
     BodyLabel,
     CaptionLabel,
@@ -17,6 +17,7 @@ from qfluentwidgets import (
     IconWidget,
     PrimaryPushButton,
     PushButton,
+    ScrollArea,
     StrongBodyLabel,
 )
 
@@ -180,8 +181,21 @@ class VisaResultRow(CardWidget):
         return (
             self._assignment_allowed
             and self.state.status not in {"unavailable", "assigned"}
-            and self.assignment.currentData() is not None
+            and self._selected_device is not None
         )
+
+    @property
+    def _selected_device(self) -> str | None:
+        selected = self.assignment.currentData()
+        if isinstance(selected, str):
+            return selected
+        # QFluentWidgets can briefly expose the selected display text before
+        # currentData() after a model/layout refresh. A conservatively
+        # recognized IDN already carries an unambiguous assignment target, so
+        # keep the primary action usable in that transient state.
+        if self.state.status == "recognized":
+            return self.state.result.device
+        return None
 
     def set_assignment_allowed(self, allowed: bool) -> None:
         self._assignment_allowed = allowed
@@ -206,7 +220,7 @@ class VisaResultRow(CardWidget):
         self.assign_button.setEnabled(self._can_assign)
 
     def _request_assignment(self) -> None:
-        device = self.assignment.currentData()
+        device = self._selected_device
         if isinstance(device, str) and self._can_assign:
             self.assignment_requested.emit(device, self.state.result.resource, self.state.result.backend)
 
@@ -260,10 +274,10 @@ class VisaResultsView(QWidget):
         self.empty_description.setMaximumWidth(560)
         empty_layout.addWidget(self.empty_description, 0, Qt.AlignmentFlag.AlignHCenter)
         layout.addWidget(self.empty_state)
-        self.scroll_area = QScrollArea(self)
+        self.scroll_area = ScrollArea(self)
         self.scroll_area.setProperty("stationSurface", "surface")
         self.scroll_area.setWidgetResizable(True)
-        self.scroll_area.setFrameShape(QScrollArea.Shape.NoFrame)
+        self.scroll_area.setFrameShape(ScrollArea.Shape.NoFrame)
         self.content = QWidget(self.scroll_area)
         self.scroll_area.viewport().setProperty("stationSurface", "surface")
         self.content.setProperty("stationSurface", "surface")

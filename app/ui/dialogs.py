@@ -2,7 +2,29 @@
 
 from __future__ import annotations
 
+from PySide6.QtCore import QEvent, Qt
 from PySide6.QtWidgets import QFileDialog, QWidget
+from PySide6.QtWidgets import QDialog
+
+
+class StationDialog(QDialog):
+    """Theme-aware host for every station-owned popup or floating window."""
+
+    def __init__(self, parent: QWidget | None = None) -> None:
+        super().__init__(parent)
+        self.setProperty("stationSurface", "page")
+        self.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
+
+    def changeEvent(self, event: QEvent) -> None:
+        super().changeEvent(event)
+        if event.type() in {
+            QEvent.Type.ApplicationPaletteChange,
+            QEvent.Type.PaletteChange,
+            QEvent.Type.StyleChange,
+        }:
+            self.update()
+            for child in self.findChildren(QWidget):
+                child.update()
 
 
 class StationFileDialog(QFileDialog):

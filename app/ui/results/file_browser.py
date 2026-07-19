@@ -6,7 +6,6 @@ from pathlib import Path
 
 from PySide6.QtCore import Qt, Signal
 from PySide6.QtWidgets import (
-    QFileDialog,
     QHBoxLayout,
     QLabel,
     QPushButton,
@@ -15,6 +14,7 @@ from PySide6.QtWidgets import (
     QVBoxLayout,
     QWidget,
 )
+from app.ui.dialogs import StationFileDialog as QFileDialog
 
 from app.storage import Hdf5RunReader, ThatecRunReader
 

@@ -158,6 +158,7 @@ class MainWindow(FluentWindow):
         # Our station shell already owns the page hierarchy and its spacing;
         # transparent mode prevents that stock edge from becoming a bright
         # outline around dark pages.
+        self.stackedWidget.setObjectName("fluentApplicationStack")
         self.stackedWidget.setProperty("isTransparent", True)
         self.shell_splitter.addWidget(self.stackedWidget)
         content_layout.addWidget(self.shell_splitter, 1)
@@ -667,6 +668,18 @@ class MainWindow(FluentWindow):
         panel.setPalette(palette)
         panel.setAutoFillBackground(True)
         panel.update()
+
+    def _apply_application_stack_surface(self) -> None:
+        """Restore the borderless station stack after QFluent's first-show QSS."""
+
+        marker = "/* station-borderless-stack */"
+        base = self.stackedWidget.styleSheet().split(marker, 1)[0].rstrip()
+        self.stackedWidget.setStyleSheet(
+            f"{base}\n{marker}\n"
+            "QStackedWidget#fluentApplicationStack {"
+            "border: none; border-radius: 0; background: transparent;"
+            "}"
+        )
 
     def refresh_system_theme(self) -> None:
         if self.theme_actions["system"].isChecked():
@@ -1397,6 +1410,9 @@ class MainWindow(FluentWindow):
         if self._navigation_layout_initialized:
             return
         self._navigation_layout_initialized = True
+        # QFluent installs the window stack stylesheet during the first show;
+        # restore only the station-owned stack rule, never the global theme.
+        self._apply_application_stack_surface()
         if self._navigation_expanded_preference:
             self.navigationInterface.expand(useAni=False)
         # Fluent recalculates a navigation tree's size hint while its parent

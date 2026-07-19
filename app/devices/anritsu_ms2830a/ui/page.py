@@ -11,11 +11,12 @@ from pathlib import Path
 
 import pyqtgraph as pg
 from PySide6.QtCore import QTimer, Qt, Signal
+from PySide6.QtGui import QResizeEvent
 from PySide6.QtWidgets import (
-    QComboBox, QDialog, QDialogButtonBox, QFileDialog,
+    QComboBox, QDialog, QDialogButtonBox,
     QFormLayout, QFrame, QGridLayout, QHBoxLayout, QLabel, QLineEdit,
     QMessageBox, QProgressBar, QScrollArea, QSplitter, QSpinBox, QTabWidget,
-    QToolButton, QVBoxLayout, QWidget,
+    QSizePolicy, QToolButton, QVBoxLayout, QWidget,
 )
 from qfluentwidgets import (
     CardWidget, CheckBox, ComboBox, PrimaryPushButton, PushButton, SpinBox,
@@ -37,7 +38,8 @@ from app.settings.models import StationSettings
 from app.spectrum import LinearPowerAverager, apply_reference_operation, frequency_grids_match
 from app.storage import ReferenceHdf5Store
 from app.ui.common import line_edit as _line
-from app.ui.recipes.fluent_dialog import StationDialog
+from app.ui.dialogs import StationFileDialog as QFileDialog
+from app.ui.dialogs import StationDialog
 from app.ui.widgets import LimitField, NotificationBanner, SpectrumPlotWidget
 from app.ui.workers import DeviceController
 
@@ -444,6 +446,11 @@ class AnritsuPage(QWidget):
         left_panel = QWidget()
         left_panel.setObjectName("anritsuControlPanel")
         left_panel.setProperty("stationSurface", "page")
+        left_panel.setMinimumWidth(0)
+        left_panel.setSizePolicy(
+            QSizePolicy.Policy.Ignored,
+            QSizePolicy.Policy.Preferred,
+        )
         left_layout = QVBoxLayout(left_panel)
         left_layout.setContentsMargins(8, 8, 8, 8)
         left_layout.setSpacing(10)
@@ -626,20 +633,21 @@ class AnritsuPage(QWidget):
         self.info = QLabel("Live stopped. Each frame is a complete trace, not a push stream.")
         self.info.setObjectName("muted")
         right_layout.addWidget(self.info)
-        left_scroll = QScrollArea()
-        left_scroll.setObjectName("anritsuControlScroll")
-        left_scroll.setProperty("stationSurface", "page")
-        left_scroll.viewport().setProperty("stationSurface", "page")
-        left_scroll.setWidgetResizable(True)
-        left_scroll.setFrameShape(QFrame.Shape.NoFrame)
-        left_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
-        left_scroll.setWidget(left_panel)
-        left_scroll.setMinimumWidth(320)
-        self.workspace_splitter.addWidget(left_scroll)
+        self.control_scroll = QScrollArea()
+        self.control_scroll.setObjectName("anritsuControlScroll")
+        self.control_scroll.setProperty("stationSurface", "page")
+        self.control_scroll.viewport().setProperty("stationSurface", "page")
+        self.control_scroll.setWidgetResizable(True)
+        self.control_scroll.setFrameShape(QFrame.Shape.NoFrame)
+        self.control_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        self.control_scroll.setWidget(left_panel)
+        self.control_scroll.setMinimumWidth(0)
+        self.workspace_splitter.addWidget(self.control_scroll)
         self.workspace_splitter.addWidget(right_panel)
         self.workspace_splitter.setStretchFactor(0, 0)
         self.workspace_splitter.setStretchFactor(1, 1)
         self.workspace_splitter.setSizes([680, 1100])
+        self._workspace_compact: bool | None = None
         self.mode_tabs = QTabWidget()
         self.mode_tabs.setObjectName("anritsuModeTabs")
         self.mode_tabs.setProperty("stationSurface", "page")
@@ -696,6 +704,19 @@ class AnritsuPage(QWidget):
             widget.setToolTip(description)
             widget.setToolTipDuration(25_000)
         self._apply_page_state()
+
+    def resizeEvent(self, event: QResizeEvent) -> None:
+        super().resizeEvent(event)
+        compact = event.size().width() < 900
+        if self._workspace_compact == compact:
+            return
+        self._workspace_compact = compact
+        self.workspace_splitter.setOrientation(
+            Qt.Orientation.Vertical if compact else Qt.Orientation.Horizontal
+        )
+        self.workspace_splitter.setSizes(
+            [1_050, 620] if compact else [680, 1_100]
+        )
 
     def _build_signal_generator_tab(self) -> QWidget:
         tab = QWidget()

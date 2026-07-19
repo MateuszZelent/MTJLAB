@@ -12,7 +12,7 @@ from uuid import uuid4
 
 from PySide6.QtCore import QMimeData, QSize, QSettings, QThread, QTimer, Qt, Signal
 from PySide6.QtGui import QAction, QActionGroup, QBrush, QCloseEvent, QColor, QDrag, QIcon, QKeySequence, QPainter, QPixmap, QShortcut
-from PySide6.QtWidgets import QAbstractItemView, QApplication, QComboBox, QCheckBox, QDialog, QDialogButtonBox, QFormLayout, QFrame, QFileDialog, QHBoxLayout, QHeaderView, QLabel, QLineEdit, QMainWindow, QMenu, QMessageBox, QPlainTextEdit, QPushButton, QScrollArea, QSplitter, QSpinBox, QStackedWidget, QStyle, QToolButton, QTreeWidget, QTreeWidgetItem, QVBoxLayout, QWidget
+from PySide6.QtWidgets import QAbstractItemView, QApplication, QComboBox, QCheckBox, QDialog, QDialogButtonBox, QFormLayout, QFrame, QHBoxLayout, QHeaderView, QLabel, QLineEdit, QMainWindow, QMenu, QMessageBox, QPlainTextEdit, QPushButton, QScrollArea, QSplitter, QSpinBox, QStackedWidget, QStyle, QToolButton, QTreeWidget, QTreeWidgetItem, QVBoxLayout, QWidget
 from qfluentwidgets import (
     BodyLabel,
     CaptionLabel,
@@ -42,6 +42,7 @@ from app.security import AccessPolicy, Permission
 from app.settings.models import StationSettings
 from app.storage import Hdf5RunReader, ThatecDevice, ThatecRow, ThatecRun, ThatecRunReader, ThatecTreeNode
 from app.ui.common import human_bytes as _human_bytes
+from app.ui.dialogs import StationFileDialog as QFileDialog
 from app.ui.common import human_duration as _human_duration
 from app.ui.common import line_edit as _line
 from app.ui.design_system import effective_theme

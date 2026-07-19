@@ -12,13 +12,13 @@ from pyqtgraph.exporters import ImageExporter, SVGExporter
 from PySide6.QtCore import Signal
 from PySide6.QtWidgets import (
     QComboBox,
-    QFileDialog,
     QHBoxLayout,
     QLabel,
     QToolButton,
     QVBoxLayout,
     QWidget,
 )
+from app.ui.dialogs import StationFileDialog as QFileDialog
 
 from app.storage import ThatecRow, ThatecRun, ThatecRunReader
 from app.ui.design_system import plot_theme, tokens_for

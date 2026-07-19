@@ -19,6 +19,10 @@ PlainTextEdit {{
 def dialog_qss(tokens: ThemeTokens) -> str:
     """Theme native Qt popup infrastructure without overriding Fluent controls."""
 
+    accent = tokens.accent.lstrip("#")
+    red, green, blue = (int(accent[index:index + 2], 16) for index in (0, 2, 4))
+    accent_luma = (0.2126 * red + 0.7152 * green + 0.0722 * blue) / 255
+    default_text = tokens.background if accent_luma > 0.36 else "#ffffff"
     return f"""
 QDialog, QMessageBox, QInputDialog, QFileDialog {{
     background: {tokens.background};
@@ -49,7 +53,7 @@ QDialogButtonBox QPushButton:disabled {{
     border-color: {tokens.border};
 }}
 QDialogButtonBox QPushButton:default {{
-    color: #ffffff;
+    color: {default_text};
     background: {tokens.accent};
     border-color: {tokens.accent};
 }}
@@ -90,6 +94,42 @@ QPlainTextEdit[stationSurface="raised"], QPlainTextEdit#eventLogText {{
 QPlainTextEdit#eventLogText QWidget {{
     background: {tokens.surface_raised};
     color: {tokens.text_primary};
+}}
+QWidget#settingsPage {{
+    background: {tokens.background};
+}}
+QWidget#settingsPage QLabel {{
+    color: {tokens.text_primary};
+}}
+QWidget#settingsPage QLabel#settingsProfileSummary,
+QWidget#settingsPage QLabel#muted {{
+    color: {tokens.text_muted};
+}}
+QWidget#settingsPage QScrollArea#settingsForm,
+QWidget#settingsPage QScrollArea#settingsForm > QWidget > QWidget {{
+    background: transparent;
+    border: none;
+}}
+QWidget#settingsPage QTableWidget,
+QWidget#settingsPage QPlainTextEdit {{
+    background: {tokens.surface_raised};
+    color: {tokens.text_primary};
+    alternate-background-color: {tokens.surface};
+    border: 1px solid {tokens.border};
+    border-radius: 6px;
+    selection-background-color: {tokens.accent};
+    selection-color: #ffffff;
+}}
+QWidget#settingsPage QHeaderView::section {{
+    background: {tokens.surface};
+    color: {tokens.text_primary};
+    border: none;
+    border-bottom: 1px solid {tokens.border};
+    padding: 7px 9px;
+}}
+QWidget#settingsPage QLabel#settingsValidationBanner,
+QWidget#settingsPage QLabel#settingsFieldError {{
+    color: {tokens.danger};
 }}
 QLabel[deviceState="verified"], QLabel[outputState="off"] {{
     color: {tokens.success};

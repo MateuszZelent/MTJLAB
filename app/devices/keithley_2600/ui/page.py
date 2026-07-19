@@ -12,14 +12,14 @@ from uuid import uuid4
 
 import pyqtgraph as pg
 from PySide6.QtCore import QMimeData, QSize, QTimer, Qt, Signal
-from PySide6.QtGui import QAction, QColor, QDrag, QIcon, QKeySequence, QPainter, QPalette, QPixmap, QShortcut
+from PySide6.QtGui import QAction, QColor, QDrag, QIcon, QKeySequence, QPainter, QPalette, QPixmap, QResizeEvent, QShortcut
 from PySide6.QtWidgets import (
     QAbstractItemView, QApplication, QCheckBox, QComboBox, QDialog,
     QDialogButtonBox, QFileDialog, QFormLayout, QFrame, QGridLayout,
-    QHBoxLayout, QHeaderView, QLabel, QLineEdit, QListWidget,
+    QBoxLayout, QHBoxLayout, QHeaderView, QLabel, QLineEdit, QListWidget,
     QListWidgetItem, QMainWindow, QMenu, QMessageBox, QPlainTextEdit,
     QProgressBar, QPushButton, QScrollArea, QSplitter, QSpinBox,
-    QStyledItemDelegate, QStyle, QTabWidget, QTableWidget,
+    QSizePolicy, QStyledItemDelegate, QStyle, QTabWidget, QTableWidget,
     QTableWidgetItem, QToolButton, QTreeWidget, QTreeWidgetItem,
     QVBoxLayout, QWidget,
 )
@@ -800,13 +800,13 @@ class KeithleyPage(QWidget):
         source_layout.addStretch(1)
         source_scroll = self._scroll_widget(source_tab)
         source_scroll.setObjectName("keithleyControlPanel")
-        source_scroll.setMinimumWidth(610)
+        source_scroll.setMinimumWidth(0)
         history_tab = QWidget()
-        history_layout = QHBoxLayout(history_tab)
-        history_layout.setContentsMargins(6, 0, 0, 0)
-        history_layout.setSpacing(8)
+        self.history_layout = QHBoxLayout(history_tab)
+        self.history_layout.setContentsMargins(6, 0, 0, 0)
+        self.history_layout.setSpacing(8)
         for channel_name in ("A", "B"):
-            history_layout.addWidget(self._build_keithley_history_panel(channel_name), 1)
+            self.history_layout.addWidget(self._build_keithley_history_panel(channel_name), 1)
         self.workspace_splitter = QSplitter(Qt.Orientation.Horizontal)
         self.workspace_splitter.setObjectName("keithleyWorkspace")
         self.workspace_splitter.addWidget(source_scroll)
@@ -815,6 +815,7 @@ class KeithleyPage(QWidget):
         self.workspace_splitter.setStretchFactor(1, 5)
         self.workspace_splitter.setSizes([680, 1140])
         self.workspace_splitter.setChildrenCollapsible(False)
+        self._workspace_compact: bool | None = None
         layout.addWidget(self.workspace_splitter, 1)
         measure.clicked.connect(self.request_measurement)
         self.output_toggle.toggled.connect(self._output_toggled)
@@ -846,11 +847,34 @@ class KeithleyPage(QWidget):
 
     @staticmethod
     def _scroll_widget(content: QWidget) -> QScrollArea:
+        content.setMinimumWidth(0)
+        content.setSizePolicy(
+            QSizePolicy.Policy.Ignored,
+            QSizePolicy.Policy.Preferred,
+        )
         scroll = QScrollArea()
         scroll.setWidgetResizable(True)
         scroll.setFrameShape(QFrame.Shape.NoFrame)
         scroll.setWidget(content)
         return scroll
+
+    def resizeEvent(self, event: QResizeEvent) -> None:
+        super().resizeEvent(event)
+        compact = event.size().width() < 900
+        if self._workspace_compact == compact:
+            return
+        self._workspace_compact = compact
+        self.workspace_splitter.setOrientation(
+            Qt.Orientation.Vertical if compact else Qt.Orientation.Horizontal
+        )
+        self.history_layout.setDirection(
+            QBoxLayout.Direction.TopToBottom
+            if compact
+            else QBoxLayout.Direction.LeftToRight
+        )
+        self.workspace_splitter.setSizes(
+            [900, 760] if compact else [680, 1140]
+        )
 
     def _build_keithley_history_panel(self, channel: str) -> CardWidget:
         panel = CardWidget()

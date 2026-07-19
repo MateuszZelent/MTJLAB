@@ -4,7 +4,6 @@ from __future__ import annotations
 
 from PySide6.QtCore import Qt, Signal
 from PySide6.QtWidgets import (
-    QDialogButtonBox,
     QFormLayout,
     QHBoxLayout,
     QLabel,
@@ -13,8 +12,8 @@ from PySide6.QtWidgets import (
     QVBoxLayout,
     QWidget,
 )
-from qfluentwidgets import PushButton
-from app.ui.recipes.fluent_dialog import StationDialog
+from qfluentwidgets import BodyLabel, LineEdit, PrimaryPushButton, PushButton, StrongBodyLabel
+from app.ui.dialogs import StationDialog
 
 from app.domain.quantities import (
     DIMENSION_CURRENT,
@@ -196,29 +195,35 @@ class LimitEditDialog(StationDialog):
         self.setModal(True)
         self.setMinimumWidth(430)
         layout = QVBoxLayout(self)
-        heading = QLabel(title)
+        heading = StrongBodyLabel(title, self)
         heading.setObjectName("pageTitle")
         layout.addWidget(heading)
-        note = QLabel(
+        note = BodyLabel(
             "Enter explicit units where applicable (for example: 10 mA, 67 mV, 1 MHz). "
             "The complete configuration is validated before it is saved."
         )
         note.setWordWrap(True)
         layout.addWidget(note)
         form = QFormLayout()
-        self.minimum = QLineEdit("" if minimum is None else str(minimum))
-        self.maximum = QLineEdit("" if maximum is None else str(maximum))
+        self.minimum = LineEdit(self)
+        self.minimum.setText("" if minimum is None else str(minimum))
+        self.maximum = LineEdit(self)
+        self.maximum.setText("" if maximum is None else str(maximum))
         self.maximum.setEnabled(maximum_enabled)
         if not maximum_enabled:
             self.maximum.setPlaceholderText("Not applicable")
         form.addRow("Minimum", self.minimum)
         form.addRow("Maximum", self.maximum)
         layout.addLayout(form)
-        warning = QLabel("Saving a safety limit change sets the safety profile to UNVERIFIED.")
+        warning = BodyLabel("Saving a safety limit change sets the safety profile to UNVERIFIED.", self)
         warning.setWordWrap(True)
         layout.addWidget(warning)
-        buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Save | QDialogButtonBox.StandardButton.Cancel)
-        buttons.accepted.connect(self.accept)
-        buttons.rejected.connect(self.reject)
-        layout.addWidget(buttons)
-
+        footer = QHBoxLayout()
+        footer.addStretch(1)
+        cancel = PushButton("Cancel", self)
+        save = PrimaryPushButton("Save limits", self)
+        cancel.clicked.connect(self.reject)
+        save.clicked.connect(self.accept)
+        footer.addWidget(cancel)
+        footer.addWidget(save)
+        layout.addLayout(footer)

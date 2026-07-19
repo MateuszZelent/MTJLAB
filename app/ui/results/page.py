@@ -5,7 +5,9 @@ from __future__ import annotations
 from pathlib import Path
 
 from PySide6.QtCore import Qt, Signal
+from PySide6.QtGui import QResizeEvent
 from PySide6.QtWidgets import (
+    QBoxLayout,
     QHBoxLayout,
     QLabel,
     QSplitter,
@@ -14,7 +16,7 @@ from PySide6.QtWidgets import (
     QVBoxLayout,
     QWidget,
 )
-from qfluentwidgets import BodyLabel, CardWidget, Pivot, PrimaryPushButton, PushButton, SubtitleLabel
+from qfluentwidgets import BodyLabel, CardWidget, ComboBox, Pivot, PrimaryPushButton, PushButton, SubtitleLabel
 
 from app.storage import (
     Hdf5RunReader,
@@ -42,12 +44,17 @@ class _FluentResultSections(QWidget):
         layout.setContentsMargins(0, 0, 0, 0)
         layout.setSpacing(8)
         self.navigation = Pivot(self)
+        self.compact_navigation = ComboBox(self)
+        self.compact_navigation.setAccessibleName("Results section")
+        self.compact_navigation.hide()
+        self.compact_navigation.currentIndexChanged.connect(self.setCurrentIndex)
         self.stack = QStackedWidget(self)
         self.stack.setSizePolicy(
             QSizePolicy.Policy.Ignored,
             QSizePolicy.Policy.Expanding,
         )
         layout.addWidget(self.navigation)
+        layout.addWidget(self.compact_navigation)
         layout.addWidget(self.stack, 1)
         self._routes: list[str] = []
         self._labels: list[str] = []
@@ -57,6 +64,7 @@ class _FluentResultSections(QWidget):
         route = f"result-section-{index}"
         self._routes.append(route)
         self._labels.append(label)
+        self.compact_navigation.addItem(label, userData=index)
         self.navigation.addItem(
             route,
             label,
@@ -69,6 +77,16 @@ class _FluentResultSections(QWidget):
     def setCurrentIndex(self, index: int) -> None:
         self.stack.setCurrentIndex(index)
         self.navigation.setCurrentItem(self._routes[index])
+        if self.compact_navigation.currentIndex() != index:
+            self.compact_navigation.blockSignals(True)
+            self.compact_navigation.setCurrentIndex(index)
+            self.compact_navigation.blockSignals(False)
+
+    def resizeEvent(self, event: QResizeEvent) -> None:
+        super().resizeEvent(event)
+        compact = event.size().width() < 620
+        self.navigation.setVisible(not compact)
+        self.compact_navigation.setVisible(compact)
 
     def setTabVisible(self, index: int, visible: bool) -> None:
         self.navigation.widget(self._routes[index]).setVisible(visible)
@@ -120,7 +138,8 @@ class ResultsPage(QWidget):
 
         # --- Deliberate operational actions ---
         self.action_card = CardWidget(self)
-        actions = QHBoxLayout(self.action_card)
+        self.actions_layout = QHBoxLayout(self.action_card)
+        actions = self.actions_layout
         actions.setContentsMargins(16, 12, 16, 12)
         action_copy = QVBoxLayout()
         action_copy.addWidget(BodyLabel("Run actions", self.action_card))
@@ -147,7 +166,8 @@ class ResultsPage(QWidget):
         layout.addWidget(self.action_card)
 
         # --- Main splitter ---
-        splitter = QSplitter(Qt.Orientation.Horizontal)
+        self.results_splitter = QSplitter(Qt.Orientation.Horizontal)
+        splitter = self.results_splitter
 
         # Left: file browser
         self.file_browser = FileBrowserPanel(output_dir)
@@ -190,6 +210,7 @@ class ResultsPage(QWidget):
         splitter.setStretchFactor(0, 0)
         splitter.setStretchFactor(1, 1)
         layout.addWidget(splitter, 1)
+        self._compact_layout: bool | None = None
 
         # --- Connections ---
         self.file_browser.file_selected.connect(self._on_file_selected)
@@ -216,6 +237,24 @@ class ResultsPage(QWidget):
         # Initial state
         self._set_heatmap_visible(False)
         self.file_browser.refresh()
+
+    def resizeEvent(self, event: QResizeEvent) -> None:
+        super().resizeEvent(event)
+        compact = event.size().width() < 900
+        if self._compact_layout == compact:
+            return
+        self._compact_layout = compact
+        self.results_splitter.setOrientation(
+            Qt.Orientation.Vertical if compact else Qt.Orientation.Horizontal
+        )
+        self.actions_layout.setDirection(
+            QBoxLayout.Direction.TopToBottom
+            if compact
+            else QBoxLayout.Direction.LeftToRight
+        )
+        self.results_splitter.setSizes(
+            [260, 760] if compact else [280, 900]
+        )
 
     # ------------------------------------------------------------------
     # Public API (backwards-compatible)

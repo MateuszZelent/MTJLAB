@@ -5,9 +5,9 @@ import unittest
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
-from PySide6.QtCore import QPoint
+from PySide6.QtCore import QPoint, Qt
 from PySide6.QtGui import QPalette
-from PySide6.QtWidgets import QApplication
+from PySide6.QtWidgets import QApplication, QLabel
 from qfluentwidgets import (
     CardWidget,
     ComboBox,
@@ -54,6 +54,14 @@ class FluentDevicePageTests(unittest.TestCase):
                     for button in rigol.preview_plot.toolbar_buttons
                 )
             )
+            visible_text = "\n".join(
+                label.text() for label in rigol.findChildren(QLabel)
+            )
+            for broken_marker in ("Â", "â", "Ã", "�"):
+                self.assertNotIn(broken_marker, visible_text)
+            self.assertEqual(rigol.device_led.text(), "●")
+            plot_title = rigol.preview_plot.plot.getPlotItem().titleLabel.text
+            self.assertIn("· SIN ·", plot_title)
 
             window._navigate_to("keithley")
             self.application.processEvents()
@@ -66,6 +74,23 @@ class FluentDevicePageTests(unittest.TestCase):
                 all(isinstance(card["measure"], PushButton) for card in keithley.channel_cards.values())
             )
             self.assertTrue(keithley.channel_cards["A"]["measure"].isVisibleTo(window))
+        finally:
+            window.close()
+            self.application.processEvents()
+
+    def test_keithley_workspace_stacks_without_clipping_at_minimum_window_size(self) -> None:
+        window = MainWindow(".config/settings.yml", simulation=True)
+        try:
+            window.resize(820, 560)
+            window.show()
+            window._navigate_to("keithley")
+            self.application.processEvents()
+
+            page = window.keithley_page
+            host = window.navigation_routes["keithley"]
+            self.assertEqual(page.workspace_splitter.orientation(), Qt.Orientation.Vertical)
+            self.assertEqual(host.scroll_area.horizontalScrollBar().maximum(), 0)
+            self.assertEqual(page.width(), host.scroll_area.viewport().width())
         finally:
             window.close()
             self.application.processEvents()

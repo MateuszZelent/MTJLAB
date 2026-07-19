@@ -51,6 +51,33 @@ class VisaResultsViewTests(unittest.TestCase):
             "keithley": ("GPIB0::22::INSTR", "system", "KEITHLEY,2602A,1,1")
         }])
 
+    def test_recognized_lakeshore_remains_assignable_if_combo_data_is_transiently_empty(self) -> None:
+        view = VisaResultsView()
+        state = VisaResultState.from_result(
+            DiscoveredInstrument(
+                "GPIB0::12::INSTR",
+                "system",
+                "LSCI,MODEL475,LSA1823,11272013",
+                "lakeshore_gaussmeter",
+            ),
+            configured_device=None,
+        )
+        emitted: list[object] = []
+        view.assignment_requested.connect(emitted.append)
+        view.set_results((state,))
+        row = view.rows[0]
+        row.assignment.setCurrentIndex(0)
+
+        self.assertTrue(row.assign_button.isEnabled())
+        row.assign_button.click()
+        self.assertEqual(emitted, [{
+            "lakeshore_gaussmeter": (
+                "GPIB0::12::INSTR",
+                "system",
+                "LSCI,MODEL475,LSA1823,11272013",
+            )
+        }])
+
     def test_unavailable_and_permission_denied_rows_cannot_assign(self) -> None:
         view = VisaResultsView()
         unavailable = VisaResultState.from_result(

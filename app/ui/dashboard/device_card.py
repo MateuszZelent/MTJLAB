@@ -3,8 +3,16 @@
 from __future__ import annotations
 
 from PySide6.QtCore import Signal
-from PySide6.QtWidgets import QFrame, QHBoxLayout, QLabel, QPushButton, QVBoxLayout, QWidget
-from qfluentwidgets import BodyLabel, CaptionLabel, CardWidget, ComboBox, PrimaryPushButton
+from PySide6.QtWidgets import QHBoxLayout, QVBoxLayout, QWidget
+from qfluentwidgets import (
+    BodyLabel,
+    CaptionLabel,
+    CardWidget,
+    ComboBox,
+    PrimaryPushButton,
+    PushButton,
+    StrongBodyLabel,
+)
 
 from app.devices.discovery import DiscoveredInstrument
 
@@ -152,7 +160,7 @@ class DeviceCard(CardWidget):
         self.assignment_hint.show()
 
 
-class DeviceConnectionPanel(QFrame):
+class DeviceConnectionPanel(CardWidget):
     """Device-local connection controls; never shown on the station dashboard."""
 
     connect_requested = Signal()
@@ -165,21 +173,21 @@ class DeviceConnectionPanel(QFrame):
         self.setProperty("stationSurface", "surface")
         layout = QHBoxLayout(self)
         copy = QVBoxLayout()
-        self.heading = QLabel("Instrument connection")
+        self.heading = StrongBodyLabel("Instrument connection", self)
         self.heading.setObjectName("sectionTitle")
-        self.summary = QLabel()
+        self.summary = BodyLabel(parent=self)
         self.identity = self.summary
         self.summary.setObjectName("muted")
         self.summary.setWordWrap(True)
         copy.addWidget(self.heading)
         copy.addWidget(self.summary)
         layout.addLayout(copy, 1)
-        self.state = QLabel("DISCONNECTED")
+        self.state = CaptionLabel("DISCONNECTED", self)
         self.state.setObjectName("stateDisconnected")
         layout.addWidget(self.state)
-        self.connect_button = QPushButton("Connect")
-        self.disconnect_button = QPushButton("Disconnect")
-        self.test_button = QPushButton("Test")
+        self.connect_button = PrimaryPushButton("Connect", self)
+        self.disconnect_button = PushButton("Disconnect", self)
+        self.test_button = PushButton("Test", self)
         self.test_button.setToolTip(
             "Open a temporary session, validate identity and protocol, force safe OFF, then disconnect."
         )

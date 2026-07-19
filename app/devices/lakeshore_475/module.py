@@ -20,7 +20,9 @@ def _adapter(settings: StationSettings, simulation: bool) -> DeviceAdapter:
     profile = settings.lakeshore_gaussmeter
     if not profile.enabled or not profile.resource:
         return UnavailableLakeShoreAdapter(
-            "Configure Lake Shore 475 with enabled=true and a VISA resource, then reconnect."
+            "Lake Shore 475 is not assigned yet. Open Discovery, run Scan VISA, "
+            "choose Lake Shore 475 for the detected LSCI,MODEL475 resource, click "
+            "Assign, confirm the change, and then reconnect."
         )
     config = GaussmeterConfig(
         resource=profile.resource,

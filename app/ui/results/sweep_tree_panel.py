@@ -7,7 +7,6 @@ from pathlib import Path
 
 from PySide6.QtCore import Qt, Signal
 from PySide6.QtWidgets import (
-    QDialog,
     QDialogButtonBox,
     QHBoxLayout,
     QLabel,
@@ -28,7 +27,7 @@ from app.storage import (
     ThatecRunReader,
     ThatecTreeNode,
 )
-from app.ui.recipes.fluent_dialog import StationDialog
+from app.ui.dialogs import StationDialog
 
 
 class SweepTreePanel(QWidget):

@@ -7,7 +7,6 @@ import ipaddress
 from PySide6.QtCore import Qt, Signal
 from PySide6.QtGui import QResizeEvent
 from PySide6.QtWidgets import (
-    QDialog,
     QGridLayout,
     QHBoxLayout,
     QLabel,
@@ -55,7 +54,7 @@ from app.ui.dashboard.device_card import DeviceCard
 from app.ui.dashboard.discovery_surfaces import SavedInstrumentsView, TcpDiscoveryResultsView
 from app.ui.dashboard.visa_results import VisaResultState, VisaResultsView
 from app.ui.discovery_worker import MokeIdentificationWorker, TcpDiscoveryWorker, VisaDiscoveryWorker
-from app.ui.recipes.fluent_dialog import StationDialog
+from app.ui.dialogs import StationDialog
 
 
 class DashboardPage(QWidget):

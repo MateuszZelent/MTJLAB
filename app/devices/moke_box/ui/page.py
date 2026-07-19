@@ -12,7 +12,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 from qfluentwidgets import CardWidget, CheckBox, PrimaryPushButton, PushButton, SpinBox
-from app.ui.recipes.fluent_dialog import StationDialog
+from app.ui.dialogs import StationDialog
 
 from app.devices.moke_box.models import MokeHallVoltageReading, hall_field_from_voltage
 from app.settings.models import StationSettings

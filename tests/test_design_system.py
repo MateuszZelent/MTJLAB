@@ -74,7 +74,7 @@ class ThemeBridgeTests(unittest.TestCase):
     def setUp(self) -> None:
         self.application.setProperty("stationAppliedTheme", None)
 
-    def test_theme_bridge_applies_fluent_without_global_stylesheet_repolish(self) -> None:
+    def test_theme_bridge_never_repolishes_the_application_stylesheet(self) -> None:
         with (
             patch("app.ui.design_system.fluent_theme.setTheme") as set_theme,
             patch("app.ui.design_system.fluent_theme.setThemeColor") as set_color,
@@ -94,13 +94,17 @@ class ThemeBridgeTests(unittest.TestCase):
             apply_application_theme(self.application, "light")
         set_theme.assert_called_once_with(Theme.LIGHT, lazy=False)
 
-    def test_real_window_system_also_uses_atomic_theme_update(self) -> None:
+    def test_real_window_system_uses_lazy_theme_update(self) -> None:
         with (
             patch.object(self.application, "platformName", return_value="windows"),
             patch("app.ui.design_system.fluent_theme.setTheme") as set_theme,
+            patch("app.ui.design_system.fluent_theme.setThemeColor") as set_color,
         ):
             apply_application_theme(self.application, "dark")
-        set_theme.assert_called_once_with(Theme.DARK, lazy=False)
+        set_theme.assert_called_once_with(Theme.DARK, lazy=True)
+        set_color.assert_called_once_with(
+            tokens_for("dark").accent, save=False, lazy=True
+        )
 
     def test_offscreen_platform_disables_motion(self) -> None:
         with patch.dict("os.environ", {"QT_QPA_PLATFORM": "offscreen"}):

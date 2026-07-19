@@ -10,7 +10,6 @@ import pyqtgraph as pg
 from pyqtgraph.exporters import ImageExporter, SVGExporter
 from PySide6.QtCore import Signal
 from PySide6.QtWidgets import (
-    QFileDialog,
     QHBoxLayout,
     QLabel,
     QSizePolicy,
@@ -18,6 +17,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 from qfluentwidgets import TransparentPushButton
+from app.ui.dialogs import StationFileDialog as QFileDialog
 
 from app.ui.design_system import plot_theme, tokens_for
 
