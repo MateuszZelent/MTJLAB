@@ -162,7 +162,7 @@ class KeithleyConfigurationPanel(CardWidget):
             ("Channel", self.channel),
             ("Source mode", self.mode),
             ("Source current", self.level_field),
-            ("Voltage compliance (safety limit)", self.compliance_field),
+            ("Voltage limit (compliance)", self.compliance_field),
             ("NPLC", self.nplc_field),
             ("Settling time", self._bounded("settle", self.settle)),
             ("Sense mode", self.sense_mode),
@@ -257,13 +257,13 @@ class KeithleyConfigurationPanel(CardWidget):
         if mode == "current":
             self.form.labelForField(self.level_field).setText("Source current")
             self.form.labelForField(self.compliance_field).setText(
-                "Voltage compliance (safety limit)"
+                "Voltage limit (compliance)"
             )
             self.form.labelForField(self.source_range_field).setText("Current source range")
         elif mode == "voltage":
             self.form.labelForField(self.level_field).setText("Source voltage")
             self.form.labelForField(self.compliance_field).setText(
-                "Current compliance (safety limit)"
+                "Current limit (compliance)"
             )
             self.form.labelForField(self.source_range_field).setText("Voltage source range")
         self.refresh_limits()
@@ -1224,9 +1224,9 @@ class KeithleyPage(QWidget):
     ) -> None:
         help_items = {
             self.channel: ("Channel", "Selects SMU channel A or B. Both channels are electrically independent and have separate source values, measurements and safety limits."),
-            self.mode: ("Source mode", "Current forces a programmed current and uses Voltage compliance as its protection. Voltage forces a programmed voltage and uses Current compliance. Measure only does not program or enable a source."),
+            self.mode: ("Source mode", "Current forces the Source current and uses Voltage limit (compliance) as its protection. Voltage forces the Source voltage and uses Current limit (compliance). Measure only does not program or enable a source."),
             self.level: ("Source value", "The quantity Keithley actively tries to force. In Current mode this is current; in Voltage mode this is voltage. MIN/MAX are the laboratory-approved range for this programmed value."),
-            self.compliance: ("Compliance safety limit", "The maximum allowed opposite quantity. Current mode limits voltage; Voltage mode limits current. Reaching compliance means the requested source value cannot be maintained safely."),
+            self.compliance: ("Opposite-quantity safety limit", "The protection limit shown directly below the source setpoint. Current mode exposes Voltage limit (compliance); Voltage mode exposes Current limit (compliance). Reaching it means the requested source value cannot be maintained."),
             self.nplc: ("NPLC", "Number of power-line cycles integrated for one measurement. Higher values reduce noise but make readings slower. For 50 Hz mains, NPLC 1 integrates for approximately 20 ms."),
             self.settle: ("Settling time", "Delay allowed after changing a source point before a measurement is taken. Longer settling can improve stability but increases sweep duration."),
             self.sense_mode: ("Sense mode", "2-wire measures through the source leads and includes lead/contact resistance. 4-wire uses separate sense leads to remove most lead-voltage error; it requires correct Kelvin wiring."),
@@ -1695,11 +1695,11 @@ class KeithleyPage(QWidget):
             self.keithley_form.setRowVisible(widget, source_visible)
         if mode == "current":
             self.keithley_form.labelForField(self.level_field).setText("Source current")
-            self.keithley_form.labelForField(self.compliance_field).setText("Voltage compliance (safety limit)")
+            self.keithley_form.labelForField(self.compliance_field).setText("Voltage limit (compliance)")
             self.keithley_form.labelForField(self.source_range_field).setText("Current source range")
         elif mode == "voltage":
             self.keithley_form.labelForField(self.level_field).setText("Source voltage")
-            self.keithley_form.labelForField(self.compliance_field).setText("Current compliance (safety limit)")
+            self.keithley_form.labelForField(self.compliance_field).setText("Current limit (compliance)")
             self.keithley_form.labelForField(self.source_range_field).setText("Voltage source range")
         self._update_output_readiness()
         self._update_ramp_defaults(reset_values=True)

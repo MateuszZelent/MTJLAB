@@ -305,6 +305,18 @@ class KeithleySimulator(_BaseSimulator):
         if command == "errorqueue.clear()":
             self.error_queue.clear()
             return
+        sense = re.match(
+            r"^(smu[ab])\.sense\s*=\s*\1\.(SENSE_[A-Z0-9_]+)$",
+            command,
+        )
+        if sense:
+            if sense.group(2) not in {"SENSE_LOCAL", "SENSE_REMOTE"}:
+                self.error_queue.append("-104\tData type error")
+                return
+            self.programmed[f"{sense.group(1)}.sense"] = (
+                f"{sense.group(1)}.{sense.group(2)}"
+            )
+            return
         assignment = re.match(
             r"^(smu[ab]\.(?:(?:source|measure)\.[A-Za-z0-9_]+|sense))\s*=\s*(.+)$",
             command,

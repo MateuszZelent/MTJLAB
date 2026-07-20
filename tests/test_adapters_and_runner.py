@@ -1720,7 +1720,27 @@ root:
         self.assertIn("smub.source.autorangei = smub.AUTORANGE_OFF", session.writes)
         self.assertIn("smub.source.rangei = 0.01", session.writes)
         self.assertIn("smub.measure.rangev = 0.067", session.writes)
-        self.assertIn("smub.sense = smub.SENSE_4WIRE", session.writes)
+        self.assertIn("smub.sense = smub.SENSE_REMOTE", session.writes)
+        self.assertNotIn("smub.sense = smub.SENSE_4WIRE", session.writes)
+
+    def test_keithley_two_wire_uses_documented_2602a_local_sense_constant(self) -> None:
+        session = FakeVisaSession(
+            responses={
+                "*IDN?": "KEITHLEY INSTRUMENTS,2602A,123456,1.0",
+                "print(errorqueue.count)": "0",
+            }
+        )
+        adapter = KeithleyAdapter(
+            self.settings, session_factory=FakeVisaSessionFactory(session)
+        )
+        adapter.connect()
+
+        adapter.configure_source(
+            KeithleySourceRequest("B", "current", 0.001, 0.067)
+        )
+
+        self.assertIn("smub.sense = smub.SENSE_LOCAL", session.writes)
+        self.assertNotIn("smub.sense = smub.SENSE_2WIRE", session.writes)
 
     def test_keithley_measure_only_configures_measurement_path_not_source_range(self) -> None:
         session = FakeVisaSession(
@@ -1743,7 +1763,8 @@ root:
             )
         )
         self.assertIn("smub.measure.rangev = 0.067", session.writes)
-        self.assertIn("smub.sense = smub.SENSE_4WIRE", session.writes)
+        self.assertIn("smub.sense = smub.SENSE_REMOTE", session.writes)
+        self.assertNotIn("smub.sense = smub.SENSE_4WIRE", session.writes)
         self.assertNotIn("smub.source.rangev =", "\n".join(session.writes))
         with self.assertRaises(SafetyViolation):
             adapter.configure_source(

@@ -349,7 +349,7 @@ class KeithleyAdapter(DeviceAdapter):
         numeric(f"{smu}.measure.nplc", expected.nplc)
         enum(
             f"{smu}.sense",
-            "SENSE_2WIRE" if expected.sense_mode == "2wire" else "SENSE_4WIRE",
+            "SENSE_LOCAL" if expected.sense_mode == "2wire" else "SENSE_REMOTE",
             0 if expected.sense_mode == "2wire" else 1,
         )
         enum(
@@ -586,7 +586,7 @@ class KeithleyAdapter(DeviceAdapter):
         commands = [
             f"{smu}.measure.autorangev = {smu}.{'AUTORANGE_ON' if request.measure_voltage_autorange else 'AUTORANGE_OFF'}",
             f"{smu}.measure.autorangei = {smu}.{'AUTORANGE_ON' if request.measure_current_autorange else 'AUTORANGE_OFF'}",
-            f"{smu}.sense = {smu}.{'SENSE_2WIRE' if request.sense_mode == '2wire' else 'SENSE_4WIRE'}",
+            f"{smu}.sense = {smu}.{'SENSE_LOCAL' if request.sense_mode == '2wire' else 'SENSE_REMOTE'}",
         ]
         if request.measure_voltage_range_si is not None:
             commands.append(f"{smu}.measure.rangev = {request.measure_voltage_range_si:.12g}")

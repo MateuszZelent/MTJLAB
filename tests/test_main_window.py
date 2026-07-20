@@ -1593,13 +1593,36 @@ class MainWindowTests(unittest.TestCase):
         window = MainWindow(".config/settings.yml", simulation=True)
         try:
             keithley = window.keithley_page
+            window.resize(1600, 900)
+            window.show()
+            window._navigate_to("keithley")
+            self.application.processEvents()
+
             self.assertEqual(keithley.keithley_form.labelForField(keithley.level_field).text(), "Source current")
-            self.assertIn("Voltage compliance", keithley.keithley_form.labelForField(keithley.compliance_field).text())
+            self.assertEqual(
+                keithley.keithley_form.labelForField(keithley.compliance_field).text(),
+                "Voltage limit (compliance)",
+            )
+            self.assertTrue(keithley.keithley_form.isRowVisible(keithley.compliance_field))
+            self.assertTrue(keithley.compliance.isVisible())
+            self.assertIn("V", keithley.compliance_field.minimum.text())
+            self.assertIn("V", keithley.compliance_field.maximum.text())
+            self.assertFalse(
+                keithley.keithley_form.isRowVisible(
+                    keithley.configuration_panel.nplc_field
+                )
+            )
             keithley.level.setText("2 mA")
 
             keithley.mode.setCurrentText("voltage")
             self.assertEqual(keithley.keithley_form.labelForField(keithley.level_field).text(), "Source voltage")
-            self.assertIn("Current compliance", keithley.keithley_form.labelForField(keithley.compliance_field).text())
+            self.assertEqual(
+                keithley.keithley_form.labelForField(keithley.compliance_field).text(),
+                "Current limit (compliance)",
+            )
+            self.assertTrue(keithley.keithley_form.isRowVisible(keithley.compliance_field))
+            self.assertIn("A", keithley.compliance_field.minimum.text())
+            self.assertIn("A", keithley.compliance_field.maximum.text())
             self.assertTrue(keithley.level.text().endswith("V"))
             self.assertTrue(keithley.compliance.text().endswith("A"))
 
@@ -1611,6 +1634,13 @@ class MainWindowTests(unittest.TestCase):
             keithley.mode.setCurrentText("current")
             self.assertEqual(keithley.level.text(), "2 mA")
             self.assertTrue(keithley.keithley_form.isRowVisible(keithley.level_field))
+            self.assertTrue(keithley.keithley_form.isRowVisible(keithley.compliance_field))
+
+            window.resize(1050, 800)
+            self.application.processEvents()
+            self.assertTrue(keithley.compliance.isVisible())
+            self.assertGreater(keithley.compliance_field.width(), 480)
+            self.assertGreater(keithley.compliance.height(), 0)
         finally:
             window.close()
             self.application.processEvents()
@@ -1688,11 +1718,6 @@ class MainWindowTests(unittest.TestCase):
         window = MainWindow(".config/settings.yml", simulation=True)
         try:
             keithley = window.keithley_page
-            self.assertFalse(
-                keithley.keithley_form.isRowVisible(
-                    keithley.configuration_panel.nplc_field
-                )
-            )
             keithley._controller.call = Mock()
             safety = keithley._station_settings.keithley.safety.model_copy(
                 update={"output_off_mode": "zero"}
