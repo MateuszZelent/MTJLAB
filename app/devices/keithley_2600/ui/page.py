@@ -1455,6 +1455,7 @@ class KeithleyPage(QWidget):
             self._style_output_toggle(enabled)
         self._update_ramp_defaults()
         self._update_output_readiness()
+        self._update_live_controls()
 
     def request_measurement(self, channel: str | None = None) -> None:
         if self._measure_pending:
@@ -1524,6 +1525,10 @@ class KeithleyPage(QWidget):
 
     def _update_live_controls(self) -> None:
         connected = self._device_is_output_ready()
+        high_impedance_off = (
+            self._station_settings.keithley.safety.output_off_mode
+            == "high_impedance"
+        )
         for channel, checkbox in (
             ("A", self.live_channel_a),
             ("B", self.live_channel_b),
@@ -1531,8 +1536,16 @@ class KeithleyPage(QWidget):
             channel_enabled = (
                 self._station_settings.keithley.safety.channels[channel].enabled
             )
-            checkbox.setEnabled(connected and channel_enabled)
-            if not channel_enabled and checkbox.isChecked():
+            measurement_path_available = (
+                not high_impedance_off or self._output_states[channel]
+            )
+            checkbox.setEnabled(
+                connected and channel_enabled and measurement_path_available
+            )
+            if (
+                (not channel_enabled or not measurement_path_available)
+                and checkbox.isChecked()
+            ):
                 checkbox.setChecked(False)
             if not connected:
                 checkbox.setToolTip(
@@ -1541,6 +1554,12 @@ class KeithleyPage(QWidget):
             elif not channel_enabled:
                 checkbox.setToolTip(
                     f"Channel {channel} is disabled in the station profile."
+                )
+            elif not measurement_path_available:
+                checkbox.setToolTip(
+                    f"Channel {channel} is OUTPUT OFF in HIGH-Z mode, so its relay is "
+                    "open and the external DUT cannot be measured. Live never enables "
+                    "OUTPUT automatically."
                 )
             else:
                 checkbox.setToolTip(
@@ -1557,6 +1576,18 @@ class KeithleyPage(QWidget):
         )
         selected = self._selected_live_channels()
         if not selected:
+            if (
+                self._device_is_output_ready()
+                and self._station_settings.keithley.safety.output_off_mode
+                == "high_impedance"
+                and not any(self._output_states.values())
+            ):
+                self.live_timing.setText("Unavailable • HIGH-Z relay open")
+                self.live_timing.setToolTip(
+                    "The approved HIGH-Z output-off mode opens both output relays. "
+                    "Live never closes them or enables OUTPUT automatically."
+                )
+                return
             self.live_timing.setText(f"Stopped • {interval_text}")
             self.live_timing.setToolTip(
                 f"Live measurement is stopped. Request interval: {interval_text}."

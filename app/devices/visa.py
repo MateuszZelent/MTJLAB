@@ -210,6 +210,20 @@ class FakeVisaSession:
         self.writes.append(command)
         response = self.responses.get(command)
         if response is None:
+            equality = re.match(
+                r"^print\(((smu[ab]\.source\.offmode)\s*==\s*(smu[ab]\.OUTPUT_[A-Z_]+))\)$",
+                command,
+            )
+            if equality:
+                field, expected = equality.group(2), equality.group(3)
+                assignment = re.compile(
+                    rf"^{re.escape(field)}\s*=\s*(.+)$", re.IGNORECASE
+                )
+                for write in reversed(self.writes[:-1]):
+                    match = assignment.match(write)
+                    if match:
+                        return "1" if match.group(1).upper() == expected.upper() else "0"
+                return "0"
             output = re.match(r"^print\((smu[ab])\.source\.output\)$", command)
             if output:
                 smu = output.group(1)

@@ -522,6 +522,105 @@ class AdapterAndRunnerTests(unittest.TestCase):
         self.assertIn("smub.source.output = smub.OUTPUT_OFF", session.writes)
         self.assertEqual(adapter.state, DeviceState.FAULT)
 
+    def test_keithley_connect_applies_and_confirms_high_impedance_off_mode(self) -> None:
+        session = FakeVisaSession(
+            responses={
+                "*IDN?": "KEITHLEY INSTRUMENTS,2602A,123456,1.0",
+                "print(errorqueue.count)": "0",
+            }
+        )
+        adapter = KeithleyAdapter(
+            self.settings, session_factory=FakeVisaSessionFactory(session)
+        )
+
+        adapter.connect()
+
+        for smu in ("smua", "smub"):
+            self.assertIn(
+                f"{smu}.source.offmode = {smu}.OUTPUT_HIGH_Z",
+                session.writes,
+            )
+            self.assertIn(
+                f"print({smu}.source.offmode == {smu}.OUTPUT_HIGH_Z)",
+                session.writes,
+            )
+        self.assertEqual(adapter.state, DeviceState.OUTPUT_OFF)
+
+    def test_keithley_passive_measure_never_writes_output_on(self) -> None:
+        session = FakeVisaSession(
+            responses={
+                "*IDN?": "KEITHLEY INSTRUMENTS,2602A,123456,1.0",
+                "print(errorqueue.count)": "0",
+                "print(smua.measure.iv())": "0\t0",
+            }
+        )
+        adapter = KeithleyAdapter(
+            self.settings, session_factory=FakeVisaSessionFactory(session)
+        )
+        adapter.connect()
+
+        result = adapter.measure("A")
+
+        self.assertEqual(result.channel, "A")
+        self.assertFalse(
+            any("source.output" in write and "OUTPUT_ON" in write for write in session.writes)
+        )
+        self.assertEqual(adapter.state, DeviceState.OUTPUT_OFF)
+
+    def test_keithley_measurement_output_transition_trips_both_channels_off(self) -> None:
+        session = FakeVisaSession()
+
+        def output_readback(command: str) -> str:
+            smu = command.split(".", 1)[0].removeprefix("print(")
+            last_off = max(
+                (
+                    index
+                    for index, write in enumerate(session.writes)
+                    if write == f"{smu}.source.output = {smu}.OUTPUT_OFF"
+                ),
+                default=-1,
+            )
+            measurement = max(
+                (
+                    index
+                    for index, write in enumerate(session.writes)
+                    if write == "print(smua.measure.iv())"
+                ),
+                default=-1,
+            )
+            return "1" if smu == "smua" and measurement > last_off else "0"
+
+        session.responses.update(
+            {
+                "*IDN?": "KEITHLEY INSTRUMENTS,2602A,123456,1.0",
+                "print(errorqueue.count)": "0",
+                "print(smua.measure.iv())": "0\t0",
+                "print(smua.source.output)": output_readback,
+                "print(smub.source.output)": output_readback,
+            }
+        )
+        adapter = KeithleyAdapter(
+            self.settings, session_factory=FakeVisaSessionFactory(session)
+        )
+        adapter.connect()
+
+        with self.assertRaisesRegex(DeviceError, "changed an OUTPUT state"):
+            adapter.measure("A")
+
+        measurement_index = session.writes.index("print(smua.measure.iv())")
+        self.assertIn(
+            "smua.source.output = smua.OUTPUT_OFF",
+            session.writes[measurement_index + 1 :],
+        )
+        self.assertIn(
+            "smub.source.output = smub.OUTPUT_OFF",
+            session.writes[measurement_index + 1 :],
+        )
+        self.assertFalse(
+            any("source.output" in write and "OUTPUT_ON" in write for write in session.writes)
+        )
+        self.assertEqual(adapter.state, DeviceState.FAULT)
+
     def test_keithley_compliance_update_preserves_energized_output_and_reads_back(self) -> None:
         raw = deepcopy(simulation_settings(approved=True).model_dump(mode="python"))
         raw["devices"]["keithley"]["safety"]["allow_output_enable"] = True

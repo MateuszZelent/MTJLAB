@@ -152,7 +152,13 @@ class KeithleyAdapter(DeviceAdapter):
                 if any(states.values()):
                     raise DeviceError("Keithley did not confirm OUTPUT OFF after connection.")
             else:
-                self._read_output_states()
+                states = self._read_output_states()
+            if any(states.values()):
+                raise DeviceError(
+                    "Keithley output-off mode cannot be applied while an output is ON."
+                )
+            for channel in ("A", "B"):
+                self._configure_output_off_mode(session, self._smu(channel))
             self._update_aggregate_output_state()
             self._clear_errors()
             return identity
@@ -194,6 +200,24 @@ class KeithleyAdapter(DeviceAdapter):
         session = self._require_session()
         session.write("smua.source.output = smua.OUTPUT_OFF")
         session.write("smub.source.output = smub.OUTPUT_OFF")
+
+    def _configure_output_off_mode(
+        self, session: InstrumentSession, smu: str
+    ) -> None:
+        constants = {
+            "normal": "OUTPUT_NORMAL",
+            "high_impedance": "OUTPUT_HIGH_Z",
+            "zero": "OUTPUT_ZERO",
+        }
+        constant = constants[self._settings.safety.output_off_mode]
+        session.write(f"{smu}.source.offmode = {smu}.{constant}")
+        confirmed = session.query(
+            f"print({smu}.source.offmode == {smu}.{constant})"
+        ).strip().upper()
+        if confirmed not in {"1", "TRUE"}:
+            raise DeviceError(
+                f"Keithley did not confirm {smu}.source.offmode = {constant}."
+            )
 
     def emergency_off(self) -> None:
         if self._session is None:
@@ -243,6 +267,7 @@ class KeithleyAdapter(DeviceAdapter):
         session = self._require_session()
         session.write(f"{smu}.source.output = {smu}.OUTPUT_OFF")
         self._output_states[request.channel] = False
+        self._configure_output_off_mode(session, smu)
         if request.mode == "measure_only":
             self._configure_measurement_ranges_and_sense(session, smu, request)
             session.write(f"{smu}.measure.nplc = {request.nplc:.12g}")
@@ -393,6 +418,11 @@ class KeithleyAdapter(DeviceAdapter):
         self._check_errors()
         try:
             actual = float(session.query(f"print({smu}.source.level{suffix})"))
+        except DeviceError:
+            self.emergency_off()
+            if self._state is not DeviceState.UNKNOWN:
+                self._state = DeviceState.FAULT
+            raise
         except (TypeError, ValueError) as exc:
             raise DeviceError("Keithley returned an invalid source-level readback.") from exc
         output_after = self._output_is_enabled(channel)
@@ -637,6 +667,13 @@ class KeithleyAdapter(DeviceAdapter):
             raise SafetyViolation("Keithley channel must be A or B.")
         smu = self._smu(channel)
         session = self._require_session()
+        expected_output_states = dict(self._output_states)
+        observed_before = self._read_output_states()
+        if observed_before != expected_output_states:
+            self._fail_measurement_output_invariant(
+                "Keithley output readback changed outside the approved control path "
+                "before measurement."
+            )
         try:
             # One TSP acquisition keeps I and V from the same measurement
             # instant. Keithley returns current first, then voltage.
@@ -648,7 +685,15 @@ class KeithleyAdapter(DeviceAdapter):
             if not (math.isfinite(current) and math.isfinite(voltage)):
                 raise ValueError("non-finite IV result")
         except (TypeError, ValueError) as exc:
+            self.emergency_off()
+            if self._state is not DeviceState.UNKNOWN:
+                self._state = DeviceState.FAULT
             raise DeviceError("Keithley returned an invalid I/V measurement.") from exc
+        observed_after = self._read_output_states()
+        if observed_after != observed_before:
+            self._fail_measurement_output_invariant(
+                "Keithley measurement changed an OUTPUT state unexpectedly."
+            )
         request = self._last_request.get(channel)
         compliance_detected = self._at_compliance_limit(request, voltage=voltage, current=current)
         stop_required = compliance_detected and self._settings.safety.stop_on_compliance
@@ -672,6 +717,14 @@ class KeithleyAdapter(DeviceAdapter):
             raise
         self._check_errors()
         return result
+
+    def _fail_measurement_output_invariant(self, message: str) -> None:
+        """Force both channels OFF after an uncommanded output transition."""
+
+        self.emergency_off()
+        if self._state is not DeviceState.UNKNOWN:
+            self._state = DeviceState.FAULT
+        raise DeviceError(message + " Both outputs were forced OFF.")
 
     @staticmethod
     def _at_compliance_limit(

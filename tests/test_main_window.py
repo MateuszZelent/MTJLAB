@@ -1682,6 +1682,18 @@ class MainWindowTests(unittest.TestCase):
         try:
             keithley = window.keithley_page
             keithley._controller.call = Mock()
+            safety = keithley._station_settings.keithley.safety.model_copy(
+                update={"output_off_mode": "zero"}
+            )
+            keithley_settings = keithley._station_settings.keithley.model_copy(
+                update={"safety": safety}
+            )
+            devices = keithley._station_settings.devices.model_copy(
+                update={"keithley": keithley_settings}
+            )
+            keithley._station_settings = keithley._station_settings.model_copy(
+                update={"devices": devices}
+            )
             keithley._device_state_changed("verified")
             keithley.live_interval.setValue(500)
 
@@ -1719,8 +1731,30 @@ class MainWindowTests(unittest.TestCase):
             )
             self.assertTrue(keithley.live_channel_b.isChecked())
             self.assertFalse(keithley.live_channel_a.isChecked())
+            self.assertTrue(
+                all(
+                    call.args[0] == "measure"
+                    for call in keithley._controller.call.call_args_list
+                )
+            )
         finally:
             window.keithley_page._live_timer.stop()
+            window.close()
+            self.application.processEvents()
+
+    def test_keithley_live_is_unavailable_for_output_off_high_impedance_channels(self) -> None:
+        window = MainWindow(".config/settings.yml", simulation=True)
+        try:
+            keithley = window.keithley_page
+            keithley._controller.call = Mock()
+            keithley._device_state_changed("verified")
+
+            self.assertFalse(keithley.live_channel_a.isEnabled())
+            self.assertFalse(keithley.live_channel_b.isEnabled())
+            self.assertIn("HIGH-Z relay open", keithley.live_timing.text())
+            self.assertIn("never", keithley.live_channel_a.toolTip())
+            keithley._controller.call.assert_not_called()
+        finally:
             window.close()
             self.application.processEvents()
 
