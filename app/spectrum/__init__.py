@@ -7,6 +7,17 @@ from .processing import (
     frequency_grids_match,
     peak_preserving_indices,
 )
+from .analysis import (
+    SpectrumCleanupResult,
+    SpectrumPeak,
+    bilateral_denoise_dbm,
+    clean_spectrum_dbm,
+    detect_spectrum_peaks,
+    detect_stationary_interference,
+    robust_noise_sigma_db,
+    rolling_noise_floor_dbm,
+    suppress_stationary_lines_dbm,
+)
 
 __all__ = [
     "LinearPowerAverager",
@@ -14,4 +25,13 @@ __all__ = [
     "average_dbm_traces",
     "frequency_grids_match",
     "peak_preserving_indices",
+    "SpectrumCleanupResult",
+    "SpectrumPeak",
+    "bilateral_denoise_dbm",
+    "clean_spectrum_dbm",
+    "detect_spectrum_peaks",
+    "detect_stationary_interference",
+    "robust_noise_sigma_db",
+    "rolling_noise_floor_dbm",
+    "suppress_stationary_lines_dbm",
 ]

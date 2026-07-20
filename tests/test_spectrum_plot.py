@@ -82,6 +82,20 @@ class SpectrumPlotTests(unittest.TestCase):
         finally:
             widget.close()
 
+    def test_multiple_peak_markers_can_highlight_one_selected_peak(self) -> None:
+        widget = SpectrumPlotWidget()
+        try:
+            widget.set_peak_markers([1e6, 2e6, 3e6], [-30.0, -20.0, -40.0])
+            self.assertEqual(len(widget.peak_markers.points()), 3)
+            widget.select_peak_marker(1)
+            points = widget.peak_markers.points()
+            self.assertEqual(points[1].size(), 14)
+            self.assertEqual(points[0].size(), 10)
+            widget.apply_theme("light")
+            self.assertEqual(points[1].brush().color().name(), plot_theme(tokens_for("light")).reference)
+        finally:
+            widget.close()
+
     def test_csv_export_contains_each_visible_trace_and_refuses_overwrite(self) -> None:
         plot = SpectrumPlotWidget()
         try:

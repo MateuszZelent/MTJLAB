@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import os
 import inspect
+import math
 from datetime import datetime, timezone
 from pathlib import Path
 import tempfile
@@ -36,6 +37,31 @@ from tests.helpers import SETTINGS_TEMPLATE
 
 TEST_ENGINEER = "LAB\\test-engineer"
 TEST_SERVICE = "LAB\\test-service"
+
+
+def synthetic_anritsu_peaks(
+    *, primary_hz: float = 1.0e9
+) -> SpectrumTrace:
+    frequencies = tuple(990e6 + index * 50e3 for index in range(401))
+    baseline_mw = 10.0 ** (-100.0 / 10.0)
+    peaks = (
+        (primary_hz, 10.0 ** (-30.0 / 10.0), 800e3),
+        (1.006e9, 10.0 ** (-38.0 / 10.0), 500e3),
+    )
+    powers = []
+    for frequency in frequencies:
+        power_mw = baseline_mw
+        for center_hz, amplitude_mw, fwhm_hz in peaks:
+            power_mw += amplitude_mw * math.exp(
+                -4.0 * math.log(2.0) * ((frequency - center_hz) / fwhm_hz) ** 2
+            )
+        powers.append(10.0 * math.log10(power_mw))
+    return SpectrumTrace(
+        frequencies,
+        tuple(powers),
+        datetime.now(timezone.utc),
+        "TRAC1",
+    )
 
 
 def write_engineer_settings(path: Path) -> None:
@@ -1976,6 +2002,99 @@ class MainWindowTests(unittest.TestCase):
                 anritsu._spectrogram_buffer.row_count,
                 anritsu._spectrogram_buffer.MAX_ROWS,
             )
+        finally:
+            window.close()
+            self.application.processEvents()
+
+    def test_anritsu_auto_cleanup_and_peak_detection_are_local_and_preserve_raw(self) -> None:
+        window = MainWindow(".config/settings.yml", simulation=True)
+        try:
+            anritsu = window.anritsu_page
+            anritsu._controller.call = Mock()
+            trace = synthetic_anritsu_peaks()
+            mode = anritsu.cleanup_mode.findData("denoise")
+            anritsu.cleanup_mode.setCurrentIndex(mode)
+
+            anritsu._show_trace(trace)
+
+            anritsu._controller.call.assert_not_called()
+            self.assertEqual(anritsu._latest_trace.powers_dbm, trace.powers_dbm)
+            self.assertIsNotNone(anritsu._cleanup_result)
+            self.assertNotEqual(
+                anritsu._cleanup_result.values_dbm,
+                trace.powers_dbm,
+            )
+            self.assertEqual(
+                anritsu.spectrum_plot._traces["Raw"][1].tolist(),
+                list(trace.powers_dbm),
+            )
+            self.assertGreater(
+                anritsu.spectrum_plot.trace_point_count("Analysis"), 0
+            )
+            self.assertGreaterEqual(len(anritsu._detected_peaks), 2)
+            self.assertEqual(
+                len(anritsu.spectrum_plot.peak_markers.points()),
+                len(anritsu._detected_peaks),
+            )
+            first = anritsu._detected_peaks[0]
+            self.assertIsNotNone(first.fit_fwhm_hz)
+            self.assertGreater(first.snr_db, 20.0)
+            self.assertIn(first.fit_model, {"Gaussian", "Lorentzian"})
+        finally:
+            window.close()
+            self.application.processEvents()
+
+    def test_anritsu_peak_table_and_floating_tracker_follow_frequency_without_visa_calls(self) -> None:
+        window = MainWindow(".config/settings.yml", simulation=True)
+        try:
+            window.resize(1360, 880)
+            window.show()
+            window._navigate_to("anritsu")
+            self.application.processEvents()
+            anritsu = window.anritsu_page
+            anritsu._controller.call = Mock()
+            anritsu._show_trace(synthetic_anritsu_peaks(primary_hz=1.0e9))
+            anritsu._open_peak_table()
+            self.application.processEvents()
+
+            table = anritsu._peak_table_dialog
+            self.assertIsNotNone(table)
+            assert table is not None
+            self.assertTrue(table.isVisible())
+            self.assertGreaterEqual(table.table.rowCount(), 2)
+            self.assertIn("Hz", table.table.item(0, 1).text())
+            self.assertIn("dBm", table.table.item(0, 2).text())
+            self.assertIn("dB", table.table.item(0, 3).text())
+            self.assertNotEqual(table.table.item(0, 5).text(), "—")
+
+            tracked_index = min(
+                range(len(anritsu._detected_peaks)),
+                key=lambda index: abs(
+                    anritsu._detected_peaks[index].frequency_hz - 1.0e9
+                ),
+            )
+            table.table.selectRow(tracked_index)
+            anritsu._start_peak_tracking(tracked_index)
+            self.application.processEvents()
+            tracking = anritsu._peak_tracking_window
+            self.assertIsNotNone(tracking)
+            assert tracking is not None
+            self.assertTrue(tracking.isVisible())
+            self.assertTrue(
+                bool(tracking.windowFlags() & Qt.WindowType.WindowStaysOnTopHint)
+            )
+            self.assertEqual(tracking.point_count, 1)
+
+            anritsu._show_trace(
+                synthetic_anritsu_peaks(primary_hz=1.0002e9)
+            )
+            self.application.processEvents()
+            self.assertEqual(tracking.point_count, 2)
+            self.assertIn("GHz", tracking.frequency.text())
+            x_values, y_values = tracking.curve.getData()
+            self.assertEqual(len(x_values), 2)
+            self.assertGreater(float(y_values[-1]), float(y_values[0]))
+            anritsu._controller.call.assert_not_called()
         finally:
             window.close()
             self.application.processEvents()

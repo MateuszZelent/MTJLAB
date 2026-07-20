@@ -21,7 +21,7 @@ from app.settings import SettingsRepository
 from app.devices.discovery import DiscoveredInstrument, identify_device
 from app.devices.lakeshore_475.models import FieldUnit, GaussmeterReading, GaussmeterSnapshot, MeasurementMode
 from app.devices.moke_box.models import MokeHallVoltageReading
-from tests.test_main_window import TEST_ENGINEER, write_engineer_settings
+from tests.test_main_window import TEST_ENGINEER, synthetic_anritsu_peaks, write_engineer_settings
 
 
 class FluentLakeShorePageTests(unittest.TestCase):
@@ -348,6 +348,52 @@ class FluentAnritsuAndMokePageTests(unittest.TestCase):
                 viewport, control.rect().bottomRight()
             ).x()
             self.assertLessEqual(right, viewport.rect().right())
+
+    def test_anritsu_peak_analysis_and_tracking_surfaces_fit_normal_and_narrow_windows(self) -> None:
+        self.window.resize(820, 560)
+        self.window._navigate_to("anritsu")
+        self.application.processEvents()
+        page = self.window.anritsu_page
+        page.analysis_tabs.setCurrentIndex(0)
+        page._show_trace(synthetic_anritsu_peaks())
+        self.application.processEvents()
+        host = self.window.navigation_routes["anritsu"]
+
+        self.assertIsInstance(page.signal_analysis_card, CardWidget)
+        self.assertIsInstance(page.cleanup_mode, ComboBox)
+        self.assertIsInstance(page.open_peak_table, PrimaryPushButton)
+        self.assertTrue(page.signal_analysis_card.isVisibleTo(self.window))
+        self.assertEqual(host.scroll_area.horizontalScrollBar().maximum(), 0)
+
+        page._open_peak_table()
+        self.application.processEvents()
+        assert page._peak_table_dialog is not None
+        table = page._peak_table_dialog
+        table.resize(720, 380)
+        self.application.processEvents()
+        self.assertTrue(table.isVisible())
+        self.assertGreaterEqual(table.table.rowCount(), 2)
+        self.assertLessEqual(
+            table.track_selected.mapTo(
+                table, table.track_selected.rect().bottomRight()
+            ).x(),
+            table.rect().right(),
+        )
+
+        page._start_peak_tracking(0)
+        self.application.processEvents()
+        assert page._peak_tracking_window is not None
+        tracking = page._peak_tracking_window
+        tracking.resize(500, 360)
+        self.application.processEvents()
+        self.assertTrue(tracking.plot.isVisibleTo(tracking))
+        self.assertGreater(tracking.plot.height(), 100)
+        self.assertLessEqual(
+            tracking.clear_history.mapTo(
+                tracking, tracking.clear_history.rect().bottomRight()
+            ).x(),
+            tracking.rect().right(),
+        )
 
     def test_anritsu_light_theme_uses_tokenized_surfaces_and_readable_connection_text(self) -> None:
         self.window._navigate_to("anritsu")

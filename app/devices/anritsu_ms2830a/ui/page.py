@@ -38,7 +38,15 @@ from app.domain.quantities import (
 from app.recipes.parameter_registry import SWEEPABLE_PARAMETERS, sweep_default
 from app.safety.anritsu import ANRITSU_SWEEP_POINT_COUNTS
 from app.settings.models import StationSettings
-from app.spectrum import LinearPowerAverager, apply_reference_operation, frequency_grids_match
+from app.spectrum import (
+    LinearPowerAverager,
+    SpectrumCleanupResult,
+    SpectrumPeak,
+    apply_reference_operation,
+    clean_spectrum_dbm,
+    detect_spectrum_peaks,
+    frequency_grids_match,
+)
 from app.storage import ReferenceHdf5Store
 from app.ui.common import line_edit as _line
 from app.ui.design_system import plot_theme, tokens_for
@@ -46,6 +54,8 @@ from app.ui.dialogs import StationFileDialog as QFileDialog
 from app.ui.dialogs import StationDialog
 from app.ui.widgets import FluentTabView, LimitField, NotificationBanner, SpectrumPlotWidget
 from app.ui.workers import DeviceController
+
+from .peak_analysis import PeakTableDialog, PeakTrackingWindow
 
 
 class AnritsuPageState(StrEnum):
@@ -603,6 +613,14 @@ class AnritsuPage(QWidget):
         self._reference_spectrum: ReferenceSpectrum | None = None
         self._spectrogram_buffer = _SpectrogramBuffer()
         self._spectrogram_window: _AnritsuSpectrogramWindow | None = None
+        self._cleanup_result: SpectrumCleanupResult | None = None
+        self._detected_peaks: tuple[SpectrumPeak, ...] = ()
+        self._last_peak_analysis_monotonic: float | None = None
+        self._peak_table_dialog: PeakTableDialog | None = None
+        self._peak_tracking_window: PeakTrackingWindow | None = None
+        self._tracked_peak_target_hz: float | None = None
+        self._tracked_peak_gate_hz: float | None = None
+        self._tracking_started_monotonic: float | None = None
         self._pending_reference_kind: str | None = None
         self._device_idn = ""
         self._last_configuration: AnritsuConfigurationSnapshot | None = None
@@ -849,6 +867,52 @@ class AnritsuPage(QWidget):
         current_spectrum_layout = QVBoxLayout(current_spectrum_tab)
         current_spectrum_layout.setContentsMargins(0, 0, 0, 0)
         current_spectrum_layout.setSpacing(4)
+        self.signal_analysis_card = CardWidget(current_spectrum_tab)
+        self.signal_analysis_card.setObjectName("anritsuSignalAnalysisCard")
+        self.signal_analysis_card.setProperty("stationSurface", "card")
+        analysis_controls = QGridLayout(self.signal_analysis_card)
+        analysis_controls.setContentsMargins(12, 8, 12, 8)
+        analysis_controls.setHorizontalSpacing(8)
+        analysis_controls.setVerticalSpacing(6)
+        analysis_title = StrongBodyLabel("Automatic signal analysis")
+        analysis_title.setObjectName("sectionTitle")
+        analysis_controls.addWidget(analysis_title, 0, 0)
+        self.cleanup_mode = ComboBox(self.signal_analysis_card)
+        self.cleanup_mode.addItem("Raw · no cleanup", userData="raw")
+        self.cleanup_mode.addItem(
+            "Edge-preserving denoise", userData="denoise"
+        )
+        self.cleanup_mode.addItem(
+            "Stationary-line rejection", userData="emi_reject"
+        )
+        self.cleanup_mode.addItem(
+            "Auto clean · denoise + line rejection", userData="auto_clean"
+        )
+        self.cleanup_mode.setToolTip(
+            "Choose local display processing. Raw remains untouched. Stationary-line "
+            "rejection is conservative and cannot prove that a stable carrier is EMI."
+        )
+        analysis_controls.addWidget(self.cleanup_mode, 0, 1, 1, 2)
+        self.auto_peak_detection = CheckBox("Auto-detect peaks")
+        self.auto_peak_detection.setChecked(True)
+        self.highlight_peaks = CheckBox("Highlight peaks")
+        self.highlight_peaks.setChecked(True)
+        self.analyze_peaks = PushButton("Analyze now", self.signal_analysis_card)
+        self.open_peak_table = PrimaryPushButton(
+            "Peak table…", self.signal_analysis_card
+        )
+        analysis_controls.addWidget(self.auto_peak_detection, 1, 0)
+        analysis_controls.addWidget(self.highlight_peaks, 1, 1)
+        analysis_controls.addWidget(self.analyze_peaks, 1, 2)
+        analysis_controls.addWidget(self.open_peak_table, 1, 3)
+        self.analysis_status = CaptionLabel(
+            "Waiting for a completed spectrum.", self.signal_analysis_card
+        )
+        self.analysis_status.setObjectName("muted")
+        self.analysis_status.setWordWrap(True)
+        analysis_controls.addWidget(self.analysis_status, 2, 0, 1, 4)
+        analysis_controls.setColumnStretch(1, 1)
+        current_spectrum_layout.addWidget(self.signal_analysis_card)
         current_spectrum_layout.addWidget(self.spectrum_plot, 1)
         current_spectrum_layout.addWidget(self.info)
         self.analysis_tabs.addTab(current_spectrum_tab, "Current spectrum")
@@ -960,6 +1024,18 @@ class AnritsuPage(QWidget):
         self.open_spectrogram_window.clicked.connect(
             self._open_spectrogram_window
         )
+        self.cleanup_mode.currentIndexChanged.connect(
+            self._signal_analysis_controls_changed
+        )
+        self.auto_peak_detection.toggled.connect(
+            self._signal_analysis_controls_changed
+        )
+        self.highlight_peaks.toggled.connect(self._sync_peak_markers)
+        self.analyze_peaks.clicked.connect(
+            lambda: self._analyze_current_spectrum(force=True)
+        )
+        self.open_peak_table.clicked.connect(self._open_peak_table)
+        self.spectrum_plot.peak_selected.connect(self._plot_peak_selected)
         controller.result.connect(self._result)
         controller.error.connect(self._error)
         controller.state_changed.connect(self._device_state_changed)
@@ -2077,7 +2153,7 @@ class AnritsuPage(QWidget):
         self._latest_trace = trace
         self._spectrogram_buffer.append(trace)
         self._apply_page_state()
-        self._refresh_spectrum_display()
+        self._update_signal_analysis(trace)
         self._refresh_spectrogram_display()
         live_detail = ""
         if self._timer.isActive():
@@ -2121,6 +2197,238 @@ class AnritsuPage(QWidget):
             f"{len(trace.powers_dbm)} points • {trace.acquired_at_utc.isoformat()} • "
             f"max {max(trace.powers_dbm):.4g} dBm{live_detail}"
         )
+
+    def _cleanup_history(self) -> tuple[tuple[float, ...], ...]:
+        snapshot = self._spectrogram_buffer.snapshot(120)
+        if snapshot is None:
+            return ()
+        return tuple(
+            tuple(float(value) for value in row)
+            for row in snapshot[2]
+        )
+
+    def _signal_analysis_controls_changed(self, *_args: object) -> None:
+        if self._latest_trace is None:
+            self._cleanup_result = None
+            self._detected_peaks = ()
+            self._sync_peak_markers()
+            return
+        self._update_signal_analysis(self._latest_trace, force=True)
+
+    def _update_signal_analysis(
+        self, trace: SpectrumTrace, *, force: bool = False
+    ) -> None:
+        mode = str(self.cleanup_mode.currentData() or "raw")
+        try:
+            self._cleanup_result = clean_spectrum_dbm(
+                trace.powers_dbm,
+                mode=mode,
+                history_dbm=self._cleanup_history(),
+            )
+        except ValueError as exc:
+            self._cleanup_result = None
+            self._detected_peaks = ()
+            self.analysis_status.setText(f"Signal analysis unavailable: {exc}")
+            self._sync_peak_markers()
+            self._refresh_spectrum_display()
+            return
+        self._refresh_spectrum_display()
+        now = time.monotonic()
+        due = (
+            force
+            or self._last_peak_analysis_monotonic is None
+            or now - self._last_peak_analysis_monotonic >= 1.0
+        )
+        if self.auto_peak_detection.isChecked() and due:
+            self._analyze_current_spectrum(force=True)
+        else:
+            self._update_analysis_status()
+        self._update_peak_tracking(now)
+
+    def _analysis_values(self) -> tuple[tuple[float, ...], tuple[float, ...]] | None:
+        trace = self._latest_trace
+        cleanup = self._cleanup_result
+        if trace is None or cleanup is None:
+            return None
+        return trace.frequencies_hz, cleanup.values_dbm
+
+    def _analyze_current_spectrum(self, *, force: bool = False) -> None:
+        data = self._analysis_values()
+        if data is None:
+            self.analysis_status.setText(
+                "Acquire a completed spectrum before detecting peaks."
+            )
+            return
+        now = time.monotonic()
+        if (
+            not force
+            and self._last_peak_analysis_monotonic is not None
+            and now - self._last_peak_analysis_monotonic < 1.0
+        ):
+            return
+        frequencies_hz, values_dbm = data
+        try:
+            self._detected_peaks = detect_spectrum_peaks(
+                frequencies_hz,
+                values_dbm,
+                min_snr_db=6.0,
+                min_prominence_db=3.0,
+                max_peaks=20,
+                fit=True,
+            )
+        except ValueError as exc:
+            self._detected_peaks = ()
+            self.analysis_status.setText(f"Peak analysis unavailable: {exc}")
+        self._last_peak_analysis_monotonic = now
+        self._sync_peak_markers()
+        self._update_analysis_status()
+        if self._peak_table_dialog is not None:
+            self._peak_table_dialog.set_peaks(
+                self._detected_peaks,
+                method=self._cleanup_result.method if self._cleanup_result else "unavailable",
+            )
+
+    def _update_analysis_status(self) -> None:
+        cleanup = self._cleanup_result
+        if cleanup is None:
+            return
+        interference = len(cleanup.stationary_interference_indices)
+        self.analysis_status.setText(
+            f"{cleanup.method} · noise σ {cleanup.noise_sigma_db:.3g} dB · "
+            f"{len(self._detected_peaks)} peak(s) · "
+            f"{interference} stationary-line candidate bin(s)"
+        )
+
+    def _sync_peak_markers(self, *_args: object) -> None:
+        if not self.highlight_peaks.isChecked() or not self._detected_peaks:
+            self.spectrum_plot.clear_peak_markers()
+            return
+        self.spectrum_plot.set_peak_markers(
+            [peak.frequency_hz for peak in self._detected_peaks],
+            [peak.amplitude_dbm for peak in self._detected_peaks],
+        )
+
+    def _open_peak_table(self) -> None:
+        self._analyze_current_spectrum(force=True)
+        if self._peak_table_dialog is None:
+            dialog = PeakTableDialog(self)
+            dialog.peak_selected.connect(self.spectrum_plot.select_peak_marker)
+            dialog.track_requested.connect(self._start_peak_tracking)
+            dialog.closed.connect(self._peak_table_closed)
+            self._peak_table_dialog = dialog
+        dialog = self._peak_table_dialog
+        dialog.set_peaks(
+            self._detected_peaks,
+            method=self._cleanup_result.method if self._cleanup_result else "unavailable",
+        )
+        dialog.show()
+        dialog.raise_()
+        dialog.activateWindow()
+
+    def _plot_peak_selected(self, index: int) -> None:
+        if self._peak_table_dialog is None:
+            self._open_peak_table()
+        dialog = self._peak_table_dialog
+        if dialog is not None and 0 <= index < dialog.table.rowCount():
+            dialog.table.selectRow(index)
+
+    def _peak_table_closed(self) -> None:
+        dialog = self._peak_table_dialog
+        self._peak_table_dialog = None
+        if dialog is not None:
+            dialog.deleteLater()
+
+    def _start_peak_tracking(self, index: int) -> None:
+        if not 0 <= index < len(self._detected_peaks):
+            return
+        peak = self._detected_peaks[index]
+        data = self._analysis_values()
+        if data is None:
+            return
+        frequencies_hz = np.asarray(data[0], dtype=float)
+        spacing_hz = float(np.median(np.abs(np.diff(frequencies_hz))))
+        width_hz = peak.fit_fwhm_hz or peak.fwhm_hz
+        self._tracked_peak_target_hz = peak.frequency_hz
+        self._tracked_peak_gate_hz = max(
+            spacing_hz * 5.0,
+            (width_hz * 2.0 if width_hz is not None else 0.0),
+        )
+        self._tracking_started_monotonic = time.monotonic()
+        if self._peak_tracking_window is None:
+            window = PeakTrackingWindow(self)
+            window.closed.connect(self._peak_tracking_closed)
+            window.history_cleared.connect(self._peak_tracking_history_cleared)
+            self._peak_tracking_window = window
+        tracking = self._peak_tracking_window
+        tracking.clear()
+        tracking.append(
+            0.0,
+            peak,
+            source=self._cleanup_result.method if self._cleanup_result else "Raw",
+        )
+        tracking.show()
+        tracking.raise_()
+        tracking.activateWindow()
+        self.spectrum_plot.select_peak_marker(index)
+        self.status.emit(
+            f"Anritsu local peak tracking started at {peak.frequency_hz:.12g} Hz"
+        )
+
+    def _update_peak_tracking(self, now: float) -> None:
+        target_hz = self._tracked_peak_target_hz
+        gate_hz = self._tracked_peak_gate_hz
+        tracking = self._peak_tracking_window
+        data = self._analysis_values()
+        if target_hz is None or gate_hz is None or tracking is None or data is None:
+            return
+        frequencies = np.asarray(data[0], dtype=float)
+        values = np.asarray(data[1], dtype=float)
+        local = np.abs(frequencies - target_hz) <= gate_hz * 4.0
+        if int(np.count_nonzero(local)) >= 5:
+            candidate_frequencies = frequencies[local]
+            candidate_values = values[local]
+        else:
+            candidate_frequencies = frequencies
+            candidate_values = values
+        try:
+            candidates = detect_spectrum_peaks(
+                candidate_frequencies,
+                candidate_values,
+                min_snr_db=4.0,
+                min_prominence_db=2.0,
+                max_peaks=40,
+                fit=False,
+            )
+        except ValueError:
+            candidates = ()
+        nearest = min(
+            candidates,
+            key=lambda peak: abs(peak.frequency_hz - target_hz),
+            default=None,
+        )
+        if nearest is None or abs(nearest.frequency_hz - target_hz) > gate_hz:
+            tracking.mark_lost(target_hz=target_hz, gate_hz=gate_hz)
+            return
+        self._tracked_peak_target_hz = nearest.frequency_hz
+        started = self._tracking_started_monotonic or now
+        tracking.append(
+            max(0.0, now - started),
+            nearest,
+            source=self._cleanup_result.method if self._cleanup_result else "Raw",
+        )
+
+    def _peak_tracking_closed(self) -> None:
+        tracking = self._peak_tracking_window
+        self._peak_tracking_window = None
+        self._tracked_peak_target_hz = None
+        self._tracked_peak_gate_hz = None
+        self._tracking_started_monotonic = None
+        if tracking is not None:
+            tracking.deleteLater()
+        self.status.emit("Anritsu local peak tracking stopped")
+
+    def _peak_tracking_history_cleared(self) -> None:
+        self._tracking_started_monotonic = time.monotonic()
 
     @staticmethod
     def _set_combo_data(combo: ComboBox, value: object) -> None:
@@ -2269,6 +2577,20 @@ class AnritsuPage(QWidget):
         traces: list[tuple[str, SpectrumTrace, tuple[float, ...], str, str]] = []
         if self._latest_trace is not None and self.show_raw.isChecked():
             traces.append(("Raw", self._latest_trace, self._latest_trace.powers_dbm, "dBm", "#2196f3"))
+        if (
+            self._latest_trace is not None
+            and self._cleanup_result is not None
+            and str(self.cleanup_mode.currentData() or "raw") != "raw"
+        ):
+            traces.append(
+                (
+                    "Analysis",
+                    self._latest_trace,
+                    self._cleanup_result.values_dbm,
+                    "dBm",
+                    "#00b7c3",
+                )
+            )
         if self._averaged_trace is not None and self.show_average.isChecked():
             traces.append(("Averaged", self._averaged_trace, self._averaged_trace.powers_dbm, "dBm", "#00a67d"))
         if self._reference_trace is not None and self.show_reference.isChecked():
@@ -2315,7 +2637,7 @@ class AnritsuPage(QWidget):
                 if self.show_processed.isChecked():
                     traces.append(("Processed", signal, processed, processed_unit, "#ab47bc"))
 
-        for name in ("Raw", "Averaged", "Reference", "Processed"):
+        for name in ("Raw", "Analysis", "Averaged", "Reference", "Processed"):
             self.spectrum_plot.clear_trace(name)
         if not traces:
             return
@@ -2328,7 +2650,7 @@ class AnritsuPage(QWidget):
                 trace.frequencies_hz,
                 values,
                 color=color,
-                primary=name in {"Processed", "Averaged", "Raw"},
+                primary=name in {"Processed", "Analysis", "Averaged", "Raw"},
             )
             displayed += sum(
                 math.isfinite(frequency) and math.isfinite(value)

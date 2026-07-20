@@ -25,6 +25,7 @@ class SpectrumPlotWidget(QWidget):
     """Reusable live/results plot with markers, holds and data export."""
 
     status_changed = Signal(str)
+    peak_selected = Signal(int)
 
     def __init__(
         self, parent: QWidget | None = None, *, legend: bool = True, compact_toolbar: bool = False
@@ -97,6 +98,15 @@ class SpectrumPlotWidget(QWidget):
             self.plot.addItem(item, ignoreBounds=True)
         self.marker.hide()
         self.delta_marker.hide()
+        self.peak_markers = pg.ScatterPlotItem(
+            size=10,
+            symbol="o",
+            pxMode=True,
+            hoverable=True,
+        )
+        self.plot.addItem(self.peak_markers)
+        self.peak_markers.sigClicked.connect(self._peak_marker_clicked)
+        self._selected_peak_index: int | None = None
         self._last_mouse_x: float | None = None
         self._mouse_proxy = pg.SignalProxy(
             self.plot.scene().sigMouseMoved, rateLimit=45, slot=self._mouse_moved
@@ -133,6 +143,7 @@ class SpectrumPlotWidget(QWidget):
         self.crosshair_y.setPen(pg.mkPen(palette.grid, width=1))
         self.marker.setPen(pg.mkPen(palette.reference, width=2))
         self.delta_marker.setPen(pg.mkPen(palette.reference, width=2))
+        self._style_peak_markers()
         for name in self._token_owned_primary_curves:
             curve = self._curves.get(name)
             if curve is not None:
@@ -196,6 +207,58 @@ class SpectrumPlotWidget(QWidget):
         self.clear_holds()
         self.marker.hide()
         self.delta_marker.hide()
+        self.clear_peak_markers()
+
+    def set_peak_markers(
+        self,
+        frequencies_hz: object,
+        amplitudes: object,
+    ) -> None:
+        frequencies = np.asarray(frequencies_hz, dtype=float)
+        values = np.asarray(amplitudes, dtype=float)
+        if frequencies.ndim != 1 or values.ndim != 1 or frequencies.size != values.size:
+            raise ValueError("Peak marker frequencies and amplitudes must be equally-sized vectors.")
+        finite = np.isfinite(frequencies) & np.isfinite(values)
+        spots = [
+            {"pos": (float(frequency), float(value)), "data": int(index)}
+            for index, (frequency, value) in enumerate(
+                zip(frequencies[finite], values[finite], strict=True)
+            )
+        ]
+        self.peak_markers.setData(spots)
+        if self._selected_peak_index is not None and self._selected_peak_index >= len(spots):
+            self._selected_peak_index = None
+        self._style_peak_markers()
+
+    def clear_peak_markers(self) -> None:
+        self.peak_markers.clear()
+        self._selected_peak_index = None
+
+    def select_peak_marker(self, index: int | None) -> None:
+        self._selected_peak_index = index
+        self._style_peak_markers()
+
+    def _style_peak_markers(self) -> None:
+        if not hasattr(self, "peak_markers"):
+            return
+        palette = plot_theme(tokens_for(self._theme_name))
+        points = self.peak_markers.points()
+        for point_index, point in enumerate(points):
+            selected = point_index == self._selected_peak_index
+            point.setSize(14 if selected else 10)
+            point.setPen(
+                pg.mkPen(palette.reference if selected else palette.axes, width=2)
+            )
+            point.setBrush(
+                pg.mkBrush(palette.reference if selected else palette.measurement)
+            )
+
+    def _peak_marker_clicked(self, _item: object, points: list[object], _event: object) -> None:
+        if not points:
+            return
+        index = int(points[0].data())
+        self.select_peak_marker(index)
+        self.peak_selected.emit(index)
 
     def auto_range(self) -> None:
         self.plot.enableAutoRange()
@@ -345,4 +408,3 @@ class SpectrumPlotWidget(QWidget):
             if magnitude >= scale:
                 return f"{value / scale:.9g} {prefix}{self._x_unit}"
         return f"{value:.9g} {self._x_unit}"
-
