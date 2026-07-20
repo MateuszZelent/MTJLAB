@@ -764,6 +764,19 @@ class KeithleyPage(QWidget):
         source_layout = QVBoxLayout(source_tab)
         source_layout.setContentsMargins(8, 6, 8, 6)
         source_layout.setSpacing(6)
+        buttons = QHBoxLayout()
+        self.apply_configuration_button = PrimaryPushButton(
+            "Apply & verify settings · OUTPUT OFF"
+        )
+        measure = PushButton("Measure selected channel")
+        self.measure_selected_button = measure
+        self.output_toggle = PushButton("OUTPUT OFF")
+        self.output_toggle.setCheckable(True)
+        self.output_toggle.setObjectName("outputOffButton")
+        self.output_toggle.setVisible(False)
+        buttons.addWidget(self.apply_configuration_button)
+        buttons.addWidget(measure)
+        source_layout.addLayout(buttons)
         self.configuration_panel = KeithleyConfigurationPanel(settings, source_tab)
         source_layout.addWidget(self.configuration_panel)
         self.channel = self.configuration_panel.channel
@@ -845,19 +858,6 @@ class KeithleyPage(QWidget):
         ramp_layout.addLayout(ramp_actions)
         source_layout.addWidget(ramp_panel)
         ramp_panel.setVisible(self._MANUAL_RAMP_ENABLED)
-        buttons = QHBoxLayout()
-        self.apply_configuration_button = PrimaryPushButton(
-            "Apply & verify settings · OUTPUT OFF"
-        )
-        measure = PushButton("Measure selected channel")
-        self.measure_selected_button = measure
-        self.output_toggle = PushButton("OUTPUT OFF")
-        self.output_toggle.setCheckable(True)
-        self.output_toggle.setObjectName("outputOffButton")
-        self.output_toggle.setVisible(False)
-        buttons.addWidget(self.apply_configuration_button)
-        buttons.addWidget(measure)
-        source_layout.addLayout(buttons)
         self.readout = BodyLabel()
         self.readout.hide()
         source_layout.addStretch(1)
@@ -1253,7 +1253,7 @@ class KeithleyPage(QWidget):
             self.ramp_deadline: ("Ramp deadline", "Maximum wall-clock time for the complete operation. Timeout triggers a best-effort OFF of both SMU outputs."),
             self.ramp_preview_button: ("Preview ramp", "Calculates the finite point sequence without contacting the instrument. Execution still queries the actual starting source level."),
             self.ramp_execute_button: ("Ramp active output", "Changes an already enabled source through bounded points. It never turns an output on; every point measures I/V and trips OFF on failure."),
-            self.apply_configuration_button: ("Apply and verify with OUTPUT OFF", "Validates every visible value and unit, forces the selected channel OUTPUT OFF, writes the complete source and measurement configuration, and reads every applied parameter back. This action never enables OUTPUT."),
+            self.apply_configuration_button: ("Apply and verify with OUTPUT OFF", "Validates every visible value and unit, forces the selected channel OUTPUT OFF, writes the complete source and measurement configuration, and reads every instrument-programmable parameter back. Software settling time is validated locally. This action never enables OUTPUT."),
         }
         for widget, (title, description) in help_items.items():
             self._set_help(widget, title, description)
@@ -2050,8 +2050,9 @@ class KeithleyPage(QWidget):
                 self._controller.call("set_output", (channel, True))
             else:
                 self.banner.show_message(
-                    f"Keithley CH {channel}: all settings applied and verified by "
-                    "instrument readback. OUTPUT remains OFF.",
+                    f"Keithley CH {channel}: all instrument settings applied and "
+                    "verified by readback; software settling time validated locally. "
+                    "OUTPUT remains OFF.",
                     severity="success",
                     timeout_ms=8_000,
                 )

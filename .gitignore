@@ -11,3 +11,5 @@ qualification-sim*/
 .config/logs/
 *.h5
 *.nc
+tmp/
+artifacts/

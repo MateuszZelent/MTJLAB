@@ -2413,7 +2413,8 @@ class MainWindowTests(unittest.TestCase):
             keithley._controller.call.assert_called_once()
             self.assertFalse(keithley._output_states["B"])
             self.assertTrue(keithley.apply_configuration_button.isEnabled())
-            self.assertIn("all settings applied", keithley.banner.label.text())
+            self.assertIn("all instrument settings applied", keithley.banner.label.text())
+            self.assertIn("settling time validated locally", keithley.banner.label.text())
             self.assertIn("OUTPUT remains OFF", keithley.banner.label.text())
         finally:
             window.close()
