@@ -11,6 +11,36 @@ from tests.helpers import SETTINGS_TEMPLATE
 
 
 class SettingsRepositoryTests(unittest.TestCase):
+    def test_load_repairs_anritsu_rf_requirement_without_inventing_power_limit(self) -> None:
+        raw = deepcopy(SettingsRepository(SETTINGS_TEMPLATE).load().raw)
+        safety = raw["devices"]["anritsu"]["safety"]
+        safety["acquisition_allowed"] = True
+        safety["require_rf_input_limit_definition"] = True
+        safety["rf_input"]["max_expected_power_at_connector"] = None
+        safety["frequency"] = {"min": "10 MHz", "max": "3 GHz"}
+        with tempfile.TemporaryDirectory() as temporary:
+            path = Path(temporary) / "settings.yml"
+            repository = SettingsRepository(path)
+            repository._atomic_dump(raw)
+
+            loaded = repository.load()
+
+            repaired = loaded.raw["devices"]["anritsu"]["safety"]
+            self.assertTrue(repaired["acquisition_allowed"])
+            self.assertFalse(repaired["require_rf_input_limit_definition"])
+            self.assertIsNone(
+                repaired["rf_input"]["max_expected_power_at_connector"]
+            )
+            self.assertEqual(
+                repaired["reference_level"],
+                {"min": "-120 dBm", "max": "+50 dBm"},
+            )
+            persisted = repository._yaml.load(path.read_text(encoding="utf-8"))
+            self.assertFalse(
+                persisted["devices"]["anritsu"]["safety"]
+                ["require_rf_input_limit_definition"]
+            )
+
     def test_legacy_profile_gets_explicit_disabled_moke_box_section(self) -> None:
         raw = deepcopy(SettingsRepository(SETTINGS_TEMPLATE).load().raw)
         raw["devices"].pop("moke_box", None)

@@ -668,6 +668,37 @@ class MainWindowTests(unittest.TestCase):
                 window.close()
                 self.application.processEvents()
 
+    def test_settings_autosave_repairs_missing_optional_anritsu_rf_declaration(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            path = Path(temporary) / "settings.yml"
+            write_engineer_settings(path)
+            window = MainWindow(
+                path, simulation=False, authenticated_username=TEST_ENGINEER
+            )
+            try:
+                page = window.settings_page
+                safety = page._raw["devices"]["anritsu"]["safety"]
+                safety["acquisition_allowed"] = True
+                safety["require_rf_input_limit_definition"] = True
+                safety["rf_input"]["max_expected_power_at_connector"] = None
+                safety["frequency"] = {"min": "10 MHz", "max": "3 GHz"}
+                page._populate()
+                page._dirty = True
+
+                self.assertTrue(page.save_draft(silent=True))
+
+                persisted = SettingsRepository(path).load().raw["devices"][
+                    "anritsu"
+                ]["safety"]
+                self.assertTrue(persisted["acquisition_allowed"])
+                self.assertFalse(persisted["require_rf_input_limit_definition"])
+                self.assertIsNone(
+                    persisted["rf_input"]["max_expected_power_at_connector"]
+                )
+            finally:
+                window.close()
+                self.application.processEvents()
+
     def test_discovered_assignment_updates_card_and_worker_adapter_before_connect(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             path = Path(temporary) / "settings.yml"

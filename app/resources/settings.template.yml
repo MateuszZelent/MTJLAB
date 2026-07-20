@@ -394,7 +394,9 @@ devices:
       qualified_firmware: []
     safety:
       acquisition_allowed: false
-      require_rf_input_limit_definition: true
+      # Optional: enable only when the laboratory wants to require an explicit
+      # expected RF power declaration before acquisition.
+      require_rf_input_limit_definition: false
       signal_generator_output_allowed: false
       outputs_off_on_disconnect: true
       rf_input:

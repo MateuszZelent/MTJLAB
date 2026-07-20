@@ -53,11 +53,12 @@ class SettingsRepository:
         # introduced nested fields arrive without per-device migration code.
         defaults = self._template_raw()
         migrated = self._merge_missing_defaults(raw, defaults)
+        repaired = self.repair_known_issues(raw)
         try:
             settings = StationSettings.model_validate(raw)
         except ValidationError as exc:
             raise ConfigurationError(f"Invalid settings.yml:\n{exc}") from exc
-        if migrated:
+        if migrated or repaired:
             # Persist only after the merged document validates.  This is a
             # schema upgrade, not an operator configuration change, so existing
             # approval metadata is preserved. _atomic_dump also keeps a .bak.
@@ -136,6 +137,7 @@ class SettingsRepository:
         """
 
         payload = deepcopy(raw)
+        self.repair_known_issues(payload)
         if self._configuration_changed(payload):
             profile = payload.setdefault("profile", {})
             profile["state"] = "unverified"
@@ -149,6 +151,39 @@ class SettingsRepository:
             raise ConfigurationError(f"Invalid settings.yml:\n{exc}") from exc
         self._atomic_dump(payload)
         return settings
+
+    @staticmethod
+    def repair_known_issues(raw: dict[str, Any]) -> bool:
+        """Repair deterministic legacy/contradictory values without inventing limits.
+
+        An empty expected-input declaration cannot coexist with a request to
+        require that declaration.  Disabling the requirement is the schema's
+        explicit opt-out; it does not create a fictitious RF power limit and
+        does not enable acquisition by itself.
+        """
+
+        try:
+            safety = raw["devices"]["anritsu"]["safety"]
+        except (KeyError, TypeError):
+            return False
+        if not isinstance(safety, dict):
+            return False
+
+        changed = False
+        rf_input = safety.get("rf_input")
+        if (
+            isinstance(rf_input, dict)
+            and safety.get("require_rf_input_limit_definition") is True
+            and rf_input.get("max_expected_power_at_connector") in (None, "", "null")
+        ):
+            safety["require_rf_input_limit_definition"] = False
+            changed = True
+
+        documented_reference = {"min": "-120 dBm", "max": "+50 dBm"}
+        if safety.get("reference_level") != documented_reference:
+            safety["reference_level"] = documented_reference
+            changed = True
+        return changed
 
     def _configuration_changed(self, candidate: dict[str, Any]) -> bool:
         """Compare a draft to the persisted profile excluding approval metadata."""

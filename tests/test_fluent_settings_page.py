@@ -6,7 +6,7 @@ import unittest
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
-from PySide6.QtWidgets import QApplication, QBoxLayout, QTabWidget
+from PySide6.QtWidgets import QApplication, QBoxLayout, QFormLayout, QTabWidget
 from qfluentwidgets import (
     CardWidget,
     CheckBox,
@@ -101,6 +101,30 @@ class FluentSettingsPageTests(unittest.TestCase):
         source = inspect.getsource(_SafetyLimitValidationDelegate)
         self.assertNotIn("setStyleSheet", source)
         self.assertNotIn("#ffffff", source)
+
+    def test_settings_form_keeps_readable_label_column_without_wrapping_rows(self) -> None:
+        page = SettingsPage(SettingsRepository(".config/settings.yml"))
+        try:
+            page.resize(1360, 880)
+            page.show()
+            self.application.processEvents()
+            form = next(
+                child
+                for child in page.forms["anritsu"].widget().findChildren(QFormLayout)
+            )
+            self.assertEqual(
+                form.rowWrapPolicy(), QFormLayout.RowWrapPolicy.DontWrapRows
+            )
+            labels = [
+                label
+                for label in page.forms["anritsu"].widget().findChildren(
+                    type(page._subtitle)
+                )
+                if label.objectName() != "settingsFieldError"
+            ]
+            self.assertTrue(any(label.minimumWidth() >= 240 for label in labels))
+        finally:
+            page.close()
 
     def test_wide_settings_rethemes_all_routes_without_navigation_artifacts(self) -> None:
         window = MainWindow(".config/settings.yml", simulation=True)

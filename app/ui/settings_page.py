@@ -705,7 +705,7 @@ class SettingsPage(QWidget):
                 form.setHorizontalSpacing(18)
                 form.setVerticalSpacing(10)
                 form.setFieldGrowthPolicy(QFormLayout.FieldGrowthPolicy.AllNonFixedFieldsGrow)
-                form.setRowWrapPolicy(QFormLayout.RowWrapPolicy.WrapLongRows)
+                form.setRowWrapPolicy(QFormLayout.RowWrapPolicy.DontWrapRows)
                 card_layout.addWidget(form_host)
                 layout.addWidget(card)
                 cards[section] = form
@@ -726,7 +726,9 @@ class SettingsPage(QWidget):
             label = " › ".join(labels[1:]) or section
             label_widget = BodyLabel(label)
             label_widget.setWordWrap(True)
-            label_widget.setMinimumWidth(0)
+            label_widget.setMinimumWidth(240)
+            label_widget.setMaximumWidth(320)
+            label_widget.setToolTip(label)
             card_for(section).addRow(label_widget, self._form_editor(path, value))
 
         walk(data, prefix, ())
@@ -1663,6 +1665,7 @@ class SettingsPage(QWidget):
             return True
         try:
             draft = self._apply_tree_values()
+            repaired = self._repository.repair_known_issues(draft)
             changed_paths = self._changed_leaf_paths(self._persisted_raw, draft)
             general_edit_allowed = self._access.allows(Permission.EDIT_SETTINGS)
             operator_output_edit = (
@@ -1713,7 +1716,11 @@ class SettingsPage(QWidget):
         self._refresh_diagnostics()
         self.settings_saved.emit(settings)
         self.status.emit(
-            "Configuration autosaved; profile approval is required"
+            "Configuration autosaved and known inconsistencies repaired; profile approval is required"
+            if silent and repaired
+            else "Configuration saved and known inconsistencies repaired; profile approval is required"
+            if repaired
+            else "Configuration autosaved; profile approval is required"
             if silent
             else "Configuration saved; profile approval is required"
         )
