@@ -1096,10 +1096,10 @@ class MainWindowTests(unittest.TestCase):
             )
             page._show_hall_reading(reading)
             self.assertEqual(popup.voltage.text(), "-0.099454 V")
-            self.assertIn("mT", popup.field.text())
+            self.assertEqual(popup.field.text(), "-99.454 mT")
 
-            page.live_interval.setValue(750)
-            self.assertEqual(popup.interval.value(), 750)
+            page.sample_interval.setCurrentIndex(0)
+            self.assertEqual(popup.interval.value(), 500)
             page._live_timer.start()
             page.stop_live("Recipe run owns the MOKE Box.")
             self.assertFalse(page._live_timer.isActive())
@@ -1884,6 +1884,10 @@ class MainWindowTests(unittest.TestCase):
             anritsu = window.anritsu_page
             anritsu._controller.call = Mock()
             self.assertEqual(anritsu.refresh.minimum(), 10)
+            trace = SpectrumTrace(
+                (1e6, 2e6), (-50.0, -40.0), datetime.now(timezone.utc), "TRAC1"
+            )
+            anritsu._spectrogram_buffer.append(trace, now=1.0)
 
             anritsu.toggle_live()
 
@@ -1894,12 +1898,10 @@ class MainWindowTests(unittest.TestCase):
             anritsu._controller.call.assert_called_once_with("start_live", False)
             snapshot = AnritsuConfigurationSnapshot(1e6, 2e6, 0.0, 101, "SPECT")
             anritsu._result("start_live", snapshot)
+            self.assertEqual(anritsu._spectrogram_buffer.row_count, 0)
             self.assertFalse(anritsu._live_transition_pending)
             self.assertFalse(anritsu.single.isEnabled())
             self.assertEqual(anritsu.live_indicator.property("liveState"), "on")
-            trace = SpectrumTrace(
-                (1e6, 2e6), (-50.0, -40.0), datetime.now(timezone.utc), "TRAC1"
-            )
             for _ in range(4):
                 anritsu._result("fetch_current_trace", trace)
 
@@ -1916,6 +1918,137 @@ class MainWindowTests(unittest.TestCase):
             self.assertTrue(anritsu.single.isEnabled())
             self.assertEqual(anritsu.live.text(), "Start Live")
             self.assertEqual(anritsu.live_indicator.property("liveState"), "off")
+        finally:
+            window.close()
+            self.application.processEvents()
+
+    def test_anritsu_spectrogram_reuses_completed_frames_and_processes_reference_locally(self) -> None:
+        window = MainWindow(".config/settings.yml", simulation=True)
+        try:
+            anritsu = window.anritsu_page
+            anritsu._controller.call = Mock()
+            reference = SpectrumTrace(
+                (1e6, 2e6, 3e6),
+                (-50.0, -40.0, -30.0),
+                datetime.now(timezone.utc),
+                "REF",
+            )
+            anritsu._latest_trace = reference
+            anritsu.capture_current_reference()
+            first = SpectrumTrace(
+                reference.frequencies_hz,
+                (-45.0, -35.0, -25.0),
+                datetime.now(timezone.utc),
+                "TRAC1",
+            )
+            second = SpectrumTrace(
+                reference.frequencies_hz,
+                (-40.0, -30.0, -20.0),
+                datetime.now(timezone.utc),
+                "TRAC1",
+            )
+
+            anritsu._spectrogram_buffer.append(first, now=100.0)
+            anritsu._spectrogram_buffer.append(second, now=131.0)
+            raw = anritsu._spectrogram_matrix(source="raw", window_s=30)
+            self.assertIsNotNone(raw)
+            assert raw is not None
+            self.assertEqual(raw[2].shape, (1, 3))
+            self.assertEqual(raw[3], "dBm")
+
+            processed = anritsu._spectrogram_matrix(
+                source="processed", window_s=60
+            )
+            self.assertIsNotNone(processed)
+            assert processed is not None
+            self.assertEqual(processed[2].tolist(), [[5.0, 5.0, 5.0], [10.0, 10.0, 10.0]])
+            self.assertEqual(processed[3], "dB")
+            anritsu._refresh_spectrogram_display()
+            anritsu._show_trace(second)
+            anritsu._controller.call.assert_not_called()
+
+            anritsu._spectrogram_buffer.clear()
+            for index in range(anritsu._spectrogram_buffer.MAX_ROWS + 100):
+                anritsu._spectrogram_buffer.append(
+                    first, now=200.0 + index * 0.11
+                )
+            self.assertLessEqual(
+                anritsu._spectrogram_buffer.row_count,
+                anritsu._spectrogram_buffer.MAX_ROWS,
+            )
+        finally:
+            window.close()
+            self.application.processEvents()
+
+    def test_anritsu_floating_spectrogram_shares_window_and_raw_processed_selection(self) -> None:
+        window = MainWindow(".config/settings.yml", simulation=True)
+        try:
+            window.resize(1360, 880)
+            window.show()
+            window._navigate_to("anritsu")
+            self.application.processEvents()
+            anritsu = window.anritsu_page
+            anritsu._open_spectrogram_window()
+            self.application.processEvents()
+            floating = anritsu._spectrogram_window
+            self.assertIsNotNone(floating)
+            assert floating is not None
+            self.assertTrue(floating.isVisible())
+            self.assertTrue(
+                bool(floating.windowFlags() & Qt.WindowType.WindowStaysOnTopHint)
+            )
+            self.assertEqual(
+                [floating.window_span.itemData(index) for index in range(floating.window_span.count())],
+                [30, 60, 90, 120],
+            )
+            floating.resize(520, 380)
+            self.application.processEvents()
+            for control in (
+                floating.source,
+                floating.window_span,
+                floating.reset_view,
+            ):
+                right = control.mapTo(
+                    floating, control.rect().bottomRight()
+                ).x()
+                self.assertLessEqual(right, floating.rect().right())
+
+            floating.window_span.setCurrentIndex(
+                floating.window_span.findData(120)
+            )
+            floating.source.setCurrentIndex(
+                floating.source.findData("processed")
+            )
+            self.assertEqual(anritsu.spectrogram_window_span.currentData(), 120)
+            self.assertEqual(anritsu.spectrogram_source.currentData(), "processed")
+            self.assertIn("requires", floating.status.text())
+
+            reference = SpectrumTrace(
+                (1e6, 2e6),
+                (-50.0, -40.0),
+                datetime.now(timezone.utc),
+                "REF",
+            )
+            anritsu._latest_trace = reference
+            anritsu.capture_current_reference()
+            frame = SpectrumTrace(
+                reference.frequencies_hz,
+                (-40.0, -25.0),
+                datetime.now(timezone.utc),
+                "TRAC1",
+            )
+            anritsu._spectrogram_buffer.append(frame, now=100.0)
+            anritsu._refresh_spectrogram_display()
+            self.assertIn("Processed", floating.status.text())
+            self.assertEqual(
+                floating.spectrogram.image.image.tolist(),
+                [[10.0, 15.0]],
+            )
+
+            anritsu.spectrogram_source.setCurrentIndex(
+                anritsu.spectrogram_source.findData("raw")
+            )
+            self.assertEqual(floating.source.currentData(), "raw")
         finally:
             window.close()
             self.application.processEvents()
@@ -2108,6 +2241,10 @@ class MainWindowTests(unittest.TestCase):
     def test_anritsu_workspace_and_event_log_are_user_resizable(self) -> None:
         window = MainWindow(".config/settings.yml", simulation=True)
         try:
+            window.resize(1360, 880)
+            window.show()
+            window._navigate_to("anritsu")
+            self.application.processEvents()
             splitter = window.anritsu_page.workspace_splitter
             self.assertEqual(splitter.orientation(), Qt.Orientation.Horizontal)
             self.assertEqual(splitter.count(), 2)
@@ -2120,6 +2257,10 @@ class MainWindowTests(unittest.TestCase):
             self.assertIs(window.shell_splitter.widget(1), window.event_log_panel)
             self.assertFalse(window.event_log_panel.isWindow())
             self.assertTrue(window.event_log_action.isCheckable())
+
+            window.resize(820, 640)
+            self.application.processEvents()
+            self.assertEqual(splitter.orientation(), Qt.Orientation.Vertical)
         finally:
             window.close()
             self.application.processEvents()

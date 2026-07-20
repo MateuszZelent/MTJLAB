@@ -258,6 +258,13 @@ def _apply_station_surface(widget: QWidget, tokens: ThemeTokens) -> None:
         color = tokens.background
     if color is not None:
         _set_widget_background(widget, color, tokens.text_primary)
+    if widget.objectName() == "fluentApplicationStack":
+        widget.setProperty("isTransparent", True)
+        widget.setStyleSheet(
+            "QStackedWidget#fluentApplicationStack {"
+            "border: none; border-radius: 0; background: transparent;"
+            "}"
+        )
 def _set_widget_background(
     widget: QWidget, color: str, text_color: str | None = None
 ) -> None:

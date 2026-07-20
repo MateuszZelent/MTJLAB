@@ -136,7 +136,11 @@ class FluentDevicePageTests(unittest.TestCase):
             ):
                 window._navigate_to(route)
                 self.application.processEvents()
-                self.assertIn(f"border: 1px solid {tokens.border}", card.styleSheet())
+                self.assertIn("border: 1px solid palette(mid)", card.styleSheet())
+                self.assertEqual(
+                    card.palette().color(QPalette.ColorRole.Mid).name(),
+                    tokens.border,
+                )
                 self.assertEqual(
                     card.palette().color(QPalette.ColorRole.Window).name(),
                     tokens.surface,

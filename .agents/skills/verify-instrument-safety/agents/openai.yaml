@@ -1,0 +1,4 @@
+interface:
+  display_name: "Instrument Safety Review"
+  short_description: "Verify fail-safe instrument-control changes"
+  default_prompt: "Use $verify-instrument-safety to review this instrument-control change for limits, interlocks, shutdown and fault behavior."

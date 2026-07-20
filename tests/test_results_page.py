@@ -249,7 +249,10 @@ class ResultsPageTests(unittest.TestCase):
                 self.assertIsInstance(page.section_navigation, Pivot)
                 self.assertIsInstance(page.action_card, CardWidget)
                 self.assertIsInstance(page.open_sweep_button, PrimaryPushButton)
-                self.assertGreater(page.section_navigation.geometry().width(), 200)
+                self.assertTrue(
+                    page.section_navigation.isVisible()
+                    or page.result_tabs.compact_navigation.isVisible()
+                )
                 self.assertTrue(page.result_stack.isVisible())
                 self.assertGreater(page.result_stack.geometry().height(), 300)
             finally:
@@ -276,6 +279,36 @@ class ResultsPageTests(unittest.TestCase):
             self.assertLessEqual(page.minimumSizeHint().width(), host.scroll_area.viewport().width())
             self.assertTrue(page.open_sweep_button.isVisibleTo(window))
             self.assertTrue(page.resume_button.isVisibleTo(window))
+        finally:
+            window.close()
+
+    def test_results_navigation_uses_compact_picker_through_shell_transition(self) -> None:
+        window = MainWindow(".config/settings.yml", simulation=True)
+        try:
+            window.resize(1024, 640)
+            window.show()
+            window._navigate_to("results")
+            window.navigationInterface.panel.collapse()
+            self.application.processEvents()
+            window.navigationInterface.expand(useAni=False)
+            self.application.processEvents()
+            self.application.processEvents()
+
+            page = window.results_page
+            host = window.navigation_routes["results"]
+            pivot = page.result_tabs.navigation
+            compact = page.result_tabs.compact_navigation
+            self.assertNotEqual(pivot.isVisibleTo(window), compact.isVisibleTo(window))
+            visible_navigation = compact if compact.isVisibleTo(window) else pivot
+            right = visible_navigation.mapTo(
+                host.scroll_area.viewport(), visible_navigation.rect().bottomRight()
+            ).x()
+            self.assertLessEqual(right, host.scroll_area.viewport().rect().right())
+            self.assertTrue(
+                page.metadata_panel.tabs.compact_navigation.isVisibleTo(window)
+            )
+            self.assertFalse(page.metadata_panel.tabs.navigation.isVisible())
+            self.assertEqual(host.scroll_area.horizontalScrollBar().maximum(), 0)
         finally:
             window.close()
 

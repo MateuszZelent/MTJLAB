@@ -4,8 +4,8 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from PySide6.QtCore import Qt, Signal
-from PySide6.QtGui import QResizeEvent
+from PySide6.QtCore import QEvent, QTimer, Qt, Signal
+from PySide6.QtGui import QResizeEvent, QShowEvent
 from PySide6.QtWidgets import (
     QBoxLayout,
     QHBoxLayout,
@@ -57,6 +57,8 @@ class _FluentResultSections(QWidget):
         layout.addWidget(self.stack, 1)
         self._routes: list[str] = []
         self._labels: list[str] = []
+        self._compact_layout: bool | None = None
+        self._navigation_sync_pending = False
 
     def addTab(self, page: QWidget, label: str) -> int:
         index = self.stack.addWidget(page)
@@ -83,7 +85,41 @@ class _FluentResultSections(QWidget):
 
     def resizeEvent(self, event: QResizeEvent) -> None:
         super().resizeEvent(event)
-        compact = event.size().width() < 620
+        self._sync_navigation_mode()
+        self._schedule_navigation_sync()
+
+    def event(self, event: QEvent) -> bool:
+        result = super().event(event)
+        if event.type() in {QEvent.Type.Show, QEvent.Type.LayoutRequest}:
+            self._schedule_navigation_sync()
+        return result
+
+    def _schedule_navigation_sync(self) -> None:
+        if self._navigation_sync_pending:
+            return
+        self._navigation_sync_pending = True
+        QTimer.singleShot(0, self._sync_navigation_mode)
+
+    def _sync_navigation_mode(self) -> None:
+        self._navigation_sync_pending = False
+        # Pivot item widths can be recalculated after a theme or shell
+        # navigation transition.  A fixed 620 px threshold allowed a cached
+        # 900+ px Pivot to be shown in a narrower Results pane, clipping its
+        # final route without producing a scrollbar.  Use both a comfortable
+        # baseline and the navigation's current natural width.
+        required_width = max(1_000, self.navigation.sizeHint().width() + 8)
+        visible_width = self.visibleRegion().boundingRect().width()
+        available_width = self.width()
+        if visible_width > 0:
+            available_width = min(available_width, visible_width)
+        compact = available_width < required_width
+        visibility_matches = (
+            self.navigation.isHidden() == compact
+            and self.compact_navigation.isHidden() == (not compact)
+        )
+        if compact == self._compact_layout and visibility_matches:
+            return
+        self._compact_layout = compact
         self.navigation.setVisible(not compact)
         self.compact_navigation.setVisible(compact)
 
@@ -240,6 +276,8 @@ class ResultsPage(QWidget):
 
     def resizeEvent(self, event: QResizeEvent) -> None:
         super().resizeEvent(event)
+        self.result_tabs._sync_navigation_mode()
+        self.result_tabs._schedule_navigation_sync()
         # The expanded Fluent navigation leaves roughly 1000 px of content at
         # a 1280 px station window.  Switch before action labels and the file
         # browser start imposing a horizontal minimum on the page host.
@@ -258,6 +296,14 @@ class ResultsPage(QWidget):
         self.results_splitter.setSizes(
             [260, 760] if compact else [280, 900]
         )
+
+    def showEvent(self, event: QShowEvent) -> None:
+        super().showEvent(event)
+        # A page inside QFluent's stack can retain the geometry it had while
+        # hidden. Re-evaluate nested navigation after the host becomes visible
+        # so a stale wide Pivot cannot leak beyond the current viewport.
+        self.result_tabs._sync_navigation_mode()
+        self.result_tabs._schedule_navigation_sync()
 
     # ------------------------------------------------------------------
     # Public API (backwards-compatible)

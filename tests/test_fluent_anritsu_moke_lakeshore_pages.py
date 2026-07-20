@@ -9,16 +9,18 @@ from unittest.mock import patch
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
+import pyqtgraph as pg
 from PySide6.QtCore import QPoint, Qt
 from PySide6.QtGui import QPalette
 from PySide6.QtWidgets import QApplication, QLabel, QMessageBox
-from qfluentwidgets import CardWidget, CheckBox, PlainTextEdit, PrimaryPushButton, PushButton
+from qfluentwidgets import CardWidget, CheckBox, ComboBox, PlainTextEdit, PrimaryPushButton, PushButton, TransparentPushButton
 
 from app.ui.shell import MainWindow
 from app.ui.design_system import tokens_for
 from app.settings import SettingsRepository
 from app.devices.discovery import DiscoveredInstrument, identify_device
 from app.devices.lakeshore_475.models import FieldUnit, GaussmeterReading, GaussmeterSnapshot, MeasurementMode
+from app.devices.moke_box.models import MokeHallVoltageReading
 from tests.test_main_window import TEST_ENGINEER, write_engineer_settings
 
 
@@ -87,6 +89,35 @@ class FluentLakeShorePageTests(unittest.TestCase):
         self.assertIn("10 min", page.plot_span.text())
         page._timer.stop()
         page._plot_timer.stop()
+
+    def test_lakeshore_plots_expose_fluent_reset_pan_and_zoom_controls(self) -> None:
+        page = self.window.lakeshore_gaussmeter_page
+        navigation = page.plot_navigation
+        self.assertEqual(
+            [button.text() for button in navigation.toolbar_buttons],
+            ["Reset view", "Pan", "Box zoom", "Zoom out"],
+        )
+        self.assertTrue(
+            all(isinstance(button, TransparentPushButton) for button in navigation.toolbar_buttons)
+        )
+
+        navigation.box_zoom.click()
+        self.assertEqual(page.history_plot.getViewBox().state["mouseMode"], pg.ViewBox.RectMode)
+        navigation.pan.click()
+        self.assertEqual(page.history_plot.getViewBox().state["mouseMode"], pg.ViewBox.PanMode)
+
+        page._field_curve.setData([0.0, 10.0], [0.0, 1.0])
+        page.history_plot.setXRange(50.0, 60.0, padding=0)
+        navigation.reset_view.click()
+        self.application.processEvents()
+        x_range = page.history_plot.viewRange()[0]
+        self.assertLessEqual(x_range[0], 0.0)
+        self.assertGreaterEqual(x_range[1], 10.0)
+
+        page._open_live_window()
+        self.application.processEvents()
+        assert page._live_window is not None
+        self.assertEqual(len(page._live_window.plot_navigation.toolbar_buttons), 4)
 
     def test_lakeshore_floating_window_shares_live_state_reading_and_history(self) -> None:
         page = self.window.lakeshore_gaussmeter_page
@@ -294,6 +325,30 @@ class FluentAnritsuAndMokePageTests(unittest.TestCase):
         self.assertEqual(host.scroll_area.horizontalScrollBar().maximum(), 0)
         self.assertEqual(page.width(), host.scroll_area.viewport().width())
 
+    def test_anritsu_spectrogram_controls_reflow_without_horizontal_overflow(self) -> None:
+        self.window.resize(820, 560)
+        self.window._navigate_to("anritsu")
+        self.application.processEvents()
+        page = self.window.anritsu_page
+        page.analysis_tabs.setCurrentIndex(1)
+        self.application.processEvents()
+        host = self.window.navigation_routes["anritsu"]
+
+        self.assertEqual(host.scroll_area.horizontalScrollBar().maximum(), 0)
+        self.assertTrue(page.spectrogram_source.isVisibleTo(self.window))
+        self.assertTrue(page.spectrogram_plot.isVisibleTo(self.window))
+        viewport = host.scroll_area.viewport()
+        for control in (
+            page.spectrogram_source,
+            page.spectrogram_window_span,
+            page.spectrogram_reset_view,
+            page.open_spectrogram_window,
+        ):
+            right = control.mapTo(
+                viewport, control.rect().bottomRight()
+            ).x()
+            self.assertLessEqual(right, viewport.rect().right())
+
     def test_anritsu_light_theme_uses_tokenized_surfaces_and_readable_connection_text(self) -> None:
         self.window._navigate_to("anritsu")
         self.window._set_theme_mode("light", persist=False)
@@ -305,8 +360,10 @@ class FluentAnritsuAndMokePageTests(unittest.TestCase):
         self.assertEqual(page.setup_card.property("stationSurface"), "card")
         self.assertEqual(page.processing_card.property("stationSurface"), "card")
         self.assertEqual(page.spectrum_plot.property("stationSurface"), "raised")
-        self.assertIn(
-            f"border: 1px solid {tokens.border}", page.setup_card.styleSheet()
+        self.assertIn("border: 1px solid palette(mid)", page.setup_card.styleSheet())
+        self.assertEqual(
+            page.setup_card.palette().color(QPalette.ColorRole.Mid).name(),
+            tokens.border,
         )
         connection = self.window.connection_panels["anritsu"]
         self.assertEqual(connection.property("stationSurface"), "surface")
@@ -317,6 +374,7 @@ class FluentAnritsuAndMokePageTests(unittest.TestCase):
 
     def test_moke_workspace_and_live_dialog_use_fluent_cards(self) -> None:
         self.window._navigate_to("moke_box")
+        self.window.moke_box_page.views.setCurrentIndex(1)
         self.application.processEvents()
 
         page = self.window.moke_box_page
@@ -325,6 +383,23 @@ class FluentAnritsuAndMokePageTests(unittest.TestCase):
         self.assertIsInstance(page.hall_card, CardWidget)
         self.assertIsInstance(page.read_vouts_button, PrimaryPushButton)
         self.assertIsInstance(page.open_live_window_button, PushButton)
+        self.assertIsInstance(page.sample_interval, ComboBox)
+        self.assertIsInstance(page.refresh_interval, ComboBox)
+        self.assertIsInstance(page.history_window, ComboBox)
+        self.assertEqual(page._selected_value(page.sample_interval), 1_000)
+        self.assertEqual(page._selected_value(page.refresh_interval), 500)
+        self.assertEqual(page._selected_value(page.history_window), 60)
+        self.assertTrue(page.history_plot.isVisibleTo(self.window))
+        now = datetime.now(timezone.utc)
+        for timestamp, voltage in ((now - timedelta(seconds=61), 0.01), (now, 0.02)):
+            page._show_hall_reading(
+                MokeHallVoltageReading(voltage, 0.0, 1, (0x800000,), timestamp)
+            )
+        self.assertEqual(len(page._history), 1)
+        self.assertEqual(len(page._voltage_curve.xData), 1)
+        x_range = page.history_plot.viewRange()[0]
+        self.assertAlmostEqual(x_range[0], -60.0, places=3)
+        self.assertAlmostEqual(x_range[1], 0.0, places=3)
         self.assertTrue(page.hero_card.isVisibleTo(self.window))
         page._open_hall_live_window()
         self.application.processEvents()
@@ -361,7 +436,7 @@ class FluentAnritsuAndMokePageTests(unittest.TestCase):
             dialogs.append(dialog)
             return 0
 
-        with patch("app.ui.dashboard.page.QDialog.exec", new=capture):
+        with patch("app.ui.dashboard.page.StationDialog.exec", new=capture):
             self.window.dashboard._show_moke_test_trace(
                 "131.246.221.33:10001", True, "Verified", b"\x18\x00\x00\x18", b"\x00"
             )

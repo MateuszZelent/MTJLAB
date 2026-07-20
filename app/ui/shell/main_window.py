@@ -6,7 +6,7 @@ from copy import deepcopy
 from pathlib import Path
 from typing import Any
 
-from PySide6.QtCore import QSettings, Qt, Signal
+from PySide6.QtCore import QSettings, QTimer, Qt, Signal
 from PySide6.QtGui import (
     QAction,
     QActionGroup,
@@ -15,6 +15,7 @@ from PySide6.QtGui import (
     QKeySequence,
     QPalette,
     QShortcut,
+    QResizeEvent,
     QShowEvent,
 )
 from PySide6.QtWidgets import (
@@ -392,6 +393,13 @@ class MainWindow(FluentWindow):
         # Keep the equipment group open on launch: device controls remain a
         # single click away while the navigation still communicates hierarchy.
         self.apparatus_navigation_item.setExpanded(True, ani=False)
+        self._apparatus_auto_collapsed = False
+        self._apparatus_required_height = (
+            self.navigationInterface.panel.vBoxLayout.minimumSize().height() + 2
+        )
+        self.apparatus_navigation_item.clicked.connect(
+            lambda: QTimer.singleShot(0, self._sync_apparatus_navigation_height)
+        )
         self.log = PlainTextEdit()
         self.log.setObjectName("eventLogText")
         self.log.setProperty("stationSurface", "raised")
@@ -689,11 +697,14 @@ class MainWindow(FluentWindow):
             applied_theme = apply_application_theme(application, mode)
             self._apply_navigation_surface(applied_theme.tokens.surface)
             application.setProperty("activeTheme", theme)
+        # Plot canvases maintain their own brushes and may be hidden when a
+        # global theme is selected. Reapply them even when the application
+        # property already names this theme.
+        for plot in self.findChildren(SpectrumPlotWidget):
+            plot.apply_theme(theme)
+        for heatmap in self.findChildren(HeatmapResultsTab):
+            heatmap.apply_theme(theme)
         if changed:
-            for plot in self.findChildren(SpectrumPlotWidget):
-                plot.apply_theme(theme)
-            for heatmap in self.findChildren(HeatmapResultsTab):
-                heatmap.apply_theme(theme)
             self.theme_changed.emit(theme)
         self._configured_theme_mode = mode
         if persist:
@@ -1476,6 +1487,12 @@ class MainWindow(FluentWindow):
         if self._navigation_layout_initialized:
             return
         self._navigation_layout_initialized = True
+        application = QApplication.instance()
+        if application is not None:
+            applied_theme = apply_application_theme(
+                application, self._configured_theme_mode
+            )
+            self._apply_navigation_surface(applied_theme.tokens.surface)
         if self._navigation_expanded_preference:
             self.navigationInterface.expand(useAni=False)
         # Fluent recalculates a navigation tree's size hint while its parent
@@ -1483,6 +1500,43 @@ class MainWindow(FluentWindow):
         # their pre-layout geometry and overlapping the group heading.
         self.apparatus_navigation_item.setExpanded(False, ani=False)
         self.apparatus_navigation_item.setExpanded(True, ani=False)
+        QTimer.singleShot(0, self._capture_apparatus_required_height)
+
+    def resizeEvent(self, event: QResizeEvent) -> None:
+        super().resizeEvent(event)
+        if hasattr(self, "apparatus_navigation_item"):
+            QTimer.singleShot(0, self._sync_apparatus_navigation_height)
+
+    def _sync_apparatus_navigation_height(self) -> None:
+        """Prevent QFluent's expanded tree from overlapping sibling routes."""
+
+        if not hasattr(self, "_apparatus_required_height"):
+            return
+        short = self.navigationInterface.panel.height() < self._apparatus_required_height
+        if short and self.apparatus_navigation_item.isExpanded:
+            self.apparatus_navigation_item.setExpanded(False, ani=False)
+            self._apparatus_auto_collapsed = True
+        elif (
+            not short
+            and self._apparatus_auto_collapsed
+            and not self.apparatus_navigation_item.isExpanded
+        ):
+            self.apparatus_navigation_item.setExpanded(True, ani=False)
+            self._apparatus_auto_collapsed = False
+        panel = self.navigationInterface.panel
+        panel.topLayout.invalidate()
+        panel.vBoxLayout.invalidate()
+        panel.layout().activate()
+
+    def _capture_apparatus_required_height(self) -> None:
+        """Capture QFluent's settled expanded-tree height after first layout."""
+
+        panel = self.navigationInterface.panel
+        self._apparatus_required_height = max(
+            self._apparatus_required_height,
+            panel.vBoxLayout.minimumSize().height() + 2,
+        )
+        self._sync_apparatus_navigation_height()
 
     def closeEvent(self, event: QCloseEvent) -> None:
         self._audit_record(

@@ -1,85 +1,69 @@
 ---
 name: build-safe-measurement-station
-description: [TODO: Complete and informative explanation of what the skill does and when to use it. Include WHEN to use this skill - specific scenarios, file types, or tasks that trigger it.]
+description: Build, modify, review, or test this PySide6 laboratory measurement station across device modules, recipes, execution, storage, settings, and the Fluent application shell. Use for cross-cutting features, new instrument support, workflow changes, architectural refactors, or any change spanning more than one subsystem; route unit-sensitive, persistence-sensitive, and hardware-output work through the specialized project skills.
 ---
 
 # Build Safe Measurement Station
 
-## Overview
+Treat the repository as a safety-relevant measurement system, not a generic desktop app. Preserve physical meaning, fail-safe behavior, provenance, recoverability, and the Fluent-native shell in every change.
 
-[TODO: 1-2 sentences explaining what this skill enables]
+## Route the work
 
-## Structuring This Skill
+- Use `$enforce-measurement-quantities` whenever values cross recipe, UI, settings, protocol, plotting, or storage boundaries.
+- Use `$verify-instrument-safety` whenever code can configure, arm, enable, ramp, stop, retry, or recover hardware outputs.
+- Use `$preserve-measurement-data` whenever code changes measurement models, HDF5/CSV persistence, thaTEC/PyThat compatibility, checkpoints, resume, or result readers.
+- Use the repository `AGENTS.md` contract and `apple-design` for Fluent shell, interaction, motion, and visual review work.
 
-[TODO: Choose the structure that best fits this skill's purpose. Common patterns:
+Load only the specialized skill relevant to the current change. Load all three for an end-to-end measurement workflow or a new device module.
 
-**1. Workflow-Based** (best for sequential processes)
-- Works well when there are clear step-by-step procedures
-- Example: DOCX skill with "Workflow Decision Tree" -> "Reading" -> "Creating" -> "Editing"
-- Structure: ## Overview -> ## Workflow Decision Tree -> ## Step 1 -> ## Step 2...
+## Establish the change contract
 
-**2. Task-Based** (best for tool collections)
-- Works well when the skill offers different operations/capabilities
-- Example: PDF skill with "Quick Start" -> "Merge PDFs" -> "Split PDFs" -> "Extract Text"
-- Structure: ## Overview -> ## Quick Start -> ## Task Category 1 -> ## Task Category 2...
+Before editing:
 
-**3. Reference/Guidelines** (best for standards or specifications)
-- Works well for brand guidelines, coding standards, or requirements
-- Example: Brand styling with "Brand Guidelines" -> "Colors" -> "Typography" -> "Features"
-- Structure: ## Overview -> ## Guidelines -> ## Specifications -> ## Usage...
+1. Trace the value or action from user input or recipe source to compiled plan, adapter command, acquired result, persisted representation, and result UI.
+2. Identify the authoritative registry or model. Extend it instead of adding a parallel mapping.
+3. Write down the safety state before, during, and after failure or cancellation.
+4. Identify compatibility surfaces: settings YAML, recipe YAML, public HDF5, private recovery state, audit events, and UI labels.
 
-**4. Capabilities-Based** (best for integrated systems)
-- Works well when the skill provides multiple interrelated features
-- Example: Product Management with "Core Capabilities" -> numbered capability list
-- Structure: ## Overview -> ## Core Capabilities -> ### 1. Feature -> ### 2. Feature...
+Do not infer safety from UI state. The compiler, safety policy, adapter, runner, and storage boundary must enforce their own invariants.
 
-Patterns can be mixed and matched as needed. Most skills combine patterns (e.g., start with task-based, add workflow for complex operations).
+## Preserve architecture
 
-Delete this entire "Structuring This Skill" section when done - it's just guidance.]
+- Keep device-independent models and errors under `app/domain`.
+- Keep device integration behind `app/contracts/device_module.py` and the registered module structure.
+- Keep protocol and hardware details inside the device package; do not import device UI from engine or storage code.
+- Keep recipe parameter identity centralized in `app/recipes/parameter_registry.py`.
+- Keep the Fluent application shell coherent; do not introduce a legacy shell or compatibility facade.
+- Prefer immutable typed request/result models at subsystem boundaries.
+- Reject unknown enum values, dimensions, commands, and schema variants explicitly; do not silently guess.
 
-## [TODO: Replace with the first main section based on chosen structure]
+## Implement vertically
 
-[TODO: Add content here. See examples in existing skills:
-- Code samples for technical skills
-- Decision trees for complex workflows
-- Concrete examples with realistic user requests
-- References to scripts/templates/references as needed]
+For a new measurable or controllable quantity, update the smallest complete vertical slice:
 
-## Resources (optional)
+1. domain quantity/model;
+2. settings or recipe schema;
+3. parameter registry and compiler;
+4. device safety validation;
+5. adapter/protocol conversion;
+6. execution state and audit event;
+7. persistence schema and reader;
+8. UI formatting and validation;
+9. focused tests at each boundary.
 
-Create only the resource directories this skill actually needs. Delete this section if no resources are required.
+Do not declare the slice complete when only the UI or adapter works.
 
-### scripts/
-Executable code (Python/Bash/etc.) that can be run directly to perform specific operations.
+## Verify proportionally to risk
 
-**Examples from other skills:**
-- PDF skill: `fill_fillable_fields.py`, `extract_form_field_info.py` - utilities for PDF manipulation
-- DOCX skill: `document.py`, `utilities.py` - Python modules for document processing
+Run focused tests first, then the broader suite for cross-cutting changes. Include negative and fault-path tests, not only the nominal path.
 
-**Appropriate for:** Python scripts, shell scripts, or any executable code that performs automation, data processing, or specific operations.
+- Quantity changes: parser, dimension mismatch, scale/exponent boundaries, finite-value checks, round-trip display.
+- Hardware changes: command ordering, limits, readback, compliance, timeout, cancellation, and confirmed safe shutdown.
+- Storage changes: interrupted append, close status, resume identity, schema validation, and PyThat round-trip.
+- Shell/page changes: show the window, process events, and assert visible non-zero geometry at a normal desktop size and a narrow size.
 
-**Note:** Scripts may be executed without loading into context, but can still be read by Codex for patching or environment adjustments.
+Run `ruff check app tests` and the relevant `pytest` targets. Treat a skipped safety or compatibility test as unresolved unless the environment limitation is recorded.
 
-### references/
-Documentation and reference material intended to be loaded into context to inform Codex's process and thinking.
+## Report completion
 
-**Examples from other skills:**
-- Product management: `communication.md`, `context_building.md` - detailed workflow guides
-- BigQuery: API reference documentation and query examples
-- Finance: Schema documentation, company policies
-
-**Appropriate for:** In-depth documentation, API references, database schemas, comprehensive guides, or any detailed information that Codex should reference while working.
-
-### assets/
-Files not intended to be loaded into context, but rather used within the output Codex produces.
-
-**Examples from other skills:**
-- Brand styling: PowerPoint template files (.pptx), logo files
-- Frontend builder: HTML/React boilerplate project directories
-- Typography: Font files (.ttf, .woff2)
-
-**Appropriate for:** Templates, boilerplate code, document templates, images, icons, fonts, or any files meant to be copied or used in the final output.
-
----
-
-**Not every skill requires all three types of resources.**
+State which contracts changed, which invariants were preserved, and exactly which tests ran. Call out any behavior that remains simulator-only or visually unverified.

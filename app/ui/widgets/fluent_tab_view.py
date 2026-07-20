@@ -60,6 +60,9 @@ class FluentTabView(QWidget):
     def setTabToolTip(self, index: int, text: str) -> None:
         self.navigation.widget(self._routes[index]).setToolTip(text)
 
+    def tabToolTip(self, index: int) -> str:
+        return self.navigation.widget(self._routes[index]).toolTip()
+
     def setTabEnabled(self, index: int, enabled: bool) -> None:
         self.navigation.widget(self._routes[index]).setEnabled(enabled)
         self.stack.widget(index).setEnabled(enabled)

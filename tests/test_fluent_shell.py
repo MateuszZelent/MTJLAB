@@ -4,7 +4,7 @@ from pathlib import Path
 import tempfile
 import unittest
 
-from PySide6.QtCore import QSettings, Qt
+from PySide6.QtCore import QPoint, QSettings, Qt
 from PySide6.QtTest import QTest
 from PySide6.QtWidgets import QApplication, QLabel, QMainWindow, QVBoxLayout, QWidget
 from qfluentwidgets import FluentWindow, ScrollArea
@@ -334,6 +334,41 @@ class MainWindowFluentShellTests(unittest.TestCase):
             self.assertGreater(
                 window.safety_strip.actor.geometry().top(),
                 window.safety_strip.readiness.geometry().top(),
+            )
+        finally:
+            window.close()
+            self.application.processEvents()
+
+    def test_apparatus_group_auto_collapses_before_navigation_rows_overlap(self) -> None:
+        window = MainWindow(".config/settings.yml", simulation=True)
+        try:
+            def visible_route_rows() -> list[tuple[str, int, int]]:
+                panel = window.navigationInterface.panel
+                rows = []
+                for route, host in window.navigation_routes.items():
+                    item = window.navigationInterface.widget(host.objectName())
+                    if item.isVisibleTo(window):
+                        top = item.mapTo(panel, QPoint()).y()
+                        rows.append((route, top, top + item.height() - 1))
+                return sorted(rows, key=lambda row: row[1])
+
+            window.resize(900, 600)
+            window.show()
+            self.application.processEvents()
+            self.application.processEvents()
+            self.assertFalse(window.apparatus_navigation_item.isExpanded)
+            compact_rows = visible_route_rows()
+            self.assertTrue(
+                all(first[2] < second[1] for first, second in zip(compact_rows, compact_rows[1:]))
+            )
+
+            window.resize(900, 720)
+            self.application.processEvents()
+            self.application.processEvents()
+            self.assertTrue(window.apparatus_navigation_item.isExpanded)
+            expanded_rows = visible_route_rows()
+            self.assertTrue(
+                all(first[2] < second[1] for first, second in zip(expanded_rows, expanded_rows[1:]))
             )
         finally:
             window.close()

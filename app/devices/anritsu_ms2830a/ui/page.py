@@ -5,13 +5,15 @@ from __future__ import annotations
 
 import math
 import time
+from collections import deque
 from dataclasses import replace
 from enum import StrEnum
 from pathlib import Path
 
+import numpy as np
 import pyqtgraph as pg
-from PySide6.QtCore import QTimer, Qt, Signal
-from PySide6.QtGui import QResizeEvent
+from PySide6.QtCore import QEvent, QRectF, QTimer, Qt, Signal
+from PySide6.QtGui import QCloseEvent, QResizeEvent
 from PySide6.QtWidgets import (
     QComboBox, QDialog, QDialogButtonBox,
     QFormLayout, QFrame, QGridLayout, QHBoxLayout, QLabel, QLineEdit,
@@ -20,7 +22,7 @@ from PySide6.QtWidgets import (
 )
 from qfluentwidgets import (
     BodyLabel,
-    CaptionLabel, CardWidget, CheckBox, ComboBox, LineEdit, PrimaryPushButton, ProgressBar, PushButton, ScrollArea, SpinBox, StrongBodyLabel, TitleLabel,
+    CaptionLabel, CardWidget, CheckBox, ComboBox, LineEdit, PrimaryPushButton, ProgressBar, PushButton, ScrollArea, SpinBox, StrongBodyLabel, TitleLabel, isDarkTheme,
 )
 
 from app.devices.anritsu_ms2830a import (
@@ -39,6 +41,7 @@ from app.settings.models import StationSettings
 from app.spectrum import LinearPowerAverager, apply_reference_operation, frequency_grids_match
 from app.storage import ReferenceHdf5Store
 from app.ui.common import line_edit as _line
+from app.ui.design_system import plot_theme, tokens_for
 from app.ui.dialogs import StationFileDialog as QFileDialog
 from app.ui.dialogs import StationDialog
 from app.ui.widgets import FluentTabView, LimitField, NotificationBanner, SpectrumPlotWidget
@@ -368,6 +371,212 @@ class AnritsuAdvancedSpectrumPanel(CardWidget):
         self.sync_editors()
 
 
+class _SpectrogramBuffer:
+    """Memory-bounded rolling store for already completed passive trace frames."""
+
+    MAX_WINDOW_S = 120.0
+    MIN_ROW_INTERVAL_S = 0.1
+    MAX_ROWS = int(MAX_WINDOW_S / MIN_ROW_INTERVAL_S) + 2
+
+    def __init__(self) -> None:
+        self._frequencies_hz: np.ndarray | None = None
+        self._rows: deque[tuple[float, np.ndarray]] = deque(maxlen=self.MAX_ROWS)
+
+    @property
+    def row_count(self) -> int:
+        return len(self._rows)
+
+    def clear(self) -> None:
+        self._frequencies_hz = None
+        self._rows.clear()
+
+    def append(self, trace: SpectrumTrace, *, now: float | None = None) -> None:
+        timestamp = time.monotonic() if now is None else float(now)
+        frequencies = np.asarray(trace.frequencies_hz, dtype=np.float64)
+        powers = np.asarray(trace.powers_dbm, dtype=np.float32)
+        if (
+            frequencies.ndim != 1
+            or powers.ndim != 1
+            or frequencies.size == 0
+            or frequencies.size != powers.size
+        ):
+            return
+        if (
+            self._frequencies_hz is None
+            or self._frequencies_hz.shape != frequencies.shape
+            or not np.array_equal(self._frequencies_hz, frequencies)
+        ):
+            self.clear()
+            self._frequencies_hz = frequencies.copy()
+        if self._rows and timestamp - self._rows[-1][0] < self.MIN_ROW_INTERVAL_S:
+            self._rows[-1] = (timestamp, powers.copy())
+        else:
+            self._rows.append((timestamp, powers.copy()))
+        cutoff = timestamp - self.MAX_WINDOW_S
+        while self._rows and self._rows[0][0] < cutoff:
+            self._rows.popleft()
+
+    def snapshot(
+        self, window_s: int, *, now: float | None = None
+    ) -> tuple[np.ndarray, np.ndarray, np.ndarray] | None:
+        if self._frequencies_hz is None or not self._rows:
+            return None
+        timestamp = self._rows[-1][0] if now is None else float(now)
+        cutoff = timestamp - float(window_s)
+        selected = [(stamp, row) for stamp, row in self._rows if stamp >= cutoff]
+        if not selected:
+            return None
+        elapsed = np.asarray([stamp - timestamp for stamp, _row in selected], dtype=float)
+        matrix = np.stack([row for _stamp, row in selected])
+        return self._frequencies_hz.copy(), elapsed, matrix
+
+
+class _AnritsuSpectrogramWidget(QWidget):
+    """Theme-aware rolling frequency/time heatmap."""
+
+    def __init__(self, parent: QWidget | None = None) -> None:
+        super().__init__(parent)
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(4)
+        self.plot = pg.PlotWidget(self)
+        self.plot.setObjectName("anritsuSpectrogramPlot")
+        self.plot.setMenuEnabled(True)
+        self.plot.setMouseEnabled(x=True, y=True)
+        self.plot.setLabel("bottom", "Frequency", units="Hz")
+        self.plot.setLabel("left", "Time before latest frame", units="s")
+        self.image = pg.ImageItem(axisOrder="row-major")
+        self.plot.addItem(self.image)
+        self.colormap = pg.colormap.get("viridis")
+        self.color_bar = pg.ColorBarItem(
+            interactive=False,
+            values=(-120.0, 0.0),
+            colorMap=self.colormap,
+            label="Amplitude (dBm)",
+        )
+        self.color_bar.setImageItem(self.image, insert_in=self.plot.getPlotItem())
+        layout.addWidget(self.plot, 1)
+        self._apply_theme()
+
+    def set_data(
+        self,
+        frequencies_hz: np.ndarray,
+        elapsed_s: np.ndarray,
+        matrix: np.ndarray,
+        *,
+        unit: str,
+    ) -> None:
+        finite = matrix[np.isfinite(matrix)]
+        if finite.size == 0:
+            self.clear()
+            return
+        low, high = np.nanpercentile(finite, (2.0, 98.0))
+        if not math.isfinite(float(low)) or not math.isfinite(float(high)):
+            self.clear()
+            return
+        if math.isclose(float(low), float(high), rel_tol=0.0, abs_tol=1e-12):
+            low, high = float(low) - 1.0, float(high) + 1.0
+        x_min = float(frequencies_hz[0])
+        x_max = float(frequencies_hz[-1])
+        x_width = max(abs(x_max - x_min), 1.0)
+        y_min = float(elapsed_s[0]) if elapsed_s.size > 1 else -1.0
+        y_max = max(float(elapsed_s[-1]), 0.0)
+        y_height = max(y_max - y_min, 1.0)
+        self.image.setImage(matrix, autoLevels=False, levels=(float(low), float(high)))
+        self.image.setRect(QRectF(min(x_min, x_max), y_min, x_width, y_height))
+        self.color_bar.setLevels((float(low), float(high)))
+        self.color_bar.axis.setLabel(f"Amplitude ({unit})")
+
+    def clear(self) -> None:
+        self.image.clear()
+
+    def reset_view(self) -> None:
+        self.plot.getViewBox().autoRange()
+
+    def event(self, event: QEvent) -> bool:
+        if event.type() in {
+            QEvent.Type.PaletteChange,
+            QEvent.Type.ApplicationPaletteChange,
+        }:
+            self._apply_theme()
+        return super().event(event)
+
+    def _apply_theme(self) -> None:
+        palette = plot_theme(tokens_for("dark" if isDarkTheme() else "light"))
+        self.plot.setBackground(palette.background)
+        for name in ("left", "bottom"):
+            axis = self.plot.getAxis(name)
+            axis.setPen(pg.mkPen(palette.axes))
+            axis.setTextPen(pg.mkPen(palette.axes))
+        self.color_bar.axis.setPen(pg.mkPen(palette.axes))
+        self.color_bar.axis.setTextPen(pg.mkPen(palette.axes))
+
+
+class _AnritsuSpectrogramWindow(StationDialog):
+    """Always-on-top view sharing the page's rolling spectrogram buffer."""
+
+    source_changed = Signal(str)
+    window_changed = Signal(int)
+    closed = Signal()
+
+    def __init__(self, parent: QWidget) -> None:
+        super().__init__(parent)
+        self.setWindowTitle("Anritsu MS2830A — floating spectrogram")
+        self.setObjectName("anritsuSpectrogramWindow")
+        self.setWindowFlag(Qt.WindowType.WindowStaysOnTopHint, True)
+        self.setModal(False)
+        self.resize(820, 560)
+        self.setMinimumSize(520, 380)
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(16, 14, 16, 14)
+        layout.setSpacing(8)
+        header = QHBoxLayout()
+        header.addWidget(StrongBodyLabel("Live spectrogram"))
+        header.addStretch(1)
+        layout.addLayout(header)
+        controls = QGridLayout()
+        controls.setHorizontalSpacing(8)
+        controls.setVerticalSpacing(6)
+        self.source = ComboBox(self)
+        self.source.addItem("Raw", userData="raw")
+        self.source.addItem("Processed (Raw − reference)", userData="processed")
+        self.source.setToolTip(
+            "Switch between untouched TRAC1 frames and local Raw − reference processing."
+        )
+        self.window_span = ComboBox(self)
+        for seconds in (30, 60, 90, 120):
+            self.window_span.addItem(f"{seconds} s", userData=seconds)
+        self.window_span.setToolTip(
+            "Choose the rolling time window retained in the spectrogram."
+        )
+        self.reset_view = PushButton("Reset view", self)
+        self.reset_view.setToolTip("Show the complete frequency and time range.")
+        controls.addWidget(BodyLabel("Trace"), 0, 0)
+        controls.addWidget(self.source, 0, 1, 1, 2)
+        controls.addWidget(BodyLabel("Window"), 1, 0)
+        controls.addWidget(self.window_span, 1, 1)
+        controls.addWidget(self.reset_view, 1, 2)
+        controls.setColumnStretch(1, 1)
+        layout.addLayout(controls)
+        self.spectrogram = _AnritsuSpectrogramWidget(self)
+        layout.addWidget(self.spectrogram, 1)
+        self.status = CaptionLabel("Waiting for completed Live frames.", self)
+        self.status.setObjectName("muted")
+        self.status.setWordWrap(True)
+        layout.addWidget(self.status)
+        self.source.currentIndexChanged.connect(
+            lambda: self.source_changed.emit(str(self.source.currentData() or "raw"))
+        )
+        self.window_span.currentIndexChanged.connect(
+            lambda: self.window_changed.emit(int(self.window_span.currentData() or 30))
+        )
+        self.reset_view.clicked.connect(self.spectrogram.reset_view)
+
+    def closeEvent(self, event: QCloseEvent) -> None:
+        super().closeEvent(event)
+        self.closed.emit()
+
+
 class AnritsuPage(QWidget):
     status = Signal(str)
 
@@ -392,6 +601,8 @@ class AnritsuPage(QWidget):
         self._averaged_trace: SpectrumTrace | None = None
         self._reference_trace: SpectrumTrace | None = None
         self._reference_spectrum: ReferenceSpectrum | None = None
+        self._spectrogram_buffer = _SpectrogramBuffer()
+        self._spectrogram_window: _AnritsuSpectrogramWindow | None = None
         self._pending_reference_kind: str | None = None
         self._device_idn = ""
         self._last_configuration: AnritsuConfigurationSnapshot | None = None
@@ -630,10 +841,69 @@ class AnritsuPage(QWidget):
         )
         self.spectrum_plot.setMinimumHeight(300)
         self.spectrum_plot.status_changed.connect(self.status.emit)
-        right_layout.addWidget(self.spectrum_plot, 1)
         self.info = CaptionLabel("Live stopped. Each frame is a complete trace, not a push stream.")
         self.info.setObjectName("muted")
-        right_layout.addWidget(self.info)
+        self.analysis_tabs = FluentTabView(self)
+        self.analysis_tabs.setObjectName("anritsuAnalysisTabs")
+        current_spectrum_tab = QWidget(self.analysis_tabs)
+        current_spectrum_layout = QVBoxLayout(current_spectrum_tab)
+        current_spectrum_layout.setContentsMargins(0, 0, 0, 0)
+        current_spectrum_layout.setSpacing(4)
+        current_spectrum_layout.addWidget(self.spectrum_plot, 1)
+        current_spectrum_layout.addWidget(self.info)
+        self.analysis_tabs.addTab(current_spectrum_tab, "Current spectrum")
+
+        spectrogram_tab = QWidget(self.analysis_tabs)
+        spectrogram_layout = QVBoxLayout(spectrogram_tab)
+        spectrogram_layout.setContentsMargins(0, 0, 0, 0)
+        spectrogram_layout.setSpacing(6)
+        spectrogram_controls = QGridLayout()
+        spectrogram_controls.setHorizontalSpacing(6)
+        spectrogram_controls.setVerticalSpacing(6)
+        self.spectrogram_source = ComboBox(self)
+        self.spectrogram_source.addItem("Raw", userData="raw")
+        self.spectrogram_source.addItem(
+            "Processed (Raw − reference)", userData="processed"
+        )
+        self.spectrogram_source.setToolTip(
+            "Raw shows untouched completed TRAC1 frames. Processed subtracts "
+            "the compatible captured reference locally without another VISA request."
+        )
+        self.spectrogram_window_span = ComboBox(self)
+        for seconds in (30, 60, 90, 120):
+            self.spectrogram_window_span.addItem(f"{seconds} s", userData=seconds)
+        self.spectrogram_window_span.setToolTip(
+            "Rolling spectrogram history: 30, 60, 90 or 120 seconds."
+        )
+        self.spectrogram_reset_view = PushButton("Reset view", self)
+        self.spectrogram_reset_view.setToolTip(
+            "Reset zoom and show the complete rolling spectrogram."
+        )
+        self.open_spectrogram_window = PushButton("Open floating window", self)
+        self.open_spectrogram_window.setToolTip(
+            "Open an always-on-top spectrogram that shares this buffer and Live session."
+        )
+        spectrogram_controls.addWidget(BodyLabel("Trace"), 0, 0)
+        spectrogram_controls.addWidget(self.spectrogram_source, 0, 1)
+        spectrogram_controls.addWidget(
+            self.open_spectrogram_window, 0, 2
+        )
+        spectrogram_controls.addWidget(BodyLabel("Window"), 1, 0)
+        spectrogram_controls.addWidget(self.spectrogram_window_span, 1, 1)
+        spectrogram_controls.addWidget(self.spectrogram_reset_view, 1, 2)
+        spectrogram_controls.setColumnStretch(1, 1)
+        spectrogram_layout.addLayout(spectrogram_controls)
+        self.spectrogram_plot = _AnritsuSpectrogramWidget(self)
+        self.spectrogram_plot.setMinimumHeight(300)
+        spectrogram_layout.addWidget(self.spectrogram_plot, 1)
+        self.spectrogram_status = CaptionLabel(
+            "Start Live to accumulate a rolling spectrogram.", self
+        )
+        self.spectrogram_status.setObjectName("muted")
+        self.spectrogram_status.setWordWrap(True)
+        spectrogram_layout.addWidget(self.spectrogram_status)
+        self.analysis_tabs.addTab(spectrogram_tab, "Spectrogram")
+        right_layout.addWidget(self.analysis_tabs, 1)
         self.control_scroll = ScrollArea()
         self.control_scroll.setObjectName("anritsuControlScroll")
         self.control_scroll.setProperty("stationSurface", "page")
@@ -642,7 +912,7 @@ class AnritsuPage(QWidget):
         self.control_scroll.setFrameShape(QFrame.Shape.NoFrame)
         self.control_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
         self.control_scroll.setWidget(left_panel)
-        self.control_scroll.setMinimumWidth(0)
+        self.control_scroll.setMinimumWidth(320)
         self.workspace_splitter.addWidget(self.control_scroll)
         self.workspace_splitter.addWidget(right_panel)
         self.workspace_splitter.setStretchFactor(0, 0)
@@ -680,6 +950,16 @@ class AnritsuPage(QWidget):
         self.reference_operation.currentIndexChanged.connect(self._refresh_spectrum_display)
         for checkbox in (self.show_raw, self.show_average, self.show_reference, self.show_processed):
             checkbox.toggled.connect(self._refresh_spectrum_display)
+        self.spectrogram_source.currentIndexChanged.connect(
+            self._spectrogram_controls_changed
+        )
+        self.spectrogram_window_span.currentIndexChanged.connect(
+            self._spectrogram_controls_changed
+        )
+        self.spectrogram_reset_view.clicked.connect(self.spectrogram_plot.reset_view)
+        self.open_spectrogram_window.clicked.connect(
+            self._open_spectrogram_window
+        )
         controller.result.connect(self._result)
         controller.error.connect(self._error)
         controller.state_changed.connect(self._device_state_changed)
@@ -1530,6 +1810,7 @@ class AnritsuPage(QWidget):
         self._update_reference_status()
         self._apply_page_state()
         self._refresh_spectrum_display()
+        self._refresh_spectrogram_display()
 
     def _update_reference_status(self) -> None:
         reference = self._reference_spectrum
@@ -1557,6 +1838,7 @@ class AnritsuPage(QWidget):
         self._update_reference_status()
         self._apply_page_state()
         self._refresh_spectrum_display()
+        self._refresh_spectrogram_display()
         self.status.emit("Anritsu reference spectrum removed")
 
     def save_reference_file(self) -> None:
@@ -1624,6 +1906,8 @@ class AnritsuPage(QWidget):
     def _result(self, operation: str, result: object) -> None:
         if operation == "connect":
             self._device_idn = str(getattr(result, "idn", "") or "")
+            self._spectrogram_buffer.clear()
+            self._refresh_spectrogram_display()
             self._set_page_state(AnritsuPageState.IDLE)
         if operation == "read_configuration" and isinstance(result, AnritsuConfigurationSnapshot):
             self._last_configuration = result
@@ -1693,6 +1977,8 @@ class AnritsuPage(QWidget):
         elif operation == "start_live" and isinstance(result, AnritsuConfigurationSnapshot):
             self._live_transition_pending = False
             self._result("read_configuration", result)
+            self._spectrogram_buffer.clear()
+            self._refresh_spectrogram_display()
             self._live_frame_count = 0
             self._identical_live_frames = 0
             self._last_live_signature = None
@@ -1789,8 +2075,10 @@ class AnritsuPage(QWidget):
 
     def _show_trace(self, trace: SpectrumTrace) -> None:
         self._latest_trace = trace
+        self._spectrogram_buffer.append(trace)
         self._apply_page_state()
         self._refresh_spectrum_display()
+        self._refresh_spectrogram_display()
         live_detail = ""
         if self._timer.isActive():
             now = time.monotonic()
@@ -1833,6 +2121,149 @@ class AnritsuPage(QWidget):
             f"{len(trace.powers_dbm)} points • {trace.acquired_at_utc.isoformat()} • "
             f"max {max(trace.powers_dbm):.4g} dBm{live_detail}"
         )
+
+    @staticmethod
+    def _set_combo_data(combo: ComboBox, value: object) -> None:
+        index = combo.findData(value)
+        if index < 0 or index == combo.currentIndex():
+            return
+        previous = combo.blockSignals(True)
+        combo.setCurrentIndex(index)
+        combo.blockSignals(previous)
+
+    def _spectrogram_controls_changed(self, *_args: object) -> None:
+        source = str(self.spectrogram_source.currentData() or "raw")
+        window_s = int(self.spectrogram_window_span.currentData() or 30)
+        floating = self._spectrogram_window
+        if floating is not None:
+            self._set_combo_data(floating.source, source)
+            self._set_combo_data(floating.window_span, window_s)
+        self._refresh_spectrogram_display()
+
+    def _floating_spectrogram_source_changed(self, source: str) -> None:
+        self._set_combo_data(self.spectrogram_source, source)
+        self._spectrogram_controls_changed()
+
+    def _floating_spectrogram_window_changed(self, window_s: int) -> None:
+        self._set_combo_data(self.spectrogram_window_span, window_s)
+        self._spectrogram_controls_changed()
+
+    def _open_spectrogram_window(self) -> None:
+        if self._spectrogram_window is None:
+            floating = _AnritsuSpectrogramWindow(self)
+            floating.source_changed.connect(
+                self._floating_spectrogram_source_changed
+            )
+            floating.window_changed.connect(
+                self._floating_spectrogram_window_changed
+            )
+            floating.closed.connect(self._spectrogram_window_closed)
+            self._spectrogram_window = floating
+        floating = self._spectrogram_window
+        self._set_combo_data(
+            floating.source, self.spectrogram_source.currentData() or "raw"
+        )
+        self._set_combo_data(
+            floating.window_span,
+            int(self.spectrogram_window_span.currentData() or 30),
+        )
+        self._refresh_spectrogram_display()
+        floating.show()
+        floating.raise_()
+        floating.activateWindow()
+
+    def _spectrogram_window_closed(self) -> None:
+        floating = self._spectrogram_window
+        self._spectrogram_window = None
+        if floating is not None:
+            floating.deleteLater()
+
+    def _spectrogram_matrix(
+        self,
+        *,
+        source: str,
+        window_s: int,
+    ) -> tuple[np.ndarray, np.ndarray, np.ndarray, str, str] | None:
+        reference = self._reference_trace
+        if source == "processed" and reference is None:
+            raise ValueError(
+                "Processed spectrogram requires a captured or loaded reference."
+            )
+        snapshot = self._spectrogram_buffer.snapshot(window_s)
+        if snapshot is None:
+            return None
+        frequencies, elapsed, raw = snapshot
+        if source == "raw":
+            return frequencies, elapsed, raw, "dBm", "Raw"
+        assert reference is not None
+        if not frequency_grids_match(
+            tuple(float(value) for value in frequencies),
+            reference.frequencies_hz,
+        ):
+            raise ValueError(
+                "Processed spectrogram unavailable: reference frequency grid differs."
+            )
+        if self._reference_spectrum is not None:
+            reference_level = self._reference_spectrum.reference_level_dbm
+            current_level = (
+                self._last_configuration.reference_level_dbm
+                if self._last_configuration is not None
+                else None
+            )
+            if (
+                reference_level is not None
+                and current_level is not None
+                and not math.isclose(
+                    reference_level, current_level, abs_tol=0.005
+                )
+            ):
+                raise ValueError(
+                    "Processed spectrogram unavailable: Reference Level differs "
+                    f"({current_level:g} dBm current, "
+                    f"{reference_level:g} dBm reference)."
+                )
+            self._validate_reference_acquisition_compatibility(
+                self._reference_spectrum
+            )
+        reference_values = np.asarray(reference.powers_dbm, dtype=np.float32)
+        processed = raw - reference_values[np.newaxis, :]
+        return frequencies, elapsed, processed, "dB", "Processed (Raw − reference)"
+
+    def _refresh_spectrogram_display(self) -> None:
+        source = str(self.spectrogram_source.currentData() or "raw")
+        window_s = int(self.spectrogram_window_span.currentData() or 30)
+        try:
+            data = self._spectrogram_matrix(source=source, window_s=window_s)
+        except ValueError as exc:
+            self.spectrogram_plot.clear()
+            message = str(exc)
+            self.spectrogram_status.setText(message)
+            if self._spectrogram_window is not None:
+                self._spectrogram_window.spectrogram.clear()
+                self._spectrogram_window.status.setText(message)
+            return
+        if data is None:
+            message = "Start Live to accumulate a rolling spectrogram."
+            self.spectrogram_plot.clear()
+            self.spectrogram_status.setText(message)
+            if self._spectrogram_window is not None:
+                self._spectrogram_window.spectrogram.clear()
+                self._spectrogram_window.status.setText(message)
+            return
+        frequencies, elapsed, matrix, unit, label = data
+        self.spectrogram_plot.set_data(
+            frequencies, elapsed, matrix, unit=unit
+        )
+        message = (
+            f"{label} · {matrix.shape[0]} completed frame(s) · "
+            f"{matrix.shape[1]} frequency point(s) · rolling {window_s} s"
+        )
+        self.spectrogram_status.setText(message)
+        if self._spectrogram_window is not None:
+            self._spectrogram_window.spectrogram.set_data(
+                frequencies, elapsed, matrix, unit=unit
+            )
+            self._spectrogram_window.status.setText(message)
 
     def _refresh_spectrum_display(self, *_args: object) -> None:
         traces: list[tuple[str, SpectrumTrace, tuple[float, ...], str, str]] = []

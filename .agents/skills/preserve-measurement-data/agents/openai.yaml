@@ -1,0 +1,4 @@
+interface:
+  display_name: "Measurement Data Contract"
+  short_description: "Preserve durable compatible measurement data"
+  default_prompt: "Use $preserve-measurement-data to implement or review measurement persistence without breaking HDF5, thaTEC or recovery contracts."

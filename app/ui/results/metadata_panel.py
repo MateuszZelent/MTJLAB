@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
+from PySide6.QtCore import QEvent, QTimer
 from PySide6.QtGui import QResizeEvent
 from PySide6.QtWidgets import (
     QSizePolicy,
@@ -42,6 +43,8 @@ class _FluentMetadataSections(QWidget):
         layout.addWidget(self.stack, 1)
         self._routes: list[str] = []
         self._labels: list[str] = []
+        self._compact_layout: bool | None = None
+        self._navigation_sync_pending = False
 
     def addTab(self, page: QWidget, label: str) -> int:
         index = self.stack.addWidget(page)
@@ -68,7 +71,32 @@ class _FluentMetadataSections(QWidget):
 
     def resizeEvent(self, event: QResizeEvent) -> None:
         super().resizeEvent(event)
-        compact = event.size().width() < 720
+        self._sync_navigation_mode()
+        self._schedule_navigation_sync()
+
+    def event(self, event: QEvent) -> bool:
+        result = super().event(event)
+        if event.type() in {QEvent.Type.Show, QEvent.Type.LayoutRequest}:
+            self._schedule_navigation_sync()
+        return result
+
+    def _schedule_navigation_sync(self) -> None:
+        if self._navigation_sync_pending:
+            return
+        self._navigation_sync_pending = True
+        QTimer.singleShot(0, self._sync_navigation_mode)
+
+    def _sync_navigation_mode(self) -> None:
+        self._navigation_sync_pending = False
+        required_width = max(1_000, self.navigation.sizeHint().width() + 8)
+        compact = self.width() < required_width
+        visibility_matches = (
+            self.navigation.isHidden() == compact
+            and self.compact_navigation.isHidden() == (not compact)
+        )
+        if compact == self._compact_layout and visibility_matches:
+            return
+        self._compact_layout = compact
         self.navigation.setVisible(not compact)
         self.compact_navigation.setVisible(compact)
 

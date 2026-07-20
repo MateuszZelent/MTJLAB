@@ -9,8 +9,8 @@ from typing import TYPE_CHECKING
 import pyqtgraph as pg
 from PySide6.QtCore import QEvent, QTimer, Qt, Signal
 from PySide6.QtGui import QResizeEvent, QShowEvent
-from PySide6.QtWidgets import QFormLayout, QGridLayout, QHBoxLayout, QSizePolicy, QVBoxLayout, QWidget
-from qfluentwidgets import BodyLabel, CaptionLabel, CardWidget, CheckBox, ComboBox, FluentIcon, IconWidget, PrimaryPushButton, PushButton, StrongBodyLabel, SubtitleLabel, isDarkTheme
+from PySide6.QtWidgets import QButtonGroup, QFormLayout, QGridLayout, QHBoxLayout, QSizePolicy, QVBoxLayout, QWidget
+from qfluentwidgets import BodyLabel, CaptionLabel, CardWidget, CheckBox, ComboBox, FluentIcon, IconWidget, PrimaryPushButton, PushButton, StrongBodyLabel, SubtitleLabel, TransparentPushButton, isDarkTheme
 
 from app.devices.lakeshore_475.models import GaussmeterReading
 from app.domain.quantities import DIMENSION_TIME, parse_quantity
@@ -20,6 +20,63 @@ from app.ui.dialogs import StationDialog
 
 if TYPE_CHECKING:
     from app.ui.workers import DeviceController
+
+
+class _PlotNavigationBar(QWidget):
+    """Small Fluent navigation bar for a pyqtgraph time-series plot."""
+
+    def __init__(self, plot: pg.PlotWidget, parent: QWidget) -> None:
+        super().__init__(parent)
+        self.plot = plot
+        self.toolbar_buttons: list[TransparentPushButton] = []
+        layout = QHBoxLayout(self)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(4)
+
+        self.reset_view = self._button(
+            "Reset view", "Show the complete field history", self._reset_view
+        )
+        self.pan = self._button(
+            "Pan", "Drag to move through the field history", self._use_pan
+        )
+        self.box_zoom = self._button(
+            "Box zoom", "Drag a rectangle to zoom into the field history", self._use_box_zoom
+        )
+        self.zoom_out = self._button(
+            "Zoom out", "Zoom out around the current view centre", self._zoom_out
+        )
+        self.mode_group = QButtonGroup(self)
+        self.mode_group.setExclusive(True)
+        for button in (self.pan, self.box_zoom):
+            button.setCheckable(True)
+            self.mode_group.addButton(button)
+        self.pan.setChecked(True)
+        self._use_pan()
+        layout.addStretch(1)
+
+    def _button(self, text: str, tooltip: str, callback: object) -> TransparentPushButton:
+        button = TransparentPushButton(text, self)
+        button.setObjectName("plotToolButton")
+        button.setToolTip(tooltip)
+        button.setAccessibleName(text)
+        button.clicked.connect(callback)  # type: ignore[arg-type]
+        self.toolbar_buttons.append(button)
+        self.layout().addWidget(button)
+        return button
+
+    def _reset_view(self) -> None:
+        self.plot.getViewBox().autoRange()
+
+    def _use_pan(self) -> None:
+        self.pan.setChecked(True)
+        self.plot.getViewBox().setMouseMode(pg.ViewBox.PanMode)
+
+    def _use_box_zoom(self) -> None:
+        self.box_zoom.setChecked(True)
+        self.plot.getViewBox().setMouseMode(pg.ViewBox.RectMode)
+
+    def _zoom_out(self) -> None:
+        self.plot.getViewBox().scaleBy((1.5, 1.5))
 
 
 class LakeShoreLiveWindow(StationDialog):
@@ -80,6 +137,8 @@ class LakeShoreLiveWindow(StationDialog):
         self.field_curve = self.plot.plot()
         self.negative_peak_curve = self.plot.plot()
         self.positive_peak_curve = self.plot.plot()
+        self.plot_navigation = _PlotNavigationBar(self.plot, self)
+        layout.addWidget(self.plot_navigation)
         layout.addWidget(self.plot, 1)
         self.status = CaptionLabel("No reading received yet.")
         self.status.setObjectName("muted")
@@ -337,6 +396,8 @@ class LakeShore475Page(QWidget):
         self._negative_peak_curve = self.history_plot.plot()
         self._positive_peak_curve = self.history_plot.plot()
         self._apply_plot_theme()
+        self.plot_navigation = _PlotNavigationBar(self.history_plot, self.plot_card)
+        plot_layout.addWidget(self.plot_navigation)
         plot_layout.addWidget(self.history_plot, 1)
         layout.addWidget(self.plot_card, 1)
         self.banner = CaptionLabel("Connect the Lake Shore 475 to begin.", self)

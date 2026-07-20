@@ -2,7 +2,11 @@
 
 from __future__ import annotations
 
-from PySide6.QtCore import QTimer, Qt, Signal
+from collections import deque
+from datetime import datetime, timedelta, timezone
+
+import pyqtgraph as pg
+from PySide6.QtCore import QEvent, QTimer, Qt, Signal
 from PySide6.QtWidgets import (
     QGridLayout,
     QHBoxLayout,
@@ -10,11 +14,12 @@ from PySide6.QtWidgets import (
     QVBoxLayout,
     QWidget,
 )
-from qfluentwidgets import BodyLabel, CaptionLabel, CardWidget, CheckBox, PrimaryPushButton, PushButton, SpinBox, StrongBodyLabel, TitleLabel
+from qfluentwidgets import BodyLabel, CaptionLabel, CardWidget, CheckBox, ComboBox, PrimaryPushButton, PushButton, SpinBox, StrongBodyLabel, TitleLabel, isDarkTheme
 from app.ui.dialogs import StationDialog
 
 from app.devices.moke_box.models import MokeHallVoltageReading, hall_field_from_voltage
 from app.settings.models import StationSettings
+from app.ui.design_system import plot_theme, tokens_for
 from app.ui.widgets import FluentTabView
 from app.ui.workers import DeviceController
 
@@ -126,6 +131,11 @@ class MokeBoxPage(QWidget):
         self._live_timer = QTimer(self)
         self._live_timer.setInterval(1_000)
         self._live_timer.timeout.connect(self._request_live_hall_read)
+        self._plot_timer = QTimer(self)
+        self._plot_timer.setInterval(500)
+        self._plot_timer.timeout.connect(self._refresh_plot_if_needed)
+        self._history: deque[MokeHallVoltageReading] = deque()
+        self._plot_dirty = False
         self._hall_live_window: MokeHallLiveWindow | None = None
         self._build()
         controller.result.connect(self._result)
@@ -235,14 +245,13 @@ class MokeBoxPage(QWidget):
         copy.addWidget(title)
         copy.addWidget(hint)
         header.addLayout(copy, 1)
-        header.addWidget(BodyLabel("Samples:"))
         self.field_samples = SpinBox()
         self.field_samples.setRange(1, 1)
         self.field_samples.setValue(1)
         self.field_samples.setToolTip(
             "One physical Hall-1 sample per request is verified on the connected MOKE Box."
         )
-        header.addWidget(self.field_samples)
+        self.field_samples.hide()
         self.read_fields_button = PrimaryPushButton("Get Hall voltage (V)")
         self.read_fields_button.setToolTip(
             "Sends Send Data(N), then reads Hall 1 (channel 0) and Hall 2 (channel 2). "
@@ -252,27 +261,46 @@ class MokeBoxPage(QWidget):
         header.addWidget(self.read_fields_button)
         content.addLayout(header)
 
-        live_controls = QHBoxLayout()
+        live_controls = QGridLayout()
+        live_controls.setHorizontalSpacing(10)
+        live_controls.setVerticalSpacing(8)
         self.live_hall = CheckBox("Live Hall")
         self.live_hall.setToolTip(
             "Poll one Hall-1 sample at a fixed interval. A new TCP request is not queued while the prior read is pending."
         )
         self.live_hall.toggled.connect(self._set_live_enabled)
-        self.live_interval = SpinBox()
-        self.live_interval.setRange(500, 60_000)
-        self.live_interval.setValue(1_000)
-        self.live_interval.setSuffix(" ms")
-        self.live_interval.setToolTip("Minimum 500 ms avoids overlapping TCP reads.")
-        self.live_interval.valueChanged.connect(self._set_live_interval)
+        self.sample_interval = self._time_combo(
+            (("2 Hz", 500), ("1 Hz", 1_000), ("0.5 Hz", 2_000), ("0.2 Hz", 5_000)),
+            "Sampling frequency",
+        )
+        self.sample_interval.setCurrentIndex(1)
+        self.sample_interval.currentIndexChanged.connect(self._sampling_changed)
+        self.live_interval = self.sample_interval
+        self.refresh_interval = self._time_combo(
+            (("100 ms", 100), ("250 ms", 250), ("500 ms", 500), ("1 s", 1_000)),
+            "Plot refresh",
+        )
+        self.refresh_interval.setCurrentIndex(2)
+        self.refresh_interval.currentIndexChanged.connect(self._refresh_changed)
+        self.history_window = self._time_combo(
+            (("1 min", 60), ("2 min", 120), ("5 min", 300), ("10 min", 600)),
+            "Recording window",
+        )
+        self.history_window.currentIndexChanged.connect(self._history_window_changed)
         self.open_live_window_button = PushButton("Open floating Hall live")
         self.open_live_window_button.setToolTip(
             "Open a compact always-on-top Hall readout that remains available while you work in other tabs."
         )
         self.open_live_window_button.clicked.connect(self._open_hall_live_window)
-        live_controls.addWidget(self.live_hall)
-        live_controls.addWidget(self.live_interval)
-        live_controls.addStretch(1)
-        live_controls.addWidget(self.open_live_window_button)
+        live_controls.addWidget(self.live_hall, 0, 0)
+        live_controls.setColumnStretch(1, 1)
+        live_controls.addWidget(self.open_live_window_button, 0, 2, 1, 4)
+        live_controls.addWidget(CaptionLabel("Sampling", page), 1, 0)
+        live_controls.addWidget(self.sample_interval, 1, 1)
+        live_controls.addWidget(CaptionLabel("Refresh", page), 1, 2)
+        live_controls.addWidget(self.refresh_interval, 1, 3)
+        live_controls.addWidget(CaptionLabel("History", page), 1, 4)
+        live_controls.addWidget(self.history_window, 1, 5)
         content.addLayout(live_controls)
 
         cards = QGridLayout()
@@ -305,8 +333,53 @@ class MokeBoxPage(QWidget):
         self.field_timestamp = BodyLabel("No Hall acquisition yet")
         self.field_timestamp.setObjectName("muted")
         content.addWidget(self.field_timestamp)
-        content.addStretch(1)
+        plot_header = QHBoxLayout()
+        plot_header.addWidget(StrongBodyLabel("Hall 1 voltage history", page))
+        plot_header.addStretch(1)
+        self.plot_span = CaptionLabel("Last 1 min · elapsed time", page)
+        plot_header.addWidget(self.plot_span)
+        content.addLayout(plot_header)
+        self.history_plot = pg.PlotWidget(page)
+        self.history_plot.setObjectName("mokeHallHistoryPlot")
+        self.history_plot.setLabel("left", "Hall voltage", units="V")
+        self.history_plot.setLabel("bottom", "Elapsed time", units="s")
+        self.history_plot.showGrid(x=True, y=True, alpha=0.2)
+        self.history_plot.setMinimumHeight(250)
+        self._voltage_curve = self.history_plot.plot()
+        self._apply_plot_theme()
+        content.addWidget(self.history_plot, 1)
         return page
+
+    def _time_combo(
+        self, choices: tuple[tuple[str, int], ...], accessible_name: str
+    ) -> ComboBox:
+        combo = ComboBox(self)
+        combo.setAccessibleName(accessible_name)
+        for label, value in choices:
+            combo.addItem(label, userData=value)
+        combo.setMinimumWidth(92)
+        return combo
+
+    @staticmethod
+    def _selected_value(combo: ComboBox) -> int:
+        return int(combo.currentData())
+
+    def event(self, event: QEvent) -> bool:
+        if event.type() in {
+            QEvent.Type.PaletteChange,
+            QEvent.Type.ApplicationPaletteChange,
+        } and hasattr(self, "history_plot"):
+            self._apply_plot_theme()
+        return super().event(event)
+
+    def _apply_plot_theme(self) -> None:
+        palette = plot_theme(tokens_for("dark" if isDarkTheme() else "light"))
+        self.history_plot.setBackground(palette.background)
+        for axis_name in ("left", "bottom"):
+            axis = self.history_plot.getAxis(axis_name)
+            axis.setPen(pg.mkPen(palette.axes))
+            axis.setTextPen(pg.mkPen(palette.axes))
+        self._voltage_curve.setPen(pg.mkPen(palette.measurement, width=2))
 
     def set_settings(self, settings: StationSettings) -> None:
         self._settings = settings
@@ -355,26 +428,47 @@ class MokeBoxPage(QWidget):
                 self.field_status.setText("Connect and verify MOKE Box before starting live Hall readout.")
                 self._sync_live_window()
                 return
-            self._live_timer.setInterval(self.live_interval.value())
+            self._live_timer.setInterval(self._selected_value(self.sample_interval))
             self._live_timer.start()
+            self._plot_timer.start(self._selected_value(self.refresh_interval))
             self._request_live_hall_read()
             self.field_status.setText("Live Hall readout is active.")
         else:
             self._live_timer.stop()
+            self._plot_timer.stop()
             if self._pending_operation is None:
                 self.field_status.setText("Live Hall readout stopped.")
         self._sync_live_window()
 
-    def _set_live_interval(self, interval_ms: int) -> None:
-        self._live_timer.setInterval(interval_ms)
+    def _sampling_changed(self, _index: int) -> None:
+        if self._live_timer.isActive():
+            self._live_timer.setInterval(self._selected_value(self.sample_interval))
         self._sync_live_window()
+
+    def _refresh_changed(self, _index: int) -> None:
+        if self._plot_timer.isActive():
+            self._plot_timer.setInterval(self._selected_value(self.refresh_interval))
+
+    def _history_window_changed(self, _index: int) -> None:
+        minutes = self._selected_value(self.history_window) // 60
+        self.plot_span.setText(f"Last {minutes} min · elapsed time")
+        self._prune_history(datetime.now(timezone.utc))
+        self._plot_dirty = True
+        self._refresh_plot_if_needed()
+
+    def _set_live_interval(self, interval_ms: int) -> None:
+        closest = min(
+            range(self.sample_interval.count()),
+            key=lambda index: abs(int(self.sample_interval.itemData(index)) - interval_ms),
+        )
+        self.sample_interval.setCurrentIndex(closest)
 
     def _open_hall_live_window(self) -> None:
         if self._hall_live_window is None:
             window = MokeHallLiveWindow(self)
             window.read_requested.connect(self._read_fields)
             window.live_changed.connect(self.live_hall.setChecked)
-            window.interval_changed.connect(self.live_interval.setValue)
+            window.interval_changed.connect(self._set_live_interval)
             window.closed.connect(self._live_window_closed)
             self._hall_live_window = window
         self._sync_live_window()
@@ -390,10 +484,13 @@ class MokeBoxPage(QWidget):
 
     def _sync_live_window(self) -> None:
         if self._hall_live_window is not None:
-            self._hall_live_window.set_live(self.live_hall.isChecked(), self.live_interval.value())
+            self._hall_live_window.set_live(
+                self.live_hall.isChecked(), self._selected_value(self.sample_interval)
+            )
 
     def stop_live(self, reason: str = "Live Hall readout stopped.") -> None:
         self._live_timer.stop()
+        self._plot_timer.stop()
         self.live_hall.blockSignals(True)
         self.live_hall.setChecked(False)
         self.live_hall.blockSignals(False)
@@ -442,8 +539,37 @@ class MokeBoxPage(QWidget):
             "Hall 1 voltage received from MainBox AD7734 channel 0. "
             "Hall 2 is intentionally not shown until its physical response is qualified."
         )
+        self._history.append(result)
+        self._prune_history(result.timestamp_utc)
+        self._plot_dirty = True
+        if not self.live_hall.isChecked():
+            self._refresh_plot_if_needed()
         if self._hall_live_window is not None:
             self._hall_live_window.set_reading(result)
+
+    def _prune_history(self, now: datetime) -> None:
+        cutoff = now - timedelta(seconds=self._selected_value(self.history_window))
+        while self._history and self._history[0].timestamp_utc < cutoff:
+            self._history.popleft()
+
+    def _refresh_plot_if_needed(self) -> None:
+        if not self._plot_dirty:
+            return
+        if not self._history:
+            self._voltage_curve.setData([], [])
+        else:
+            latest = self._history[-1].timestamp_utc
+            elapsed = [
+                (reading.timestamp_utc - latest).total_seconds()
+                for reading in self._history
+            ]
+            self._voltage_curve.setData(
+                elapsed, [reading.voltage_v for reading in self._history]
+            )
+        self.history_plot.setXRange(
+            -self._selected_value(self.history_window), 0, padding=0
+        )
+        self._plot_dirty = False
 
     def _error(self, operation: str, error: str) -> None:
         if operation == self._pending_operation:

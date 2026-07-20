@@ -31,10 +31,10 @@ class MokeProtocolTests(unittest.TestCase):
         self.assertEqual(set_kerr_gain(MokeTarget.KERR0, 100), bytes.fromhex("4802004C"))
         self.assertEqual(set_kerr_gain(MokeTarget.KERR1, 1000), bytes.fromhex("8803008E"))
 
-    def test_confirmed_hall_polynomial_vectors(self) -> None:
-        self.assertAlmostEqual(hall_field_from_voltage(-2), -0.02672380095)
-        self.assertAlmostEqual(hall_field_from_voltage(0), -0.0007387072430926411)
-        self.assertAlmostEqual(hall_field_from_voltage(2), 0.02526823526)
+    def test_hall_conversion_uses_one_tesla_per_volt_reference_scale(self) -> None:
+        self.assertAlmostEqual(hall_field_from_voltage(-0.1), -0.1)
+        self.assertAlmostEqual(hall_field_from_voltage(0), 0.0)
+        self.assertAlmostEqual(hall_field_from_voltage(0.1), 0.1)
 
     def test_decoder_rejects_bad_checksum(self) -> None:
         with self.assertRaises(DeviceError):

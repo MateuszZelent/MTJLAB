@@ -113,13 +113,20 @@ class FluentSettingsPageTests(unittest.TestCase):
             window._set_theme_mode("dark", persist=False)
             self.application.processEvents()
             dark_surface = page.tabs.grab().toImage().pixelColor(4, 4).lightness()
+            dark_form_margin = (
+                page.forms["general"].widget().grab().toImage().pixelColor(4, 4).lightness()
+            )
             window._set_theme_mode("light", persist=False)
             self.application.processEvents()
             light_surface = page.tabs.grab().toImage().pixelColor(4, 4).lightness()
+            light_form_margin = (
+                page.forms["general"].widget().grab().toImage().pixelColor(4, 4).lightness()
+            )
 
             self.assertTrue(page.tabs.navigation.isVisibleTo(window))
             self.assertFalse(page.tabs.compact_navigation.isVisible())
             self.assertGreater(light_surface, dark_surface + 40)
+            self.assertGreater(light_form_margin, dark_form_margin + 40)
             self.assertLess(
                 page.tabs.navigation.geometry().bottom(),
                 page.tabs.stack.geometry().top(),

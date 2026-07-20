@@ -1,0 +1,4 @@
+interface:
+  display_name: "Measurement Quantities"
+  short_description: "Keep units, scales and dimensions correct"
+  default_prompt: "Use $enforce-measurement-quantities to review this change for correct physical units, SI normalization, scaling and display."

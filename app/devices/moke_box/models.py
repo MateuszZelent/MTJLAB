@@ -113,18 +113,12 @@ class MokeFieldReading:
 
 
 def hall_field_from_voltage(voltage_v: float) -> float:
-    """Base Hall polynomial from the supplied calibration, output in tesla.
+    """Convert Hall voltage to tesla using the verified approximate scale.
 
-    The optional interpolation table is deliberately excluded: its X unit is
-    not established by the reconstruction report.
+    The sensor reference point is 100 mV ≈ 100 mT, therefore the working
+    sensitivity is 1 T/V with zero volts representing zero derived field.
     """
 
     if not math.isfinite(voltage_v):
         raise ValueError("MOKE Hall voltage must be finite.")
-    c0, c1, c2, c3 = (
-        -0.0007387072430926411,
-        0.013032760125236825,
-        0.0000027310986380390884,
-        -0.00000868776802374576,
-    )
-    return c0 + voltage_v * (c1 + voltage_v * (c2 + voltage_v * c3))
+    return voltage_v

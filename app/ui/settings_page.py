@@ -662,6 +662,7 @@ class SettingsPage(QWidget):
         self, name: str, data: Any, prefix: tuple[str | int, ...]
     ) -> None:
         host = QWidget()
+        host.setProperty("stationSurface", "page")
         host.setMinimumWidth(0)
         host.setSizePolicy(
             QSizePolicy.Policy.Ignored,

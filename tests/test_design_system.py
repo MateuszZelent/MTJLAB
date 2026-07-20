@@ -97,7 +97,7 @@ class ThemeBridgeTests(unittest.TestCase):
             apply_application_theme(self.application, "light")
         set_theme.assert_called_once_with(Theme.LIGHT, lazy=False)
 
-    def test_real_window_system_uses_lazy_theme_update(self) -> None:
+    def test_real_window_system_rethemes_hidden_routes_synchronously(self) -> None:
         with (
             patch.dict(os.environ, {"QT_QPA_PLATFORM": ""}),
             patch.object(self.application, "platformName", return_value="windows"),
@@ -105,7 +105,7 @@ class ThemeBridgeTests(unittest.TestCase):
             patch("app.ui.design_system.fluent_theme._stage_fluent_accent") as set_accent,
         ):
             apply_application_theme(self.application, "dark")
-        set_theme.assert_called_once_with(Theme.DARK, lazy=True)
+        set_theme.assert_called_once_with(Theme.DARK, lazy=False)
         set_accent.assert_called_once_with(tokens_for("dark"))
 
     def test_offscreen_platform_disables_motion(self) -> None:
