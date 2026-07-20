@@ -310,6 +310,13 @@ devices:
             output_enabled: false
             sense_mode: "2-wire"
             nplc: 1.0
+            settling_time: "100 ms"
+            source_autorange: true
+            source_range: "AUTO"
+            measure_voltage_autorange: true
+            measure_voltage_range: "AUTO"
+            measure_current_autorange: true
+            measure_current_range: "AUTO"
             measure_delay: "auto"
         B:
           enabled: true
@@ -354,6 +361,13 @@ devices:
             output_enabled: false
             sense_mode: "2-wire"
             nplc: 1.0
+            settling_time: "100 ms"
+            source_autorange: true
+            source_range: "AUTO"
+            measure_voltage_autorange: true
+            measure_voltage_range: "AUTO"
+            measure_current_autorange: true
+            measure_current_range: "AUTO"
             measure_delay: "auto"
 
   anritsu:

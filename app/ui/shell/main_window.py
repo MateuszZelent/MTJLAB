@@ -488,6 +488,9 @@ class MainWindow(FluentWindow):
         self.keithley_page.settings_assignment_requested.connect(
             self._save_keithley_readback_defaults
         )
+        self.keithley_page.settings_defaults_requested.connect(
+            self._save_keithley_readback_defaults
+        )
         self.recipe_page.run_requested.connect(self._start_run)
         self.recipe_page.plan_preflight_changed.connect(self.dashboard.update_plan_preflight)
         self.results_page.resume_requested.connect(self._resume_run)
@@ -748,7 +751,14 @@ class MainWindow(FluentWindow):
             QMessageBox.critical(self, "Cannot edit limits", str(exc))
             return
 
-        dialog = LimitEditDialog(title, minimum, maximum, maximum_enabled=maximum_enabled, parent=self)
+        dialog = LimitEditDialog(
+            title,
+            minimum,
+            maximum,
+            maximum_enabled=maximum_enabled,
+            value_label="Maximum power" if scalar_limit else "Minimum",
+            parent=self,
+        )
         if dialog.exec() != QDialog.DialogCode.Accepted:
             return
         try:

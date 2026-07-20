@@ -1862,11 +1862,34 @@ class MainWindowTests(unittest.TestCase):
             keithley.level.setText("5 V")
             keithley.compliance.setText("1 mA")
 
-            keithley._output_toggled(True)
+            with patch.object(QMessageBox, "warning") as warning:
+                keithley._output_toggled(True)
 
             keithley._controller.call.assert_not_called()
-            self.assertIn("outside", keithley.banner.label.text())
+            self.assertIn("Invalid Keithley settings", keithley.banner.label.text())
             self.assertFalse(keithley._output_states["B"])
+            self.assertIn("outside", warning.call_args.args[2])
+            self.assertIn("No command was sent to Keithley", warning.call_args.args[2])
+        finally:
+            window.close()
+            self.application.processEvents()
+
+    def test_keithley_output_on_explains_unmet_preconditions_without_dispatch(self) -> None:
+        window = MainWindow(".config/settings.yml", simulation=True)
+        try:
+            keithley = window.keithley_page
+            keithley._controller.call = Mock()
+            button = keithley.channel_cards["B"]["output_on_action"]
+
+            self.assertTrue(button.isEnabled())
+            with patch.object(QMessageBox, "warning") as warning:
+                button.click()
+
+            keithley._controller.call.assert_not_called()
+            self.assertTrue(warning.called)
+            message = warning.call_args.args[2]
+            self.assertIn("device connected and verified", message)
+            self.assertIn("No command was sent to Keithley", message)
         finally:
             window.close()
             self.application.processEvents()
@@ -3364,6 +3387,83 @@ class MainWindowTests(unittest.TestCase):
                     "4 mW",
                 )
                 self.assertEqual(field.editor.text(), "4 mW")
+            finally:
+                window.close()
+                self.application.processEvents()
+
+    def test_keithley_template_declares_every_manual_form_default(self) -> None:
+        raw = SettingsRepository(SETTINGS_TEMPLATE).load().raw
+        channels = raw["devices"]["keithley"]["safety"]["channels"]
+        expected_defaults = {
+            "source_mode",
+            "output_enabled",
+            "sense_mode",
+            "nplc",
+            "settling_time",
+            "source_autorange",
+            "source_range",
+            "measure_voltage_autorange",
+            "measure_voltage_range",
+            "measure_current_autorange",
+            "measure_current_range",
+            "measure_delay",
+        }
+        for channel in ("A", "B"):
+            self.assertTrue(
+                expected_defaults <= channels[channel]["defaults"].keys(),
+                channel,
+            )
+            self.assertIn("max_abs_power", channels[channel]["lab_limits"])
+
+    def test_keithley_form_values_autosave_to_channel_defaults(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            path = Path(temporary) / "settings.yml"
+            write_engineer_settings(path)
+            repository = SettingsRepository(path)
+            raw = repository.load().raw
+            raw["devices"]["keithley"]["safety"]["channels"]["A"]["enabled"] = True
+            repository.save_raw(raw)
+            window = MainWindow(
+                path, simulation=False, authenticated_username=TEST_ENGINEER
+            )
+            try:
+                keithley = window.keithley_page
+                keithley.level.setText("2 mA")
+                keithley.level.editingFinished.emit()
+                keithley.compliance.setText("60 mV")
+                keithley.compliance.editingFinished.emit()
+                defaults = SettingsRepository(path).load().raw["devices"]["keithley"][
+                    "safety"
+                ]["channels"]["B"]["defaults"]
+                self.assertEqual(defaults["source_current"], "2 mA")
+                self.assertEqual(defaults["voltage_compliance"], "60 mV")
+            finally:
+                window.close()
+                self.application.processEvents()
+
+    def test_settings_page_exposes_and_autosaves_keithley_maximum_power(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            path = Path(temporary) / "settings.yml"
+            write_engineer_settings(path)
+            window = MainWindow(
+                path, simulation=False, authenticated_username=TEST_ENGINEER
+            )
+            try:
+                settings = window.settings_page
+                limit_path = (
+                    "devices", "keithley", "safety", "channels", "B",
+                    "lab_limits", "max_abs_power",
+                )
+                editor = settings._safety_limit_editors[limit_path]
+                self.assertEqual(editor.text(), "670 uW")
+                editor.setText("4 mW")
+                editor.editingFinished.emit()
+                QTest.qWait(900)
+                self.assertEqual(
+                    SettingsRepository(path).load().raw["devices"]["keithley"]
+                    ["safety"]["channels"]["B"]["lab_limits"]["max_abs_power"],
+                    "4 mW",
+                )
             finally:
                 window.close()
                 self.application.processEvents()

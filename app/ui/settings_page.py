@@ -995,6 +995,12 @@ class SettingsPage(QWidget):
             for key, nested in value.items():
                 if isinstance(nested, dict):
                     walk(nested, path + (str(key),))
+                elif (
+                    key == "max_abs_power"
+                    and path[-1:] == ("lab_limits",)
+                    and isinstance(nested, str)
+                ):
+                    self._add_scalar_limit_row(path + (str(key),), nested)
 
         devices = self._raw.get("devices", {})
         if isinstance(devices, dict):
@@ -1025,7 +1031,7 @@ class SettingsPage(QWidget):
                 continue
             min_path = tuple(minimum.data(Qt.ItemDataRole.UserRole) or ())
             max_path = tuple(maximum.data(Qt.ItemDataRole.UserRole) or ())
-            if not min_path or not max_path:
+            if not min_path:
                 continue
             device = str(min_path[1]).capitalize() if len(min_path) > 1 else "Device"
             if device not in device_layouts:
@@ -1057,12 +1063,16 @@ class SettingsPage(QWidget):
             label.setObjectName("safetyLimitLabel")
             label.setMinimumWidth(250)
             values_layout.addWidget(label, 1)
-            values_layout.addWidget(self._safety_boundary_label("MIN"))
+            scalar_limit = not max_path
+            values_layout.addWidget(
+                self._safety_boundary_label("LIMIT" if scalar_limit else "MIN")
+            )
             minimum_editor = self._make_safety_limit_editor(min_path, minimum.text())
             values_layout.addWidget(minimum_editor)
-            values_layout.addWidget(self._safety_boundary_label("MAX"))
-            maximum_editor = self._make_safety_limit_editor(max_path, maximum.text())
-            values_layout.addWidget(maximum_editor)
+            if not scalar_limit:
+                values_layout.addWidget(self._safety_boundary_label("MAX"))
+                maximum_editor = self._make_safety_limit_editor(max_path, maximum.text())
+                values_layout.addWidget(maximum_editor)
             unit = BodyLabel(unit_item.text() if unit_item is not None else "SI / explicit")
             unit.setObjectName("safetyLimitUnit")
             unit.setMinimumWidth(84)
@@ -1074,7 +1084,8 @@ class SettingsPage(QWidget):
             error.hide()
             row_layout.addWidget(error)
             self._safety_limit_error_labels[min_path] = error
-            self._safety_limit_error_labels[max_path] = error
+            if not scalar_limit:
+                self._safety_limit_error_labels[max_path] = error
             device_layouts[device].addWidget(row_widget)
 
         content_layout.addStretch(1)
@@ -1283,6 +1294,35 @@ class SettingsPage(QWidget):
                 item.setFlags(item.flags() & ~Qt.ItemFlag.ItemIsEditable)
             self.limits_table.setItem(row, column, item)
 
+    def _add_scalar_limit_row(
+        self, path: tuple[str | int, ...], value: str
+    ) -> None:
+        """Add a one-value safety limit such as maximum allowed power."""
+
+        row = self.limits_table.rowCount()
+        self.limits_table.insertRow(row)
+        scope_parts = [
+            str(part)
+            for part in path[1:-1]
+            if str(part) not in {"safety", "lab_limits"}
+        ]
+        scope = " / ".join(scope_parts) or str(path[1])
+        parameter = str(path[-1]).replace("_", " ")
+        unit = self._range_unit(value, value)
+        values = (scope, parameter, value, "â€”", unit, "â€”", "Laboratory profile")
+        for column, text in enumerate(values):
+            item = QTableWidgetItem(text)
+            if column == 2:
+                item.setData(Qt.ItemDataRole.UserRole, path)
+                self._limit_items_by_path[path] = item
+                if not self._read_only:
+                    item.setFlags(item.flags() | Qt.ItemFlag.ItemIsEditable)
+                else:
+                    item.setFlags(item.flags() & ~Qt.ItemFlag.ItemIsEditable)
+            else:
+                item.setFlags(item.flags() & ~Qt.ItemFlag.ItemIsEditable)
+            self.limits_table.setItem(row, column, item)
+
     @staticmethod
     def _range_unit(minimum: str, maximum: str) -> str:
         units: list[str] = []
@@ -1357,6 +1397,25 @@ class SettingsPage(QWidget):
         if path is None:
             return
         dimension = self._limit_dimension(tuple(path))
+        if maximum.data(Qt.ItemDataRole.UserRole) is None:
+            self._set_limit_validation(minimum, None)
+            try:
+                if dimension is None:
+                    float(minimum.text().strip().replace(",", "."))
+                else:
+                    value = parse_quantity(
+                        minimum.text(), dimension, require_unit=True
+                    ).si_value
+                    if value <= 0:
+                        raise ValueError("Value must be greater than zero.")
+            except (QuantityError, ValueError) as exc:
+                expected = (
+                    f" expected unit: {dimension}." if dimension else " expected a number."
+                )
+                self._set_limit_validation(
+                    minimum, f"Invalid limit value:{expected} {exc}"
+                )
+            return
         values: dict[str, float] = {}
         for item, boundary in ((minimum, "minimum"), (maximum, "maximum")):
             # A range is a single validation unit: correcting either boundary must

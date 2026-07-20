@@ -955,6 +955,7 @@ class KeithleyPage(QWidget):
     status = Signal(str)
     quick_controls_requested = Signal()
     settings_assignment_requested = Signal(object)
+    settings_defaults_requested = Signal(object)
     _MANUAL_RAMP_ENABLED = False
 
     def __init__(self, controller: DeviceController, settings: StationSettings, parent: QWidget | None = None) -> None:
@@ -985,6 +986,7 @@ class KeithleyPage(QWidget):
         self._floating_panels: dict[str, _KeithleyFloatingPanelWindow] = {}
         self._readback_dialog: _KeithleyReadbackDialog | None = None
         self._last_assignment_succeeded = False
+        self._loading_form_snapshot = False
         self._panel_placeholders: dict[str, CardWidget] = {}
         self._live_timer = QTimer(self)
         self._live_timer.setInterval(1000)
@@ -1225,6 +1227,20 @@ class KeithleyPage(QWidget):
         self.channel.currentTextChanged.connect(self._channel_changed)
         self.mode.currentTextChanged.connect(self._mode_changed)
         self.channel.currentTextChanged.connect(self._selected_channel_changed)
+        for editor in (
+            self.level,
+            self.compliance,
+            self.nplc,
+            self.settle,
+            self.source_range,
+            self.measure_voltage_range,
+            self.measure_current_range,
+        ):
+            editor.editingFinished.connect(self._persist_form_defaults)
+        self.sense_mode.currentIndexChanged.connect(self._persist_form_defaults)
+        self.source_autorange.toggled.connect(self._persist_form_defaults)
+        self.measure_voltage_autorange.toggled.connect(self._persist_form_defaults)
+        self.measure_current_autorange.toggled.connect(self._persist_form_defaults)
         self._selected_channel_changed(self.channel.currentText())
         self._update_source_mode_ui()
         self._update_output_readiness()
@@ -1703,16 +1719,13 @@ class KeithleyPage(QWidget):
                 item for item in channel_checks if item.startswith("✕")
             )
             card["output_on_action"].setEnabled(
-                channel_ready
-                and
-                not self._output_states[channel]
-                and not pending_enable
+                not self._output_states[channel] and not pending_enable
             )
             card["output_on_action"].setToolTip(
                 (
                     "Ready: configure OFF → enable with readback."
                     if channel_ready
-                    else "OUTPUT remains blocked: " + missing
+                    else "Click for the blocking condition: " + missing
                 )
             )
             # De-energising is never gated by ARM, profile approval, RBAC or
@@ -2063,20 +2076,24 @@ class KeithleyPage(QWidget):
         )
 
     def _load_form_snapshot(self, snapshot: KeithleyConfigurationSnapshot) -> None:
-        self.mode.blockSignals(True)
-        self.mode.setCurrentText(snapshot.source_mode)
-        self.mode.blockSignals(False)
-        self._active_mode = snapshot.source_mode
-        self.level.setText(snapshot.source_level)
-        self.compliance.setText(snapshot.compliance)
-        self.nplc.setText(snapshot.nplc)
-        self.sense_mode.setCurrentText(snapshot.sense_mode)
-        self.source_autorange.setChecked(snapshot.source_autorange)
-        self.source_range.setText(snapshot.source_range)
-        self.measure_voltage_autorange.setChecked(snapshot.measure_voltage_autorange)
-        self.measure_voltage_range.setText(snapshot.measure_voltage_range)
-        self.measure_current_autorange.setChecked(snapshot.measure_current_autorange)
-        self.measure_current_range.setText(snapshot.measure_current_range)
+        self._loading_form_snapshot = True
+        try:
+            self.mode.blockSignals(True)
+            self.mode.setCurrentText(snapshot.source_mode)
+            self.mode.blockSignals(False)
+            self._active_mode = snapshot.source_mode
+            self.level.setText(snapshot.source_level)
+            self.compliance.setText(snapshot.compliance)
+            self.nplc.setText(snapshot.nplc)
+            self.sense_mode.setCurrentText(snapshot.sense_mode)
+            self.source_autorange.setChecked(snapshot.source_autorange)
+            self.source_range.setText(snapshot.source_range)
+            self.measure_voltage_autorange.setChecked(snapshot.measure_voltage_autorange)
+            self.measure_voltage_range.setText(snapshot.measure_voltage_range)
+            self.measure_current_autorange.setChecked(snapshot.measure_current_autorange)
+            self.measure_current_range.setText(snapshot.measure_current_range)
+        finally:
+            self._loading_form_snapshot = False
         self._source_value_cache[(snapshot.channel, snapshot.source_mode)] = (
             snapshot.source_level,
             snapshot.compliance,
@@ -2137,6 +2154,13 @@ class KeithleyPage(QWidget):
         self._refresh_keithley_limits()
         self._load_source_values()
         self._update_source_mode_ui()
+        self._persist_form_defaults()
+
+    def _persist_form_defaults(self, *_args: object) -> None:
+        if self._loading_form_snapshot:
+            return
+        self._remember_source_values()
+        self.settings_defaults_requested.emit(dict(self._channel_form_snapshots))
 
     def _update_source_mode_ui(self) -> None:
         mode = self.mode.currentText()
@@ -2543,21 +2567,22 @@ class KeithleyPage(QWidget):
             return
         ready, checks = self._output_prerequisites()
         if not ready:
-            self.banner.show_message(
-                "OUTPUT cannot be enabled. Complete the missing readiness checks: "
-                + "; ".join(item for item in checks if item.startswith("✕")),
-                timeout_ms=15_000,
+            self._show_output_blocked(
+                "Complete the missing readiness checks:\n"
+                + "\n".join(item for item in checks if item.startswith("✕"))
             )
             self._reset_output_toggle()
             return
         try:
             request = self._source_request()
         except Exception as exc:
-            self.banner.show_message(f"Invalid Keithley settings: {exc}")
+            self._show_output_blocked(f"Invalid Keithley settings:\n{exc}")
             self._reset_output_toggle()
             return
         if request.mode == "measure_only":
-            self.banner.show_message("Select Current or Voltage source mode before enabling OUTPUT.")
+            self._show_output_blocked(
+                "Select Current or Voltage source mode before enabling OUTPUT."
+            )
             self._reset_output_toggle()
             return
         self._auto_enable_channel = channel
@@ -2568,6 +2593,18 @@ class KeithleyPage(QWidget):
         self._update_output_readiness()
         self.status.emit(f"Keithley CH {channel}: validating and configuring before OUTPUT ON")
         self._controller.call("configure", request)
+
+    def _show_output_blocked(self, detail: str) -> None:
+        """Explain every local OUTPUT-ON rejection before any VISA dispatch.
+
+        The adapter remains responsible for the final device-side safety check.
+        This message covers only UI-side validation/preconditions, where no
+        command has yet been submitted to the worker or instrument.
+        """
+        message = f"{detail}\n\nNo command was sent to Keithley."
+        self.banner.show_message(f"OUTPUT ON blocked: {detail}", timeout_ms=15_000)
+        self.status.emit(f"Keithley OUTPUT ON blocked: {detail}")
+        QMessageBox.warning(self, "Keithley OUTPUT ON blocked", message)
 
     def _reset_output_toggle(self) -> None:
         self.output_toggle.blockSignals(True)

@@ -218,6 +218,7 @@ class LimitEditDialog(StationDialog):
         maximum: object,
         *,
         maximum_enabled: bool = True,
+        value_label: str = "Minimum",
         parent: QWidget | None = None,
     ) -> None:
         super().__init__(parent)
@@ -242,7 +243,7 @@ class LimitEditDialog(StationDialog):
         self.maximum.setEnabled(maximum_enabled)
         if not maximum_enabled:
             self.maximum.setPlaceholderText("Not applicable")
-        form.addRow("Minimum", self.minimum)
+        form.addRow(value_label, self.minimum)
         form.addRow("Maximum", self.maximum)
         layout.addLayout(form)
         warning = BodyLabel(
