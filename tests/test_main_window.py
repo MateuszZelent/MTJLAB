@@ -2514,7 +2514,7 @@ class MainWindowTests(unittest.TestCase):
             table_values = {
                 dialog.table.item(row, 0).text(): (
                     dialog.table.item(row, 1).text(),
-                    dialog.table.item(row, 2).text(),
+                    dialog.table.item(row, 4).text(),
                 )
                 for row in range(dialog.table.rowCount())
             }
@@ -2524,6 +2524,37 @@ class MainWindowTests(unittest.TestCase):
             self.assertEqual(table_values["Source level"], ("500 uA", "10 mV"))
             self.assertEqual(table_values["Compliance limit"], ("50 mV", "1 mA"))
             self.assertEqual(table_values["Sense mode"], ("4-wire", "2-wire"))
+            status_values = {
+                dialog.table.item(row, 0).text(): (
+                    dialog.table.item(row, 2).text(),
+                    dialog.table.item(row, 5).text(),
+                )
+                for row in range(dialog.table.rowCount())
+            }
+            self.assertIn(status_values["Source level"][0], {"MATCH", "DIFFERENT"})
+            self.assertIsNotNone(dialog.table.cellWidget(2, 3))
+            self.assertIsNotNone(dialog.table.cellWidget(2, 6))
+
+            dialog.assign_requested.emit("ALL", "ALL")
+            self.assertEqual(keithley.mode.currentText(), "voltage")
+            self.assertEqual(keithley.level.text(), "10 mV")
+            self.assertEqual(keithley.compliance.text(), "1 mA")
+            self.assertEqual(keithley.nplc.text(), "2")
+            self.assertFalse(keithley.source_autorange.isChecked())
+            self.assertEqual(keithley.source_range.text(), "67 mV")
+            self.assertFalse(keithley.measure_voltage_autorange.isChecked())
+            self.assertEqual(keithley.measure_voltage_range.text(), "70 mV")
+
+            keithley.channel.setCurrentText("A")
+            self.assertEqual(keithley.mode.currentText(), "current")
+            self.assertEqual(keithley.level.text(), "500 uA")
+            self.assertEqual(keithley.compliance.text(), "50 mV")
+            self.assertEqual(keithley.nplc.text(), "0.5")
+            self.assertEqual(keithley.sense_mode.currentText(), "4wire")
+            self.assertTrue(keithley.source_autorange.isChecked())
+            self.assertEqual(keithley.source_range.text(), "AUTO")
+            self.assertFalse(keithley.measure_current_autorange.isChecked())
+            self.assertEqual(keithley.measure_current_range.text(), "1 mA")
             self.assertFalse(keithley._readback_pending)
             self.assertTrue(keithley.read_configuration_button.isEnabled())
             self.assertFalse(keithley._output_states["A"])

@@ -645,9 +645,12 @@ class KeithleyNodeEditorDialog(FluentRecipeDialog):
 class _KeithleyReadbackDialog(StationDialog):
     """Modal, read-only comparison of both Keithley channel configurations."""
 
+    assign_requested = Signal(str, str)
+
     def __init__(
         self,
         readback: KeithleyConfigurationReadback,
+        configured: dict[str, KeithleyConfigurationSnapshot],
         parent: QWidget,
     ) -> None:
         super().__init__(parent)
@@ -689,8 +692,10 @@ class _KeithleyReadbackDialog(StationDialog):
         self.table.setAccessibleName(
             "Keithley hardware settings read from channels A and B"
         )
-        self.table.setColumnCount(3)
-        self.table.setHorizontalHeaderLabels(["Parameter", "Channel A", "Channel B"])
+        self.table.setColumnCount(7)
+        self.table.setHorizontalHeaderLabels(
+            ["Parameter", "Channel A", "Status", "", "Channel B", "Status", ""]
+        )
         self.table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
         self.table.setSelectionMode(QAbstractItemView.SelectionMode.SingleSelection)
         self.table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
@@ -699,6 +704,10 @@ class _KeithleyReadbackDialog(StationDialog):
         values = {
             channel.channel: self._channel_values(channel)
             for channel in readback.channels
+        }
+        expected = {
+            channel: self._snapshot_values(snapshot)
+            for channel, snapshot in configured.items()
         }
         rows = (
             "OUTPUT state",
@@ -718,21 +727,87 @@ class _KeithleyReadbackDialog(StationDialog):
         self.table.setRowCount(len(rows))
         for row, parameter in enumerate(rows):
             self.table.setItem(row, 0, QTableWidgetItem(parameter))
-            self.table.setItem(row, 1, QTableWidgetItem(values["A"][parameter]))
-            self.table.setItem(row, 2, QTableWidgetItem(values["B"][parameter]))
+            for channel, value_column, status_column, button_column in (
+                ("A", 1, 2, 3),
+                ("B", 4, 5, 6),
+            ):
+                value = values[channel][parameter]
+                matches = expected[channel].get(parameter) == value
+                value_item = QTableWidgetItem(value)
+                status_item = QTableWidgetItem("MATCH" if matches else "DIFFERENT")
+                colour = QColor("#168a45" if matches else "#c43b3b")
+                value_item.setForeground(colour)
+                status_item.setForeground(colour)
+                self.table.setItem(row, value_column, value_item)
+                self.table.setItem(row, status_column, status_item)
+                if parameter not in {"OUTPUT state", "OUTPUT OFF mode"}:
+                    assign = PushButton("Assign", self.table)
+                    assign.setAccessibleName(
+                        f"Assign {parameter} from Keithley channel {channel}"
+                    )
+                    assign.clicked.connect(
+                        lambda _checked=False, ch=channel, key=parameter: (
+                            self.assign_requested.emit(ch, key)
+                        )
+                    )
+                    self.table.setCellWidget(row, button_column, assign)
         header = self.table.horizontalHeader()
         header.setSectionResizeMode(0, QHeaderView.ResizeMode.ResizeToContents)
         header.setSectionResizeMode(1, QHeaderView.ResizeMode.Stretch)
-        header.setSectionResizeMode(2, QHeaderView.ResizeMode.Stretch)
+        header.setSectionResizeMode(2, QHeaderView.ResizeMode.ResizeToContents)
+        header.setSectionResizeMode(3, QHeaderView.ResizeMode.ResizeToContents)
+        header.setSectionResizeMode(4, QHeaderView.ResizeMode.Stretch)
+        header.setSectionResizeMode(5, QHeaderView.ResizeMode.ResizeToContents)
+        header.setSectionResizeMode(6, QHeaderView.ResizeMode.ResizeToContents)
         self.table.resizeRowsToContents()
         layout.addWidget(self.table, 1)
 
         footer = QHBoxLayout()
+        assign_all = PrimaryPushButton("Assign all", self)
+        assign_all.setToolTip(
+            "Copy all configurable A/B values to the form. Safety limits and OUTPUT "
+            "states are not changed."
+        )
+        assign_all.clicked.connect(
+            lambda: self.assign_requested.emit("ALL", "ALL")
+        )
+        footer.addWidget(assign_all)
         footer.addStretch(1)
-        close = PrimaryPushButton("Close", self)
+        close = PushButton("Close", self)
         close.clicked.connect(self.accept)
         footer.addWidget(close)
         layout.addLayout(footer)
+
+    @classmethod
+    def _snapshot_values(cls, snapshot: KeithleyConfigurationSnapshot) -> dict[str, str]:
+        source_dimension = (
+            DIMENSION_CURRENT if snapshot.source_mode == "current" else DIMENSION_VOLTAGE
+        )
+        compliance_dimension = (
+            DIMENSION_VOLTAGE if snapshot.source_mode == "current" else DIMENSION_CURRENT
+        )
+
+        def quantity(text: str, dimension: str) -> str:
+            if text.strip().upper() == "AUTO":
+                return "AUTO"
+            try:
+                return format_quantity_auto(parse_quantity(text, dimension).si_value, dimension)
+            except Exception:
+                return text.strip()
+
+        return {
+            "Source mode": snapshot.source_mode.upper(),
+            "Source level": quantity(snapshot.source_level, source_dimension),
+            "Compliance limit": quantity(snapshot.compliance, compliance_dimension),
+            "Source autorange": "ON" if snapshot.source_autorange else "OFF",
+            "Active source range": quantity(snapshot.source_range, source_dimension),
+            "Sense mode": "2-wire" if snapshot.sense_mode == "2wire" else "4-wire",
+            "NPLC": snapshot.nplc.strip(),
+            "Measure V autorange": "ON" if snapshot.measure_voltage_autorange else "OFF",
+            "Active measure V range": quantity(snapshot.measure_voltage_range, DIMENSION_VOLTAGE),
+            "Measure I autorange": "ON" if snapshot.measure_current_autorange else "OFF",
+            "Active measure I range": quantity(snapshot.measure_current_range, DIMENSION_CURRENT),
+        }
 
     @staticmethod
     def _channel_values(
@@ -1059,6 +1134,22 @@ class KeithleyPage(QWidget):
                 self.level.text(), self.compliance.text(), self.source_range.text()
             )
         }
+        initial_snapshot = self._capture_form_snapshot(
+            channel=self._active_channel, mode=self._active_mode
+        )
+        self._channel_form_snapshots: dict[str, KeithleyConfigurationSnapshot] = {
+            channel: replace(
+                initial_snapshot,
+                channel=channel,
+                source_mode=str(
+                    self._station_settings.keithley.safety.channels[channel].defaults.get(
+                        "source_mode", initial_snapshot.source_mode
+                    )
+                ),
+            )
+            for channel in ("A", "B")
+        }
+        self._channel_form_snapshots[self._active_channel] = initial_snapshot
         self.channel.currentTextChanged.connect(self._channel_changed)
         self.mode.currentTextChanged.connect(self._mode_changed)
         self.channel.currentTextChanged.connect(self._selected_channel_changed)
@@ -1834,6 +1925,54 @@ class KeithleyPage(QWidget):
             self.compliance.text(),
             self.source_range.text(),
         )
+        if hasattr(self, "_channel_form_snapshots"):
+            self._channel_form_snapshots[self._active_channel] = (
+                self._capture_form_snapshot(
+                    channel=self._active_channel, mode=self._active_mode
+                )
+            )
+
+    def _capture_form_snapshot(
+        self, *, channel: str, mode: str
+    ) -> KeithleyConfigurationSnapshot:
+        return KeithleyConfigurationSnapshot(
+            channel=channel,
+            source_mode=mode,
+            source_level=self.level.text().strip(),
+            compliance=self.compliance.text().strip(),
+            nplc=self.nplc.text().strip(),
+            settling_time=self.settle.text().strip(),
+            sense_mode=self.sense_mode.currentText(),
+            source_autorange=self.source_autorange.isChecked(),
+            source_range=self.source_range.text().strip(),
+            measure_voltage_autorange=self.measure_voltage_autorange.isChecked(),
+            measure_voltage_range=self.measure_voltage_range.text().strip(),
+            measure_current_autorange=self.measure_current_autorange.isChecked(),
+            measure_current_range=self.measure_current_range.text().strip(),
+        )
+
+    def _load_form_snapshot(self, snapshot: KeithleyConfigurationSnapshot) -> None:
+        self.mode.blockSignals(True)
+        self.mode.setCurrentText(snapshot.source_mode)
+        self.mode.blockSignals(False)
+        self._active_mode = snapshot.source_mode
+        self.level.setText(snapshot.source_level)
+        self.compliance.setText(snapshot.compliance)
+        self.nplc.setText(snapshot.nplc)
+        self.sense_mode.setCurrentText(snapshot.sense_mode)
+        self.source_autorange.setChecked(snapshot.source_autorange)
+        self.source_range.setText(snapshot.source_range)
+        self.measure_voltage_autorange.setChecked(snapshot.measure_voltage_autorange)
+        self.measure_voltage_range.setText(snapshot.measure_voltage_range)
+        self.measure_current_autorange.setChecked(snapshot.measure_current_autorange)
+        self.measure_current_range.setText(snapshot.measure_current_range)
+        self._source_value_cache[(snapshot.channel, snapshot.source_mode)] = (
+            snapshot.source_level,
+            snapshot.compliance,
+            snapshot.source_range,
+        )
+        self._refresh_keithley_limits()
+        self._update_source_mode_ui()
 
     def _default_source_values(self, channel: str, mode: str) -> tuple[str, str, str]:
         channel_settings = self._station_settings.keithley.safety.channels[channel]
@@ -1868,9 +2007,13 @@ class KeithleyPage(QWidget):
     def _channel_changed(self, channel: str) -> None:
         self._remember_source_values()
         self._active_channel = channel
-        self._refresh_keithley_limits()
-        self._load_source_values()
-        self._update_source_mode_ui()
+        snapshot = self._channel_form_snapshots.get(channel)
+        if snapshot is not None:
+            self._load_form_snapshot(snapshot)
+        else:
+            self._refresh_keithley_limits()
+            self._load_source_values()
+            self._update_source_mode_ui()
 
     def _mode_changed(self, mode: str) -> None:
         self._remember_source_values()
@@ -2116,9 +2259,94 @@ class KeithleyPage(QWidget):
         self,
         readback: KeithleyConfigurationReadback,
     ) -> None:
-        dialog = _KeithleyReadbackDialog(readback, self)
+        self._remember_source_values()
+        dialog = _KeithleyReadbackDialog(
+            readback, dict(self._channel_form_snapshots), self
+        )
+        dialog.assign_requested.connect(
+            lambda channel, parameter: self._assign_configuration_readback(
+                readback, channel, parameter
+            )
+        )
         self._readback_dialog = dialog
         dialog.exec()
+
+    def _assign_configuration_readback(
+        self,
+        readback: KeithleyConfigurationReadback,
+        channel: str,
+        parameter: str,
+    ) -> None:
+        channels = {
+            item.channel: item for item in readback.channels
+        }
+        targets = ("A", "B") if channel == "ALL" else (channel,)
+        for target in targets:
+            hardware = channels[target]
+            snapshot = self._channel_form_snapshots[target]
+            source_dimension = (
+                DIMENSION_CURRENT
+                if hardware.source_mode == "current"
+                else DIMENSION_VOLTAGE
+            )
+            compliance_dimension = (
+                DIMENSION_VOLTAGE
+                if hardware.source_mode == "current"
+                else DIMENSION_CURRENT
+            )
+            changes: dict[str, object] = {}
+            assignments = {
+                "Source mode": ("source_mode", hardware.source_mode),
+                "Source level": (
+                    "source_level",
+                    format_quantity_auto(hardware.source_level_si, source_dimension),
+                ),
+                "Compliance limit": (
+                    "compliance",
+                    format_quantity_auto(hardware.compliance_si, compliance_dimension),
+                ),
+                "Source autorange": ("source_autorange", hardware.source_autorange),
+                "Active source range": (
+                    "source_range",
+                    "AUTO" if hardware.source_autorange else format_quantity_auto(
+                        hardware.source_range_si, source_dimension
+                    ),
+                ),
+                "Sense mode": ("sense_mode", hardware.sense_mode),
+                "NPLC": ("nplc", f"{hardware.nplc:.9g}"),
+                "Measure V autorange": (
+                    "measure_voltage_autorange",
+                    hardware.measure_voltage_autorange,
+                ),
+                "Active measure V range": (
+                    "measure_voltage_range",
+                    "AUTO" if hardware.measure_voltage_autorange else format_quantity_auto(
+                        hardware.measure_voltage_range_v, DIMENSION_VOLTAGE
+                    ),
+                ),
+                "Measure I autorange": (
+                    "measure_current_autorange",
+                    hardware.measure_current_autorange,
+                ),
+                "Active measure I range": (
+                    "measure_current_range",
+                    "AUTO" if hardware.measure_current_autorange else format_quantity_auto(
+                        hardware.measure_current_range_a, DIMENSION_CURRENT
+                    ),
+                ),
+            }
+            selected = assignments if parameter == "ALL" else {parameter: assignments[parameter]}
+            for field_name, value in selected.values():
+                changes[field_name] = value
+            self._channel_form_snapshots[target] = replace(snapshot, **changes)
+
+        active = self.channel.currentText()
+        self._active_channel = active
+        self._load_form_snapshot(self._channel_form_snapshots[active])
+        self.banner.show_message(
+            "Device readback assigned to the form. Safety MIN/MAX, OUTPUT state, "
+            "and hardware were not changed; use Apply & verify to send it."
+        )
 
     def _source_request(self) -> KeithleySourceRequest:
         mode = self.mode.currentText()
