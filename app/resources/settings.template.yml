@@ -301,6 +301,10 @@ devices:
             max_abs_power: "100 uW"
             ramp_current_step_max: "100 uA"
             ramp_voltage_step_max: "10 mV"
+            sweep_points_max: 1000
+            point_settle_time:
+              min: "1 ms"
+              max: "10 s"
           defaults:
             source_mode: "measure_only"
             output_enabled: false

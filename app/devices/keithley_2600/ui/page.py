@@ -213,11 +213,7 @@ class KeithleyConfigurationPanel(CardWidget):
         if key == "nplc":
             return 0.001, 25
         if key == "settle":
-            return (
-                (limits.point_settle_time.min, limits.point_settle_time.max)
-                if limits.point_settle_time
-                else ("0 s", "no profile maximum")
-            )
+            return limits.point_settle_time.min, limits.point_settle_time.max
         if mode == "measure_only" and key in {"level", "compliance", "source_range"}:
             return "N/A", "N/A"
         if key == "level":
@@ -1796,7 +1792,7 @@ class KeithleyPage(QWidget):
         if key == "nplc":
             return 0.001, 25
         if key == "settle":
-            return (limits.point_settle_time.min, limits.point_settle_time.max) if limits.point_settle_time else ("0 s", "no profile maximum")
+            return limits.point_settle_time.min, limits.point_settle_time.max
         if mode == "measure_only" and key in {"level", "compliance", "source_range"}:
             return "N/A", "N/A"
         if key == "level":

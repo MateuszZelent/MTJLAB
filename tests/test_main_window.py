@@ -1522,6 +1522,12 @@ class MainWindowTests(unittest.TestCase):
                 )
 
             keithley = window.keithley_page
+            keithley.channel.setCurrentText("A")
+            self.application.processEvents()
+            self.assertEqual(keithley._limit_fields["settle"].minimum.text(), "MIN  1 ms")
+            self.assertEqual(keithley._limit_fields["settle"].maximum.text(), "MAX  10 s")
+            keithley.channel.setCurrentText("B")
+            self.application.processEvents()
             current_bound = shared_bounds["keithley.B.current"]
             self.assertEqual(
                 keithley._limit_fields["level"].minimum.text(),

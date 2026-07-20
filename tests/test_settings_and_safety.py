@@ -90,6 +90,20 @@ class QuantityAndSafetyTests(unittest.TestCase):
         raw["profile"]["lock_outputs_when_unverified"] = False
         self.assertTrue(StationSettings.model_validate(raw).outputs_locked)
 
+    def test_keithley_settling_time_limits_are_required_for_every_channel(self) -> None:
+        settings = loaded_settings()
+        for channel in ("A", "B"):
+            limits = settings.keithley.safety.channels[channel].lab_limits.point_settle_time
+            self.assertEqual(limits.min, "1 ms")
+            self.assertEqual(limits.max, "10 s")
+
+        raw = deepcopy(SettingsRepository(SETTINGS_TEMPLATE).load().raw)
+        del raw["devices"]["keithley"]["safety"]["channels"]["A"]["lab_limits"][
+            "point_settle_time"
+        ]
+        with self.assertRaisesRegex(ValueError, "point_settle_time"):
+            StationSettings.model_validate(raw)
+
     def test_rigol_current_estimate_is_limited(self) -> None:
         settings = loaded_settings()
         estimate = validate_rigol_waveform(

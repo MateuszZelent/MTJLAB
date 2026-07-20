@@ -216,7 +216,7 @@ class KeithleyChannelLimits(StrictModel):
     ramp_current_step_max: str
     ramp_voltage_step_max: str
     sweep_points_max: int = 1000
-    point_settle_time: RangeSettings | None = None
+    point_settle_time: RangeSettings
 
     @model_validator(mode="after")
     def validate_dimensions(self) -> "KeithleyChannelLimits":
@@ -234,8 +234,7 @@ class KeithleyChannelLimits(StrictModel):
             raise ValueError("ramp_voltage_step_max must be positive")
         if self.sweep_points_max < 2:
             raise ValueError("sweep_points_max must be at least 2")
-        if self.point_settle_time is not None:
-            self.point_settle_time.checked(DIMENSION_TIME)
+        self.point_settle_time.checked(DIMENSION_TIME)
         return self
 
 

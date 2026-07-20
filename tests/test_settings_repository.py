@@ -104,6 +104,46 @@ class SettingsRepositoryTests(unittest.TestCase):
         self.assertIsNone(current["devices"]["future_meter"]["resource"])
         self.assertEqual(current["devices"]["future_source"], {"enabled": False})
 
+    def test_load_restores_a_missing_field_for_every_device_from_template(self) -> None:
+        template = deepcopy(SettingsRepository(SETTINGS_TEMPLATE).load().raw)
+        raw = deepcopy(template)
+        removed_paths: dict[str, tuple[str, ...]] = {}
+
+        def remove_first_leaf(mapping: dict[str, object]) -> tuple[str, ...] | None:
+            for key, value in list(mapping.items()):
+                if isinstance(value, dict) and value:
+                    nested = remove_first_leaf(value)
+                    if nested is not None:
+                        return (key, *nested)
+                else:
+                    mapping.pop(key)
+                    return (key,)
+            return None
+
+        def value_at(mapping: dict[str, object], path: tuple[str, ...]) -> object:
+            current: object = mapping
+            for key in path:
+                self.assertIsInstance(current, dict)
+                current = current[key]  # type: ignore[index]
+            return current
+
+        for device, profile in raw["devices"].items():
+            path = remove_first_leaf(profile)
+            self.assertIsNotNone(path, f"No removable template field for {device}")
+            removed_paths[device] = path or ()
+
+        with tempfile.TemporaryDirectory() as temporary:
+            path = Path(temporary) / "settings.yml"
+            repository = SettingsRepository(path)
+            repository._atomic_dump(raw)
+
+            loaded = repository.load().raw
+
+            for device, removed_path in removed_paths.items():
+                expected = value_at(template["devices"][device], removed_path)
+                actual = value_at(loaded["devices"][device], removed_path)
+                self.assertEqual(actual, expected, f"Migration failed for {device}")
+
     def test_replace_retries_short_windows_file_lock(self) -> None:
         with patch(
             "app.settings.repository.os.replace",
