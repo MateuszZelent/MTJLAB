@@ -1903,6 +1903,8 @@ class MainWindowTests(unittest.TestCase):
             self.assertTrue(keithley.history_widgets["B"]["plot"].isVisible())
             self.assertTrue(keithley.level.isVisible())
             self.assertTrue(keithley.compliance.isVisible())
+            self.assertTrue(keithley.apply_configuration_button.isVisible())
+            self.assertGreater(keithley.apply_configuration_button.width(), 0)
             self.assertIs(keithley.live_channel_a.parentWidget(), keithley.hero_card)
             self.assertIs(keithley.live_channel_b.parentWidget(), keithley.hero_card)
             self.assertIs(keithley.live_interval.parentWidget(), keithley.hero_card)
@@ -1919,6 +1921,8 @@ class MainWindowTests(unittest.TestCase):
                 Qt.Orientation.Vertical,
             )
             self.assertGreater(keithley.level_field.width(), 480)
+            self.assertTrue(keithley.apply_configuration_button.isVisible())
+            self.assertGreater(keithley.apply_configuration_button.height(), 0)
             self.assertLess(
                 keithley.level_field.editor.geometry().right(),
                 keithley.level_field.minimum.geometry().left(),
@@ -2013,6 +2017,7 @@ class MainWindowTests(unittest.TestCase):
         try:
             keithley = window.keithley_page
             keithley._controller.call = Mock()
+            keithley._device_state_changed("verified")
             keithley._output_prerequisites = Mock(return_value=(True, ["✓ ready"]))
 
             keithley._output_toggled(True)

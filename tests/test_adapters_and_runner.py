@@ -842,7 +842,7 @@ class AdapterAndRunnerTests(unittest.TestCase):
         self.assertFalse(
             any("OUTPUT_ON" in command for command in configuration_traffic)
         )
-        for field in (
+        for readback_field in (
             "smub.source.output",
             "smub.measure.nplc",
             "smub.sense",
@@ -856,7 +856,7 @@ class AdapterAndRunnerTests(unittest.TestCase):
             "smub.source.autorangei",
             "smub.source.rangei",
         ):
-            self.assertIn(f"print({field})", configuration_traffic)
+            self.assertIn(f"print({readback_field})", configuration_traffic)
         self.assertEqual(adapter.state, DeviceState.OUTPUT_OFF)
 
     def test_keithley_manual_ramp_queries_actual_level_and_measures_each_step(self) -> None:
