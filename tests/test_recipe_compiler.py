@@ -1228,23 +1228,32 @@ root:
         with self.assertRaisesRegex(SafetyViolation, "exceeds the station limit"):
             RecipeCompiler(simulation_settings()).compile(parse_recipe_text(source))
 
-    def test_output_on_requires_complete_dut_limits(self) -> None:
+    def test_keithley_output_on_uses_station_limits_without_extra_permission_or_dut_block(self) -> None:
         source = """\
 schema_version: 1
 name: missing-dut-envelope
 root:
-  id: output-on
-  type: set_keithley_output
-  channel: B
-  enabled: true
+  id: sequence
+  type: sequence
+  children:
+    - id: configure
+      type: configure_keithley
+      channel: B
+      mode: current
+      level: 1 mA
+      compliance: 67 mV
+    - id: output-on
+      type: set_keithley_output
+      channel: B
+      enabled: true
 """
-        settings = simulation_settings(approved=True)
-        raw = deepcopy(settings.model_dump(mode="python"))
-        raw["devices"]["keithley"]["safety"]["allow_output_enable"] = True
-        with self.assertRaisesRegex(SafetyViolation, "complete recipe.dut_limits"):
-            RecipeCompiler(StationSettings.model_validate(raw)).compile(
-                parse_recipe_text(source)
-            )
+        settings = simulation_settings(approved=False)
+        plan = RecipeCompiler(settings).compile(parse_recipe_text(source))
+
+        self.assertEqual(
+            [action.kind for action in plan.actions],
+            ["configure_keithley", "set_keithley_output"],
+        )
 
     def test_qualified_anritsu_advanced_action_compiles_documented_values(self) -> None:
         raw = deepcopy(simulation_settings(approved=True).model_dump(mode="python"))

@@ -344,6 +344,27 @@ class AdapterAndRunnerTests(unittest.TestCase):
 
         self.assertEqual(tuple(session.writes), writes_before)
 
+    def test_keithley_output_uses_channel_limits_without_legacy_permission_flag(self) -> None:
+        raw = deepcopy(simulation_settings(approved=False).model_dump(mode="python"))
+        raw["devices"]["keithley"]["safety"]["allow_output_enable"] = False
+        settings = StationSettings.model_validate(raw)
+        session = FakeVisaSession(
+            responses={
+                "*IDN?": "KEITHLEY INSTRUMENTS,2602A,123456,1.0",
+                "print(errorqueue.count)": "0",
+            }
+        )
+        adapter = KeithleyAdapter(
+            settings, session_factory=FakeVisaSessionFactory(session)
+        )
+        adapter.connect()
+        adapter.configure_source(
+            KeithleySourceRequest("B", "current", 0.001, 0.067)
+        )
+
+        self.assertTrue(adapter.set_output("B", True))
+        self.assertEqual(adapter.state, DeviceState.OUTPUT_ON)
+
     def test_device_state_remains_on_when_another_channel_is_disabled(self) -> None:
         raw = deepcopy(simulation_settings(approved=True).model_dump(mode="python"))
         raw["devices"]["keithley"]["safety"]["allow_output_enable"] = True

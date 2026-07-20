@@ -11,7 +11,6 @@ from typing import Literal
 from app.devices.base import (
     DeviceAdapter,
     InstrumentSession,
-    OutputInterlock,
     SessionFactory,
     parse_identity,
     validate_identity,
@@ -94,12 +93,6 @@ class KeithleyAdapter(DeviceAdapter):
         self._session: InstrumentSession | None = None
         self._last_request: dict[str, KeithleySourceRequest] = {}
         self._output_states: dict[Literal["A", "B"], bool] = {"A": False, "B": False}
-
-    def _interlock(self) -> OutputInterlock:
-        return OutputInterlock(
-            profile_approved=self._station.profile.state == "approved",
-            profile_locks_outputs=False,
-        )
 
     def _require_session(self) -> InstrumentSession:
         if self._session is None:
@@ -514,7 +507,7 @@ class KeithleyAdapter(DeviceAdapter):
         mode: Literal["current", "voltage"],
         level_si: float,
     ) -> float:
-        """Apply a quick target directly at OFF or through the approved ramp at ON."""
+        """Apply a validated quick target directly and verify its readback."""
 
         current = self._last_request.get(channel)
         if current is None or current.mode != mode:
@@ -522,7 +515,7 @@ class KeithleyAdapter(DeviceAdapter):
                 f"Configure Keithley {channel} for {mode} before quick control."
             )
         # A floating quick control is only another UI entry point; it must
-        # never bypass the exact same user-approved source and compliance
+        # never bypass the exact same configured source and compliance
         # limits as the regular device page.  Validate before even querying
         # OUTPUT so an invalid target causes no VISA traffic.
         validate_keithley_source(
@@ -606,10 +599,6 @@ class KeithleyAdapter(DeviceAdapter):
             raise SafetyViolation("Keithley channel must be A or B.")
         settings = self._channel_settings(channel)
         if enabled:
-            self._interlock().assert_can_enable(
-                device_name=f"Keithley CH{channel}",
-                device_allows_output=settings.enabled,
-            )
             request = self._last_request.get(channel)
             if request is None:
                 raise SafetyViolation("Configure a safe Keithley source before enabling OUTPUT.")
