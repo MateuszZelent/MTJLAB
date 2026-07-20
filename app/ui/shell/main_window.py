@@ -44,7 +44,7 @@ from qfluentwidgets.common.style_sheet import styleSheetManager
 
 from app.audit import AuditLogger
 from app.bootstrap import StationComposition
-from app.domain.errors import AuthorizationError, ConfigurationError
+from app.domain.errors import AuthorizationError, ConfigurationError, SafetyViolation
 from app.domain.quantities import (
     DIMENSION_CURRENT,
     DIMENSION_FREQUENCY,
@@ -59,6 +59,7 @@ from app.devices.anritsu_ms2830a import (
     AdvancedSpectrumSnapshot,
     AnritsuConfigurationSnapshot,
 )
+from app.devices.keithley_2600 import KeithleySourceRequest
 from app.devices.simulators import simulated_station_settings
 from app.engine.compiler import RecipeCompiler
 from app.engine.estimation import PlanEstimator
@@ -69,6 +70,7 @@ from app.recipes import (
 from app.settings import SettingsRepository
 from app.settings.models import StationSettings
 from app.security import AccessPolicy, Permission
+from app.safety.keithley import validate_keithley_source
 from app.storage import Hdf5RunReader
 from app.ui.settings_page import SettingsPage
 from app.ui.run_worker import RunController, serialize_settings_snapshot
@@ -482,6 +484,9 @@ class MainWindow(FluentWindow):
         self.settings_page.settings_saved.connect(self._settings_saved)
         self.anritsu_page.settings_readback_requested.connect(
             self._save_anritsu_readback_defaults
+        )
+        self.keithley_page.settings_assignment_requested.connect(
+            self._save_keithley_readback_defaults
         )
         self.recipe_page.run_requested.connect(self._start_run)
         self.recipe_page.plan_preflight_changed.connect(self.dashboard.update_plan_preflight)
@@ -1436,6 +1441,137 @@ class MainWindow(FluentWindow):
             severity="success",
         )
         self._log("ANRITSU SETTINGS IMPORT SAVED: query-only readback persisted; adapter unchanged")
+
+    def _save_keithley_readback_defaults(self, snapshots: object) -> None:
+        """Validate and atomically persist query-only Keithley form assignments."""
+
+        if not isinstance(snapshots, dict) or set(snapshots) != {"A", "B"}:
+            self.keithley_page.readback_assignment_completed(False)
+            self.keithley_page.banner.show_message(
+                "Keithley settings were not saved: incomplete A/B configuration."
+            )
+            return
+        try:
+            self._access.require(
+                Permission.EDIT_SETTINGS,
+                action="saving Keithley instrument readback to settings.yml",
+            )
+            loaded = self._repository.load()
+            raw = loaded.raw
+            for channel in ("A", "B"):
+                snapshot = snapshots[channel]
+                mode = str(snapshot.source_mode)
+                level_dimension = (
+                    DIMENSION_CURRENT if mode == "current" else DIMENSION_VOLTAGE
+                )
+                compliance_dimension = (
+                    DIMENSION_VOLTAGE if mode == "current" else DIMENSION_CURRENT
+                )
+
+                def manual_range(text: str, dimension: str, autorange: bool) -> float | None:
+                    if autorange:
+                        return None
+                    if text.strip().upper() == "AUTO":
+                        raise ValueError(
+                            f"Channel {channel}: manual range is AUTO while autorange is OFF."
+                        )
+                    return parse_quantity(text, dimension).si_value
+
+                request = KeithleySourceRequest(
+                    channel=channel,
+                    mode=mode,
+                    level_si=(
+                        0.0
+                        if mode == "measure_only"
+                        else parse_quantity(snapshot.source_level, level_dimension).si_value
+                    ),
+                    compliance_si=(
+                        0.0
+                        if mode == "measure_only"
+                        else parse_quantity(
+                            snapshot.compliance, compliance_dimension
+                        ).si_value
+                    ),
+                    nplc=float(str(snapshot.nplc).replace(",", ".")),
+                    settle_time_s=parse_quantity(
+                        snapshot.settling_time, DIMENSION_TIME
+                    ).si_value,
+                    sense_mode=snapshot.sense_mode,
+                    source_autorange=snapshot.source_autorange,
+                    source_range_si=manual_range(
+                        snapshot.source_range,
+                        level_dimension,
+                        snapshot.source_autorange,
+                    ),
+                    measure_voltage_autorange=snapshot.measure_voltage_autorange,
+                    measure_voltage_range_si=manual_range(
+                        snapshot.measure_voltage_range,
+                        DIMENSION_VOLTAGE,
+                        snapshot.measure_voltage_autorange,
+                    ),
+                    measure_current_autorange=snapshot.measure_current_autorange,
+                    measure_current_range_si=manual_range(
+                        snapshot.measure_current_range,
+                        DIMENSION_CURRENT,
+                        snapshot.measure_current_autorange,
+                    ),
+                )
+                validate_keithley_source(
+                    loaded.settings.keithley.safety.channels[channel], request
+                )
+                defaults = raw["devices"]["keithley"]["safety"]["channels"][
+                    channel
+                ]["defaults"]
+                defaults.update(
+                    {
+                        "source_mode": mode,
+                        "sense_mode": snapshot.sense_mode,
+                        "nplc": request.nplc,
+                        "settling_time": snapshot.settling_time,
+                        "source_autorange": snapshot.source_autorange,
+                        "source_range": snapshot.source_range,
+                        "measure_voltage_autorange": snapshot.measure_voltage_autorange,
+                        "measure_voltage_range": snapshot.measure_voltage_range,
+                        "measure_current_autorange": snapshot.measure_current_autorange,
+                        "measure_current_range": snapshot.measure_current_range,
+                    }
+                )
+                if mode == "current":
+                    defaults["source_current"] = snapshot.source_level
+                    defaults["voltage_compliance"] = snapshot.compliance
+                elif mode == "voltage":
+                    defaults["source_voltage"] = snapshot.source_level
+                    defaults["current_compliance"] = snapshot.compliance
+            persisted = self._repository.save_raw(raw)
+        except (
+            AuthorizationError,
+            ConfigurationError,
+            SafetyViolation,
+            KeyError,
+            TypeError,
+            ValueError,
+        ) as exc:
+            self.keithley_page.readback_assignment_completed(False)
+            self.keithley_page.set_settings(self._settings)
+            QMessageBox.critical(self, "Keithley settings not saved", str(exc))
+            self.keithley_page.banner.show_message(
+                f"Keithley readback was not saved: {exc}"
+            )
+            self._log(f"KEITHLEY SETTINGS IMPORT FAILED: {type(exc).__name__}: {exc}")
+            return
+
+        self._settings = simulated_station_settings(persisted) if self._simulation else persisted
+        self.keithley_page.readback_assignment_completed(True)
+        self.settings_page.reload()
+        self.keithley_page.set_settings(self._settings)
+        self.recipe_page.set_settings(self._settings)
+        self._refresh_safety_strip()
+        self.keithley_page.banner.show_message(
+            "Keithley A/B defaults saved to settings.yml. Safety MIN/MAX, OUTPUT state, "
+            "and the live instrument were not changed.",
+            severity="success",
+        )
+        self._log("KEITHLEY SETTINGS IMPORT SAVED: validated A/B defaults persisted")
 
     def _save_discovered_assignments(self, payload: object) -> None:
         self._log(f"VISA ASSIGN RECEIVED: payload={payload!r}")

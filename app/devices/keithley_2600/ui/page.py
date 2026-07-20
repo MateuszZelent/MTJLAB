@@ -793,12 +793,16 @@ class _KeithleyReadbackDialog(StationDialog):
 
     def _assign(self, channel: str, parameter: str) -> None:
         self.assign_requested.emit(channel, parameter)
+        if not getattr(self.parent(), "_last_assignment_succeeded", False):
+            return
         item = self._status_cells[(channel, parameter)]
         item.setText("MATCH")
         item.setForeground(QColor("#168a45"))
 
     def _assign_all(self) -> None:
         self.assign_requested.emit("ALL", "ALL")
+        if not getattr(self.parent(), "_last_assignment_succeeded", False):
+            return
         for (channel, parameter), item in self._status_cells.items():
             if parameter in {"OUTPUT state", "OUTPUT OFF mode"}:
                 continue
@@ -911,6 +915,7 @@ class _KeithleyFloatingPanelWindow(StationDialog):
 class KeithleyPage(QWidget):
     status = Signal(str)
     quick_controls_requested = Signal()
+    settings_assignment_requested = Signal(object)
     _MANUAL_RAMP_ENABLED = False
 
     def __init__(self, controller: DeviceController, settings: StationSettings, parent: QWidget | None = None) -> None:
@@ -940,6 +945,7 @@ class KeithleyPage(QWidget):
         self._panel_float_buttons: dict[str, TransparentToolButton] = {}
         self._floating_panels: dict[str, _KeithleyFloatingPanelWindow] = {}
         self._readback_dialog: _KeithleyReadbackDialog | None = None
+        self._last_assignment_succeeded = False
         self._panel_placeholders: dict[str, CardWidget] = {}
         self._live_timer = QTimer(self)
         self._live_timer.setInterval(1000)
@@ -1161,22 +1167,11 @@ class KeithleyPage(QWidget):
                 self.level.text(), self.compliance.text(), self.source_range.text()
             )
         }
-        initial_snapshot = self._capture_form_snapshot(
-            channel=self._active_channel, mode=self._active_mode
-        )
         self._channel_form_snapshots: dict[str, KeithleyConfigurationSnapshot] = {
-            channel: replace(
-                initial_snapshot,
-                channel=channel,
-                source_mode=str(
-                    self._station_settings.keithley.safety.channels[channel].defaults.get(
-                        "source_mode", initial_snapshot.source_mode
-                    )
-                ),
-            )
+            channel: self._default_form_snapshot(channel)
             for channel in ("A", "B")
         }
-        self._channel_form_snapshots[self._active_channel] = initial_snapshot
+        self._load_form_snapshot(self._channel_form_snapshots[self._active_channel])
         self.channel.currentTextChanged.connect(self._channel_changed)
         self.mode.currentTextChanged.connect(self._mode_changed)
         self.channel.currentTextChanged.connect(self._selected_channel_changed)
@@ -1978,6 +1973,35 @@ class KeithleyPage(QWidget):
             measure_current_range=self.measure_current_range.text().strip(),
         )
 
+    def _default_form_snapshot(self, channel: str) -> KeithleyConfigurationSnapshot:
+        defaults = self._station_settings.keithley.safety.channels[channel].defaults
+        mode = str(defaults.get("source_mode", "measure_only"))
+        source_key = "source_current" if mode == "current" else "source_voltage"
+        compliance_key = (
+            "voltage_compliance" if mode == "current" else "current_compliance"
+        )
+        fallback_level, fallback_compliance, _ = self._default_source_values(channel, mode)
+        sense = str(defaults.get("sense_mode", "2wire")).replace("-", "").lower()
+        return KeithleyConfigurationSnapshot(
+            channel=channel,
+            source_mode=mode,
+            source_level=str(defaults.get(source_key, fallback_level)),
+            compliance=str(defaults.get(compliance_key, fallback_compliance)),
+            nplc=str(defaults.get("nplc", 1)),
+            settling_time=str(defaults.get("settling_time", "100 ms")),
+            sense_mode=sense,
+            source_autorange=bool(defaults.get("source_autorange", True)),
+            source_range=str(defaults.get("source_range", "AUTO")),
+            measure_voltage_autorange=bool(
+                defaults.get("measure_voltage_autorange", True)
+            ),
+            measure_voltage_range=str(defaults.get("measure_voltage_range", "AUTO")),
+            measure_current_autorange=bool(
+                defaults.get("measure_current_autorange", True)
+            ),
+            measure_current_range=str(defaults.get("measure_current_range", "AUTO")),
+        )
+
     def _load_form_snapshot(self, snapshot: KeithleyConfigurationSnapshot) -> None:
         self.mode.blockSignals(True)
         self.mode.setCurrentText(snapshot.source_mode)
@@ -2222,6 +2246,12 @@ class KeithleyPage(QWidget):
     def set_settings(self, settings: StationSettings) -> None:
         self._station_settings = settings
         self.configuration_panel.set_settings(settings)
+        self._channel_form_snapshots = {
+            channel: self._default_form_snapshot(channel) for channel in ("A", "B")
+        }
+        self._load_form_snapshot(
+            self._channel_form_snapshots[self.channel.currentText()]
+        )
         self._refresh_keithley_limits()
         self._update_output_readiness()
         self._update_ramp_defaults(reset_values=True)
@@ -2370,10 +2400,11 @@ class KeithleyPage(QWidget):
         active = self.channel.currentText()
         self._active_channel = active
         self._load_form_snapshot(self._channel_form_snapshots[active])
-        self.banner.show_message(
-            "Device readback assigned to the form. Safety MIN/MAX, OUTPUT state, "
-            "and hardware were not changed; use Apply & verify to send it."
-        )
+        self._last_assignment_succeeded = False
+        self.settings_assignment_requested.emit(dict(self._channel_form_snapshots))
+
+    def readback_assignment_completed(self, succeeded: bool) -> None:
+        self._last_assignment_succeeded = succeeded
 
     def _source_request(self) -> KeithleySourceRequest:
         mode = self.mode.currentText()

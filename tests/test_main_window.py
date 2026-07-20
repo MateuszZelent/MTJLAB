@@ -4,6 +4,7 @@ import os
 import inspect
 import math
 import time
+from dataclasses import replace
 from datetime import datetime, timezone
 from pathlib import Path
 import tempfile
@@ -30,6 +31,7 @@ from app.devices.keithley_2600 import (
     KeithleyChannelConfigurationReadback,
     KeithleyConfigurationReadback,
 )
+from app.devices.keithley_2600.ui.page import KeithleyConfigurationSnapshot
 from app.domain.quantities import DIMENSION_DBM, DIMENSION_FREQUENCY, parse_quantity
 from app.settings.repository import SettingsRepository
 from app.settings.models import StationSettings
@@ -2535,6 +2537,7 @@ class MainWindowTests(unittest.TestCase):
             self.assertIsNotNone(dialog.table.cellWidget(2, 3))
             self.assertIsNotNone(dialog.table.cellWidget(2, 6))
 
+            keithley.settings_assignment_requested.disconnect()
             dialog.assign_requested.emit("ALL", "ALL")
             self.assertEqual(keithley.mode.currentText(), "voltage")
             self.assertEqual(keithley.level.text(), "10 mV")
@@ -2569,6 +2572,94 @@ class MainWindowTests(unittest.TestCase):
         finally:
             window.close()
             self.application.processEvents()
+
+    def test_keithley_assigned_readback_defaults_survive_restart(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            path = Path(temporary) / "settings.yml"
+            write_engineer_settings(path)
+            repository = SettingsRepository(path)
+            raw = repository.load().raw
+            raw["devices"]["keithley"]["safety"]["channels"]["A"]["enabled"] = True
+            repository.save_raw(raw)
+            window = MainWindow(
+                path, simulation=False, authenticated_username=TEST_ENGINEER
+            )
+            try:
+                snapshots = {
+                    "A": KeithleyConfigurationSnapshot(
+                        channel="A",
+                        source_mode="current",
+                        source_level="500 uA",
+                        compliance="50 mV",
+                        nplc="0.5",
+                        settling_time="100 ms",
+                        sense_mode="4wire",
+                        source_autorange=True,
+                        source_range="AUTO",
+                        measure_voltage_autorange=True,
+                        measure_voltage_range="AUTO",
+                        measure_current_autorange=False,
+                        measure_current_range="1 mA",
+                    ),
+                    "B": KeithleyConfigurationSnapshot(
+                        channel="B",
+                        source_mode="current",
+                        source_level="2 mA",
+                        compliance="60 mV",
+                        nplc="2",
+                        settling_time="200 ms",
+                        sense_mode="2wire",
+                        source_autorange=False,
+                        source_range="10 mA",
+                        measure_voltage_autorange=False,
+                        measure_voltage_range="70 mV",
+                        measure_current_autorange=True,
+                        measure_current_range="AUTO",
+                    ),
+                }
+                with patch.object(QMessageBox, "critical", return_value=None) as error:
+                    window._save_keithley_readback_defaults(snapshots)
+                self.assertFalse(error.called, window.keithley_page.banner.label.text())
+                saved = SettingsRepository(path).load().raw["devices"]["keithley"][
+                    "safety"
+                ]["channels"]
+                self.assertEqual(saved["A"]["defaults"]["source_current"], "500 uA")
+                self.assertEqual(saved["A"]["defaults"]["sense_mode"], "4wire")
+                self.assertEqual(saved["B"]["defaults"]["source_current"], "2 mA")
+                self.assertEqual(saved["B"]["defaults"]["source_range"], "10 mA")
+                before_invalid_save = path.read_text(encoding="utf-8")
+                invalid = dict(snapshots)
+                invalid["B"] = replace(snapshots["B"], compliance="670 mV")
+                with patch.object(QMessageBox, "critical", return_value=None) as error:
+                    window._save_keithley_readback_defaults(invalid)
+                self.assertTrue(error.called)
+                self.assertIn(
+                    "outside", window.keithley_page.banner.label.text().lower()
+                )
+                self.assertEqual(path.read_text(encoding="utf-8"), before_invalid_save)
+            finally:
+                window.close()
+                self.application.processEvents()
+
+            restarted = MainWindow(
+                path, simulation=False, authenticated_username=TEST_ENGINEER
+            )
+            try:
+                keithley = restarted.keithley_page
+                self.assertEqual(keithley.channel.currentText(), "B")
+                self.assertEqual(keithley.level.text(), "2 mA")
+                self.assertEqual(keithley.compliance.text(), "60 mV")
+                self.assertEqual(keithley.nplc.text(), "2")
+                self.assertFalse(keithley.source_autorange.isChecked())
+                self.assertEqual(keithley.source_range.text(), "10 mA")
+                keithley.channel.setCurrentText("A")
+                self.assertEqual(keithley.level.text(), "500 uA")
+                self.assertEqual(keithley.sense_mode.currentText(), "4wire")
+                self.assertFalse(keithley.measure_current_autorange.isChecked())
+                self.assertEqual(keithley.measure_current_range.text(), "1 mA")
+            finally:
+                restarted.close()
+                self.application.processEvents()
 
     def test_anritsu_spectrogram_reuses_completed_frames_and_processes_reference_locally(self) -> None:
         window = MainWindow(".config/settings.yml", simulation=True)
