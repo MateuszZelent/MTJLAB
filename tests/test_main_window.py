@@ -1618,7 +1618,8 @@ class MainWindowTests(unittest.TestCase):
                 keithley.source_autorange, keithley.source_range,
                 keithley.measure_voltage_autorange, keithley.measure_voltage_range,
                 keithley.measure_current_autorange, keithley.measure_current_range,
-                keithley.live_measurements, keithley.device_led, keithley.device_state,
+                keithley.live_channel_a, keithley.live_channel_b,
+                keithley.live_interval, keithley.live_timing,
             )
             self.assertTrue(all(widget.toolTip() for widget in controls))
             for card in keithley.channel_cards.values():
@@ -1660,10 +1661,91 @@ class MainWindowTests(unittest.TestCase):
             self.assertEqual(
                 keithley.history_widgets["B"]["plot"].trace_point_count("CH B Resistance"), 1
             )
+            self.assertEqual(
+                keithley.history_widgets["A"]["plot"]
+                ._curves["CH A Resistance"]
+                .opts["symbol"],
+                "o",
+            )
+            self.assertIn("updated", keithley.last_update_labels["A"].text())
+            self.assertIn("updated", keithley.last_update_labels["B"].text())
 
             keithley._clear_keithley_history("A")
             self.assertEqual(keithley._measurement_history["A"], [])
             self.assertEqual(len(keithley._measurement_history["B"]), 1)
+        finally:
+            window.close()
+            self.application.processEvents()
+
+    def test_keithley_live_selects_channels_independently_and_shows_effective_timing(self) -> None:
+        window = MainWindow(".config/settings.yml", simulation=True)
+        try:
+            keithley = window.keithley_page
+            keithley._controller.call = Mock()
+            keithley._device_state_changed("verified")
+            keithley.live_interval.setValue(500)
+
+            keithley.live_channel_a.setChecked(True)
+            self.assertTrue(keithley._live_timer.isActive())
+            self.assertEqual(
+                keithley._controller.call.call_args.args,
+                ("measure", "A"),
+            )
+            self.assertIn("A • each", keithley.live_timing.text())
+            self.assertIn("500 ms", keithley.live_timing.text())
+
+            keithley._measure_pending = False
+            keithley.live_channel_b.setChecked(True)
+            self.assertIn("A + B", keithley.live_timing.text())
+            self.assertIn("1 s", keithley.live_timing.text())
+            keithley._request_live_measurement()
+            self.assertEqual(
+                keithley._controller.call.call_args.args,
+                ("measure", "A"),
+            )
+            keithley._measure_pending = False
+            keithley._request_live_measurement()
+            self.assertEqual(
+                keithley._controller.call.call_args.args,
+                ("measure", "B"),
+            )
+
+            keithley.live_channel_a.setChecked(False)
+            keithley._measure_pending = False
+            keithley._request_live_measurement()
+            self.assertEqual(
+                keithley._controller.call.call_args.args,
+                ("measure", "B"),
+            )
+            self.assertTrue(keithley.live_channel_b.isChecked())
+            self.assertFalse(keithley.live_channel_a.isChecked())
+        finally:
+            window.keithley_page._live_timer.stop()
+            window.close()
+            self.application.processEvents()
+
+    def test_keithley_output_block_explains_unapproved_profile_without_dispatch(self) -> None:
+        window = MainWindow(".config/settings.yml", simulation=True)
+        try:
+            keithley = window.keithley_page
+            keithley._controller.call = Mock()
+            profile = keithley._station_settings.profile.model_copy(
+                update={"state": "unverified"}
+            )
+            keithley._station_settings = keithley._station_settings.model_copy(
+                update={"profile": profile}
+            )
+            keithley._device_state_changed("verified")
+            button = keithley.channel_cards["B"]["output_on_action"]
+
+            self.assertTrue(button.isEnabled())
+            self.assertIn("profile approved", keithley.output_readiness.text())
+            self.assertIn("approve the station profile", keithley.output_guidance.text())
+            button.click()
+
+            keithley._controller.call.assert_not_called()
+            self.assertIn("OUTPUT cannot be enabled", keithley.banner.label.text())
+            self.assertEqual(button.text(), "OUTPUT ON")
         finally:
             window.close()
             self.application.processEvents()
@@ -1709,6 +1791,30 @@ class MainWindowTests(unittest.TestCase):
             self.assertTrue(keithley.history_widgets["B"]["plot"].isVisible())
             self.assertTrue(keithley.level.isVisible())
             self.assertTrue(keithley.compliance.isVisible())
+            self.assertIs(keithley.live_channel_a.parentWidget(), keithley.hero_card)
+            self.assertIs(keithley.live_channel_b.parentWidget(), keithley.hero_card)
+            self.assertIs(keithley.live_interval.parentWidget(), keithley.hero_card)
+            page_layout = keithley.layout()
+            self.assertLess(
+                page_layout.indexOf(keithley.hero_card),
+                page_layout.indexOf(window.connection_panels["keithley"]),
+            )
+
+            window.resize(1050, 800)
+            self.application.processEvents()
+            self.assertEqual(
+                keithley.workspace_splitter.orientation(),
+                Qt.Orientation.Vertical,
+            )
+            self.assertGreater(keithley.level_field.width(), 480)
+            self.assertLess(
+                keithley.level_field.editor.geometry().right(),
+                keithley.level_field.minimum.geometry().left(),
+            )
+            self.assertLess(
+                keithley.level_field.minimum.geometry().right(),
+                keithley.level_field.maximum.geometry().left(),
+            )
         finally:
             window.close()
             self.application.processEvents()

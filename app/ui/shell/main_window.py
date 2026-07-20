@@ -237,7 +237,11 @@ class MainWindow(FluentWindow):
                     "Open one TCP session, validate the documented VOUT response, then disconnect. "
                     "No gain or VOUT-setting command is sent."
                 )
-            page.layout().insertWidget(0, panel)
+            # Keithley keeps its compact device title/live controls as the
+            # page anchor; the single authoritative connection surface sits
+            # immediately below it. Other device pages retain their current
+            # connection-first composition.
+            page.layout().insertWidget(2 if key == "keithley" else 0, panel)
             self.connection_panels[key] = panel
         self.recipe_page = RecipePage(
             self._settings,

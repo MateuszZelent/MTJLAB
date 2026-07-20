@@ -3,25 +3,5 @@ name: Untitled sweep
 root:
   id: sequence-main
   type: sequence
-  children:
-  - id: keithley-c31309b4
-    type: sequence
-    text: Keithley 2600 — configuration required
-    device_module: keithley
-    label: Keithley 2600
-    configuration_required: true
-    children:
-    - id: comment-a36887df
-      type: comment
-      text: Drop nested devices or flow actions here
-    - id: rigol-3bf231eb
-      type: sequence
-      text: Rigol DG1032Z — configuration required
-      device_module: rigol
-      label: Rigol DG1032Z
-      configuration_required: true
-      children:
-      - id: comment-5017ae2f
-        type: comment
-        text: Drop nested devices or flow actions here
+  children: []
 finally: []

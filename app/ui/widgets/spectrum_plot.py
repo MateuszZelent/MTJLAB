@@ -158,6 +158,7 @@ class SpectrumPlotWidget(QWidget):
         color: str | None = None,
         visible: bool = True,
         primary: bool = False,
+        show_points: bool = False,
     ) -> None:
         caller_supplied_color = color is not None
         token_owned_primary = not caller_supplied_color and primary
@@ -183,6 +184,11 @@ class SpectrumPlotWidget(QWidget):
         elif caller_supplied_color:
             self._token_owned_primary_curves.discard(name)
         curve.setData(x_values, y_values)
+        curve.setSymbol("o" if show_points else None)
+        if show_points:
+            curve.setSymbolSize(6)
+            curve.setSymbolPen(pg.mkPen(color, width=1))
+            curve.setSymbolBrush(pg.mkBrush(color))
         curve.setVisible(visible)
         if primary or self._hold_source is None:
             self._hold_source = name

@@ -236,7 +236,7 @@ class InstrumentWorker(QObject):
 
 
 class DeviceController(QObject):
-    """Thread-safe faÃ§ade used by pages in the main window."""
+    """Thread-safe façade used by pages in the main window."""
 
     request = Signal(str, object)
     result = Signal(str, object)

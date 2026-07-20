@@ -55,6 +55,24 @@ class SpectrumPlotTests(unittest.TestCase):
         finally:
             plot.close()
 
+    def test_trace_can_render_a_visible_symbol_for_a_single_live_point(self) -> None:
+        plot = SpectrumPlotWidget()
+        try:
+            plot.set_trace(
+                "Live",
+                [0.5],
+                [12.0],
+                color="#00a67d",
+                primary=True,
+                show_points=True,
+            )
+            curve = plot._curves["Live"]
+            self.assertEqual(curve.opts["symbol"], "o")
+            self.assertEqual(curve.opts["symbolSize"], 6)
+            self.assertEqual(curve.opts["symbolBrush"].color().name(), "#00a67d")
+        finally:
+            plot.close()
+
     def test_apply_theme_uses_design_system_plot_palette(self) -> None:
         widget = SpectrumPlotWidget()
         try:

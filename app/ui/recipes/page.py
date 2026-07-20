@@ -687,14 +687,14 @@ class RecipePage(QWidget):
 
         safety = group("Safe shutdown", "5")
         action(
-            safety, "Keithley A â†’ 0 + OFF",
+            safety, "Keithley A → 0 + OFF",
             "Add an unconditional channel A ramp and OUTPUT OFF to Finally", "keithley",
             QStyle.StandardPixmap.SP_MediaStop,
             lambda: self._library_add_keithley_shutdown("A"),
             drag_kind="safety:keithley_a",
         )
         action(
-            safety, "Keithley B â†’ 0 + OFF",
+            safety, "Keithley B → 0 + OFF",
             "Add an unconditional channel B ramp and OUTPUT OFF to Finally", "keithley",
             QStyle.StandardPixmap.SP_MediaStop,
             lambda: self._library_add_keithley_shutdown("B"),

@@ -432,8 +432,8 @@ finally: []
                     "Measure Lake Shore field",
                     "Acquire reference",
                     "Acquire spectrum once",
-                    "Keithley A â†’ 0 + OFF",
-                    "Keithley B â†’ 0 + OFF",
+                    "Keithley A → 0 + OFF",
+                    "Keithley B → 0 + OFF",
                     "Rigol CH1 OFF",
                     "Rigol CH2 OFF",
                     "Anritsu SG OFF",
@@ -447,6 +447,8 @@ finally: []
             )
             self.assertNotIn("Sweep current", labels)
             self.assertNotIn("Set fixed voltage", labels)
+            for broken_marker in ("Â", "â", "Ã", "�"):
+                self.assertNotIn(broken_marker, "\n".join(labels))
             self.assertEqual(page.tree.headerItem().text(0), "Measurement sequence")
         finally:
             page.close()
@@ -2111,7 +2113,7 @@ finally: []
                 ],
             )
             labels = {button.text() for button in page._library_action_buttons}
-            self.assertIn("Keithley A ramp to zero + OFF", labels)
+            self.assertIn("Keithley A → 0 + OFF", labels)
             self.assertIn("Rigol CH2 OUTPUT OFF", labels)
             self.assertIn("Anritsu SG RF OFF", labels)
         finally:

@@ -684,11 +684,13 @@ class KeithleyPage(QWidget):
         self._pending_output_signature: tuple[object, ...] | None = None
         self._measure_pending = False
         self._ramp_pending = False
+        self._device_state_value = "DISCONNECTED"
         self._live_next_channel = "A"
         self._history_started_at = time.monotonic()
         self._history_window_s = 30.0
         self._measurement_history: dict[str, list[dict[str, float]]] = {"A": [], "B": []}
         self.history_widgets: dict[str, dict[str, object]] = {}
+        self.last_update_labels: dict[str, CaptionLabel] = {}
         self._panel_slots: dict[str, QWidget] = {}
         self._panel_titles: dict[str, str] = {}
         self._panel_widgets: dict[str, QWidget] = {}
@@ -718,31 +720,38 @@ class KeithleyPage(QWidget):
         self.quick_controls_button = PushButton("Quick controls...", self.hero_card)
         self.quick_controls_button.clicked.connect(self.quick_controls_requested)
         hero_layout.addWidget(self.quick_controls_button)
-        self.live_measurements = CheckBox("Live A/B", self)
-        self.live_measurements.setToolTip(
-            "Alternately measures channels A and B. This never enables an output."
-        )
-        self.live_interval = SpinBox(self)
+        live_title = StrongBodyLabel("Live", hero)
+        live_title.setObjectName("sectionTitle")
+        self.live_channel_a = CheckBox("A", hero)
+        self.live_channel_b = CheckBox("B", hero)
+        for channel, checkbox in (
+            ("A", self.live_channel_a),
+            ("B", self.live_channel_b),
+        ):
+            checkbox.setToolTip(
+                f"Continuously measure channel {channel}. This is read-only and never "
+                "enables an output."
+            )
+        interval_label = BodyLabel("Interval", hero)
+        self.live_interval = SpinBox(hero)
         self.live_interval.setRange(100, 60_000)
+        self.live_interval.setSingleStep(100)
         self.live_interval.setValue(1000)
         self.live_interval.setSuffix(" ms")
-        self.live_interval.setFixedWidth(108)
+        self.live_interval.setFixedWidth(132)
         self.live_interval.setToolTip(
-            "Interval between alternating A/B measurements. Each channel is sampled every "
-            "approximately two intervals when both are enabled."
+            "Time between measurement requests. When A and B are selected they are "
+            "measured alternately, so each channel updates about every two intervals."
         )
-        self.last_update = BodyLabel("No measurements yet")
-        self.last_update.setObjectName("keithleyLastUpdate")
-        self.last_update.setMinimumWidth(150)
-        hero_layout.addWidget(self.live_measurements)
+        self.live_timing = CaptionLabel(hero)
+        self.live_timing.setObjectName("keithleyLiveTiming")
+        self.live_timing.setMinimumWidth(118)
+        hero_layout.addWidget(live_title)
+        hero_layout.addWidget(self.live_channel_a)
+        hero_layout.addWidget(self.live_channel_b)
+        hero_layout.addWidget(interval_label)
         hero_layout.addWidget(self.live_interval)
-        hero_layout.addWidget(self.last_update)
-        self.device_led = BodyLabel("●")
-        self.device_led.setObjectName("keithleyLed")
-        self.device_state = StrongBodyLabel("DISCONNECTED")
-        self.device_state.setObjectName("keithleyState")
-        hero_layout.addWidget(self.device_led)
-        hero_layout.addWidget(self.device_state)
+        hero_layout.addWidget(self.live_timing)
         hero.setMaximumHeight(60)
         layout.addWidget(hero)
         channel_grid = QGridLayout()
@@ -797,6 +806,10 @@ class KeithleyPage(QWidget):
             "OUTPUT interlock status. All checks must pass before a channel can be enabled."
         )
         workflow_layout.addWidget(self.output_readiness)
+        self.output_guidance = CaptionLabel(workflow)
+        self.output_guidance.setObjectName("muted")
+        self.output_guidance.setWordWrap(True)
+        workflow_layout.addWidget(self.output_guidance)
         source_layout.addWidget(workflow)
         ramp_panel = CardWidget()
         ramp_panel.setObjectName("keithleyRampPanel")
@@ -844,8 +857,13 @@ class KeithleyPage(QWidget):
         self.readout.hide()
         source_layout.addStretch(1)
         source_scroll = self._scroll_widget(source_tab)
+        source_tab.setSizePolicy(
+            QSizePolicy.Policy.Expanding,
+            QSizePolicy.Policy.Preferred,
+        )
+        self.source_scroll = source_scroll
         source_scroll.setObjectName("keithleyControlPanel")
-        source_scroll.setMinimumWidth(0)
+        source_scroll.setMinimumWidth(640)
         history_tab = QWidget()
         self.history_layout = QHBoxLayout(history_tab)
         self.history_layout.setContentsMargins(6, 0, 0, 0)
@@ -864,7 +882,7 @@ class KeithleyPage(QWidget):
         self.workspace_splitter.addWidget(history_tab)
         self.workspace_splitter.setStretchFactor(0, 3)
         self.workspace_splitter.setStretchFactor(1, 5)
-        self.workspace_splitter.setSizes([680, 1140])
+        self.workspace_splitter.setSizes([760, 1040])
         self.workspace_splitter.setChildrenCollapsible(False)
         self._workspace_compact: bool | None = None
         layout.addWidget(self.workspace_splitter, 1)
@@ -872,8 +890,9 @@ class KeithleyPage(QWidget):
         self.output_toggle.toggled.connect(self._output_toggled)
         self.ramp_preview_button.clicked.connect(self._preview_manual_ramp)
         self.ramp_execute_button.clicked.connect(self._execute_manual_ramp)
-        self.live_measurements.toggled.connect(self._toggle_live_measurements)
-        self.live_interval.valueChanged.connect(self._live_timer.setInterval)
+        self.live_channel_a.toggled.connect(self._live_selection_changed)
+        self.live_channel_b.toggled.connect(self._live_selection_changed)
+        self.live_interval.valueChanged.connect(self._live_interval_changed)
         controller.result.connect(self._result)
         controller.error.connect(self._error)
         controller.state_changed.connect(self._device_state_changed)
@@ -891,6 +910,7 @@ class KeithleyPage(QWidget):
         self._update_source_mode_ui()
         self._update_output_readiness()
         self._update_ramp_defaults()
+        self._update_live_controls()
         self._install_keithley_help(
             measure=measure,
             output_toggle=self.output_toggle,
@@ -911,10 +931,11 @@ class KeithleyPage(QWidget):
 
     def resizeEvent(self, event: QResizeEvent) -> None:
         super().resizeEvent(event)
-        compact = event.size().width() < 900
+        compact = event.size().width() < 1360
         if self._workspace_compact == compact:
             return
         self._workspace_compact = compact
+        self.source_scroll.setMinimumWidth(0 if compact else 640)
         self.workspace_splitter.setOrientation(
             Qt.Orientation.Vertical if compact else Qt.Orientation.Horizontal
         )
@@ -924,7 +945,7 @@ class KeithleyPage(QWidget):
             else QBoxLayout.Direction.LeftToRight
         )
         self.workspace_splitter.setSizes(
-            [900, 760] if compact else [680, 1140]
+            [900, 760] if compact else [760, 1040]
         )
 
     def _register_detachable_panel(
@@ -1030,6 +1051,9 @@ class KeithleyPage(QWidget):
         header = QHBoxLayout()
         title = StrongBodyLabel(f"CHANNEL {channel} — rolling 30 s history")
         title.setObjectName("keithleyHistoryTitle")
+        last_update = CaptionLabel("No measurements yet", panel)
+        last_update.setObjectName("keithleyLastUpdate")
+        self.last_update_labels[channel] = last_update
         metric = ComboBox()
         metric.addItem("DC resistance |V/I|", userData=("resistance", "Resistance", "Ω"))
         metric.addItem("Voltage", userData=("voltage", "Voltage", "V"))
@@ -1040,6 +1064,7 @@ class KeithleyPage(QWidget):
         metric.setFixedHeight(28)
         clear.setFixedHeight(28)
         header.addWidget(title)
+        header.addWidget(last_update)
         header.addStretch(1)
         header.addWidget(metric)
         header.addWidget(clear)
@@ -1079,10 +1104,12 @@ class KeithleyPage(QWidget):
             [point[key] for point in history],
             color="#00a67d" if channel == "A" else "#2196f3",
             primary=True,
+            show_points=True,
         )
 
     def _clear_keithley_history(self, channel: str) -> None:
         self._measurement_history[channel].clear()
+        self.last_update_labels[channel].setText("No measurements yet")
         plot = self.history_widgets[channel]["plot"]
         if isinstance(plot, SpectrumPlotWidget):
             plot.clear()
@@ -1205,9 +1232,10 @@ class KeithleyPage(QWidget):
             self.measure_current_range: ("Current measurement range", "Fixed current measurement range used only when current autorange is disabled. It is not Current compliance."),
             measure: ("Measure selected channel", "Reads voltage and current from the selected SMU channel. Power and resistance shown in the cards are calculated from those I/V readings."),
             output_toggle: ("OUTPUT ON/OFF", "ON validates and confirms the visible source settings, configures the channel with OUTPUT OFF, performs the internal safety unlock and then energizes the terminals. OFF immediately starts the safe ramp-to-zero and disables the output."),
-            self.live_measurements: ("Live readout", "Alternately requests I/V readings from enabled channels every second. It never enables an output, but it does generate continuous instrument traffic."),
-            self.device_led: ("Keithley connection state", "Grey means disconnected, green verified/output-safe, amber energized and red indicates compliance, fault or unknown state."),
-            self.device_state: ("Device state", "Connection and safety state reported by the Keithley adapter. This is separate from the individual A/B output indicators."),
+            self.live_channel_a: ("Live channel A", "Continuously requests I/V readings from channel A. It never enables an output, but it does generate instrument traffic."),
+            self.live_channel_b: ("Live channel B", "Continuously requests I/V readings from channel B. It never enables an output, but it does generate instrument traffic."),
+            self.live_interval: ("Live request interval", "Time between read requests. With both channels selected, A and B alternate, so each channel updates approximately every two request intervals."),
+            self.live_timing: ("Effective live timing", "Shows both the request interval and the effective update period for each selected channel."),
             self.ramp_target: ("Ramp target", "Final Current or Voltage source level. It is validated against the channel laboratory limits and active DUT envelope before any command is sent."),
             self.ramp_step: ("Maximum ramp step", "Largest allowed change between adjacent source points. The adapter rejects values above the approved ramp_current_step_max or ramp_voltage_step_max."),
             self.ramp_settle: ("Ramp dwell", "Time allowed after every source step before the atomic I/V safety measurement."),
@@ -1248,41 +1276,78 @@ class KeithleyPage(QWidget):
         self._style_output_toggle(self._output_states[selected])
         self._update_output_readiness()
 
-    def _output_prerequisites(self) -> tuple[bool, list[str]]:
-        channel = self.channel.currentText()
+    def _device_is_output_ready(self) -> bool:
+        return self._device_state_value in {"VERIFIED", "OUTPUT OFF", "OUTPUT ON"}
+
+    def _output_prerequisites(
+        self, channel: str | None = None
+    ) -> tuple[bool, list[str]]:
+        channel = channel or self.channel.currentText()
         safety = self._station_settings.keithley.safety
         checks = [
             (not self._station_settings.outputs_locked, "profile approved"),
             (safety.allow_output_enable, "Keithley output permission enabled"),
             (safety.channels[channel].enabled, f"channel {channel} enabled"),
-            (self.device_state.text() != "DISCONNECTED", "device connected"),
+            (self._device_is_output_ready(), "device connected and verified"),
         ]
         return all(value for value, _label in checks), [
             f"{'✓' if value else '✕'} {label}" for value, label in checks
         ]
 
+    def _output_readiness_guidance(self, channel: str) -> str:
+        steps: list[str] = []
+        if not self._station_settings.keithley.connection.resource:
+            steps.append(
+                "configure and save the Keithley VISA resource in Discovery or Settings"
+            )
+        if self._station_settings.outputs_locked:
+            steps.append(
+                "approve the station profile in Settings with an engineer/service account"
+            )
+        if not self._device_is_output_ready():
+            steps.append(
+                "use Instrument connection at the top of this page and click Connect"
+            )
+        if not self._station_settings.keithley.safety.channels[channel].enabled:
+            steps.append(f"enable channel {channel} in the approved station profile")
+        if not self._station_settings.keithley.safety.allow_output_enable:
+            steps.append("enable Keithley output permission in the station profile")
+        if steps:
+            return "To enable OUTPUT: " + "; then ".join(steps) + "."
+        return (
+            "Ready. OUTPUT ON will configure with terminals OFF, arm the selected "
+            "channel, enable it once, and verify the instrument readback."
+        )
+
     def _update_output_readiness(self) -> None:
         if not hasattr(self, "output_readiness"):
             return
-        ready, checks = self._output_prerequisites()
+        selected_channel = self.channel.currentText()
+        ready, checks = self._output_prerequisites(selected_channel)
         self.output_readiness.setText("Output readiness: " + " • ".join(checks))
-        self.output_toggle.setEnabled(ready or self._output_states[self.channel.currentText()])
-        safety = self._station_settings.keithley.safety
-        common_ready = (
-            not self._station_settings.outputs_locked
-            and safety.allow_output_enable
-            and self.device_state.text() != "DISCONNECTED"
+        self.output_guidance.setText(
+            self._output_readiness_guidance(selected_channel)
         )
+        self.output_toggle.setEnabled(ready or self._output_states[self.channel.currentText()])
         for channel, card in self.channel_cards.items():
             pending_enable = (
                 self._auto_enable_channel == channel
                 or channel in self._pending_channels.values()
             )
+            channel_ready, channel_checks = self._output_prerequisites(channel)
+            missing = "; ".join(
+                item for item in channel_checks if item.startswith("✕")
+            )
             card["output_on_action"].setEnabled(
                 not self._output_states[channel]
                 and not pending_enable
-                and common_ready
-                and safety.channels[channel].enabled
+            )
+            card["output_on_action"].setToolTip(
+                (
+                    "Ready: configure OFF → arm → enable with readback."
+                    if channel_ready
+                    else "OUTPUT remains blocked: " + missing
+                )
             )
             # De-energising is never gated by ARM, profile approval, RBAC or
             # audit health. An uncertain state still warrants a best-effort OFF.
@@ -1297,22 +1362,11 @@ class KeithleyPage(QWidget):
 
     def _device_state_changed(self, state: str) -> None:
         normalized = state.upper()
-        self.device_state.setText(normalized.replace("_", " "))
-        semantic_state = {
-            "VERIFIED": "verified",
-            "OUTPUT_OFF": "verified",
-            "OUTPUT_ON": "active",
-            "COMPLIANCE": "compliance",
-            "FAULT": "fault",
-            "UNKNOWN": "fault",
-        }.get(normalized, "neutral")
-        for widget in (self.device_led, self.device_state):
-            widget.setProperty("deviceState", semantic_state)
-            widget.style().unpolish(widget)
-            widget.style().polish(widget)
+        self._device_state_value = normalized.replace("_", " ")
         if normalized == "DISCONNECTED":
             self._live_timer.stop()
-            self.live_measurements.setChecked(False)
+            for checkbox in (self.live_channel_a, self.live_channel_b):
+                checkbox.setChecked(False)
             self._configured_channels.clear()
             self._armed_until_ui = 0.0
             self._arm_timer.stop()
@@ -1328,6 +1382,7 @@ class KeithleyPage(QWidget):
             # Connection qualification explicitly forces and verifies both outputs OFF.
             self._set_channel_output("A", False)
             self._set_channel_output("B", False)
+        self._update_live_controls()
         self._update_output_readiness()
 
     @staticmethod
@@ -1374,8 +1429,9 @@ class KeithleyPage(QWidget):
         if len(history) > 2000:
             del history[: len(history) - 2000]
         self._refresh_keithley_history_plot(channel)
-        self.last_update.setText(
-            f"CH {channel}  •  {elapsed:.1f} s  •  {len(history)} pts"
+        self.last_update_labels[channel].setText(
+            f"{channel}: updated {time.strftime('%H:%M:%S')} • "
+            f"t={elapsed:.1f} s • {len(history)} pts"
         )
 
     def _set_channel_output(self, channel: str, enabled: bool) -> None:
@@ -1425,29 +1481,110 @@ class KeithleyPage(QWidget):
         self.output_toggle.setEnabled(False)
         self._controller.call("ramp_to_zero", channel)
 
-    def _toggle_live_measurements(self, enabled: bool) -> None:
-        if enabled:
-            self._live_timer.setInterval(self.live_interval.value())
+    def _selected_live_channels(self) -> list[str]:
+        return [
+            channel
+            for channel, checkbox in (
+                ("A", self.live_channel_a),
+                ("B", self.live_channel_b),
+            )
+            if checkbox.isChecked()
+            and self._station_settings.keithley.safety.channels[channel].enabled
+        ]
+
+    def _live_interval_changed(self, interval_ms: int) -> None:
+        self._live_timer.setInterval(interval_ms)
+        self._update_live_timing()
+
+    def _live_selection_changed(self, _enabled: bool) -> None:
+        selected = self._selected_live_channels()
+        self._update_live_timing()
+        if not selected:
+            self._live_timer.stop()
+            return
+        if not self._device_is_output_ready():
+            self._live_timer.stop()
+            self.banner.show_message(
+                "Live measurement requires a connected and verified Keithley. "
+                "Use Instrument connection at the top of this page.",
+                timeout_ms=12_000,
+            )
+            return
+        if self._live_next_channel not in selected:
+            self._live_next_channel = selected[0]
+        self._live_timer.setInterval(self.live_interval.value())
+        if not self._live_timer.isActive():
             self._request_live_measurement()
             self._live_timer.start()
-        else:
-            self._live_timer.stop()
+
+    def _update_live_controls(self) -> None:
+        connected = self._device_is_output_ready()
+        for channel, checkbox in (
+            ("A", self.live_channel_a),
+            ("B", self.live_channel_b),
+        ):
+            channel_enabled = (
+                self._station_settings.keithley.safety.channels[channel].enabled
+            )
+            checkbox.setEnabled(connected and channel_enabled)
+            if not channel_enabled and checkbox.isChecked():
+                checkbox.setChecked(False)
+            if not connected:
+                checkbox.setToolTip(
+                    f"Connect and verify Keithley before starting Live channel {channel}."
+                )
+            elif not channel_enabled:
+                checkbox.setToolTip(
+                    f"Channel {channel} is disabled in the station profile."
+                )
+            else:
+                checkbox.setToolTip(
+                    f"Continuously measure channel {channel}. This is read-only and "
+                    "never enables an output."
+                )
+        self.live_interval.setEnabled(connected)
+        self._update_live_timing()
+
+    def _update_live_timing(self) -> None:
+        interval_s = self.live_interval.value() / 1000.0
+        interval_text = format_quantity_auto(
+            interval_s, DIMENSION_TIME, precision=4
+        )
+        selected = self._selected_live_channels()
+        if not selected:
+            self.live_timing.setText(f"Stopped • {interval_text}")
+            self.live_timing.setToolTip(
+                f"Live measurement is stopped. Request interval: {interval_text}."
+            )
+            return
+        channels = " + ".join(selected)
+        effective_s = interval_s * len(selected)
+        effective_text = format_quantity_auto(
+            effective_s, DIMENSION_TIME, precision=4
+        )
+        self.live_timing.setText(
+            f"{channels} • each ≈ {effective_text}"
+        )
+        self.live_timing.setToolTip(
+            f"Live {channels}: one request every {interval_text}; "
+            f"each selected channel updates approximately every {effective_text}."
+        )
 
     def _request_live_measurement(self) -> None:
         if self._measure_pending or self._ramp_pending:
             return
-        enabled = [
-            channel
-            for channel in ("A", "B")
-            if self._station_settings.keithley.safety.channels[channel].enabled
-        ]
-        if not enabled:
-            self.live_measurements.setChecked(False)
-            self.status.emit("Keithley live readout stopped: no enabled channels")
+        selected = self._selected_live_channels()
+        if not selected:
+            self._live_timer.stop()
+            self.status.emit("Keithley live readout stopped: no selected channels")
             return
-        channel = self._live_next_channel if self._live_next_channel in enabled else enabled[0]
-        next_index = (enabled.index(channel) + 1) % len(enabled)
-        self._live_next_channel = enabled[next_index]
+        channel = (
+            self._live_next_channel
+            if self._live_next_channel in selected
+            else selected[0]
+        )
+        next_index = (selected.index(channel) + 1) % len(selected)
+        self._live_next_channel = selected[next_index]
         self.request_measurement(channel)
 
     def _remember_source_values(self) -> None:
