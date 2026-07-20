@@ -2539,7 +2539,16 @@ class MainWindowTests(unittest.TestCase):
             self.assertIsNotNone(dialog.table.cellWidget(2, 6))
 
             keithley.settings_assignment_requested.disconnect()
+            dialog.assign_requested.emit("A", "Source autorange")
+            keithley.channel.setCurrentText("A")
+            self.assertEqual(keithley.mode.currentText(), "current")
+            self.assertEqual(keithley.level.text(), "500 uA")
+            self.assertEqual(keithley.compliance.text(), "50 mV")
+            self.assertTrue(keithley.source_autorange.isChecked())
+            self.assertEqual(keithley.source_range.text(), "AUTO")
+
             dialog.assign_requested.emit("ALL", "ALL")
+            keithley.channel.setCurrentText("B")
             self.assertEqual(keithley.mode.currentText(), "voltage")
             self.assertEqual(keithley.level.text(), "10 mV")
             self.assertEqual(keithley.compliance.text(), "1 mA")

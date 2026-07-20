@@ -797,9 +797,18 @@ class _KeithleyReadbackDialog(StationDialog):
         self.assign_requested.emit(channel, parameter)
         if not getattr(self.parent(), "_last_assignment_succeeded", False):
             return
-        item = self._status_cells[(channel, parameter)]
-        item.setText("MATCH")
-        item.setForeground(QColor("#168a45"))
+        source_group = {
+            "Source mode",
+            "Source level",
+            "Compliance limit",
+            "Source autorange",
+            "Active source range",
+        }
+        parameters = source_group if parameter in source_group else {parameter}
+        for assigned_parameter in parameters:
+            item = self._status_cells[(channel, assigned_parameter)]
+            item.setText("MATCH")
+            item.setForeground(QColor("#168a45"))
 
     def _assign_all(self) -> None:
         self.assign_requested.emit("ALL", "ALL")
@@ -2422,7 +2431,19 @@ class KeithleyPage(QWidget):
                     ),
                 ),
             }
-            selected = assignments if parameter == "ALL" else {parameter: assignments[parameter]}
+            source_group = {
+                "Source mode",
+                "Source level",
+                "Compliance limit",
+                "Source autorange",
+                "Active source range",
+            }
+            if parameter == "ALL":
+                selected = assignments
+            elif parameter in source_group:
+                selected = {key: assignments[key] for key in source_group}
+            else:
+                selected = {parameter: assignments[parameter]}
             dependent_autorange = {
                 "Active source range": "Source autorange",
                 "Active measure V range": "Measure V autorange",
