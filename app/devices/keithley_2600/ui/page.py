@@ -1100,6 +1100,17 @@ class KeithleyPage(QWidget):
         self.source_range_field = self.configuration_panel.source_range_field
         self.keithley_form = self.configuration_panel.form
         self._limit_fields = self.configuration_panel.limit_fields
+        self.max_abs_power = _line(
+            self._station_settings.keithley.safety.channels[
+                self.channel.currentText()
+            ].lab_limits.max_abs_power
+        )
+        self.max_abs_power_field = self._keithley_bounded(
+            "max_abs_power", self.max_abs_power
+        )
+        self.keithley_form.addRow(
+            "Maximum source × compliance power", self.max_abs_power_field
+        )
         workflow = CardWidget()
         workflow.setObjectName("keithleyOutputWorkflow")
         workflow_layout = QVBoxLayout(workflow)
@@ -1418,6 +1429,16 @@ class KeithleyPage(QWidget):
             color="#00a67d" if channel == "A" else "#2196f3",
             primary=True,
             show_points=True,
+        )
+        # The history keeps elapsed seconds from the start of this page.  Move
+        # the visible viewport with the rolling retention window; otherwise
+        # points collected after 30 s remain in the data model but drift out of
+        # the original 0â€“30 s view.
+        latest_elapsed_s = history[-1]["elapsed_s"] if history else 0.0
+        plot.plot.setXRange(
+            max(0.0, latest_elapsed_s - self._history_window_s),
+            max(self._history_window_s, latest_elapsed_s),
+            padding=0,
         )
 
     def _clear_keithley_history(self, channel: str) -> None:
@@ -2097,6 +2118,11 @@ class KeithleyPage(QWidget):
     def _channel_changed(self, channel: str) -> None:
         self._remember_source_values()
         self._active_channel = channel
+        self.max_abs_power.setText(
+            self._station_settings.keithley.safety.channels[
+                channel
+            ].lab_limits.max_abs_power
+        )
         snapshot = self._channel_form_snapshots.get(channel)
         if snapshot is not None:
             self._load_form_snapshot(snapshot)
@@ -2241,6 +2267,8 @@ class KeithleyPage(QWidget):
     def _keithley_limit_values(self, key: str) -> tuple[object, object]:
         limits = self._station_settings.keithley.safety.channels[self.channel.currentText()].lab_limits
         mode = self.mode.currentText()
+        if key == "max_abs_power":
+            return "> 0", limits.max_abs_power
         if key == "nplc":
             return 0.001, 25
         if key == "settle":
@@ -2285,6 +2313,11 @@ class KeithleyPage(QWidget):
     def set_settings(self, settings: StationSettings) -> None:
         self._station_settings = settings
         self.configuration_panel.set_settings(settings)
+        self.max_abs_power.setText(
+            settings.keithley.safety.channels[
+                self.channel.currentText()
+            ].lab_limits.max_abs_power
+        )
         self._channel_form_snapshots = {
             channel: self._default_form_snapshot(channel) for channel in ("A", "B")
         }

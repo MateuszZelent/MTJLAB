@@ -1892,6 +1892,10 @@ class MainWindowTests(unittest.TestCase):
             self.assertEqual(
                 keithley.history_widgets["A"]["plot"].trace_point_count("CH A Resistance"), 1
             )
+            plot = keithley.history_widgets["A"]["plot"]
+            x_range = plot.plot.viewRange()[0]
+            self.assertLessEqual(x_range[0], 15.0)
+            self.assertGreaterEqual(x_range[1], 45.0)
         finally:
             window.close()
             self.application.processEvents()
@@ -3326,6 +3330,40 @@ class MainWindowTests(unittest.TestCase):
                     window.keithley_page._limit_fields["level"].maximum.text(),
                     f"MAX  {original.max_abs}",
                 )
+            finally:
+                window.close()
+                self.application.processEvents()
+
+    def test_keithley_maximum_power_limit_is_visible_and_saved(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            path = Path(temporary) / "settings.yml"
+            write_engineer_settings(path)
+            window = MainWindow(
+                path, simulation=False, authenticated_username=TEST_ENGINEER
+            )
+            try:
+                window.resize(1600, 900)
+                window.show()
+                window._navigate_to("keithley")
+                self.application.processEvents()
+                field = window.keithley_page._limit_fields["max_abs_power"]
+                self.assertTrue(field.isVisible())
+                self.assertEqual(field.editor.text(), "670 uW")
+
+                def complete_dialog() -> None:
+                    dialog = QApplication.activeModalWidget()
+                    self.assertIsInstance(dialog, LimitEditDialog)
+                    dialog.minimum.setText("4 mW")
+                    dialog.accept()
+
+                QTimer.singleShot(0, complete_dialog)
+                field.edit_button.click()
+                saved = SettingsRepository(path).load().settings
+                self.assertEqual(
+                    saved.keithley.safety.channels["B"].lab_limits.max_abs_power,
+                    "4 mW",
+                )
+                self.assertEqual(field.editor.text(), "4 mW")
             finally:
                 window.close()
                 self.application.processEvents()

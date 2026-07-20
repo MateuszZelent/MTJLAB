@@ -710,10 +710,15 @@ class MainWindow(FluentWindow):
             "measure_voltage_range": "measured_voltage_trip",
             "measure_current_range": "measured_current_trip",
             "settle": "point_settle_time",
+            "max_abs_power": "max_abs_power",
         }
         mapped = mappings[key]
         path = ("devices", "keithley", "safety", "channels", channel, "lab_limits", mapped)
-        return f"Keithley CH{channel} — {mapped.replace('_', ' ')}", path, True
+        return (
+            f"Keithley CH{channel} — {mapped.replace('_', ' ')}",
+            path,
+            key != "max_abs_power",
+        )
 
     def _edit_device_limit(self, device: str, field: LimitField) -> None:
         try:
@@ -732,8 +737,13 @@ class MainWindow(FluentWindow):
             range_data = self._nested_value(raw, path)
             if range_data is None:
                 range_data = {"min": "", "max": ""}
-            minimum = range_data.get("min")
-            maximum = range_data.get("max") if maximum_enabled else None
+            scalar_limit = not isinstance(range_data, dict)
+            minimum = range_data if scalar_limit else range_data.get("min")
+            maximum = (
+                range_data.get("max")
+                if maximum_enabled and not scalar_limit
+                else None
+            )
         except (ConfigurationError, KeyError, TypeError) as exc:
             QMessageBox.critical(self, "Cannot edit limits", str(exc))
             return
@@ -742,16 +752,20 @@ class MainWindow(FluentWindow):
         if dialog.exec() != QDialog.DialogCode.Accepted:
             return
         try:
-            replacement = dict(range_data)
-            replacement["min"] = self._coerce_limit_value(dialog.minimum.text(), minimum)
-            if maximum_enabled:
-                replacement["max"] = self._coerce_limit_value(dialog.maximum.text(), maximum)
-            if "max_abs" in replacement and maximum_enabled:
-                replacement["max_abs"] = self._synchronised_max_abs(
-                    replacement["min"],
-                    replacement["max"],
-                    replacement["max_abs"],
-                )
+            if scalar_limit:
+                replacement = self._coerce_limit_value(dialog.minimum.text(), minimum)
+                parse_quantity(str(replacement), DIMENSION_POWER)
+            else:
+                replacement = dict(range_data)
+                replacement["min"] = self._coerce_limit_value(dialog.minimum.text(), minimum)
+                if maximum_enabled:
+                    replacement["max"] = self._coerce_limit_value(dialog.maximum.text(), maximum)
+                if "max_abs" in replacement and maximum_enabled:
+                    replacement["max_abs"] = self._synchronised_max_abs(
+                        replacement["min"],
+                        replacement["max"],
+                        replacement["max_abs"],
+                    )
             container: Any = raw
             for part in path[:-1]:
                 container = container[part]
