@@ -641,6 +641,7 @@ class KeithleyNodeEditorDialog(FluentRecipeDialog):
 
 class KeithleyPage(QWidget):
     status = Signal(str)
+    quick_controls_requested = Signal()
 
     def __init__(self, controller: DeviceController, settings: StationSettings, parent: QWidget | None = None) -> None:
         super().__init__(parent)
@@ -681,6 +682,9 @@ class KeithleyPage(QWidget):
         title.setObjectName("keithleyPageTitle")
         hero_layout.addWidget(title)
         hero_layout.addStretch(1)
+        self.quick_controls_button = PushButton("Quick controlsâ€¦", self.hero_card)
+        self.quick_controls_button.clicked.connect(self.quick_controls_requested)
+        hero_layout.addWidget(self.quick_controls_button)
         self.live_measurements = CheckBox("Live A/B", self)
         self.live_measurements.setToolTip(
             "Alternately measures channels A and B. This never enables an output."

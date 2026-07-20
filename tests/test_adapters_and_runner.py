@@ -304,6 +304,58 @@ class AdapterAndRunnerTests(unittest.TestCase):
         self.assertEqual(adapter.state, DeviceState.OUTPUT_ON)
         self.assertIn(":SOUR1:VOLT:HIGH 0.003", session.writes)
 
+    def test_rigol_quick_amplitude_and_offset_are_atomic_and_preserve_output(self) -> None:
+        raw = deepcopy(simulation_settings(approved=True).model_dump(mode="python"))
+        raw["devices"]["rigol"]["safety"]["allow_output_enable"] = True
+        settings = StationSettings.model_validate(raw)
+        session = FakeVisaSession()
+        session.responses.update(
+            {
+                "*IDN?": "Rigol Technologies,DG1032Z,DG1ZA172902039,00.01.08",
+                ":SYST:ERR?": "0,No error",
+                ":SOUR1:FUNC?": "SQU",
+                ":SOUR1:FREQ?": "1000",
+                ":SOUR1:VOLT:HIGH?": lambda _command: next(
+                    (
+                        command.rsplit(" ", 1)[-1]
+                        for command in reversed(session.writes)
+                        if command.startswith(":SOUR1:VOLT:HIGH ")
+                    ),
+                    "0.001",
+                ),
+                ":SOUR1:VOLT:LOW?": lambda _command: next(
+                    (
+                        command.rsplit(" ", 1)[-1]
+                        for command in reversed(session.writes)
+                        if command.startswith(":SOUR1:VOLT:LOW ")
+                    ),
+                    "-0.001",
+                ),
+                ":OUTP1?": lambda _command: (
+                    "ON" if ":OUTP1 ON" in session.writes else "OFF"
+                ),
+            }
+        )
+        adapter = RigolAdapter(settings, session_factory=FakeVisaSessionFactory(session))
+        adapter.connect()
+        adapter.configure_channel(
+            RigolChannelConfig(1, "SQU", 1000, 0.001, -0.001, dut_min_impedance_ohm=50)
+        )
+        adapter.arm_output(1)
+        adapter.set_output(1, True)
+
+        self.assertAlmostEqual(adapter.update_amplitude_vpp(1, 0.004), 0.004)
+        self.assertAlmostEqual(adapter.update_offset(1, 0.001), 0.001)
+        self.assertEqual(adapter.state, DeviceState.OUTPUT_ON)
+        self.assertIn(":SOUR1:VOLT:HIGH 0.002", session.writes)
+        self.assertIn(":SOUR1:VOLT:LOW -0.002", session.writes)
+        self.assertIn(":SOUR1:VOLT:HIGH 0.003", session.writes)
+        self.assertIn(":SOUR1:VOLT:LOW -0.001", session.writes)
+        writes_before = len(session.writes)
+        with self.assertRaises(SafetyViolation):
+            adapter.update_amplitude_vpp(1, 1_000.0)
+        self.assertEqual(len(session.writes), writes_before)
+
     def test_keithley_measurement_trip_forces_all_outputs_off(self) -> None:
         raw = deepcopy(simulation_settings(approved=True).model_dump(mode="python"))
         raw["devices"]["keithley"]["safety"]["allow_output_enable"] = True
@@ -411,6 +463,45 @@ class AdapterAndRunnerTests(unittest.TestCase):
         )
         self.assertEqual(adapter.state, DeviceState.OUTPUT_ON)
         self.assertAlmostEqual(result.final_measurement.voltage_v, 0.01)
+
+    def test_keithley_quick_active_setpoint_uses_measured_safe_ramp(self) -> None:
+        raw = deepcopy(simulation_settings(approved=True).model_dump(mode="python"))
+        raw["devices"]["keithley"]["safety"]["allow_output_enable"] = True
+        settings = StationSettings.model_validate(raw)
+        session = FakeVisaSession(
+            responses={
+                "*IDN?": "KEITHLEY INSTRUMENTS,2602A,123456,1.0",
+                "print(errorqueue.count)": "0",
+                "print(smub.source.leveli)": "0.001",
+                "print(smub.measure.iv())": "0.0011\t0.01",
+            }
+        )
+        adapter = KeithleyAdapter(settings, session_factory=FakeVisaSessionFactory(session))
+        adapter.connect()
+        adapter.configure_source(KeithleySourceRequest("B", "current", 0.001, 0.067))
+        adapter.arm_output("B")
+        adapter.set_output("B", True)
+
+        writes_before_limit_check = len(session.writes)
+        with self.assertRaises(SafetyViolation):
+            adapter.quick_update_source_level(
+                "B", mode="current", level_si=1_000.0
+            )
+        self.assertEqual(len(session.writes), writes_before_limit_check)
+
+        actual = adapter.quick_update_source_level(
+            "B", mode="current", level_si=0.0012
+        )
+
+        self.assertAlmostEqual(actual, 0.0012)
+        self.assertIn("print(smub.measure.iv())", session.writes)
+        self.assertEqual(adapter.state, DeviceState.OUTPUT_ON)
+        writes_before = len(session.writes)
+        with self.assertRaisesRegex(SafetyViolation, "Configure Keithley B for voltage"):
+            adapter.quick_update_source_level(
+                "B", mode="voltage", level_si=0.001
+            )
+        self.assertEqual(len(session.writes), writes_before)
 
     def test_keithley_manual_ramp_failure_forces_both_outputs_off(self) -> None:
         raw = deepcopy(simulation_settings(approved=True).model_dump(mode="python"))

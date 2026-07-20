@@ -32,6 +32,19 @@ def _dispatch(adapter: DeviceAdapter, operation: str, payload: object) -> object
     if operation == "set_output":
         channel, enabled = payload  # type: ignore[misc]
         return adapter.set_output(channel, enabled)
+    if operation == "quick_setpoint":
+        target, value_si = payload  # type: ignore[misc]
+        _device, channel_text, field = str(target).split(".")
+        channel = int(channel_text)
+        if field == "frequency":
+            return adapter.update_frequency(channel, float(value_si))
+        if field == "amplitude":
+            return adapter.update_amplitude_vpp(channel, float(value_si))
+        if field == "offset":
+            return adapter.update_offset(channel, float(value_si))
+        raise ValueError(f"Unsupported Rigol quick-control target {target!r}.")
+    if operation == "quick_readback":
+        return adapter.quick_control_snapshot()
     try:
         return actions[operation]()
     except KeyError as exc:

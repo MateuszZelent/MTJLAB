@@ -47,7 +47,6 @@ from app.spectrum import (
     SpectrumCleanupResult,
     SpectrumPeak,
     apply_reference_operation,
-    clean_spectrum_dbm,
     detect_spectrum_peaks,
     frequency_grids_match,
 )
@@ -60,6 +59,11 @@ from app.ui.widgets import FluentTabView, LimitField, NotificationBanner, Spectr
 from app.ui.workers import DeviceController
 
 from .peak_analysis import PeakTableDialog, PeakTrackingWindow
+from .analysis_worker import (
+    SpectrumAnalysisController,
+    SpectrumAnalysisOutcome,
+    SpectrumAnalysisRequest,
+)
 
 
 class AnritsuPageState(StrEnum):
@@ -449,6 +453,22 @@ class _SpectrogramBuffer:
         matrix = np.stack([row for _stamp, row in selected])
         return self._frequencies_hz.copy(), elapsed, matrix
 
+    def recent_power_rows(self, max_rows: int = 24) -> tuple[tuple[float, ...], ...]:
+        """Return a bounded temporal sample for EMI classification.
+
+        The full 120-second buffer belongs to the spectrogram.  Re-copying it
+        for every analysis frame scales poorly and gives the stationary-line
+        classifier little additional value over a recent representative tail.
+        """
+
+        count = max(0, int(max_rows))
+        if count == 0:
+            return ()
+        return tuple(
+            tuple(float(value) for value in row)
+            for _stamp, row in tuple(self._rows)[-count:]
+        )
+
 
 class _AnritsuSpectrogramWidget(QWidget):
     """Theme-aware rolling frequency/time heatmap."""
@@ -599,6 +619,7 @@ class _AnritsuSpectrogramWindow(StationDialog):
 class AnritsuPage(QWidget):
     status = Signal(str)
     settings_readback_requested = Signal(object, object)
+    quick_controls_requested = Signal()
 
     def __init__(
         self,
@@ -626,6 +647,10 @@ class AnritsuPage(QWidget):
         self._cleanup_result: SpectrumCleanupResult | None = None
         self._detected_peaks: tuple[SpectrumPeak, ...] = ()
         self._last_peak_analysis_monotonic: float | None = None
+        self._analysis_generation = 0
+        self._analysis_controller = SpectrumAnalysisController(self)
+        self._analysis_controller.result.connect(self._analysis_completed)
+        self._analysis_controller.error.connect(self._analysis_failed)
         self._peak_table_dialog: PeakTableDialog | None = None
         self._peak_tracking_window: PeakTrackingWindow | None = None
         self._tracked_peak_target_hz: float | None = None
@@ -672,6 +697,12 @@ class AnritsuPage(QWidget):
         title.setObjectName("pageTitle")
         title_row.addWidget(title)
         title_row.addStretch(1)
+        self.quick_controls_button = PushButton("Quick controlsâ€¦", self.hero_card)
+        self.quick_controls_button.setToolTip(
+            "Open always-on-top Rigol and Keithley setpoint controls beside Live Spectrum."
+        )
+        self.quick_controls_button.clicked.connect(self.quick_controls_requested)
+        title_row.addWidget(self.quick_controls_button)
         self.live_indicator = BodyLabel("●  LIVE OFF")
         self.live_indicator.setObjectName("anritsuLiveIndicator")
         self.live_indicator.setProperty("liveState", "off")
@@ -2265,13 +2296,7 @@ class AnritsuPage(QWidget):
         )
 
     def _cleanup_history(self) -> tuple[tuple[float, ...], ...]:
-        snapshot = self._spectrogram_buffer.snapshot(120)
-        if snapshot is None:
-            return ()
-        return tuple(
-            tuple(float(value) for value in row)
-            for row in snapshot[2]
-        )
+        return self._spectrogram_buffer.recent_power_rows(24)
 
     def _signal_analysis_controls_changed(self, *_args: object) -> None:
         if self._latest_trace is None:
@@ -2285,31 +2310,54 @@ class AnritsuPage(QWidget):
         self, trace: SpectrumTrace, *, force: bool = False
     ) -> None:
         mode = str(self.cleanup_mode.currentData() or "raw")
-        try:
-            self._cleanup_result = clean_spectrum_dbm(
-                trace.powers_dbm,
-                mode=mode,
-                history_dbm=self._cleanup_history(),
-            )
-        except ValueError as exc:
-            self._cleanup_result = None
-            self._detected_peaks = ()
-            self.analysis_status.setText(f"Signal analysis unavailable: {exc}")
-            self._sync_peak_markers()
-            self._refresh_spectrum_display()
-            return
-        self._refresh_spectrum_display()
         now = time.monotonic()
-        due = (
+        peak_analysis_due = (
             force
             or self._last_peak_analysis_monotonic is None
             or now - self._last_peak_analysis_monotonic >= 1.0
         )
-        if self.auto_peak_detection.isChecked() and due:
-            self._analyze_current_spectrum(force=True)
-        else:
-            self._update_analysis_status()
-        self._update_peak_tracking(now)
+        self._analysis_generation += 1
+        request = SpectrumAnalysisRequest(
+            generation=self._analysis_generation,
+            frequencies_hz=trace.frequencies_hz,
+            powers_dbm=trace.powers_dbm,
+            mode=mode,
+            history_dbm=self._cleanup_history(),
+            detect_peaks=(
+                self.auto_peak_detection.isChecked() and peak_analysis_due
+            ),
+        )
+        self.analysis_status.setText(
+            "Analyzing newest completed frame on the background CPU workerâ€¦"
+        )
+        self._analysis_controller.submit(request)
+
+    def _analysis_completed(self, result: object) -> None:
+        if not isinstance(result, SpectrumAnalysisOutcome):
+            return
+        if result.generation != self._analysis_generation:
+            return
+        self._cleanup_result = result.cleanup
+        if result.peaks is not None:
+            self._detected_peaks = result.peaks
+            self._last_peak_analysis_monotonic = time.monotonic()
+        self._refresh_spectrum_display()
+        self._sync_peak_markers()
+        self._update_analysis_status()
+        if self._peak_table_dialog is not None:
+            self._peak_table_dialog.set_peaks(
+                self._detected_peaks, method=result.cleanup.method
+            )
+        self._update_peak_tracking(time.monotonic())
+
+    def _analysis_failed(self, generation: int, message: str) -> None:
+        if generation != self._analysis_generation:
+            return
+        self._cleanup_result = None
+        self._detected_peaks = ()
+        self.analysis_status.setText(f"Signal analysis unavailable: {message}")
+        self._sync_peak_markers()
+        self._refresh_spectrum_display()
 
     def _analysis_values(self) -> tuple[tuple[float, ...], tuple[float, ...]] | None:
         trace = self._latest_trace
@@ -2319,40 +2367,13 @@ class AnritsuPage(QWidget):
         return trace.frequencies_hz, cleanup.values_dbm
 
     def _analyze_current_spectrum(self, *, force: bool = False) -> None:
-        data = self._analysis_values()
-        if data is None:
+        trace = self._latest_trace
+        if trace is None:
             self.analysis_status.setText(
                 "Acquire a completed spectrum before detecting peaks."
             )
             return
-        now = time.monotonic()
-        if (
-            not force
-            and self._last_peak_analysis_monotonic is not None
-            and now - self._last_peak_analysis_monotonic < 1.0
-        ):
-            return
-        frequencies_hz, values_dbm = data
-        try:
-            self._detected_peaks = detect_spectrum_peaks(
-                frequencies_hz,
-                values_dbm,
-                min_snr_db=6.0,
-                min_prominence_db=3.0,
-                max_peaks=20,
-                fit=True,
-            )
-        except ValueError as exc:
-            self._detected_peaks = ()
-            self.analysis_status.setText(f"Peak analysis unavailable: {exc}")
-        self._last_peak_analysis_monotonic = now
-        self._sync_peak_markers()
-        self._update_analysis_status()
-        if self._peak_table_dialog is not None:
-            self._peak_table_dialog.set_peaks(
-                self._detected_peaks,
-                method=self._cleanup_result.method if self._cleanup_result else "unavailable",
-            )
+        self._update_signal_analysis(trace, force=force)
 
     def _update_analysis_status(self) -> None:
         cleanup = self._cleanup_result

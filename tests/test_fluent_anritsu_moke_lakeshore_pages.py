@@ -21,7 +21,12 @@ from app.settings import SettingsRepository
 from app.devices.discovery import DiscoveredInstrument, identify_device
 from app.devices.lakeshore_475.models import FieldUnit, GaussmeterReading, GaussmeterSnapshot, MeasurementMode
 from app.devices.moke_box.models import MokeHallVoltageReading
-from tests.test_main_window import TEST_ENGINEER, synthetic_anritsu_peaks, write_engineer_settings
+from tests.test_main_window import (
+    TEST_ENGINEER,
+    synthetic_anritsu_peaks,
+    wait_for_ui,
+    write_engineer_settings,
+)
 
 
 class FluentLakeShorePageTests(unittest.TestCase):
@@ -356,7 +361,7 @@ class FluentAnritsuAndMokePageTests(unittest.TestCase):
         page = self.window.anritsu_page
         page.analysis_tabs.setCurrentIndex(0)
         page._show_trace(synthetic_anritsu_peaks())
-        self.application.processEvents()
+        self.assertTrue(wait_for_ui(lambda: len(page._detected_peaks) >= 2))
         host = self.window.navigation_routes["anritsu"]
 
         self.assertIsInstance(page.signal_analysis_card, CardWidget)

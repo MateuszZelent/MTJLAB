@@ -28,6 +28,16 @@ def _dispatch(adapter: DeviceAdapter, operation: str, payload: object) -> object
     if operation == "set_output":
         channel, enabled = payload  # type: ignore[misc]
         return adapter.set_output(channel, enabled)
+    if operation == "quick_setpoint":
+        target, value_si = payload  # type: ignore[misc]
+        _device, channel, mode = str(target).split(".")
+        if channel not in {"A", "B"} or mode not in {"current", "voltage"}:
+            raise ValueError(f"Unsupported Keithley quick-control target {target!r}.")
+        return adapter.quick_update_source_level(
+            channel, mode=mode, level_si=float(value_si)  # type: ignore[arg-type]
+        )
+    if operation == "quick_readback":
+        return adapter.quick_control_snapshot()
     try:
         return actions[operation]()
     except KeyError as exc:

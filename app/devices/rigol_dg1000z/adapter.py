@@ -432,6 +432,52 @@ class RigolAdapter(DeviceAdapter):
         self._update_aggregate_output_state()
         return actual_high, actual_low
 
+    def update_amplitude_vpp(self, channel: int, amplitude_vpp_v: float) -> float:
+        """Update Vpp around the validated current offset without cycling OUTPUT."""
+
+        config = self._last_config.get(channel)
+        if config is None:
+            raise SafetyViolation("Configure the Rigol channel before quick amplitude control.")
+        if not math.isfinite(amplitude_vpp_v) or amplitude_vpp_v < 0:
+            raise SafetyViolation("Rigol amplitude Vpp must be finite and non-negative.")
+        offset_v = (config.high_level_v + config.low_level_v) / 2.0
+        actual_high, actual_low = self.update_levels(
+            channel,
+            high_level_v=offset_v + amplitude_vpp_v / 2.0,
+            low_level_v=offset_v - amplitude_vpp_v / 2.0,
+        )
+        return actual_high - actual_low
+
+    def update_offset(self, channel: int, offset_v: float) -> float:
+        """Update offset while preserving validated Vpp and OUTPUT state."""
+
+        config = self._last_config.get(channel)
+        if config is None:
+            raise SafetyViolation("Configure the Rigol channel before quick offset control.")
+        if not math.isfinite(offset_v):
+            raise SafetyViolation("Rigol offset must be finite.")
+        amplitude_vpp_v = config.high_level_v - config.low_level_v
+        actual_high, actual_low = self.update_levels(
+            channel,
+            high_level_v=offset_v + amplitude_vpp_v / 2.0,
+            low_level_v=offset_v - amplitude_vpp_v / 2.0,
+        )
+        return (actual_high + actual_low) / 2.0
+
+    def quick_control_snapshot(self) -> dict[str, float]:
+        """Return the last configuration verified against instrument readback."""
+
+        snapshot: dict[str, float] = {}
+        for channel, config in self._last_config.items():
+            snapshot[f"rigol.{channel}.frequency"] = config.frequency_hz
+            snapshot[f"rigol.{channel}.amplitude"] = (
+                config.high_level_v - config.low_level_v
+            )
+            snapshot[f"rigol.{channel}.offset"] = (
+                config.high_level_v + config.low_level_v
+            ) / 2.0
+        return snapshot
+
     def _validate_waveform_config(self, config: RigolChannelConfig) -> RigolCurrentEstimate:
         channel = self._channel_settings(config.channel)
         return validate_rigol_waveform(

@@ -459,6 +459,66 @@ class KeithleyAdapter(DeviceAdapter):
         self._update_aggregate_output_state()
         return actual
 
+    def quick_update_source_level(
+        self,
+        channel: Literal["A", "B"],
+        *,
+        mode: Literal["current", "voltage"],
+        level_si: float,
+    ) -> float:
+        """Apply a quick target directly at OFF or through the approved ramp at ON."""
+
+        current = self._last_request.get(channel)
+        if current is None or current.mode != mode:
+            raise SafetyViolation(
+                f"Configure Keithley {channel} for {mode} before quick control."
+            )
+        # A floating quick control is only another UI entry point; it must
+        # never bypass the exact same user-approved source and compliance
+        # limits as the regular device page.  Validate before even querying
+        # OUTPUT so an invalid target causes no VISA traffic.
+        validate_keithley_source(
+            self._channel_settings(channel),
+            replace(current, level_si=float(level_si)),
+        )
+        if not self._output_is_enabled(channel):
+            return self.update_source_level(channel, mode=mode, level_si=level_si)
+        limits = self._channel_settings(channel).lab_limits
+        dimension = "current" if mode == "current" else "voltage"
+        max_step_si = parse_quantity(
+            limits.ramp_current_step_max
+            if mode == "current"
+            else limits.ramp_voltage_step_max,
+            dimension,
+        ).si_value
+        settle_time_s = current.settle_time_s
+        if limits.point_settle_time is not None:
+            settle_time_s = max(
+                settle_time_s,
+                parse_quantity(
+                    limits.point_settle_time.min, DIMENSION_TIME
+                ).si_value,
+            )
+        result = self.ramp_to_level(
+            KeithleyRampRequest(
+                channel=channel,
+                target_si=float(level_si),
+                max_step_si=max_step_si,
+                settle_time_s=settle_time_s,
+                deadline_s=60.0,
+            )
+        )
+        return result.target_si
+
+    def quick_control_snapshot(self) -> dict[str, float]:
+        """Return source levels from configurations already verified by readback."""
+
+        return {
+            f"keithley.{channel}.{request.mode}": request.level_si
+            for channel, request in self._last_request.items()
+            if request.mode in {"current", "voltage"}
+        }
+
     @staticmethod
     def _configure_ranges_and_sense(
         session: InstrumentSession, smu: str, request: KeithleySourceRequest

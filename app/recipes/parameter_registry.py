@@ -32,6 +32,16 @@ class ParameterDescriptor:
     requires_output_cycle: bool = False
 
 
+@dataclass(frozen=True, slots=True)
+class QuickControlDescriptor:
+    target: str
+    device_module: str
+    label: str
+    dimension: str
+    default_text: str
+    atomic_group: str
+
+
 _DESCRIPTORS: Final[tuple[ParameterDescriptor, ...]] = (
     ParameterDescriptor(
         "keithley.A.level", "keithley", "Keithley 2602A",
@@ -232,6 +242,41 @@ def parameter_definitions_for_module(module_key: str) -> tuple[dict[str, str], .
 # Transitional compatibility surface for the existing Qt recipe editor.  It
 # belongs to the recipe domain, not to the UI package of any particular device.
 SWEEPABLE_PARAMETERS: Final[tuple[dict[str, str], ...]] = legacy_ui_parameter_definitions()
+
+
+QUICK_CONTROL_DESCRIPTORS: Final[tuple[QuickControlDescriptor, ...]] = (
+    *tuple(
+        QuickControlDescriptor(
+            f"keithley.{channel}.{mode}",
+            "keithley",
+            f"Keithley {channel} · {mode.title()}",
+            DIMENSION_CURRENT if mode == "current" else DIMENSION_VOLTAGE,
+            "0.000 A" if mode == "current" else "0.000 V",
+            f"keithley.{channel}.source",
+        )
+        for channel in ("A", "B")
+        for mode in ("current", "voltage")
+    ),
+    *tuple(
+        QuickControlDescriptor(
+            f"rigol.{channel}.{field}",
+            "rigol",
+            f"Rigol CH{channel} · {label}",
+            dimension,
+            default,
+            f"rigol.{channel}.levels" if field in {"amplitude", "offset"} else f"rigol.{channel}.frequency",
+        )
+        for channel in (1, 2)
+        for field, label, dimension, default in (
+            ("frequency", "Frequency", DIMENSION_FREQUENCY, "1.000 kHz"),
+            ("amplitude", "Amplitude Vpp", DIMENSION_VOLTAGE, "1.000 V"),
+            ("offset", "Offset", DIMENSION_VOLTAGE, "0.000 V"),
+        )
+    ),
+)
+QUICK_CONTROLS_BY_TARGET: Final = MappingProxyType(
+    {descriptor.target: descriptor for descriptor in QUICK_CONTROL_DESCRIPTORS}
+)
 
 
 def sweep_default(dimension: str) -> tuple[str, str]:

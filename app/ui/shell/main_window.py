@@ -79,6 +79,7 @@ from app.ui.recipes.page import (  # noqa: F401
 from app.ui.shell.page_host import FluentPageHost
 from app.ui.shell.safety_strip import StationSafetySnapshot, StationSafetyStrip
 from app.ui.widgets import LimitEditDialog, LimitField, SpectrumPlotWidget
+from app.ui.quick_controls import QuickControlCoordinator, QuickControlsWindow
 
 
 class MainWindow(FluentWindow):
@@ -214,6 +215,18 @@ class MainWindow(FluentWindow):
         self.anritsu_page = self._device_pages["anritsu"]
         self.moke_box_page = self._device_pages["moke_box"]
         self.lakeshore_gaussmeter_page = self._device_pages["lakeshore_gaussmeter"]
+        self.quick_control_coordinator = QuickControlCoordinator(
+            self._controllers, self
+        )
+        self.quick_controls_window = QuickControlsWindow(
+            self.quick_control_coordinator, self
+        )
+        self.quick_controls_window.restore_workspace()
+        self.anritsu_page.quick_controls_requested.connect(
+            self._show_quick_controls
+        )
+        self.rigol_page.quick_controls_requested.connect(self._show_quick_controls)
+        self.keithley_page.quick_controls_requested.connect(self._show_quick_controls)
         self.connection_panels: dict[str, DeviceConnectionPanel] = {}
         for key, page in self._device_pages.items():
             resource, backend = self._device_connection_details(self._settings, key)
@@ -819,6 +832,15 @@ class MainWindow(FluentWindow):
             elif name == "anritsu":
                 controller.capabilities_changed.connect(self.anritsu_page.set_capabilities)
 
+    def _show_quick_controls(self) -> None:
+        if not self.quick_controls_window._selected:
+            self.quick_controls_window.choose_controls()
+        if self.quick_controls_window._selected:
+            self.quick_control_coordinator.refresh()
+            self.quick_controls_window.show()
+            self.quick_controls_window.raise_()
+            self.quick_controls_window.activateWindow()
+
     def _device_result(self, device: str, card: DeviceConnectionPanel, operation: str, result: object) -> None:
         if operation == "connect":
             card.set_connecting(False)
@@ -877,6 +899,11 @@ class MainWindow(FluentWindow):
     def _guard_manual_operation(self, operation: str, payload: object) -> None:
         """Fail closed for new energy-producing operations after audit I/O failure."""
 
+        if operation == "quick_setpoint" and self._run_controller.running:
+            raise ConfigurationError(
+                "Quick controls are locked while a recipe run owns the instruments."
+            )
+
         # De-energising and disconnecting are never blocked by RBAC or audit
         # health. This invariant is stronger than any normal user permission.
         if operation in {"emergency_off", "ramp_to_zero", "stop_live", "disconnect"}:
@@ -902,6 +929,7 @@ class MainWindow(FluentWindow):
             "trigger_sweep",
             "trigger_burst",
             "ramp_to_level",
+            "quick_setpoint",
             "configure_signal_generator",
             "configure_advanced_spectrum",
             "arm_signal_generator",
@@ -928,6 +956,7 @@ class MainWindow(FluentWindow):
             "trigger_sweep",
             "trigger_burst",
             "ramp_to_level",
+            "quick_setpoint",
         }
         if operation == "set_output":
             try:
@@ -1169,6 +1198,7 @@ class MainWindow(FluentWindow):
             QMessageBox.StandardButton.Cancel,
         )
         if answer == QMessageBox.StandardButton.Yes:
+            self.quick_control_coordinator.cancel_all("E-STOP requested")
             # Always use independent short-lived VISA sessions. A manual
             # instrument worker can be blocked just as a recipe worker can;
             # queueing OFF behind that operation is not an emergency path.
@@ -1422,6 +1452,11 @@ class MainWindow(FluentWindow):
         self._log(f"MOKE BOX ASSIGN SUCCESS: endpoint={endpoint!r}; VOUT control remains disabled")
 
     def _set_run_ui_locked(self, locked: bool) -> None:
+        self.quick_controls_window.setEnabled(not locked)
+        if locked:
+            self.quick_control_coordinator.cancel_all(
+                "Recipe run owns the instruments"
+            )
         if locked:
             self.moke_box_page.stop_live(
                 "Live Hall readout paused while a recipe run owns the MOKE Box."
@@ -1636,7 +1671,10 @@ class MainWindow(FluentWindow):
         )
         self._save_workspace()
         self.recipe_page.cancel_preflight()
+        self.quick_controls_window.close()
+        self.quick_control_coordinator.cancel_all("Application closing")
         self.anritsu_page._timer.stop()
+        self.anritsu_page._analysis_controller.close()
         self._run_controller.close()
         for controller in self._controllers.values():
             controller.close()

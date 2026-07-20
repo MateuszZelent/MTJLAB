@@ -59,6 +59,7 @@ class RigolConfigurationSnapshot:
 
 class RigolPage(QWidget):
     status = Signal(str)
+    quick_controls_requested = Signal()
 
     def __init__(self, controller: DeviceController, settings: StationSettings, parent: QWidget | None = None) -> None:
         super().__init__(parent)
@@ -82,6 +83,9 @@ class RigolPage(QWidget):
         heading.addWidget(title)
         heading.addWidget(subtitle)
         header_layout.addLayout(heading, 1)
+        self.quick_controls_button = PushButton("Quick controlsâ€¦", self.hero_card)
+        self.quick_controls_button.clicked.connect(self.quick_controls_requested)
+        header_layout.addWidget(self.quick_controls_button)
 
         self.device_led = BodyLabel("●")
         self.device_led.setObjectName("rigolLed")
@@ -1029,6 +1033,5 @@ class RigolPage(QWidget):
                 self._pending_output_enable = False
                 self.output_on.setEnabled(True)
             QMessageBox.warning(self, "Rigol", error)
-
 
 

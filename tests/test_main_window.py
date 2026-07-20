@@ -3,6 +3,7 @@ from __future__ import annotations
 import os
 import inspect
 import math
+import time
 from datetime import datetime, timezone
 from pathlib import Path
 import tempfile
@@ -37,6 +38,16 @@ from tests.helpers import SETTINGS_TEMPLATE
 
 TEST_ENGINEER = "LAB\\test-engineer"
 TEST_SERVICE = "LAB\\test-service"
+
+
+def wait_for_ui(predicate: object, *, timeout_ms: int = 5_000) -> bool:
+    deadline = time.monotonic() + timeout_ms / 1_000.0
+    while time.monotonic() < deadline:
+        QApplication.processEvents()
+        if callable(predicate) and predicate():
+            return True
+        QTest.qWait(10)
+    return bool(callable(predicate) and predicate())
 
 
 def synthetic_anritsu_peaks(
@@ -771,6 +782,62 @@ class MainWindowTests(unittest.TestCase):
             self.assertIn("VISA RX", visible)
             window.copy_traffic_button.click()
             self.assertEqual(QApplication.clipboard().text(), visible)
+        finally:
+            window.close()
+            self.application.processEvents()
+
+    def test_each_device_and_spectrum_analysis_have_distinct_background_threads(self) -> None:
+        window = MainWindow(".config/settings.yml", simulation=True)
+        device_threads = [controller._thread for controller in window._controllers.values()]
+        analysis_thread = window.anritsu_page._analysis_controller._thread
+        try:
+            self.assertEqual(len(device_threads), 5)
+            self.assertEqual(len({id(thread) for thread in device_threads}), 5)
+            self.assertTrue(all(thread.isRunning() for thread in device_threads))
+            self.assertTrue(analysis_thread.isRunning())
+            self.assertNotIn(analysis_thread, device_threads)
+            self.assertTrue(
+                all(thread is not self.application.thread() for thread in device_threads)
+            )
+            self.assertIsNot(analysis_thread, self.application.thread())
+        finally:
+            window.close()
+            self.application.processEvents()
+        self.assertTrue(all(not thread.isRunning() for thread in device_threads))
+        self.assertFalse(analysis_thread.isRunning())
+
+    def test_anritsu_opens_composed_quick_controls_and_arrows_send_immediately(self) -> None:
+        window = MainWindow(".config/settings.yml", simulation=True)
+        try:
+            targets = (
+                "keithley.A.current",
+                "keithley.B.voltage",
+                "rigol.1.frequency",
+                "rigol.1.amplitude",
+                "rigol.1.offset",
+            )
+            window.quick_controls_window.set_targets(targets)
+            window._controllers["rigol"].call = Mock()
+
+            window.anritsu_page.quick_controls_button.click()
+            self.application.processEvents()
+
+            floating = window.quick_controls_window
+            self.assertTrue(floating.isVisible())
+            self.assertEqual(tuple(floating._rows), targets)
+            window._controllers["rigol"].call.reset_mock()
+            frequency = floating._rows["rigol.1.frequency"]
+            frequency.value.setText("10.000 kHz")
+            frequency.increase.click()
+            window._controllers["rigol"].call.assert_called_once_with(
+                "quick_setpoint", ("rigol.1.frequency", 10_001.0)
+            )
+            self.assertEqual(frequency.value.text(), "10.001 kHz")
+
+            window._set_run_ui_locked(True)
+            self.assertFalse(floating.isEnabled())
+            window._set_run_ui_locked(False)
+            self.assertTrue(floating.isEnabled())
         finally:
             window.close()
             self.application.processEvents()
@@ -2036,6 +2103,7 @@ class MainWindowTests(unittest.TestCase):
                 anritsu._spectrogram_buffer.row_count,
                 anritsu._spectrogram_buffer.MAX_ROWS,
             )
+            self.assertEqual(len(anritsu._cleanup_history()), 24)
         finally:
             window.close()
             self.application.processEvents()
@@ -2050,6 +2118,8 @@ class MainWindowTests(unittest.TestCase):
             anritsu.cleanup_mode.setCurrentIndex(mode)
 
             anritsu._show_trace(trace)
+
+            self.assertTrue(wait_for_ui(lambda: anritsu._cleanup_result is not None))
 
             anritsu._controller.call.assert_not_called()
             self.assertEqual(anritsu._latest_trace.powers_dbm, trace.powers_dbm)
@@ -2089,7 +2159,12 @@ class MainWindowTests(unittest.TestCase):
             anritsu._controller.call = Mock()
             anritsu._show_trace(synthetic_anritsu_peaks(primary_hz=1.0e9))
             anritsu._open_peak_table()
-            self.application.processEvents()
+            self.assertTrue(
+                wait_for_ui(
+                    lambda: anritsu._peak_table_dialog is not None
+                    and anritsu._peak_table_dialog.table.rowCount() >= 2
+                )
+            )
 
             table = anritsu._peak_table_dialog
             self.assertIsNotNone(table)
@@ -2122,7 +2197,7 @@ class MainWindowTests(unittest.TestCase):
             anritsu._show_trace(
                 synthetic_anritsu_peaks(primary_hz=1.0002e9)
             )
-            self.application.processEvents()
+            self.assertTrue(wait_for_ui(lambda: tracking.point_count == 2))
             self.assertEqual(tracking.point_count, 2)
             self.assertIn("GHz", tracking.frequency.text())
             x_values, y_values = tracking.curve.getData()
