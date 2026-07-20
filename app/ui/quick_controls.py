@@ -19,13 +19,19 @@ from qfluentwidgets import (
     StrongBodyLabel,
 )
 
-from app.domain.quick_controls import QuickSetpoint, step_quantity_text
+from app.domain.quick_controls import (
+    QuickSetpoint,
+    render_quantity_si_like,
+    step_quantity_text,
+)
 from app.domain.quantities import format_quantity_auto, parse_quantity
 from app.recipes.parameter_registry import (
     QUICK_CONTROLS_BY_TARGET,
     QUICK_CONTROL_DESCRIPTORS,
     QuickControlDescriptor,
 )
+from app.safety.quick_controls import quick_control_safety_bounds
+from app.settings.models import StationSettings
 from app.ui.dialogs import StationDialog
 from app.ui.workers import DeviceController
 
@@ -34,9 +40,18 @@ class QuickControlCoordinator(QObject):
     state_changed = Signal(str, str, str)
     value_read = Signal(str, float)
 
-    def __init__(self, controllers: dict[str, DeviceController], parent: QObject) -> None:
+    def __init__(
+        self,
+        controllers: dict[str, DeviceController],
+        parent: QObject,
+        *,
+        settings: StationSettings | None = None,
+    ) -> None:
         super().__init__(parent)
         self._controllers = controllers
+        self._bounds: dict[str, tuple[float, float]] = {}
+        if settings is not None:
+            self.set_settings(settings)
         self._sequence = 0
         self._inflight: dict[str, QuickSetpoint | None] = {
             "rigol": None,
@@ -65,12 +80,37 @@ class QuickControlCoordinator(QObject):
     def submit(self, target: str, text: str) -> None:
         descriptor = QUICK_CONTROLS_BY_TARGET[target]
         value_si = parse_quantity(text, descriptor.dimension).si_value
+        _bounded, limited, detail = self.bound_value(target, value_si)
+        if limited:
+            self.state_changed.emit(target, "rejected", detail)
+            return
         self._sequence += 1
         request = QuickSetpoint(target, text, value_si, self._sequence)
         device = descriptor.device_module
         self._pending[device][target] = request
         self.state_changed.emit(target, "pending", "Waiting for device readback")
         self._send_next(device)
+
+    def set_settings(self, settings: StationSettings) -> None:
+        """Refresh UI preflight bounds from the active approved station profile."""
+
+        self._bounds = {
+            target: (bound.minimum_si, bound.maximum_si)
+            for target, bound in quick_control_safety_bounds(settings).items()
+        }
+
+    def bound_value(self, target: str, value_si: float) -> tuple[float, bool, str]:
+        """Clamp arrow stepping while typed out-of-range input remains rejected."""
+
+        try:
+            lower, upper = self._bounds[target]
+        except KeyError:
+            return value_si, False, ""
+        if value_si < lower:
+            return lower, True, f"Minimum safety limit reached ({lower:.12g} SI)"
+        if value_si > upper:
+            return upper, True, f"Maximum safety limit reached ({upper:.12g} SI)"
+        return value_si, False, ""
 
     def refresh(self) -> None:
         for device in self._inflight:
@@ -87,7 +127,7 @@ class QuickControlCoordinator(QObject):
             return
         _target, request = self._pending[device].popitem(last=False)
         self._inflight[device] = request
-        self.state_changed.emit(request.target, "applying", "Applyingâ€¦")
+        self.state_changed.emit(request.target, "applying", "Applying...")
         self._controllers[device].call(
             "quick_setpoint", (request.target, request.value_si)
         )
@@ -152,9 +192,15 @@ class QuickControlRow(QWidget):
     submit_requested = Signal(str, str)
     move_requested = Signal(str, int)
 
-    def __init__(self, descriptor: QuickControlDescriptor, parent: QWidget) -> None:
+    def __init__(
+        self,
+        descriptor: QuickControlDescriptor,
+        coordinator: QuickControlCoordinator,
+        parent: QWidget,
+    ) -> None:
         super().__init__(parent)
         self.descriptor = descriptor
+        self._coordinator = coordinator
         layout = QVBoxLayout(self)
         layout.setContentsMargins(10, 8, 10, 8)
         layout.setSpacing(4)
@@ -206,16 +252,30 @@ class QuickControlRow(QWidget):
 
     def step(self, direction: int, multiplier: object) -> None:
         try:
-            text, _value_si = step_quantity_text(
+            previous_si = parse_quantity(
+                self.value.text(), self.descriptor.dimension
+            ).si_value
+            text, value_si = step_quantity_text(
                 self.value.text(),
                 self.descriptor.dimension,
                 direction,
                 multiplier=Decimal(multiplier),
             )
+            bounded_si, limited, detail = self._coordinator.bound_value(
+                self.descriptor.target, value_si
+            )
+            if limited:
+                text = render_quantity_si_like(
+                    self.value.text(), self.descriptor.dimension, bounded_si
+                )
         except ValueError as exc:
             self.set_state("rejected", str(exc))
             return
         self.value.setText(text)
+        if limited:
+            self.set_state("limit", detail)
+            if previous_si == bounded_si:
+                return
         self.submit()
 
     def submit(self) -> None:
@@ -282,7 +342,7 @@ class QuickControlsWindow(StationDialog):
         header = QHBoxLayout()
         header.addWidget(StrongBodyLabel("Peripheral setpoints", self))
         header.addStretch(1)
-        self.choose = PushButton("Chooseâ€¦", self)
+        self.choose = PushButton("Choose...", self)
         header.addWidget(self.choose)
         self.layout_root.addLayout(header)
         self.content_host = QWidget(self)
@@ -321,7 +381,7 @@ class QuickControlsWindow(StationDialog):
         self._rows.clear()
         for target in self._selected:
             descriptor = QUICK_CONTROLS_BY_TARGET[target]
-            row = QuickControlRow(descriptor, self)
+            row = QuickControlRow(descriptor, self._coordinator, self)
             if target in previous_values:
                 row.value.setText(previous_values[target])
             row.submit_requested.connect(self._coordinator.submit)

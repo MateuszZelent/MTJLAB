@@ -34,6 +34,11 @@ from app.devices.visa import FakeVisaSession, FakeVisaSessionFactory
 from app.domain.errors import DeviceError, SafetyViolation
 from app.domain.models import DeviceState
 from app.domain.models import ApplicationState
+from app.domain.quantities import (
+    DIMENSION_CURRENT,
+    DIMENSION_FREQUENCY,
+    parse_quantity,
+)
 from app.engine.compiler import ExecutionPlan, PlanAction, RecipeCompiler
 from app.engine.runner import RecipeRunner
 from app.recipes import parse_recipe_text
@@ -355,6 +360,86 @@ class AdapterAndRunnerTests(unittest.TestCase):
         with self.assertRaises(SafetyViolation):
             adapter.update_amplitude_vpp(1, 1_000.0)
         self.assertEqual(len(session.writes), writes_before)
+
+    def test_quick_setpoints_accept_exact_limits_and_reject_above_without_visa(self) -> None:
+        settings = simulation_settings(approved=True)
+        rigol_session = FakeVisaSession()
+        rigol_session.responses.update(
+            {
+                "*IDN?": "Rigol Technologies,DG1032Z,DG1ZA172902039,00.01.08",
+                ":SYST:ERR?": "0,No error",
+                ":SOUR1:FUNC?": "SIN",
+                ":SOUR1:FREQ?": lambda _command: next(
+                    (
+                        command.rsplit(" ", 1)[-1]
+                        for command in reversed(rigol_session.writes)
+                        if command.startswith(":SOUR1:FREQ ")
+                    ),
+                    "1000",
+                ),
+                ":SOUR1:VOLT:HIGH?": "0.001",
+                ":SOUR1:VOLT:LOW?": "-0.001",
+                ":OUTP1?": "OFF",
+            }
+        )
+        rigol = RigolAdapter(
+            settings, session_factory=FakeVisaSessionFactory(rigol_session)
+        )
+        rigol.connect()
+        rigol.configure_channel(
+            RigolChannelConfig(
+                1, "SIN", 1000, 0.001, -0.001, dut_min_impedance_ohm=50
+            )
+        )
+        rigol_limit = parse_quantity(
+            settings.rigol.safety.channels["1"].lab_limits.frequency.max,
+            DIMENSION_FREQUENCY,
+        ).si_value
+        self.assertEqual(rigol.update_frequency(1, rigol_limit), rigol_limit)
+        rigol_writes_at_limit = len(rigol_session.writes)
+        with self.assertRaises(SafetyViolation):
+            rigol.update_frequency(1, rigol_limit + 1.0)
+        self.assertEqual(len(rigol_session.writes), rigol_writes_at_limit)
+
+        keithley_session = FakeVisaSession()
+        keithley_session.responses.update(
+            {
+                "*IDN?": "KEITHLEY INSTRUMENTS,2602A,123456,1.0",
+                "print(errorqueue.count)": "0",
+                "print(smub.source.leveli)": lambda _command: next(
+                    (
+                        command.rsplit(" = ", 1)[-1]
+                        for command in reversed(keithley_session.writes)
+                        if command.startswith("smub.source.leveli = ")
+                    ),
+                    "0.001",
+                ),
+                "print(smub.source.output)": "0",
+            }
+        )
+        keithley = KeithleyAdapter(
+            settings, session_factory=FakeVisaSessionFactory(keithley_session)
+        )
+        keithley.connect()
+        keithley.configure_source(
+            KeithleySourceRequest("B", "current", 0.001, 0.067)
+        )
+        keithley_limit = parse_quantity(
+            settings.keithley.safety.channels["B"].lab_limits.source_current.max,
+            DIMENSION_CURRENT,
+        ).si_value
+        self.assertEqual(
+            keithley.quick_update_source_level(
+                "B", mode="current", level_si=keithley_limit
+            ),
+            keithley_limit,
+        )
+        keithley_writes_at_limit = len(keithley_session.writes)
+        with self.assertRaises(SafetyViolation):
+            keithley.quick_update_source_level(
+                "B", mode="current", level_si=keithley_limit + 1e-9
+            )
+        self.assertEqual(len(keithley_session.writes), keithley_writes_at_limit)
 
     def test_keithley_measurement_trip_forces_all_outputs_off(self) -> None:
         raw = deepcopy(simulation_settings(approved=True).model_dump(mode="python"))

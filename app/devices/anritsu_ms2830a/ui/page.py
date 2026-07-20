@@ -697,7 +697,7 @@ class AnritsuPage(QWidget):
         title.setObjectName("pageTitle")
         title_row.addWidget(title)
         title_row.addStretch(1)
-        self.quick_controls_button = PushButton("Quick controlsâ€¦", self.hero_card)
+        self.quick_controls_button = PushButton("Quick controls...", self.hero_card)
         self.quick_controls_button.setToolTip(
             "Open always-on-top Rigol and Keithley setpoint controls beside Live Spectrum."
         )
@@ -2328,7 +2328,7 @@ class AnritsuPage(QWidget):
             ),
         )
         self.analysis_status.setText(
-            "Analyzing newest completed frame on the background CPU workerâ€¦"
+            "Analyzing newest completed frame on the background CPU worker..."
         )
         self._analysis_controller.submit(request)
 

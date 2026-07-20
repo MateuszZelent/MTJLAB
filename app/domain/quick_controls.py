@@ -65,3 +65,17 @@ def step_quantity_text(
     rendered = f"{format(updated, 'f')} {unit}"
     return rendered, parse_quantity(rendered, dimension).si_value
 
+
+def render_quantity_si_like(text: str, dimension: str, value_si: float) -> str:
+    """Render an SI boundary in the user's current unit and written precision."""
+
+    match = _QUANTITY.fullmatch(text)
+    if match is None:
+        raise ValueError("Enter a number followed by an explicit unit.")
+    original = Decimal(match.group("number").replace(",", "."))
+    unit = match.group("unit").strip()
+    scale = Decimal(str(parse_quantity(f"1 {unit}", dimension).si_value))
+    value_in_unit = Decimal(str(value_si)) / scale
+    quantum = Decimal(1).scaleb(original.as_tuple().exponent)
+    rendered = value_in_unit.quantize(quantum)
+    return f"{format(rendered, 'f')} {unit}"

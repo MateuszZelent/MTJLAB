@@ -26,6 +26,7 @@ from app.domain.quantities import (
     parse_quantity,
 )
 from app.safety.rigol_current import validate_rigol_frequency_sweep, validate_rigol_waveform
+from app.safety.quick_controls import quick_control_safety_bounds
 from app.settings.models import StationSettings
 from app.ui.common import line_edit as _line
 from app.ui.widgets import FluentTabView, LimitField, NotificationBanner, SpectrumPlotWidget
@@ -83,7 +84,7 @@ class RigolPage(QWidget):
         heading.addWidget(title)
         heading.addWidget(subtitle)
         header_layout.addLayout(heading, 1)
-        self.quick_controls_button = PushButton("Quick controlsâ€¦", self.hero_card)
+        self.quick_controls_button = PushButton("Quick controls...", self.hero_card)
         self.quick_controls_button.clicked.connect(self.quick_controls_requested)
         header_layout.addWidget(self.quick_controls_button)
 
@@ -426,6 +427,16 @@ class RigolPage(QWidget):
 
     def _rigol_limit_values(self, key: str) -> tuple[object, object]:
         limits = self._station_settings.rigol.safety.channels[self.channel.currentText()].lab_limits
+        quick_field = {
+            "frequency": "frequency",
+            "amplitude_vpp": "amplitude",
+            "offset": "offset",
+        }.get(key)
+        if quick_field is not None:
+            bound = quick_control_safety_bounds(self._station_settings)[
+                f"rigol.{self.channel.currentText()}.{quick_field}"
+            ]
+            return bound.minimum_text, bound.maximum_text
         value = getattr(limits, key)
         if key == "declared_dut_impedance":
             return value.min, "no profile maximum"
@@ -1033,5 +1044,3 @@ class RigolPage(QWidget):
                 self._pending_output_enable = False
                 self.output_on.setEnabled(True)
             QMessageBox.warning(self, "Rigol", error)
-
-

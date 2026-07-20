@@ -38,6 +38,7 @@ from app.domain.quantities import (
     format_quantity_auto, parse_quantity,
 )
 from app.recipes import RecipeNode, replace_recipe_node
+from app.safety.quick_controls import quick_control_safety_bounds
 from app.recipes.parameter_registry import SWEEP_DIMENSIONS
 from app.safety.keithley import validate_keithley_source
 from app.settings.models import StationSettings
@@ -218,8 +219,10 @@ class KeithleyConfigurationPanel(CardWidget):
         if mode == "measure_only" and key in {"level", "compliance", "source_range"}:
             return "N/A", "N/A"
         if key == "level":
-            value = limits.source_current if mode == "current" else limits.source_voltage
-            return value.min, value.max
+            bound = quick_control_safety_bounds(self._settings)[
+                f"keithley.{self.channel.currentText()}.{mode}"
+            ]
+            return bound.minimum_text, bound.maximum_text
         if key == "compliance":
             value = (
                 limits.voltage_compliance
@@ -682,7 +685,7 @@ class KeithleyPage(QWidget):
         title.setObjectName("keithleyPageTitle")
         hero_layout.addWidget(title)
         hero_layout.addStretch(1)
-        self.quick_controls_button = PushButton("Quick controlsâ€¦", self.hero_card)
+        self.quick_controls_button = PushButton("Quick controls...", self.hero_card)
         self.quick_controls_button.clicked.connect(self.quick_controls_requested)
         hero_layout.addWidget(self.quick_controls_button)
         self.live_measurements = CheckBox("Live A/B", self)
@@ -1461,8 +1464,10 @@ class KeithleyPage(QWidget):
         if mode == "measure_only" and key in {"level", "compliance", "source_range"}:
             return "N/A", "N/A"
         if key == "level":
-            value = limits.source_current if mode == "current" else limits.source_voltage
-            return value.min, value.max
+            bound = quick_control_safety_bounds(self._station_settings)[
+                f"keithley.{self.channel.currentText()}.{mode}"
+            ]
+            return bound.minimum_text, bound.maximum_text
         if key == "compliance":
             value = limits.voltage_compliance if mode == "current" else limits.current_compliance
             return value.min, value.max

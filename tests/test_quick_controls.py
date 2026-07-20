@@ -9,9 +9,20 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 from PySide6.QtCore import QObject, QSettings, Qt, Signal
 from PySide6.QtWidgets import QApplication, QWidget
 
-from app.domain.quick_controls import quantity_step_si, step_quantity_text
-from app.domain.quantities import DIMENSION_CURRENT, DIMENSION_FREQUENCY
+from app.domain.quick_controls import (
+    quantity_step_si,
+    render_quantity_si_like,
+    step_quantity_text,
+)
+from app.domain.quantities import (
+    DIMENSION_CURRENT,
+    DIMENSION_FREQUENCY,
+    format_quantity_auto,
+    parse_quantity,
+)
+from app.recipes.parameter_registry import QUICK_CONTROLS_BY_TARGET
 from app.ui.quick_controls import QuickControlCoordinator, QuickControlsWindow
+from tests.helpers import simulation_settings
 
 
 class _FakeController(QObject):
@@ -64,6 +75,61 @@ class QuickControlTests(unittest.TestCase):
         )
         self.assertEqual(text, "0.0099 A")
         self.assertAlmostEqual(value, 0.0099)
+        self.assertEqual(
+            render_quantity_si_like("9.999 mA", DIMENSION_CURRENT, 0.01),
+            "10.000 mA",
+        )
+
+    def test_user_safety_limits_block_typed_values_for_both_devices(self) -> None:
+        parent = QWidget()
+        rigol = _FakeController()
+        keithley = _FakeController()
+        coordinator = QuickControlCoordinator(  # type: ignore[arg-type]
+            {"rigol": rigol, "keithley": keithley},
+            parent,
+            settings=simulation_settings(approved=True),
+        )
+
+        rigol_max = coordinator._bounds["rigol.1.frequency"][1]
+        keithley_max = coordinator._bounds["keithley.B.current"][1]
+        coordinator.submit(
+            "rigol.1.frequency",
+            format_quantity_auto(rigol_max * 2, DIMENSION_FREQUENCY),
+        )
+        coordinator.submit(
+            "keithley.B.current",
+            format_quantity_auto(keithley_max * 2, DIMENSION_CURRENT),
+        )
+
+        self.assertEqual(rigol.calls, [])
+        self.assertEqual(keithley.calls, [])
+
+    def test_arrows_stop_at_every_user_limit_for_rigol_and_keithley(self) -> None:
+        parent = QWidget()
+        controllers = {"rigol": _FakeController(), "keithley": _FakeController()}
+        coordinator = QuickControlCoordinator(  # type: ignore[arg-type]
+            controllers,
+            parent,
+            settings=simulation_settings(approved=True),
+        )
+        window = QuickControlsWindow(coordinator, parent)
+        window.set_targets(tuple(coordinator._bounds))
+        try:
+            for target, (minimum, maximum) in coordinator._bounds.items():
+                dimension = QUICK_CONTROLS_BY_TARGET[target].dimension
+                row = window._rows[target]
+                for boundary, direction in ((minimum, -1), (maximum, 1)):
+                    row.value.setText(format_quantity_auto(boundary, dimension))
+                    row.step(direction, Decimal(1))
+                    self.assertAlmostEqual(
+                        parse_quantity(row.value.text(), dimension).si_value,
+                        boundary,
+                    )
+                    self.assertEqual(
+                        controllers[target.split(".")[0]].calls, []
+                    )
+        finally:
+            window.close()
 
     def test_coordinator_keeps_only_latest_pending_value_per_target(self) -> None:
         parent = QWidget()

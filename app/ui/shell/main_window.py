@@ -216,7 +216,7 @@ class MainWindow(FluentWindow):
         self.moke_box_page = self._device_pages["moke_box"]
         self.lakeshore_gaussmeter_page = self._device_pages["lakeshore_gaussmeter"]
         self.quick_control_coordinator = QuickControlCoordinator(
-            self._controllers, self
+            self._controllers, self, settings=self._settings
         )
         self.quick_controls_window = QuickControlsWindow(
             self.quick_control_coordinator, self
@@ -373,10 +373,10 @@ class MainWindow(FluentWindow):
         self.apparatus_navigation_item = self.navigationInterface.addItem(
             routeKey="apparatusMenu",
             icon=FluentIcon.DEVELOPER_TOOLS,
-            text="Aparatura",
+            text="Devices",
             selectable=False,
             position=NavigationItemPosition.TOP,
-            tooltip="Sterowanie podłączoną aparaturą pomiarową",
+            tooltip="Connected measurement devices",
         )
         apparatus_routes = {
             "rigol",
@@ -1215,6 +1215,7 @@ class MainWindow(FluentWindow):
 
     def _settings_saved(self, settings: StationSettings) -> None:
         self._settings = simulated_station_settings(settings) if self._simulation else settings
+        self.quick_control_coordinator.set_settings(self._settings)
         self.dashboard.update_settings(self._settings)
         self.rigol_page.set_settings(self._settings)
         self.keithley_page.set_settings(self._settings)
