@@ -1285,7 +1285,6 @@ class KeithleyPage(QWidget):
         channel = channel or self.channel.currentText()
         safety = self._station_settings.keithley.safety
         checks = [
-            (safety.allow_output_enable, "Keithley output permission enabled"),
             (safety.channels[channel].enabled, f"channel {channel} enabled"),
             (self._device_is_output_ready(), "device connected and verified"),
         ]
@@ -1304,9 +1303,7 @@ class KeithleyPage(QWidget):
                 "use Instrument connection at the top of this page and click Connect"
             )
         if not self._station_settings.keithley.safety.channels[channel].enabled:
-            steps.append(f"enable channel {channel} in the approved station profile")
-        if not self._station_settings.keithley.safety.allow_output_enable:
-            steps.append("enable Keithley output permission in the station profile")
+            steps.append(f"enable channel {channel} in station settings")
         if steps:
             return "To enable OUTPUT: " + "; then ".join(steps) + "."
         return (

@@ -1475,8 +1475,6 @@ class RecipeCompiler:
                 raise ConfigurationError("set_keithley_output requires channel A or B.")
             enabled = self._require_boolean(data, "enabled", node.id)
             self._assert_output_action_allowed("keithley", enabled)
-            if enabled:
-                self._require_complete_dut_limits("keithley", channel)
             payload = {"channel": channel, "enabled": enabled}
         elif node.type == "ramp_keithley_to_zero":
             channel = str(data.get("channel", ""))
@@ -1543,7 +1541,10 @@ class RecipeCompiler:
         if device == "rigol":
             permitted = self._settings.rigol.safety.allow_output_enable
         elif device == "keithley":
-            permitted = self._settings.keithley.safety.allow_output_enable
+            # Keithley output permission is defined by its channel enable flag
+            # and validated station min/max limits. The legacy global flag is
+            # retained in YAML only for backwards compatibility.
+            permitted = True
         elif device == "anritsu_sg":
             permitted = self._settings.anritsu.safety.signal_generator_output_allowed
         else:

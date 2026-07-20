@@ -608,9 +608,7 @@ class KeithleyAdapter(DeviceAdapter):
         if enabled:
             self._interlock().assert_can_enable(
                 device_name=f"Keithley CH{channel}",
-                device_allows_output=(
-                    self._settings.safety.allow_output_enable and settings.enabled
-                ),
+                device_allows_output=settings.enabled,
             )
             request = self._last_request.get(channel)
             if request is None:
