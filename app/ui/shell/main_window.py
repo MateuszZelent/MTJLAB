@@ -45,6 +45,15 @@ from qfluentwidgets.common.style_sheet import styleSheetManager
 from app.audit import AuditLogger
 from app.bootstrap import StationComposition
 from app.domain.errors import AuthorizationError, ConfigurationError
+from app.domain.quantities import (
+    DIMENSION_FREQUENCY,
+    DIMENSION_TIME,
+    format_quantity_auto,
+)
+from app.devices.anritsu_ms2830a import (
+    AdvancedSpectrumSnapshot,
+    AnritsuConfigurationSnapshot,
+)
 from app.devices.simulators import simulated_station_settings
 from app.engine.compiler import RecipeCompiler
 from app.engine.estimation import PlanEstimator
@@ -449,6 +458,9 @@ class MainWindow(FluentWindow):
         self.dashboard.moke_assignment_requested.connect(self._save_moke_assignment)
         self.dashboard.status.connect(self._log)
         self.settings_page.settings_saved.connect(self._settings_saved)
+        self.anritsu_page.settings_readback_requested.connect(
+            self._save_anritsu_readback_defaults
+        )
         self.recipe_page.run_requested.connect(self._start_run)
         self.recipe_page.plan_preflight_changed.connect(self.dashboard.update_plan_preflight)
         self.results_page.resume_requested.connect(self._resume_run)
@@ -1196,6 +1208,83 @@ class MainWindow(FluentWindow):
             self.dashboard.cards[name].update_state("disconnected")
         self._refresh_safety_strip()
         self._log("Profile changed. VISA sessions were safely switched OFF and disconnected; new limits apply on the next connection.")
+
+    def _save_anritsu_readback_defaults(self, basic: object, advanced: object) -> None:
+        """Persist query-only analyser readback without replacing the live adapter."""
+
+        if not isinstance(basic, AnritsuConfigurationSnapshot):
+            self._log("ANRITSU SETTINGS IMPORT FAILED: invalid basic readback")
+            return
+        try:
+            self._access.require(
+                Permission.EDIT_SETTINGS,
+                action="saving Anritsu instrument readback to settings.yml",
+            )
+            loaded = self._repository.load()
+            raw = loaded.raw
+            defaults = raw["devices"]["anritsu"]["safety"]["defaults"]
+            defaults.update(
+                {
+                    "application": basic.instrument_mode or "SPECT",
+                    "start_frequency": format_quantity_auto(
+                        basic.start_hz, DIMENSION_FREQUENCY
+                    ),
+                    "stop_frequency": format_quantity_auto(
+                        basic.stop_hz, DIMENSION_FREQUENCY
+                    ),
+                    "center_frequency": format_quantity_auto(
+                        (basic.start_hz + basic.stop_hz) / 2,
+                        DIMENSION_FREQUENCY,
+                    ),
+                    "span": format_quantity_auto(
+                        basic.stop_hz - basic.start_hz, DIMENSION_FREQUENCY
+                    ),
+                    "reference_level": f"{basic.reference_level_dbm:.9g} dBm",
+                    "sweep_points": basic.points,
+                }
+            )
+            if isinstance(advanced, AdvancedSpectrumSnapshot):
+                defaults.update(
+                    {
+                        "rbw": format_quantity_auto(
+                            advanced.rbw_hz, DIMENSION_FREQUENCY
+                        ),
+                        "rbw_auto": advanced.rbw_auto,
+                        "vbw": (
+                            None
+                            if advanced.vbw_hz is None
+                            else format_quantity_auto(
+                                advanced.vbw_hz, DIMENSION_FREQUENCY
+                            )
+                        ),
+                        "vbw_mode": advanced.vbw_mode,
+                        "detector": advanced.detector,
+                        "attenuation": f"{advanced.attenuation_db:.9g} dB",
+                        "attenuation_auto": advanced.attenuation_auto,
+                        "preamplifier_enabled": advanced.preamplifier_enabled,
+                        "sweep_time": format_quantity_auto(
+                            advanced.sweep_time_s, DIMENSION_TIME
+                        ),
+                        "sweep_time_auto": advanced.sweep_time_auto,
+                    }
+                )
+            persisted = self._repository.save_raw(raw)
+        except (AuthorizationError, ConfigurationError, KeyError, ValueError) as exc:
+            QMessageBox.critical(self, "Anritsu settings not saved", str(exc))
+            self._log(f"ANRITSU SETTINGS IMPORT FAILED: {type(exc).__name__}: {exc}")
+            return
+
+        self._settings = simulated_station_settings(persisted) if self._simulation else persisted
+        self.settings_page.reload()
+        self.anritsu_page.set_settings(self._settings)
+        self.recipe_page.set_settings(self._settings)
+        self._refresh_safety_strip()
+        self.anritsu_page.banner.show_message(
+            "Instrument readback saved to settings.yml as acquisition defaults. "
+            "The analyser, safety limits and live VISA session were not changed.",
+            severity="success",
+        )
+        self._log("ANRITSU SETTINGS IMPORT SAVED: query-only readback persisted; adapter unchanged")
 
     def _save_discovered_assignments(self, payload: object) -> None:
         self._log(f"VISA ASSIGN RECEIVED: payload={payload!r}")

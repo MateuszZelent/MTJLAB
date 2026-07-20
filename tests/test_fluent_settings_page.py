@@ -131,6 +131,13 @@ class FluentSettingsPageTests(unittest.TestCase):
                 page.tabs.navigation.geometry().bottom(),
                 page.tabs.stack.geometry().top(),
             )
+            self.assertFalse(page._draft_model_host.isVisibleTo(window))
+            self.assertTrue(
+                all(tree.parentWidget() is page._draft_model_host for tree in page.trees.values())
+            )
+            self.assertTrue(all(not tree.isVisibleTo(window) for tree in page.trees.values()))
+            self.assertIs(page.limits_table.parentWidget(), page._draft_model_host)
+            self.assertFalse(page.limits_table.isVisibleTo(window))
         finally:
             window._set_theme_mode("system", persist=False)
             window.close()

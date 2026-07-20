@@ -2364,6 +2364,7 @@ class MainWindowTests(unittest.TestCase):
             window.show()
             window._navigate_to("anritsu")
             self.application.processEvents()
+
             splitter = window.anritsu_page.workspace_splitter
             self.assertEqual(splitter.orientation(), Qt.Orientation.Horizontal)
             self.assertEqual(splitter.count(), 2)
@@ -2383,6 +2384,73 @@ class MainWindowTests(unittest.TestCase):
         finally:
             window.close()
             self.application.processEvents()
+
+    def test_anritsu_readback_is_saved_as_defaults_without_writing_instrument(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "settings.yml"
+            write_engineer_settings(path)
+            window = MainWindow(
+                path, simulation=False, authenticated_username=TEST_ENGINEER
+            )
+            try:
+                anritsu = window.anritsu_page
+                anritsu._controller.call = Mock()
+                with patch.object(
+                    QMessageBox,
+                    "question",
+                    return_value=QMessageBox.StandardButton.Save,
+                ):
+                    anritsu.read_and_save_configuration.click()
+                    anritsu._controller.call.assert_called_once_with("read_configuration")
+                    basic = AnritsuConfigurationSnapshot(
+                        2e6, 3e9, -15.5, 2001, "SPECT"
+                    )
+                    anritsu._result("read_configuration", basic)
+                    self.assertEqual(
+                        anritsu._controller.call.call_args_list[-1].args,
+                        ("read_advanced_spectrum",),
+                    )
+                    advanced = AdvancedSpectrumSnapshot(
+                        rbw_auto=False,
+                        rbw_hz=3e3,
+                        vbw_mode="off",
+                        vbw_hz=None,
+                        detector="POS",
+                        attenuation_auto=False,
+                        attenuation_db=20,
+                        preamplifier_enabled=False,
+                        sweep_time_auto=False,
+                        sweep_time_s=0.2,
+                        instrument_mode="SPECT",
+                    )
+                    anritsu._result("read_advanced_spectrum", advanced)
+
+                defaults = SettingsRepository(path).load().raw["devices"]["anritsu"][
+                    "safety"
+                ]["defaults"]
+                self.assertEqual(
+                    parse_quantity(defaults["start_frequency"], DIMENSION_FREQUENCY).si_value,
+                    2e6,
+                )
+                self.assertEqual(
+                    parse_quantity(defaults["stop_frequency"], DIMENSION_FREQUENCY).si_value,
+                    3e9,
+                )
+                self.assertEqual(defaults["reference_level"], "-15.5 dBm")
+                self.assertEqual(defaults["sweep_points"], 2001)
+                self.assertEqual(
+                    parse_quantity(defaults["rbw"], DIMENSION_FREQUENCY).si_value,
+                    3e3,
+                )
+                self.assertEqual(defaults["detector"], "POS")
+                self.assertEqual(defaults["attenuation"], "20 dB")
+                self.assertEqual(
+                    [call.args[0] for call in anritsu._controller.call.call_args_list],
+                    ["read_configuration", "read_advanced_spectrum"],
+                )
+            finally:
+                window.close()
+                self.application.processEvents()
 
     def test_limit_edit_button_opens_popup_and_saves_the_range(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:

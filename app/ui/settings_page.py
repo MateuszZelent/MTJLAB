@@ -107,7 +107,6 @@ class _FluentSettingsSections(QWidget):
         # Start compact so Pivot's wide size hint cannot inflate the page
         # before its first real resize.  resizeEvent selects the proper mode.
         self.navigation.hide()
-        self.compact_navigation.show()
         self.compact_navigation.currentIndexChanged.connect(self.setCurrentIndex)
         self.stack = QStackedWidget(self)
         self.stack.setProperty("stationSurface", "page")
@@ -256,6 +255,14 @@ class SettingsPage(QWidget):
         self.tabs = _FluentSettingsSections(self)
         self.section_navigation = self.tabs.navigation
         self.page_stack = self.tabs.stack
+        # These widgets retain the editable draft representation consumed by
+        # validation and persistence, but are not part of the operator-facing
+        # Fluent forms.  Keep them below one permanently hidden parent so a
+        # native style/theme refresh cannot expose their default 100x30
+        # geometry at the page origin.
+        self._draft_model_host = QWidget(self)
+        self._draft_model_host.setObjectName("settingsDraftModelHost")
+        self._draft_model_host.hide()
         self.trees: dict[str, QTreeWidget] = {}
         self.forms: dict[str, ScrollArea] = {}
         for key, label in (
@@ -266,7 +273,7 @@ class SettingsPage(QWidget):
             ("moke_box", "MOKE Box"),
             ("lakeshore_gaussmeter", "Lake Shore 475"),
         ):
-            tree = TreeWidget(self)
+            tree = TreeWidget(self._draft_model_host)
             tree.setHeaderLabels(["Parameter", "Value"])
             tree.setAlternatingRowColors(True)
             tree.itemChanged.connect(self._changed)
@@ -300,7 +307,7 @@ class SettingsPage(QWidget):
         limits_card.setObjectName("settingsTableCard")
         limits_card_layout = QVBoxLayout(limits_card)
         limits_card_layout.setContentsMargins(14, 14, 14, 14)
-        self.limits_table = TableWidget(self)
+        self.limits_table = TableWidget(self._draft_model_host)
         self.limits_table.setColumnCount(7)
         self.limits_table.setHorizontalHeaderLabels(
             ["Device / scope", "Parameter", "Minimum", "Maximum", "Unit", "Default", "Source"]

@@ -589,6 +589,7 @@ class _AnritsuSpectrogramWindow(StationDialog):
 
 class AnritsuPage(QWidget):
     status = Signal(str)
+    settings_readback_requested = Signal(object, object)
 
     def __init__(
         self,
@@ -625,6 +626,7 @@ class AnritsuPage(QWidget):
         self._device_idn = ""
         self._last_configuration: AnritsuConfigurationSnapshot | None = None
         self._last_advanced_configuration: AdvancedSpectrumSnapshot | None = None
+        self._save_readback_pending = False
         self._page_state = AnritsuPageState.IDLE
         self._capabilities: object | None = None
         self._averager = LinearPowerAverager()
@@ -752,6 +754,7 @@ class AnritsuPage(QWidget):
         controls = QGridLayout()
         controls.setSpacing(6)
         self.read_configuration = PushButton("Read from instrument")
+        self.read_and_save_configuration = PushButton("Read all & save defaults")
         self.configure_button = PrimaryPushButton("Apply configuration")
         self.single = PushButton("Read current spectrum")
         self.live = PrimaryPushButton("Start Live")
@@ -759,13 +762,15 @@ class AnritsuPage(QWidget):
         self.abort_button.setObjectName("warningButton")
         for button in (
             self.read_configuration,
+            self.read_and_save_configuration,
             self.configure_button,
             self.single,
             self.live,
             self.abort_button,
         ):
             button.setProperty("compact", True)
-        controls.addWidget(self.read_configuration, 0, 0, 1, 2)
+        controls.addWidget(self.read_configuration, 0, 0)
+        controls.addWidget(self.read_and_save_configuration, 0, 1)
         controls.addWidget(self.configure_button, 1, 0)
         controls.addWidget(self.single, 1, 1)
         controls.addWidget(self.live, 2, 0)
@@ -999,6 +1004,9 @@ class AnritsuPage(QWidget):
         self.mode_tabs.setTabVisible(self.signal_generator_tab_index, False)
         layout.addWidget(self.mode_tabs, 1)
         self.read_configuration.clicked.connect(self.read_configuration_from_instrument)
+        self.read_and_save_configuration.clicked.connect(
+            self.read_and_save_configuration_from_instrument
+        )
         self.configure_button.clicked.connect(self.configure)
         self.single.clicked.connect(self.read_once)
         self.live.clicked.connect(self.toggle_live)
@@ -1041,6 +1049,7 @@ class AnritsuPage(QWidget):
         controller.state_changed.connect(self._device_state_changed)
         help_items = {
             self.read_configuration: "Read Start, Stop, Reference level, and Points from the connected analyser. This sends query commands only and never changes the instrument or approved safety limits.",
+            self.read_and_save_configuration: "Read the current basic and advanced Spectrum settings using query commands, preview them, then save them as settings.yml defaults. No instrument setting or safety limit is changed.",
             self.single: "Read the currently displayed TRAC1 spectrum using SCPI queries only. This does not configure or trigger the analyser and does not require an approved safety profile.",
             self.average_count: "Number of complete spectra to average. 200 is common in the Thatec workflow. Averaging is performed in linear mW, not directly in dBm.",
             self.acquire_average: "Passively read N traces at the Live refresh interval and average power in linear mW. No analyser setting or trigger mode is changed.",
@@ -1411,6 +1420,7 @@ class AnritsuPage(QWidget):
         }
         connected = self._page_state != AnritsuPageState.DISCONNECTED
         self.read_configuration.setEnabled(idle)
+        self.read_and_save_configuration.setEnabled(idle)
         self.configure_button.setEnabled(idle)
         self.single.setEnabled(idle and self._trace_supported)
         self.live.setEnabled((idle or live) and connected and not self._live_transition_pending)
@@ -1614,6 +1624,48 @@ class AnritsuPage(QWidget):
     def read_configuration_from_instrument(self) -> None:
         self.status.emit("Anritsu current-configuration read requested")
         self._controller.call("read_configuration")
+
+    def read_and_save_configuration_from_instrument(self) -> None:
+        self._save_readback_pending = True
+        self.status.emit("Anritsu read-only settings import requested")
+        self._controller.call("read_configuration")
+
+    def _confirm_settings_readback(self) -> None:
+        basic = self._last_configuration
+        if basic is None:
+            return
+        advanced = self._last_advanced_configuration
+        lines = [
+            f"Start: {format_quantity_auto(basic.start_hz, DIMENSION_FREQUENCY)}",
+            f"Stop: {format_quantity_auto(basic.stop_hz, DIMENSION_FREQUENCY)}",
+            f"Reference level: {basic.reference_level_dbm:.9g} dBm",
+            f"Sweep points: {basic.points}",
+        ]
+        if advanced is not None:
+            lines.extend(
+                (
+                    f"RBW: {'AUTO' if advanced.rbw_auto else format_quantity_auto(advanced.rbw_hz, DIMENSION_FREQUENCY)}",
+                    f"VBW: {advanced.vbw_mode.upper() if advanced.vbw_hz is None else format_quantity_auto(advanced.vbw_hz, DIMENSION_FREQUENCY)}",
+                    f"Detector: {advanced.detector}",
+                    f"Attenuation: {'AUTO' if advanced.attenuation_auto else f'{advanced.attenuation_db:.9g} dB'}",
+                    f"Preamplifier: {'ON' if advanced.preamplifier_enabled else 'OFF'}",
+                    f"Sweep time: {'AUTO' if advanced.sweep_time_auto else format_quantity_auto(advanced.sweep_time_s, DIMENSION_TIME)}",
+                )
+            )
+        answer = QMessageBox.question(
+            self,
+            "Save Anritsu readback",
+            "The following values were read using SCPI queries only:\n\n"
+            + "\n".join(lines)
+            + "\n\nSave them as acquisition defaults in settings.yml? "
+            "Safety limits and the instrument will not be changed.",
+            QMessageBox.StandardButton.Save | QMessageBox.StandardButton.Cancel,
+            QMessageBox.StandardButton.Save,
+        )
+        if answer == QMessageBox.StandardButton.Save:
+            self.settings_readback_requested.emit(basic, advanced)
+        else:
+            self.status.emit("Anritsu settings import cancelled; settings.yml unchanged")
 
     def read_once(self) -> None:
         if self._page_state not in {AnritsuPageState.IDLE, AnritsuPageState.ERROR}:
@@ -2002,6 +2054,8 @@ class AnritsuPage(QWidget):
                 severity="success",
             )
             self.status.emit("Anritsu current configuration read from instrument")
+            if self._save_readback_pending:
+                self._controller.call("read_advanced_spectrum")
         elif operation in {
             "read_advanced_spectrum",
             "configure_advanced_spectrum",
@@ -2017,6 +2071,9 @@ class AnritsuPage(QWidget):
                 f"Advanced Spectrum settings {verb}.", severity="success"
             )
             self.status.emit(f"Anritsu advanced Spectrum settings {verb}")
+            if operation == "read_advanced_spectrum" and self._save_readback_pending:
+                self._save_readback_pending = False
+                self._confirm_settings_readback()
         elif operation in {
             "read_signal_generator",
             "configure_signal_generator",
@@ -2666,6 +2723,16 @@ class AnritsuPage(QWidget):
 
     def _error(self, operation: str, error: str) -> None:
         if operation in {"read_advanced_spectrum", "configure_advanced_spectrum"}:
+            if operation == "read_advanced_spectrum" and self._save_readback_pending:
+                self._save_readback_pending = False
+                self._set_page_state(AnritsuPageState.ERROR)
+                self.banner.show_message(
+                    "Advanced readback was unavailable; the basic Start/Stop, "
+                    "reference-level and point-count values can still be saved.",
+                    severity="warning",
+                )
+                self._confirm_settings_readback()
+                return
             self._set_page_state(AnritsuPageState.ERROR)
             self.banner.show_message(
                 f"Anritsu advanced Spectrum operation failed: {error}",
