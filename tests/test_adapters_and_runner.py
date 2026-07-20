@@ -859,6 +859,80 @@ class AdapterAndRunnerTests(unittest.TestCase):
             self.assertIn(f"print({readback_field})", configuration_traffic)
         self.assertEqual(adapter.state, DeviceState.OUTPUT_OFF)
 
+    def test_keithley_reads_both_channel_configurations_using_queries_only(self) -> None:
+        raw = deepcopy(self.settings.model_dump(mode="python"))
+        raw["devices"]["keithley"]["safety"]["channels"]["A"]["enabled"] = True
+        settings = StationSettings.model_validate(raw)
+        session = FakeVisaSession(
+            responses={
+                "*IDN?": "KEITHLEY INSTRUMENTS,2602A,123456,1.0",
+                "print(errorqueue.count)": "0",
+            }
+        )
+        adapter = KeithleyAdapter(
+            settings, session_factory=FakeVisaSessionFactory(session)
+        )
+        adapter.connect()
+        adapter.configure_source(
+            KeithleySourceRequest(
+                "A",
+                "current",
+                500e-6,
+                50e-3,
+                nplc=0.5,
+                sense_mode="4wire",
+                source_autorange=False,
+                source_range_si=1e-3,
+                measure_voltage_autorange=False,
+                measure_voltage_range_si=100e-3,
+                measure_current_autorange=False,
+                measure_current_range_si=1e-3,
+            )
+        )
+        adapter.configure_source(
+            KeithleySourceRequest(
+                "B",
+                "voltage",
+                10e-3,
+                1e-3,
+                nplc=2.0,
+                source_autorange=False,
+                source_range_si=67e-3,
+                measure_voltage_autorange=False,
+                measure_voltage_range_si=70e-3,
+                measure_current_autorange=False,
+                measure_current_range_si=10e-3,
+            )
+        )
+        adapter.set_output("B", True)
+        traffic_start = len(session.writes)
+
+        readback = adapter.read_configuration()
+
+        read_traffic = session.writes[traffic_start:]
+        self.assertTrue(read_traffic)
+        self.assertTrue(all(command.startswith("print(") for command in read_traffic))
+        self.assertFalse(any(" = " in command for command in read_traffic))
+        channel_a, channel_b = readback.channels
+        self.assertEqual(channel_a.channel, "A")
+        self.assertFalse(channel_a.output_enabled)
+        self.assertEqual(channel_a.output_off_mode, "high_impedance")
+        self.assertEqual(channel_a.source_mode, "current")
+        self.assertEqual(channel_a.source_level_si, 500e-6)
+        self.assertEqual(channel_a.compliance_si, 50e-3)
+        self.assertEqual(channel_a.source_range_si, 1e-3)
+        self.assertEqual(channel_a.sense_mode, "4wire")
+        self.assertEqual(channel_a.nplc, 0.5)
+        self.assertEqual(channel_b.channel, "B")
+        self.assertTrue(channel_b.output_enabled)
+        self.assertEqual(channel_b.source_mode, "voltage")
+        self.assertEqual(channel_b.source_level_si, 10e-3)
+        self.assertEqual(channel_b.compliance_si, 1e-3)
+        self.assertEqual(channel_b.source_range_si, 67e-3)
+        self.assertEqual(channel_b.sense_mode, "2wire")
+        self.assertEqual(channel_b.nplc, 2.0)
+        self.assertEqual(adapter.state, DeviceState.OUTPUT_ON)
+
     def test_keithley_manual_ramp_queries_actual_level_and_measures_each_step(self) -> None:
         raw = deepcopy(simulation_settings(approved=True).model_dump(mode="python"))
         raw["devices"]["keithley"]["safety"]["allow_output_enable"] = True

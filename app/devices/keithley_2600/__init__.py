@@ -4,6 +4,8 @@ from typing import Any
 
 from app.devices.keithley_2600.adapter import (
     KeithleyAdapter,
+    KeithleyChannelConfigurationReadback,
+    KeithleyConfigurationReadback,
     KeithleyRampRequest,
     KeithleyRampResult,
     build_keithley_ramp_levels,
@@ -13,6 +15,8 @@ from app.safety.keithley import KeithleySourceRequest
 __all__ = [
     "MODULE",
     "KeithleyAdapter",
+    "KeithleyChannelConfigurationReadback",
+    "KeithleyConfigurationReadback",
     "KeithleyRampRequest",
     "KeithleyRampResult",
     "KeithleySourceRequest",

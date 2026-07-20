@@ -26,6 +26,10 @@ from app.devices.anritsu_ms2830a import (
     AnritsuConfigurationSnapshot,
     SpectrumTrace,
 )
+from app.devices.keithley_2600 import (
+    KeithleyChannelConfigurationReadback,
+    KeithleyConfigurationReadback,
+)
 from app.domain.quantities import DIMENSION_DBM, DIMENSION_FREQUENCY, parse_quantity
 from app.settings.repository import SettingsRepository
 from app.settings.models import StationSettings
@@ -1657,6 +1661,9 @@ class MainWindowTests(unittest.TestCase):
                 keithley.measure_current_autorange, keithley.measure_current_range,
                 keithley.live_channel_a, keithley.live_channel_b,
                 keithley.live_interval, keithley.live_timing,
+                keithley.apply_configuration_button,
+                keithley.read_configuration_button,
+                keithley.measure_selected_button,
             )
             self.assertTrue(all(widget.toolTip() for widget in controls))
             for card in keithley.channel_cards.values():
@@ -2434,6 +2441,100 @@ class MainWindowTests(unittest.TestCase):
             keithley._controller.call.assert_not_called()
             self.assertIn("Invalid Keithley settings", keithley.banner.label.text())
             self.assertTrue(keithley.apply_configuration_button.isEnabled())
+        finally:
+            window.close()
+            self.application.processEvents()
+
+    def test_keithley_reads_both_channels_and_shows_modal_configuration(self) -> None:
+        window = MainWindow(".config/settings.yml", simulation=True)
+        try:
+            keithley = window.keithley_page
+            keithley._controller.call = Mock()
+            window.resize(1600, 900)
+            window.show()
+            window._navigate_to("keithley")
+            keithley._device_state_changed("verified")
+            self.application.processEvents()
+
+            self.assertTrue(keithley.read_configuration_button.isVisible())
+            self.assertTrue(keithley.read_configuration_button.isEnabled())
+            keithley.read_configuration_button.click()
+
+            keithley._controller.call.assert_called_once_with("read_configuration")
+            self.assertTrue(keithley._readback_pending)
+            self.assertFalse(keithley.read_configuration_button.isEnabled())
+            self.assertEqual(
+                keithley.read_configuration_button.text(), "Reading device…"
+            )
+            readback = KeithleyConfigurationReadback(
+                (
+                    KeithleyChannelConfigurationReadback(
+                        channel="A",
+                        output_enabled=False,
+                        output_off_mode="high_impedance",
+                        source_mode="current",
+                        source_level_si=500e-6,
+                        compliance_si=50e-3,
+                        source_autorange=True,
+                        source_range_si=1e-3,
+                        nplc=0.5,
+                        sense_mode="4wire",
+                        measure_voltage_autorange=True,
+                        measure_voltage_range_v=100e-3,
+                        measure_current_autorange=False,
+                        measure_current_range_a=1e-3,
+                    ),
+                    KeithleyChannelConfigurationReadback(
+                        channel="B",
+                        output_enabled=True,
+                        output_off_mode="zero",
+                        source_mode="voltage",
+                        source_level_si=10e-3,
+                        compliance_si=1e-3,
+                        source_autorange=False,
+                        source_range_si=67e-3,
+                        nplc=2.0,
+                        sense_mode="2wire",
+                        measure_voltage_autorange=False,
+                        measure_voltage_range_v=70e-3,
+                        measure_current_autorange=True,
+                        measure_current_range_a=10e-3,
+                    ),
+                )
+            )
+            with patch(
+                "app.devices.keithley_2600.ui.page._KeithleyReadbackDialog.exec",
+                return_value=0,
+            ):
+                keithley._result("read_configuration", readback)
+
+            dialog = keithley._readback_dialog
+            self.assertTrue(dialog.isModal())
+            self.assertEqual(dialog.table.rowCount(), 13)
+            table_values = {
+                dialog.table.item(row, 0).text(): (
+                    dialog.table.item(row, 1).text(),
+                    dialog.table.item(row, 2).text(),
+                )
+                for row in range(dialog.table.rowCount())
+            }
+            self.assertEqual(table_values["OUTPUT state"], ("OFF", "ON"))
+            self.assertEqual(table_values["OUTPUT OFF mode"], ("HIGH-Z", "ZERO"))
+            self.assertEqual(table_values["Source mode"], ("CURRENT", "VOLTAGE"))
+            self.assertEqual(table_values["Source level"], ("500 uA", "10 mV"))
+            self.assertEqual(table_values["Compliance limit"], ("50 mV", "1 mA"))
+            self.assertEqual(table_values["Sense mode"], ("4-wire", "2-wire"))
+            self.assertFalse(keithley._readback_pending)
+            self.assertTrue(keithley.read_configuration_button.isEnabled())
+            self.assertFalse(keithley._output_states["A"])
+            self.assertTrue(keithley._output_states["B"])
+
+            dialog.show()
+            self.application.processEvents()
+            self.assertTrue(dialog.isVisible())
+            self.assertGreater(dialog.table.width(), 600)
+            self.assertGreater(dialog.table.height(), 300)
+            dialog.close()
         finally:
             window.close()
             self.application.processEvents()

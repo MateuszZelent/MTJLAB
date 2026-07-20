@@ -300,6 +300,27 @@ class KeithleySimulator(_BaseSimulator):
         self.noise_fraction = 0.0
         self._measurement_index = {"smua": 0, "smub": 0}
         self.programmed: dict[str, str] = {}
+        for smu in ("smua", "smub"):
+            self.programmed.update(
+                {
+                    f"{smu}.source.offmode": f"{smu}.OUTPUT_HIGH_Z",
+                    f"{smu}.source.func": f"{smu}.OUTPUT_DCAMPS",
+                    f"{smu}.source.leveli": "0",
+                    f"{smu}.source.levelv": "0",
+                    f"{smu}.source.limitv": "0.1",
+                    f"{smu}.source.limiti": "0.1",
+                    f"{smu}.source.autorangei": f"{smu}.AUTORANGE_ON",
+                    f"{smu}.source.autorangev": f"{smu}.AUTORANGE_ON",
+                    f"{smu}.source.rangei": "0.1",
+                    f"{smu}.source.rangev": "20",
+                    f"{smu}.measure.nplc": "1",
+                    f"{smu}.measure.autorangev": f"{smu}.AUTORANGE_ON",
+                    f"{smu}.measure.autorangei": f"{smu}.AUTORANGE_ON",
+                    f"{smu}.measure.rangev": "20",
+                    f"{smu}.measure.rangei": "0.1",
+                    f"{smu}.sense": f"{smu}.SENSE_LOCAL",
+                }
+            )
 
     def _write(self, command: str) -> None:
         if command == "errorqueue.clear()":
@@ -356,7 +377,8 @@ class KeithleySimulator(_BaseSimulator):
         if output:
             return "1" if self.output[output.group(1)] else "0"
         equality = re.match(
-            r"^print\(((smu[ab]\.source\.offmode)\s*==\s*(smu[ab]\.OUTPUT_[A-Z_]+))\)$",
+            r"^print\(((smu[ab]\.(?:(?:source|measure)\.[A-Za-z0-9_]+|sense))"
+            r"\s*==\s*(smu[ab]\.[A-Z0-9_]+))\)$",
             command,
         )
         if equality:

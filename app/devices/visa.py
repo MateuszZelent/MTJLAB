@@ -211,7 +211,8 @@ class FakeVisaSession:
         response = self.responses.get(command)
         if response is None:
             equality = re.match(
-                r"^print\(((smu[ab]\.source\.offmode)\s*==\s*(smu[ab]\.OUTPUT_[A-Z_]+))\)$",
+                r"^print\(((smu[ab]\.(?:(?:source|measure)\.[A-Za-z0-9_]+|sense))"
+                r"\s*==\s*(smu[ab]\.[A-Z0-9_]+))\)$",
                 command,
             )
             if equality:

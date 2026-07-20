@@ -115,6 +115,24 @@ class SimulatorTests(unittest.TestCase):
         self.assertEqual(len(trace.powers_dbm), 101)
         self.assertEqual(trace.frequencies_hz[-1], 2e6)
 
+    def test_keithley_simulator_supports_read_only_configuration_snapshot(self) -> None:
+        settings = simulated_station_settings(loaded_settings())
+        keithley = KeithleyAdapter(
+            settings, session_factory=SimulatedVisaFactory("keithley")
+        )
+        keithley.connect()
+
+        readback = keithley.read_configuration()
+
+        self.assertEqual(
+            tuple(channel.channel for channel in readback.channels), ("A", "B")
+        )
+        self.assertTrue(all(not channel.output_enabled for channel in readback.channels))
+        self.assertTrue(
+            all(channel.output_off_mode == "high_impedance" for channel in readback.channels)
+        )
+        self.assertTrue(all(channel.source_mode == "current" for channel in readback.channels))
+
     def test_anritsu_trace_timeout_is_reported_without_hardware(self) -> None:
         settings = simulated_station_settings(loaded_settings())
         anritsu = AnritsuAdapter(

@@ -198,6 +198,8 @@ class InstrumentWorker(QObject):
         if isinstance(self._adapter, KeithleyAdapter):
             if operation == "configure":
                 return self._adapter.configure_source(payload)  # type: ignore[arg-type]
+            if operation == "read_configuration":
+                return self._adapter.read_configuration()
             if operation == "set_output":
                 channel, enabled = payload  # type: ignore[misc]
                 return self._adapter.set_output(channel, enabled)

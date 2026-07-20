@@ -36,6 +36,36 @@ class KeithleyMeasurement:
 
 
 @dataclass(frozen=True, slots=True)
+class KeithleyChannelConfigurationReadback:
+    """Read-only snapshot of one channel's active hardware configuration."""
+
+    channel: Literal["A", "B"]
+    output_enabled: bool
+    output_off_mode: Literal["normal", "high_impedance", "zero"]
+    source_mode: Literal["current", "voltage"]
+    source_level_si: float
+    compliance_si: float
+    source_autorange: bool
+    source_range_si: float
+    nplc: float
+    sense_mode: Literal["2wire", "4wire"]
+    measure_voltage_autorange: bool
+    measure_voltage_range_v: float
+    measure_current_autorange: bool
+    measure_current_range_a: float
+
+
+@dataclass(frozen=True, slots=True)
+class KeithleyConfigurationReadback:
+    """Complete read-only hardware snapshot for both Keithley SMU channels."""
+
+    channels: tuple[
+        KeithleyChannelConfigurationReadback,
+        KeithleyChannelConfigurationReadback,
+    ]
+
+
+@dataclass(frozen=True, slots=True)
 class KeithleyRampRequest:
     channel: Literal["A", "B"]
     target_si: float
@@ -266,6 +296,140 @@ class KeithleyAdapter(DeviceAdapter):
         errors = self.read_errors()
         if errors:
             raise DeviceError("Keithley reported an error: " + "; ".join(errors))
+
+    @staticmethod
+    def _parse_boolean_readback(field: str, response: str) -> bool:
+        normalized = response.strip().upper()
+        if normalized in {"1", "1.0", "TRUE", "ON"}:
+            return True
+        if normalized in {"0", "0.0", "FALSE", "OFF"}:
+            return False
+        try:
+            numeric = float(normalized)
+        except ValueError as exc:
+            raise DeviceError(
+                f"Keithley returned invalid boolean readback for {field}: "
+                f"{response!r}."
+            ) from exc
+        if numeric == 1:
+            return True
+        if numeric == 0:
+            return False
+        raise DeviceError(
+            f"Keithley returned invalid boolean readback for {field}: {response!r}."
+        )
+
+    def _query_boolean(self, expression: str) -> bool:
+        response = self._require_session().query(f"print({expression})")
+        return self._parse_boolean_readback(expression, response)
+
+    def _query_finite_float(self, field: str) -> float:
+        response = self._require_session().query(f"print({field})").strip()
+        try:
+            value = float(response)
+        except ValueError as exc:
+            raise DeviceError(
+                f"Keithley returned invalid numeric readback for {field}: "
+                f"{response!r}."
+            ) from exc
+        if not math.isfinite(value):
+            raise DeviceError(
+                f"Keithley returned non-finite numeric readback for {field}: "
+                f"{response!r}."
+            )
+        return value
+
+    def _query_enum(
+        self,
+        field: str,
+        choices: tuple[tuple[str, str], ...],
+    ) -> str:
+        smu = field.split(".", 1)[0]
+        matches = [
+            value
+            for value, constant in choices
+            if self._query_boolean(f"{field} == {smu}.{constant}")
+        ]
+        if len(matches) != 1:
+            raise DeviceError(
+                f"Keithley returned an unknown or ambiguous value for {field}."
+            )
+        return matches[0]
+
+    def read_configuration(self) -> KeithleyConfigurationReadback:
+        """Query both channels without writing or changing either OUTPUT state."""
+
+        self._require_session()
+        snapshots: list[KeithleyChannelConfigurationReadback] = []
+        observed_outputs: dict[Literal["A", "B"], bool] = {}
+        for channel in ("A", "B"):
+            smu = self._smu(channel)
+            output_enabled = self._output_is_enabled(channel)
+            output_off_mode = self._query_enum(
+                f"{smu}.source.offmode",
+                (
+                    ("normal", "OUTPUT_NORMAL"),
+                    ("high_impedance", "OUTPUT_HIGH_Z"),
+                    ("zero", "OUTPUT_ZERO"),
+                ),
+            )
+            source_mode = self._query_enum(
+                f"{smu}.source.func",
+                (
+                    ("current", "OUTPUT_DCAMPS"),
+                    ("voltage", "OUTPUT_DCVOLTS"),
+                ),
+            )
+            suffix = "i" if source_mode == "current" else "v"
+            compliance_field = "limitv" if source_mode == "current" else "limiti"
+            source_autorange = self._query_enum(
+                f"{smu}.source.autorange{suffix}",
+                (("off", "AUTORANGE_OFF"), ("on", "AUTORANGE_ON")),
+            )
+            sense_mode = self._query_enum(
+                f"{smu}.sense",
+                (("2wire", "SENSE_LOCAL"), ("4wire", "SENSE_REMOTE")),
+            )
+            measure_voltage_autorange = self._query_enum(
+                f"{smu}.measure.autorangev",
+                (("off", "AUTORANGE_OFF"), ("on", "AUTORANGE_ON")),
+            )
+            measure_current_autorange = self._query_enum(
+                f"{smu}.measure.autorangei",
+                (("off", "AUTORANGE_OFF"), ("on", "AUTORANGE_ON")),
+            )
+            snapshots.append(
+                KeithleyChannelConfigurationReadback(
+                    channel=channel,
+                    output_enabled=output_enabled,
+                    output_off_mode=output_off_mode,  # type: ignore[arg-type]
+                    source_mode=source_mode,  # type: ignore[arg-type]
+                    source_level_si=self._query_finite_float(
+                        f"{smu}.source.level{suffix}"
+                    ),
+                    compliance_si=self._query_finite_float(
+                        f"{smu}.source.{compliance_field}"
+                    ),
+                    source_autorange=source_autorange == "on",
+                    source_range_si=self._query_finite_float(
+                        f"{smu}.source.range{suffix}"
+                    ),
+                    nplc=self._query_finite_float(f"{smu}.measure.nplc"),
+                    sense_mode=sense_mode,  # type: ignore[arg-type]
+                    measure_voltage_autorange=measure_voltage_autorange == "on",
+                    measure_voltage_range_v=self._query_finite_float(
+                        f"{smu}.measure.rangev"
+                    ),
+                    measure_current_autorange=measure_current_autorange == "on",
+                    measure_current_range_a=self._query_finite_float(
+                        f"{smu}.measure.rangei"
+                    ),
+                )
+            )
+            observed_outputs[channel] = output_enabled
+        self._output_states.update(observed_outputs)
+        self._update_aggregate_output_state()
+        return KeithleyConfigurationReadback((snapshots[0], snapshots[1]))
 
     def configure_source(self, request: KeithleySourceRequest) -> None:
         """Set function, range-safe level and compliance while output is guaranteed OFF."""

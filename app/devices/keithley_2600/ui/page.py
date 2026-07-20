@@ -31,6 +31,7 @@ from qfluentwidgets import (
 )
 
 from app.devices.keithley_2600 import (
+    KeithleyChannelConfigurationReadback, KeithleyConfigurationReadback,
     KeithleyRampRequest, KeithleySourceRequest, build_keithley_ramp_levels,
 )
 from app.domain.errors import ConfigurationError
@@ -641,6 +642,148 @@ class KeithleyNodeEditorDialog(FluentRecipeDialog):
             super().accept()
 
 
+class _KeithleyReadbackDialog(StationDialog):
+    """Modal, read-only comparison of both Keithley channel configurations."""
+
+    def __init__(
+        self,
+        readback: KeithleyConfigurationReadback,
+        parent: QWidget,
+    ) -> None:
+        super().__init__(parent)
+        self.setObjectName("keithleyReadbackDialog")
+        self.setWindowTitle("Keithley 2600 — settings read from device")
+        self.setModal(True)
+        self.setMinimumSize(760, 500)
+        self.resize(860, 540)
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(18, 16, 18, 16)
+        layout.setSpacing(10)
+
+        title = StrongBodyLabel("Hardware configuration snapshot", self)
+        title.setObjectName("pageTitle")
+        layout.addWidget(title)
+        note = BodyLabel(
+            "Read-only TSP queries were used for both channels. No setting or OUTPUT "
+            "state was changed. Settling time belongs to the application and is not "
+            "stored in the Keithley.",
+            self,
+        )
+        note.setWordWrap(True)
+        layout.addWidget(note)
+
+        output_on = any(channel.output_enabled for channel in readback.channels)
+        output_status = StrongBodyLabel(
+            "Warning: at least one hardware OUTPUT is ON."
+            if output_on
+            else "Hardware readback: OUTPUT A OFF · OUTPUT B OFF",
+            self,
+        )
+        output_status.setObjectName(
+            "keithleyReadbackOutputOn" if output_on else "sectionTitle"
+        )
+        layout.addWidget(output_status)
+
+        self.table = QTableWidget(self)
+        self.table.setObjectName("keithleyReadbackTable")
+        self.table.setAccessibleName(
+            "Keithley hardware settings read from channels A and B"
+        )
+        self.table.setColumnCount(3)
+        self.table.setHorizontalHeaderLabels(["Parameter", "Channel A", "Channel B"])
+        self.table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
+        self.table.setSelectionMode(QAbstractItemView.SelectionMode.SingleSelection)
+        self.table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
+        self.table.setAlternatingRowColors(True)
+        self.table.verticalHeader().setVisible(False)
+        values = {
+            channel.channel: self._channel_values(channel)
+            for channel in readback.channels
+        }
+        rows = (
+            "OUTPUT state",
+            "OUTPUT OFF mode",
+            "Source mode",
+            "Source level",
+            "Compliance limit",
+            "Source autorange",
+            "Active source range",
+            "Sense mode",
+            "NPLC",
+            "Measure V autorange",
+            "Active measure V range",
+            "Measure I autorange",
+            "Active measure I range",
+        )
+        self.table.setRowCount(len(rows))
+        for row, parameter in enumerate(rows):
+            self.table.setItem(row, 0, QTableWidgetItem(parameter))
+            self.table.setItem(row, 1, QTableWidgetItem(values["A"][parameter]))
+            self.table.setItem(row, 2, QTableWidgetItem(values["B"][parameter]))
+        header = self.table.horizontalHeader()
+        header.setSectionResizeMode(0, QHeaderView.ResizeMode.ResizeToContents)
+        header.setSectionResizeMode(1, QHeaderView.ResizeMode.Stretch)
+        header.setSectionResizeMode(2, QHeaderView.ResizeMode.Stretch)
+        self.table.resizeRowsToContents()
+        layout.addWidget(self.table, 1)
+
+        footer = QHBoxLayout()
+        footer.addStretch(1)
+        close = PrimaryPushButton("Close", self)
+        close.clicked.connect(self.accept)
+        footer.addWidget(close)
+        layout.addLayout(footer)
+
+    @staticmethod
+    def _channel_values(
+        channel: KeithleyChannelConfigurationReadback,
+    ) -> dict[str, str]:
+        source_dimension = (
+            DIMENSION_CURRENT
+            if channel.source_mode == "current"
+            else DIMENSION_VOLTAGE
+        )
+        compliance_dimension = (
+            DIMENSION_VOLTAGE
+            if channel.source_mode == "current"
+            else DIMENSION_CURRENT
+        )
+        off_mode = {
+            "normal": "NORMAL",
+            "high_impedance": "HIGH-Z",
+            "zero": "ZERO",
+        }[channel.output_off_mode]
+        return {
+            "OUTPUT state": "ON" if channel.output_enabled else "OFF",
+            "OUTPUT OFF mode": off_mode,
+            "Source mode": channel.source_mode.upper(),
+            "Source level": format_quantity_auto(
+                channel.source_level_si, source_dimension
+            ),
+            "Compliance limit": format_quantity_auto(
+                channel.compliance_si, compliance_dimension
+            ),
+            "Source autorange": "ON" if channel.source_autorange else "OFF",
+            "Active source range": format_quantity_auto(
+                channel.source_range_si, source_dimension
+            ),
+            "Sense mode": "2-wire" if channel.sense_mode == "2wire" else "4-wire",
+            "NPLC": f"{channel.nplc:.9g}",
+            "Measure V autorange": (
+                "ON" if channel.measure_voltage_autorange else "OFF"
+            ),
+            "Active measure V range": format_quantity_auto(
+                channel.measure_voltage_range_v, DIMENSION_VOLTAGE
+            ),
+            "Measure I autorange": (
+                "ON" if channel.measure_current_autorange else "OFF"
+            ),
+            "Active measure I range": format_quantity_auto(
+                channel.measure_current_range_a, DIMENSION_CURRENT
+            ),
+        }
+
+
 class _KeithleyFloatingPanelWindow(StationDialog):
     """Non-modal host for one live Keithley panel."""
 
@@ -681,6 +824,7 @@ class KeithleyPage(QWidget):
         self._auto_enable_channel: str | None = None
         self._measure_pending = False
         self._ramp_pending = False
+        self._readback_pending = False
         self._device_state_value = "DISCONNECTED"
         self._live_next_channel = "A"
         self._history_started_at = time.monotonic()
@@ -693,6 +837,7 @@ class KeithleyPage(QWidget):
         self._panel_widgets: dict[str, QWidget] = {}
         self._panel_float_buttons: dict[str, TransparentToolButton] = {}
         self._floating_panels: dict[str, _KeithleyFloatingPanelWindow] = {}
+        self._readback_dialog: _KeithleyReadbackDialog | None = None
         self._panel_placeholders: dict[str, CardWidget] = {}
         self._live_timer = QTimer(self)
         self._live_timer.setInterval(1000)
@@ -768,6 +913,7 @@ class KeithleyPage(QWidget):
         self.apply_configuration_button = PrimaryPushButton(
             "Apply & verify settings · OUTPUT OFF"
         )
+        self.read_configuration_button = PushButton("Read from device…")
         measure = PushButton("Measure selected channel")
         self.measure_selected_button = measure
         self.output_toggle = PushButton("OUTPUT OFF")
@@ -775,6 +921,7 @@ class KeithleyPage(QWidget):
         self.output_toggle.setObjectName("outputOffButton")
         self.output_toggle.setVisible(False)
         buttons.addWidget(self.apply_configuration_button)
+        buttons.addWidget(self.read_configuration_button)
         buttons.addWidget(measure)
         source_layout.addLayout(buttons)
         self.configuration_panel = KeithleyConfigurationPanel(settings, source_tab)
@@ -892,6 +1039,9 @@ class KeithleyPage(QWidget):
         self._workspace_compact: bool | None = None
         layout.addWidget(self.workspace_splitter, 1)
         self.apply_configuration_button.clicked.connect(self.configure)
+        self.read_configuration_button.clicked.connect(
+            self.read_configuration_from_device
+        )
         measure.clicked.connect(self.request_measurement)
         self.output_toggle.toggled.connect(self._output_toggled)
         self.ramp_preview_button.clicked.connect(self._preview_manual_ramp)
@@ -1254,6 +1404,7 @@ class KeithleyPage(QWidget):
             self.ramp_preview_button: ("Preview ramp", "Calculates the finite point sequence without contacting the instrument. Execution still queries the actual starting source level."),
             self.ramp_execute_button: ("Ramp active output", "Changes an already enabled source through bounded points. It never turns an output on; every point measures I/V and trips OFF on failure."),
             self.apply_configuration_button: ("Apply and verify with OUTPUT OFF", "Validates every visible value and unit, forces the selected channel OUTPUT OFF, writes the complete source and measurement configuration, and reads every instrument-programmable parameter back. Software settling time is validated locally. This action never enables OUTPUT."),
+            self.read_configuration_button: ("Read settings from device", "Queries the complete active configuration of channels A and B and opens a read-only comparison. Only print(...) TSP queries are sent; no setting or OUTPUT state is changed."),
         }
         for widget, (title, description) in help_items.items():
             self._set_help(widget, title, description)
@@ -1346,17 +1497,29 @@ class KeithleyPage(QWidget):
                 )
             )
         )
+        configuration_busy = configuration_mutation_pending or self._readback_pending
         self.apply_configuration_button.setText(
             "Applying & verifying…"
             if configure_pending
             else "Apply & verify settings · OUTPUT OFF"
         )
         self.apply_configuration_button.setEnabled(
-            self._device_is_output_ready() and not configuration_mutation_pending
+            self._device_is_output_ready() and not configuration_busy
+        )
+        self.read_configuration_button.setText(
+            "Reading device…"
+            if self._readback_pending
+            else "Read from device…"
+        )
+        self.read_configuration_button.setEnabled(
+            self._device_is_output_ready()
+            and not configuration_busy
+            and not self._measure_pending
         )
         for channel, card in self.channel_cards.items():
             pending_enable = (
                 self._auto_enable_channel == channel
+                or self._readback_pending
                 or any(
                     self._pending_channels.get(operation) == channel
                     for operation in ("configure", "set_output")
@@ -1894,7 +2057,7 @@ class KeithleyPage(QWidget):
         self._update_ramp_defaults(reset_values=True)
 
     def configure(self) -> None:
-        if self._auto_enable_channel is not None or any(
+        if self._readback_pending or self._auto_enable_channel is not None or any(
             operation in self._pending_channels
             for operation in (
                 "configure",
@@ -1924,6 +2087,38 @@ class KeithleyPage(QWidget):
             f"Keithley CH {request.channel}: applying and verifying settings with OUTPUT OFF"
         )
         self._controller.call("configure", request)
+
+    def read_configuration_from_device(self) -> None:
+        mutation_pending = self._auto_enable_channel is not None or any(
+            operation in self._pending_channels
+            for operation in (
+                "configure",
+                "set_output",
+                "ramp_to_zero",
+                "ramp_to_level",
+            )
+        )
+        if self._readback_pending or mutation_pending:
+            return
+        if not self._device_is_output_ready():
+            self.banner.show_message(
+                "Connect and verify Keithley before reading device settings."
+            )
+            return
+        self._readback_pending = True
+        self._update_output_readiness()
+        self.status.emit(
+            "Keithley: reading complete channel A/B configuration (queries only)"
+        )
+        self._controller.call("read_configuration")
+
+    def _show_configuration_readback(
+        self,
+        readback: KeithleyConfigurationReadback,
+    ) -> None:
+        dialog = _KeithleyReadbackDialog(readback, self)
+        self._readback_dialog = dialog
+        dialog.exec()
 
     def _source_request(self) -> KeithleySourceRequest:
         mode = self.mode.currentText()
@@ -2014,7 +2209,18 @@ class KeithleyPage(QWidget):
         self.output_toggle.style().polish(self.output_toggle)
 
     def _result(self, operation: str, result: object) -> None:
-        if operation == "measure" and hasattr(result, "current_a"):
+        if operation == "read_configuration" and isinstance(
+            result, KeithleyConfigurationReadback
+        ):
+            self._readback_pending = False
+            for channel in result.channels:
+                self._set_channel_output(channel.channel, channel.output_enabled)
+            self._update_output_readiness()
+            self.status.emit(
+                "Keithley: channel A/B settings read using queries only"
+            )
+            self._show_configuration_readback(result)
+        elif operation == "measure" and hasattr(result, "current_a"):
             measurement = result
             self._measure_pending = False
             if hasattr(measurement, "output_enabled"):
@@ -2090,6 +2296,9 @@ class KeithleyPage(QWidget):
             self.status.emit(f"Keithley CH {channel}: manual ramp completed")
 
     def _error(self, operation: str, error: str) -> None:
+        if operation == "read_configuration":
+            self._readback_pending = False
+            self._update_output_readiness()
         if operation == "measure":
             self._measure_pending = False
         if operation == "configure":
@@ -2116,6 +2325,7 @@ class KeithleyPage(QWidget):
             self._update_output_readiness()
         if operation in {
             "configure",
+            "read_configuration",
             "measure",
             "set_output",
             "ramp_to_zero",
