@@ -110,6 +110,19 @@ class DeviceAdapter(ABC):
     def connected(self) -> bool:
         return self._state is not DeviceState.DISCONNECTED
 
+    def refresh_station_context(self, station: object) -> None:
+        """Refresh station-wide interlocks when this device profile is unchanged."""
+
+        if hasattr(self, "_station"):
+            self._station = station
+
+    def apply_limit_settings(self, station: object) -> None:
+        """Apply changed safety limits without replacing the active adapter."""
+
+        raise SafetyViolation(
+            f"{type(self).__name__} does not support live safety-limit updates."
+        )
+
     @contextmanager
     def io_timeout(self, timeout_s: float):
         """Temporarily cap VISA I/O latency for one high-level operation.

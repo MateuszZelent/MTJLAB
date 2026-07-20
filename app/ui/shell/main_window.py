@@ -1218,6 +1218,7 @@ class MainWindow(FluentWindow):
             )
 
     def _settings_saved(self, settings: StationSettings) -> None:
+        previous_settings = self._settings
         self._settings = simulated_station_settings(settings) if self._simulation else settings
         self.quick_control_coordinator.set_settings(self._settings)
         self.dashboard.update_settings(self._settings)
@@ -1231,6 +1232,22 @@ class MainWindow(FluentWindow):
             panel.update_resource(resource, backend)
         self.recipe_page.set_settings(self._settings)
         for name, controller in self._controllers.items():
+            previous_device = getattr(previous_settings.devices, name)
+            updated_device = getattr(self._settings.devices, name)
+            changes = self._setting_changes(
+                previous_device.model_dump(mode="python"),
+                updated_device.model_dump(mode="python"),
+            )
+            if not changes:
+                controller.call("refresh_station_context", self._settings)
+                continue
+            if all(path and path[-1] in {"min", "max", "max_abs"} for path in changes):
+                controller.call("apply_limit_settings", self._settings)
+                self._log(
+                    f"DEVICE LIMITS HOT-APPLY QUEUED [{name}]: session remains connected; "
+                    "output-capable hardware must confirm OUTPUT OFF."
+                )
+                continue
             self.dashboard.cards[name].set_reconfiguring(True)
             self.connection_panels[name].set_reconfiguring(True)
             resource, backend = self._device_connection_details(self._settings, name)
@@ -1242,7 +1259,30 @@ class MainWindow(FluentWindow):
             self._device_states[name] = "disconnected"
             self.dashboard.cards[name].update_state("disconnected")
         self._refresh_safety_strip()
-        self._log("Profile changed. VISA sessions were safely switched OFF and disconnected; new limits apply on the next connection.")
+        self._log(
+            "Profile changed. Limit-only edits were applied without reconnecting; "
+            "only connection, identity, driver or other operational changes replaced adapters."
+        )
+
+    @classmethod
+    def _setting_changes(
+        cls,
+        previous: object,
+        updated: object,
+        prefix: tuple[str, ...] = (),
+    ) -> set[tuple[str, ...]]:
+        if isinstance(previous, dict) and isinstance(updated, dict):
+            changes: set[tuple[str, ...]] = set()
+            for key in previous.keys() | updated.keys():
+                path = (*prefix, str(key))
+                if key not in previous or key not in updated:
+                    changes.add(path)
+                else:
+                    changes.update(
+                        cls._setting_changes(previous[key], updated[key], path)
+                    )
+            return changes
+        return set() if previous == updated else {prefix}
 
     def _save_anritsu_readback_defaults(self, basic: object, advanced: object) -> None:
         """Persist query-only analyser readback without replacing the live adapter."""

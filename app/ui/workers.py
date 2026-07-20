@@ -165,6 +165,10 @@ class InstrumentWorker(QObject):
             return self._adapter.disconnect()
         if operation == "emergency_off":
             return self._adapter.emergency_off()
+        if operation == "refresh_station_context":
+            return self._adapter.refresh_station_context(payload)
+        if operation == "apply_limit_settings":
+            return self._adapter.apply_limit_settings(payload)
         if self._dispatcher is not None:
             return self._dispatcher(self._adapter, operation, payload)
         # Compatibility path for existing callers that construct a controller

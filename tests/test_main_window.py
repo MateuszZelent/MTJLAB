@@ -28,6 +28,7 @@ from app.devices.anritsu_ms2830a import (
 )
 from app.domain.quantities import DIMENSION_DBM, DIMENSION_FREQUENCY, parse_quantity
 from app.settings.repository import SettingsRepository
+from app.settings.models import StationSettings
 from app.safety.quick_controls import quick_control_safety_bounds
 from app.devices.anritsu_ms2830a.ui import AnritsuPageState
 from app.ui.shell import MainWindow
@@ -1939,52 +1940,22 @@ class MainWindowTests(unittest.TestCase):
             window.close()
             self.application.processEvents()
 
-    def test_keithley_manual_ramp_previews_then_dispatches_bounded_request(self) -> None:
+    def test_keithley_manual_ramp_is_hidden_and_cannot_dispatch(self) -> None:
         window = MainWindow(".config/settings.yml", simulation=True)
         try:
             keithley = window.keithley_page
             keithley._controller.call = Mock()
-            keithley.level.setText("1 mA")
-            keithley.ramp_target.setText("1.2 mA")
-            keithley.ramp_step.setText("100 uA")
-            keithley.ramp_settle.setText("1 ms")
-            keithley.ramp_deadline.setText("1 s")
+
+            self.assertTrue(keithley.manual_ramp_panel.isHidden())
+            self.assertFalse(keithley.ramp_preview_button.isEnabled())
+            self.assertFalse(keithley.ramp_execute_button.isEnabled())
+
             keithley._preview_manual_ramp()
-            self.assertIn("point(s)", keithley.ramp_preview.text())
             keithley._set_channel_output("B", True)
+            keithley._execute_manual_ramp()
 
-            with patch.object(
-                QMessageBox,
-                "warning",
-                return_value=QMessageBox.StandardButton.Yes,
-            ):
-                keithley._execute_manual_ramp()
-
-            operation, request = keithley._controller.call.call_args.args
-            self.assertEqual(operation, "ramp_to_level")
-            self.assertAlmostEqual(request.target_si, 0.0012)
-            self.assertAlmostEqual(request.max_step_si, 0.0001)
-            self.assertTrue(keithley._ramp_pending)
-
-            measurement = SimpleNamespace(
-                channel="B",
-                voltage_v=0.012,
-                current_a=0.0012,
-                power_w=0.0000144,
-                compliance_detected=False,
-            )
-            keithley._result(
-                "ramp_to_level",
-                SimpleNamespace(
-                    final_measurement=measurement,
-                    levels_si=(0.0011, 0.0012),
-                    target_si=0.0012,
-                ),
-            )
-            self.assertFalse(keithley._ramp_pending)
-            self.assertTrue(keithley._output_states["B"])
-            self.assertEqual(keithley.level.text(), "1.2 mA")
-            self.assertIn("Ramp completed", keithley.ramp_preview.text())
+            keithley._controller.call.assert_not_called()
+            self.assertFalse(keithley.ramp_execute_button.isEnabled())
         finally:
             window.close()
             self.application.processEvents()
@@ -2811,6 +2782,59 @@ class MainWindowTests(unittest.TestCase):
             finally:
                 window.close()
                 self.application.processEvents()
+
+    def test_limit_only_changes_hot_apply_without_reconnecting_any_device(self) -> None:
+        window = MainWindow(".config/settings.yml", simulation=False)
+        try:
+            for controller in window._controllers.values():
+                controller.call = Mock()
+                controller.reconfigure = Mock()
+
+            cases = (
+                (
+                    "rigol",
+                    ("devices", "rigol", "safety", "channels", "1", "lab_limits", "frequency", "max"),
+                    "900 kHz",
+                ),
+                (
+                    "keithley",
+                    ("devices", "keithley", "safety", "channels", "B", "lab_limits", "source_current", "max"),
+                    "9 mA",
+                ),
+                (
+                    "anritsu",
+                    ("devices", "anritsu", "safety", "frequency", "max"),
+                    "19 GHz",
+                ),
+            )
+            for changed_device, path, value in cases:
+                with self.subTest(device=changed_device):
+                    raw = window._settings.model_dump(mode="python")
+                    target = raw
+                    for key in path[:-1]:
+                        target = target[key]
+                    target[path[-1]] = value
+                    updated = StationSettings.model_validate(raw)
+                    for controller in window._controllers.values():
+                        controller.call.reset_mock()
+                        controller.reconfigure.reset_mock()
+
+                    window._settings_saved(updated)
+
+                    for name, controller in window._controllers.items():
+                        controller.reconfigure.assert_not_called()
+                        expected_operation = (
+                            "apply_limit_settings"
+                            if name == changed_device
+                            else "refresh_station_context"
+                        )
+                        self.assertEqual(
+                            controller.call.call_args.args[0],
+                            expected_operation,
+                        )
+        finally:
+            window.close()
+            self.application.processEvents()
 
     def test_limit_edit_button_opens_popup_and_saves_the_range(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:

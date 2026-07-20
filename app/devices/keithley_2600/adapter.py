@@ -234,6 +234,25 @@ class KeithleyAdapter(DeviceAdapter):
             self._output_states = {"A": False, "B": False}
             self._state = DeviceState.OUTPUT_OFF
 
+    def apply_limit_settings(self, station: object) -> None:
+        if not isinstance(station, StationSettings):
+            raise TypeError("Keithley limit update requires StationSettings.")
+        if self._session is not None:
+            try:
+                states = self._read_output_states()
+            except Exception:
+                self.emergency_off()
+                raise
+            if any(states.values()):
+                raise SafetyViolation(
+                    "Keithley limits can change without reconnecting only when OUTPUT A "
+                    "and OUTPUT B are confirmed OFF."
+                )
+        self._station = station
+        self._settings = station.keithley
+        self._last_request.clear()
+        self._armed_until.clear()
+
     def _clear_errors(self) -> None:
         self._require_session().write("errorqueue.clear()")
 

@@ -364,6 +364,32 @@ class AnritsuAdapter(DeviceAdapter):
             self._sg_armed_until = 0.0
             self._state = DeviceState.VERIFIED
 
+    def apply_limit_settings(self, station: object) -> None:
+        if not isinstance(station, StationSettings):
+            raise TypeError("Anritsu limit update requires StationSettings.")
+        if (
+            self._session is not None
+            and self._capabilities is not None
+            and self._capabilities.supports("signal_generator")
+        ):
+            session = self._session
+            try:
+                session.write("INST SG")
+                output_enabled = self._parse_output_state(session.query("OUTP?"))
+                session.write("INST SPECT")
+            except Exception:
+                self.emergency_off()
+                raise
+            if output_enabled:
+                raise SafetyViolation(
+                    "Anritsu limits can change without reconnecting only when the RF "
+                    "generator output is confirmed OFF."
+                )
+        self._station = station
+        self._settings = station.anritsu
+        self._last_sg_config = None
+        self._sg_armed_until = 0.0
+
     def _assert_signal_generator_supported(self) -> None:
         if self._capabilities is None or not self._capabilities.supports("signal_generator"):
             raise SafetyViolation(

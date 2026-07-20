@@ -269,6 +269,26 @@ class RigolAdapter(DeviceAdapter):
             self._output_states = {1: False, 2: False}
             self._state = DeviceState.OUTPUT_OFF
 
+    def apply_limit_settings(self, station: object) -> None:
+        if not isinstance(station, StationSettings):
+            raise TypeError("Rigol limit update requires StationSettings.")
+        if self._session is not None:
+            try:
+                states = self._read_output_states()
+            except Exception:
+                self.emergency_off()
+                raise
+            if any(states.values()):
+                raise SafetyViolation(
+                    "Rigol limits can change without reconnecting only when both "
+                    "outputs are confirmed OFF."
+                )
+        self._station = station
+        self._settings = station.rigol
+        self._last_config.clear()
+        self._last_output_config.clear()
+        self._armed_until.clear()
+
     def _read_output_states(self) -> dict[int, bool]:
         session = self._require_session()
         states = {

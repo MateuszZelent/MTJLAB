@@ -665,6 +665,7 @@ class _KeithleyFloatingPanelWindow(StationDialog):
 class KeithleyPage(QWidget):
     status = Signal(str)
     quick_controls_requested = Signal()
+    _MANUAL_RAMP_ENABLED = False
 
     def __init__(self, controller: DeviceController, settings: StationSettings, parent: QWidget | None = None) -> None:
         super().__init__(parent)
@@ -809,6 +810,7 @@ class KeithleyPage(QWidget):
         source_layout.addWidget(workflow)
         ramp_panel = CardWidget()
         ramp_panel.setObjectName("keithleyRampPanel")
+        self.manual_ramp_panel = ramp_panel
         ramp_layout = QVBoxLayout(ramp_panel)
         ramp_layout.setContentsMargins(7, 5, 7, 5)
         ramp_title = StrongBodyLabel("Manual source ramp — OUTPUT must already be ON")
@@ -841,6 +843,7 @@ class KeithleyPage(QWidget):
         ramp_actions.addWidget(self.ramp_preview, 1)
         ramp_layout.addLayout(ramp_actions)
         source_layout.addWidget(ramp_panel)
+        ramp_panel.setVisible(self._MANUAL_RAMP_ENABLED)
         buttons = QHBoxLayout()
         measure = PushButton("Measure selected channel")
         self.output_toggle = PushButton("OUTPUT OFF")
@@ -1687,6 +1690,10 @@ class KeithleyPage(QWidget):
         self._update_ramp_defaults(reset_values=True)
 
     def _update_ramp_defaults(self, *, reset_values: bool = False) -> None:
+        if not self._MANUAL_RAMP_ENABLED:
+            self.ramp_preview_button.setEnabled(False)
+            self.ramp_execute_button.setEnabled(False)
+            return
         mode = self.mode.currentText()
         enabled = mode in {"current", "voltage"}
         self.ramp_preview_button.setEnabled(enabled and not self._ramp_pending)
@@ -1744,6 +1751,9 @@ class KeithleyPage(QWidget):
         return request, levels
 
     def _preview_manual_ramp(self) -> None:
+        if not self._MANUAL_RAMP_ENABLED:
+            self.banner.show_message("Manual source ramp is disabled in the thaTEC workflow.")
+            return
         try:
             request, levels = self._manual_ramp_request()
         except Exception as exc:
@@ -1758,6 +1768,9 @@ class KeithleyPage(QWidget):
         )
 
     def _execute_manual_ramp(self) -> None:
+        if not self._MANUAL_RAMP_ENABLED:
+            self.banner.show_message("Manual source ramp is disabled in the thaTEC workflow.")
+            return
         channel = self.channel.currentText()
         if not self._output_states[channel]:
             self.banner.show_message("Manual ramp requires the selected OUTPUT to be ON.")
