@@ -936,6 +936,11 @@ class KeithleyPage(QWidget):
             return
         self._workspace_compact = compact
         self.source_scroll.setMinimumWidth(0 if compact else 640)
+        self.keithley_form.setRowWrapPolicy(
+            QFormLayout.RowWrapPolicy.WrapAllRows
+            if compact
+            else QFormLayout.RowWrapPolicy.DontWrapRows
+        )
         self.workspace_splitter.setOrientation(
             Qt.Orientation.Vertical if compact else Qt.Orientation.Horizontal
         )

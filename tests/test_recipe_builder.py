@@ -2114,8 +2114,8 @@ finally: []
             )
             labels = {button.text() for button in page._library_action_buttons}
             self.assertIn("Keithley A → 0 + OFF", labels)
-            self.assertIn("Rigol CH2 OUTPUT OFF", labels)
-            self.assertIn("Anritsu SG RF OFF", labels)
+            self.assertIn("Rigol CH2 OFF", labels)
+            self.assertIn("Anritsu SG OFF", labels)
         finally:
             page.close()
 

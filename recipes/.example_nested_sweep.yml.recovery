@@ -55,6 +55,16 @@ root:
         type: acquire_spectrum
         trace: TRAC1
 
+  - id: rigol-b971d67a
+    type: sequence
+    text: Rigol DG1032Z — configuration required
+    device_module: rigol
+    label: Rigol DG1032Z
+    configuration_required: true
+    children:
+    - id: comment-92801ca4
+      type: comment
+      text: Drop nested devices or flow actions here
 finally:
 - id: rigol-ch1-off-finally
   type: set_rigol_output
