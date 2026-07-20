@@ -51,6 +51,21 @@ class FluentDialogTests(unittest.TestCase):
             dialog.close()
             plot.close()
 
+    def test_unitless_numeric_limit_accepts_valid_nplc_and_clamps_outside_value(self) -> None:
+        editor = line_edit("1")
+        limit = LimitField(editor, 0.001, 25.0)
+        try:
+            self.assertTrue(limit.validate_and_clamp())
+            self.assertEqual(editor.text(), "1")
+            self.assertTrue(limit.validation_warning.isHidden())
+
+            editor.setText("26")
+            self.assertFalse(limit.validate_and_clamp())
+            self.assertEqual(editor.text(), "25.0")
+            self.assertFalse(limit.validation_warning.isHidden())
+        finally:
+            limit.close()
+
     def test_native_dialog_buttons_receive_readable_light_and_dark_styles(self) -> None:
         box = QMessageBox()
         try:

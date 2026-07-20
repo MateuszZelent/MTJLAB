@@ -1688,6 +1688,11 @@ class MainWindowTests(unittest.TestCase):
         window = MainWindow(".config/settings.yml", simulation=True)
         try:
             keithley = window.keithley_page
+            self.assertFalse(
+                keithley.keithley_form.isRowVisible(
+                    keithley.configuration_panel.nplc_field
+                )
+            )
             keithley._controller.call = Mock()
             safety = keithley._station_settings.keithley.safety.model_copy(
                 update={"output_off_mode": "zero"}
@@ -1896,6 +1901,33 @@ class MainWindowTests(unittest.TestCase):
             self.assertLess(
                 keithley.level_field.minimum.geometry().right(),
                 keithley.level_field.maximum.geometry().left(),
+            )
+        finally:
+            window.close()
+            self.application.processEvents()
+
+    def test_keithley_high_z_off_keeps_derived_resistance_visible(self) -> None:
+        window = MainWindow(".config/settings.yml", simulation=True)
+        try:
+            keithley = window.keithley_page
+            measurement = SimpleNamespace(
+                channel="A",
+                voltage_v=50e-3,
+                current_a=1e-3,
+                power_w=50e-6,
+                output_enabled=False,
+                measurement_path_connected=False,
+                compliance_detected=False,
+            )
+
+            keithley._result("measure", measurement)
+
+            card = keithley.channel_cards["A"]
+            self.assertEqual(card["resistance"].text(), "50 Ω")
+            self.assertEqual(card["power"].text(), "50 µW")
+            self.assertIn("HIGH-Z / FLOATING", card["compliance"].text())
+            self.assertEqual(
+                keithley._measurement_history["A"][-1]["resistance"], 50.0
             )
         finally:
             window.close()

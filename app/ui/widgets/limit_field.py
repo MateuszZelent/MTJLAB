@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import math
+
 from PySide6.QtCore import Qt, Signal
 from PySide6.QtWidgets import (
     QFormLayout,
@@ -99,11 +101,36 @@ class LimitField(QWidget):
         self.validation_warning.hide()
         self.editor.setStyleSheet("")
 
-    def _quantity_values(self) -> tuple[float, float | None, float | None, str] | None:
+    def _quantity_values(
+        self,
+    ) -> tuple[float, float | None, float | None, str | None] | None:
         if not isinstance(self.editor, QLineEdit):
             return None
         boundaries = [value for value in (self._minimum_value, self._maximum_value) if value is not None]
-        if not boundaries or any(not isinstance(value, str) for value in boundaries):
+        if not boundaries:
+            return None
+        if all(
+            isinstance(value, (int, float)) and not isinstance(value, bool)
+            for value in boundaries
+        ):
+            try:
+                current = float(self.editor.text().strip().replace(",", "."))
+            except ValueError:
+                return None
+            if not math.isfinite(current):
+                return None
+            minimum = (
+                float(self._minimum_value)
+                if self._minimum_value is not None
+                else None
+            )
+            maximum = (
+                float(self._maximum_value)
+                if self._maximum_value is not None
+                else None
+            )
+            return current, minimum, maximum, None
+        if any(not isinstance(value, str) for value in boundaries):
             return None
         dimensions = (
             DIMENSION_VOLTAGE,
@@ -163,7 +190,11 @@ class LimitField(QWidget):
             self._show_validation_warning(f"Value exceeded MAX and has been changed to {replacement}.")
             return False
         if isinstance(self.editor, QLineEdit):
-            normalized = format_quantity_auto(value, dimension)
+            normalized = (
+                f"{value:.12g}"
+                if dimension is None
+                else format_quantity_auto(value, dimension)
+            )
             self.editor.setText(normalized)
             self._last_valid = normalized
         self._clear_validation_warning()

@@ -156,13 +156,14 @@ class KeithleyConfigurationPanel(CardWidget):
         self.measure_current_range = _line("AUTO")
         self.level_field = self._bounded("level", self.level)
         self.compliance_field = self._bounded("compliance", self.compliance)
+        self.nplc_field = self._bounded("nplc", self.nplc)
         self.source_range_field = self._bounded("source_range", self.source_range)
         for label, widget in (
             ("Channel", self.channel),
             ("Source mode", self.mode),
             ("Source current", self.level_field),
             ("Voltage compliance (safety limit)", self.compliance_field),
-            ("NPLC", self._bounded("nplc", self.nplc)),
+            ("NPLC", self.nplc_field),
             ("Settling time", self._bounded("settle", self.settle)),
             ("Sense mode", self.sense_mode),
             ("", self.source_autorange),
@@ -770,6 +771,11 @@ class KeithleyPage(QWidget):
         self.level = self.configuration_panel.level
         self.compliance = self.configuration_panel.compliance
         self.nplc = self.configuration_panel.nplc
+        # NPLC is an advanced acquisition parameter. Manual control uses the
+        # channel default (normally 1 PLC); recipe editors can still expose it.
+        self.configuration_panel.form.setRowVisible(
+            self.configuration_panel.nplc_field, False
+        )
         self.settle = self.configuration_panel.settle
         self.sense_mode = self.configuration_panel.sense_mode
         self.source_autorange = self.configuration_panel.source_autorange
@@ -1390,21 +1396,18 @@ class KeithleyPage(QWidget):
         path_connected = bool(
             getattr(measurement, "measurement_path_connected", True)
         )
-        resistance = (
-            abs(voltage / current)
-            if path_connected and abs(current) > 1e-15
-            else math.nan
-        )
+        # Keep the thaTEC-compatible derived V/I view available even when the
+        # HIGH-Z off-mode relay is open. The UI labels that state as FLOATING;
+        # it does not claim this is a physically valid connected-DUT value.
+        resistance = abs(voltage / current) if abs(current) > 1e-15 else math.inf
         widgets = self.channel_cards[channel]
         widgets["voltage"].setText(self._engineering(voltage, "V"))
         widgets["current"].setText(self._engineering(current, "A"))
-        widgets["power"].setText(
-            self._engineering(power, "W") if path_connected else "— W (HIGH-Z)"
-        )
+        widgets["power"].setText(self._engineering(power, "W"))
         widgets["resistance"].setText(
             self._engineering(resistance, "Ω")
             if math.isfinite(resistance)
-            else ("— Ω (HIGH-Z)" if not path_connected else "∞ Ω")
+            else "∞ Ω"
         )
         compliance = bool(getattr(measurement, "compliance_detected", False))
         widgets["compliance"].setText(
@@ -1425,7 +1428,7 @@ class KeithleyPage(QWidget):
                 "voltage": voltage,
                 "current": current,
                 "resistance": resistance,
-                "power": power if path_connected else math.nan,
+                "power": power,
             }
         )
         cutoff = elapsed - self._history_window_s
@@ -1973,7 +1976,7 @@ class KeithleyPage(QWidget):
                 f"V: {measurement.voltage_v * 1e3:.8g} mV   P: {measurement.power_w * 1e6:.8g} µW"
                 + ("   COMPLIANCE" if measurement.compliance_detected else "")
                 + (
-                    "   HIGH-Z / FLOATING — DUT resistance is not valid"
+                    "   HIGH-Z / FLOATING — derived V/I shown for thaTEC compatibility"
                     if not getattr(measurement, "measurement_path_connected", True)
                     else ""
                 )
