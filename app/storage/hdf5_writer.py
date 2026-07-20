@@ -56,6 +56,7 @@ class Hdf5RunWriter:
             ) from exc
         self._points = self._file.create_group("points")
         self._spectra = self._file.create_group("spectra")
+        self._references = self._file.create_group("references")
         self._pending = self._file.create_group("_pending")
         events = self._file.create_group("events")
         string_dtype = h5py.string_dtype("utf-8")
@@ -151,6 +152,9 @@ class Hdf5RunWriter:
             self._validate_resume_identity(recipe_source, settings_source, plan_hash)
             self._points = self._file["points"]
             self._spectra = self._file["spectra"]
+            self._references = self._file.require_group("references")
+            if "reference" in self._file and "0" not in self._references:
+                self._references["0"] = self._file["reference"]
             self._pending = self._file["_pending"]
             events = self._file["events"]
             self._event_timestamps = events["timestamp"]
@@ -232,6 +236,21 @@ class Hdf5RunWriter:
             del self._points[name]
         for name in tuple(self._pending):
             del self._pending[name]
+        referenced = {
+            int(self._spectra[name].attrs["reference_index"])
+            for name in self._spectra
+            if "reference_index" in self._spectra[name].attrs
+        }
+        if referenced:
+            last_reference = max(referenced)
+            for name in tuple(self._references):
+                if name.isdigit() and int(name) > last_reference:
+                    del self._references[name]
+        elif checkpoint_count == 0:
+            for name in tuple(self._references):
+                del self._references[name]
+            if "reference" in self._file:
+                del self._file["reference"]
         self._truncate_public_thatec(checkpoint_count)
 
     def _truncate_public_thatec(self, checkpoint_count: int) -> None:
@@ -350,20 +369,27 @@ class Hdf5RunWriter:
         *,
         kind: str = "single",
         average_count: int = 1,
-    ) -> None:
-        """Durably store the immutable reference used by this run."""
+    ) -> int:
+        """Durably append a reference and return its stable run-local index.
+
+        ``/reference`` remains a hard-link alias for the first reference so
+        existing readers keep working.  Repeated per-point references live in
+        ``/references/<index>`` and are linked from processed spectra.
+        """
 
         if self._closed:
             raise ExecutionError("Attempted to write a reference to a closed HDF5 file.")
         self._validate_trace(trace)
-        if "reference" in self._file:
-            raise ExecutionError("This run already contains a reference spectrum.")
         if kind not in {"single", "averaged", "loaded"}:
             raise ExecutionError(f"Unsupported reference kind {kind!r}.")
         if average_count < 1:
             raise ExecutionError("Reference average_count must be positive.")
+        indexes = [int(name) for name in self._references if name.isdigit()]
+        index = max(indexes, default=-1) + 1
+        name = str(index)
         try:
-            group = self._file.create_group("reference")
+            group = self._references.create_group(name)
+            group.attrs["reference_index"] = index
             group.attrs["trace_name"] = trace.trace_name
             group.attrs["acquired_at_utc"] = trace.acquired_at_utc.isoformat()
             group.attrs["kind"] = kind
@@ -378,11 +404,16 @@ class Hdf5RunWriter:
                 data=self._np.asarray(trace.powers_dbm, dtype="f8"),
                 compression="gzip",
             )
+            if index == 0 and "reference" not in self._file:
+                self._file["reference"] = group
             self._file.flush()
+            return index
         except Exception as exc:
-            if "reference" in self._file:
+            if index == 0 and "reference" in self._file:
                 del self._file["reference"]
-                self._file.flush()
+            if name in self._references:
+                del self._references[name]
+            self._file.flush()
             raise ExecutionError(f"Could not store the reference spectrum: {exc}") from exc
 
     def append(
@@ -424,6 +455,14 @@ class Hdf5RunWriter:
                 spectrum = group.create_group("spectrum")
                 spectrum.attrs["trace_name"] = trace.trace_name
                 spectrum.attrs["acquired_at_utc"] = trace.acquired_at_utc.isoformat()
+                reference_index = point.metadata.get("reference_index")
+                if reference_index is not None:
+                    reference_index = int(reference_index)
+                    if str(reference_index) not in self._references:
+                        raise ExecutionError(
+                            f"Point references missing spectrum reference {reference_index}."
+                        )
+                    spectrum.attrs["reference_index"] = reference_index
                 spectrum.create_dataset(
                     "frequency_hz", data=self._np.asarray(trace.frequencies_hz, dtype="f8"), compression="gzip"
                 )

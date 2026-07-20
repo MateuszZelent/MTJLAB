@@ -6,6 +6,7 @@ from dataclasses import dataclass
 
 from app.domain.quantities import format_quantity_auto, parse_quantity
 from app.settings.models import RangeSettings, StationSettings
+from app.safety.rigol_current import rigol_hardware_frequency_max_hz
 
 
 @dataclass(frozen=True, slots=True)
@@ -17,7 +18,10 @@ class QuickControlSafetyBound:
 
 
 def _effective_range(
-    configured: RangeSettings, dimension: str
+    configured: RangeSettings,
+    dimension: str,
+    *,
+    hard_maximum_si: float | None = None,
 ) -> QuickControlSafetyBound:
     configured_minimum = parse_quantity(configured.min, dimension).si_value
     configured_maximum = parse_quantity(configured.max, dimension).si_value
@@ -27,6 +31,8 @@ def _effective_range(
         maximum_absolute = parse_quantity(configured.max_abs, dimension).si_value
         minimum = max(minimum, -maximum_absolute)
         maximum = min(maximum, maximum_absolute)
+    if hard_maximum_si is not None:
+        maximum = min(maximum, hard_maximum_si)
     return QuickControlSafetyBound(
         minimum,
         maximum,
@@ -60,7 +66,9 @@ def quick_control_safety_bounds(
     for channel, channel_settings in settings.rigol.safety.channels.items():
         limits = channel_settings.lab_limits
         bounds[f"rigol.{channel}.frequency"] = _effective_range(
-            limits.frequency, "frequency"
+            limits.frequency,
+            "frequency",
+            hard_maximum_si=rigol_hardware_frequency_max_hz(),
         )
         bounds[f"rigol.{channel}.amplitude"] = _effective_range(
             limits.amplitude_vpp, "voltage"

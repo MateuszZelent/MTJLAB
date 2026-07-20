@@ -4,6 +4,9 @@ from __future__ import annotations
 
 from app.contracts import DeviceModule, RecipeExtension
 from app.devices.base import DeviceAdapter
+from app.domain.quick_controls import QuickControlCommand
+from app.domain.quantities import parse_quantity
+from app.recipes.parameter_registry import QUICK_CONTROLS_BY_TARGET
 from app.devices.rigol_dg1000z import RigolAdapter
 from app.devices.rigol_dg1000z.ui import RigolPage
 from app.devices.simulators import SimulatedVisaFactory
@@ -33,8 +36,17 @@ def _dispatch(adapter: DeviceAdapter, operation: str, payload: object) -> object
         channel, enabled = payload  # type: ignore[misc]
         return adapter.set_output(channel, enabled)
     if operation == "quick_setpoint":
-        target, value_si = payload  # type: ignore[misc]
-        _device, channel_text, field = str(target).split(".")
+        if not isinstance(payload, QuickControlCommand):
+            raise ValueError("Rigol quick_setpoint requires an explicit-unit command.")
+        descriptor = QUICK_CONTROLS_BY_TARGET.get(payload.target)
+        if descriptor is None or descriptor.device_module != "rigol":
+            raise ValueError(
+                f"Unsupported Rigol quick-control target {payload.target!r}."
+            )
+        value_si = parse_quantity(
+            payload.quantity_text, descriptor.dimension
+        ).si_value
+        _device, channel_text, field = payload.target.split(".")
         channel = int(channel_text)
         if field == "frequency":
             return adapter.update_frequency(channel, float(value_si))
@@ -42,7 +54,9 @@ def _dispatch(adapter: DeviceAdapter, operation: str, payload: object) -> object
             return adapter.update_amplitude_vpp(channel, float(value_si))
         if field == "offset":
             return adapter.update_offset(channel, float(value_si))
-        raise ValueError(f"Unsupported Rigol quick-control target {target!r}.")
+        raise ValueError(
+            f"Unsupported Rigol quick-control target {payload.target!r}."
+        )
     if operation == "quick_readback":
         return adapter.quick_control_snapshot()
     try:

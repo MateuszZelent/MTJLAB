@@ -1,0 +1,59 @@
+schema_version: 1
+name: "Rigol sine frequency with per-point Anritsu reference (10 points)"
+
+dut_limits:
+  rigol:
+    1:
+      minimum_impedance: "50 ohm"
+      max_abs_current: "20 uA"
+      max_abs_power: "20 nW"
+  anritsu:
+    max_expected_input: "-10 dBm"
+
+root:
+  id: measurement-sequence
+  type: sequence
+  children:
+    - {id: rigol-output-off-initial, type: set_rigol_output, channel: 1, enabled: false}
+    - id: anritsu-spectrum-configuration
+      type: configure_anritsu
+      start_frequency: "1 MHz"
+      stop_frequency: "40 MHz"
+      reference_level: "0 dBm"
+      points: 1001
+      trace: TRAC1
+    - id: rigol-ch1-initial-configuration
+      type: configure_rigol
+      channel: 1
+      waveform: SIN
+      frequency: "100 kHz"
+      high_level: "1 mV"
+      low_level: "-1 mV"
+      output_load: HIGHZ
+      dut_min_impedance: "50 ohm"
+    - id: rigol-ch1-frequency-sweep
+      type: sweep
+      target: rigol.1.frequency
+      start: "100 kHz"
+      stop: "30 MHz"
+      points: 10
+      spacing: linear
+      children:
+        - {id: rigol-off-before-point, type: set_rigol_output, channel: 1, enabled: false}
+        - id: rigol-frequency-point
+          type: update_rigol_frequency
+          channel: 1
+          frequency: "${rigol.1.frequency}"
+        - {id: anritsu-reference-per-point, type: acquire_reference, trace: TRAC1}
+        - {id: rigol-arm-per-point, type: arm_rigol_output, channel: 1}
+        - {id: rigol-on-per-point, type: set_rigol_output, channel: 1, enabled: true}
+        - id: acquire-raw-and-reference-difference
+          type: acquire_spectrum
+          trace: TRAC1
+          reference_operation: difference_db
+          store_raw: true
+          store_processed: true
+        - {id: rigol-off-after-point, type: set_rigol_output, channel: 1, enabled: false}
+
+finally:
+  - {id: rigol-output-off-finally, type: set_rigol_output, channel: 1, enabled: false}

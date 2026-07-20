@@ -15,7 +15,7 @@ from PySide6.QtWidgets import (
     QTableWidgetItem, QVBoxLayout, QWidget, QMessageBox,
 )
 from qfluentwidgets import (
-    BodyLabel, ComboBox, LineEdit, PrimaryPushButton, PushButton, TableWidget,
+    BodyLabel, CaptionLabel, ComboBox, LineEdit, PrimaryPushButton, PushButton, TableWidget,
 )
 
 from app.recipes.parameter_registry import sweep_default as _sweep_default
@@ -24,6 +24,8 @@ from app.recipes import estimate_sweep_point_count, generate_sweep_points, gener
 from app.ui.common import line_edit as _line
 from app.ui.design_system import effective_theme, plot_theme, tokens_for
 from app.ui.recipes.fluent_dialog import FluentRecipeDialog
+from app.safety.quick_controls import QuickControlSafetyBound, quick_control_safety_bounds
+from app.settings.models import StationSettings
 
 
 class SeamlessRoiCellDelegate(QStyledItemDelegate):
@@ -72,6 +74,21 @@ class SweepGeneratorDialog(FluentRecipeDialog):
         )
         heading.setWordWrap(True)
         layout.addWidget(heading)
+        self._safety_bound = self._resolve_safety_bound()
+        self.safety_limits = CaptionLabel(self)
+        self.safety_limits.setObjectName("sweepSafetyLimits")
+        self.safety_limits.setWordWrap(True)
+        if self._safety_bound is None:
+            self.safety_limits.setText(
+                "Safety range: final limits are validated during recipe preflight."
+            )
+        else:
+            self.safety_limits.setText(
+                "Allowed sweep range  ·  "
+                f"MIN {self._safety_bound.minimum_text}  ·  "
+                f"MAX {self._safety_bound.maximum_text}"
+            )
+        layout.addWidget(self.safety_limits)
         self.splitter = QSplitter(Qt.Orientation.Horizontal)
         self.splitter.setChildrenCollapsible(False)
         self.segment_panel = QWidget()
@@ -159,6 +176,32 @@ class SweepGeneratorDialog(FluentRecipeDialog):
             self.add_interval()
         self._update_responsive_layout()
         self._connect_theme_source()
+
+    def _resolve_safety_bound(self) -> QuickControlSafetyBound | None:
+        owner: QWidget | None = self.parentWidget()
+        while owner is not None:
+            settings = getattr(owner, "_settings", None)
+            if isinstance(settings, StationSettings):
+                return quick_control_safety_bounds(settings).get(
+                    str(self.definition.get("target", ""))
+                )
+            owner = owner.parentWidget()
+        return None
+
+    def _validate_safety_bounds(self, points: tuple[Any, ...]) -> None:
+        if self._safety_bound is None:
+            return
+        for point in points:
+            if not (
+                self._safety_bound.minimum_si
+                <= point.si_value
+                <= self._safety_bound.maximum_si
+            ):
+                raise ConfigurationError(
+                    f"Sweep value {point.si_value:.12g} SI is outside the allowed "
+                    f"range [{self._safety_bound.minimum_text}, "
+                    f"{self._safety_bound.maximum_text}]."
+                )
 
     def _resolved_plot_theme(self) -> str:
         application = QApplication.instance()
@@ -439,9 +482,11 @@ class SweepGeneratorDialog(FluentRecipeDialog):
                 segments, self.definition["dimension"]
             )
             points = tuple(point for stage in stages for point in stage)
+            self._validate_safety_bounds(points)
         except Exception as exc:
             self.plot.clear()
             self.preview.setText(f"Invalid point generator: {exc}")
+            self.create_button.setEnabled(False)
             return
         self.plot.clear()
         # PlotItem.clear() removes data but preserves the legend, so the labels
@@ -481,11 +526,16 @@ class SweepGeneratorDialog(FluentRecipeDialog):
             f"Generated {len(points):,} unique points • first {points[0].si_value:.12g} SI • "
             f"last {points[-1].si_value:.12g} SI"
         )
+        self.create_button.setEnabled(True)
 
     def accept(self) -> None:
         try:
+            segments = self.segment_data()
             point_count = estimate_sweep_point_count(
-                self.segment_data(), self.definition["dimension"]
+                segments, self.definition["dimension"]
+            )
+            self._validate_safety_bounds(
+                generate_sweep_points(segments, self.definition["dimension"])
             )
         except Exception as exc:
             QMessageBox.warning(self, "Point generator", str(exc))

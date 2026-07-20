@@ -18,6 +18,7 @@ from PySide6.QtWidgets import QApplication, QLabel, QMessageBox, QPushButton, QS
 from PySide6.QtTest import QTest
 
 from app.domain.models import DeviceCapabilities
+from app.domain.quick_controls import QuickControlCommand
 from app.devices.discovery import DiscoveredInstrument
 from app.devices.moke_box.models import MokeHallVoltageReading
 from app.devices.anritsu_ms2830a import (
@@ -27,6 +28,7 @@ from app.devices.anritsu_ms2830a import (
 )
 from app.domain.quantities import DIMENSION_DBM, DIMENSION_FREQUENCY, parse_quantity
 from app.settings.repository import SettingsRepository
+from app.safety.quick_controls import quick_control_safety_bounds
 from app.devices.anritsu_ms2830a.ui import AnritsuPageState
 from app.ui.shell import MainWindow
 from app.ui.dashboard.device_card import DeviceCard
@@ -825,12 +827,26 @@ class MainWindowTests(unittest.TestCase):
             floating = window.quick_controls_window
             self.assertTrue(floating.isVisible())
             self.assertEqual(tuple(floating._rows), targets)
+            self.assertEqual(
+                window.anritsu_page.quick_controls_button.text(),
+                "Quick controls...",
+            )
+            self.assertEqual(
+                window.rigol_page.quick_controls_button.text(),
+                "Quick controls...",
+            )
+            self.assertEqual(
+                window.keithley_page.quick_controls_button.text(),
+                "Quick controls...",
+            )
+            self.assertEqual(floating.choose.text(), "Choose...")
             window._controllers["rigol"].call.reset_mock()
             frequency = floating._rows["rigol.1.frequency"]
             frequency.value.setText("10.000 kHz")
             frequency.increase.click()
             window._controllers["rigol"].call.assert_called_once_with(
-                "quick_setpoint", ("rigol.1.frequency", 10_001.0)
+                "quick_setpoint",
+                QuickControlCommand("rigol.1.frequency", "10.001 kHz"),
             )
             self.assertEqual(frequency.value.text(), "10.001 kHz")
 
@@ -893,6 +909,7 @@ class MainWindowTests(unittest.TestCase):
             self.assertIsNotNone(apparatus)
             self.assertTrue(apparatus.isVisible())
             self.assertGreater(apparatus.width(), 100)
+            self.assertEqual(apparatus.itemWidget._text, "Devices")
             previous_bottom = apparatus.mapTo(window, QPoint()).y() + 36
             for route in (
                 "rigol",
@@ -1483,17 +1500,52 @@ class MainWindowTests(unittest.TestCase):
     def test_device_fields_show_profile_limits_and_keithley_updates_them_by_mode(self) -> None:
         window = MainWindow(".config/settings.yml", simulation=False)
         try:
+            shared_bounds = quick_control_safety_bounds(window._settings)
             rigol = window.rigol_page
-            self.assertEqual(rigol._limit_fields[rigol.frequency].minimum.text(), "MIN  1 Hz")
-            expected_frequency_max = window._settings.rigol.safety.channels["1"].lab_limits.frequency.max
-            self.assertEqual(rigol._limit_fields[rigol.frequency].maximum.text(), f"MAX  {expected_frequency_max}")
+            for editor, target in (
+                (rigol.frequency, "rigol.1.frequency"),
+                (rigol.vpp, "rigol.1.amplitude"),
+                (rigol.offset, "rigol.1.offset"),
+            ):
+                bound = shared_bounds[target]
+                self.assertEqual(
+                    rigol._limit_fields[editor].minimum.text(),
+                    f"MIN  {bound.minimum_text}",
+                )
+                self.assertEqual(
+                    rigol._limit_fields[editor].maximum.text(),
+                    f"MAX  {bound.maximum_text}",
+                )
+                self.assertEqual(
+                    window.quick_control_coordinator._bounds[target],
+                    (bound.minimum_si, bound.maximum_si),
+                )
 
             keithley = window.keithley_page
-            self.assertEqual(keithley._limit_fields["level"].minimum.text(), "MIN  0 A")
-            self.assertEqual(keithley._limit_fields["level"].maximum.text(), "MAX  10 mA")
+            current_bound = shared_bounds["keithley.B.current"]
+            self.assertEqual(
+                keithley._limit_fields["level"].minimum.text(),
+                f"MIN  {current_bound.minimum_text}",
+            )
+            self.assertEqual(
+                keithley._limit_fields["level"].maximum.text(),
+                f"MAX  {current_bound.maximum_text}",
+            )
+            self.assertEqual(
+                window.quick_control_coordinator._bounds["keithley.B.current"],
+                (current_bound.minimum_si, current_bound.maximum_si),
+            )
             keithley.mode.setCurrentText("voltage")
             self.application.processEvents()
-            self.assertEqual(keithley._limit_fields["level"].minimum.text(), "MIN  -67 mV")
+            voltage_bound = shared_bounds["keithley.B.voltage"]
+            self.assertEqual(
+                keithley._limit_fields["level"].minimum.text(),
+                f"MIN  {voltage_bound.minimum_text}",
+            )
+            self.assertEqual(
+                keithley._limit_fields["level"].maximum.text(),
+                f"MAX  {voltage_bound.maximum_text}",
+            )
             self.assertEqual(keithley._limit_fields["compliance"].maximum.text(), "MAX  10 mA")
 
             anritsu = window.anritsu_page
@@ -1656,6 +1708,56 @@ class MainWindowTests(unittest.TestCase):
             self.assertTrue(keithley.level.isVisible())
             self.assertTrue(keithley.compliance.isVisible())
         finally:
+            window.close()
+            self.application.processEvents()
+
+    def test_all_four_keithley_live_panels_can_float_and_redock(self) -> None:
+        window = MainWindow(".config/settings.yml", simulation=True)
+        try:
+            window.resize(1600, 900)
+            window.show()
+            window._navigate_to("keithley")
+            self.application.processEvents()
+            keithley = window.keithley_page
+            panel_keys = ("channel_A", "channel_B", "plot_A", "plot_B")
+
+            for key in panel_keys:
+                keithley._panel_float_buttons[key].click()
+            self.application.processEvents()
+
+            self.assertEqual(set(keithley._floating_panels), set(panel_keys))
+            for key in panel_keys:
+                floating = keithley._floating_panels[key]
+                panel = keithley._panel_widgets[key]
+                self.assertTrue(floating.isVisible())
+                self.assertTrue(
+                    bool(floating.windowFlags() & Qt.WindowType.WindowStaysOnTopHint)
+                )
+                self.assertIs(panel.window(), floating)
+                self.assertGreater(panel.width(), 0)
+                self.assertGreater(panel.height(), 0)
+                self.assertTrue(keithley._panel_placeholders[key].isVisible())
+
+            first_window = keithley._floating_panels["channel_A"]
+            first_window.close()
+            self.application.processEvents()
+            self.assertNotIn("channel_A", keithley._floating_panels)
+            self.assertIs(
+                keithley._panel_widgets["channel_A"].parentWidget(),
+                keithley._panel_slots["channel_A"],
+            )
+            self.assertTrue(keithley._panel_widgets["channel_A"].isVisible())
+
+            keithley._panel_placeholders["plot_A"].findChild(QPushButton).click()
+            self.application.processEvents()
+            self.assertNotIn("plot_A", keithley._floating_panels)
+            self.assertIs(
+                keithley._panel_widgets["plot_A"].parentWidget(),
+                keithley._panel_slots["plot_A"],
+            )
+        finally:
+            for floating in list(window.keithley_page._floating_panels.values()):
+                floating.close()
             window.close()
             self.application.processEvents()
 

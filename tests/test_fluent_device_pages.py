@@ -18,6 +18,7 @@ from qfluentwidgets import (
 
 from app.ui.shell import MainWindow
 from app.ui.design_system import tokens_for
+from app.domain.models import DeviceCapabilities
 
 
 class FluentDevicePageTests(unittest.TestCase):
@@ -34,6 +35,7 @@ class FluentDevicePageTests(unittest.TestCase):
             window.show()
             window._navigate_to("rigol")
             self.application.processEvents()
+
             rigol = window.rigol_page
             self.assertIsInstance(rigol.hero_card, CardWidget)
             self.assertIsInstance(rigol.safety_card, CardWidget)
@@ -74,6 +76,52 @@ class FluentDevicePageTests(unittest.TestCase):
                 all(isinstance(card["measure"], PushButton) for card in keithley.channel_cards.values())
             )
             self.assertTrue(keithley.channel_cards["A"]["measure"].isVisibleTo(window))
+        finally:
+            window.close()
+            self.application.processEvents()
+
+    def test_output_and_configuration_controls_render_for_rigol_and_anritsu(self) -> None:
+        window = MainWindow(".config/settings.yml", simulation=True)
+        try:
+            window.resize(1360, 880)
+            window.show()
+            window._navigate_to("rigol")
+            self.application.processEvents()
+            rigol = window.rigol_page
+            self.assertTrue(rigol.waveform_apply_button.isVisibleTo(window))
+            self.assertGreater(rigol.waveform_apply_button.width(), 80)
+            rigol.control_tabs.setCurrentIndex(2)
+            self.application.processEvents()
+            for control in (rigol.output_on, rigol.output_off):
+                self.assertTrue(control.isVisibleTo(window))
+                self.assertGreater(control.width(), 80)
+                self.assertGreater(control.height(), 24)
+
+            window._navigate_to("anritsu")
+            anritsu = window.anritsu_page
+            self.application.processEvents()
+            self.assertTrue(anritsu.configure_button.isVisibleTo(window))
+            self.assertGreater(anritsu.configure_button.width(), 80)
+            anritsu.set_capabilities(
+                DeviceCapabilities(
+                    device_name="anritsu",
+                    model="MS2830A",
+                    firmware="sim",
+                    features=frozenset({"spectrum_trace", "signal_generator"}),
+                    hardware_options=("041", "020"),
+                )
+            )
+            anritsu.mode_tabs.setCurrentIndex(anritsu.signal_generator_tab_index)
+            self.application.processEvents()
+            for control in (
+                anritsu.sg_configure,
+                anritsu.sg_arm,
+                anritsu.sg_on,
+                anritsu.sg_off,
+            ):
+                self.assertTrue(control.isVisibleTo(window))
+                self.assertGreater(control.width(), 80)
+                self.assertGreater(control.height(), 24)
         finally:
             window.close()
             self.application.processEvents()

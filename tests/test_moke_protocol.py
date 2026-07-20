@@ -22,6 +22,9 @@ class MokeProtocolTests(unittest.TestCase):
         self.assertEqual(encode_voltage(1), (0x8C, 0xCD))
         self.assertEqual(encode_voltage(10), (0xFF, 0xFF))
         self.assertAlmostEqual(decode_voltage(0x80, 0x00), 0.0)
+        for invalid in (-10.0001, 10.0001, float("nan"), float("inf")):
+            with self.subTest(invalid=invalid), self.assertRaises(ValueError):
+                encode_voltage(invalid)
 
     def test_confirmed_command_vectors(self) -> None:
         self.assertEqual(set_vout(2, 1), bytes.fromhex("128CCD5E"))
@@ -69,6 +72,24 @@ class MokeProtocolTests(unittest.TestCase):
 
         with self.assertRaises(DeviceError):
             adapter.set_vout(0, 1.0)
+
+    def test_binary_adapter_rejects_out_of_range_vout_before_transport(self) -> None:
+        transport = _BinaryTransport(_vout_response())
+        adapter = MokeBoxAdapter(
+            MokeBoxConfig(
+                "127.0.0.1:10001",
+                allow_vout_control=True,
+                allowed_vout_channels=(0,),
+            ),
+            transport,
+        )
+        adapter.connect()
+        sent_before = list(transport.sent)
+
+        with self.assertRaisesRegex(DeviceError, "within -10 V..10 V"):
+            adapter.set_vout(0, 10.1)
+
+        self.assertEqual(transport.sent, sent_before)
 
     def test_binary_adapter_reads_live_hall1_24_bit_sample(self) -> None:
         sample = MokeAd7734Frame(MokeTarget.MAIN_BOX, 0, 0x7EBA1C).encode()

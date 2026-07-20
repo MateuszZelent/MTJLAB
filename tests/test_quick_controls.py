@@ -10,6 +10,7 @@ from PySide6.QtCore import QObject, QSettings, Qt, Signal
 from PySide6.QtWidgets import QApplication, QWidget
 
 from app.domain.quick_controls import (
+    QuickControlCommand,
     quantity_step_si,
     render_quantity_si_like,
     step_quantity_text,
@@ -118,6 +119,11 @@ class QuickControlTests(unittest.TestCase):
             for target, (minimum, maximum) in coordinator._bounds.items():
                 dimension = QUICK_CONTROLS_BY_TARGET[target].dimension
                 row = window._rows[target]
+                minimum_text, maximum_text = coordinator._bound_texts[target]
+                self.assertEqual(
+                    row.limits.text(),
+                    f"MIN  {minimum_text}    MAX  {maximum_text}",
+                )
                 for boundary, direction in ((minimum, -1), (maximum, 1)):
                     row.value.setText(format_quantity_auto(boundary, dimension))
                     row.step(direction, Decimal(1))
@@ -148,10 +154,16 @@ class QuickControlTests(unittest.TestCase):
         coordinator.submit("rigol.1.frequency", "1.002 kHz")
 
         self.assertEqual(len(rigol.calls), 1)
-        self.assertEqual(rigol.calls[0][1], ("rigol.1.frequency", 1000.0))
+        self.assertEqual(
+            rigol.calls[0][1],
+            QuickControlCommand("rigol.1.frequency", "1.000 kHz"),
+        )
         rigol.result.emit("quick_setpoint", 1000.0)
         self.assertEqual(len(rigol.calls), 2)
-        self.assertEqual(rigol.calls[1][1], ("rigol.1.frequency", 1002.0))
+        self.assertEqual(
+            rigol.calls[1][1],
+            QuickControlCommand("rigol.1.frequency", "1.002 kHz"),
+        )
         rigol.result.emit("quick_setpoint", 1002.0)
         self.assertTrue(any(state == "applied" for _target, state, _detail in states))
 

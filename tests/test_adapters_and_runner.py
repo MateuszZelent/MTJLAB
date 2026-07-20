@@ -19,6 +19,7 @@ from app.devices.keithley_2600 import (
     KeithleySourceRequest,
     build_keithley_ramp_levels,
 )
+from app.devices.keithley_2600.module import _dispatch as dispatch_keithley
 from app.devices.rigol_dg1000z import (
     RigolAdapter,
     RigolBurstConfig,
@@ -26,12 +27,14 @@ from app.devices.rigol_dg1000z import (
     RigolFrequencySweepConfig,
     RigolModulationConfig,
 )
+from app.devices.rigol_dg1000z.module import _dispatch as dispatch_rigol
 from app.devices.moke_box.models import MokeHallVoltageReading, hall_field_from_voltage
 from app.devices.lakeshore_475.models import (
     FieldUnit, GaussmeterReading, GaussmeterSnapshot, MeasurementMode,
 )
 from app.devices.visa import FakeVisaSession, FakeVisaSessionFactory
 from app.domain.errors import DeviceError, SafetyViolation
+from app.domain.quick_controls import QuickControlCommand
 from app.domain.models import DeviceState
 from app.domain.models import ApplicationState
 from app.domain.quantities import (
@@ -395,10 +398,23 @@ class AdapterAndRunnerTests(unittest.TestCase):
             settings.rigol.safety.channels["1"].lab_limits.frequency.max,
             DIMENSION_FREQUENCY,
         ).si_value
-        self.assertEqual(rigol.update_frequency(1, rigol_limit), rigol_limit)
+        self.assertEqual(
+            dispatch_rigol(
+                rigol,
+                "quick_setpoint",
+                QuickControlCommand("rigol.1.frequency", f"{rigol_limit} Hz"),
+            ),
+            rigol_limit,
+        )
         rigol_writes_at_limit = len(rigol_session.writes)
         with self.assertRaises(SafetyViolation):
-            rigol.update_frequency(1, rigol_limit + 1.0)
+            dispatch_rigol(
+                rigol,
+                "quick_setpoint",
+                QuickControlCommand(
+                    "rigol.1.frequency", f"{rigol_limit + 1.0} Hz"
+                ),
+            )
         self.assertEqual(len(rigol_session.writes), rigol_writes_at_limit)
 
         keithley_session = FakeVisaSession()
@@ -429,17 +445,58 @@ class AdapterAndRunnerTests(unittest.TestCase):
             DIMENSION_CURRENT,
         ).si_value
         self.assertEqual(
-            keithley.quick_update_source_level(
-                "B", mode="current", level_si=keithley_limit
+            dispatch_keithley(
+                keithley,
+                "quick_setpoint",
+                QuickControlCommand(
+                    "keithley.B.current", f"{keithley_limit} A"
+                ),
             ),
             keithley_limit,
         )
         keithley_writes_at_limit = len(keithley_session.writes)
         with self.assertRaises(SafetyViolation):
-            keithley.quick_update_source_level(
-                "B", mode="current", level_si=keithley_limit + 1e-9
+            dispatch_keithley(
+                keithley,
+                "quick_setpoint",
+                QuickControlCommand(
+                    "keithley.B.current", f"{keithley_limit + 1e-9} A"
+                ),
             )
         self.assertEqual(len(keithley_session.writes), keithley_writes_at_limit)
+
+    def test_quick_protocol_boundary_rejects_wrong_or_missing_units_before_visa(self) -> None:
+        settings = simulation_settings(approved=True)
+        rigol_session = FakeVisaSession()
+        keithley_session = FakeVisaSession()
+        rigol = RigolAdapter(
+            settings, session_factory=FakeVisaSessionFactory(rigol_session)
+        )
+        keithley = KeithleyAdapter(
+            settings, session_factory=FakeVisaSessionFactory(keithley_session)
+        )
+
+        for payload in (
+            QuickControlCommand("rigol.1.frequency", "1 mA"),
+            QuickControlCommand("rigol.1.frequency", "1000"),
+        ):
+            with self.assertRaises(ValueError):
+                dispatch_rigol(rigol, "quick_setpoint", payload)
+        for payload in (
+            QuickControlCommand("keithley.B.current", "1 V"),
+            QuickControlCommand("keithley.B.current", "0.001"),
+        ):
+            with self.assertRaises(ValueError):
+                dispatch_keithley(keithley, "quick_setpoint", payload)
+        with self.assertRaisesRegex(ValueError, "explicit-unit command"):
+            dispatch_rigol(
+                rigol,
+                "quick_setpoint",
+                ("rigol.1.frequency", 1000.0),
+            )
+
+        self.assertEqual(rigol_session.writes, [])
+        self.assertEqual(keithley_session.writes, [])
 
     def test_keithley_measurement_trip_forces_all_outputs_off(self) -> None:
         raw = deepcopy(simulation_settings(approved=True).model_dump(mode="python"))
@@ -1270,8 +1327,35 @@ root:
         session = FakeVisaSession(responses={"*IDN?": "ANRITSU,MS2830A,123456,1.0"})
         adapter = AnritsuAdapter(self.settings, session_factory=FakeVisaSessionFactory(session))
         adapter.connect()
+        writes_before = len(session.writes)
         with self.assertRaises(SafetyViolation):
             adapter.configure_spectrum(SpectrumConfig(1e6, 101e9, 0, 101))
+        self.assertEqual(len(session.writes), writes_before)
+
+    def test_anritsu_sg_rejects_sweep_point_above_limit_before_scpi(self) -> None:
+        raw = simulation_settings(approved=True).model_dump(mode="python")
+        raw["devices"]["anritsu"]["signal_generator"] = {
+            "control_protocol": "basic_scpi",
+            "frequency": {"min": "250 kHz", "max": "3.6 GHz"},
+            "power": {"min": "-100 dBm", "max": "0 dBm"},
+            "arm_ttl": "30 s",
+        }
+        settings = StationSettings.model_validate(raw)
+        session = FakeVisaSession(
+            responses={"*IDN?": "ANRITSU,MS2830A,123456,1.0"}
+        )
+        adapter = AnritsuAdapter(
+            settings, session_factory=FakeVisaSessionFactory(session)
+        )
+        adapter.connect()
+        writes_before = len(session.writes)
+
+        with self.assertRaises(SafetyViolation):
+            adapter.configure_signal_generator(
+                SignalGeneratorConfig(3.600_000_001e9, -20.0)
+            )
+
+        self.assertEqual(len(session.writes), writes_before)
 
     def test_anritsu_opc_query_uses_and_restores_hard_visa_deadline(self) -> None:
         session = FakeVisaSession(

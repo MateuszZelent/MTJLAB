@@ -63,6 +63,92 @@ root:
         self.assertEqual(plan.total_points, 3)
         self.assertEqual(plan.required_devices, frozenset({"moke_box"}))
 
+    def test_every_output_sweep_revalidates_generated_points_against_limits(self) -> None:
+        sources = {
+            "keithley": """\
+schema_version: 1
+name: unsafe-keithley-sweep
+root:
+  id: root
+  type: sequence
+  children:
+    - {id: configure, type: configure_keithley, channel: B, mode: current, level: "1 mA", compliance: "67 mV"}
+    - id: axis
+      type: sweep
+      target: keithley.B.current
+      start: "1 mA"
+      stop: "10.001 mA"
+      points: 3
+      children:
+        - {id: point, type: update_keithley_level, channel: B, mode: current, level: "${keithley.B.current}"}
+""",
+            "rigol": """\
+schema_version: 1
+name: unsafe-rigol-sweep
+root:
+  id: root
+  type: sequence
+  children:
+    - {id: configure, type: configure_rigol, channel: 1, waveform: SIN, frequency: "1 kHz", high_level: "1 mV", low_level: "-1 mV", output_load: HIGHZ, dut_min_impedance: "50 ohm"}
+    - id: axis
+      type: sweep
+      target: rigol.1.frequency
+      start: "1 kHz"
+      stop: "1000 GHz"
+      points: 3
+      children:
+        - {id: point, type: update_rigol_frequency, channel: 1, frequency: "${rigol.1.frequency}"}
+""",
+            "anritsu": """\
+schema_version: 1
+name: unsafe-anritsu-sweep
+root:
+  id: axis
+  type: sweep
+  target: anritsu.spectrum.stop_frequency
+  start: "10 MHz"
+  stop: "101 GHz"
+  points: 3
+  children:
+    - {id: point, type: configure_anritsu, start_frequency: "1 MHz", stop_frequency: "${anritsu.spectrum.stop_frequency}", reference_level: "0 dBm", points: 101}
+""",
+        }
+        for device, source in sources.items():
+            with self.subTest(device=device), self.assertRaises(Exception):
+                RecipeCompiler(simulation_settings()).compile(
+                    parse_recipe_text(source)
+                )
+
+        raw = deepcopy(simulation_settings(approved=True).model_dump(mode="python"))
+        raw["devices"]["anritsu"]["signal_generator"].update(
+            {
+                "control_protocol": "basic_scpi",
+                "frequency": {"min": "100 MHz", "max": "6 GHz"},
+                "power": {"min": "-100 dBm", "max": "0 dBm"},
+            }
+        )
+        sg_source = """\
+schema_version: 1
+name: unsafe-anritsu-sg-sweep
+root:
+  id: sg
+  type: sequence
+  device_module: anritsu_sg
+  operation: configure_selected_parameters
+  configuration: {frequency: "1 GHz", power: "-30 dBm"}
+  parameter_actions:
+    - parameter_id: sg.frequency
+      mode: sweep
+      segments:
+        - {start: "1 GHz", stop: "6.001 GHz", points: 3}
+  children:
+    - {id: wait, type: wait, duration: "1 ms"}
+"""
+        with self.assertRaises(SafetyViolation):
+            RecipeCompiler(StationSettings.model_validate(raw)).compile(
+                parse_recipe_text(sg_source)
+            )
+
     def test_compilation_can_be_cancelled_before_expansion(self) -> None:
         source = """\
 schema_version: 1
@@ -115,7 +201,7 @@ finally:
     def test_compiles_reference_processed_nested_setpoint_updates(self) -> None:
         raw = deepcopy(simulation_settings(approved=True).model_dump(mode="python"))
         raw["devices"]["rigol"]["safety"]["allow_output_enable"] = True
-        raw["devices"]["rigol"]["safety"]["channels"]["1"]["lab_limits"]["frequency"]["max"] = "1 GHz"
+        raw["devices"]["rigol"]["safety"]["channels"]["1"]["lab_limits"]["frequency"]["max"] = "30 MHz"
         raw["devices"]["keithley"]["safety"]["allow_output_enable"] = True
         channel = raw["devices"]["keithley"]["safety"]["channels"]["B"]["lab_limits"]
         channel["source_current"] = {"min": "0 A", "max": "150 mA", "max_abs": "150 mA"}
@@ -186,7 +272,7 @@ root:
           type: sweep
           target: rigol.1.frequency
           start: "100 kHz"
-          stop: "1 GHz"
+          stop: "30 MHz"
           points: 100
           children:
             - id: rigol-point

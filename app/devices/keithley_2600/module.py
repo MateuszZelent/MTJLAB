@@ -4,6 +4,9 @@ from __future__ import annotations
 
 from app.contracts import DeviceModule, RecipeExtension
 from app.devices.base import DeviceAdapter
+from app.domain.quick_controls import QuickControlCommand
+from app.domain.quantities import parse_quantity
+from app.recipes.parameter_registry import QUICK_CONTROLS_BY_TARGET
 from app.devices.keithley_2600 import KeithleyAdapter
 from app.devices.keithley_2600.ui import KeithleyPage
 from app.devices.simulators import SimulatedVisaFactory
@@ -29,10 +32,21 @@ def _dispatch(adapter: DeviceAdapter, operation: str, payload: object) -> object
         channel, enabled = payload  # type: ignore[misc]
         return adapter.set_output(channel, enabled)
     if operation == "quick_setpoint":
-        target, value_si = payload  # type: ignore[misc]
-        _device, channel, mode = str(target).split(".")
+        if not isinstance(payload, QuickControlCommand):
+            raise ValueError("Keithley quick_setpoint requires an explicit-unit command.")
+        descriptor = QUICK_CONTROLS_BY_TARGET.get(payload.target)
+        if descriptor is None or descriptor.device_module != "keithley":
+            raise ValueError(
+                f"Unsupported Keithley quick-control target {payload.target!r}."
+            )
+        value_si = parse_quantity(
+            payload.quantity_text, descriptor.dimension
+        ).si_value
+        _device, channel, mode = payload.target.split(".")
         if channel not in {"A", "B"} or mode not in {"current", "voltage"}:
-            raise ValueError(f"Unsupported Keithley quick-control target {target!r}.")
+            raise ValueError(
+                f"Unsupported Keithley quick-control target {payload.target!r}."
+            )
         return adapter.quick_update_source_level(
             channel, mode=mode, level_si=float(value_si)  # type: ignore[arg-type]
         )

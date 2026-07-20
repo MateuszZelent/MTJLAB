@@ -31,6 +31,78 @@ from tests.helpers import loaded_settings
 
 
 class SimulatedRunTests(unittest.TestCase):
+    def test_rigol_frequency_sweep_stores_one_reference_per_processed_point(self) -> None:
+        recipe_path = (
+            Path(__file__).resolve().parents[1]
+            / "recipes"
+            / "rigol_frequency_anritsu_reference_10.yml"
+        )
+        raw = deepcopy(
+            simulated_station_settings(loaded_settings()).model_dump(mode="python")
+        )
+        raw["devices"]["rigol"]["safety"]["allow_output_enable"] = True
+        settings = StationSettings.model_validate(raw)
+        recipe = load_recipe(recipe_path)
+        plan = RecipeCompiler(settings).compile(recipe)
+        self.assertEqual((plan.total_points, plan.total_spectra), (10, 10))
+        self.assertEqual(
+            sum(action.kind == "acquire_reference" for action in plan.actions), 10
+        )
+
+        context = SimulationContext(seed=1032)
+        rigol = RigolAdapter(
+            settings, session_factory=SimulatedVisaFactory("rigol", context=context)
+        )
+        keithley = KeithleyAdapter(
+            settings, session_factory=SimulatedVisaFactory("keithley", context=context)
+        )
+        anritsu = AnritsuAdapter(
+            settings, session_factory=SimulatedVisaFactory("anritsu", context=context)
+        )
+        for device in (rigol, keithley, anritsu):
+            device.connect()
+
+        with tempfile.TemporaryDirectory() as temporary:
+            path = Path(temporary) / "per-point-reference.h5"
+            writer = Hdf5RunWriter(
+                path,
+                recipe_source=recipe.source_text,
+                settings_source="simulation: true\n",
+                plan_hash=plan.sha256,
+                device_idn={},
+                expected_points=10,
+                simulation_metadata=context.metadata(("rigol", "anritsu")),
+            )
+            result = RecipeRunner(
+                rigol=rigol,
+                keithley=keithley,
+                anritsu=anritsu,
+                writer=writer,
+            ).run(plan)
+
+            self.assertIsNone(result.error)
+            self.assertEqual(result.stored_points, 10)
+            self.assertFalse(rigol._output_states[1])
+            self.assertFalse(keithley._output_states["A"])
+            self.assertFalse(keithley._output_states["B"])
+            references = Hdf5RunReader.references(path)
+            self.assertEqual(tuple(reference.index for reference in references), tuple(range(10)))
+            points = Hdf5RunReader.points(path)
+            for index, point in enumerate(points):
+                self.assertAlmostEqual(
+                    point.setpoints["rigol.1.frequency"],
+                    100e3 + index * (30e6 - 100e3) / 9,
+                    places=6,
+                )
+            for index in range(10):
+                spectrum = Hdf5RunReader.spectrum(path, index)
+                self.assertIsNotNone(spectrum)
+                assert spectrum is not None
+                self.assertEqual(spectrum.reference_index, index)
+                self.assertEqual(len(spectrum.powers_dbm), 1001)
+                self.assertEqual(len(spectrum.processed_values or ()), 1001)
+                self.assertEqual(spectrum.processing_operation, "difference_db")
+
     def test_lakeshore_recipe_compiles_runs_and_round_trips(self) -> None:
         raw = deepcopy(simulated_station_settings(loaded_settings()).model_dump(mode="python"))
         raw["devices"]["lakeshore_gaussmeter"].update(
@@ -139,7 +211,7 @@ root:
         recipe = load_recipe(recipe_path)
         raw = deepcopy(simulated_station_settings(loaded_settings()).model_dump(mode="python"))
         raw["devices"]["rigol"]["safety"]["allow_output_enable"] = True
-        raw["devices"]["rigol"]["safety"]["channels"]["1"]["lab_limits"]["frequency"]["max"] = "1 GHz"
+        raw["devices"]["rigol"]["safety"]["channels"]["1"]["lab_limits"]["frequency"]["max"] = "30 MHz"
         raw["devices"]["keithley"]["safety"]["allow_output_enable"] = True
         limits = raw["devices"]["keithley"]["safety"]["channels"]["B"]["lab_limits"]
         limits["source_current"] = {

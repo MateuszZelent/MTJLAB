@@ -130,7 +130,7 @@ devices:
           lab_limits:
             frequency:
               min: 1 Hz
-              max: 100 MHz
+              max: 30 MHz
             high_level:
               min: "-100 mV"
               max: "100 mV"

@@ -105,7 +105,9 @@ class MokeAd7734Frame:
 def encode_voltage(voltage_v: float) -> tuple[int, int]:
     if not math.isfinite(voltage_v):
         raise ValueError("MOKE VOUT voltage must be finite.")
-    voltage_v = max(-10.0, min(10.0, float(voltage_v)))
+    if not -10.0 <= voltage_v <= 10.0:
+        raise ValueError("MOKE VOUT voltage must be within -10 V..10 V.")
+    voltage_v = float(voltage_v)
     scale = 3276.7 if voltage_v >= 0 else 3276.8
     value = max(0, min(65535, int(round(32768 + scale * voltage_v))))
     return value >> 8, value & 0xFF

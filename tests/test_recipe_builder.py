@@ -319,7 +319,7 @@ finally: []
             )
             self.assertEqual(rigol_roi.text(0), "ROI 1")
             self.assertIn("100 kHz", rigol_roi.text(1))
-            self.assertIn("1 GHz", rigol_roi.text(1))
+            self.assertIn("30 MHz", rigol_roi.text(1))
             self.assertIn("100 pts", rigol_roi.text(1))
 
             with patch.object(page, "_edit_selected_generator") as editor:
@@ -910,6 +910,42 @@ root:
         finally:
             dialog.close()
             apply_application_theme(self.application, "light")
+
+    def test_rigol_frequency_roi_shows_and_enforces_effective_hardware_limit(self) -> None:
+        page = RecipePage(simulation_settings())
+        dialog = SweepGeneratorDialog(
+            {
+                "device": "Rigol",
+                "label": "Channel 1 · frequency",
+                "target": "rigol.1.frequency",
+                "dimension": "frequency",
+            },
+            page,
+            initial_segments=[
+                {"start": "1 MHz", "stop": "30 MHz", "points": 10}
+            ],
+        )
+        try:
+            dialog.resize(1180, 700)
+            dialog.show()
+            self.application.processEvents()
+            self.assertTrue(dialog.safety_limits.isVisibleTo(dialog))
+            self.assertIn("MIN 1 Hz", dialog.safety_limits.text())
+            self.assertIn("MAX 30 MHz", dialog.safety_limits.text())
+            self.assertTrue(dialog.create_button.isEnabled())
+
+            for forbidden in ("100 MHz", "1 GHz"):
+                dialog.segments.item(0, 1).setText(forbidden)
+                self.application.processEvents()
+                self.assertFalse(dialog.create_button.isEnabled())
+                self.assertIn("outside the allowed range", dialog.preview.text())
+                with patch.object(QMessageBox, "warning") as warning:
+                    dialog.accept()
+                warning.assert_called_once()
+                self.assertEqual(dialog.result(), QDialog.DialogCode.Rejected)
+        finally:
+            dialog.close()
+            page.close()
 
     def test_roi_plot_uses_active_application_theme_not_windows_theme(self) -> None:
         previous = self.application.property("activeTheme")

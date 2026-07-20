@@ -1,6 +1,6 @@
 """Run artefacts and durable checkpoint writers."""
 
-from app.storage.hdf5_reader import Hdf5RunReader, RunDetail, RunSummary, StoredEvent, StoredPoint, StoredSpectrum
+from app.storage.hdf5_reader import Hdf5RunReader, RunDetail, RunSummary, StoredEvent, StoredPoint, StoredReference, StoredSpectrum
 from app.storage.hdf5_writer import Hdf5RunWriter
 from app.storage.thatec_reader import (
     ThatecDevice,
@@ -41,6 +41,7 @@ __all__ = [
     "RunSummary",
     "StoredEvent",
     "StoredPoint",
+    "StoredReference",
     "StoredSpectrum",
     "ThatecSchema",
     "ThatecSchemaMapper",

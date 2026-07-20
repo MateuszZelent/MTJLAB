@@ -215,6 +215,22 @@ class QuantityAndSafetyTests(unittest.TestCase):
                 points=999,
             )
 
+    def test_rigol_documented_waveform_limit_cannot_be_expanded_by_profile(self) -> None:
+        raw = deepcopy(SettingsRepository(SETTINGS_TEMPLATE).load().raw)
+        raw["devices"]["rigol"]["safety"]["channels"]["1"]["lab_limits"]["frequency"]["max"] = "1 GHz"
+        settings = StationSettings.model_validate(raw)
+        with self.assertRaisesRegex(SafetyViolation, "documented DG1032Z hardware limit"):
+            validate_rigol_waveform(
+                channel=settings.rigol.safety.channels["1"],
+                safety=settings.rigol.safety,
+                waveform="SIN",
+                frequency="100 MHz",
+                high_level="1 mV",
+                low_level="-1 mV",
+                output_load="HIGHZ",
+                dut_min_impedance="50 ohm",
+            )
+
     def test_anritsu_reference_level_uses_documented_hardware_range(self) -> None:
         settings = simulation_settings()
         for value in (-120.0, 50.0):

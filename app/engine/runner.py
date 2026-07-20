@@ -47,6 +47,7 @@ class _AcquiredSpectrum:
     processed_values: tuple[float, ...] | None = None
     processed_unit: str | None = None
     processing_operation: str = "none"
+    reference_index: int | None = None
 
 
 class RecipeRunner:
@@ -97,6 +98,7 @@ class RecipeRunner:
         self._watchdog_started_monotonic = 0.0
         self._correlation_id = ""
         self._reference_trace: SpectrumTrace | None = None
+        self._reference_index: int | None = None
 
     @property
     def state(self) -> ApplicationState:
@@ -142,6 +144,7 @@ class RecipeRunner:
         self._last_safe_boundary_points = stored_points
         self._watchdog_timed_out.clear()
         self._reference_trace = None
+        self._reference_index = None
         self._correlation_id = str(uuid4())
         self._start_watchdog()
         self._state = ApplicationState.RUNNING
@@ -244,6 +247,11 @@ class RecipeRunner:
                                 acquisition.average_count
                                 if acquisition is not None
                                 else 1
+                            ),
+                            "reference_index": (
+                                acquisition.reference_index
+                                if acquisition is not None
+                                else None
                             ),
                         },
                     )
@@ -794,18 +802,24 @@ class RecipeRunner:
                 payload.get("dut_max_expected_input_dbm"),
                 average_count,
             )
-            self._writer.store_reference(
+            stored_reference_index = self._writer.store_reference(
                 reference,
                 kind="single" if average_count == 1 else "averaged",
                 average_count=average_count,
             )
             self._reference_trace = reference
+            self._reference_index = (
+                stored_reference_index
+                if isinstance(stored_reference_index, int)
+                else None
+            )
             self._emit(
                 "reference_stored",
                 {
                     "trace": reference.trace_name,
                     "points": len(reference.powers_dbm),
                     "average_count": average_count,
+                    "reference_index": self._reference_index,
                     "acquired_at_utc": reference.acquired_at_utc.isoformat(),
                 },
             )
@@ -847,6 +861,9 @@ class RecipeRunner:
                 processed_values=processed,
                 processed_unit=processed_unit,
                 processing_operation=operation,
+                reference_index=(
+                    self._reference_index if operation != "none" else None
+                ),
             )
         elif action.kind == "checkpoint":
             pass

@@ -107,7 +107,7 @@ root:
       type: sweep
       target: rigol.1.frequency
       start: 100 kHz
-      stop: 1 GHz
+      stop: 30 MHz
       points: 100
       spacing: linear
       children:

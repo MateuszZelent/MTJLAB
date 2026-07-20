@@ -12,7 +12,7 @@ from uuid import uuid4
 
 import pyqtgraph as pg
 from PySide6.QtCore import QMimeData, QSize, QTimer, Qt, Signal
-from PySide6.QtGui import QAction, QColor, QDrag, QIcon, QKeySequence, QPainter, QPalette, QPixmap, QResizeEvent, QShortcut
+from PySide6.QtGui import QAction, QColor, QCloseEvent, QDrag, QIcon, QKeySequence, QPainter, QPalette, QPixmap, QResizeEvent, QShortcut
 from PySide6.QtWidgets import (
     QAbstractItemView, QApplication, QCheckBox, QComboBox, QDialog,
     QDialogButtonBox, QFormLayout, QFrame, QGridLayout,
@@ -26,7 +26,8 @@ from PySide6.QtWidgets import (
 from qfluentwidgets import (
     BodyLabel,
     CaptionLabel, CardWidget, CheckBox, ComboBox, PrimaryPushButton, PushButton,
-    ScrollArea, SpinBox, StrongBodyLabel, TitleLabel,
+    FluentIcon, ScrollArea, SpinBox, StrongBodyLabel, TitleLabel,
+    TransparentToolButton,
 )
 
 from app.devices.keithley_2600 import (
@@ -43,6 +44,7 @@ from app.recipes.parameter_registry import SWEEP_DIMENSIONS
 from app.safety.keithley import validate_keithley_source
 from app.settings.models import StationSettings
 from app.ui.common import line_edit as _line
+from app.ui.dialogs import StationDialog
 from app.ui.widgets import LimitField, NotificationBanner, SpectrumPlotWidget
 from app.ui.recipes.fluent_dialog import FluentRecipeDialog
 from app.ui.workers import DeviceController
@@ -642,6 +644,28 @@ class KeithleyNodeEditorDialog(FluentRecipeDialog):
             super().accept()
 
 
+class _KeithleyFloatingPanelWindow(StationDialog):
+    """Non-modal host for one live Keithley panel."""
+
+    closed = Signal()
+
+    def __init__(self, title: str, panel: QWidget, parent: QWidget) -> None:
+        super().__init__(parent)
+        self.setWindowTitle(f"Keithley 2600 — {title}")
+        self.setObjectName("keithleyFloatingPanelWindow")
+        self.setWindowFlag(Qt.WindowType.WindowStaysOnTopHint, True)
+        self.setModal(False)
+        self.setMinimumSize(460, 230)
+        self.resize(760, 360 if "wykres" in title.lower() else 270)
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(12, 12, 12, 12)
+        layout.addWidget(panel)
+
+    def closeEvent(self, event: QCloseEvent) -> None:
+        self.closed.emit()
+        super().closeEvent(event)
+
+
 class KeithleyPage(QWidget):
     status = Signal(str)
     quick_controls_requested = Signal()
@@ -665,6 +689,12 @@ class KeithleyPage(QWidget):
         self._history_window_s = 30.0
         self._measurement_history: dict[str, list[dict[str, float]]] = {"A": [], "B": []}
         self.history_widgets: dict[str, dict[str, object]] = {}
+        self._panel_slots: dict[str, QWidget] = {}
+        self._panel_titles: dict[str, str] = {}
+        self._panel_widgets: dict[str, QWidget] = {}
+        self._panel_float_buttons: dict[str, TransparentToolButton] = {}
+        self._floating_panels: dict[str, _KeithleyFloatingPanelWindow] = {}
+        self._panel_placeholders: dict[str, CardWidget] = {}
         self._armed_until_ui = 0.0
         self._live_timer = QTimer(self)
         self._live_timer.setInterval(1000)
@@ -719,7 +749,14 @@ class KeithleyPage(QWidget):
         channel_grid.setSpacing(12)
         self.channel_cards: dict[str, dict[str, QLabel | QFrame]] = {}
         for column, channel_name in enumerate(("A", "B")):
-            channel_grid.addWidget(self._build_channel_card(channel_name), 0, column)
+            panel = self._build_channel_card(channel_name)
+            channel_grid.addWidget(
+                self._register_detachable_panel(
+                    f"channel_{channel_name}", panel, f"Kanał {channel_name}"
+                ),
+                0,
+                column,
+            )
         layout.addLayout(channel_grid)
         source_tab = QWidget()
         source_layout = QVBoxLayout(source_tab)
@@ -814,7 +851,13 @@ class KeithleyPage(QWidget):
         self.history_layout.setContentsMargins(6, 0, 0, 0)
         self.history_layout.setSpacing(8)
         for channel_name in ("A", "B"):
-            self.history_layout.addWidget(self._build_keithley_history_panel(channel_name), 1)
+            panel = self._build_keithley_history_panel(channel_name)
+            self.history_layout.addWidget(
+                self._register_detachable_panel(
+                    f"plot_{channel_name}", panel, f"Wykres kanału {channel_name}"
+                ),
+                1,
+            )
         self.workspace_splitter = QSplitter(Qt.Orientation.Horizontal)
         self.workspace_splitter.setObjectName("keithleyWorkspace")
         self.workspace_splitter.addWidget(source_scroll)
@@ -884,6 +927,100 @@ class KeithleyPage(QWidget):
             [900, 760] if compact else [680, 1140]
         )
 
+    def _register_detachable_panel(
+        self, key: str, panel: QWidget, title: str
+    ) -> QWidget:
+        slot = QWidget(self)
+        slot.setObjectName(f"keithleyPanelSlot_{key}")
+        slot_layout = QVBoxLayout(slot)
+        slot_layout.setContentsMargins(0, 0, 0, 0)
+        slot_layout.setSpacing(0)
+        slot_layout.addWidget(panel)
+        self._panel_slots[key] = slot
+        self._panel_titles[key] = title
+        self._panel_widgets[key] = panel
+        return slot
+
+    def _panel_float_button(self, key: str, parent: QWidget) -> TransparentToolButton:
+        button = TransparentToolButton(FluentIcon.FULL_SCREEN, parent)
+        button.setObjectName(f"keithleyFloatButton_{key}")
+        button.setFixedSize(28, 28)
+        button.setToolTip("Otwórz ten panel w osobnym, pływającym oknie")
+        button.setAccessibleName("Otwórz panel w pływającym oknie")
+        button.clicked.connect(
+            lambda _checked=False, panel_key=key: self._toggle_panel_floating(panel_key)
+        )
+        self._panel_float_buttons[key] = button
+        return button
+
+    def _toggle_panel_floating(self, key: str) -> None:
+        if key in self._floating_panels:
+            self._dock_panel(key)
+        else:
+            self._detach_panel(key)
+
+    def _detach_panel(self, key: str) -> None:
+        floating = self._floating_panels.get(key)
+        if floating is not None:
+            floating.show()
+            floating.raise_()
+            floating.activateWindow()
+            return
+        panel = self._panel_widgets[key]
+        slot = self._panel_slots[key]
+        slot.layout().removeWidget(panel)
+        placeholder = CardWidget(slot)
+        placeholder.setObjectName("keithleyFloatingPlaceholder")
+        placeholder_layout = QVBoxLayout(placeholder)
+        placeholder_layout.setContentsMargins(14, 12, 14, 12)
+        placeholder_layout.addWidget(StrongBodyLabel(self._panel_titles[key], placeholder))
+        note = BodyLabel("Panel jest otwarty w osobnym oknie.", placeholder)
+        note.setObjectName("muted")
+        placeholder_layout.addWidget(note)
+        restore = PushButton("Przywróć panel", placeholder)
+        restore.clicked.connect(
+            lambda _checked=False, panel_key=key: self._dock_panel(panel_key)
+        )
+        placeholder_layout.addWidget(restore)
+        placeholder_layout.addStretch(1)
+        slot.layout().addWidget(placeholder)
+        self._panel_placeholders[key] = placeholder
+
+        floating = _KeithleyFloatingPanelWindow(
+            self._panel_titles[key], panel, self
+        )
+        floating.closed.connect(
+            lambda panel_key=key: self._dock_panel(panel_key, close_window=False)
+        )
+        self._floating_panels[key] = floating
+        button = self._panel_float_buttons[key]
+        button.setIcon(FluentIcon.BACK_TO_WINDOW)
+        button.setToolTip("Przywróć ten panel na stronę Keithley")
+        button.setAccessibleName("Przywróć panel na stronę Keithley")
+        floating.show()
+        floating.raise_()
+        floating.activateWindow()
+
+    def _dock_panel(self, key: str, *, close_window: bool = True) -> None:
+        floating = self._floating_panels.pop(key, None)
+        if floating is None:
+            return
+        panel = self._panel_widgets[key]
+        if floating.layout() is not None:
+            floating.layout().removeWidget(panel)
+        placeholder = self._panel_placeholders.pop(key, None)
+        if placeholder is not None:
+            self._panel_slots[key].layout().removeWidget(placeholder)
+            placeholder.deleteLater()
+        self._panel_slots[key].layout().addWidget(panel)
+        button = self._panel_float_buttons[key]
+        button.setIcon(FluentIcon.FULL_SCREEN)
+        button.setToolTip("Otwórz ten panel w osobnym, pływającym oknie")
+        button.setAccessibleName("Otwórz panel w pływającym oknie")
+        if close_window:
+            floating.close()
+        floating.deleteLater()
+
     def _build_keithley_history_panel(self, channel: str) -> CardWidget:
         panel = CardWidget()
         panel.setObjectName("keithleyChannelCard")
@@ -906,6 +1043,7 @@ class KeithleyPage(QWidget):
         header.addStretch(1)
         header.addWidget(metric)
         header.addWidget(clear)
+        header.addWidget(self._panel_float_button(f"plot_{channel}", panel))
         panel_layout.addLayout(header)
         note = BodyLabel("ROLLING 30 s  •  DC resistance |V/I|  •  not complex impedance")
         note.setObjectName("keithleyHistoryNote")
@@ -969,6 +1107,7 @@ class KeithleyPage(QWidget):
         header.addStretch(1)
         header.addWidget(led)
         header.addWidget(output)
+        header.addWidget(self._panel_float_button(f"channel_{channel}", card))
         card_layout.addLayout(header)
         meters = QGridLayout()
         values: dict[str, QLabel] = {}

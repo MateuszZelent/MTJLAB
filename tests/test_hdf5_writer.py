@@ -303,6 +303,56 @@ class Hdf5WriterTests(unittest.TestCase):
             self.assertIn("Spectrum", tree.dataset.data_vars)
             self.assertIn("Spectrum raw-reference", tree.dataset.data_vars)
 
+    def test_repeated_references_are_indexed_and_linked_to_processed_spectra(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            path = Path(temporary) / "repeated-references.h5"
+            writer = Hdf5RunWriter(
+                path,
+                recipe_source="schema_version: 1\n",
+                settings_source="schema_version: 1\n",
+                plan_hash="repeated-references",
+                device_idn={"anritsu": "ANRITSU,MS2830A,SIM,1.0"},
+                expected_points=2,
+            )
+            acquired = datetime.now(timezone.utc)
+            for index in range(2):
+                reference = SpectrumTrace(
+                    (1e6, 2e6, 3e6),
+                    (-70.0 - index, -60.0 - index, -65.0 - index),
+                    acquired,
+                    "TRAC1",
+                )
+                self.assertEqual(writer.store_reference(reference), index)
+                raw = SpectrumTrace(
+                    reference.frequencies_hz,
+                    tuple(value + 10 for value in reference.powers_dbm),
+                    acquired,
+                    "TRAC1",
+                )
+                writer.append(
+                    MeasurementPoint(
+                        index=index,
+                        setpoints={"rigol.1.frequency": (index + 1) * 1e6},
+                        measurements={},
+                        metadata={"reference_index": index},
+                    ),
+                    raw,
+                    processed_values=(10.0, 10.0, 10.0),
+                    processed_unit="dB",
+                    processing_operation="difference_db",
+                )
+            writer.close("completed")
+
+            references = Hdf5RunReader.references(path)
+            self.assertEqual(tuple(item.index for item in references), (0, 1))
+            for index in range(2):
+                spectrum = Hdf5RunReader.spectrum(path, index)
+                self.assertIsNotNone(spectrum)
+                assert spectrum is not None
+                self.assertEqual(spectrum.reference_index, index)
+            with h5py.File(path, "r") as file:
+                self.assertEqual(file["reference"].id, file["references/0"].id)
+
     def test_multi_point_run_round_trips_setpoints_measurements_and_spectrum(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             path = Path(temporary) / "multi-point.h5"

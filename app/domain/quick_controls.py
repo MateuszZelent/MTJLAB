@@ -22,6 +22,14 @@ class QuickSetpoint:
     sequence: int
 
 
+@dataclass(frozen=True, slots=True)
+class QuickControlCommand:
+    """Explicit-unit command crossing from UI into an instrument worker."""
+
+    target: str
+    quantity_text: str
+
+
 def quantity_step_si(text: str, dimension: str) -> float:
     """Return the SI step represented by the last written decimal place."""
 

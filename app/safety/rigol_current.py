@@ -18,6 +18,28 @@ from app.domain.quantities import (
 from app.settings.models import RigolChannelSettings, RigolSafety
 
 
+# DG1032Z documented basic-waveform ceilings.  These are hardware limits,
+# independent of (and more authoritative than) an editable laboratory profile.
+_DG1032Z_MAX_FREQUENCY_HZ = {
+    "SIN": 30e6,
+    "SQU": 25e6,
+    "RAMP": 500e3,
+    "PULS": 15e6,
+    "USER": 10e6,
+}
+
+
+def rigol_hardware_frequency_max_hz(waveform: str | None = None) -> float:
+    """Return the immutable DG1032Z ceiling used by UI and safety layers."""
+
+    if waveform is None:
+        return max(_DG1032Z_MAX_FREQUENCY_HZ.values())
+    return _DG1032Z_MAX_FREQUENCY_HZ.get(
+        waveform.strip().upper(),
+        max(_DG1032Z_MAX_FREQUENCY_HZ.values()),
+    )
+
+
 @dataclass(frozen=True, slots=True)
 class RigolCurrentEstimate:
     """Worst-case DC-equivalent output-current estimate, not a measured value."""
@@ -112,6 +134,12 @@ def validate_rigol_waveform(
     low_v = parse_quantity(low_level, DIMENSION_VOLTAGE, require_unit=not isinstance(low_level, (int, float))).si_value
     if waveform_normalized != "DC" and high_v <= low_v:
         raise SafetyViolation("HighL must be greater than LowL for non-DC waveforms.")
+    hardware_max_hz = _DG1032Z_MAX_FREQUENCY_HZ.get(waveform_normalized)
+    if hardware_max_hz is not None and freq_hz > hardware_max_hz:
+        raise SafetyViolation(
+            f"{waveform_normalized} frequency {freq_hz:.9g} Hz exceeds the "
+            f"documented DG1032Z hardware limit {hardware_max_hz:.9g} Hz."
+        )
 
     limits = channel.lab_limits
     if waveform_normalized not in {"DC", "NOIS"}:

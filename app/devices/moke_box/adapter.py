@@ -273,12 +273,14 @@ class MokeBoxAdapter(DeviceAdapter):
 
         if not self._config.allow_vout_control or channel not in self._config.allowed_vout_channels:
             raise DeviceError("MOKE VOUT control is not qualified for this channel.")
+        if not math.isfinite(voltage_v) or not -10.0 <= voltage_v <= 10.0:
+            raise DeviceError("MOKE VOUT voltage must be finite and within -10 V..10 V.")
         transport = self._require_binary_transport()
         with self._lock:
             try:
                 transport.send(set_vout(channel, voltage_v))
                 actual = self.read_vouts()[channel]
-                if not math.isclose(actual, max(-10.0, min(10.0, voltage_v)), abs_tol=0.001):
+                if not math.isclose(actual, voltage_v, abs_tol=0.001):
                     raise DeviceError("MOKE VOUT readback differs from requested value.")
                 return actual
             except Exception as exc:
@@ -289,8 +291,10 @@ class MokeBoxAdapter(DeviceAdapter):
 
         if not self._config.allow_vout_control or channel not in self._config.allowed_vout_channels:
             raise DeviceError("MOKE VOUT control is not qualified for this channel.")
+        if not math.isfinite(voltage_v) or not -10.0 <= voltage_v <= 10.0:
+            raise DeviceError("MOKE VOUT ramp target must be finite and within -10 V..10 V.")
         start = self.read_vouts()[channel]
-        target = max(-10.0, min(10.0, voltage_v))
+        target = voltage_v
         direction = 1.0 if target >= start else -1.0
         value = start
         while abs(target - value) > 0.05:

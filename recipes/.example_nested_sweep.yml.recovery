@@ -7,13 +7,6 @@ root:
   id: sequence-main
   type: sequence
   children:
-  - id: keithley-b-config
-    type: configure_keithley
-    channel: B
-    mode: current
-    level: ${keithley.B.current}
-    compliance: 67 mV
-    nplc: 1.0
   - id: anritsu-spectrum-setup
     type: configure_anritsu
     start_frequency: 1 MHz
@@ -28,15 +21,13 @@ root:
     points: 100
     spacing: linear
     children:
-    - id: anritsu-sg-5bf46dd2
-      type: sequence
-      text: Anritsu SG — configuration required · RF OFF
-      device_module: anritsu_sg
-      label: Anritsu MS2830A Signal Generator
-      operation: configure_selected_parameters
-      configuration_required: true
-      parameter_actions: []
-      children: []
+    - id: keithley-b-config
+      type: configure_keithley
+      channel: B
+      mode: current
+      level: ${keithley.B.current}
+      compliance: 67 mV
+      nplc: 1.0
     - id: rigol-high-level-sweep
       type: sweep
       target: rigol.1.high_level
@@ -64,6 +55,9 @@ root:
         type: acquire_spectrum
         trace: TRAC1
 
+  - id: wait-c715a6af
+    type: wait
+    duration: 100 ms
 finally:
 - id: rigol-ch1-off-finally
   type: set_rigol_output

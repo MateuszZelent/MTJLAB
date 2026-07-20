@@ -20,6 +20,7 @@ from qfluentwidgets import (
 )
 
 from app.domain.quick_controls import (
+    QuickControlCommand,
     QuickSetpoint,
     render_quantity_si_like,
     step_quantity_text,
@@ -39,6 +40,7 @@ from app.ui.workers import DeviceController
 class QuickControlCoordinator(QObject):
     state_changed = Signal(str, str, str)
     value_read = Signal(str, float)
+    bounds_changed = Signal()
 
     def __init__(
         self,
@@ -50,6 +52,7 @@ class QuickControlCoordinator(QObject):
         super().__init__(parent)
         self._controllers = controllers
         self._bounds: dict[str, tuple[float, float]] = {}
+        self._bound_texts: dict[str, tuple[str, str]] = {}
         if settings is not None:
             self.set_settings(settings)
         self._sequence = 0
@@ -94,10 +97,19 @@ class QuickControlCoordinator(QObject):
     def set_settings(self, settings: StationSettings) -> None:
         """Refresh UI preflight bounds from the active approved station profile."""
 
+        resolved = quick_control_safety_bounds(settings)
         self._bounds = {
             target: (bound.minimum_si, bound.maximum_si)
-            for target, bound in quick_control_safety_bounds(settings).items()
+            for target, bound in resolved.items()
         }
+        self._bound_texts = {
+            target: (bound.minimum_text, bound.maximum_text)
+            for target, bound in resolved.items()
+        }
+        self.bounds_changed.emit()
+
+    def bound_texts(self, target: str) -> tuple[str, str] | None:
+        return self._bound_texts.get(target)
 
     def bound_value(self, target: str, value_si: float) -> tuple[float, bool, str]:
         """Clamp arrow stepping while typed out-of-range input remains rejected."""
@@ -129,7 +141,7 @@ class QuickControlCoordinator(QObject):
         self._inflight[device] = request
         self.state_changed.emit(request.target, "applying", "Applying...")
         self._controllers[device].call(
-            "quick_setpoint", (request.target, request.value_si)
+            "quick_setpoint", QuickControlCommand(request.target, request.text)
         )
 
     def _result(self, device: str, operation: str, result: object) -> None:
@@ -236,6 +248,10 @@ class QuickControlRow(QWidget):
         controls.addWidget(self.value, 1)
         controls.addWidget(self.increase)
         layout.addLayout(controls)
+        self.limits = CaptionLabel("Safety limits unavailable", self)
+        self.limits.setObjectName("quickControlLimits")
+        layout.addWidget(self.limits)
+        self.refresh_limits()
         self.status = CaptionLabel("Ready · output state is never changed", self)
         self.status.setObjectName("muted")
         self.status.setWordWrap(True)
@@ -249,6 +265,13 @@ class QuickControlRow(QWidget):
         self._typing_timer.timeout.connect(self.submit)
         self.value.textEdited.connect(lambda _text: self._typing_timer.start())
         self.value.editingFinished.connect(self.submit)
+
+    def refresh_limits(self) -> None:
+        bounds = self._coordinator.bound_texts(self.descriptor.target)
+        if bounds is None:
+            self.limits.setText("Safety limits unavailable")
+            return
+        self.limits.setText(f"MIN  {bounds[0]}    MAX  {bounds[1]}")
 
     def step(self, direction: int, multiplier: object) -> None:
         try:
@@ -360,6 +383,7 @@ class QuickControlsWindow(StationDialog):
         self.choose.clicked.connect(self.choose_controls)
         coordinator.state_changed.connect(self._state_changed)
         coordinator.value_read.connect(self._value_read)
+        coordinator.bounds_changed.connect(self._refresh_limits)
 
     def restore_workspace(self) -> None:
         settings = QSettings("LabControl", "LabControl")
@@ -419,6 +443,10 @@ class QuickControlsWindow(StationDialog):
             return
         descriptor = QUICK_CONTROLS_BY_TARGET[target]
         row.value.setText(format_quantity_auto(value_si, descriptor.dimension))
+
+    def _refresh_limits(self) -> None:
+        for row in self._rows.values():
+            row.refresh_limits()
 
     def closeEvent(self, event: QCloseEvent) -> None:
         QSettings("LabControl", "LabControl").setValue(
