@@ -7,7 +7,7 @@ import math
 from typing import Any
 
 import pyqtgraph as pg
-from PySide6.QtCore import QTimer, Qt
+from PySide6.QtCore import QEvent, QTimer, Qt
 from PySide6.QtGui import QColor, QPalette
 from PySide6.QtWidgets import (
     QAbstractItemView, QApplication, QDialog, QFormLayout, QHBoxLayout,
@@ -206,9 +206,10 @@ class SweepGeneratorDialog(FluentRecipeDialog):
     def _resolved_plot_theme(self) -> str:
         application = QApplication.instance()
         if application is not None:
-            active = application.property("activeTheme")
-            if str(active).lower() in {"light", "dark"}:
-                return str(active).lower()
+            for property_name in ("activeTheme", "stationAppliedTheme"):
+                active = application.property(property_name)
+                if str(active).lower() in {"light", "dark"}:
+                    return str(active).lower()
         owner: QWidget | None = self.parentWidget()
         while owner is not None:
             settings = getattr(owner, "_settings", None)
@@ -335,6 +336,25 @@ class SweepGeneratorDialog(FluentRecipeDialog):
         super().resizeEvent(event)
         if hasattr(self, "splitter"):
             self._update_responsive_layout()
+
+    def changeEvent(self, event: QEvent) -> None:
+        super().changeEvent(event)
+        if not hasattr(self, "plot_theme"):
+            return
+        if event.type() in {
+            QEvent.Type.ApplicationPaletteChange,
+            QEvent.Type.PaletteChange,
+            QEvent.Type.StyleChange,
+            QEvent.Type.ThemeChange,
+        }:
+            # QFluent updates the application palette/style before child
+            # widgets receive this event. Reapply the explicit plot/table
+            # tokens afterwards so an already-open ROI editor changes as one
+            # coherent surface rather than retaining light fragments.
+            QTimer.singleShot(
+                0,
+                lambda: self._set_plot_theme(self._resolved_plot_theme()),
+            )
 
     def add_interval(self, initial: dict[str, object] | None = None) -> None:
         row = self.segments.rowCount()

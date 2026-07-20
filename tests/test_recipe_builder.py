@@ -19,6 +19,7 @@ from PySide6.QtWidgets import (
     QTreeWidgetItem,
 )
 from PySide6.QtCore import Qt
+from PySide6.QtGui import QPalette
 from PySide6.QtTest import QTest
 from qfluentwidgets import (
     ComboBox, LineEdit, PlainTextEdit, PrimaryPushButton, PushButton,
@@ -110,6 +111,7 @@ class RecipeBuilderTests(unittest.TestCase):
                 page.path.setText(str(path))
                 page.load_editor(show_error=False)
                 self.assertTrue(page.historical_sweep_active)
+                self.assertFalse(page.library_panel.isEnabled())
                 self.assertIn("Historical THATEC Sweep", page.tree.topLevelItem(0).text(0))
                 self.assertIn("Historical THATEC Sweep loaded", page.summary.text())
             finally:
@@ -426,10 +428,15 @@ finally: []
                     "Rigol DG1032Z",
                     "Anritsu configuration",
                     "Anritsu signal generator",
-                    "Measure MOKE Hall (V + field)",
+                    "MOKE Hall (V + field)",
                     "Measure Lake Shore field",
                     "Acquire reference",
                     "Acquire spectrum once",
+                    "Keithley A â†’ 0 + OFF",
+                    "Keithley B â†’ 0 + OFF",
+                    "Rigol CH1 OFF",
+                    "Rigol CH2 OFF",
+                    "Anritsu SG OFF",
                     "Wait",
                     "Sequence / group",
                     "Repeat",
@@ -751,6 +758,7 @@ root:
             page.new_recipe(confirm=False)
             page._library_add_device("keithley")
             source = parse_recipe_text(page.editor.toPlainText()).root.children[-1]
+            page.tree.setCurrentItem(page.tree.topLevelItem(0))
             page._library_add_device("rigol")
             target = parse_recipe_text(page.editor.toPlainText()).root.children[-1]
             target_item = page._find_tree_item(target.id)
@@ -760,12 +768,14 @@ root:
             target_item.setExpanded(False)
             page.tree.setCurrentItem(source_item)
 
-            page._move_recipe_node(
-                source.id,
-                target.id,
-                "children",
-                len(target.children),
-            )
+            with patch.object(QMessageBox, "warning") as warning:
+                page._move_recipe_node(
+                    source.id,
+                    target.id,
+                    "children",
+                    len(target.children),
+                )
+            warning.assert_not_called()
 
             updated = parse_recipe_text(page.editor.toPlainText())
             updated_target = updated.root.children[-1]
@@ -775,8 +785,53 @@ root:
             self.assertEqual(selected.id, source.id)
             self.assertTrue(page._find_tree_item(target.id).isExpanded())
             self.assertFalse(page.tree.visualItemRect(page.tree.currentItem()).isEmpty())
+
+            page.undo_tree_edit()
+            undone = parse_recipe_text(page.editor.toPlainText())
+            self.assertEqual(
+                tuple(node.id for node in undone.root.children),
+                (source.id, target.id),
+            )
+            page.redo_tree_edit()
+            redone_target = parse_recipe_text(page.editor.toPlainText()).root.children[-1]
+            self.assertIn(source.id, tuple(node.id for node in redone_target.children))
         finally:
             page.close()
+
+    def test_drop_uses_node_pinned_at_drag_start_not_hover_selection(self) -> None:
+        tree = RecipeTreeWidget()
+        source_item = QTreeWidgetItem(["Source"])
+        target_item = QTreeWidgetItem(["Target"])
+        source_item.setData(
+            0,
+            Qt.ItemDataRole.UserRole,
+            RecipeNode("source", "comment"),
+        )
+        target_item.setData(
+            0,
+            Qt.ItemDataRole.UserRole,
+            RecipeNode("target", "sequence"),
+        )
+        tree.addTopLevelItems([source_item, target_item])
+        tree._dragged_node_id = "source"
+        tree.setCurrentItem(target_item)
+        moves: list[tuple[str, str, str, int]] = []
+        tree.move_requested.connect(lambda *move: moves.append(move))
+        event = Mock()
+        event.mimeData().hasFormat.return_value = False
+
+        with (
+            patch.object(tree, "itemAt", return_value=target_item),
+            patch.object(
+                tree,
+                "_drop_destination",
+                return_value=("target", "children", 0),
+            ),
+        ):
+            tree.dropEvent(event)
+
+        self.assertEqual(moves, [("source", "target", "children", 0)])
+        event.accept.assert_called_once_with()
 
     def test_logical_drop_index_ignores_projected_parameter_rows(self) -> None:
         parent = QTreeWidgetItem(["Device"])
@@ -981,13 +1036,18 @@ root:
             dialog.resize(900, 700)
             dialog.show()
             self.application.processEvents()
-            viewport = dialog.segments.viewport()
-            center = viewport.rect().center()
-            light = viewport.grab().toImage().pixelColor(center)
+            light = dialog.plot.backgroundBrush().color().name()
+            self.assertEqual(dialog.plot_theme, "light")
             apply_application_theme(self.application, "dark")
             self.application.processEvents()
-            dark = viewport.grab().toImage().pixelColor(center)
-            self.assertNotEqual(light.name(), dark.name())
+            self.application.processEvents()
+            dark = dialog.plot.backgroundBrush().color().name()
+            self.assertEqual(dialog.plot_theme, "dark")
+            self.assertNotEqual(light, dark)
+            self.assertEqual(
+                dialog.segments.palette().color(QPalette.ColorRole.Base).name(),
+                tokens_for("dark").surface,
+            )
             editor = dialog._roi_cell_delegate.createEditor(
                 dialog.segments.viewport(), None, None
             )
@@ -1643,10 +1703,13 @@ root:
     def test_node_library_filters_actions_and_adds_a_tree_node(self) -> None:
         page = RecipePage(simulation_settings())
         try:
-            self.assertEqual(len(page._library_action_buttons), 14)
+            self.assertEqual(len(page._library_action_buttons), 19)
             page.library_search.setText("spectrum analyzer")
             visible = [button.text() for button in page._library_action_buttons if not button.isHidden()]
-            self.assertEqual(visible, ["Anritsu configuration"])
+            self.assertEqual(
+                visible,
+                ["Anritsu configuration", "Anritsu SG OFF"],
+            )
             page.library_search.clear()
             page._library_add_basic("wait")
             recipe = parse_recipe_text(page.editor.toPlainText())
@@ -2011,6 +2074,46 @@ root:
             parsed = parse_recipe_text(page.editor.toPlainText())
             self.assertEqual(parsed.finally_nodes[-1].type, "set_rigol_output")
             self.assertFalse(parsed.finally_nodes[-1].data["enabled"])
+        finally:
+            page.close()
+
+    def test_empty_finally_is_visible_and_library_adds_explicit_safe_outputs(self) -> None:
+        page = RecipePage(simulation_settings())
+        try:
+            recipe = parse_recipe_text(
+                """\
+schema_version: 1
+name: empty-finally
+root: {id: root, type: sequence, children: []}
+finally: []
+"""
+            )
+            page.editor.setPlainText(recipe.source_text)
+            page._populate_recipe_tree(recipe.root, recipe.finally_nodes, None)
+            finally_item = page.tree.topLevelItem(page.tree.topLevelItemCount() - 1)
+            self.assertTrue(finally_item.text(0).startswith("Finally"))
+            self.assertIn("Empty", finally_item.text(1))
+
+            page._library_add_keithley_shutdown("A")
+            page._library_add_output_off("set_rigol_output", channel=2)
+            page._library_add_output_off("set_anritsu_sg_output")
+            parsed = parse_recipe_text(page.editor.toPlainText())
+            self.assertEqual(
+                [
+                    (node.type, node.data.get("channel"), node.data.get("enabled"))
+                    for node in parsed.finally_nodes
+                ],
+                [
+                    ("ramp_keithley_to_zero", "A", None),
+                    ("set_keithley_output", "A", False),
+                    ("set_rigol_output", 2, False),
+                    ("set_anritsu_sg_output", None, False),
+                ],
+            )
+            labels = {button.text() for button in page._library_action_buttons}
+            self.assertIn("Keithley A ramp to zero + OFF", labels)
+            self.assertIn("Rigol CH2 OUTPUT OFF", labels)
+            self.assertIn("Anritsu SG RF OFF", labels)
         finally:
             page.close()
 

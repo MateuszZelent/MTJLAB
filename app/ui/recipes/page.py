@@ -12,7 +12,7 @@ from uuid import uuid4
 
 from PySide6.QtCore import QMimeData, QSize, QSettings, QThread, QTimer, Qt, Signal
 from PySide6.QtGui import QAction, QActionGroup, QBrush, QCloseEvent, QColor, QDrag, QIcon, QKeySequence, QPainter, QPixmap, QShortcut
-from PySide6.QtWidgets import QAbstractItemView, QApplication, QComboBox, QCheckBox, QDialog, QDialogButtonBox, QFormLayout, QFrame, QHBoxLayout, QHeaderView, QLabel, QLineEdit, QMainWindow, QMenu, QMessageBox, QPlainTextEdit, QPushButton, QSplitter, QSpinBox, QStackedWidget, QStyle, QToolButton, QTreeWidget, QTreeWidgetItem, QVBoxLayout, QWidget
+from PySide6.QtWidgets import QAbstractItemView, QApplication, QComboBox, QCheckBox, QDialog, QDialogButtonBox, QFormLayout, QFrame, QHBoxLayout, QHeaderView, QLabel, QLineEdit, QMainWindow, QMenu, QMessageBox, QPlainTextEdit, QPushButton, QSizePolicy, QSplitter, QSpinBox, QStackedWidget, QStyle, QToolButton, QTreeWidget, QTreeWidgetItem, QVBoxLayout, QWidget
 from qfluentwidgets import (
     BodyLabel,
     CaptionLabel,
@@ -610,6 +610,10 @@ class RecipePage(QWidget):
             button.setIcon(self.style().standardIcon(icon))
             button.setIconSize(QSize(18, 18))
             button.setMinimumHeight(34)
+            button.setMinimumWidth(0)
+            button.setSizePolicy(
+                QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Fixed
+            )
             button.clicked.connect(callback)  # type: ignore[arg-type]
             target_layout.addWidget(button)
             self._library_action_buttons.append(button)
@@ -646,7 +650,7 @@ class RecipePage(QWidget):
         acquisition = group("Acquisition", "3")
         action(
             acquisition,
-            "Measure MOKE Hall (V + field)",
+            "MOKE Hall (V + field)",
             "Read Hall 1 voltage and store the derived base-polynomial field at this sweep point. Read-only; no VOUT or gain command.",
             "moke_box",
             QStyle.StandardPixmap.SP_DialogApplyButton,
@@ -683,37 +687,37 @@ class RecipePage(QWidget):
 
         safety = group("Safe shutdown", "5")
         action(
-            safety, "Keithley A ramp to zero + OFF",
+            safety, "Keithley A â†’ 0 + OFF",
             "Add an unconditional channel A ramp and OUTPUT OFF to Finally", "keithley",
             QStyle.StandardPixmap.SP_MediaStop,
             lambda: self._library_add_keithley_shutdown("A"),
-            drag_kind="flow:ramp_keithley_to_zero",
+            drag_kind="safety:keithley_a",
         )
         action(
-            safety, "Keithley B ramp to zero + OFF",
+            safety, "Keithley B â†’ 0 + OFF",
             "Add an unconditional channel B ramp and OUTPUT OFF to Finally", "keithley",
             QStyle.StandardPixmap.SP_MediaStop,
             lambda: self._library_add_keithley_shutdown("B"),
-            drag_kind="flow:ramp_keithley_to_zero",
+            drag_kind="safety:keithley_b",
         )
         action(
-            safety, "Rigol CH1 OUTPUT OFF", "Add Rigol channel 1 OUTPUT OFF to Finally", "rigol",
+            safety, "Rigol CH1 OFF", "Add Rigol channel 1 OUTPUT OFF to Finally", "rigol",
             QStyle.StandardPixmap.SP_MediaStop,
             lambda: self._library_add_output_off("set_rigol_output", channel=1),
-            drag_kind="flow:set_rigol_output",
+            drag_kind="safety:rigol_1",
         )
         action(
-            safety, "Rigol CH2 OUTPUT OFF", "Add Rigol channel 2 OUTPUT OFF to Finally", "rigol",
+            safety, "Rigol CH2 OFF", "Add Rigol channel 2 OUTPUT OFF to Finally", "rigol",
             QStyle.StandardPixmap.SP_MediaStop,
             lambda: self._library_add_output_off("set_rigol_output", channel=2),
-            drag_kind="flow:set_rigol_output",
+            drag_kind="safety:rigol_2",
         )
         action(
-            safety, "Anritsu SG RF OFF",
+            safety, "Anritsu SG OFF",
             "Add signal-generator RF OFF to Finally; the spectrum analyzer input has no source output", "anritsu",
             QStyle.StandardPixmap.SP_MediaStop,
             lambda: self._library_add_output_off("set_anritsu_sg_output"),
-            drag_kind="flow:set_anritsu_sg_output",
+            drag_kind="safety:anritsu_sg",
         )
 
         flow = group("Flow", "6")
@@ -968,6 +972,18 @@ class RecipePage(QWidget):
                 self._library_add_device(
                     kind, parent_id=parent_id, branch=branch, index=index
                 )
+                return
+            if category == "safety":
+                if kind in {"keithley_a", "keithley_b"}:
+                    self._library_add_keithley_shutdown(kind[-1].upper())
+                elif kind in {"rigol_1", "rigol_2"}:
+                    self._library_add_output_off(
+                        "set_rigol_output", channel=int(kind[-1])
+                    )
+                elif kind == "anritsu_sg":
+                    self._library_add_output_off("set_anritsu_sg_output")
+                else:
+                    raise ConfigurationError(f"Unknown safe-shutdown block {kind!r}.")
                 return
             if category != "flow":
                 return
@@ -1558,13 +1574,22 @@ class RecipePage(QWidget):
                     add_node(child, else_item)
 
         add_node(root)
-        if finally_nodes:
-            cleanup = QTreeWidgetItem(["Finally — safe shutdown", "Guaranteed cleanup", "●"])
-            cleanup.setIcon(0, self._tree_badge_icon("Safety", "#455363", "OFF"))
-            cleanup.setData(0, Qt.ItemDataRole.UserRole, None)
-            top_level_items.append(cleanup)
-            for node in finally_nodes:
-                add_node(node, cleanup)
+        cleanup_detail = (
+            "Guaranteed cleanup"
+            if finally_nodes
+            else "Empty — select an OFF action from Safe shutdown"
+        )
+        cleanup = QTreeWidgetItem(["Finally — safe shutdown", cleanup_detail, "●"])
+        cleanup.setIcon(0, self._tree_badge_icon("Safety", "#455363", "OFF"))
+        cleanup.setData(0, Qt.ItemDataRole.UserRole, None)
+        cleanup.setToolTip(
+            0,
+            "Select this row, then click a Safe shutdown action in the Node library. "
+            "These actions run after success, stop and fault.",
+        )
+        top_level_items.append(cleanup)
+        for node in finally_nodes:
+            add_node(node, cleanup)
         # Commit only after every row, synthetic control and icon was built.
         # A presentation exception must never erase the operator's current tree.
         self.tree.clear()
