@@ -371,7 +371,7 @@ class MainWindowTests(unittest.TestCase):
                 window.close()
                 self.application.processEvents()
 
-    def test_anritsu_acquisition_error_highlights_missing_frequency_and_reference_limits(self) -> None:
+    def test_anritsu_acquisition_error_highlights_only_missing_frequency_limits(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             path = Path(temporary) / "settings.yml"
             write_engineer_settings(path)
@@ -381,18 +381,21 @@ class MainWindowTests(unittest.TestCase):
                 safety = page._raw["devices"]["anritsu"]["safety"]
                 safety["acquisition_allowed"] = True
                 safety["frequency"] = {"min": None, "max": None}
-                safety["reference_level"] = {"min": None, "max": None}
                 page._populate()
                 with patch.object(QMessageBox, "critical"):
                     self.assertIsNone(page.validate_draft())
                 expected = {
                     ("devices", "anritsu", "safety", "frequency", boundary)
                     for boundary in ("min", "max")
-                } | {
-                    ("devices", "anritsu", "safety", "reference_level", boundary)
-                    for boundary in ("min", "max")
                 }
                 self.assertTrue(expected.issubset(set(page._limit_items_by_path)))
+                self.assertFalse(
+                    any(
+                        path[:4]
+                        == ("devices", "anritsu", "safety", "reference_level")
+                        for path in page._limit_items_by_path
+                    )
+                )
                 self.assertTrue(
                     all(page._limit_items_by_path[item] in page._limit_error_items for item in expected)
                 )

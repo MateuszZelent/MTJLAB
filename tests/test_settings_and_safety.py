@@ -215,6 +215,26 @@ class QuantityAndSafetyTests(unittest.TestCase):
                 points=999,
             )
 
+    def test_anritsu_reference_level_uses_documented_hardware_range(self) -> None:
+        settings = simulation_settings()
+        for value in (-120.0, 50.0):
+            validate_anritsu_spectrum(
+                settings.anritsu.safety,
+                start_hz=1e6,
+                stop_hz=2e6,
+                reference_level_dbm=value,
+                points=101,
+            )
+        for value in (-120.01, 50.01):
+            with self.assertRaisesRegex(SafetyViolation, "documented MS2830A range"):
+                validate_anritsu_spectrum(
+                    settings.anritsu.safety,
+                    start_hz=1e6,
+                    stop_hz=2e6,
+                    reference_level_dbm=value,
+                    points=101,
+                )
+
     def test_keithley_preflight_rejects_source_compliance_power(self) -> None:
         raw = deepcopy(SettingsRepository(SETTINGS_TEMPLATE).load().raw)
         limits = raw["devices"]["keithley"]["safety"]["channels"]["B"]["lab_limits"]

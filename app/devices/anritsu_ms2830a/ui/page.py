@@ -36,7 +36,11 @@ from app.domain.quantities import (
     DIMENSION_VOLTAGE, format_quantity_auto, parse_quantity,
 )
 from app.recipes.parameter_registry import SWEEPABLE_PARAMETERS, sweep_default
-from app.safety.anritsu import ANRITSU_SWEEP_POINT_COUNTS
+from app.safety.anritsu import (
+    ANRITSU_REFERENCE_LEVEL_MAX_DBM,
+    ANRITSU_REFERENCE_LEVEL_MIN_DBM,
+    ANRITSU_SWEEP_POINT_COUNTS,
+)
 from app.settings.models import StationSettings
 from app.spectrum import (
     LinearPowerAverager,
@@ -127,6 +131,11 @@ class AnritsuSpectrumConfigurationPanel(CardWidget):
         self.set_settings(settings)
 
     def _limit_values(self, key: str) -> tuple[object, object]:
+        if key == "reference_level":
+            return (
+                f"{ANRITSU_REFERENCE_LEVEL_MIN_DBM:g} dBm",
+                f"{ANRITSU_REFERENCE_LEVEL_MAX_DBM:g} dBm",
+            )
         value = getattr(self._settings.anritsu.safety, key)
         return value.min, value.max
 

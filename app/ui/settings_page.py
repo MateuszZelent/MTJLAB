@@ -194,6 +194,8 @@ class SettingsPage(QWidget):
         ("profile", "state"),
         ("profile", "approved_by"),
         ("profile", "approved_at"),
+        ("devices", "anritsu", "safety", "reference_level", "min"),
+        ("devices", "anritsu", "safety", "reference_level", "max"),
     }
     _OPERATOR_EDITABLE_PATHS = {
         ("devices", "rigol", "safety", "allow_output_enable"),
@@ -991,7 +993,8 @@ class SettingsPage(QWidget):
             if not isinstance(value, dict):
                 return
             if "min" in value and "max" in value:
-                self._add_limit_row(path, value)
+                if path != ("devices", "anritsu", "safety", "reference_level"):
+                    self._add_limit_row(path, value)
             for key, nested in value.items():
                 if isinstance(nested, dict):
                     walk(nested, path + (str(key),))
@@ -1580,10 +1583,9 @@ class SettingsPage(QWidget):
     ) -> tuple[tuple[str | int, ...], ...]:
         message = str(error).lower()
         anritsu_safety = ("devices", "anritsu", "safety")
-        if "anritsu acquisition requires complete frequency and reference-level limits" in message:
+        if "anritsu acquisition requires a complete frequency limit" in message:
             return tuple(
-                anritsu_safety + (range_name, boundary)
-                for range_name in ("frequency", "reference_level")
+                anritsu_safety + ("frequency", boundary)
                 for boundary in ("min", "max")
             )
         if "optional range must define both limits" in message:

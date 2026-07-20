@@ -319,11 +319,10 @@ class AnritsuSafety(StrictModel):
     def validate_optional_ranges(self) -> "AnritsuSafety":
         # Null RF ranges intentionally lock acquisition until a lab owner fills them in.
         self.frequency.checked_if_complete(DIMENSION_FREQUENCY)
-        self.reference_level.checked_if_complete(DIMENSION_DBM)
         if self.acquisition_allowed:
-            if self.frequency.min is None or self.reference_level.min is None:
+            if self.frequency.min is None:
                 raise ValueError(
-                    "Anritsu acquisition requires complete frequency and reference-level limits."
+                    "Anritsu acquisition requires a complete frequency limit."
                 )
             if self.require_rf_input_limit_definition and self.rf_input.max_expected_power_at_connector is None:
                 raise ValueError(

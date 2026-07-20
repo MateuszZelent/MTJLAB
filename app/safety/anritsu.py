@@ -16,6 +16,8 @@ from app.settings.models import AnritsuSafety, AnritsuSettings
 
 
 ANRITSU_SWEEP_POINT_COUNTS = (11, 21, 41, 51, 101, 201, 251, 401, 501, 1001, 2001, 5001, 10001)
+ANRITSU_REFERENCE_LEVEL_MIN_DBM = -120.0
+ANRITSU_REFERENCE_LEVEL_MAX_DBM = 50.0
 ANRITSU_BASIC_DETECTORS = frozenset({"NORM", "POS", "SAMP", "NEG", "RMS"})
 ANRITSU_CISPR_DETECTORS = frozenset({"QPE", "CAV", "CRMS"})
 ANRITSU_CISPR_OPTIONS = frozenset({"016", "116"})
@@ -36,7 +38,7 @@ def assert_anritsu_acquisition_allowed(safety: AnritsuSafety) -> None:
     if not safety.acquisition_allowed:
         raise SafetyViolation(
             "Anritsu acquisition is locked by the safety profile. "
-            "Define the RF input, frequency, and reference-level limits in Settings > Anritsu, "
+            "Define the RF input and frequency limits in Settings > Anritsu, "
             "then enable acquisition."
         )
     if safety.require_rf_input_limit_definition and safety.rf_input.max_expected_power_at_connector is None:
@@ -45,8 +47,6 @@ def assert_anritsu_acquisition_allowed(safety: AnritsuSafety) -> None:
         parse_quantity(safety.rf_input.max_expected_power_at_connector, DIMENSION_DBM)
     if safety.frequency.min is None or safety.frequency.max is None:
         raise SafetyViolation("Define the permitted Anritsu frequency range before acquisition.")
-    if safety.reference_level.min is None or safety.reference_level.max is None:
-        raise SafetyViolation("Define the permitted Anritsu reference-level range before acquisition.")
 
 
 def validate_anritsu_dut_input(
@@ -94,11 +94,11 @@ def validate_anritsu_spectrum(
             f"Anritsu range {start_hz:.9g}–{stop_hz:.9g} Hz is outside the approved range "
             f"of {frequency_min:.9g}–{frequency_max:.9g} Hz."
         )
-    reference_min = parse_quantity(safety.reference_level.min, DIMENSION_DBM).si_value
-    reference_max = parse_quantity(safety.reference_level.max, DIMENSION_DBM).si_value
+    reference_min = ANRITSU_REFERENCE_LEVEL_MIN_DBM
+    reference_max = ANRITSU_REFERENCE_LEVEL_MAX_DBM
     if reference_level_dbm < reference_min or reference_level_dbm > reference_max:
         raise SafetyViolation(
-            f"Reference level {reference_level_dbm:.9g} dBm is outside the approved range "
+            f"Reference level {reference_level_dbm:.9g} dBm is outside the documented MS2830A range "
             f"of {reference_min:.9g}–{reference_max:.9g} dBm."
         )
     if isinstance(points, bool) or points not in ANRITSU_SWEEP_POINT_COUNTS:

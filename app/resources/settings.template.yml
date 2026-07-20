@@ -409,8 +409,9 @@ devices:
         min:
         max:
       reference_level:
-        min:
-        max:
+        # Hardware-defined MS2830A range; displayed read-only in Settings.
+        min: "-120 dBm"
+        max: "+50 dBm"
       sweep_points:
         min: 101
         max: 10001
