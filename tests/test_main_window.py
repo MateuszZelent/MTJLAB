@@ -2899,10 +2899,69 @@ class MainWindowTests(unittest.TestCase):
                 loaded = SettingsRepository(path).load()
                 limits = loaded.raw["devices"]["keithley"]["safety"]["channels"]["B"]["lab_limits"]
                 self.assertEqual(limits["source_current"]["max"], "9 mA")
+                self.assertEqual(limits["source_current"]["max_abs"], "9 mA")
                 self.assertEqual(field.maximum.text(), "MAX  9 mA")
+                self.assertFalse(field.validation_warning.isVisible())
                 self.assertIsNot(
                     window.stackedWidget.currentWidget(),
                     window.navigation_routes["settings"],
+                )
+            finally:
+                window.close()
+                self.application.processEvents()
+
+    def test_limit_edit_synchronizes_hidden_absolute_bound(self) -> None:
+        self.assertEqual(
+            MainWindow._synchronised_max_abs("-10 mA", "10 mA", "1 mA"),
+            "10 mA",
+        )
+
+    def test_failed_limit_hot_apply_shows_error_and_restores_saved_range(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            path = Path(temporary) / "settings.yml"
+            write_engineer_settings(path)
+            window = MainWindow(
+                path, simulation=False, authenticated_username=TEST_ENGINEER
+            )
+            try:
+                original = window._settings.keithley.safety.channels[
+                    "B"
+                ].lab_limits.source_current
+                raw = window._repository.load().raw
+                changed = raw["devices"]["keithley"]["safety"]["channels"][
+                    "B"
+                ]["lab_limits"]["source_current"]
+                changed["max"] = "9 mA"
+                changed["max_abs"] = "9 mA"
+                updated = window._repository.save_raw(raw)
+                for controller in window._controllers.values():
+                    controller.call = Mock()
+
+                window._settings_saved(updated)
+                self.assertEqual(
+                    window.keithley_page._limit_fields["level"].maximum.text(),
+                    "MAX  9 mA",
+                )
+
+                with patch.object(QMessageBox, "critical") as critical:
+                    window._device_error(
+                        "keithley",
+                        "apply_limit_settings",
+                        "OUTPUT A and OUTPUT B must be confirmed OFF.",
+                    )
+
+                critical.assert_called_once()
+                self.assertIn("rolled back", critical.call_args.args[2])
+                restored = SettingsRepository(path).load().settings
+                self.assertEqual(
+                    restored.keithley.safety.channels[
+                        "B"
+                    ].lab_limits.source_current,
+                    original,
+                )
+                self.assertEqual(
+                    window.keithley_page._limit_fields["level"].maximum.text(),
+                    f"MAX  {original.max_abs}",
                 )
             finally:
                 window.close()

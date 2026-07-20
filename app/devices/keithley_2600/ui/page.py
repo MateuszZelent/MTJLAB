@@ -1853,6 +1853,7 @@ class KeithleyPage(QWidget):
     def _refresh_keithley_limits(self, *_args: object) -> None:
         for key, field in self._limit_fields.items():
             field.set_limits(*self._keithley_limit_values(key))
+            field.validate_and_clamp()
 
     def set_settings(self, settings: StationSettings) -> None:
         self._station_settings = settings

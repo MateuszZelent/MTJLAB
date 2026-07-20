@@ -46,9 +46,14 @@ from app.audit import AuditLogger
 from app.bootstrap import StationComposition
 from app.domain.errors import AuthorizationError, ConfigurationError
 from app.domain.quantities import (
+    DIMENSION_CURRENT,
     DIMENSION_FREQUENCY,
+    DIMENSION_POWER,
+    DIMENSION_RESISTANCE,
     DIMENSION_TIME,
+    DIMENSION_VOLTAGE,
     format_quantity_auto,
+    parse_quantity,
 )
 from app.devices.anritsu_ms2830a import (
     AdvancedSpectrumSnapshot,
@@ -99,6 +104,7 @@ class MainWindow(FluentWindow):
         self._simulation = simulation
         persisted = self._repository.load().settings
         self._settings = simulated_station_settings(persisted) if simulation else persisted
+        self._pending_limit_rollbacks: dict[str, StationSettings] = {}
         self._access = AccessPolicy.from_settings(
             persisted,
             username=authenticated_username,
@@ -647,6 +653,37 @@ class MainWindow(FluentWindow):
             return float(stripped)
         return stripped
 
+    @staticmethod
+    def _synchronised_max_abs(
+        minimum: object,
+        maximum: object,
+        original_max_abs: object,
+    ) -> object:
+        """Keep a hidden max_abs bound aligned with the edited MIN/MAX pair."""
+
+        if not isinstance(original_max_abs, str):
+            return original_max_abs
+        for dimension in (
+            DIMENSION_CURRENT,
+            DIMENSION_VOLTAGE,
+            DIMENSION_POWER,
+            DIMENSION_FREQUENCY,
+            DIMENSION_RESISTANCE,
+            DIMENSION_TIME,
+        ):
+            try:
+                parse_quantity(original_max_abs, dimension)
+                minimum_si = parse_quantity(str(minimum), dimension).si_value
+                maximum_si = parse_quantity(str(maximum), dimension).si_value
+            except Exception:
+                continue
+            return format_quantity_auto(
+                max(abs(minimum_si), abs(maximum_si)), dimension
+            )
+        raise ValueError(
+            f"Cannot synchronize max_abs={original_max_abs!r} with the edited range."
+        )
+
     def _limit_edit_spec(self, device: str, field: LimitField) -> tuple[str, tuple[str, ...], bool]:
         key = str(field.property("limitKey"))
         if device == "rigol":
@@ -704,6 +741,12 @@ class MainWindow(FluentWindow):
             replacement["min"] = self._coerce_limit_value(dialog.minimum.text(), minimum)
             if maximum_enabled:
                 replacement["max"] = self._coerce_limit_value(dialog.maximum.text(), maximum)
+            if "max_abs" in replacement and maximum_enabled:
+                replacement["max_abs"] = self._synchronised_max_abs(
+                    replacement["min"],
+                    replacement["max"],
+                    replacement["max_abs"],
+                )
             container: Any = raw
             for part in path[:-1]:
                 container = container[part]
@@ -877,10 +920,37 @@ class MainWindow(FluentWindow):
                 f"Communication test passed: {result.get('idn', '')}; "
                 f"features={features}; options={options}"
             )
+        elif operation == "apply_limit_settings":
+            self._pending_limit_rollbacks.pop(device, None)
+            self._log(f"Safety limits applied immediately: {device}")
 
     def _device_error(self, device: str, operation: str, error: str) -> None:
         if operation == "replace_adapter":
             self.dashboard.cards[device].set_reconfiguring(False)
+        elif operation == "apply_limit_settings":
+            previous = self._pending_limit_rollbacks.pop(device, None)
+            rollback_error: str | None = None
+            if previous is not None:
+                try:
+                    raw = self._repository.load().raw
+                    raw["devices"][device] = getattr(previous.devices, device).model_dump(
+                        mode="python"
+                    )
+                    restored = self._repository.save_raw(raw)
+                    self._apply_settings_to_ui(restored)
+                    self.settings_page.reload()
+                except Exception as exc:
+                    rollback_error = str(exc)
+            detail = error
+            if previous is not None and rollback_error is None:
+                detail += "\n\nThe saved limits were rolled back and the UI was restored."
+            elif rollback_error is not None:
+                detail += f"\n\nAutomatic settings rollback also failed: {rollback_error}"
+            QMessageBox.critical(
+                self,
+                f"{getattr(self._settings, device).display_name} — limits not applied",
+                detail,
+            )
         elif operation in {"connect", "test_communication"}:
             card = self.connection_panels[device]
             action = "Connection" if operation == "connect" else "Communication test"
@@ -1218,18 +1288,8 @@ class MainWindow(FluentWindow):
 
     def _settings_saved(self, settings: StationSettings) -> None:
         previous_settings = self._settings
-        self._settings = simulated_station_settings(settings) if self._simulation else settings
-        self.quick_control_coordinator.set_settings(self._settings)
-        self.dashboard.update_settings(self._settings)
-        self.rigol_page.set_settings(self._settings)
-        self.keithley_page.set_settings(self._settings)
-        self.anritsu_page.set_settings(self._settings)
-        self.moke_box_page.set_settings(self._settings)
-        self.lakeshore_gaussmeter_page.set_settings(self._settings)
-        for name, panel in self.connection_panels.items():
-            resource, backend = self._device_connection_details(self._settings, name)
-            panel.update_resource(resource, backend)
-        self.recipe_page.set_settings(self._settings)
+        self._apply_settings_to_ui(settings)
+
         for name, controller in self._controllers.items():
             previous_device = getattr(previous_settings.devices, name)
             updated_device = getattr(self._settings.devices, name)
@@ -1241,6 +1301,7 @@ class MainWindow(FluentWindow):
                 controller.call("refresh_station_context", self._settings)
                 continue
             if all(path and path[-1] in {"min", "max", "max_abs"} for path in changes):
+                self._pending_limit_rollbacks.setdefault(name, previous_settings)
                 controller.call("apply_limit_settings", self._settings)
                 self._log(
                     f"DEVICE LIMITS HOT-APPLY QUEUED [{name}]: session remains connected; "
@@ -1259,9 +1320,25 @@ class MainWindow(FluentWindow):
             self.dashboard.cards[name].update_state("disconnected")
         self._refresh_safety_strip()
         self._log(
-            "Profile changed. Limit-only edits were applied without reconnecting; "
+            "Settings changed. Limit-only edits were applied without reconnecting; "
             "only connection, identity, driver or other operational changes replaced adapters."
         )
+
+    def _apply_settings_to_ui(self, settings: StationSettings) -> None:
+        """Update every visible settings consumer without dispatching device work."""
+
+        self._settings = simulated_station_settings(settings) if self._simulation else settings
+        self.quick_control_coordinator.set_settings(self._settings)
+        self.dashboard.update_settings(self._settings)
+        self.rigol_page.set_settings(self._settings)
+        self.keithley_page.set_settings(self._settings)
+        self.anritsu_page.set_settings(self._settings)
+        self.moke_box_page.set_settings(self._settings)
+        self.lakeshore_gaussmeter_page.set_settings(self._settings)
+        for name, panel in self.connection_panels.items():
+            resource, backend = self._device_connection_details(self._settings, name)
+            panel.update_resource(resource, backend)
+        self.recipe_page.set_settings(self._settings)
 
     @classmethod
     def _setting_changes(

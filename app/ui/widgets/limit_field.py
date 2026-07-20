@@ -214,7 +214,11 @@ class LimitEditDialog(StationDialog):
         form.addRow("Minimum", self.minimum)
         form.addRow("Maximum", self.maximum)
         layout.addLayout(form)
-        warning = BodyLabel("Saving a safety limit change sets the safety profile to UNVERIFIED.", self)
+        warning = BodyLabel(
+            "On success the new range is applied immediately. If validation or the "
+            "device check fails, an error is shown and the previous range is restored.",
+            self,
+        )
         warning.setWordWrap(True)
         layout.addWidget(warning)
         footer = QHBoxLayout()
