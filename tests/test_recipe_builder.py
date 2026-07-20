@@ -116,7 +116,7 @@ class RecipeBuilderTests(unittest.TestCase):
                 page.close()
 
     def test_tree_builder_can_add_read_only_moke_hall_checkpoint(self) -> None:
-            page = RecipePage(simulation_settings())
+        page = RecipePage(simulation_settings())
         try:
             page.new_recipe(confirm=False)
             self.assertTrue(
