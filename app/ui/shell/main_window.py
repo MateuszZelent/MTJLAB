@@ -1516,9 +1516,16 @@ class MainWindow(FluentWindow):
                         snapshot.measure_current_autorange,
                     ),
                 )
-                validate_keithley_source(
-                    loaded.settings.keithley.safety.channels[channel], request
-                )
+                try:
+                    validate_keithley_source(
+                        loaded.settings.keithley.safety.channels[channel], request
+                    )
+                except SafetyViolation as exc:
+                    raise SafetyViolation(
+                        f"Channel {channel}: {exc} To keep these device values, edit "
+                        f"Settings > Keithley > Channel {channel} safety limits first. "
+                        "No setting was saved."
+                    ) from exc
                 defaults = raw["devices"]["keithley"]["safety"]["channels"][
                     channel
                 ]["defaults"]

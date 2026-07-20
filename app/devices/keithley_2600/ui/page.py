@@ -741,7 +741,9 @@ class _KeithleyReadbackDialog(StationDialog):
                 ("B", 4, 5, 6),
             ):
                 value = values[channel][parameter]
-                matches = expected[channel].get(parameter) == value
+                matches = self._values_match(
+                    parameter, values[channel], expected[channel]
+                )
                 value_item = QTableWidgetItem(value)
                 configured_value = expected[channel].get(parameter)
                 status_item = QTableWidgetItem(
@@ -831,14 +833,42 @@ class _KeithleyReadbackDialog(StationDialog):
             "Source level": quantity(snapshot.source_level, source_dimension),
             "Compliance limit": quantity(snapshot.compliance, compliance_dimension),
             "Source autorange": "ON" if snapshot.source_autorange else "OFF",
-            "Active source range": quantity(snapshot.source_range, source_dimension),
+            "Active source range": (
+                "AUTO (device selects active range)"
+                if snapshot.source_autorange
+                else quantity(snapshot.source_range, source_dimension)
+            ),
             "Sense mode": "2-wire" if snapshot.sense_mode == "2wire" else "4-wire",
             "NPLC": snapshot.nplc.strip(),
             "Measure V autorange": "ON" if snapshot.measure_voltage_autorange else "OFF",
-            "Active measure V range": quantity(snapshot.measure_voltage_range, DIMENSION_VOLTAGE),
+            "Active measure V range": (
+                "AUTO (device selects active range)"
+                if snapshot.measure_voltage_autorange
+                else quantity(snapshot.measure_voltage_range, DIMENSION_VOLTAGE)
+            ),
             "Measure I autorange": "ON" if snapshot.measure_current_autorange else "OFF",
-            "Active measure I range": quantity(snapshot.measure_current_range, DIMENSION_CURRENT),
+            "Active measure I range": (
+                "AUTO (device selects active range)"
+                if snapshot.measure_current_autorange
+                else quantity(snapshot.measure_current_range, DIMENSION_CURRENT)
+            ),
         }
+
+    @staticmethod
+    def _values_match(
+        parameter: str,
+        device: dict[str, str],
+        configured: dict[str, str],
+    ) -> bool:
+        range_to_autorange = {
+            "Active source range": "Source autorange",
+            "Active measure V range": "Measure V autorange",
+            "Active measure I range": "Measure I autorange",
+        }
+        autorange_parameter = range_to_autorange.get(parameter)
+        if autorange_parameter is not None and configured[autorange_parameter] == "ON":
+            return device[autorange_parameter] == "ON"
+        return configured.get(parameter) == device[parameter]
 
     @staticmethod
     def _channel_values(
@@ -2393,6 +2423,13 @@ class KeithleyPage(QWidget):
                 ),
             }
             selected = assignments if parameter == "ALL" else {parameter: assignments[parameter]}
+            dependent_autorange = {
+                "Active source range": "Source autorange",
+                "Active measure V range": "Measure V autorange",
+                "Active measure I range": "Measure I autorange",
+            }.get(parameter)
+            if dependent_autorange is not None:
+                selected[dependent_autorange] = assignments[dependent_autorange]
             for field_name, value in selected.values():
                 changes[field_name] = value
             self._channel_form_snapshots[target] = replace(snapshot, **changes)

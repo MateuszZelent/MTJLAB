@@ -2534,6 +2534,7 @@ class MainWindowTests(unittest.TestCase):
                 for row in range(dialog.table.rowCount())
             }
             self.assertTrue(status_values["Source level"][0])
+            self.assertEqual(status_values["Active source range"][0], "MATCH")
             self.assertIsNotNone(dialog.table.cellWidget(2, 3))
             self.assertIsNotNone(dialog.table.cellWidget(2, 6))
 

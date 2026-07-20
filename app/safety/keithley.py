@@ -93,15 +93,19 @@ def validate_keithley_source(channel: KeithleyChannelSettings, request: Keithley
     if request.mode != "measure_only":
         worst_case_power = abs(request.level_si * request.compliance_si)
         max_power = parse_quantity(limits.max_abs_power, DIMENSION_POWER).si_value
+        power_limit_source = "station profile max_abs_power"
         if request.dut_envelope is not None:
             _validate_source_against_dut(request, request.dut_envelope)
             if request.dut_envelope.max_abs_power_w is not None:
+                if request.dut_envelope.max_abs_power_w < max_power:
+                    power_limit_source = "DUT limit"
                 max_power = min(max_power, request.dut_envelope.max_abs_power_w)
         tolerance = max(max_power, 1.0) * 1e-12
         if worst_case_power > max_power + tolerance:
             raise SafetyViolation(
                 "Worst-case source × compliance power "
-                f"{worst_case_power:.9g} W exceeds the DUT limit {max_power:.9g} W."
+                f"{worst_case_power:.9g} W exceeds the {power_limit_source} "
+                f"{max_power:.9g} W."
             )
     source_dimension = DIMENSION_CURRENT if request.mode == "current" else DIMENSION_VOLTAGE
     source_limits = limits.source_current if request.mode == "current" else limits.source_voltage
