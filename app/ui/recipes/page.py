@@ -681,6 +681,41 @@ class RecipePage(QWidget):
             drag_kind="flow:acquire_spectrum",
         )
 
+        safety = group("Safe shutdown", "5")
+        action(
+            safety, "Keithley A ramp to zero + OFF",
+            "Add an unconditional channel A ramp and OUTPUT OFF to Finally", "keithley",
+            QStyle.StandardPixmap.SP_MediaStop,
+            lambda: self._library_add_keithley_shutdown("A"),
+            drag_kind="flow:ramp_keithley_to_zero",
+        )
+        action(
+            safety, "Keithley B ramp to zero + OFF",
+            "Add an unconditional channel B ramp and OUTPUT OFF to Finally", "keithley",
+            QStyle.StandardPixmap.SP_MediaStop,
+            lambda: self._library_add_keithley_shutdown("B"),
+            drag_kind="flow:ramp_keithley_to_zero",
+        )
+        action(
+            safety, "Rigol CH1 OUTPUT OFF", "Add Rigol channel 1 OUTPUT OFF to Finally", "rigol",
+            QStyle.StandardPixmap.SP_MediaStop,
+            lambda: self._library_add_output_off("set_rigol_output", channel=1),
+            drag_kind="flow:set_rigol_output",
+        )
+        action(
+            safety, "Rigol CH2 OUTPUT OFF", "Add Rigol channel 2 OUTPUT OFF to Finally", "rigol",
+            QStyle.StandardPixmap.SP_MediaStop,
+            lambda: self._library_add_output_off("set_rigol_output", channel=2),
+            drag_kind="flow:set_rigol_output",
+        )
+        action(
+            safety, "Anritsu SG RF OFF",
+            "Add signal-generator RF OFF to Finally; the spectrum analyzer input has no source output", "anritsu",
+            QStyle.StandardPixmap.SP_MediaStop,
+            lambda: self._library_add_output_off("set_anritsu_sg_output"),
+            drag_kind="flow:set_anritsu_sg_output",
+        )
+
         flow = group("Flow", "6")
         action(
             flow, "Wait", "Add a settling delay", "timing",
@@ -770,6 +805,55 @@ class RecipePage(QWidget):
             branch=branch,
             insert_index=index,
         )
+
+    def _library_add_keithley_shutdown(self, channel: str) -> None:
+        self._add_finally_nodes(
+            [
+                {
+                    "id": self._new_node_id("ramp-keithley-zero"),
+                    "type": "ramp_keithley_to_zero",
+                    "channel": channel,
+                    "deadline": "30 s",
+                },
+                {
+                    "id": self._new_node_id("keithley-output-off"),
+                    "type": "set_keithley_output",
+                    "channel": channel,
+                    "enabled": False,
+                },
+            ],
+            f"Added Keithley {channel} safe shutdown",
+        )
+
+    def _library_add_output_off(self, kind: str, *, channel: int | None = None) -> None:
+        node: dict[str, object] = {
+            "id": self._new_node_id("output-off"),
+            "type": kind,
+            "enabled": False,
+        }
+        if channel is not None:
+            node["channel"] = channel
+        self._add_finally_nodes([node], "Added output OFF to safe shutdown")
+
+    def _add_finally_nodes(
+        self, nodes: list[dict[str, object]], status: str
+    ) -> None:
+        source = self.editor.toPlainText()
+        try:
+            for node in nodes:
+                source = add_recipe_node(
+                    source,
+                    parent_id="__finally__",
+                    branch="children",
+                    node=node,
+                )
+            self._apply_builder_source(
+                source,
+                status,
+                selected_node_id=str(nodes[-1]["id"]),
+            )
+        except Exception as exc:
+            QMessageBox.warning(self, "Add safe shutdown", str(exc))
 
     def _library_add_device(
         self,
