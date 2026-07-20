@@ -44,7 +44,6 @@ ACTION_TYPES: Final[frozenset[str]] = frozenset(
         "arm_anritsu_sg_output",
         "set_anritsu_sg_output",
         "arm_rigol_output",
-        "arm_keithley_output",
         "set_rigol_output",
         "set_keithley_output",
         "ramp_keithley_to_zero",

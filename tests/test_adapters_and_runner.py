@@ -213,6 +213,99 @@ class AdapterAndRunnerTests(unittest.TestCase):
         self.assertLess(keithley_session.writes.index("smua.source.output = smua.OUTPUT_OFF"), clear_errors)
         self.assertLess(keithley_session.writes.index("smub.source.output = smub.OUTPUT_OFF"), clear_errors)
 
+    def test_limit_updates_keep_confirmed_off_instrument_sessions_open(self) -> None:
+        raw = deepcopy(self.settings.model_dump(mode="python"))
+        raw["devices"]["rigol"]["safety"]["channels"]["1"]["lab_limits"]["frequency"][
+            "max"
+        ] = "900 kHz"
+        raw["devices"]["keithley"]["safety"]["channels"]["B"]["lab_limits"][
+            "source_current"
+        ]["max"] = "9 mA"
+        raw["devices"]["anritsu"]["safety"]["frequency"]["max"] = "19 GHz"
+        updated = StationSettings.model_validate(raw)
+
+        rigol_session = FakeVisaSession(
+            responses={
+                "*IDN?": "Rigol Technologies,DG1032Z,DG1ZA172902039,00.01.08",
+                ":SOUR1:MOD?": "OFF",
+                ":SOUR1:SWE:STAT?": "OFF",
+                ":SOUR1:BURS:STAT?": "OFF",
+                ":SOUR1:PHAS?": "0",
+            }
+        )
+        rigol = RigolAdapter(
+            self.settings, session_factory=FakeVisaSessionFactory(rigol_session)
+        )
+        rigol.connect()
+
+        keithley_session = FakeVisaSession(
+            responses={
+                "*IDN?": "KEITHLEY INSTRUMENTS,2602A,123456,1.0",
+                "print(errorqueue.count)": "0",
+            }
+        )
+        keithley = KeithleyAdapter(
+            self.settings, session_factory=FakeVisaSessionFactory(keithley_session)
+        )
+        keithley.connect()
+
+        anritsu_session = FakeVisaSession(
+            responses={
+                "*IDN?": "ANRITSU,MS2830A,123456,1.0",
+                "*OPT?": "020",
+                "OUTP?": "0",
+            }
+        )
+        anritsu = AnritsuAdapter(
+            self.settings, session_factory=FakeVisaSessionFactory(anritsu_session)
+        )
+        anritsu.connect()
+
+        rigol.apply_limit_settings(updated)
+        keithley.apply_limit_settings(updated)
+        anritsu.apply_limit_settings(updated)
+
+        self.assertFalse(rigol_session.closed)
+        self.assertFalse(keithley_session.closed)
+        self.assertFalse(anritsu_session.closed)
+        self.assertEqual(rigol._settings.safety.channels["1"].lab_limits.frequency.max, "900 kHz")
+        self.assertEqual(
+            keithley._settings.safety.channels["B"].lab_limits.source_current.max,
+            "9 mA",
+        )
+        self.assertEqual(anritsu._settings.safety.frequency.max, "19 GHz")
+
+    def test_limit_update_is_rejected_while_keithley_output_is_on(self) -> None:
+        raw = deepcopy(simulation_settings(approved=True).model_dump(mode="python"))
+        raw["devices"]["keithley"]["safety"]["allow_output_enable"] = True
+        active_settings = StationSettings.model_validate(raw)
+        updated_raw = deepcopy(raw)
+        updated_raw["devices"]["keithley"]["safety"]["channels"]["B"]["lab_limits"][
+            "source_current"
+        ]["max"] = "9 mA"
+        updated = StationSettings.model_validate(updated_raw)
+        session = FakeVisaSession(
+            responses={
+                "*IDN?": "KEITHLEY INSTRUMENTS,2602A,123456,1.0",
+                "print(errorqueue.count)": "0",
+            }
+        )
+        adapter = KeithleyAdapter(
+            active_settings, session_factory=FakeVisaSessionFactory(session)
+        )
+        adapter.connect()
+        adapter.configure_source(KeithleySourceRequest("B", "current", 0.001, 0.067))
+        adapter.set_output("B", True)
+
+        with self.assertRaisesRegex(SafetyViolation, "confirmed OFF"):
+            adapter.apply_limit_settings(updated)
+
+        self.assertFalse(session.closed)
+        self.assertEqual(
+            adapter._settings.safety.channels["B"].lab_limits.source_current.max,
+            "10 mA",
+        )
+
     def test_keithley_rejects_unconfirmed_output_state(self) -> None:
         raw = deepcopy(self.settings.model_dump(mode="python"))
         raw["profile"]["state"] = "approved"
@@ -228,10 +321,28 @@ class AdapterAndRunnerTests(unittest.TestCase):
         adapter = KeithleyAdapter(settings, session_factory=FakeVisaSessionFactory(session))
         adapter.connect()
         adapter.configure_source(KeithleySourceRequest("B", "current", .001, .067))
-        adapter.arm_output("B")
-
         with self.assertRaisesRegex(Exception, "did not confirm"):
             adapter.set_output("B", True)
+
+    def test_keithley_adapter_rejects_five_volts_before_any_source_write(self) -> None:
+        session = FakeVisaSession(
+            responses={
+                "*IDN?": "KEITHLEY INSTRUMENTS,2602A,123456,1.0",
+                "print(errorqueue.count)": "0",
+            }
+        )
+        adapter = KeithleyAdapter(
+            self.settings, session_factory=FakeVisaSessionFactory(session)
+        )
+        adapter.connect()
+        writes_before = tuple(session.writes)
+
+        with self.assertRaisesRegex(SafetyViolation, "outside"):
+            adapter.configure_source(
+                KeithleySourceRequest("B", "voltage", 5.0, 0.001)
+            )
+
+        self.assertEqual(tuple(session.writes), writes_before)
 
     def test_device_state_remains_on_when_another_channel_is_disabled(self) -> None:
         raw = deepcopy(simulation_settings(approved=True).model_dump(mode="python"))
@@ -245,7 +356,6 @@ class AdapterAndRunnerTests(unittest.TestCase):
         keithley = KeithleyAdapter(settings, session_factory=FakeVisaSessionFactory(keithley_session))
         keithley.connect()
         keithley.configure_source(KeithleySourceRequest("B", "current", 0.001, 0.067))
-        keithley.arm_output("B")
         keithley.set_output("B", True)
         keithley.set_output("A", False)
         self.assertEqual(keithley.state, DeviceState.OUTPUT_ON)
@@ -512,7 +622,6 @@ class AdapterAndRunnerTests(unittest.TestCase):
         adapter = KeithleyAdapter(settings, session_factory=FakeVisaSessionFactory(session))
         adapter.connect()
         adapter.configure_source(KeithleySourceRequest("B", "current", 0.001, 0.067))
-        adapter.arm_output("B")
         adapter.set_output("B", True)
 
         with self.assertRaises(SafetyViolation):
@@ -643,7 +752,6 @@ class AdapterAndRunnerTests(unittest.TestCase):
         adapter.configure_source(
             KeithleySourceRequest("B", "current", 0.001, 0.067)
         )
-        adapter.arm_output("B")
         adapter.set_output("B", True)
 
         actual = adapter.update_source_compliance(
@@ -689,7 +797,6 @@ class AdapterAndRunnerTests(unittest.TestCase):
         adapter = KeithleyAdapter(settings, session_factory=FakeVisaSessionFactory(session))
         adapter.connect()
         adapter.configure_source(KeithleySourceRequest("B", "current", 0.001, 0.067))
-        adapter.arm_output("B")
         adapter.set_output("B", True)
 
         result = adapter.ramp_to_level(
@@ -705,7 +812,7 @@ class AdapterAndRunnerTests(unittest.TestCase):
         self.assertEqual(adapter.state, DeviceState.OUTPUT_ON)
         self.assertAlmostEqual(result.final_measurement.voltage_v, 0.01)
 
-    def test_keithley_quick_active_setpoint_uses_measured_safe_ramp(self) -> None:
+    def test_keithley_quick_active_setpoint_updates_directly_with_readback(self) -> None:
         raw = deepcopy(simulation_settings(approved=True).model_dump(mode="python"))
         raw["devices"]["keithley"]["safety"]["allow_output_enable"] = True
         settings = StationSettings.model_validate(raw)
@@ -713,14 +820,17 @@ class AdapterAndRunnerTests(unittest.TestCase):
             responses={
                 "*IDN?": "KEITHLEY INSTRUMENTS,2602A,123456,1.0",
                 "print(errorqueue.count)": "0",
-                "print(smub.source.leveli)": "0.001",
+                "print(smub.source.leveli)": lambda _command: (
+                    "0.0012"
+                    if "smub.source.leveli = 0.0012" in session.writes
+                    else "0.001"
+                ),
                 "print(smub.measure.iv())": "0.0011\t0.01",
             }
         )
         adapter = KeithleyAdapter(settings, session_factory=FakeVisaSessionFactory(session))
         adapter.connect()
         adapter.configure_source(KeithleySourceRequest("B", "current", 0.001, 0.067))
-        adapter.arm_output("B")
         adapter.set_output("B", True)
 
         writes_before_limit_check = len(session.writes)
@@ -735,7 +845,7 @@ class AdapterAndRunnerTests(unittest.TestCase):
         )
 
         self.assertAlmostEqual(actual, 0.0012)
-        self.assertIn("print(smub.measure.iv())", session.writes)
+        self.assertNotIn("print(smub.measure.iv())", session.writes)
         self.assertEqual(adapter.state, DeviceState.OUTPUT_ON)
         writes_before = len(session.writes)
         with self.assertRaisesRegex(SafetyViolation, "Configure Keithley B for voltage"):
@@ -758,7 +868,6 @@ class AdapterAndRunnerTests(unittest.TestCase):
         adapter = KeithleyAdapter(settings, session_factory=FakeVisaSessionFactory(session))
         adapter.connect()
         adapter.configure_source(KeithleySourceRequest("B", "current", 0.001, 0.067))
-        adapter.arm_output("B")
         adapter.set_output("B", True)
 
         with self.assertRaisesRegex(Exception, "No fake VISA response"):
@@ -807,7 +916,6 @@ class AdapterAndRunnerTests(unittest.TestCase):
                 adapter.configure_source(
                     KeithleySourceRequest("B", "current", 0.001, 0.067)
                 )
-                adapter.arm_output("B")
                 adapter.set_output("B", True)
 
                 with self.assertRaisesRegex(SafetyViolation, message):

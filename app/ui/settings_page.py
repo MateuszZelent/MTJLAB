@@ -179,13 +179,7 @@ class _SafetyLimitValidationDelegate(QStyledItemDelegate):
 
 
 class SettingsPage(QWidget):
-    """A generic leaf editor for every value in `.config/settings.yml`.
-
-    Editing a profile always revokes its approval.  Approval is a separate,
-    deliberately explicit operation with an operator name and confirmation
-    phrase, keeping raw safety limits editable without silently unlocking
-    outputs.
-    """
+    """A generic validated leaf editor for every value in `.config/settings.yml`."""
 
     settings_saved = Signal(object)
     status = Signal(str)
@@ -297,7 +291,7 @@ class SettingsPage(QWidget):
         limits_title = StrongBodyLabel("Safety limits")
         limits_title.setObjectName("sectionTitle")
         limits_description = BodyLabel(
-            "Approved laboratory boundaries. Enter values with units, for example 10 mA, 67 mV or 1 MHz."
+            "Laboratory boundaries. Enter values with units, for example 10 mA, 67 mV or 1 MHz."
         )
         limits_description.setObjectName("muted")
         limits_description.setWordWrap(True)
@@ -417,7 +411,7 @@ class SettingsPage(QWidget):
         workflow_title = StrongBodyLabel("Configuration workflow", self.action_card)
         action_copy.addWidget(workflow_title)
         action_note = BodyLabel(
-            "Validate before saving. Any safety-impacting change revokes profile approval.",
+            "Validate before saving. Device permissions, limits and hardware readback remain enforced.",
             self.action_card,
         )
         action_note.setWordWrap(True)
@@ -433,6 +427,7 @@ class SettingsPage(QWidget):
         self.validate_button = PushButton("Validate")
         self.save_button = PrimaryPushButton(FluentIcon.SAVE, "Save changes")
         self.approve_button = PrimaryPushButton("Approve profile…")
+        self.approve_button.hide()
         for index, button in enumerate((
             self.reload_button,
             self.discard_button,
@@ -545,7 +540,7 @@ class SettingsPage(QWidget):
         if self._settings is None:
             return
         state = self._settings.profile.state
-        locked = "OUTPUTS LOCKED" if self._settings.outputs_locked else "profile approved"
+        locked = "profile approval not required"
         mode = (
             " • limited edit: Rigol output permission only"
             if self._read_only and self._can_edit_operator_output()
@@ -589,7 +584,7 @@ class SettingsPage(QWidget):
         dialog.resize(760, 480)
         layout = QVBoxLayout(dialog)
         summary = BodyLabel(
-            f"{len(changes)} unsaved structural change(s). Saving any safety change revokes profile approval."
+            f"{len(changes)} unsaved structural change(s). Values will be validated before saving."
         )
         summary.setWordWrap(True)
         text = PlainTextEdit(dialog)
@@ -1686,12 +1681,6 @@ class SettingsPage(QWidget):
                 raise AuthorizationError(
                     "An engineer or service identity is required to change access-control settings."
                 )
-            # A limit edit invalidates a previous approval and retains the safe
-            # output lock.  Explicit approval is handled below.
-            draft["profile"]["state"] = "unverified"
-            draft["profile"]["approved_by"] = None
-            draft["profile"]["approved_at"] = None
-            draft["profile"]["approval_note"] = "Profile approval is required after settings changes."
             settings = self._repository.save_raw(draft)
         except AuthorizationError as exc:
             if silent:
@@ -1716,13 +1705,13 @@ class SettingsPage(QWidget):
         self._refresh_diagnostics()
         self.settings_saved.emit(settings)
         self.status.emit(
-            "Configuration autosaved and known inconsistencies repaired; profile approval is required"
+            "Configuration autosaved and known inconsistencies repaired"
             if silent and repaired
-            else "Configuration saved and known inconsistencies repaired; profile approval is required"
+            else "Configuration saved and known inconsistencies repaired"
             if repaired
-            else "Configuration autosaved; profile approval is required"
+            else "Configuration autosaved"
             if silent
-            else "Configuration saved; profile approval is required"
+            else "Configuration saved"
         )
         return True
 

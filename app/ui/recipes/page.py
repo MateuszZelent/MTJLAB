@@ -143,17 +143,15 @@ class RecipePage(QWidget):
         hero_copy.addWidget(subtitle)
         hero_layout.addLayout(hero_copy, 1)
         self.recipe_profile_badge = StrongBodyLabel(
-            "LOCKED PROFILE" if self._settings.outputs_locked else "APPROVED PROFILE",
+            "PROFILE APPROVAL NOT REQUIRED",
             hero,
         )
         self.recipe_profile_badge.setObjectName("recipeProfileBadge")
         self.recipe_profile_badge.setProperty(
-            "safetyState", "caution" if self._settings.outputs_locked else "verified"
+            "safetyState", "verified"
         )
         self.recipe_profile_badge.setToolTip(
-            "Outputs remain locked by station policy."
-            if self._settings.outputs_locked
-            else "The active station profile permits approved output operations."
+            "Device permissions, limits, ARM and hardware readback govern output operations."
         )
         hero_layout.addWidget(self.recipe_profile_badge, 0, Qt.AlignmentFlag.AlignVCenter)
         layout.addWidget(hero)
@@ -1026,15 +1024,13 @@ class RecipePage(QWidget):
         self._settings = settings
         self._update_lakeshore_library_availability()
         self.recipe_profile_badge.setText(
-            "LOCKED PROFILE" if settings.outputs_locked else "APPROVED PROFILE"
+            "PROFILE APPROVAL NOT REQUIRED"
         )
         self.recipe_profile_badge.setProperty(
-            "safetyState", "caution" if settings.outputs_locked else "verified"
+            "safetyState", "verified"
         )
         self.recipe_profile_badge.setToolTip(
-            "Outputs remain locked by station policy."
-            if settings.outputs_locked
-            else "The active station profile permits approved output operations."
+            "Device permissions, limits, ARM and hardware readback govern output operations."
         )
         self.recipe_profile_badge.style().unpolish(self.recipe_profile_badge)
         self.recipe_profile_badge.style().polish(self.recipe_profile_badge)

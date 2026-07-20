@@ -179,7 +179,6 @@ class SimulatorTests(unittest.TestCase):
         )
         keithley.connect()
         keithley.configure_source(KeithleySourceRequest("B", "current", 0.001, 0.067))
-        keithley.arm_output("B")
         keithley.set_output("B", True)
 
         measurement = keithley.measure("B")
@@ -198,7 +197,6 @@ class SimulatorTests(unittest.TestCase):
         )
         keithley.connect()
         keithley.configure_source(KeithleySourceRequest("B", "current", 0.001, 0.067))
-        keithley.arm_output("B")
         keithley.set_output("B", True)
 
         measurement = keithley.measure("B")
@@ -287,7 +285,6 @@ class SimulatorTests(unittest.TestCase):
                     {"config": RigolChannelConfig(1, "SQU", 1000, 0.001, -0.001, dut_min_impedance_ohm=50)},
                     {},
                 ),
-                PlanAction("keithley-arm", "arm_keithley_output", {"channel": "B"}, {}),
                 PlanAction("keithley-on", "set_keithley_output", {"channel": "B", "enabled": True}, {}),
                 PlanAction("rigol-arm", "arm_rigol_output", {"channel": 1}, {}),
                 PlanAction("rigol-on", "set_rigol_output", {"channel": 1, "enabled": True}, {}),

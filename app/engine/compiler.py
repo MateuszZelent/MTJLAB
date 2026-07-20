@@ -223,9 +223,7 @@ class RecipeCompiler:
 
             arm_device: str | None = None
             arm_channel: str | None = None
-            if kind == "arm_keithley_output":
-                arm_device, arm_channel = "keithley", str(payload["channel"])
-            elif kind == "arm_rigol_output":
+            if kind == "arm_rigol_output":
                 arm_device, arm_channel = "rigol", str(payload["channel"])
             elif kind == "arm_anritsu_sg_output":
                 arm_device, arm_channel = "anritsu_sg", "RF"
@@ -257,7 +255,7 @@ class RecipeCompiler:
                         f"{action.node_id}: {kind} requires an earlier configuration "
                         f"for {output_device} channel {output_channel}."
                     )
-                if output_key not in armed:
+                if output_device != "keithley" and output_key not in armed:
                     raise ConfigurationError(
                         f"{action.node_id}: {kind} requires an earlier one-shot ARM "
                         f"for {output_device} channel {output_channel}."
@@ -554,21 +552,17 @@ class RecipeCompiler:
         if output_policy not in {"unchanged", "on", "off"}:
             raise ConfigurationError(f"{node.id}: invalid Keithley output policy.")
         if output_policy == "on":
-            for suffix, kind, data in (
-                ("arm", "arm_keithley_output", {"channel": channel}),
-                (
-                    "output-on",
-                    "set_keithley_output",
-                    {"channel": channel, "enabled": True},
-                ),
-            ):
-                actions.append(
-                    self._compile_action(
-                        RecipeNode(f"{node.id}.{suffix}", kind, data),
-                        context,
-                        is_finally=False,
-                    )
+            actions.append(
+                self._compile_action(
+                    RecipeNode(
+                        f"{node.id}.output-on",
+                        "set_keithley_output",
+                        {"channel": channel, "enabled": True},
+                    ),
+                    context,
+                    is_finally=False,
                 )
+            )
         elif output_policy == "off":
             actions.append(
                 self._compile_action(
@@ -642,25 +636,17 @@ class RecipeCompiler:
                 self._visit(child, nested, actions, is_finally=False)
 
         if output_policy == "on":
-            for suffix, kind, data in (
-                (
-                    "ramp-zero",
-                    "ramp_keithley_to_zero",
-                    {"channel": channel, "deadline": "10 s"},
-                ),
-                (
-                    "output-off",
-                    "set_keithley_output",
-                    {"channel": channel, "enabled": False},
-                ),
-            ):
-                actions.append(
-                    self._compile_action(
-                        RecipeNode(f"{node.id}.{suffix}", kind, data),
-                        context,
-                        is_finally=False,
-                    )
+            actions.append(
+                self._compile_action(
+                    RecipeNode(
+                        f"{node.id}.output-off",
+                        "set_keithley_output",
+                        {"channel": channel, "enabled": False},
+                    ),
+                    context,
+                    is_finally=False,
                 )
+            )
 
     def _visit_rigol_device_node(
         self,
@@ -1500,13 +1486,6 @@ class RecipeCompiler:
             if deadline <= 0 or deadline > 120:
                 raise SafetyViolation("Keithley ramp deadline must be in the range (0, 120] s.")
             payload = {"channel": channel, "deadline_s": deadline}
-        elif node.type == "arm_keithley_output":
-            channel = str(data.get("channel", ""))
-            if channel not in {"A", "B"}:
-                raise ConfigurationError("arm_keithley_output requires channel A or B.")
-            self._assert_output_action_allowed("keithley", True)
-            self._require_complete_dut_limits("keithley", channel)
-            payload = {"channel": channel}
         elif node.type == "arm_anritsu_sg_output":
             self._assert_output_action_allowed("anritsu_sg", True)
             self._require_complete_dut_limits("anritsu_sg", "RF")

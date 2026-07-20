@@ -30,6 +30,8 @@ class KeithleyMeasurement:
     voltage_v: float
     current_a: float
     power_w: float
+    output_enabled: bool
+    measurement_path_connected: bool = True
     compliance_detected: bool = False
     compliance_stop_required: bool = False
 
@@ -91,13 +93,12 @@ class KeithleyAdapter(DeviceAdapter):
         self._factory = session_factory or PyVisaSessionFactory()
         self._session: InstrumentSession | None = None
         self._last_request: dict[str, KeithleySourceRequest] = {}
-        self._armed_until: dict[str, float] = {}
         self._output_states: dict[Literal["A", "B"], bool] = {"A": False, "B": False}
 
     def _interlock(self) -> OutputInterlock:
         return OutputInterlock(
             profile_approved=self._station.profile.state == "approved",
-            profile_locks_outputs=True,
+            profile_locks_outputs=False,
         )
 
     def _require_session(self) -> InstrumentSession:
@@ -192,7 +193,6 @@ class KeithleyAdapter(DeviceAdapter):
                 self._identity = None
                 self._capabilities = None
                 self._last_request.clear()
-                self._armed_until.clear()
                 self._output_states = {"A": False, "B": False}
                 self._state = DeviceState.DISCONNECTED
 
@@ -230,13 +230,13 @@ class KeithleyAdapter(DeviceAdapter):
         except Exception:
             self._state = DeviceState.UNKNOWN
         else:
-            self._armed_until.clear()
             self._output_states = {"A": False, "B": False}
             self._state = DeviceState.OUTPUT_OFF
 
     def apply_limit_settings(self, station: object) -> None:
         if not isinstance(station, StationSettings):
             raise TypeError("Keithley limit update requires StationSettings.")
+        self.assert_limit_only_update(self._settings, station.keithley)
         if self._session is not None:
             try:
                 states = self._read_output_states()
@@ -251,7 +251,6 @@ class KeithleyAdapter(DeviceAdapter):
         self._station = station
         self._settings = station.keithley
         self._last_request.clear()
-        self._armed_until.clear()
 
     def _clear_errors(self) -> None:
         self._require_session().write("errorqueue.clear()")
@@ -530,34 +529,7 @@ class KeithleyAdapter(DeviceAdapter):
             self._channel_settings(channel),
             replace(current, level_si=float(level_si)),
         )
-        if not self._output_is_enabled(channel):
-            return self.update_source_level(channel, mode=mode, level_si=level_si)
-        limits = self._channel_settings(channel).lab_limits
-        dimension = "current" if mode == "current" else "voltage"
-        max_step_si = parse_quantity(
-            limits.ramp_current_step_max
-            if mode == "current"
-            else limits.ramp_voltage_step_max,
-            dimension,
-        ).si_value
-        settle_time_s = current.settle_time_s
-        if limits.point_settle_time is not None:
-            settle_time_s = max(
-                settle_time_s,
-                parse_quantity(
-                    limits.point_settle_time.min, DIMENSION_TIME
-                ).si_value,
-            )
-        result = self.ramp_to_level(
-            KeithleyRampRequest(
-                channel=channel,
-                target_si=float(level_si),
-                max_step_si=max_step_si,
-                settle_time_s=settle_time_s,
-                deadline_s=60.0,
-            )
-        )
-        return result.target_si
+        return self.update_source_level(channel, mode=mode, level_si=level_si)
 
     def quick_control_snapshot(self) -> dict[str, float]:
         """Return source levels from configurations already verified by readback."""
@@ -629,16 +601,21 @@ class KeithleyAdapter(DeviceAdapter):
             commands.append(f"{smu}.measure.rangei = {request.measure_current_range_si:.12g}")
         return commands
 
-    def set_output(self, channel: Literal["A", "B"], enabled: bool) -> None:
+    def set_output(self, channel: Literal["A", "B"], enabled: bool) -> bool:
         if channel not in {"A", "B"}:
             raise SafetyViolation("Keithley channel must be A or B.")
         settings = self._channel_settings(channel)
         if enabled:
+            self._interlock().assert_can_enable(
+                device_name=f"Keithley CH{channel}",
+                device_allows_output=(
+                    self._settings.safety.allow_output_enable and settings.enabled
+                ),
+            )
             request = self._last_request.get(channel)
             if request is None:
                 raise SafetyViolation("Configure a safe Keithley source before enabling OUTPUT.")
             validate_keithley_source(settings, request)
-            self._assert_armed(channel, settings.enabled)
         smu = self._smu(channel)
         self._require_session().write(
             f"{smu}.source.output = {smu}.OUTPUT_ON" if enabled else f"{smu}.source.output = {smu}.OUTPUT_OFF"
@@ -646,40 +623,12 @@ class KeithleyAdapter(DeviceAdapter):
         self._check_errors()
         active = self._output_is_enabled(channel)
         if active != enabled:
+            if enabled:
+                self.emergency_off()
             raise DeviceError("Keithley did not confirm the requested output state.")
         self._output_states[channel] = active
         self._update_aggregate_output_state()
-        if not enabled:
-            self._armed_until.pop(channel, None)
-
-    def arm_output(self, channel: Literal["A", "B"], *, ttl_s: float = 30.0) -> float:
-        if channel not in {"A", "B"}:
-            raise SafetyViolation("Keithley channel must be A or B.")
-        settings = self._channel_settings(channel)
-        self._interlock().assert_can_enable(
-            device_name=f"Keithley CH{channel}",
-            device_allows_output=self._settings.safety.allow_output_enable and settings.enabled,
-        )
-        request = self._last_request.get(channel)
-        if request is None or request.mode == "measure_only":
-            raise SafetyViolation("Configure a safe Keithley source first.")
-        validate_keithley_source(settings, request)
-        if ttl_s <= 0 or ttl_s > 120:
-            raise SafetyViolation("Keithley ARM duration must be in the range (0, 120] s.")
-        expires = time.monotonic() + ttl_s
-        self._armed_until[channel] = expires
-        return expires
-
-    def _assert_armed(self, channel: Literal["A", "B"], channel_enabled: bool) -> None:
-        self._interlock().assert_can_enable(
-            device_name=f"Keithley CH{channel}",
-            device_allows_output=self._settings.safety.allow_output_enable and channel_enabled,
-        )
-        expiry = self._armed_until.pop(channel, None)
-        if expiry is None:
-            raise SafetyViolation("ARM the Keithley channel first.")
-        if time.monotonic() > expiry:
-            raise SafetyViolation("Keithley ARM window expired; ARM the channel again.")
+        return active
 
     def measure(self, channel: Literal["A", "B"]) -> KeithleyMeasurement:
         if channel not in {"A", "B"}:
@@ -719,7 +668,6 @@ class KeithleyAdapter(DeviceAdapter):
         if stop_required:
             self.emergency_off()
             self._state = DeviceState.COMPLIANCE
-        result = KeithleyMeasurement(channel, voltage, current, voltage * current, compliance_detected, stop_required)
         try:
             validate_keithley_measurement(
                 self._channel_settings(channel),
@@ -735,7 +683,17 @@ class KeithleyAdapter(DeviceAdapter):
                 self._state = DeviceState.FAULT
             raise
         self._check_errors()
-        return result
+        return KeithleyMeasurement(
+            channel,
+            voltage,
+            current,
+            voltage * current,
+            self._output_states[channel],
+            self._output_states[channel]
+            or self._settings.safety.output_off_mode != "high_impedance",
+            compliance_detected,
+            stop_required,
+        )
 
     def _fail_measurement_output_invariant(self, message: str) -> None:
         """Force both channels OFF after an uncommanded output transition."""

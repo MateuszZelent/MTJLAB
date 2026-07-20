@@ -493,9 +493,9 @@ class StationSettings(StrictModel):
 
     @property
     def outputs_locked(self) -> bool:
-        # A malformed or manually edited profile must never turn an
-        # unverified/revoked state into permission to energise a DUT.
-        return self.profile.state != "approved"
+        """Profile approval is informational; device safety gates are authoritative."""
+
+        return False
 
     @property
     def rigol(self) -> RigolSettings:

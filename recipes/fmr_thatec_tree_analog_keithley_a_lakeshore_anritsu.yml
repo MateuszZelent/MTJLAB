@@ -49,7 +49,6 @@ root:
       source_autorange: true
       measure_voltage_autorange: true
       measure_current_autorange: true
-    - {id: keithley-a-positive-arm, type: arm_keithley_output, channel: A}
     - {id: keithley-a-positive-on, type: set_keithley_output, channel: A, enabled: true}
     - {id: positive-saturation-settle, type: wait, duration: "10 s"}
     - {id: positive-saturation-field, type: measure_lakeshore_field, checkpoint: false}
@@ -81,7 +80,6 @@ root:
           store_raw: true
           store_processed: true
 
-    - {id: positive-ramp-zero, type: ramp_keithley_to_zero, channel: A, deadline: "30 s"}
     - {id: keithley-a-off-before-negative, type: set_keithley_output, channel: A, enabled: false}
 
     - id: keithley-a-negative-saturation-config
@@ -95,7 +93,6 @@ root:
       source_autorange: true
       measure_voltage_autorange: true
       measure_current_autorange: true
-    - {id: keithley-a-negative-arm, type: arm_keithley_output, channel: A}
     - {id: keithley-a-negative-on, type: set_keithley_output, channel: A, enabled: true}
     - {id: negative-saturation-settle, type: wait, duration: "10 s"}
     - {id: negative-saturation-field, type: measure_lakeshore_field, checkpoint: false}

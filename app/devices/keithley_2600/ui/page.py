@@ -6,7 +6,7 @@ from __future__ import annotations
 import math
 import time
 from copy import deepcopy
-from dataclasses import astuple, dataclass, replace
+from dataclasses import dataclass, replace
 from typing import Any
 from uuid import uuid4
 
@@ -674,11 +674,10 @@ class KeithleyPage(QWidget):
         self._limit_fields: dict[str, LimitField] = {}
         self._output_states = {"A": False, "B": False}
         self._pending_channels: dict[str, str] = {}
+        self._pending_output_enabled: dict[str, bool] = {}
         self._pending_config_modes: dict[str, str] = {}
         self._configured_channels: set[str] = set()
         self._auto_enable_channel: str | None = None
-        self._confirmed_output_settings: dict[str, tuple[object, ...]] = {}
-        self._pending_output_signature: tuple[object, ...] | None = None
         self._measure_pending = False
         self._ramp_pending = False
         self._device_state_value = "DISCONNECTED"
@@ -694,13 +693,9 @@ class KeithleyPage(QWidget):
         self._panel_float_buttons: dict[str, TransparentToolButton] = {}
         self._floating_panels: dict[str, _KeithleyFloatingPanelWindow] = {}
         self._panel_placeholders: dict[str, CardWidget] = {}
-        self._armed_until_ui = 0.0
         self._live_timer = QTimer(self)
         self._live_timer.setInterval(1000)
         self._live_timer.timeout.connect(self._request_live_measurement)
-        self._arm_timer = QTimer(self)
-        self._arm_timer.setInterval(200)
-        self._arm_timer.timeout.connect(self._update_arm_status)
         layout = QVBoxLayout(self)
         self.banner = NotificationBanner()
         layout.addWidget(self.banner)
@@ -846,6 +841,7 @@ class KeithleyPage(QWidget):
         ramp_panel.setVisible(self._MANUAL_RAMP_ENABLED)
         buttons = QHBoxLayout()
         measure = PushButton("Measure selected channel")
+        self.measure_selected_button = measure
         self.output_toggle = PushButton("OUTPUT OFF")
         self.output_toggle.setCheckable(True)
         self.output_toggle.setObjectName("outputOffButton")
@@ -1235,7 +1231,7 @@ class KeithleyPage(QWidget):
             self.measure_current_autorange: ("Current measurement autorange", "Automatically selects the current measurement range. It changes measurement range, not the sourced current or compliance."),
             self.measure_current_range: ("Current measurement range", "Fixed current measurement range used only when current autorange is disabled. It is not Current compliance."),
             measure: ("Measure selected channel", "Reads voltage and current from the selected SMU channel. Power and resistance shown in the cards are calculated from those I/V readings."),
-            output_toggle: ("OUTPUT ON/OFF", "ON validates and confirms the visible source settings, configures the channel with OUTPUT OFF, performs the internal safety unlock and then energizes the terminals. OFF immediately starts the safe ramp-to-zero and disables the output."),
+            output_toggle: ("OUTPUT ON/OFF", "ON validates the visible values against MIN/MAX, configures with OUTPUT OFF, verifies readback and then energizes the terminals. OFF disables the selected output immediately and verifies readback."),
             self.live_channel_a: ("Live channel A", "Continuously requests I/V readings from channel A. It never enables an output, but it does generate instrument traffic."),
             self.live_channel_b: ("Live channel B", "Continuously requests I/V readings from channel B. It never enables an output, but it does generate instrument traffic."),
             self.live_interval: ("Live request interval", "Time between read requests. With both channels selected, A and B alternate, so each channel updates approximately every two request intervals."),
@@ -1262,7 +1258,7 @@ class KeithleyPage(QWidget):
             self._set_help(card["select"], f"Select channel {channel}", "Makes this channel active in the configuration form without changing its electrical output.")
             self._set_help(card["measure"], f"Measure channel {channel}", "Requests one voltage/current reading for this channel without enabling its output.")
             self._set_help(card["output_on_action"], f"Channel {channel} OUTPUT ON", "Validates and confirms the visible source settings, configures with OUTPUT OFF, applies the internal safety unlock and only then energizes this channel.")
-            self._set_help(card["output_off_action"], f"Channel {channel} OUTPUT OFF", "Always requests a safe ramp to zero and disables this channel. It does not require ARM, profile approval or a healthy audit log.")
+            self._set_help(card["output_off_action"], f"Channel {channel} OUTPUT OFF", "Disables this channel immediately and verifies the hardware readback. OUTPUT OFF is never blocked by profile state or audit health.")
         self.workspace_splitter.setToolTip(
             "Source controls and independent A/B time histories remain visible together. "
             "Resistance is derived as |V/I| and is not complex AC impedance."
@@ -1289,7 +1285,6 @@ class KeithleyPage(QWidget):
         channel = channel or self.channel.currentText()
         safety = self._station_settings.keithley.safety
         checks = [
-            (not self._station_settings.outputs_locked, "profile approved"),
             (safety.allow_output_enable, "Keithley output permission enabled"),
             (safety.channels[channel].enabled, f"channel {channel} enabled"),
             (self._device_is_output_ready(), "device connected and verified"),
@@ -1304,10 +1299,6 @@ class KeithleyPage(QWidget):
             steps.append(
                 "configure and save the Keithley VISA resource in Discovery or Settings"
             )
-        if self._station_settings.outputs_locked:
-            steps.append(
-                "approve the station profile in Settings with an engineer/service account"
-            )
         if not self._device_is_output_ready():
             steps.append(
                 "use Instrument connection at the top of this page and click Connect"
@@ -1319,8 +1310,8 @@ class KeithleyPage(QWidget):
         if steps:
             return "To enable OUTPUT: " + "; then ".join(steps) + "."
         return (
-            "Ready. OUTPUT ON will configure with terminals OFF, arm the selected "
-            "channel, enable it once, and verify the instrument readback."
+            "Ready. OUTPUT ON will configure with terminals OFF, enable the selected "
+            "channel, and verify the instrument readback."
         )
 
     def _update_output_readiness(self) -> None:
@@ -1336,19 +1327,24 @@ class KeithleyPage(QWidget):
         for channel, card in self.channel_cards.items():
             pending_enable = (
                 self._auto_enable_channel == channel
-                or channel in self._pending_channels.values()
+                or any(
+                    self._pending_channels.get(operation) == channel
+                    for operation in ("configure", "set_output")
+                )
             )
             channel_ready, channel_checks = self._output_prerequisites(channel)
             missing = "; ".join(
                 item for item in channel_checks if item.startswith("✕")
             )
             card["output_on_action"].setEnabled(
+                channel_ready
+                and
                 not self._output_states[channel]
                 and not pending_enable
             )
             card["output_on_action"].setToolTip(
                 (
-                    "Ready: configure OFF → arm → enable with readback."
+                    "Ready: configure OFF → enable with readback."
                     if channel_ready
                     else "OUTPUT remains blocked: " + missing
                 )
@@ -1356,13 +1352,6 @@ class KeithleyPage(QWidget):
             # De-energising is never gated by ARM, profile approval, RBAC or
             # audit health. An uncertain state still warrants a best-effort OFF.
             card["output_off_action"].setEnabled(True)
-
-    def _update_arm_status(self) -> None:
-        remaining = self._armed_until_ui - time.monotonic()
-        if remaining <= 0:
-            self._armed_until_ui = 0.0
-            self._arm_timer.stop()
-        self._update_output_readiness()
 
     def _device_state_changed(self, state: str) -> None:
         normalized = state.upper()
@@ -1372,8 +1361,6 @@ class KeithleyPage(QWidget):
             for checkbox in (self.live_channel_a, self.live_channel_b):
                 checkbox.setChecked(False)
             self._configured_channels.clear()
-            self._armed_until_ui = 0.0
-            self._arm_timer.stop()
             self._output_states = {"A": False, "B": False}
             self._reset_output_toggle()
             for channel in ("A", "B"):
@@ -1403,14 +1390,31 @@ class KeithleyPage(QWidget):
         voltage = float(getattr(measurement, "voltage_v"))
         current = float(getattr(measurement, "current_a"))
         power = float(getattr(measurement, "power_w"))
-        resistance = abs(voltage / current) if abs(current) > 1e-15 else math.inf
+        path_connected = bool(
+            getattr(measurement, "measurement_path_connected", True)
+        )
+        resistance = (
+            abs(voltage / current)
+            if path_connected and abs(current) > 1e-15
+            else math.nan
+        )
         widgets = self.channel_cards[channel]
         widgets["voltage"].setText(self._engineering(voltage, "V"))
         widgets["current"].setText(self._engineering(current, "A"))
-        widgets["power"].setText(self._engineering(power, "W"))
-        widgets["resistance"].setText("∞ Ω" if not math.isfinite(resistance) else self._engineering(resistance, "Ω"))
+        widgets["power"].setText(
+            self._engineering(power, "W") if path_connected else "— W (HIGH-Z)"
+        )
+        widgets["resistance"].setText(
+            self._engineering(resistance, "Ω")
+            if math.isfinite(resistance)
+            else ("— Ω (HIGH-Z)" if not path_connected else "∞ Ω")
+        )
         compliance = bool(getattr(measurement, "compliance_detected", False))
-        widgets["compliance"].setText("COMPLIANCE: ACTIVE" if compliance else "COMPLIANCE: clear")
+        widgets["compliance"].setText(
+            "PATH: HIGH-Z / FLOATING"
+            if not path_connected
+            else ("COMPLIANCE: ACTIVE" if compliance else "COMPLIANCE: clear")
+        )
         widgets["compliance"].setObjectName("keithleyComplianceActive" if compliance else "keithleyComplianceClear")
         widgets["compliance"].style().unpolish(widgets["compliance"])
         widgets["compliance"].style().polish(widgets["compliance"])
@@ -1424,7 +1428,7 @@ class KeithleyPage(QWidget):
                 "voltage": voltage,
                 "current": current,
                 "resistance": resistance,
-                "power": power,
+                "power": power if path_connected else math.nan,
             }
         )
         cutoff = elapsed - self._history_window_s
@@ -1436,6 +1440,7 @@ class KeithleyPage(QWidget):
         self.last_update_labels[channel].setText(
             f"{channel}: updated {time.strftime('%H:%M:%S')} • "
             f"t={elapsed:.1f} s • {len(history)} pts"
+            + (" • HIGH-Z / floating" if not path_connected else "")
         )
 
     def _set_channel_output(self, channel: str, enabled: bool) -> None:
@@ -1476,15 +1481,16 @@ class KeithleyPage(QWidget):
         if enabled:
             self._output_toggled(True)
         else:
-            self.request_ramp_off(channel)
+            self.request_output_off(channel)
 
-    def request_ramp_off(self, channel: str | None = None) -> None:
+    def request_output_off(self, channel: str | None = None) -> None:
         channel = channel or self.channel.currentText()
         self.channel.setCurrentText(channel)
-        self._pending_channels["ramp_to_zero"] = channel
+        self._pending_channels["set_output"] = channel
+        self._pending_output_enabled[channel] = False
         self.output_toggle.setText("DISABLING…")
         self.output_toggle.setEnabled(False)
-        self._controller.call("ramp_to_zero", channel)
+        self._controller.call("set_output", (channel, False))
 
     def _selected_live_channels(self) -> list[str]:
         return [
@@ -1538,13 +1544,10 @@ class KeithleyPage(QWidget):
             measurement_path_available = (
                 not high_impedance_off or self._output_states[channel]
             )
-            checkbox.setEnabled(
-                connected and channel_enabled and measurement_path_available
-            )
-            if (
-                (not channel_enabled or not measurement_path_available)
-                and checkbox.isChecked()
-            ):
+            checkbox.setEnabled(connected and channel_enabled)
+            measure_button = self.channel_cards[channel]["measure"]
+            measure_button.setEnabled(connected and channel_enabled)
+            if not channel_enabled and checkbox.isChecked():
                 checkbox.setChecked(False)
             if not connected:
                 checkbox.setToolTip(
@@ -1557,14 +1560,26 @@ class KeithleyPage(QWidget):
             elif not measurement_path_available:
                 checkbox.setToolTip(
                     f"Channel {channel} is OUTPUT OFF in HIGH-Z mode, so its relay is "
-                    "open and the external DUT cannot be measured. Live never enables "
-                    "OUTPUT automatically."
+                    "open and the reading may float. Live never enables OUTPUT "
+                    "automatically."
+                )
+                measure_button.setToolTip(
+                    f"Read channel {channel} without changing OUTPUT. In HIGH-Z with "
+                    "OUTPUT OFF the relay is open, so the result may float."
                 )
             else:
                 checkbox.setToolTip(
                     f"Continuously measure channel {channel}. This is read-only and "
                     "never enables an output."
                 )
+                measure_button.setToolTip(
+                    f"Read channel {channel} without changing either OUTPUT state."
+                )
+        selected = self.channel.currentText()
+        if hasattr(self, "measure_selected_button"):
+            self.measure_selected_button.setEnabled(
+                self.channel_cards[selected]["measure"].isEnabled()
+            )
         self.live_interval.setEnabled(connected)
         self._update_live_timing()
 
@@ -1581,10 +1596,10 @@ class KeithleyPage(QWidget):
                 == "high_impedance"
                 and not any(self._output_states.values())
             ):
-                self.live_timing.setText("Unavailable • HIGH-Z relay open")
+                self.live_timing.setText("Stopped • HIGH-Z relay open; readings may float")
                 self.live_timing.setToolTip(
-                    "The approved HIGH-Z output-off mode opens both output relays. "
-                    "Live never closes them or enables OUTPUT automatically."
+                    "HIGH-Z opens both output relays. Live remains available and never "
+                    "changes OUTPUT, but OFF-state readings are not connected-DUT values."
                 )
                 return
             self.live_timing.setText(f"Stopped • {interval_text}")
@@ -1863,7 +1878,7 @@ class KeithleyPage(QWidget):
         mode = self.mode.currentText()
         level_dimension = DIMENSION_CURRENT if mode == "current" else DIMENSION_VOLTAGE
         compliance_dimension = DIMENSION_VOLTAGE if mode == "current" else DIMENSION_CURRENT
-        return KeithleySourceRequest(
+        request = KeithleySourceRequest(
             channel=self.channel.currentText(),  # type: ignore[arg-type]
             mode=mode,  # type: ignore[arg-type]
             level_si=0.0 if mode == "measure_only" else parse_quantity(self.level.text(), level_dimension).si_value,
@@ -1878,6 +1893,14 @@ class KeithleyPage(QWidget):
             measure_current_autorange=self.measure_current_autorange.isChecked(),
             measure_current_range_si=self._manual_range(self.measure_current_range.text(), DIMENSION_CURRENT, self.measure_current_autorange.isChecked()),
         )
+        # First safety layer: reject unit mistakes and out-of-profile values in
+        # the UI before any request reaches the worker or VISA session. The
+        # adapter repeats the same validation as the independent second layer.
+        validate_keithley_source(
+            self._station_settings.keithley.safety.channels[request.channel],
+            request,
+        )
+        return request
 
     @staticmethod
     def _manual_range(text: str, dimension: str, autorange: bool) -> float | None:
@@ -1893,7 +1916,7 @@ class KeithleyPage(QWidget):
         if not enabled:
             self._style_output_toggle(False)
             if self._output_states[channel]:
-                self.request_ramp_off()
+                self.request_output_off()
             return
         ready, checks = self._output_prerequisites()
         if not ready:
@@ -1914,22 +1937,6 @@ class KeithleyPage(QWidget):
             self.banner.show_message("Select Current or Voltage source mode before enabling OUTPUT.")
             self._reset_output_toggle()
             return
-        signature = astuple(request)
-        if self._confirmed_output_settings.get(channel) != signature:
-            source_name = "Current" if request.mode == "current" else "Voltage"
-            answer = QMessageBox.warning(
-                self, "Enable Keithley output",
-                f"Enable physical OUTPUT on channel {channel}?\n\n"
-                f"Mode: {source_name}\nSource: {self.level.text()}\n"
-                f"Compliance: {self.compliance.text()}\nSense: {self.sense_mode.currentText()}\n\n"
-                "The application will configure the channel safely and then energize the terminals.",
-                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.Cancel,
-                QMessageBox.StandardButton.Cancel,
-            )
-            if answer != QMessageBox.StandardButton.Yes:
-                self._reset_output_toggle()
-                return
-            self._pending_output_signature = signature
         self._auto_enable_channel = channel
         self._pending_channels["configure"] = channel
         self._pending_config_modes[channel] = request.mode
@@ -1958,11 +1965,20 @@ class KeithleyPage(QWidget):
         if operation == "measure" and hasattr(result, "current_a"):
             measurement = result
             self._measure_pending = False
+            if hasattr(measurement, "output_enabled"):
+                self._set_channel_output(
+                    str(measurement.channel), bool(measurement.output_enabled)
+                )
             self._update_channel_measurement(measurement)
             self.readout.setText(
                 f"I: {measurement.current_a * 1e3:.8g} mA   "
                 f"V: {measurement.voltage_v * 1e3:.8g} mV   P: {measurement.power_w * 1e6:.8g} µW"
                 + ("   COMPLIANCE" if measurement.compliance_detected else "")
+                + (
+                    "   HIGH-Z / FLOATING — DUT resistance is not valid"
+                    if not getattr(measurement, "measurement_path_connected", True)
+                    else ""
+                )
             )
             self.status.emit("Keithley measurement completed")
         elif operation == "configure":
@@ -1973,42 +1989,27 @@ class KeithleyPage(QWidget):
             else:
                 self._configured_channels.add(channel)
             self._set_channel_output(channel, False)
-            self._armed_until_ui = 0.0
-            self._update_arm_status()
             self._update_output_readiness()
             if self._auto_enable_channel == channel:
-                self._pending_channels["arm"] = channel
-                self.status.emit(f"Keithley CH {channel}: configuration accepted; applying safety unlock")
-                self._controller.call("arm", channel)
-            else:
-                self.status.emit(f"Keithley CH {channel} configured while OUTPUT is OFF")
-        elif operation == "arm":
-            self._armed_until_ui = float(result) if isinstance(result, (int, float)) else time.monotonic() + 30.0
-            self._arm_timer.start()
-            self._update_arm_status()
-            channel = self._pending_channels.pop("arm", self.channel.currentText())
-            if self._auto_enable_channel == channel:
                 self._pending_channels["set_output"] = channel
-                self.status.emit(f"Keithley CH {channel}: safety checks passed; enabling OUTPUT")
+                self._pending_output_enabled[channel] = True
+                self.status.emit(f"Keithley CH {channel}: configuration verified; enabling OUTPUT")
                 self._controller.call("set_output", (channel, True))
             else:
-                self.status.emit("Keithley output unlocked internally; terminals remain OFF")
+                self.status.emit(f"Keithley CH {channel} configured while OUTPUT is OFF")
         elif operation == "set_output":
             channel = self._pending_channels.pop("set_output", self.channel.currentText())
-            self._set_channel_output(channel, True)
-            if self._pending_output_signature is not None:
-                self._confirmed_output_settings[channel] = self._pending_output_signature
-            self._pending_output_signature = None
+            requested_enabled = self._pending_output_enabled.pop(channel, bool(result))
+            actual_enabled = result if isinstance(result, bool) else requested_enabled
+            self._set_channel_output(channel, actual_enabled)
             self._auto_enable_channel = None
-            self._armed_until_ui = 0.0
-            self._update_arm_status()
-            self.status.emit(f"Keithley CH {channel} OUTPUT ON")
+            self.status.emit(
+                f"Keithley CH {channel} OUTPUT {'ON' if actual_enabled else 'OFF'}"
+            )
         elif operation == "ramp_to_zero":
             channel = self._pending_channels.pop("ramp_to_zero", self.channel.currentText())
             self._set_channel_output(channel, False)
             self._auto_enable_channel = None
-            self._armed_until_ui = 0.0
-            self._update_arm_status()
             self.status.emit(f"Keithley CH {channel} ramped to zero; OUTPUT OFF")
         elif operation == "ramp_to_level" and hasattr(result, "final_measurement"):
             channel = self._pending_channels.pop("ramp_to_level", self.channel.currentText())
@@ -2034,18 +2035,17 @@ class KeithleyPage(QWidget):
         if operation == "configure":
             channel = self._pending_channels.pop("configure", self.channel.currentText())
             self._pending_config_modes.pop(channel, None)
-        if operation in {"arm", "set_output"}:
-            self._armed_until_ui = 0.0
-            self._update_arm_status()
+        if operation == "set_output":
+            channel = self._pending_channels.get("set_output", self.channel.currentText())
+            self._pending_output_enabled.pop(channel, None)
         if operation == "ramp_to_level":
             channel = self._pending_channels.pop("ramp_to_level", self.channel.currentText())
             self._ramp_pending = False
             self.ramp_execute_button.setText("Ramp to target")
             self._set_channel_output(channel, False)
             self._update_ramp_defaults()
-        if operation in {"configure", "arm", "set_output", "ramp_to_zero"}:
+        if operation in {"configure", "set_output", "ramp_to_zero"}:
             self._auto_enable_channel = None
-            self._pending_output_signature = None
             if operation == "ramp_to_zero" and self._output_states[self.channel.currentText()]:
                 self.output_toggle.blockSignals(True)
                 self.output_toggle.setChecked(True)
@@ -2060,6 +2060,5 @@ class KeithleyPage(QWidget):
             "set_output",
             "ramp_to_zero",
             "ramp_to_level",
-            "arm",
         }:
             QMessageBox.warning(self, "Keithley", error)

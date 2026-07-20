@@ -72,14 +72,13 @@ class FluentRecipeAndExecutionPageTests(unittest.TestCase):
             page.set_settings(
                 simulation_settings(approved=page._settings.outputs_locked)
             )
-            expected_locked = page._settings.outputs_locked
             self.assertEqual(
                 page.recipe_profile_badge.text(),
-                "LOCKED PROFILE" if expected_locked else "APPROVED PROFILE",
+                "PROFILE APPROVAL NOT REQUIRED",
             )
             self.assertEqual(
                 page.recipe_profile_badge.property("safetyState"),
-                "caution" if expected_locked else "verified",
+                "verified",
             )
 
             sample = page.hero_card.mapTo(window, QPoint(40, 40))

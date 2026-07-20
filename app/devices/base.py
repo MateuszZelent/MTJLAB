@@ -123,6 +123,41 @@ class DeviceAdapter(ABC):
             f"{type(self).__name__} does not support live safety-limit updates."
         )
 
+    @classmethod
+    def assert_limit_only_update(cls, previous: object, updated: object) -> None:
+        """Reject any hot update containing more than range-bound changes."""
+
+        previous_dump = previous.model_dump(mode="python")  # type: ignore[attr-defined]
+        updated_dump = updated.model_dump(mode="python")  # type: ignore[attr-defined]
+        changes = cls._changed_setting_paths(previous_dump, updated_dump)
+        if not changes or any(
+            not path or path[-1] not in {"min", "max", "max_abs"}
+            for path in changes
+        ):
+            raise SafetyViolation(
+                "Hot settings update accepts only min, max and max_abs limit changes."
+            )
+
+    @classmethod
+    def _changed_setting_paths(
+        cls,
+        previous: object,
+        updated: object,
+        prefix: tuple[str, ...] = (),
+    ) -> set[tuple[str, ...]]:
+        if isinstance(previous, dict) and isinstance(updated, dict):
+            changes: set[tuple[str, ...]] = set()
+            for key in previous.keys() | updated.keys():
+                path = (*prefix, str(key))
+                if key not in previous or key not in updated:
+                    changes.add(path)
+                else:
+                    changes.update(
+                        cls._changed_setting_paths(previous[key], updated[key], path)
+                    )
+            return changes
+        return set() if previous == updated else {prefix}
+
     @contextmanager
     def io_timeout(self, timeout_s: float):
         """Temporarily cap VISA I/O latency for one high-level operation.

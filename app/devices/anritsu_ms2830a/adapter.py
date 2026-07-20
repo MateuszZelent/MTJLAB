@@ -367,6 +367,7 @@ class AnritsuAdapter(DeviceAdapter):
     def apply_limit_settings(self, station: object) -> None:
         if not isinstance(station, StationSettings):
             raise TypeError("Anritsu limit update requires StationSettings.")
+        self.assert_limit_only_update(self._settings, station.anritsu)
         if (
             self._session is not None
             and self._capabilities is not None

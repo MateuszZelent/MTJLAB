@@ -1749,15 +1749,15 @@ class MainWindowTests(unittest.TestCase):
             window.close()
             self.application.processEvents()
 
-    def test_keithley_live_is_unavailable_for_output_off_high_impedance_channels(self) -> None:
+    def test_keithley_live_remains_available_and_warns_for_output_off_high_impedance(self) -> None:
         window = MainWindow(".config/settings.yml", simulation=True)
         try:
             keithley = window.keithley_page
             keithley._controller.call = Mock()
             keithley._device_state_changed("verified")
 
-            self.assertFalse(keithley.live_channel_a.isEnabled())
-            self.assertFalse(keithley.live_channel_b.isEnabled())
+            self.assertTrue(keithley.live_channel_a.isEnabled())
+            self.assertTrue(keithley.live_channel_b.isEnabled())
             self.assertIn("HIGH-Z relay open", keithley.live_timing.text())
             self.assertIn("never", keithley.live_channel_a.toolTip())
             keithley._controller.call.assert_not_called()
@@ -1765,7 +1765,7 @@ class MainWindowTests(unittest.TestCase):
             window.close()
             self.application.processEvents()
 
-    def test_keithley_output_block_explains_unapproved_profile_without_dispatch(self) -> None:
+    def test_keithley_manual_output_does_not_require_profile_approval(self) -> None:
         window = MainWindow(".config/settings.yml", simulation=True)
         try:
             keithley = window.keithley_page
@@ -1780,13 +1780,54 @@ class MainWindowTests(unittest.TestCase):
             button = keithley.channel_cards["B"]["output_on_action"]
 
             self.assertTrue(button.isEnabled())
-            self.assertIn("profile approved", keithley.output_readiness.text())
-            self.assertIn("approve the station profile", keithley.output_guidance.text())
-            button.click()
+            self.assertNotIn("profile approved", keithley.output_readiness.text())
+            with patch.object(
+                QMessageBox,
+                "warning",
+                return_value=QMessageBox.StandardButton.Yes,
+            ):
+                button.click()
+
+            self.assertEqual(keithley._controller.call.call_args.args[0], "configure")
+        finally:
+            window.close()
+            self.application.processEvents()
+
+    def test_keithley_measure_does_not_toggle_or_disable_output_control(self) -> None:
+        window = MainWindow(".config/settings.yml", simulation=True)
+        try:
+            keithley = window.keithley_page
+            keithley._controller.call = Mock()
+            keithley._device_state_changed("verified")
+            button = keithley.channel_cards["A"]["output_on_action"]
+            self.assertTrue(button.isEnabled())
+
+            keithley.channel_cards["A"]["measure"].click()
+            keithley._update_output_readiness()
+
+            keithley._controller.call.assert_called_once_with("measure", "A")
+            self.assertTrue(button.isEnabled())
+            self.assertEqual(keithley.channel_cards["A"]["output"].text(), "OUTPUT OFF")
+            self.assertFalse(keithley._output_states["A"])
+        finally:
+            window.close()
+            self.application.processEvents()
+
+    def test_keithley_ui_rejects_five_volts_when_profile_allows_millivolts(self) -> None:
+        window = MainWindow(".config/settings.yml", simulation=True)
+        try:
+            keithley = window.keithley_page
+            keithley._controller.call = Mock()
+            keithley._device_state_changed("verified")
+            keithley.mode.setCurrentText("voltage")
+            keithley.level.setText("5 V")
+            keithley.compliance.setText("1 mA")
+
+            keithley._output_toggled(True)
 
             keithley._controller.call.assert_not_called()
-            self.assertIn("OUTPUT cannot be enabled", keithley.banner.label.text())
-            self.assertEqual(button.text(), "OUTPUT ON")
+            self.assertIn("outside", keithley.banner.label.text())
+            self.assertFalse(keithley._output_states["B"])
         finally:
             window.close()
             self.application.processEvents()
@@ -1910,24 +1951,20 @@ class MainWindowTests(unittest.TestCase):
             window.close()
             self.application.processEvents()
 
-    def test_keithley_output_switch_runs_configure_unlock_and_enable_sequence(self) -> None:
+    def test_keithley_output_switch_runs_configure_and_direct_enable_sequence(self) -> None:
         window = MainWindow(".config/settings.yml", simulation=True)
         try:
             keithley = window.keithley_page
             keithley._controller.call = Mock()
             keithley._output_prerequisites = Mock(return_value=(True, ["✓ ready"]))
 
-            with patch.object(QMessageBox, "warning", return_value=QMessageBox.StandardButton.Yes):
-                keithley._output_toggled(True)
+            keithley._output_toggled(True)
             self.assertEqual(keithley._controller.call.call_args.args[0], "configure")
 
             keithley._result("configure", None)
-            self.assertEqual(keithley._controller.call.call_args.args, ("arm", "B"))
-
-            keithley._result("arm", 123.0)
             self.assertEqual(keithley._controller.call.call_args.args, ("set_output", ("B", True)))
 
-            keithley._result("set_output", None)
+            keithley._result("set_output", True)
             self.assertTrue(keithley._output_states["B"])
             self.assertTrue(keithley.output_toggle.isChecked())
             self.assertEqual(keithley.output_toggle.text(), "OUTPUT ON")
@@ -1935,7 +1972,7 @@ class MainWindowTests(unittest.TestCase):
             self.assertEqual(keithley.channel_cards["B"]["output_off_action"].text(), "OUTPUT OFF")
 
             keithley._request_channel_output("B", False)
-            self.assertEqual(keithley._controller.call.call_args.args, ("ramp_to_zero", "B"))
+            self.assertEqual(keithley._controller.call.call_args.args, ("set_output", ("B", False)))
         finally:
             window.close()
             self.application.processEvents()
@@ -2847,7 +2884,7 @@ class MainWindowTests(unittest.TestCase):
                 field = window.keithley_page._limit_fields["level"]
                 self.assertTrue(field.edit_button.isEnabled())
                 self.assertIn(
-                    "Saving revokes profile approval", field.edit_button.toolTip()
+                    "Values are validated before saving", field.edit_button.toolTip()
                 )
 
                 def complete_dialog() -> None:

@@ -28,8 +28,6 @@ class LoadedSettings:
 class SettingsRepository:
     """Read/write station configuration without silently accepting invalid YAML."""
 
-    _APPROVAL_METADATA = frozenset({"state", "approved_by", "approved_at", "approval_note"})
-
     def __init__(self, path: str | Path) -> None:
         self.path = Path(path)
         self._yaml = YAML()
@@ -123,28 +121,15 @@ class SettingsRepository:
             temp_path.unlink(missing_ok=True)
 
     def save(self, settings: StationSettings) -> None:
-        """Persist a typed profile, revoking approval after a configuration edit."""
+        """Persist a validated station configuration."""
 
         self.save_raw(settings.model_dump(mode="python"))
 
     def save_raw(self, raw: dict[str, Any]) -> StationSettings:
-        """Validate then atomically persist a UI-edited round-trip YAML document.
-
-        Approval fields may change independently through the explicit approval
-        workflow.  Any other profile/device/configuration change revokes an
-        existing approval at the persistence boundary, so a future caller
-        cannot accidentally retain permission to energise a DUT.
-        """
+        """Validate then atomically persist a UI-edited round-trip YAML document."""
 
         payload = deepcopy(raw)
         self.repair_known_issues(payload)
-        if self._configuration_changed(payload):
-            profile = payload.setdefault("profile", {})
-            profile["state"] = "unverified"
-            profile["approved_by"] = None
-            profile["approved_at"] = None
-            profile["approval_note"] = "Profile approval is required after settings changes."
-
         try:
             settings = StationSettings.model_validate(payload)
         except ValidationError as exc:
@@ -184,31 +169,6 @@ class SettingsRepository:
             safety["reference_level"] = documented_reference
             changed = True
         return changed
-
-    def _configuration_changed(self, candidate: dict[str, Any]) -> bool:
-        """Compare a draft to the persisted profile excluding approval metadata."""
-
-        if not self.path.exists():
-            return True
-        try:
-            current = self.load().raw
-        except ConfigurationError:
-            # Refuse to inherit an approval from a malformed predecessor.
-            return True
-        return self._without_approval_metadata(current) != self._without_approval_metadata(candidate)
-
-    @classmethod
-    def _without_approval_metadata(cls, raw: dict[str, Any]) -> dict[str, Any]:
-        comparable = deepcopy(raw)
-        profile = comparable.get("profile")
-        if isinstance(profile, dict):
-            for field in cls._APPROVAL_METADATA:
-                profile.pop(field, None)
-        # Presentation-only changes must not revoke a safety approval.
-        ui = comparable.get("ui")
-        if isinstance(ui, dict):
-            ui.pop("theme", None)
-        return comparable
 
     def _atomic_dump(self, payload: dict[str, Any]) -> None:
         """Replace the file only after a complete temporary YAML write succeeds."""

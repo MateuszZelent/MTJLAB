@@ -335,7 +335,6 @@ root:
       low_level: "-1 mV"
       output_load: HIGHZ
       dut_min_impedance: "50 ohm"
-    - {id: keithley-arm, type: arm_keithley_output, channel: B}
     - {id: keithley-on, type: set_keithley_output, channel: B, enabled: true}
     - {id: rigol-arm, type: arm_rigol_output, channel: 1}
     - {id: rigol-on, type: set_rigol_output, channel: 1, enabled: true}
@@ -509,7 +508,7 @@ root:
             self.assertEqual(preview["source_points"], 101)
             self.assertEqual(len(preview["frequency_hz"]), 101)
 
-    def test_explicitly_armed_energized_point_runs_only_with_approved_permissions(self) -> None:
+    def test_energized_point_runs_with_limits_and_output_permissions(self) -> None:
         recipe_source = """\
 schema_version: 1
 name: energized-simulation-smoke
@@ -551,9 +550,6 @@ root:
       low_level: "-1 mV"
       output_load: HIGHZ
       dut_min_impedance: "50 ohm"
-    - id: arm-keithley
-      type: arm_keithley_output
-      channel: B
     - id: on-keithley
       type: set_keithley_output
       channel: B

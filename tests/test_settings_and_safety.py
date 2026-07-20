@@ -80,15 +80,15 @@ class QuantityAndSafetyTests(unittest.TestCase):
             1e-6,
         )
 
-    def test_station_profile_is_loaded_and_outputs_locked(self) -> None:
+    def test_station_profile_approval_does_not_lock_outputs(self) -> None:
         settings = loaded_settings()
-        self.assertTrue(settings.outputs_locked)
+        self.assertFalse(settings.outputs_locked)
         self.assertFalse(settings.rigol.identity.require_serial_match)
         self.assertIsNone(settings.rigol.identity.expected_serial)
         self.assertIsNone(settings.rigol.connection.resource)
         raw = deepcopy(SettingsRepository(SETTINGS_TEMPLATE).load().raw)
         raw["profile"]["lock_outputs_when_unverified"] = False
-        self.assertTrue(StationSettings.model_validate(raw).outputs_locked)
+        self.assertFalse(StationSettings.model_validate(raw).outputs_locked)
 
     def test_keithley_settling_time_limits_are_required_for_every_channel(self) -> None:
         settings = loaded_settings()
@@ -154,7 +154,7 @@ class QuantityAndSafetyTests(unittest.TestCase):
                 dut_min_impedance="50 ohm",
             )
 
-    def test_repository_revokes_approval_for_any_configuration_change(self) -> None:
+    def test_repository_does_not_require_reapproval_after_configuration_change(self) -> None:
         source = SETTINGS_TEMPLATE.read_text(encoding="utf-8")
         with tempfile.TemporaryDirectory() as temporary:
             path = Path(temporary) / "settings.yml"
@@ -175,10 +175,10 @@ class QuantityAndSafetyTests(unittest.TestCase):
             changed["devices"]["rigol"]["safety"]["channels"]["1"]["lab_limits"]["frequency"]["max"] = "900 kHz"
             saved = repository.save_raw(changed)
 
-            self.assertEqual(saved.profile.state, "unverified")
-            self.assertIsNone(saved.profile.approved_by)
-            self.assertTrue(saved.outputs_locked)
-            self.assertEqual(repository.load().settings.profile.state, "unverified")
+            self.assertEqual(saved.profile.state, "approved")
+            self.assertEqual(saved.profile.approved_by, "Operator Test")
+            self.assertFalse(saved.outputs_locked)
+            self.assertEqual(repository.load().settings.profile.state, "approved")
 
     def test_theme_change_does_not_revoke_safety_approval(self) -> None:
         source = SETTINGS_TEMPLATE.read_text(encoding="utf-8")

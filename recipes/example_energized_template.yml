@@ -46,9 +46,6 @@ root:
       low_level: "-1 mV"
       output_load: HIGHZ
       dut_min_impedance: "50 ohm"
-    - id: keithley-b-arm
-      type: arm_keithley_output
-      channel: B
     - id: keithley-b-on
       type: set_keithley_output
       channel: B

@@ -49,9 +49,6 @@ root:
       mode: current
       level: "1 mA"
       compliance: "67 mV"
-    - id: keithley-arm
-      type: arm_keithley_output
-      channel: B
     - id: keithley-on
       type: set_keithley_output
       channel: B

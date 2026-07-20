@@ -730,14 +730,14 @@ class RecipeRunner:
         elif action.kind == "arm_rigol_output":
             self._rigol.arm_output(payload["channel"])
         elif action.kind == "set_keithley_output":
-            self._keithley.set_output(payload["channel"], payload["enabled"])
-            self._keithley_output_active[payload["channel"]] = bool(payload["enabled"])
+            actual_enabled = self._keithley.set_output(
+                payload["channel"], payload["enabled"]
+            )
+            self._keithley_output_active[payload["channel"]] = actual_enabled
             context = self._active_safety_context.get(f"keithley.{payload['channel']}", {})
-            context["output_enabled"] = bool(payload["enabled"])
+            context["output_enabled"] = actual_enabled
             self._active_safety_context[f"keithley.{payload['channel']}"] = context
             self._record_device_state("keithley", f"channel_{payload['channel']}", requested=payload, actual=context)
-        elif action.kind == "arm_keithley_output":
-            self._keithley.arm_output(payload["channel"])
         elif action.kind == "arm_anritsu_sg_output":
             self._anritsu.arm_signal_generator_output()
         elif action.kind == "set_anritsu_sg_output":
@@ -756,6 +756,10 @@ class RecipeRunner:
             measurements[f"{prefix}.voltage_v"] = result.voltage_v
             measurements[f"{prefix}.current_a"] = result.current_a
             measurements[f"{prefix}.power_w"] = result.power_w
+            measurements[f"{prefix}.output_enabled"] = float(result.output_enabled)
+            measurements[f"{prefix}.measurement_path_connected"] = float(
+                result.measurement_path_connected
+            )
             measurements[f"{prefix}.compliance_detected"] = float(result.compliance_detected)
             measurements[f"{prefix}.compliance_stop_required"] = float(result.compliance_stop_required)
         elif action.kind == "measure_moke_hall":

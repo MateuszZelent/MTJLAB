@@ -272,6 +272,7 @@ class RigolAdapter(DeviceAdapter):
     def apply_limit_settings(self, station: object) -> None:
         if not isinstance(station, StationSettings):
             raise TypeError("Rigol limit update requires StationSettings.")
+        self.assert_limit_only_update(self._settings, station.rigol)
         if self._session is not None:
             try:
                 states = self._read_output_states()

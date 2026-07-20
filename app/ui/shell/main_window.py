@@ -300,8 +300,7 @@ class MainWindow(FluentWindow):
             else:
                 enabled = True
                 reason = (
-                    "Edit this safety range. Saving revokes profile approval and "
-                    "requires a new authorized approval."
+                    "Edit this safety range. Values are validated before saving."
                 )
             field.edit_button.setEnabled(enabled)
             field.edit_button.setToolTip(reason)
@@ -585,7 +584,7 @@ class MainWindow(FluentWindow):
                 ready=self.dashboard.evaluate_readiness().ready,
                 active_outputs=active_outputs,
                 profile_state=(
-                    "LOCKED" if self._settings.outputs_locked else "APPROVED"
+                    "NOT REQUIRED"
                 ),
                 simulation=self._simulation,
                 actor=self._access.identity.username,
@@ -1402,7 +1401,7 @@ class MainWindow(FluentWindow):
             "Save VISA assignments",
             "Save these discovered resources?\n\n"
             f"{summary}\n\n"
-            "Changing a connection revokes profile approval and safely disconnects current sessions. "
+            "Changing a connection safely disconnects current sessions. "
             "Existing serial-number requirements are not changed automatically.",
             QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.Cancel,
             QMessageBox.StandardButton.Cancel,

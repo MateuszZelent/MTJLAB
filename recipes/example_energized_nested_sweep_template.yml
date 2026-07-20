@@ -46,9 +46,6 @@ root:
           level: "${keithley.B.current}"
           compliance: "67 mV"
           nplc: 1.0
-        - id: keithley-b-arm
-          type: arm_keithley_output
-          channel: B
         - id: keithley-b-on
           type: set_keithley_output
           channel: B

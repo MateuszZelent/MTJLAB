@@ -23,7 +23,6 @@ def _dispatch(adapter: DeviceAdapter, operation: str, payload: object) -> object
         raise TypeError("Keithley module received an incompatible adapter.")
     actions = {
         "configure": lambda: adapter.configure_source(payload),
-        "arm": lambda: adapter.arm_output(payload),
         "measure": lambda: adapter.measure(payload),
         "ramp_to_zero": lambda: adapter.ramp_to_zero(payload),
         "ramp_to_level": lambda: adapter.ramp_to_level(payload),

@@ -201,8 +201,6 @@ class InstrumentWorker(QObject):
             if operation == "set_output":
                 channel, enabled = payload  # type: ignore[misc]
                 return self._adapter.set_output(channel, enabled)
-            if operation == "arm":
-                return self._adapter.arm_output(payload)  # type: ignore[arg-type]
             if operation == "measure":
                 return self._adapter.measure(payload)  # type: ignore[arg-type]
             if operation == "ramp_to_zero":

@@ -54,7 +54,7 @@ class LimitField(QWidget):
         self.edit_button = PushButton("Edit…", self)
         self.edit_button.setObjectName("limitEditButton")
         self.edit_button.setToolTip(
-            "Edit this safety range in a popup window. Saving revokes profile approval."
+            "Edit this safety range in a popup window. Values are validated before saving."
         )
         self.edit_button.clicked.connect(self.edit_requested)
         row.addWidget(self.edit_button)
@@ -226,4 +226,3 @@ class LimitEditDialog(StationDialog):
         footer.addWidget(cancel)
         footer.addWidget(save)
         layout.addLayout(footer)
-

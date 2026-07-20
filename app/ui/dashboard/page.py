@@ -173,7 +173,7 @@ class DashboardPage(QWidget):
         safety_copy.setSpacing(2)
         safety_copy.addWidget(StrongBodyLabel("Read-only discovery", self.discovery_safety_card))
         safety_hint = CaptionLabel(
-            "Scans never enable outputs. Saving an assignment is a separate, deliberate action and revokes safety-profile approval.",
+            "Scans never enable outputs. Saving an assignment is a separate, deliberate action.",
             self.discovery_safety_card,
         )
         safety_hint.setWordWrap(True)
@@ -1071,4 +1071,3 @@ class DashboardPage(QWidget):
         )
         self.visa_results.set_results(states)
         self.visa_results.set_assignment_allowed(self._assignment_allowed)
-

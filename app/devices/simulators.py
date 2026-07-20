@@ -343,6 +343,12 @@ class KeithleySimulator(_BaseSimulator):
         output = re.match(r"^print\((smu[ab])\.source\.output\)$", command)
         if output:
             return "1" if self.output[output.group(1)] else "0"
+        equality = re.match(
+            r"^print\(((smu[ab]\.source\.offmode)\s*==\s*(smu[ab]\.OUTPUT_[A-Z_]+))\)$",
+            command,
+        )
+        if equality:
+            return "1" if self.programmed.get(equality.group(2)) == equality.group(3) else "0"
         level = re.match(r"^print\((smu[ab])\.source\.level[iv]\)$", command)
         if level:
             return f"{self.level[level.group(1)]:.12g}"

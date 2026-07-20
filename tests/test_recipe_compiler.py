@@ -304,7 +304,6 @@ root:
       low_level: "-1 mV"
       output_load: HIGHZ
       dut_min_impedance: "50 ohm"
-    - {id: keithley-arm, type: arm_keithley_output, channel: B}
     - {id: keithley-on, type: set_keithley_output, channel: B, enabled: true}
     - {id: rigol-arm, type: arm_rigol_output, channel: 1}
     - {id: rigol-on, type: set_rigol_output, channel: 1, enabled: true}
@@ -503,7 +502,7 @@ root:
         )
         self.assertFalse(
             any(
-                action.kind in {"arm_keithley_output", "set_keithley_output"}
+                action.kind == "set_keithley_output"
                 for action in plan.actions
             )
         )
@@ -940,7 +939,7 @@ root:
         self.assertFalse(plan.actions[-1].payload["enabled"])
         self.assertTrue(plan.actions[-1].is_finally)
 
-    def test_energized_template_requires_and_uses_explicit_arm_actions(self) -> None:
+    def test_energized_template_uses_direct_keithley_output_and_rigol_arm(self) -> None:
         raw = deepcopy(simulation_settings(approved=True).model_dump(mode="python"))
         raw["devices"]["rigol"]["safety"]["allow_output_enable"] = True
         raw["devices"]["keithley"]["safety"]["allow_output_enable"] = True
@@ -949,7 +948,8 @@ root:
         plan = RecipeCompiler(settings).compile(recipe)
         self.assertEqual(plan.total_points, 2000)
         self.assertIn("arm_rigol_output", tuple(action.kind for action in plan.actions))
-        self.assertIn("arm_keithley_output", tuple(action.kind for action in plan.actions))
+        self.assertNotIn("arm_keithley_output", tuple(action.kind for action in plan.actions))
+        self.assertIn("set_keithley_output", tuple(action.kind for action in plan.actions))
 
     def test_recipe_rejects_duplicate_node_id(self) -> None:
         source = """\
@@ -1228,14 +1228,15 @@ root:
         with self.assertRaisesRegex(SafetyViolation, "exceeds the station limit"):
             RecipeCompiler(simulation_settings()).compile(parse_recipe_text(source))
 
-    def test_output_arm_requires_complete_dut_limits(self) -> None:
+    def test_output_on_requires_complete_dut_limits(self) -> None:
         source = """\
 schema_version: 1
 name: missing-dut-envelope
 root:
-  id: arm
-  type: arm_keithley_output
+  id: output-on
+  type: set_keithley_output
   channel: B
+  enabled: true
 """
         settings = simulation_settings(approved=True)
         raw = deepcopy(settings.model_dump(mode="python"))
