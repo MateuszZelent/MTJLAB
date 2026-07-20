@@ -694,7 +694,15 @@ class _KeithleyReadbackDialog(StationDialog):
         )
         self.table.setColumnCount(7)
         self.table.setHorizontalHeaderLabels(
-            ["Parameter", "Channel A", "Status", "", "Channel B", "Status", ""]
+            [
+                "Parameter",
+                "Device A",
+                "Current form A",
+                "",
+                "Device B",
+                "Current form B",
+                "",
+            ]
         )
         self.table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
         self.table.setSelectionMode(QAbstractItemView.SelectionMode.SingleSelection)
@@ -725,6 +733,7 @@ class _KeithleyReadbackDialog(StationDialog):
             "Active measure I range",
         )
         self.table.setRowCount(len(rows))
+        self._status_cells: dict[tuple[str, str], QTableWidgetItem] = {}
         for row, parameter in enumerate(rows):
             self.table.setItem(row, 0, QTableWidgetItem(parameter))
             for channel, value_column, status_column, button_column in (
@@ -734,12 +743,16 @@ class _KeithleyReadbackDialog(StationDialog):
                 value = values[channel][parameter]
                 matches = expected[channel].get(parameter) == value
                 value_item = QTableWidgetItem(value)
-                status_item = QTableWidgetItem("MATCH" if matches else "DIFFERENT")
+                configured_value = expected[channel].get(parameter)
+                status_item = QTableWidgetItem(
+                    "MATCH" if matches else (configured_value or "Not controlled by form")
+                )
                 colour = QColor("#168a45" if matches else "#c43b3b")
                 value_item.setForeground(colour)
                 status_item.setForeground(colour)
                 self.table.setItem(row, value_column, value_item)
                 self.table.setItem(row, status_column, status_item)
+                self._status_cells[(channel, parameter)] = status_item
                 if parameter not in {"OUTPUT state", "OUTPUT OFF mode"}:
                     assign = PushButton("Assign", self.table)
                     assign.setAccessibleName(
@@ -747,7 +760,7 @@ class _KeithleyReadbackDialog(StationDialog):
                     )
                     assign.clicked.connect(
                         lambda _checked=False, ch=channel, key=parameter: (
-                            self.assign_requested.emit(ch, key)
+                            self._assign(ch, key)
                         )
                     )
                     self.table.setCellWidget(row, button_column, assign)
@@ -769,7 +782,7 @@ class _KeithleyReadbackDialog(StationDialog):
             "states are not changed."
         )
         assign_all.clicked.connect(
-            lambda: self.assign_requested.emit("ALL", "ALL")
+            self._assign_all
         )
         footer.addWidget(assign_all)
         footer.addStretch(1)
@@ -777,6 +790,20 @@ class _KeithleyReadbackDialog(StationDialog):
         close.clicked.connect(self.accept)
         footer.addWidget(close)
         layout.addLayout(footer)
+
+    def _assign(self, channel: str, parameter: str) -> None:
+        self.assign_requested.emit(channel, parameter)
+        item = self._status_cells[(channel, parameter)]
+        item.setText("MATCH")
+        item.setForeground(QColor("#168a45"))
+
+    def _assign_all(self) -> None:
+        self.assign_requested.emit("ALL", "ALL")
+        for (channel, parameter), item in self._status_cells.items():
+            if parameter in {"OUTPUT state", "OUTPUT OFF mode"}:
+                continue
+            item.setText("MATCH")
+            item.setForeground(QColor("#168a45"))
 
     @classmethod
     def _snapshot_values(cls, snapshot: KeithleyConfigurationSnapshot) -> dict[str, str]:

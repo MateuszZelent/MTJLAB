@@ -2531,7 +2531,7 @@ class MainWindowTests(unittest.TestCase):
                 )
                 for row in range(dialog.table.rowCount())
             }
-            self.assertIn(status_values["Source level"][0], {"MATCH", "DIFFERENT"})
+            self.assertTrue(status_values["Source level"][0])
             self.assertIsNotNone(dialog.table.cellWidget(2, 3))
             self.assertIsNotNone(dialog.table.cellWidget(2, 6))
 
