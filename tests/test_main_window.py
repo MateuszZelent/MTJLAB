@@ -1623,9 +1623,11 @@ class MainWindowTests(unittest.TestCase):
             self.assertTrue(all(widget.toolTip() for widget in controls))
             for card in keithley.channel_cards.values():
                 self.assertTrue(all(widget.toolTip() for widget in card.values()))
-            output_actions = [keithley.channel_cards[channel]["output_action"] for channel in ("A", "B")]
-            self.assertTrue(all(button.text() == "OUTPUT OFF" for button in output_actions))
-            self.assertTrue(all(button.toolTip() for button in output_actions))
+            output_on_actions = [keithley.channel_cards[channel]["output_on_action"] for channel in ("A", "B")]
+            output_off_actions = [keithley.channel_cards[channel]["output_off_action"] for channel in ("A", "B")]
+            self.assertTrue(all(button.text() == "OUTPUT ON" for button in output_on_actions))
+            self.assertTrue(all(button.text() == "OUTPUT OFF" for button in output_off_actions))
+            self.assertTrue(all(button.toolTip() for button in (*output_on_actions, *output_off_actions)))
             self.assertTrue(keithley.workspace_splitter.toolTip())
         finally:
             window.close()
@@ -1782,9 +1784,10 @@ class MainWindowTests(unittest.TestCase):
             self.assertTrue(keithley._output_states["B"])
             self.assertTrue(keithley.output_toggle.isChecked())
             self.assertEqual(keithley.output_toggle.text(), "OUTPUT ON")
-            self.assertEqual(keithley.channel_cards["B"]["output_action"].text(), "OUTPUT ON")
+            self.assertEqual(keithley.channel_cards["B"]["output_on_action"].text(), "OUTPUT ON")
+            self.assertEqual(keithley.channel_cards["B"]["output_off_action"].text(), "OUTPUT OFF")
 
-            keithley._request_channel_output("B")
+            keithley._request_channel_output("B", False)
             self.assertEqual(keithley._controller.call.call_args.args, ("ramp_to_zero", "B"))
         finally:
             window.close()

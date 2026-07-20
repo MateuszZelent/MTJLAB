@@ -63,6 +63,20 @@ finally: []
         recipe = parse_recipe_text(moved)
         self.assertEqual(tuple(node.id for node in recipe.root.children), ("last", "first", "condition"))
 
+    def test_same_parent_move_uses_original_tree_gap_without_overshooting(self) -> None:
+        moved = move_recipe_node(
+            SOURCE,
+            node_id="first",
+            destination_parent_id="root",
+            destination_branch="children",
+            destination_index=2,
+        )
+
+        self.assertEqual(
+            tuple(node.id for node in parse_recipe_text(moved).root.children),
+            ("condition", "first", "last"),
+        )
+
     def test_moves_between_if_branches(self) -> None:
         moved = move_recipe_node(
             SOURCE,

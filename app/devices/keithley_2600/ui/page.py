@@ -1141,18 +1141,25 @@ class KeithleyPage(QWidget):
         measure = PushButton(f"Measure CH {channel}")
         measure.setProperty("compact", True)
         measure.clicked.connect(lambda _checked=False, ch=channel: self.request_measurement(ch))
-        output_action = PushButton("OUTPUT OFF")
-        output_action.setProperty("compact", True)
-        output_action.setObjectName("outputOffButton")
-        output_action.clicked.connect(
-            lambda _checked=False, ch=channel: self._request_channel_output(ch)
+        output_on_action = PrimaryPushButton("OUTPUT ON")
+        output_off_action = PushButton("OUTPUT OFF")
+        for button in (output_on_action, output_off_action):
+            button.setProperty("compact", True)
+        output_on_action.setObjectName("outputOnButton")
+        output_off_action.setObjectName("outputOffButton")
+        output_on_action.clicked.connect(
+            lambda _checked=False, ch=channel: self._request_channel_output(ch, True)
+        )
+        output_off_action.clicked.connect(
+            lambda _checked=False, ch=channel: self._request_channel_output(ch, False)
         )
         footer.addWidget(compliance)
         footer.addStretch(1)
         footer.addWidget(select)
         footer.addWidget(measure)
-        footer.addWidget(output_action)
-        for button in (select, measure, output_action):
+        footer.addWidget(output_on_action)
+        footer.addWidget(output_off_action)
+        for button in (select, measure, output_on_action, output_off_action):
             button.setFixedHeight(28)
         card_layout.addLayout(footer)
         self.channel_cards[channel] = {
@@ -1162,7 +1169,8 @@ class KeithleyPage(QWidget):
             "compliance": compliance,
             "select": select,
             "measure": measure,
-            "output_action": output_action,
+            "output_on_action": output_on_action,
+            "output_off_action": output_off_action,
             **values,
         }
         return card
@@ -1221,7 +1229,8 @@ class KeithleyPage(QWidget):
             self._set_help(card["compliance"], "Compliance indicator", "ACTIVE means the measured opposite quantity reached the programmed compliance threshold. The safety policy may immediately disable outputs.")
             self._set_help(card["select"], f"Select channel {channel}", "Makes this channel active in the configuration form without changing its electrical output.")
             self._set_help(card["measure"], f"Measure channel {channel}", "Requests one voltage/current reading for this channel without enabling its output.")
-            self._set_help(card["output_action"], f"Channel {channel} OUTPUT", "Enables or disables this channel. Enabling validates and confirms the visible source settings before energizing the terminals; disabling ramps safely to zero.")
+            self._set_help(card["output_on_action"], f"Channel {channel} OUTPUT ON", "Validates and confirms the visible source settings, configures with OUTPUT OFF, applies the internal safety unlock and only then energizes this channel.")
+            self._set_help(card["output_off_action"], f"Channel {channel} OUTPUT OFF", "Always requests a safe ramp to zero and disables this channel. It does not require ARM, profile approval or a healthy audit log.")
         self.workspace_splitter.setToolTip(
             "Source controls and independent A/B time histories remain visible together. "
             "Resistance is derived as |V/I| and is not complex AC impedance."
@@ -1265,9 +1274,19 @@ class KeithleyPage(QWidget):
             and self.device_state.text() != "DISCONNECTED"
         )
         for channel, card in self.channel_cards.items():
-            card["output_action"].setEnabled(
-                self._output_states[channel] or (common_ready and safety.channels[channel].enabled)
+            pending_enable = (
+                self._auto_enable_channel == channel
+                or channel in self._pending_channels.values()
             )
+            card["output_on_action"].setEnabled(
+                not self._output_states[channel]
+                and not pending_enable
+                and common_ready
+                and safety.channels[channel].enabled
+            )
+            # De-energising is never gated by ARM, profile approval, RBAC or
+            # audit health. An uncertain state still warrants a best-effort OFF.
+            card["output_off_action"].setEnabled(True)
 
     def _update_arm_status(self) -> None:
         remaining = self._armed_until_ui - time.monotonic()
@@ -1366,17 +1385,15 @@ class KeithleyPage(QWidget):
         widgets["led"].setProperty("outputState", "active" if enabled else "off")
         widgets["led"].style().unpolish(widgets["led"])
         widgets["led"].style().polish(widgets["led"])
-        action = widgets["output_action"]
-        action.setText("OUTPUT ON" if enabled else "OUTPUT OFF")
-        action.setObjectName("outputOnButton" if enabled else "outputOffButton")
-        action.style().unpolish(action)
-        action.style().polish(action)
+        widgets["output_on_action"].setText("OUTPUT ON")
+        widgets["output_off_action"].setText("OUTPUT OFF")
         if channel == self.channel.currentText():
             self.output_toggle.blockSignals(True)
             self.output_toggle.setChecked(enabled)
             self.output_toggle.blockSignals(False)
             self._style_output_toggle(enabled)
         self._update_ramp_defaults()
+        self._update_output_readiness()
 
     def request_measurement(self, channel: str | None = None) -> None:
         if self._measure_pending:
@@ -1386,16 +1403,23 @@ class KeithleyPage(QWidget):
         self._measure_pending = True
         self._controller.call("measure", selected)
 
-    def _request_channel_output(self, channel: str) -> None:
+    def _request_channel_output(self, channel: str, enabled: bool) -> None:
         self.channel.setCurrentText(channel)
-        target_enabled = not self._output_states[channel]
-        action = self.channel_cards[channel]["output_action"]
-        action.setText("ENABLING…" if target_enabled else "DISABLING…")
+        if enabled and self._output_states[channel]:
+            return
+        action = self.channel_cards[channel][
+            "output_on_action" if enabled else "output_off_action"
+        ]
+        action.setText("ENABLING…" if enabled else "DISABLING…")
         action.setEnabled(False)
-        self._output_toggled(target_enabled)
+        if enabled:
+            self._output_toggled(True)
+        else:
+            self.request_ramp_off(channel)
 
-    def request_ramp_off(self) -> None:
-        channel = self.channel.currentText()
+    def request_ramp_off(self, channel: str | None = None) -> None:
+        channel = channel or self.channel.currentText()
+        self.channel.setCurrentText(channel)
         self._pending_channels["ramp_to_zero"] = channel
         self.output_toggle.setText("DISABLING…")
         self.output_toggle.setEnabled(False)

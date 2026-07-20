@@ -18,7 +18,6 @@ from qfluentwidgets import (
     CaptionLabel,
     CardWidget,
     CommandBar,
-    ComboBox,
     LineEdit,
     PlainTextEdit,
     PrimaryPushButton,
@@ -297,22 +296,6 @@ class RecipePage(QWidget):
         selection_copy.addWidget(self.selection_context)
         builder_actions.addWidget(selection_summary)
         builder_actions.addStretch(1)
-        self.node_kind = ComboBox(self.selection_card)
-        self.node_kind.addItem("Sequence group", userData="sequence")
-        self.node_kind.addItem("Repeat group", userData="repeat")
-        self.node_kind.addItem("If / else group", userData="if")
-        self.node_kind.addItem("Wait", userData="wait")
-        self.node_kind.addItem("Measure Keithley", userData="measure_keithley")
-        self.node_kind.addItem("Measure MOKE Hall (V + field)", userData="measure_moke_hall")
-        self.node_kind.addItem("Acquire Anritsu reference", userData="acquire_reference")
-        self.node_kind.addItem("Acquire Anritsu spectrum", userData="acquire_spectrum")
-        self.node_kind.addItem("Keithley ramp to zero", userData="ramp_keithley_to_zero")
-        self.node_kind.addItem("Keithley output OFF", userData="set_keithley_output")
-        self.node_kind.addItem("Rigol output OFF", userData="set_rigol_output")
-        self.node_kind.addItem("Anritsu SG ARM", userData="arm_anritsu_sg_output")
-        self.node_kind.addItem("Anritsu SG RF ON", userData="set_anritsu_sg_output_on")
-        self.node_kind.addItem("Anritsu SG output OFF", userData="set_anritsu_sg_output")
-        self.node_kind.addItem("Comment", userData="comment")
         def tool_button(
             text: str, tooltip: str, icon: QStyle.StandardPixmap, *, primary: bool = False
         ) -> PushButton:
@@ -322,12 +305,6 @@ class RecipePage(QWidget):
             button.setIcon(self.style().standardIcon(icon))
             return button
 
-        self.add_node_button = tool_button(
-            "+ Add node", "Add the selected structural or measurement node", QStyle.StandardPixmap.SP_FileDialogNewFolder
-        )
-        self.add_controls_button = tool_button(
-            "+ Device controls / point generator", "Choose instrument parameters and create a fixed setting or point generator", QStyle.StandardPixmap.SP_ComputerIcon, primary=True
-        )
         self.edit_device_button = tool_button(
             "Device settings",
             "Open a separate configuration window for the selected instrument",
@@ -462,8 +439,6 @@ class RecipePage(QWidget):
         self.tree.itemDoubleClicked.connect(self._open_node_editor)
         self.tree.move_requested.connect(self._move_recipe_node)
         self.tree.library_drop_requested.connect(self._drop_library_block)
-        self.add_node_button.clicked.connect(self._add_basic_node)
-        self.add_controls_button.clicked.connect(self._add_device_controls)
         self.edit_device_button.clicked.connect(
             self._edit_selected_device_settings
         )
@@ -789,11 +764,8 @@ class RecipePage(QWidget):
         branch: str | None = None,
         index: int | None = None,
     ) -> None:
-        combo_index = self.node_kind.findData(kind)
-        if combo_index < 0:
-            raise ConfigurationError(f"Library node kind {kind!r} is not registered.")
-        self.node_kind.setCurrentIndex(combo_index)
         self._add_basic_node(
+            kind,
             parent_id=parent_id,
             branch=branch,
             insert_index=index,
@@ -868,7 +840,9 @@ class RecipePage(QWidget):
         )
         if device == "anritsu_sg":
             self._apply_builder_source(
-                source, "Added editable Anritsu signal-generator module"
+                source,
+                "Added editable Anritsu signal-generator module",
+                selected_node_id=str(node["id"]),
             )
             self.summary.setText(
                 "Anritsu SG added. Double-click it to configure frequency/power; "
@@ -876,14 +850,20 @@ class RecipePage(QWidget):
             )
         elif device == "anritsu":
             self._apply_builder_source(
-                source, "Added editable Anritsu spectrum module"
+                source,
+                "Added editable Anritsu spectrum module",
+                selected_node_id=str(node["id"]),
             )
             self.summary.setText(
                 "Anritsu configuration added. Double-click it to select Spectrum "
                 "settings. Add Acquire spectrum once separately inside a loop."
             )
         else:
-            self._apply_builder_source(source, f"Added {labels[device]} module placeholder")
+            self._apply_builder_source(
+                source,
+                f"Added {labels[device]} module placeholder",
+                selected_node_id=str(node["id"]),
+            )
             self.summary.setText(
                 f"{labels[device]} added — configuration required. "
                 "This placeholder cannot execute instrument commands."
@@ -1057,8 +1037,9 @@ class RecipePage(QWidget):
         self.tree.setDragEnabled(False)
         self.tree.setAcceptDrops(False)
         self.tree.setDropIndicatorShown(False)
+        self.library_panel.setEnabled(False)
         for button in (
-            self.add_node_button, self.add_controls_button, self.edit_device_button,
+            self.edit_device_button,
             self.edit_generator_button, self.delete_node_button,
             self.duplicate_node_button, self.move_up_button, self.move_down_button,
             self.open_editor_button,
@@ -1164,9 +1145,10 @@ class RecipePage(QWidget):
         self.tree.setDragEnabled(True)
         self.tree.setAcceptDrops(True)
         self.tree.setDropIndicatorShown(True)
+        self.library_panel.setEnabled(True)
         self.compile_recipe_action.setEnabled(True)
         for button in (
-            self.add_node_button, self.add_controls_button, self.edit_device_button,
+            self.edit_device_button,
             self.edit_generator_button, self.delete_node_button,
             self.duplicate_node_button, self.move_up_button, self.move_down_button,
         ):
@@ -1431,15 +1413,15 @@ class RecipePage(QWidget):
         root: RecipeNode,
         finally_nodes: tuple[RecipeNode, ...],
         plan: object | None,
+        selected_id: str | None = None,
     ) -> None:
-        selected_id: str | None = None
         current = self.tree.currentItem()
         current_node = (
             current.data(0, Qt.ItemDataRole.UserRole)
             if current is not None
             else None
         )
-        if isinstance(current_node, RecipeNode):
+        if selected_id is None and isinstance(current_node, RecipeNode):
             selected_id = current_node.id
         expanded_ids: set[str] = set()
 
@@ -1514,7 +1496,15 @@ class RecipePage(QWidget):
             self._find_tree_item(selected_id) if selected_id is not None else None
         )
         if selected is not None:
+            ancestor = selected.parent()
+            while ancestor is not None:
+                ancestor.setExpanded(True)
+                ancestor = ancestor.parent()
             self.tree.setCurrentItem(selected)
+            self.tree.scrollToItem(
+                selected,
+                QAbstractItemView.ScrollHint.EnsureVisible,
+            )
         elif self.tree.topLevelItemCount():
             self.tree.setCurrentItem(self.tree.topLevelItem(0))
         self.tree.verticalScrollBar().setValue(previous_scroll)
@@ -2467,6 +2457,7 @@ class RecipePage(QWidget):
         self._apply_builder_source(
             moved_source,
             f"Recipe node {node_id} moved to {destination_parent_id}.{destination_branch}",
+            selected_node_id=node_id,
         )
 
     def _find_tree_item(self, node_id: str) -> QTreeWidgetItem | None:
@@ -2560,7 +2551,13 @@ class RecipePage(QWidget):
         self._restore_tree_history_source(source, "Tree Builder change redone")
         self._update_tree_history_controls()
 
-    def _apply_builder_source(self, source: str, status: str) -> None:
+    def _apply_builder_source(
+        self,
+        source: str,
+        status: str,
+        *,
+        selected_node_id: str | None = None,
+    ) -> None:
         self._leave_historical_sweep_mode()
         previous = self.editor.toPlainText()
         previous_plan = self._plan
@@ -2577,7 +2574,12 @@ class RecipePage(QWidget):
             raise
         self._plan = None
         try:
-            self._populate_recipe_tree(recipe.root, recipe.finally_nodes, None)
+            self._populate_recipe_tree(
+                recipe.root,
+                recipe.finally_nodes,
+                None,
+                selected_node_id,
+            )
         except Exception as exc:
             self._plan = previous_plan
             self._emit_tree_diagnostic(
@@ -2612,12 +2614,12 @@ class RecipePage(QWidget):
 
     def _add_basic_node(
         self,
+        kind: str,
         *,
         parent_id: str | None = None,
         branch: str | None = None,
         insert_index: int | None = None,
     ) -> None:
-        kind = str(self.node_kind.currentData())
         if parent_id is None or branch is None:
             parent_id, branch = self._builder_parent()
         node_id = self._new_node_id(kind)
@@ -2721,7 +2723,11 @@ class RecipePage(QWidget):
                 index=insert_index,
                 node=defaults[kind],
             )
-            self._apply_builder_source(source, f"Added {kind} node")
+            self._apply_builder_source(
+                source,
+                f"Added {kind} node",
+                selected_node_id=node_id,
+            )
         except Exception as exc:
             QMessageBox.warning(self, "Add recipe node", str(exc))
 
@@ -4531,15 +4537,24 @@ class RecipePage(QWidget):
                 return
             parent_id, branch = owner.id, "children"
         copy = self._clone_node_mapping(self._node_to_mapping(node))
+        copy_id = str(copy["id"])
         try:
             source = add_recipe_node(
                 self.editor.toPlainText(),
                 parent_id=parent_id,
                 branch=branch,
-                index=parent.indexOfChild(item) + 1,
+                index=RecipeTreeWidget._logical_index(
+                    parent,
+                    item,
+                    below=True,
+                ),
                 node=copy,
             )
-            self._apply_builder_source(source, f"Duplicated {node.id}")
+            self._apply_builder_source(
+                source,
+                f"Duplicated {node.id}",
+                selected_node_id=copy_id,
+            )
         except Exception as exc:
             QMessageBox.warning(self, "Duplicate node", str(exc))
 
@@ -4565,9 +4580,13 @@ class RecipePage(QWidget):
         if not isinstance(node, RecipeNode) or parent is None:
             return
         parent_id, branch = self._builder_parent()
-        index = parent.indexOfChild(item)
-        target = max(0, min(index + delta, parent.childCount() - 1))
-        if target == index:
+        index = RecipeTreeWidget._logical_index(parent, item, below=False)
+        count = RecipeTreeWidget._logical_child_count(parent)
+        if delta < 0:
+            target = index - 1
+        else:
+            target = index + 2
+        if target < 0 or target > count:
             return
         self._move_recipe_node(node.id, parent_id, branch, target)
 

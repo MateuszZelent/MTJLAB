@@ -445,11 +445,29 @@ class RecipeTreeWidget(TreeWidget):
 
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
+        self._dragged_node_id: str | None = None
         self.setDragEnabled(True)
         self.setAcceptDrops(True)
         self.setDropIndicatorShown(True)
         self.setDragDropMode(QAbstractItemView.DragDropMode.InternalMove)
         self.setDefaultDropAction(Qt.DropAction.MoveAction)
+
+    def startDrag(self, supported_actions: Any) -> None:
+        """Pin the logical source before hover changes tree selection."""
+
+        item = self.currentItem()
+        node = (
+            item.data(0, Qt.ItemDataRole.UserRole)
+            if item is not None
+            else None
+        )
+        if not isinstance(node, RecipeNode):
+            return
+        self._dragged_node_id = node.id
+        try:
+            super().startDrag(supported_actions)
+        finally:
+            self._dragged_node_id = None
 
     def dragEnterEvent(self, event: Any) -> None:
         if event.mimeData().hasFormat(self.library_mime_type):
@@ -478,12 +496,7 @@ class RecipeTreeWidget(TreeWidget):
             self.library_drop_requested.emit(kind, parent_id, branch, index)
             event.acceptProposedAction()
             return
-        source = self.currentItem()
-        if source is None or target is None:
-            event.ignore()
-            return
-        source_node = source.data(0, Qt.ItemDataRole.UserRole)
-        if not isinstance(source_node, RecipeNode):
+        if self._dragged_node_id is None or target is None:
             event.ignore()
             return
         destination = self._drop_destination(target)
@@ -491,7 +504,7 @@ class RecipeTreeWidget(TreeWidget):
             event.ignore()
             return
         parent_id, branch, index = destination
-        self.move_requested.emit(source_node.id, parent_id, branch, index)
+        self.move_requested.emit(self._dragged_node_id, parent_id, branch, index)
         event.accept()
 
     def _drop_destination(self, target: QTreeWidgetItem) -> tuple[str, str, int] | None:
@@ -502,18 +515,36 @@ class RecipeTreeWidget(TreeWidget):
             and isinstance(target_node, RecipeNode)
             and target_node.type in {"sequence", "sweep", "repeat", "if"}
         ):
-            return target_node.id, "children", target.childCount()
-        if target.text(0).startswith("Else") and target.parent() is not None:
+            return target_node.id, "children", self._logical_child_count(target)
+        if (
+            indicator is QAbstractItemView.DropIndicatorPosition.OnItem
+            and target.text(0).startswith("Else")
+            and target.parent() is not None
+        ):
             parent_node = target.parent().data(0, Qt.ItemDataRole.UserRole)
             if isinstance(parent_node, RecipeNode) and parent_node.type == "if":
-                return parent_node.id, "else", target.childCount()
+                return parent_node.id, "else", self._logical_child_count(target)
+        if (
+            indicator is QAbstractItemView.DropIndicatorPosition.OnItem
+            and target.text(0).startswith("Finally")
+        ):
+            return "__finally__", "children", self._logical_child_count(target)
+
+        # Parameter/ROI rows are projections of a node, not recipe nodes.
+        # Accepting a drop relative to them produces an index that has no YAML
+        # counterpart and was the main cause of apparently disappearing rows.
+        if not isinstance(target_node, RecipeNode):
+            return None
 
         parent = target.parent()
         if parent is None:
             return None
-        index = parent.indexOfChild(target)
-        if indicator is QAbstractItemView.DropIndicatorPosition.BelowItem:
-            index += 1
+        index = self._logical_index(
+            parent,
+            target,
+            below=indicator
+            is QAbstractItemView.DropIndicatorPosition.BelowItem,
+        )
         if parent.text(0).startswith("Finally"):
             return "__finally__", "children", index
         if parent.text(0).startswith("Else") and parent.parent() is not None:
@@ -521,3 +552,28 @@ class RecipeTreeWidget(TreeWidget):
             return (owner.id, "else", index) if isinstance(owner, RecipeNode) else None
         owner = parent.data(0, Qt.ItemDataRole.UserRole)
         return (owner.id, "children", index) if isinstance(owner, RecipeNode) else None
+
+    @staticmethod
+    def _logical_child_count(parent: QTreeWidgetItem) -> int:
+        return sum(
+            isinstance(
+                parent.child(index).data(0, Qt.ItemDataRole.UserRole), RecipeNode
+            )
+            for index in range(parent.childCount())
+        )
+
+    @staticmethod
+    def _logical_index(
+        parent: QTreeWidgetItem,
+        target: QTreeWidgetItem,
+        *,
+        below: bool,
+    ) -> int:
+        index = 0
+        for child_index in range(parent.childCount()):
+            child = parent.child(child_index)
+            if child is target:
+                return index + (1 if below else 0)
+            if isinstance(child.data(0, Qt.ItemDataRole.UserRole), RecipeNode):
+                index += 1
+        return index

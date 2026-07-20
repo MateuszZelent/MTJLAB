@@ -76,6 +76,14 @@ class FluentDevicePageTests(unittest.TestCase):
                 all(isinstance(card["measure"], PushButton) for card in keithley.channel_cards.values())
             )
             self.assertTrue(keithley.channel_cards["A"]["measure"].isVisibleTo(window))
+            for channel in ("A", "B"):
+                card = keithley.channel_cards[channel]
+                self.assertTrue(card["output_on_action"].isVisibleTo(window))
+                self.assertTrue(card["output_off_action"].isVisibleTo(window))
+                self.assertEqual(card["output_on_action"].text(), "OUTPUT ON")
+                self.assertEqual(card["output_off_action"].text(), "OUTPUT OFF")
+                self.assertFalse(card["output_on_action"].isEnabled())
+                self.assertTrue(card["output_off_action"].isEnabled())
         finally:
             window.close()
             self.application.processEvents()
@@ -90,12 +98,17 @@ class FluentDevicePageTests(unittest.TestCase):
             rigol = window.rigol_page
             self.assertTrue(rigol.waveform_apply_button.isVisibleTo(window))
             self.assertGreater(rigol.waveform_apply_button.width(), 80)
-            rigol.control_tabs.setCurrentIndex(2)
-            self.application.processEvents()
             for control in (rigol.output_on, rigol.output_off):
                 self.assertTrue(control.isVisibleTo(window))
                 self.assertGreater(control.width(), 80)
                 self.assertGreater(control.height(), 24)
+            self.assertFalse(rigol.output_on.isEnabled())
+            self.assertTrue(rigol.output_off.isEnabled())
+            self.assertTrue(rigol.output_action_bar.isVisibleTo(window))
+            rigol.control_tabs.setCurrentIndex(2)
+            self.application.processEvents()
+            self.assertTrue(rigol.output_on.isVisibleTo(window))
+            self.assertTrue(rigol.output_off.isVisibleTo(window))
 
             window._navigate_to("anritsu")
             anritsu = window.anritsu_page

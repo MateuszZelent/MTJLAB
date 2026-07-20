@@ -1,0 +1,132 @@
+schema_version: 1
+name: "FMR thaTEC tree analog: Keithley A +/- sweep, Lake Shore field, Anritsu spectra"
+
+# Structural migration of:
+#   05062026_YIG20CoFeB1_FMR_S12_S21_2A_-2A_10MHz_4GHz_Measurement_#3.h5
+#
+# Mapping of the original thaTEC tree:
+#   Bruker +/-20 A saturation  -> Keithley A +/-1 mA saturation
+#   Bruker +/-2 A -> 0 A sweep -> Keithley A +/-100 uA -> 0 A sweep
+#   Lake Shore 455 field       -> Lake Shore 475 field
+#   Anritsu MS46xx S12/S21     -> MS2830A raw spectrum + reference difference
+#
+# This is a structurally analogous measurement, not an S-parameter-equivalent
+# VNA measurement.  The approved profile must explicitly enable Keithley A,
+# Lake Shore 475 and Anritsu acquisition before hardware execution.  Keithley B
+# is intentionally not used: its qualified station range is unipolar 0..10 mA.
+
+dut_limits:
+  keithley:
+    A:
+      current: {min: "-1 mA", max: "1 mA"}
+      voltage: {min: "-100 mV", max: "100 mV"}
+      max_abs_power: "100 uW"
+  anritsu:
+    max_expected_input: "-10 dBm"
+
+root:
+  id: fmr-measurement
+  type: sequence
+  children:
+    - {id: keithley-a-off-initial, type: set_keithley_output, channel: A, enabled: false}
+
+    - id: anritsu-10mhz-to-4ghz
+      type: configure_anritsu
+      start_frequency: "10 MHz"
+      stop_frequency: "4 GHz"
+      reference_level: "0 dBm"
+      points: 5001
+      trace: TRAC1
+
+    - id: keithley-a-positive-saturation-config
+      type: configure_keithley
+      channel: A
+      mode: current
+      level: "1 mA"
+      compliance: "100 mV"
+      nplc: 1.0
+      sense_mode: 2wire
+      source_autorange: true
+      measure_voltage_autorange: true
+      measure_current_autorange: true
+    - {id: keithley-a-positive-arm, type: arm_keithley_output, channel: A}
+    - {id: keithley-a-positive-on, type: set_keithley_output, channel: A, enabled: true}
+    - {id: positive-saturation-settle, type: wait, duration: "10 s"}
+    - {id: positive-saturation-field, type: measure_lakeshore_field, checkpoint: false}
+    - {id: positive-reference, type: acquire_reference, trace: TRAC1, average_count: 3}
+    - id: positive-saturation-spectrum
+      type: acquire_spectrum
+      trace: TRAC1
+      average_count: 3
+      reference_operation: difference_db
+      store_raw: true
+      store_processed: true
+
+    - id: positive-current-sweep
+      type: sweep
+      target: keithley.A.current
+      start: "100 uA"
+      stop: "0 A"
+      points: 11
+      spacing: linear
+      children:
+        - {id: positive-current-point, type: update_keithley_level, channel: A, mode: current, level: "${keithley.A.current}"}
+        - {id: positive-point-settle, type: wait, duration: "10 s"}
+        - {id: positive-point-field, type: measure_lakeshore_field, checkpoint: false}
+        - id: positive-point-spectrum
+          type: acquire_spectrum
+          trace: TRAC1
+          average_count: 3
+          reference_operation: difference_db
+          store_raw: true
+          store_processed: true
+
+    - {id: positive-ramp-zero, type: ramp_keithley_to_zero, channel: A, deadline: "30 s"}
+    - {id: keithley-a-off-before-negative, type: set_keithley_output, channel: A, enabled: false}
+
+    - id: keithley-a-negative-saturation-config
+      type: configure_keithley
+      channel: A
+      mode: current
+      level: "-1 mA"
+      compliance: "100 mV"
+      nplc: 1.0
+      sense_mode: 2wire
+      source_autorange: true
+      measure_voltage_autorange: true
+      measure_current_autorange: true
+    - {id: keithley-a-negative-arm, type: arm_keithley_output, channel: A}
+    - {id: keithley-a-negative-on, type: set_keithley_output, channel: A, enabled: true}
+    - {id: negative-saturation-settle, type: wait, duration: "10 s"}
+    - {id: negative-saturation-field, type: measure_lakeshore_field, checkpoint: false}
+    - {id: negative-reference, type: acquire_reference, trace: TRAC1, average_count: 3}
+    - id: negative-saturation-spectrum
+      type: acquire_spectrum
+      trace: TRAC1
+      average_count: 3
+      reference_operation: difference_db
+      store_raw: true
+      store_processed: true
+
+    - id: negative-current-sweep
+      type: sweep
+      target: keithley.A.current
+      start: "-100 uA"
+      stop: "0 A"
+      points: 11
+      spacing: linear
+      children:
+        - {id: negative-current-point, type: update_keithley_level, channel: A, mode: current, level: "${keithley.A.current}"}
+        - {id: negative-point-settle, type: wait, duration: "10 s"}
+        - {id: negative-point-field, type: measure_lakeshore_field, checkpoint: false}
+        - id: negative-point-spectrum
+          type: acquire_spectrum
+          trace: TRAC1
+          average_count: 3
+          reference_operation: difference_db
+          store_raw: true
+          store_processed: true
+
+finally:
+  - {id: keithley-a-ramp-zero-finally, type: ramp_keithley_to_zero, channel: A, deadline: "30 s"}
+  - {id: keithley-a-output-off-finally, type: set_keithley_output, channel: A, enabled: false}

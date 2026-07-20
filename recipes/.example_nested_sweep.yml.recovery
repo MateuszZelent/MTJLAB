@@ -55,9 +55,6 @@ root:
         type: acquire_spectrum
         trace: TRAC1
 
-  - id: wait-c715a6af
-    type: wait
-    duration: 100 ms
 finally:
 - id: rigol-ch1-off-finally
   type: set_rigol_output

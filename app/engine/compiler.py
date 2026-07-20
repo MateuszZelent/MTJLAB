@@ -1399,7 +1399,7 @@ class RecipeCompiler:
                 raise ConfigurationError(
                     f"{node.id}: Lake Shore field measurement requires enabled=true and a VISA resource."
                 )
-            payload = {}
+            payload = {"checkpoint": bool(data.get("checkpoint", True))}
         elif node.type in {"acquire_reference", "acquire_spectrum"}:
             if self._settings.anritsu.acquisition.single_sweep_mode != "standard_scpi_opc":
                 raise SafetyViolation(

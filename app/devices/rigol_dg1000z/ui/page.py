@@ -189,6 +189,24 @@ class RigolPage(QWidget):
         self.sync_phases_button.setEnabled(False)
         self.output_on = PrimaryPushButton("OUTPUT ON")
         self.output_off = PushButton("OUTPUT OFF")
+        self.output_on.setEnabled(False)
+        self.output_action_bar = CardWidget(self)
+        self.output_action_bar.setObjectName("rigolOutputActionBar")
+        output_action_layout = QHBoxLayout(self.output_action_bar)
+        output_action_layout.setContentsMargins(12, 8, 12, 8)
+        self.output_action_context = StrongBodyLabel("Physical output · CH1")
+        self.output_action_context.setObjectName("sectionTitle")
+        output_action_note = CaptionLabel(
+            "OFF is always available. ON validates the visible waveform first."
+        )
+        output_action_note.setObjectName("muted")
+        output_action_layout.addWidget(self.output_action_context)
+        output_action_layout.addWidget(output_action_note, 1)
+        output_action_layout.addWidget(self.output_on)
+        output_action_layout.addWidget(self.output_off)
+        # Keep de-energising controls visible independently of the selected
+        # configuration tab; operators must not hunt for OUTPUT OFF.
+        layout.insertWidget(2, self.output_action_bar)
         self.output_scroll = self._form_page(
             "Output path and SYNC",
             "OUTPUT ON validates the visible channel settings, performs an internal "
@@ -205,8 +223,6 @@ class RigolPage(QWidget):
             (
                 configure_output,
                 self.sync_phases_button,
-                self.output_on,
-                self.output_off,
             ),
         )
 
@@ -275,6 +291,11 @@ class RigolPage(QWidget):
         self.time_mode.currentTextChanged.connect(self._update_dynamic_controls)
         self.waveform.currentTextChanged.connect(self._update_preview)
         self.channel.currentTextChanged.connect(self._update_preview)
+        self.channel.currentTextChanged.connect(
+            lambda value: self.output_action_context.setText(
+                f"Physical output · CH{value}"
+            )
+        )
         self.channel.currentTextChanged.connect(self._refresh_rigol_limits)
         for field in (self.frequency, self.period, self.high_level, self.low_level, self.vpp, self.offset, self.duty, self.ramp_symmetry, self.pulse_width):
             field.textChanged.connect(self._update_preview)
@@ -523,6 +544,11 @@ class RigolPage(QWidget):
             widget.setProperty("deviceState", semantic_state)
             widget.style().unpolish(widget)
             widget.style().polish(widget)
+        self.output_on.setEnabled(
+            normalized in {"verified", "output_off"}
+            and not self._pending_output_enable
+        )
+        self.output_off.setEnabled(True)
 
     def _update_dynamic_controls(self, *_args: object) -> None:
         waveform = self.waveform.currentText()
@@ -1019,7 +1045,7 @@ class RigolPage(QWidget):
                 self.status.emit("Rigol armed for 30 seconds")
         elif operation == "set_output":
             self._pending_output_enable = False
-            self.output_on.setEnabled(True)
+            self.output_on.setEnabled(not bool(result))
             self.status.emit(
                 f"Rigol CH{self.channel.currentText()} OUTPUT "
                 f"{'ON' if bool(result) else 'OFF'}"
@@ -1042,5 +1068,7 @@ class RigolPage(QWidget):
         }:
             if operation in {"configure", "arm", "set_output"}:
                 self._pending_output_enable = False
-                self.output_on.setEnabled(True)
+                self.output_on.setEnabled(
+                    self.device_state.text() in {"VERIFIED", "OUTPUT OFF"}
+                )
             QMessageBox.warning(self, "Rigol", error)

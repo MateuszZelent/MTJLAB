@@ -111,20 +111,26 @@ def move_recipe_node(
     if raw["root"].get("id") == node_id:
         raise ConfigurationError("The recipe root cannot be moved.")
 
-    detached = _detach(raw["root"], node_id, section="root")
     finally_nodes = raw.setdefault("finally", [])
     if not isinstance(finally_nodes, list):
         raise ConfigurationError("recipe.finally must be a list.")
-    if detached is None:
-        detached = _detach_list(finally_nodes, node_id, section="finally")
-    if detached is None:
+
+    source = _locate(raw["root"], node_id, section="root")
+    if source is None:
+        source = _locate_list(finally_nodes, node_id, section="finally")
+    if source is None:
         raise ConfigurationError(f"Recipe node {node_id!r} was not found.")
-    moved, source_section = detached
+    moved, source_list, source_index, source_section = source
 
     if destination_parent_id == "__finally__":
         target = finally_nodes
         destination_section = "finally"
     else:
+        if _find(moved, destination_parent_id) is not None:
+            raise ConfigurationError(
+                "The destination is inside the moved node. "
+                "A node cannot be moved into its own descendant."
+            )
         parent = _find(raw["root"], destination_parent_id)
         destination_section = "root"
         if parent is None:
@@ -136,8 +142,7 @@ def move_recipe_node(
                         break
         if parent is None:
             raise ConfigurationError(
-                "The destination is inside the moved node or no longer exists. "
-                "A node cannot be moved into its own descendant."
+                f"Recipe destination {destination_parent_id!r} was not found."
             )
         if destination_branch not in {"children", "else"}:
             raise ConfigurationError("Destination branch must be children or else.")
@@ -147,7 +152,15 @@ def move_recipe_node(
 
     if source_section != destination_section:
         raise ConfigurationError("Drag-and-drop cannot move nodes into or out of finally.")
-    index = max(0, min(int(destination_index), len(target)))
+
+    # The UI reports a gap in the original list.  Once the source is removed,
+    # every later gap shifts left by one.  Without this correction, moving a
+    # sibling downward can skip a node or appear to move into the wrong block.
+    index = int(destination_index)
+    if target is source_list and source_index < index:
+        index -= 1
+    source_list.pop(source_index)
+    index = max(0, min(index, len(target)))
     target.insert(index, moved)
 
     stream = StringIO()
@@ -196,4 +209,30 @@ def _find(node: dict[str, Any], node_id: str) -> dict[str, Any] | None:
                 found = _find(candidate, node_id)
                 if found is not None:
                     return found
+    return None
+
+
+def _locate(
+    node: dict[str, Any], node_id: str, *, section: str
+) -> tuple[dict[str, Any], list[Any], int, str] | None:
+    for branch in ("children", "else"):
+        nested = node.get(branch, [])
+        if isinstance(nested, list):
+            found = _locate_list(nested, node_id, section=section)
+            if found is not None:
+                return found
+    return None
+
+
+def _locate_list(
+    nodes: list[Any], node_id: str, *, section: str
+) -> tuple[dict[str, Any], list[Any], int, str] | None:
+    for index, candidate in enumerate(nodes):
+        if not isinstance(candidate, dict):
+            continue
+        if candidate.get("id") == node_id:
+            return candidate, nodes, index, section
+        found = _locate(candidate, node_id, section=section)
+        if found is not None:
+            return found
     return None

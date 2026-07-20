@@ -11,6 +11,31 @@ from tests.helpers import ROOT, loaded_settings, simulation_settings
 
 
 class RecipeCompilerTests(unittest.TestCase):
+    def test_thatec_fmr_analog_recipe_preserves_two_branches_in_24_combined_points(self) -> None:
+        raw = deepcopy(simulation_settings(approved=True).model_dump(mode="python"))
+        raw["devices"]["keithley"]["safety"]["allow_output_enable"] = True
+        raw["devices"]["keithley"]["safety"]["channels"]["A"]["enabled"] = True
+        raw["devices"]["lakeshore_gaussmeter"].update(
+            {"enabled": True, "resource": "SIM::LAKESHORE::INSTR"}
+        )
+
+        plan = RecipeCompiler(StationSettings.model_validate(raw)).compile(
+            load_recipe(ROOT / "recipes" / "fmr_thatec_tree_analog_keithley_a_lakeshore_anritsu.yml")
+        )
+
+        self.assertEqual(plan.total_points, 24)
+        self.assertEqual(plan.total_spectra, 24)
+        self.assertEqual(sum(action.kind == "acquire_reference" for action in plan.actions), 2)
+        field_actions = [
+            action for action in plan.actions if action.kind == "measure_lakeshore_field"
+        ]
+        self.assertEqual(len(field_actions), 24)
+        self.assertTrue(all(action.payload["checkpoint"] is False for action in field_actions))
+        self.assertEqual(
+            plan.required_devices,
+            frozenset({"keithley", "lakeshore_gaussmeter", "anritsu"}),
+        )
+
     def test_lakeshore_measurement_compiles_as_one_read_only_checkpoint(self) -> None:
         raw = deepcopy(simulation_settings().model_dump(mode="python"))
         raw["devices"]["lakeshore_gaussmeter"].update(
@@ -31,6 +56,33 @@ root:
         self.assertEqual([action.kind for action in plan.actions], ["measure_lakeshore_field"])
         self.assertEqual(plan.total_points, 1)
         self.assertEqual(plan.required_devices, frozenset({"lakeshore_gaussmeter"}))
+
+    def test_lakeshore_measurement_can_be_attached_to_following_spectrum_checkpoint(self) -> None:
+        raw = deepcopy(simulation_settings().model_dump(mode="python"))
+        raw["devices"]["lakeshore_gaussmeter"].update(
+            {"enabled": True, "resource": "SIM::LAKESHORE::INSTR"}
+        )
+        source = """\
+schema_version: 1
+name: field-and-spectrum-one-point
+dut_limits:
+  anritsu: {max_expected_input: "-10 dBm"}
+root:
+  id: root
+  type: sequence
+  children:
+    - {id: configure, type: configure_anritsu, start_frequency: "10 MHz", stop_frequency: "4 GHz", reference_level: "0 dBm", points: 5001, trace: TRAC1}
+    - {id: field, type: measure_lakeshore_field, checkpoint: false}
+    - {id: spectrum, type: acquire_spectrum, trace: TRAC1}
+"""
+
+        plan = RecipeCompiler(StationSettings.model_validate(raw)).compile(
+            parse_recipe_text(source)
+        )
+
+        self.assertFalse(plan.actions[1].payload["checkpoint"])
+        self.assertEqual(plan.total_points, 1)
+        self.assertEqual(plan.total_spectra, 1)
 
     def test_hall_measurement_inside_sweep_expands_to_one_stored_point_per_step(self) -> None:
         raw = deepcopy(simulation_settings().model_dump(mode="python"))

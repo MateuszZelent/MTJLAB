@@ -16,6 +16,7 @@ from PySide6.QtWidgets import (
     QFileDialog,
     QHeaderView,
     QMessageBox,
+    QTreeWidgetItem,
 )
 from PySide6.QtCore import Qt
 from PySide6.QtTest import QTest
@@ -24,7 +25,7 @@ from qfluentwidgets import (
     SpinBox, TableWidget,
 )
 
-from app.recipes import parse_recipe_text
+from app.recipes import RecipeNode, parse_recipe_text
 from app.devices.anritsu_ms2830a.ui import (
     AnritsuAdvancedSpectrumPanel,
     AnritsuNodeEditorDialog,
@@ -37,7 +38,7 @@ from app.devices.keithley_2600.ui import (
     KeithleyPage,
 )
 from app.devices.rigol_dg1000z.ui import RigolNodeEditorDialog
-from app.ui.recipes import DeviceParameterDialog, SweepGeneratorDialog
+from app.ui.recipes import DeviceParameterDialog, RecipeTreeWidget, SweepGeneratorDialog
 from app.ui.recipes.page import (
     AnritsuAcquisitionEditorDialog,
     CommentEditorDialog,
@@ -65,8 +66,10 @@ class RecipeBuilderTests(unittest.TestCase):
             self.assertEqual(page.workflow_tabs.currentRouteKey(), "tree")
             self.assertIs(page.builder_stack.widget(0), page.tree)
             self.assertIs(page.builder_stack.widget(1), page.editor)
-            self.assertTrue(page.add_node_button.text().startswith("+ Add"))
-            self.assertIn("point generator", page.add_controls_button.text())
+            self.assertFalse(hasattr(page, "add_node_button"))
+            self.assertFalse(hasattr(page, "add_controls_button"))
+            self.assertFalse(hasattr(page, "node_kind"))
+            self.assertTrue(page.library_panel.isEnabled())
             self.assertEqual(page.edit_device_button.text(), "Device settings")
             self.assertEqual(page.edit_generator_button.text(), "Edit ROI")
             self.assertEqual(page.delete_node_button.text(), "Delete")
@@ -113,10 +116,15 @@ class RecipeBuilderTests(unittest.TestCase):
                 page.close()
 
     def test_tree_builder_can_add_read_only_moke_hall_checkpoint(self) -> None:
-        page = RecipePage(simulation_settings())
+            page = RecipePage(simulation_settings())
         try:
             page.new_recipe(confirm=False)
-            self.assertGreaterEqual(page.node_kind.findData("measure_moke_hall"), 0)
+            self.assertTrue(
+                any(
+                    button.drag_kind == "flow:measure_moke_hall"
+                    for button in page._library_action_buttons
+                )
+            )
             page._library_add_basic("measure_moke_hall")
 
             recipe = parse_recipe_text(page.editor.toPlainText())
@@ -464,6 +472,24 @@ finally: []
         finally:
             page.close()
 
+    def test_node_library_is_the_only_add_surface_above_measurement_tree(self) -> None:
+        page = RecipePage(simulation_settings())
+        try:
+            page.resize(1900, 850)
+            page.show()
+            self.application.processEvents()
+
+            self.assertFalse(hasattr(page, "node_kind"))
+            self.assertFalse(hasattr(page, "_node_kind_model_host"))
+            self.assertIn(
+                "Sequence / group",
+                [button.text() for button in page._library_action_buttons],
+            )
+            self.assertTrue(page.selection_title.isVisibleTo(page))
+            self.assertTrue(page.selection_context.isVisibleTo(page))
+        finally:
+            page.close()
+
     def test_measurement_tree_stretches_node_name_and_keeps_metadata_readable(self) -> None:
         page = RecipePage(simulation_settings())
         try:
@@ -497,8 +523,7 @@ finally: []
     def test_comment_node_is_presented_by_content_and_is_editable(self) -> None:
         page = RecipePage(simulation_settings())
         try:
-            page.node_kind.setCurrentIndex(page.node_kind.findData("comment"))
-            page._add_basic_node()
+            page._add_basic_node("comment")
             root = page.tree.topLevelItem(0)
             item = next(
                 root.child(index)
@@ -716,6 +741,69 @@ root:
             )
         finally:
             page.close()
+
+    def test_move_into_collapsed_device_keeps_node_selected_and_visible(self) -> None:
+        page = RecipePage(simulation_settings())
+        try:
+            page.resize(1500, 850)
+            page.show()
+            self.application.processEvents()
+            page.new_recipe(confirm=False)
+            page._library_add_device("keithley")
+            source = parse_recipe_text(page.editor.toPlainText()).root.children[-1]
+            page._library_add_device("rigol")
+            target = parse_recipe_text(page.editor.toPlainText()).root.children[-1]
+            target_item = page._find_tree_item(target.id)
+            source_item = page._find_tree_item(source.id)
+            self.assertIsNotNone(target_item)
+            self.assertIsNotNone(source_item)
+            target_item.setExpanded(False)
+            page.tree.setCurrentItem(source_item)
+
+            page._move_recipe_node(
+                source.id,
+                target.id,
+                "children",
+                len(target.children),
+            )
+
+            updated = parse_recipe_text(page.editor.toPlainText())
+            updated_target = updated.root.children[-1]
+            self.assertIn(source.id, tuple(node.id for node in updated_target.children))
+            selected = page.tree.currentItem().data(0, Qt.ItemDataRole.UserRole)
+            self.assertIsInstance(selected, RecipeNode)
+            self.assertEqual(selected.id, source.id)
+            self.assertTrue(page._find_tree_item(target.id).isExpanded())
+            self.assertFalse(page.tree.visualItemRect(page.tree.currentItem()).isEmpty())
+        finally:
+            page.close()
+
+    def test_logical_drop_index_ignores_projected_parameter_rows(self) -> None:
+        parent = QTreeWidgetItem(["Device"])
+        projected = QTreeWidgetItem(["ROI 1"])
+        first = QTreeWidgetItem(["First"])
+        second = QTreeWidgetItem(["Second"])
+        first.setData(
+            0,
+            Qt.ItemDataRole.UserRole,
+            RecipeNode("first", "comment"),
+        )
+        second.setData(
+            0,
+            Qt.ItemDataRole.UserRole,
+            RecipeNode("second", "comment"),
+        )
+        parent.addChildren([projected, first, second])
+
+        self.assertEqual(RecipeTreeWidget._logical_child_count(parent), 2)
+        self.assertEqual(
+            RecipeTreeWidget._logical_index(parent, second, below=False),
+            1,
+        )
+        self.assertEqual(
+            RecipeTreeWidget._logical_index(parent, second, below=True),
+            2,
+        )
 
     def test_manual_page_and_sweep_editor_share_keithley_configuration_panel(self) -> None:
         settings = simulation_settings()
@@ -1909,8 +1997,7 @@ root:
     def test_tree_builder_adds_containers_and_safe_nodes_to_finally(self) -> None:
         page = RecipePage(simulation_settings())
         try:
-            page.node_kind.setCurrentIndex(page.node_kind.findData("sequence"))
-            page._add_basic_node()
+            page._add_basic_node("sequence")
             parsed = parse_recipe_text(page.editor.toPlainText())
             self.assertIn("sequence", tuple(node.type for node in parsed.root.children))
 
@@ -1920,8 +2007,7 @@ root:
                 if page.tree.topLevelItem(index).text(0).startswith("Finally")
             )
             page.tree.setCurrentItem(finally_item)
-            page.node_kind.setCurrentIndex(page.node_kind.findData("set_rigol_output"))
-            page._add_basic_node()
+            page._add_basic_node("set_rigol_output")
             parsed = parse_recipe_text(page.editor.toPlainText())
             self.assertEqual(parsed.finally_nodes[-1].type, "set_rigol_output")
             self.assertFalse(parsed.finally_nodes[-1].data["enabled"])
