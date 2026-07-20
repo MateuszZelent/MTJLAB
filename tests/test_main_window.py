@@ -2017,9 +2017,11 @@ class MainWindowTests(unittest.TestCase):
 
             keithley._output_toggled(True)
             self.assertEqual(keithley._controller.call.call_args.args[0], "configure")
+            self.assertFalse(keithley.apply_configuration_button.isEnabled())
 
             keithley._result("configure", None)
             self.assertEqual(keithley._controller.call.call_args.args, ("set_output", ("B", True)))
+            self.assertFalse(keithley.apply_configuration_button.isEnabled())
 
             keithley._result("set_output", True)
             self.assertTrue(keithley._output_states["B"])
@@ -2027,6 +2029,7 @@ class MainWindowTests(unittest.TestCase):
             self.assertEqual(keithley.output_toggle.text(), "OUTPUT ON")
             self.assertEqual(keithley.channel_cards["B"]["output_on_action"].text(), "OUTPUT ON")
             self.assertEqual(keithley.channel_cards["B"]["output_off_action"].text(), "OUTPUT OFF")
+            self.assertTrue(keithley.apply_configuration_button.isEnabled())
 
             keithley._request_channel_output("B", False)
             self.assertEqual(keithley._controller.call.call_args.args, ("set_output", ("B", False)))
@@ -2361,6 +2364,70 @@ class MainWindowTests(unittest.TestCase):
             self.assertTrue(anritsu.single.isEnabled())
             self.assertEqual(anritsu.live.text(), "Start Live")
             self.assertEqual(anritsu.live_indicator.property("liveState"), "off")
+        finally:
+            window.close()
+            self.application.processEvents()
+
+    def test_keithley_applies_and_verifies_settings_without_enabling_output(self) -> None:
+        window = MainWindow(".config/settings.yml", simulation=True)
+        try:
+            keithley = window.keithley_page
+            keithley._controller.call = Mock()
+            keithley._device_state_changed("verified")
+            keithley.channel.setCurrentText("B")
+            keithley.mode.setCurrentText("current")
+            keithley.level.setText("500 uA")
+            keithley.compliance.setText("50 mV")
+            keithley.settle.setText("200 ms")
+            keithley.sense_mode.setCurrentText("4wire")
+
+            self.assertTrue(keithley.apply_configuration_button.isEnabled())
+            keithley.apply_configuration_button.click()
+
+            keithley._controller.call.assert_called_once()
+            operation, request = keithley._controller.call.call_args.args
+            self.assertEqual(operation, "configure")
+            self.assertEqual(request.channel, "B")
+            self.assertEqual(request.mode, "current")
+            self.assertEqual(request.level_si, 500e-6)
+            self.assertEqual(request.compliance_si, 50e-3)
+            self.assertEqual(request.settle_time_s, 0.2)
+            self.assertEqual(request.sense_mode, "4wire")
+            self.assertTrue(request.source_autorange)
+            self.assertTrue(request.measure_voltage_autorange)
+            self.assertTrue(request.measure_current_autorange)
+            self.assertIsNone(keithley._auto_enable_channel)
+            self.assertFalse(keithley.apply_configuration_button.isEnabled())
+            self.assertEqual(
+                keithley.apply_configuration_button.text(),
+                "Applying & verifying…",
+            )
+
+            keithley._result("configure", None)
+
+            keithley._controller.call.assert_called_once()
+            self.assertFalse(keithley._output_states["B"])
+            self.assertTrue(keithley.apply_configuration_button.isEnabled())
+            self.assertIn("all settings applied", keithley.banner.label.text())
+            self.assertIn("OUTPUT remains OFF", keithley.banner.label.text())
+        finally:
+            window.close()
+            self.application.processEvents()
+
+    def test_keithley_apply_settings_rejects_invalid_units_before_dispatch(self) -> None:
+        window = MainWindow(".config/settings.yml", simulation=True)
+        try:
+            keithley = window.keithley_page
+            keithley._controller.call = Mock()
+            keithley._device_state_changed("verified")
+            keithley.mode.setCurrentText("current")
+            keithley.level.setText("5 V")
+
+            keithley.apply_configuration_button.click()
+
+            keithley._controller.call.assert_not_called()
+            self.assertIn("Invalid Keithley settings", keithley.banner.label.text())
+            self.assertTrue(keithley.apply_configuration_button.isEnabled())
         finally:
             window.close()
             self.application.processEvents()

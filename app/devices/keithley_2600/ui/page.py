@@ -846,12 +846,16 @@ class KeithleyPage(QWidget):
         source_layout.addWidget(ramp_panel)
         ramp_panel.setVisible(self._MANUAL_RAMP_ENABLED)
         buttons = QHBoxLayout()
+        self.apply_configuration_button = PrimaryPushButton(
+            "Apply & verify settings · OUTPUT OFF"
+        )
         measure = PushButton("Measure selected channel")
         self.measure_selected_button = measure
         self.output_toggle = PushButton("OUTPUT OFF")
         self.output_toggle.setCheckable(True)
         self.output_toggle.setObjectName("outputOffButton")
         self.output_toggle.setVisible(False)
+        buttons.addWidget(self.apply_configuration_button)
         buttons.addWidget(measure)
         source_layout.addLayout(buttons)
         self.readout = BodyLabel()
@@ -887,6 +891,7 @@ class KeithleyPage(QWidget):
         self.workspace_splitter.setChildrenCollapsible(False)
         self._workspace_compact: bool | None = None
         layout.addWidget(self.workspace_splitter, 1)
+        self.apply_configuration_button.clicked.connect(self.configure)
         measure.clicked.connect(self.request_measurement)
         self.output_toggle.toggled.connect(self._output_toggled)
         self.ramp_preview_button.clicked.connect(self._preview_manual_ramp)
@@ -1248,6 +1253,7 @@ class KeithleyPage(QWidget):
             self.ramp_deadline: ("Ramp deadline", "Maximum wall-clock time for the complete operation. Timeout triggers a best-effort OFF of both SMU outputs."),
             self.ramp_preview_button: ("Preview ramp", "Calculates the finite point sequence without contacting the instrument. Execution still queries the actual starting source level."),
             self.ramp_execute_button: ("Ramp active output", "Changes an already enabled source through bounded points. It never turns an output on; every point measures I/V and trips OFF on failure."),
+            self.apply_configuration_button: ("Apply and verify with OUTPUT OFF", "Validates every visible value and unit, forces the selected channel OUTPUT OFF, writes the complete source and measurement configuration, and reads every applied parameter back. This action never enables OUTPUT."),
         }
         for widget, (title, description) in help_items.items():
             self._set_help(widget, title, description)
@@ -1327,6 +1333,27 @@ class KeithleyPage(QWidget):
             self._output_readiness_guidance(selected_channel)
         )
         self.output_toggle.setEnabled(ready or self._output_states[self.channel.currentText()])
+        configure_pending = "configure" in self._pending_channels
+        configuration_mutation_pending = (
+            self._auto_enable_channel is not None
+            or any(
+                operation in self._pending_channels
+                for operation in (
+                    "configure",
+                    "set_output",
+                    "ramp_to_zero",
+                    "ramp_to_level",
+                )
+            )
+        )
+        self.apply_configuration_button.setText(
+            "Applying & verifying…"
+            if configure_pending
+            else "Apply & verify settings · OUTPUT OFF"
+        )
+        self.apply_configuration_button.setEnabled(
+            self._device_is_output_ready() and not configuration_mutation_pending
+        )
         for channel, card in self.channel_cards.items():
             pending_enable = (
                 self._auto_enable_channel == channel
@@ -1490,6 +1517,7 @@ class KeithleyPage(QWidget):
         self._pending_output_enabled[channel] = False
         self.output_toggle.setText("DISABLING…")
         self.output_toggle.setEnabled(False)
+        self._update_output_readiness()
         self._controller.call("set_output", (channel, False))
 
     def _selected_live_channels(self) -> list[str]:
@@ -1866,13 +1894,35 @@ class KeithleyPage(QWidget):
         self._update_ramp_defaults(reset_values=True)
 
     def configure(self) -> None:
+        if self._auto_enable_channel is not None or any(
+            operation in self._pending_channels
+            for operation in (
+                "configure",
+                "set_output",
+                "ramp_to_zero",
+                "ramp_to_level",
+            )
+        ):
+            return
+        if not self._device_is_output_ready():
+            self.banner.show_message(
+                "Connect and verify Keithley before applying settings. No command was sent."
+            )
+            return
         try:
             request = self._source_request()
         except Exception as exc:
             self.banner.show_message(f"Invalid Keithley settings: {exc}")
             return
+        # This is the explicit, non-energizing configuration path. It must
+        # never inherit an OUTPUT-ON continuation from another UI action.
+        self._auto_enable_channel = None
         self._pending_channels["configure"] = self.channel.currentText()
         self._pending_config_modes[self.channel.currentText()] = request.mode
+        self._update_output_readiness()
+        self.status.emit(
+            f"Keithley CH {request.channel}: applying and verifying settings with OUTPUT OFF"
+        )
         self._controller.call("configure", request)
 
     def _source_request(self) -> KeithleySourceRequest:
@@ -1943,6 +1993,7 @@ class KeithleyPage(QWidget):
         self._pending_config_modes[channel] = request.mode
         self.output_toggle.setText("ENABLING…")
         self.output_toggle.setEnabled(False)
+        self._update_output_readiness()
         self.status.emit(f"Keithley CH {channel}: validating and configuring before OUTPUT ON")
         self._controller.call("configure", request)
 
@@ -1995,15 +2046,22 @@ class KeithleyPage(QWidget):
                 self._pending_channels["set_output"] = channel
                 self._pending_output_enabled[channel] = True
                 self.status.emit(f"Keithley CH {channel}: configuration verified; enabling OUTPUT")
+                self._update_output_readiness()
                 self._controller.call("set_output", (channel, True))
             else:
+                self.banner.show_message(
+                    f"Keithley CH {channel}: all settings applied and verified by "
+                    "instrument readback. OUTPUT remains OFF.",
+                    severity="success",
+                    timeout_ms=8_000,
+                )
                 self.status.emit(f"Keithley CH {channel} configured while OUTPUT is OFF")
         elif operation == "set_output":
             channel = self._pending_channels.pop("set_output", self.channel.currentText())
             requested_enabled = self._pending_output_enabled.pop(channel, bool(result))
             actual_enabled = result if isinstance(result, bool) else requested_enabled
-            self._set_channel_output(channel, actual_enabled)
             self._auto_enable_channel = None
+            self._set_channel_output(channel, actual_enabled)
             self.status.emit(
                 f"Keithley CH {channel} OUTPUT {'ON' if actual_enabled else 'OFF'}"
             )

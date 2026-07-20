@@ -803,6 +803,62 @@ class AdapterAndRunnerTests(unittest.TestCase):
                 )
             )
 
+    def test_keithley_configuration_verifies_all_settings_without_output_on(self) -> None:
+        session = FakeVisaSession(
+            responses={
+                "*IDN?": "KEITHLEY INSTRUMENTS,2602A,123456,1.0",
+                "print(errorqueue.count)": "0",
+            }
+        )
+        adapter = KeithleyAdapter(
+            self.settings, session_factory=FakeVisaSessionFactory(session)
+        )
+        adapter.connect()
+        writes_before = len(session.writes)
+
+        adapter.configure_source(
+            KeithleySourceRequest(
+                "B",
+                "current",
+                500e-6,
+                50e-3,
+                nplc=0.5,
+                settle_time_s=0.2,
+                sense_mode="4wire",
+                source_autorange=False,
+                source_range_si=1e-3,
+                measure_voltage_autorange=False,
+                measure_voltage_range_si=67e-3,
+                measure_current_autorange=False,
+                measure_current_range_si=1e-3,
+            )
+        )
+
+        configuration_traffic = session.writes[writes_before:]
+        self.assertEqual(
+            configuration_traffic[0],
+            "smub.source.output = smub.OUTPUT_OFF",
+        )
+        self.assertFalse(
+            any("OUTPUT_ON" in command for command in configuration_traffic)
+        )
+        for field in (
+            "smub.source.output",
+            "smub.measure.nplc",
+            "smub.sense",
+            "smub.measure.autorangev",
+            "smub.measure.autorangei",
+            "smub.measure.rangev",
+            "smub.measure.rangei",
+            "smub.source.func",
+            "smub.source.leveli",
+            "smub.source.limitv",
+            "smub.source.autorangei",
+            "smub.source.rangei",
+        ):
+            self.assertIn(f"print({field})", configuration_traffic)
+        self.assertEqual(adapter.state, DeviceState.OUTPUT_OFF)
+
     def test_keithley_manual_ramp_queries_actual_level_and_measures_each_step(self) -> None:
         raw = deepcopy(simulation_settings(approved=True).model_dump(mode="python"))
         raw["devices"]["keithley"]["safety"]["allow_output_enable"] = True
