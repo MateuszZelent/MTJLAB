@@ -71,14 +71,15 @@ class RecipeBuilderTests(unittest.TestCase):
         requests: list[tuple[object, bool]] = []
         plan = object()
         try:
-            page._plan = plan
             page.run_requested.connect(
                 lambda selected, demo: requests.append((selected, demo))
             )
 
             page.execution_mode.setCurrentIndex(1)
+            page._plan = plan
             page.request_run()
             page.execution_mode.setCurrentIndex(0)
+            page._plan = plan
             page.request_run()
 
             self.assertEqual(requests, [(plan, True), (plan, False)])

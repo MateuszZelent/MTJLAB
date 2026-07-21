@@ -1,8 +1,8 @@
 schema_version: 1
 name: Keithley B current × Rigol CH1 high level × Anritsu spectrum
 
-# Safe, executable 100 × 20 example. It deliberately contains no ARM or
-# OUTPUT ON action, so compiling or simulating it cannot energise a source.
+# Safe, executable 100 × 20 example. It deliberately contains no OUTPUT ON
+# action, so compiling or simulating it cannot energise a source.
 root:
   id: sequence-main
   type: sequence
@@ -55,16 +55,17 @@ root:
         type: acquire_spectrum
         trace: TRAC1
 
-  - id: rigol-b971d67a
+  - id: anritsu-spectrum-f7562272
     type: sequence
-    text: Rigol DG1032Z — configuration required
-    device_module: rigol
-    label: Rigol DG1032Z
+    text: Anritsu MS2830A · acquire single spectrum
+    trace: TRAC1
+    device_module: anritsu
+    label: Anritsu MS2830A
+    operation: configure_selected_parameters
     configuration_required: true
-    children:
-    - id: comment-92801ca4
-      type: comment
-      text: Drop nested devices or flow actions here
+    acquire_single: false
+    parameter_actions: []
+    children: []
 finally:
 - id: rigol-ch1-off-finally
   type: set_rigol_output
