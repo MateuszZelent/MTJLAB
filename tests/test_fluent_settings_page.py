@@ -56,6 +56,40 @@ class FluentSettingsPageTests(unittest.TestCase):
         finally:
             page.close()
 
+    def test_every_safety_limit_row_has_a_persisted_disable_control(self) -> None:
+        page = SettingsPage(SettingsRepository(".config/settings.yml"))
+        try:
+            page.resize(1360, 880)
+            page.show()
+            self.application.processEvents()
+            checks = [
+                check
+                for check in page.limits_scroll.widget().findChildren(CheckBox)
+                if check.text() == "Disable limit"
+            ]
+            self.assertEqual(len(checks), page.limits_table.rowCount())
+            target_path = (
+                "devices",
+                "keithley",
+                "safety",
+                "channels",
+                "A",
+                "lab_limits",
+                "measured_current_trip",
+                "enabled",
+            )
+            target = next(
+                check
+                for check in checks
+                if tuple(check.property("limitEnabledPath")) == target_path
+            )
+            target.setChecked(True)
+            self.application.processEvents()
+            self.assertFalse(page._get_path(page._raw, target_path))
+            self.assertTrue(page._dirty)
+        finally:
+            page.close()
+
     def test_embedded_settings_actions_fit_and_remain_reachable_at_1280_by_720(self) -> None:
         window = MainWindow(".config/settings.yml", simulation=True)
         try:

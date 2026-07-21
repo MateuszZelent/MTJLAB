@@ -18,7 +18,14 @@ from qfluentwidgets import (
 )
 
 from app.domain.errors import ConfigurationError
-from app.domain.quantities import DIMENSION_CURRENT, DIMENSION_TIME, DIMENSION_VOLTAGE, parse_quantity
+from app.domain.quantities import (
+    DIMENSION_CURRENT,
+    DIMENSION_DBM,
+    DIMENSION_FREQUENCY,
+    DIMENSION_TIME,
+    DIMENSION_VOLTAGE,
+    parse_quantity,
+)
 from app.recipes import RecipeNode, generate_sweep_points
 from app.recipes.parameter_registry import SWEEPABLE_PARAMETERS as _SWEEPABLE_PARAMETERS
 from app.recipes.parameter_registry import sweep_default as _sweep_default
@@ -178,7 +185,9 @@ class ActionNodeEditorDialog(FluentRecipeDialog):
             return checkbox, "bool"
         if isinstance(value, int):
             spin = SpinBox(self)
-            spin.setRange(0, 100_000)
+            minimum = 2 if key == "points" else 1 if key in {"count", "average_count"} else 0
+            maximum = 9_999 if key == "average_count" else 100_000
+            spin.setRange(minimum, maximum)
             spin.setValue(value)
             return spin, "int"
         if isinstance(value, float):
@@ -219,7 +228,15 @@ class ActionNodeEditorDialog(FluentRecipeDialog):
                 parse_quantity(fields[key], DIMENSION_TIME)
         for key in self._FREQUENCY_FIELDS:
             if key in fields and self._literal(fields[key]):
-                parse_quantity(fields[key], "frequency")
+                parse_quantity(fields[key], DIMENSION_FREQUENCY)
+        logarithmic_power_fields = {
+            "reference_level",
+        }
+        if self._node.type == "configure_anritsu_sg":
+            logarithmic_power_fields.add("power")
+        for key in logarithmic_power_fields:
+            if key in fields and self._literal(fields[key]):
+                parse_quantity(fields[key], DIMENSION_DBM)
         mode = str(fields.get("mode", ""))
         if (
             "level" in fields
@@ -789,6 +806,9 @@ class RecipeTreeWidget(TreeWidget):
             self._dragged_node_id = None
 
     def dragEnterEvent(self, event: Any) -> None:
+        # Let QAbstractItemView initialize its drag state before we apply the
+        # recipe-specific MIME and boundary rules.
+        super().dragEnterEvent(event)
         if event.mimeData().hasFormat(self.library_mime_type):
             event.acceptProposedAction()
             return
@@ -799,6 +819,10 @@ class RecipeTreeWidget(TreeWidget):
         event.ignore()
 
     def dragMoveEvent(self, event: Any) -> None:
+        # QAbstractItemView calculates and paints Above/On/Below only in its
+        # implementation. Without this call every hover remained ``OnItem``,
+        # so a visually identical drop could not be placed above a leaf.
+        super().dragMoveEvent(event)
         library_drag = event.mimeData().hasFormat(self.library_mime_type)
         internal_drag = event.source() is self and self._dragged_node_id is not None
         if not library_drag and not internal_drag:

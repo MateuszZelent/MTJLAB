@@ -1620,13 +1620,14 @@ class RecipeCompiler:
             if mode == "current"
             else channel_settings.lab_limits.source_voltage
         )
-        minimum = parse_quantity(profile_range.min, dimension).si_value
-        maximum = parse_quantity(profile_range.max, dimension).si_value
-        if not minimum <= level <= maximum:
-            raise SafetyViolation(
-                f"{node_id}: Keithley {channel} {mode} level {level:g} SI is outside "
-                f"the station range [{minimum:g}, {maximum:g}]."
-            )
+        if profile_range.enabled:
+            minimum = parse_quantity(profile_range.min, dimension).si_value
+            maximum = parse_quantity(profile_range.max, dimension).si_value
+            if not minimum <= level <= maximum:
+                raise SafetyViolation(
+                    f"{node_id}: Keithley {channel} {mode} level {level:g} SI is outside "
+                    f"the station range [{minimum:g}, {maximum:g}]."
+                )
         dut = self._dut_limits.keithley.get(channel)
         dut_range = (
             dut.current if dut is not None and mode == "current"
@@ -1656,13 +1657,14 @@ class RecipeCompiler:
             data.get("frequency"), DIMENSION_FREQUENCY, {}
         ).si_value
         limits = channel_settings.lab_limits.frequency
-        minimum = parse_quantity(limits.min, DIMENSION_FREQUENCY).si_value
-        maximum = parse_quantity(limits.max, DIMENSION_FREQUENCY).si_value
-        if not minimum <= frequency_hz <= maximum:
-            raise SafetyViolation(
-                f"{node_id}: Rigol CH{channel} frequency {frequency_hz:g} Hz is "
-                f"outside the station range [{minimum:g}, {maximum:g}] Hz."
-            )
+        if limits.enabled:
+            minimum = parse_quantity(limits.min, DIMENSION_FREQUENCY).si_value
+            maximum = parse_quantity(limits.max, DIMENSION_FREQUENCY).si_value
+            if not minimum <= frequency_hz <= maximum:
+                raise SafetyViolation(
+                    f"{node_id}: Rigol CH{channel} frequency {frequency_hz:g} Hz is "
+                    f"outside the station range [{minimum:g}, {maximum:g}] Hz."
+                )
         return {"channel": channel, "frequency_hz": frequency_hz}
 
     def _compile_anritsu_advanced(

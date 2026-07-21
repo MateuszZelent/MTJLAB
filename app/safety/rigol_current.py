@@ -142,13 +142,16 @@ def validate_rigol_waveform(
         )
 
     limits = channel.lab_limits
-    if waveform_normalized not in {"DC", "NOIS"}:
+    if waveform_normalized not in {"DC", "NOIS"} and limits.frequency.enabled:
         _enforce_range("frequency", freq_hz, limits.frequency.min, limits.frequency.max, DIMENSION_FREQUENCY)
-    _enforce_range("high_level", high_v, limits.high_level.min, limits.high_level.max, DIMENSION_VOLTAGE)
-    _enforce_range("low_level", low_v, limits.low_level.min, limits.low_level.max, DIMENSION_VOLTAGE)
-    if waveform_normalized != "DC":
+    if limits.high_level.enabled:
+        _enforce_range("high_level", high_v, limits.high_level.min, limits.high_level.max, DIMENSION_VOLTAGE)
+    if limits.low_level.enabled:
+        _enforce_range("low_level", low_v, limits.low_level.min, limits.low_level.max, DIMENSION_VOLTAGE)
+    if waveform_normalized != "DC" and limits.amplitude_vpp.enabled:
         _enforce_range("amplitude_vpp", high_v - low_v, limits.amplitude_vpp.min, limits.amplitude_vpp.max, DIMENSION_VOLTAGE)
-    _enforce_range("offset", (high_v + low_v) / 2.0, limits.offset.min, limits.offset.max, DIMENSION_VOLTAGE)
+    if limits.offset.enabled:
+        _enforce_range("offset", (high_v + low_v) / 2.0, limits.offset.min, limits.offset.max, DIMENSION_VOLTAGE)
 
     if dut_min_impedance is None:
         if dut_envelope is not None and dut_envelope.minimum_impedance_ohm is not None:
@@ -184,7 +187,11 @@ def validate_rigol_waveform(
         dut_min_impedance=dut_min_impedance,
         source_resistance=safety.fixed_source_resistance,
     )
-    current_limit = parse_quantity(limits.estimated_load_current.max_abs or limits.estimated_load_current.max, DIMENSION_CURRENT).si_value
+    current_limit = (
+        parse_quantity(limits.estimated_load_current.max_abs or limits.estimated_load_current.max, DIMENSION_CURRENT).si_value
+        if limits.estimated_load_current.enabled
+        else math.inf
+    )
     if dut_envelope is not None and dut_envelope.max_abs_current_a is not None:
         current_limit = min(current_limit, dut_envelope.max_abs_current_a)
     if estimate.peak_absolute_current_a > current_limit:
@@ -192,9 +199,14 @@ def validate_rigol_waveform(
             "Estimated Rigol load current "
             f"{estimate.peak_absolute_current_a:.9g} A exceeds the {current_limit:.9g} A limit."
         )
-    power_limit = parse_quantity(
-        limits.estimated_load_power.max_abs or limits.estimated_load_power.max, DIMENSION_POWER
-    ).si_value
+    power_limit = (
+        parse_quantity(
+            limits.estimated_load_power.max_abs or limits.estimated_load_power.max,
+            DIMENSION_POWER,
+        ).si_value
+        if limits.estimated_load_power.enabled
+        else math.inf
+    )
     if dut_envelope is not None and dut_envelope.max_abs_power_w is not None:
         power_limit = min(power_limit, dut_envelope.max_abs_power_w)
     if estimate.peak_estimated_dut_power_w > power_limit:
@@ -229,10 +241,12 @@ def validate_rigol_frequency_sweep(
         raise SafetyViolation("Sweep step count must be an integer.")
 
     limits = channel.lab_limits
-    _enforce_range("sweep_start", start_hz, limits.frequency.min, limits.frequency.max, DIMENSION_FREQUENCY)
-    _enforce_range("sweep_stop", stop_hz, limits.frequency.min, limits.frequency.max, DIMENSION_FREQUENCY)
-    _enforce_range("sweep_duration", duration_s, limits.sweep_duration.min, limits.sweep_duration.max, "time")
-    if not limits.sweep_steps.min <= steps <= limits.sweep_steps.max:
+    if limits.frequency.enabled:
+        _enforce_range("sweep_start", start_hz, limits.frequency.min, limits.frequency.max, DIMENSION_FREQUENCY)
+        _enforce_range("sweep_stop", stop_hz, limits.frequency.min, limits.frequency.max, DIMENSION_FREQUENCY)
+    if limits.sweep_duration.enabled:
+        _enforce_range("sweep_duration", duration_s, limits.sweep_duration.min, limits.sweep_duration.max, "time")
+    if limits.sweep_steps.enabled and not limits.sweep_steps.min <= steps <= limits.sweep_steps.max:
         raise SafetyViolation(
             f"sweep_steps={steps} outside configured range [{limits.sweep_steps.min}, {limits.sweep_steps.max}]."
         )

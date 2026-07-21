@@ -92,11 +92,15 @@ def validate_keithley_source(channel: KeithleyChannelSettings, request: Keithley
         raise SafetyViolation("Keithley sense mode must be 2wire or 4wire.")
     limits = channel.lab_limits
     if request.mode == "current":
-        _range_check("source current", request.level_si, limits.source_current.min, limits.source_current.max, DIMENSION_CURRENT)
-        _range_check("voltage compliance", request.compliance_si, limits.voltage_compliance.min, limits.voltage_compliance.max, DIMENSION_VOLTAGE)
+        if limits.source_current.enabled:
+            _range_check("source current", request.level_si, limits.source_current.min, limits.source_current.max, DIMENSION_CURRENT)
+        if limits.voltage_compliance.enabled:
+            _range_check("voltage compliance", request.compliance_si, limits.voltage_compliance.min, limits.voltage_compliance.max, DIMENSION_VOLTAGE)
     elif request.mode == "voltage":
-        _range_check("source voltage", request.level_si, limits.source_voltage.min, limits.source_voltage.max, DIMENSION_VOLTAGE)
-        _range_check("current compliance", request.compliance_si, limits.current_compliance.min, limits.current_compliance.max, DIMENSION_CURRENT)
+        if limits.source_voltage.enabled:
+            _range_check("source voltage", request.level_si, limits.source_voltage.min, limits.source_voltage.max, DIMENSION_VOLTAGE)
+        if limits.current_compliance.enabled:
+            _range_check("current compliance", request.compliance_si, limits.current_compliance.min, limits.current_compliance.max, DIMENSION_CURRENT)
     else:
         if request.level_si != 0 or request.compliance_si != 0:
             raise SafetyViolation("measure_only mode cannot set a source level or compliance.")
@@ -104,7 +108,11 @@ def validate_keithley_source(channel: KeithleyChannelSettings, request: Keithley
             raise SafetyViolation("measure_only mode does not use a source range; set source_autorange=true.")
     if request.mode != "measure_only":
         worst_case_power = abs(request.level_si * request.compliance_si)
-        max_power = parse_quantity(limits.max_abs_power, DIMENSION_POWER).si_value
+        max_power = (
+            parse_quantity(limits.max_abs_power, DIMENSION_POWER).si_value
+            if limits.max_abs_power_enabled
+            else math.inf
+        )
         power_limit_source = "station profile max_abs_power"
         if request.dut_envelope is not None:
             _validate_source_against_dut(request, request.dut_envelope)
@@ -113,7 +121,7 @@ def validate_keithley_source(channel: KeithleyChannelSettings, request: Keithley
                     power_limit_source = "DUT limit"
                 max_power = min(max_power, request.dut_envelope.max_abs_power_w)
         tolerance = max(max_power, 1.0) * 1e-12
-        if worst_case_power > max_power + tolerance:
+        if math.isfinite(max_power) and worst_case_power > max_power + tolerance:
             raise SafetyViolation(
                 "Worst-case source × compliance power "
                 f"{worst_case_power:.9g} W exceeds the {power_limit_source} "
@@ -248,9 +256,15 @@ def validate_keithley_measurement(
     dut_envelope: KeithleySafetyEnvelope | None = None,
 ) -> None:
     limits = channel.lab_limits
-    _range_check("measured current", current_a, limits.measured_current_trip.min, limits.measured_current_trip.max, DIMENSION_CURRENT)
-    _range_check("measured voltage", voltage_v, limits.measured_voltage_trip.min, limits.measured_voltage_trip.max, DIMENSION_VOLTAGE)
-    max_power = parse_quantity(limits.max_abs_power, DIMENSION_POWER).si_value
+    if limits.measured_current_trip.enabled:
+        _range_check("measured current", current_a, limits.measured_current_trip.min, limits.measured_current_trip.max, DIMENSION_CURRENT)
+    if limits.measured_voltage_trip.enabled:
+        _range_check("measured voltage", voltage_v, limits.measured_voltage_trip.min, limits.measured_voltage_trip.max, DIMENSION_VOLTAGE)
+    max_power = (
+        parse_quantity(limits.max_abs_power, DIMENSION_POWER).si_value
+        if limits.max_abs_power_enabled
+        else math.inf
+    )
     if dut_envelope is not None:
         _validate_optional_si_range(
             "measured current",
@@ -267,7 +281,7 @@ def validate_keithley_measurement(
         if dut_envelope.max_abs_power_w is not None:
             max_power = min(max_power, dut_envelope.max_abs_power_w)
     measured_power = abs(voltage_v * current_a)
-    if measured_power > max_power and not math.isclose(
+    if math.isfinite(max_power) and measured_power > max_power and not math.isclose(
         measured_power, max_power, rel_tol=1e-12, abs_tol=1e-15
     ):
         raise SafetyViolation(

@@ -287,7 +287,9 @@ class SettingsPage(QWidget):
         limits_title = StrongBodyLabel("Safety limits")
         limits_title.setObjectName("sectionTitle")
         limits_description = BodyLabel(
-            "Laboratory boundaries. Enter values with units, for example 10 mA, 67 mV or 1 MHz."
+            "Laboratory software boundaries. Enter values with units, for example "
+            "10 mA, 67 mV or 1 MHz. Disabling a limit does not disable immutable "
+            "instrument limits or DUT limits from a recipe."
         )
         limits_description.setObjectName("muted")
         limits_description.setWordWrap(True)
@@ -1093,6 +1095,26 @@ class SettingsPage(QWidget):
             unit.setObjectName("safetyLimitUnit")
             unit.setMinimumWidth(84)
             values_layout.addWidget(unit)
+            enabled_path = self._limit_enabled_path(min_path, scalar_limit)
+            enabled = self._limit_enabled_value(enabled_path)
+            disable_limit = CheckBox("Disable limit", row_widget)
+            disable_limit.setProperty("limitEnabledPath", enabled_path)
+            disable_limit.setChecked(not enabled)
+            disable_limit.setEnabled(not self._read_only)
+            disable_limit.setToolTip(
+                "Ignore this station-profile limit. Hardware and recipe DUT limits remain active."
+            )
+            disable_limit.toggled.connect(
+                lambda disabled, p=enabled_path, row=row_widget, editors=(
+                    minimum_editor,
+                    None if scalar_limit else maximum_editor,
+                ): self._set_limit_disabled(p, disabled, row, editors)
+            )
+            values_layout.addWidget(disable_limit)
+            minimum_editor.setEnabled(enabled and not self._read_only)
+            if not scalar_limit:
+                maximum_editor.setEnabled(enabled and not self._read_only)
+            row_widget.setProperty("limitDisabled", not enabled)
             row_layout.addLayout(values_layout)
             error = BodyLabel()
             error.setObjectName("settingsFieldError")
@@ -1106,6 +1128,40 @@ class SettingsPage(QWidget):
 
         content_layout.addStretch(1)
         self.limits_scroll.setWidget(content)
+
+    @staticmethod
+    def _limit_enabled_path(
+        value_path: tuple[str | int, ...], scalar_limit: bool
+    ) -> tuple[str | int, ...]:
+        if scalar_limit:
+            return value_path[:-1] + (f"{value_path[-1]}_enabled",)
+        return value_path[:-1] + ("enabled",)
+
+    def _limit_enabled_value(self, path: tuple[str | int, ...]) -> bool:
+        try:
+            return bool(self._get_path(self._raw, path))
+        except (KeyError, IndexError, TypeError):
+            return True
+
+    def _set_limit_disabled(
+        self,
+        path: tuple[str | int, ...],
+        disabled: bool,
+        row: QWidget,
+        editors: tuple[QLineEdit, QLineEdit | None],
+    ) -> None:
+        self._set_path(self._raw, path, not disabled)
+        for editor in editors:
+            if editor is not None:
+                editor.setEnabled(not disabled and not self._read_only)
+        row.setProperty("limitDisabled", disabled)
+        row.style().unpolish(row)
+        row.style().polish(row)
+        self._dirty = True
+        self.status.emit(
+            f"Safety limit {'disabled' if disabled else 'enabled'} in the draft. "
+            "Use Save changes to persist it."
+        )
 
     @staticmethod
     def _safety_boundary_label(text: str) -> QLabel:

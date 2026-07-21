@@ -45,7 +45,9 @@ def assert_anritsu_acquisition_allowed(safety: AnritsuSafety) -> None:
         raise SafetyViolation("Define the maximum expected RF power at the Anritsu input connector first.")
     if safety.rf_input.max_expected_power_at_connector is not None:
         parse_quantity(safety.rf_input.max_expected_power_at_connector, DIMENSION_DBM)
-    if safety.frequency.min is None or safety.frequency.max is None:
+    if safety.frequency.enabled and (
+        safety.frequency.min is None or safety.frequency.max is None
+    ):
         raise SafetyViolation("Define the permitted Anritsu frequency range before acquisition.")
 
 
@@ -87,13 +89,14 @@ def validate_anritsu_spectrum(
         raise SafetyViolation("Anritsu spectrum parameters must be finite numbers.")
     if start_hz <= 0 or stop_hz <= start_hz:
         raise SafetyViolation("The Anritsu spectrum range must satisfy 0 < start < stop.")
-    frequency_min = parse_quantity(safety.frequency.min, DIMENSION_FREQUENCY).si_value
-    frequency_max = parse_quantity(safety.frequency.max, DIMENSION_FREQUENCY).si_value
-    if start_hz < frequency_min or stop_hz > frequency_max:
-        raise SafetyViolation(
-            f"Anritsu range {start_hz:.9g}–{stop_hz:.9g} Hz is outside the configured range "
-            f"of {frequency_min:.9g}–{frequency_max:.9g} Hz."
-        )
+    if safety.frequency.enabled:
+        frequency_min = parse_quantity(safety.frequency.min, DIMENSION_FREQUENCY).si_value
+        frequency_max = parse_quantity(safety.frequency.max, DIMENSION_FREQUENCY).si_value
+        if start_hz < frequency_min or stop_hz > frequency_max:
+            raise SafetyViolation(
+                f"Anritsu range {start_hz:.9g}–{stop_hz:.9g} Hz is outside the configured range "
+                f"of {frequency_min:.9g}–{frequency_max:.9g} Hz."
+            )
     reference_min = ANRITSU_REFERENCE_LEVEL_MIN_DBM
     reference_max = ANRITSU_REFERENCE_LEVEL_MAX_DBM
     if reference_level_dbm < reference_min or reference_level_dbm > reference_max:
@@ -107,7 +110,7 @@ def validate_anritsu_spectrum(
             + ", ".join(str(value) for value in ANRITSU_SWEEP_POINT_COUNTS)
             + "."
         )
-    if not safety.sweep_points.min <= points <= safety.sweep_points.max:
+    if safety.sweep_points.enabled and not safety.sweep_points.min <= points <= safety.sweep_points.max:
         raise SafetyViolation(
             f"The Anritsu point count must be between {safety.sweep_points.min} "
             f"and {safety.sweep_points.max}."

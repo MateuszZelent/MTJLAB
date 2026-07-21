@@ -12,13 +12,14 @@ from uuid import uuid4
 
 from PySide6.QtCore import QMimeData, QSize, QSettings, QThread, QTimer, Qt, Signal
 from PySide6.QtGui import QAction, QActionGroup, QBrush, QCloseEvent, QColor, QDrag, QIcon, QKeySequence, QPainter, QPixmap, QShortcut
-from PySide6.QtWidgets import QAbstractItemView, QApplication, QComboBox, QCheckBox, QDialog, QDialogButtonBox, QFormLayout, QFrame, QHBoxLayout, QHeaderView, QLabel, QLineEdit, QMenu, QPlainTextEdit, QPushButton, QSizePolicy, QSplitter, QSpinBox, QStackedWidget, QStyle, QToolButton, QTreeWidget, QTreeWidgetItem, QVBoxLayout, QWidget
+from PySide6.QtWidgets import QAbstractItemView, QApplication, QComboBox, QCheckBox, QDialog, QDialogButtonBox, QFormLayout, QFrame, QGridLayout, QHBoxLayout, QHeaderView, QLabel, QLineEdit, QMenu, QPlainTextEdit, QPushButton, QSizePolicy, QSplitter, QSpinBox, QStackedWidget, QStyle, QToolButton, QTreeWidget, QTreeWidgetItem, QVBoxLayout, QWidget
 from qfluentwidgets import (
     BodyLabel,
     CaptionLabel,
     CardWidget,
     CommandBar,
     ComboBox,
+    FlowLayout,
     LineEdit,
     PlainTextEdit,
     PrimaryPushButton,
@@ -85,6 +86,12 @@ class RecipePage(QWidget):
     run_requested = Signal(object, bool)
     plan_preflight_changed = Signal(object)
     operator_row_role = int(Qt.ItemDataRole.UserRole) + 17
+    _FINALLY_ACTION_TYPES = {
+        "ramp_keithley_to_zero",
+        "set_keithley_output",
+        "set_rigol_output",
+        "set_anritsu_sg_output",
+    }
 
     def __init__(
         self,
@@ -147,6 +154,10 @@ class RecipePage(QWidget):
         )
         subtitle.setObjectName("muted")
         subtitle.setWordWrap(True)
+        subtitle.setMinimumWidth(0)
+        subtitle.setSizePolicy(
+            QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred
+        )
         hero_copy.addWidget(subtitle)
         hero_layout.addLayout(hero_copy, 1)
         self.recipe_profile_badge = StrongBodyLabel(
@@ -294,29 +305,37 @@ class RecipePage(QWidget):
         path_line.addWidget(self.path, 1)
         path_line.addWidget(self.restore_button)
         document_layout.addLayout(path_line)
-        execution_line = QHBoxLayout()
+        execution_line = QGridLayout()
         execution_line.setSpacing(8)
         execution_label = CaptionLabel("Execution mode", self.document_card)
-        execution_line.addWidget(execution_label)
-        execution_line.addWidget(self.execution_mode)
+        execution_line.addWidget(execution_label, 0, 0)
+        execution_line.addWidget(self.execution_mode, 0, 1)
         self.execution_mode_hint = CaptionLabel(
             "Normal measurement: OUTPUT actions in the recipe are executed.",
             self.document_card,
         )
         self.execution_mode_hint.setObjectName("muted")
         self.execution_mode_hint.setWordWrap(True)
-        execution_line.addWidget(self.execution_mode_hint, 1)
-        execution_line.addWidget(self.run_button)
+        self.execution_mode_hint.setMinimumWidth(0)
+        self.execution_mode_hint.setSizePolicy(
+            QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred
+        )
+        execution_line.addWidget(self.execution_mode_hint, 1, 0, 1, 3)
+        execution_line.addWidget(self.run_button, 0, 2)
+        execution_line.setColumnStretch(1, 1)
         document_layout.addLayout(execution_line)
         layout.addWidget(self.document_card)
         self.selection_card = CardWidget(self)
         self.selection_card.setObjectName("recipeSelectionCard")
-        builder_actions = QHBoxLayout(self.selection_card)
+        builder_actions = FlowLayout(
+            self.selection_card, needAni=False, isTight=True
+        )
         builder_actions.setContentsMargins(12, 8, 12, 8)
-        builder_actions.setSpacing(8)
+        builder_actions.setHorizontalSpacing(8)
+        builder_actions.setVerticalSpacing(8)
         selection_summary = QWidget(self.selection_card)
-        selection_summary.setMinimumWidth(120)
-        selection_summary.setMaximumWidth(180)
+        selection_summary.setMinimumWidth(180)
+        selection_summary.setMaximumWidth(220)
         selection_summary.setMinimumHeight(40)
         selection_copy = QVBoxLayout(selection_summary)
         selection_copy.setContentsMargins(0, 0, 0, 0)
@@ -329,7 +348,6 @@ class RecipePage(QWidget):
         selection_copy.addWidget(self.selection_title)
         selection_copy.addWidget(self.selection_context)
         builder_actions.addWidget(selection_summary)
-        builder_actions.addStretch(1)
         def tool_button(
             text: str, tooltip: str, icon: QStyle.StandardPixmap, *, primary: bool = False
         ) -> PushButton:
@@ -460,9 +478,18 @@ class RecipePage(QWidget):
         status_layout.setSpacing(2)
         self.version_label = CaptionLabel("No saved version history.", self.status_card)
         self.version_label.setObjectName("muted")
+        self.version_label.setWordWrap(True)
+        self.version_label.setMinimumWidth(0)
+        self.version_label.setSizePolicy(
+            QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred
+        )
         status_layout.addWidget(self.version_label)
         self.summary = BodyLabel("The recipe has not been compiled.", self.status_card)
         self.summary.setWordWrap(True)
+        self.summary.setMinimumWidth(0)
+        self.summary.setSizePolicy(
+            QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred
+        )
         status_layout.addWidget(self.summary)
         layout.addWidget(self.status_card)
         self.restore_button.clicked.connect(self.restore_autosave)
@@ -1062,6 +1089,13 @@ class RecipePage(QWidget):
             raise ConfigurationError(f"Unknown device module {device!r}.")
         if parent_id is None or branch is None:
             parent_id, branch = self._builder_parent()
+        if parent_id == "__finally__":
+            QMessageBox.warning(
+                self,
+                "Cannot add device",
+                "Finally accepts only ramp-to-zero and OUTPUT OFF safety actions.",
+            )
+            return
         if device == "anritsu_sg":
             node = {
                 "id": self._new_node_id("anritsu-sg"),
@@ -1154,6 +1188,10 @@ class RecipePage(QWidget):
             if not separator:
                 raise ConfigurationError(
                     f"Malformed library block identifier {drag_kind!r}."
+                )
+            if parent_id == "__finally__" and category in {"device", "flow"}:
+                raise ConfigurationError(
+                    "Finally accepts only ramp-to-zero and OUTPUT OFF safety actions."
                 )
             if category == "device":
                 self._library_add_device(
@@ -3222,6 +3260,15 @@ class RecipePage(QWidget):
             },
         }
         try:
+            if kind not in defaults:
+                raise ConfigurationError(f"Unknown recipe action {kind!r}.")
+            if (
+                parent_id == "__finally__"
+                and kind not in self._FINALLY_ACTION_TYPES
+            ):
+                raise ConfigurationError(
+                    "Finally accepts only ramp-to-zero and OUTPUT OFF safety actions."
+                )
             source = add_recipe_node(
                 self.editor.toPlainText(),
                 parent_id=parent_id,
@@ -3238,11 +3285,22 @@ class RecipePage(QWidget):
             QMessageBox.warning(self, "Add recipe node", str(exc))
 
     def _add_device_controls(self, device: str | None = None) -> None:
+        try:
+            parent_id, branch = self._builder_parent()
+        except Exception as exc:
+            QMessageBox.warning(self, "Add device control", str(exc))
+            return
+        if parent_id == "__finally__":
+            QMessageBox.warning(
+                self,
+                "Cannot add device control",
+                "Finally accepts only ramp-to-zero and OUTPUT OFF safety actions.",
+            )
+            return
         if device == "Keithley":
             dialog = KeithleySweepBuilderDialog(self._settings, self)
             if dialog.exec() != QDialog.DialogCode.Accepted:
                 return
-            parent_id, branch = self._builder_parent()
             try:
                 node = self._sweep_node_from_generator(
                     dialog.definition,
@@ -3265,7 +3323,6 @@ class RecipePage(QWidget):
             return
         definitions = picker.selected()
         operation = picker.operation_kind()
-        parent_id, branch = self._builder_parent()
         source = self.editor.toPlainText()
         added = 0
         for definition in definitions:
@@ -3459,12 +3516,11 @@ class RecipePage(QWidget):
             self._edit_legacy_rigol_configuration(configuration)
         elif configuration.type == "configure_anritsu":
             self._edit_legacy_anritsu_configuration(configuration)
-        elif configuration.type == "configure_anritsu_sg":
-            QMessageBox.information(
-                self,
-                "Anritsu SG settings",
-                "Signal-generator plan editing will be available in the Anritsu module.",
-            )
+        elif configuration.type in {
+            "configure_anritsu_advanced",
+            "configure_anritsu_sg",
+        }:
+            self._edit_action_node(configuration)
         else:
             QMessageBox.information(
                 self,

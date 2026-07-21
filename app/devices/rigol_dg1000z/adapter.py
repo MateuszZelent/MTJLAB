@@ -739,10 +739,11 @@ class RigolAdapter(DeviceAdapter):
         if config.rate_hz <= 0:
             raise SafetyViolation("Modulation frequency/rate must be positive.")
         rate_limits = channel.lab_limits.modulation_rate
-        minimum = parse_quantity(rate_limits.min, "frequency").si_value
-        maximum = parse_quantity(rate_limits.max, "frequency").si_value
-        if not minimum <= config.rate_hz <= maximum:
-            raise SafetyViolation("Modulation rate is outside the configured Rigol frequency range.")
+        if rate_limits.enabled:
+            minimum = parse_quantity(rate_limits.min, "frequency").si_value
+            maximum = parse_quantity(rate_limits.max, "frequency").si_value
+            if not minimum <= config.rate_hz <= maximum:
+                raise SafetyViolation("Modulation rate is outside the configured Rigol frequency range.")
         if config.parameter < 0:
             raise SafetyViolation("The modulation parameter cannot be negative.")
         session = self._require_session()
@@ -826,15 +827,17 @@ class RigolAdapter(DeviceAdapter):
         if config.duration_s <= 0 or min(config.start_hold_s, config.stop_hold_s, config.return_time_s) < 0:
             raise SafetyViolation("Sweep time must be positive; hold/return times cannot be negative.")
         advanced = channel.lab_limits
-        duration_min = parse_quantity(advanced.sweep_duration.min, "time").si_value
-        duration_max = parse_quantity(advanced.sweep_duration.max, "time").si_value
-        if not duration_min <= config.duration_s <= duration_max:
-            raise SafetyViolation("Sweep time is outside the configured range.")
-        if not advanced.sweep_steps.min <= config.steps <= advanced.sweep_steps.max:
+        if advanced.sweep_duration.enabled:
+            duration_min = parse_quantity(advanced.sweep_duration.min, "time").si_value
+            duration_max = parse_quantity(advanced.sweep_duration.max, "time").si_value
+            if not duration_min <= config.duration_s <= duration_max:
+                raise SafetyViolation("Sweep time is outside the configured range.")
+        if advanced.sweep_steps.enabled and not advanced.sweep_steps.min <= config.steps <= advanced.sweep_steps.max:
             raise SafetyViolation("Sweep step count is outside the configured range.")
         limits = channel.lab_limits.frequency
-        for value, name in ((config.start_hz, "start"), (config.stop_hz, "stop")):
-            self._enforce_frequency(value, limits.min, limits.max, f"Sweep {name}")
+        if limits.enabled:
+            for value, name in ((config.start_hz, "start"), (config.stop_hz, "stop")):
+                self._enforce_frequency(value, limits.min, limits.max, f"Sweep {name}")
         session = self._require_session()
         source = f":SOUR{config.channel}"
         session.write(f":OUTP{config.channel} OFF")
@@ -905,11 +908,12 @@ class RigolAdapter(DeviceAdapter):
         if config.cycles < 1 or config.period_s <= 0 or config.delay_s < 0:
             raise SafetyViolation("Burst requires cycles >= 1, period > 0, and delay >= 0.")
         limits = channel.lab_limits
-        period_min = parse_quantity(limits.burst_period.min, "time").si_value
-        period_max = parse_quantity(limits.burst_period.max, "time").si_value
-        if not period_min <= config.period_s <= period_max:
-            raise SafetyViolation("Burst period is outside the configured range.")
-        if not limits.burst_cycles.min <= config.cycles <= limits.burst_cycles.max:
+        if limits.burst_period.enabled:
+            period_min = parse_quantity(limits.burst_period.min, "time").si_value
+            period_max = parse_quantity(limits.burst_period.max, "time").si_value
+            if not period_min <= config.period_s <= period_max:
+                raise SafetyViolation("Burst period is outside the configured range.")
+        if limits.burst_cycles.enabled and not limits.burst_cycles.min <= config.cycles <= limits.burst_cycles.max:
             raise SafetyViolation("Burst cycle count is outside the configured range.")
         session = self._require_session()
         source = f":SOUR{config.channel}"

@@ -17,7 +17,11 @@ from app.domain.quantities import (
     parse_quantity,
 )
 from app.safety.anritsu import validate_anritsu_spectrum
-from app.safety.keithley import KeithleySourceRequest, validate_keithley_source
+from app.safety.keithley import (
+    KeithleySourceRequest,
+    validate_keithley_measurement,
+    validate_keithley_source,
+)
 from app.safety.rigol_current import validate_rigol_frequency_sweep, validate_rigol_waveform
 from app.settings import SettingsRepository
 from app.settings.models import StationSettings
@@ -121,6 +125,53 @@ class QuantityAndSafetyTests(unittest.TestCase):
             ValueError, "measured_voltage_trip.*voltage_compliance"
         ):
             StationSettings.model_validate(raw)
+
+    def test_disabled_keithley_software_limits_are_not_enforced(self) -> None:
+        raw = deepcopy(SettingsRepository(SETTINGS_TEMPLATE).load().raw)
+        limits = raw["devices"]["keithley"]["safety"]["channels"]["A"][
+            "lab_limits"
+        ]
+        raw["devices"]["keithley"]["safety"]["channels"]["A"]["enabled"] = True
+        for name in (
+            "source_current",
+            "voltage_compliance",
+            "measured_current_trip",
+            "measured_voltage_trip",
+        ):
+            limits[name]["enabled"] = False
+        limits["max_abs_power_enabled"] = False
+        settings = StationSettings.model_validate(raw)
+        channel = settings.keithley.safety.channels["A"]
+
+        validate_keithley_source(
+            channel,
+            KeithleySourceRequest("A", "current", 0.004, 0.67),
+        )
+        validate_keithley_measurement(channel, 0.159851, 0.00383496)
+
+    def test_disabled_station_limit_does_not_disable_hardware_limit(self) -> None:
+        raw = deepcopy(SettingsRepository(SETTINGS_TEMPLATE).load().raw)
+        limits = raw["devices"]["keithley"]["safety"]["channels"]["A"][
+            "lab_limits"
+        ]
+        raw["devices"]["keithley"]["safety"]["channels"]["A"]["enabled"] = True
+        limits["source_current"]["enabled"] = False
+        limits["voltage_compliance"]["enabled"] = False
+        limits["max_abs_power_enabled"] = False
+        channel = StationSettings.model_validate(raw).keithley.safety.channels["A"]
+
+        with self.assertRaisesRegex(SafetyViolation, "hardware maximum"):
+            validate_keithley_source(
+                channel,
+                KeithleySourceRequest(
+                    "A",
+                    "current",
+                    0.004,
+                    0.67,
+                    source_autorange=False,
+                    source_range_si=4.0,
+                ),
+            )
 
     def test_rigol_current_estimate_is_limited(self) -> None:
         settings = loaded_settings()

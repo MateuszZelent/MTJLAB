@@ -95,6 +95,7 @@ class RangeSettings(StrictModel):
     min: str
     max: str
     max_abs: str | None = None
+    enabled: bool = True
 
     def checked(self, dimension: str) -> "RangeSettings":
         lower = parse_quantity(self.min, dimension)
@@ -113,6 +114,7 @@ class CurrentEstimateSettings(RangeSettings):
 class IntegerRangeSettings(StrictModel):
     min: int
     max: int
+    enabled: bool = True
 
     @model_validator(mode="after")
     def validate_order(self) -> "IntegerRangeSettings":
@@ -124,6 +126,7 @@ class IntegerRangeSettings(StrictModel):
 class ImpedanceSettings(StrictModel):
     min: str
     nominal: str | None = None
+    enabled: bool = True
 
     @model_validator(mode="after")
     def validate_impedance(self) -> "ImpedanceSettings":
@@ -208,6 +211,7 @@ class KeithleyChannelLimits(StrictModel):
     measured_current_trip: RangeSettings
     measured_voltage_trip: RangeSettings
     max_abs_power: str
+    max_abs_power_enabled: bool = True
     ramp_current_step_max: str
     ramp_voltage_step_max: str
     sweep_points_max: int = 1000
@@ -221,34 +225,38 @@ class KeithleyChannelLimits(StrictModel):
         self.voltage_compliance.checked(DIMENSION_VOLTAGE)
         self.measured_current_trip.checked(DIMENSION_CURRENT)
         self.measured_voltage_trip.checked(DIMENSION_VOLTAGE)
-        self._require_trip_contains(
+        if self.source_current.enabled and self.measured_current_trip.enabled:
+            self._require_trip_contains(
             "source_current",
             self.source_current,
             "measured_current_trip",
             self.measured_current_trip,
             DIMENSION_CURRENT,
-        )
-        self._require_trip_contains(
+            )
+        if self.source_voltage.enabled and self.measured_voltage_trip.enabled:
+            self._require_trip_contains(
             "source_voltage",
             self.source_voltage,
             "measured_voltage_trip",
             self.measured_voltage_trip,
             DIMENSION_VOLTAGE,
-        )
-        self._require_compliance_inside_trip(
+            )
+        if self.current_compliance.enabled and self.measured_current_trip.enabled:
+            self._require_compliance_inside_trip(
             "current_compliance",
             self.current_compliance,
             "measured_current_trip",
             self.measured_current_trip,
             DIMENSION_CURRENT,
-        )
-        self._require_compliance_inside_trip(
+            )
+        if self.voltage_compliance.enabled and self.measured_voltage_trip.enabled:
+            self._require_compliance_inside_trip(
             "voltage_compliance",
             self.voltage_compliance,
             "measured_voltage_trip",
             self.measured_voltage_trip,
             DIMENSION_VOLTAGE,
-        )
+            )
         if parse_quantity(self.max_abs_power, DIMENSION_POWER).si_value <= 0:
             raise ValueError("max_abs_power must be positive")
         if parse_quantity(self.ramp_current_step_max, DIMENSION_CURRENT).si_value <= 0:
@@ -332,6 +340,7 @@ class OptionalRangeSettings(StrictModel):
 
     min: str | None
     max: str | None
+    enabled: bool = True
 
     def checked_if_complete(self, dimension: str) -> "OptionalRangeSettings":
         if (self.min is None) != (self.max is None):
@@ -382,7 +391,7 @@ class AnritsuSafety(StrictModel):
         # Null RF ranges intentionally lock acquisition until a lab owner fills them in.
         self.frequency.checked_if_complete(DIMENSION_FREQUENCY)
         if self.acquisition_allowed:
-            if self.frequency.min is None:
+            if self.frequency.enabled and self.frequency.min is None:
                 raise ValueError(
                     "Anritsu acquisition requires a complete frequency limit."
                 )
