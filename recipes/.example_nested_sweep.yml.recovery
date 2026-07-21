@@ -13,48 +13,57 @@ root:
     stop_frequency: 10 MHz
     reference_level: 0 dBm
     points: 1001
-  - id: keithley-current-sweep
-    type: sweep
-    target: keithley.B.current
-    start: 1 mA
-    stop: 10 mA
-    points: 100
-    spacing: linear
+  - id: repeat-9cefc141
+    type: repeat
     children:
-    - id: keithley-b-config
-      type: configure_keithley
-      channel: B
-      mode: current
-      level: ${keithley.B.current}
-      compliance: 67 mV
-      nplc: 1.0
-    - id: rigol-high-level-sweep
+    - id: keithley-current-sweep
       type: sweep
-      target: rigol.1.high_level
-      start: 1 mV
-      stop: 3 mV
-      points: 20
+      target: keithley.B.current
+      start: 1 mA
+      stop: 10 mA
+      points: 100
       spacing: linear
       children:
-      - id: rigol-ch1-config
-        type: configure_rigol
-        channel: 1
-        waveform: SQU
-        frequency: 1 kHz
-        high_level: ${rigol.1.high_level}
-        low_level: -1 mV
-        output_load: HIGHZ
-        dut_min_impedance: 50 ohm
-      - id: wait-for-settle
+      - id: keithley-b-config
+        type: configure_keithley
+        channel: B
+        mode: current
+        level: ${keithley.B.current}
+        compliance: 67 mV
+        nplc: 1.0
+      - id: wait-a28867db
         type: wait
         duration: 100 ms
-      - id: measure-keithley-b
-        type: measure_keithley
-        channel: B
-      - id: acquire-spectrum
-        type: acquire_spectrum
-        trace: TRAC1
-
+      - id: rigol-high-level-sweep
+        type: sweep
+        target: rigol.1.high_level
+        start: 1 mV
+        stop: 3 mV
+        points: 20
+        spacing: linear
+        children:
+        - id: rigol-ch1-config
+          type: configure_rigol
+          channel: 1
+          waveform: SQU
+          frequency: 1 kHz
+          high_level: ${rigol.1.high_level}
+          low_level: -1 mV
+          output_load: HIGHZ
+          dut_min_impedance: 50 ohm
+        - id: wait-for-settle
+          type: wait
+          duration: 100 ms
+        - id: measure-keithley-b
+          type: measure_keithley
+          channel: B
+        - id: acquire-spectrum
+          type: acquire_spectrum
+          trace: TRAC1
+    - id: comment-b3e08999
+      type: comment
+      text: Add repeated actions here
+    count: 4
 finally:
 - id: rigol-ch1-off-finally
   type: set_rigol_output

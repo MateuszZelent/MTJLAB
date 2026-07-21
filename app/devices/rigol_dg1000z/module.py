@@ -30,6 +30,8 @@ def _dispatch(adapter: DeviceAdapter, operation: str, payload: object) -> object
         "configure_burst": lambda: adapter.configure_burst(payload),
         "trigger_burst": lambda: adapter.trigger_burst(payload),
         "synchronize_phases": adapter.synchronize_phases,
+        "configure_counter": lambda: adapter.configure_counter(payload),
+        "read_counter": adapter.read_counter,
     }
     if operation == "set_output":
         channel, enabled = payload  # type: ignore[misc]
@@ -53,6 +55,20 @@ def _dispatch(adapter: DeviceAdapter, operation: str, payload: object) -> object
             return adapter.update_amplitude_vpp(channel, float(value_si))
         if field == "offset":
             return adapter.update_offset(channel, float(value_si))
+        if field == "high_level":
+            config = adapter.last_channel_config(channel)
+            return adapter.update_levels(
+                channel,
+                high_level_v=float(value_si),
+                low_level_v=config.low_level_v,
+            )[0]
+        if field == "low_level":
+            config = adapter.last_channel_config(channel)
+            return adapter.update_levels(
+                channel,
+                high_level_v=config.high_level_v,
+                low_level_v=float(value_si),
+            )[1]
         raise ValueError(
             f"Unsupported Rigol quick-control target {payload.target!r}."
         )

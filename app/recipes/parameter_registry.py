@@ -269,6 +269,8 @@ QUICK_CONTROL_DESCRIPTORS: Final[tuple[QuickControlDescriptor, ...]] = (
         for channel in (1, 2)
         for field, label, dimension, default in (
             ("frequency", "Frequency", DIMENSION_FREQUENCY, "1.000 kHz"),
+            ("high_level", "High level", DIMENSION_VOLTAGE, "1.000 V"),
+            ("low_level", "Low level", DIMENSION_VOLTAGE, "-1.000 V"),
             ("amplitude", "Amplitude Vpp", DIMENSION_VOLTAGE, "1.000 V"),
             ("offset", "Offset", DIMENSION_VOLTAGE, "0.000 V"),
         )

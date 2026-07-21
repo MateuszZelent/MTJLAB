@@ -120,6 +120,7 @@ class RigolNodeEditorDialog(FluentRecipeDialog):
             ("SYNC delay", self.sync_delay),
         ):
             form.addRow(label, widget)
+        self.carrier_form = form
         content.addWidget(carrier)
         actions_frame = CardWidget(self)
         actions_layout = QFormLayout(actions_frame)
@@ -165,9 +166,31 @@ class RigolNodeEditorDialog(FluentRecipeDialog):
         footer.addWidget(self.apply_button)
         self.apply_button.clicked.connect(self.accept)
         self.cancel_button.clicked.connect(self.reject)
+        self.waveform.currentTextChanged.connect(self._waveform_changed)
+        self.high_level.editingFinished.connect(self._sync_dc_level)
         layout.addLayout(footer)
         self.load_plan_actions(parameter_actions or [])
         self._selection_changed()
+        self._waveform_changed(self.waveform.currentText())
+
+    def _sync_dc_level(self) -> None:
+        if self.waveform.currentText() == "DC":
+            self.low_level.setText(self.high_level.text())
+
+    def _waveform_changed(self, waveform: str) -> None:
+        is_dc = waveform == "DC"
+        self.carrier_form.setRowVisible(self.frequency, not is_dc)
+        self.carrier_form.setRowVisible(self.low_level, not is_dc)
+        self.carrier_form.setRowVisible(self.phase, not is_dc)
+        high_label = self.carrier_form.labelForField(self.high_level)
+        if high_label is not None:
+            high_label.setText("DC level" if is_dc else "HighL")
+        if is_dc:
+            self._sync_dc_level()
+        for selector in self.parameter_selectors.values():
+            selector.setEnabled(not is_dc)
+            if is_dc:
+                selector.setCurrentIndex(selector.findData("set"))
 
     def selected_channel(self) -> int:
         return int(self.channel.currentData())
@@ -176,12 +199,18 @@ class RigolNodeEditorDialog(FluentRecipeDialog):
         return str(self.output_policy.currentData())
 
     def configuration_snapshot(self) -> RigolConfigurationSnapshot:
+        high_level = self.high_level.text().strip()
+        low_level = (
+            high_level
+            if self.waveform.currentText() == "DC"
+            else self.low_level.text().strip()
+        )
         return RigolConfigurationSnapshot(
             channel=self.selected_channel(),
             waveform=self.waveform.currentText(),
             frequency=self.frequency.text().strip(),
-            high_level=self.high_level.text().strip(),
-            low_level=self.low_level.text().strip(),
+            high_level=high_level,
+            low_level=low_level,
             output_load=self.output_load.text().strip(),
             phase_deg=self.phase.text().strip(),
             square_duty_percent=self.duty.text().strip(),
@@ -199,10 +228,15 @@ class RigolNodeEditorDialog(FluentRecipeDialog):
         )
 
     def planned_parameter_actions(self) -> list[dict[str, object]]:
+        high_level = self.high_level.text().strip()
         values = {
             "carrier.frequency": self.frequency.text().strip(),
-            "carrier.high_level": self.high_level.text().strip(),
-            "carrier.low_level": self.low_level.text().strip(),
+            "carrier.high_level": high_level,
+            "carrier.low_level": (
+                high_level
+                if self.waveform.currentText() == "DC"
+                else self.low_level.text().strip()
+            ),
         }
         result: list[dict[str, object]] = []
         for parameter_id, selector in self.parameter_selectors.items():
@@ -339,4 +373,3 @@ class RigolNodeEditorDialog(FluentRecipeDialog):
                 QMessageBox.warning(self, "Rigol configuration", str(exc))
                 return
         super().accept()
-

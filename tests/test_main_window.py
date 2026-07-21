@@ -158,9 +158,8 @@ class MainWindowTests(unittest.TestCase):
             for controller in window._controllers.values():
                 controller.call = Mock()
 
-            with patch.object(
-                QMessageBox,
-                "warning",
+            with patch(
+                "app.ui.shell.main_window.QMessageBox.warning",
                 return_value=QMessageBox.StandardButton.Yes,
             ):
                 window._emergency_off_all()
@@ -770,8 +769,9 @@ class MainWindowTests(unittest.TestCase):
             )
             try:
                 resource = "USB0::NEW_RIGOL::INSTR"
-                with patch.object(
-                    QMessageBox, "question", return_value=QMessageBox.StandardButton.Yes
+                with patch(
+                    "app.ui.shell.main_window.QMessageBox.question",
+                    return_value=QMessageBox.StandardButton.Yes,
                 ):
                     window._save_discovered_assignments(
                         {"rigol": (resource, "@py", "RIGOL TECHNOLOGIES,DG1032Z,NEW,1")}
@@ -1243,8 +1243,9 @@ class MainWindowTests(unittest.TestCase):
                 )
                 window.dashboard._scan_completed((result,))
                 card = window.dashboard.cards["anritsu"]
-                with patch.object(
-                    QMessageBox, "question", return_value=int(QMessageBox.StandardButton.Yes)
+                with patch(
+                    "app.ui.shell.main_window.QMessageBox.question",
+                    return_value=int(QMessageBox.StandardButton.Yes),
                 ):
                     card.assign_button.click()
                 QTest.qWait(100)
@@ -1369,9 +1370,8 @@ class MainWindowTests(unittest.TestCase):
                 authenticated_username=TEST_ENGINEER,
             )
             try:
-                with patch.object(
-                    QMessageBox,
-                    "question",
+                with patch(
+                    "app.ui.shell.main_window.QMessageBox.question",
                     return_value=QMessageBox.StandardButton.Yes,
                 ):
                     window._save_moke_assignment("131.246.221.33:10001")
@@ -1901,9 +1901,8 @@ class MainWindowTests(unittest.TestCase):
 
             self.assertTrue(button.isEnabled())
             self.assertIn("output permission enabled", keithley.output_readiness.text())
-            with patch.object(
-                QMessageBox,
-                "warning",
+            with patch(
+                "app.devices.keithley_2600.ui.page.QMessageBox.warning",
                 return_value=QMessageBox.StandardButton.Yes,
             ):
                 button.click()
@@ -2095,7 +2094,9 @@ class MainWindowTests(unittest.TestCase):
             self.assertEqual(anritsu.sg_status.property("outputState"), "active")
             self.assertEqual(anritsu.sg_on.property("controlState"), "energized")
             self.assertTrue(anritsu.sg_on.isChecked())
-            self.assertTrue(anritsu.sg_on.isEnabled())
+            # The active state remains visibly checked, while the redundant
+            # ON command is disabled and the safe OFF action stays available.
+            self.assertFalse(anritsu.sg_on.isEnabled())
             self.assertTrue(anritsu.sg_off.isEnabled())
 
             anritsu._set_sg_output_state(None)
@@ -2462,9 +2463,8 @@ class MainWindowTests(unittest.TestCase):
             anritsu._controller.call.assert_not_called()
 
             anritsu._latest_trace = second
-            with patch.object(
-                QMessageBox,
-                "question",
+            with patch(
+                "app.devices.anritsu_ms2830a.ui.page.QMessageBox.question",
                 return_value=QMessageBox.StandardButton.No,
             ):
                 anritsu.capture_current_reference()
@@ -3443,9 +3443,8 @@ class MainWindowTests(unittest.TestCase):
             try:
                 anritsu = window.anritsu_page
                 anritsu._controller.call = Mock()
-                with patch.object(
-                    QMessageBox,
-                    "question",
+                with patch(
+                    "app.devices.anritsu_ms2830a.ui.page.QMessageBox.question",
                     return_value=QMessageBox.StandardButton.Save,
                 ):
                     anritsu.read_and_save_configuration.click()

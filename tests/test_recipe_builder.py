@@ -16,7 +16,6 @@ from PySide6.QtWidgets import (
     QDialogButtonBox,
     QFileDialog,
     QHeaderView,
-    QMessageBox,
     QTreeWidgetItem,
 )
 from PySide6.QtCore import QMimeData, QPoint, Qt

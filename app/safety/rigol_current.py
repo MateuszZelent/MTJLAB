@@ -132,6 +132,12 @@ def validate_rigol_waveform(
     freq_hz = parse_quantity(frequency, DIMENSION_FREQUENCY, require_unit=not isinstance(frequency, (int, float))).si_value
     high_v = parse_quantity(high_level, DIMENSION_VOLTAGE, require_unit=not isinstance(high_level, (int, float))).si_value
     low_v = parse_quantity(low_level, DIMENSION_VOLTAGE, require_unit=not isinstance(low_level, (int, float))).si_value
+    if waveform_normalized == "DC" and not math.isclose(
+        high_v, low_v, rel_tol=1e-12, abs_tol=1e-12
+    ):
+        raise SafetyViolation(
+            "DC mode requires one DC level; the internal configuration supplied two different voltages."
+        )
     if waveform_normalized != "DC" and high_v <= low_v:
         raise SafetyViolation("HighL must be greater than LowL for non-DC waveforms.")
     hardware_max_hz = _DG1032Z_MAX_FREQUENCY_HZ.get(waveform_normalized)
@@ -144,9 +150,9 @@ def validate_rigol_waveform(
     limits = channel.lab_limits
     if waveform_normalized not in {"DC", "NOIS"} and limits.frequency.enabled:
         _enforce_range("frequency", freq_hz, limits.frequency.min, limits.frequency.max, DIMENSION_FREQUENCY)
-    if limits.high_level.enabled:
+    if waveform_normalized != "DC" and limits.high_level.enabled:
         _enforce_range("high_level", high_v, limits.high_level.min, limits.high_level.max, DIMENSION_VOLTAGE)
-    if limits.low_level.enabled:
+    if waveform_normalized != "DC" and limits.low_level.enabled:
         _enforce_range("low_level", low_v, limits.low_level.min, limits.low_level.max, DIMENSION_VOLTAGE)
     if waveform_normalized != "DC" and limits.amplitude_vpp.enabled:
         _enforce_range("amplitude_vpp", high_v - low_v, limits.amplitude_vpp.min, limits.amplitude_vpp.max, DIMENSION_VOLTAGE)

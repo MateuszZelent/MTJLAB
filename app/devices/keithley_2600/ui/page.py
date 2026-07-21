@@ -962,6 +962,7 @@ class _KeithleyFloatingPanelWindow(StationDialog):
 class KeithleyPage(QWidget):
     status = Signal(str)
     quick_controls_requested = Signal()
+    quick_setpoint_requested = Signal(str, str)
     settings_assignment_requested = Signal(object)
     settings_defaults_requested = Signal(object)
     _MANUAL_RAMP_ENABLED = False
@@ -1246,6 +1247,7 @@ class KeithleyPage(QWidget):
             self.measure_current_range,
         ):
             editor.editingFinished.connect(self._persist_form_defaults)
+        self.level.editingFinished.connect(self._submit_active_source_level)
         self.sense_mode.currentIndexChanged.connect(self._persist_form_defaults)
         self.source_autorange.toggled.connect(
             lambda enabled: self._autorange_changed(
@@ -1271,6 +1273,55 @@ class KeithleyPage(QWidget):
             measure=measure,
             output_toggle=self.output_toggle,
         )
+
+    def _submit_active_source_level(self) -> None:
+        """Apply the visible source level when the selected OUTPUT is confirmed ON."""
+
+        channel = self.channel.currentText()
+        mode = self.mode.currentText()
+        if (
+            mode not in {"current", "voltage"}
+            or not self._output_states[channel]
+            or not self._output_state_known[channel]
+        ):
+            return
+        dimension = DIMENSION_CURRENT if mode == "current" else DIMENSION_VOLTAGE
+        try:
+            value = parse_quantity(self.level.text(), dimension)
+        except Exception as exc:
+            self.banner.show_message(
+                f"Keithley CH {channel}: invalid active setpoint: {exc}",
+                severity="error",
+                timeout_ms=12_000,
+            )
+            return
+        self.quick_setpoint_requested.emit(
+            f"keithley.{channel}.{mode}",
+            format_quantity_auto(value.si_value, dimension),
+        )
+
+    def quick_setpoint_state_changed(self, target: str, state: str, detail: str) -> None:
+        if not target.startswith("keithley."):
+            return
+        if state == "rejected":
+            self.banner.show_message(
+                f"Active Keithley change rejected: {detail}",
+                severity="error",
+                timeout_ms=15_000,
+            )
+        elif state == "applied":
+            self.status.emit(f"Keithley active setpoint verified: {detail}")
+
+    def quick_setpoint_value_read(self, target: str, value_si: float) -> None:
+        parts = target.split(".")
+        if len(parts) != 3 or parts[0] != "keithley":
+            return
+        _device, channel, mode = parts
+        if channel != self.channel.currentText() or mode != self.mode.currentText():
+            return
+        dimension = DIMENSION_CURRENT if mode == "current" else DIMENSION_VOLTAGE
+        self.level.setText(format_quantity_auto(value_si, dimension))
+        self._persist_form_defaults()
 
     @staticmethod
     def _scroll_widget(content: QWidget) -> ScrollArea:
@@ -1470,7 +1521,7 @@ class KeithleyPage(QWidget):
         # The history keeps elapsed seconds from the start of this page.  Move
         # the visible viewport with the rolling retention window; otherwise
         # points collected after 30 s remain in the data model but drift out of
-        # the original 0â€“30 s view.
+        # the original 0–30 s view.
         latest_elapsed_s = history[-1]["elapsed_s"] if history else 0.0
         plot.plot.setXRange(
             max(0.0, latest_elapsed_s - self._history_window_s),

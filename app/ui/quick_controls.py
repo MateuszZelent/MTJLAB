@@ -86,6 +86,7 @@ class QuickControlCoordinator(QObject):
         _bounded, limited, detail = self.bound_value(target, value_si)
         if limited:
             self.state_changed.emit(target, "rejected", detail)
+            self._controllers[descriptor.device_module].call("quick_readback")
             return
         self._sequence += 1
         request = QuickSetpoint(target, text, value_si, self._sequence)
@@ -158,6 +159,7 @@ class QuickControlCoordinator(QObject):
         request = self._inflight[device]
         self._inflight[device] = None
         if request is not None:
+            self.value_read.emit(request.target, float(result))
             self.state_changed.emit(
                 request.target,
                 "applied",
@@ -172,6 +174,7 @@ class QuickControlCoordinator(QObject):
         self._inflight[device] = None
         if request is not None:
             self.state_changed.emit(request.target, "rejected", error)
+        self._controllers[device].call("quick_readback")
         self._send_next(device)
 
     def _device_state(self, device: str, state: str) -> None:

@@ -153,11 +153,44 @@ class RigolSimulator(_BaseSimulator):
         self.sweep = {1: False, 2: False}
         self.burst = {1: False, 2: False}
         self.programmed_scpi: dict[str, str] = {}
+        self.counter_state = "OFF"
+        self.counter_coupling = "AC"
+        self.counter_gate = "USER1"
+        self.counter_hf = False
+        self.counter_level = 0.0
+        self.counter_sensitivity = 25.0
 
     def _write(self, command: str) -> None:
         assignment = re.match(r"^(:[A-Za-z0-9:]+)\s+(.+)$", command)
         if assignment:
             self.programmed_scpi[assignment.group(1).upper()] = assignment.group(2)
+        if command.upper() == ":COUN:AUTO":
+            self.counter_gate = "USER1"
+            return
+        match = re.match(r"^:COUN\s+(ON|OFF|RUN|STOP|SINGLE)$", command, re.IGNORECASE)
+        if match:
+            self.counter_state = match.group(1).upper()
+            return
+        match = re.match(r"^:COUN:COUP\s+(AC|DC)$", command, re.IGNORECASE)
+        if match:
+            self.counter_coupling = match.group(1).upper()
+            return
+        match = re.match(r"^:COUN:GATE\s+(USER[1-6])$", command, re.IGNORECASE)
+        if match:
+            self.counter_gate = match.group(1).upper()
+            return
+        match = re.match(r"^:COUN:HF\s+(ON|OFF)$", command, re.IGNORECASE)
+        if match:
+            self.counter_hf = match.group(1).upper() == "ON"
+            return
+        match = re.match(rf"^:COUN:LEVE\s+({_SCPI_NUMBER})$", command, re.IGNORECASE)
+        if match:
+            self.counter_level = float(match.group(1))
+            return
+        match = re.match(rf"^:COUN:SENS\s+({_SCPI_NUMBER})$", command, re.IGNORECASE)
+        if match:
+            self.counter_sensitivity = float(match.group(1))
+            return
         match = re.match(r"^:OUTP([12])\s+(ON|OFF)$", command, re.IGNORECASE)
         if match:
             self.output[int(match.group(1))] = match.group(2).upper() == "ON"
@@ -238,6 +271,17 @@ class RigolSimulator(_BaseSimulator):
                 self.high[channel] = value
             else:
                 self.low[channel] = value
+            return
+        match = re.match(
+            rf"^:SOUR([12]):VOLT:OFFS\s+({_SCPI_NUMBER})$",
+            command,
+            re.IGNORECASE,
+        )
+        if match:
+            channel, value = int(match.group(1)), float(match.group(2))
+            amplitude = self.high[channel] - self.low[channel]
+            self.high[channel] = value + amplitude / 2.0
+            self.low[channel] = value - amplitude / 2.0
 
     def _query(self, command: str) -> str:
         if command == "*IDN?":
@@ -248,6 +292,24 @@ class RigolSimulator(_BaseSimulator):
             return "2"
         if command == ":SYST:ERR?":
             return "0,No error"
+        if command.upper() == ":COUN?":
+            return self.counter_state
+        if command.upper() == ":COUN:COUP?":
+            return self.counter_coupling
+        if command.upper() == ":COUN:GATE?":
+            return self.counter_gate
+        if command.upper() == ":COUN:HF?":
+            return "ON" if self.counter_hf else "OFF"
+        if command.upper() == ":COUN:LEVE?":
+            return f"{self.counter_level:.12g}"
+        if command.upper() == ":COUN:SENS?":
+            return f"{self.counter_sensitivity:.12g}"
+        if command.upper() == ":COUN:MEAS?":
+            return "1000,0.001,50,0.0005,0.0005"
+        match = re.match(r"^:SOUR([12]):VOLT:OFFS\?$", command, re.IGNORECASE)
+        if match:
+            channel = int(match.group(1))
+            return str((self.high[channel] + self.low[channel]) / 2.0)
         match = re.match(r"^:OUTP([12])\?$", command, re.IGNORECASE)
         if match:
             return "ON" if self.output[int(match.group(1))] else "OFF"

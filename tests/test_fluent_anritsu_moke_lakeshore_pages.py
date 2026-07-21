@@ -274,8 +274,9 @@ class FluentLakeShorePageTests(unittest.TestCase):
             assignment_index = row.assignment.findData("lakeshore_gaussmeter")
             self.assertGreaterEqual(assignment_index, 0)
             row.assignment.setCurrentIndex(assignment_index)
-            with patch.object(
-                QMessageBox, "question", return_value=QMessageBox.StandardButton.Yes
+            with patch(
+                "app.ui.shell.main_window.QMessageBox.question",
+                return_value=QMessageBox.StandardButton.Yes,
             ):
                 row.assign_button.click()
             self.application.processEvents()

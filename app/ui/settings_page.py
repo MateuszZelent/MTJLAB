@@ -1385,7 +1385,7 @@ class SettingsPage(QWidget):
         # prefix after editing (for example 6700 uW -> 6.7 mW).  A duplicated
         # fixed suffix would incorrectly imply that the editor is unitless.
         unit = "explicit unit"
-        values = (scope, parameter, value, "â€”", unit, "â€”", "Station configuration")
+        values = (scope, parameter, value, "—", unit, "—", "Station configuration")
         for column, text in enumerate(values):
             item = QTableWidgetItem(text)
             if column == 2:

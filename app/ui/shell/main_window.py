@@ -263,6 +263,24 @@ class MainWindow(FluentWindow):
             self.quick_control_coordinator, self
         )
         self.quick_controls_window.restore_workspace()
+        self.rigol_page.quick_setpoint_requested.connect(
+            self.quick_control_coordinator.submit
+        )
+        self.keithley_page.quick_setpoint_requested.connect(
+            self.quick_control_coordinator.submit
+        )
+        self.quick_control_coordinator.state_changed.connect(
+            self.rigol_page.quick_setpoint_state_changed
+        )
+        self.quick_control_coordinator.state_changed.connect(
+            self.keithley_page.quick_setpoint_state_changed
+        )
+        self.quick_control_coordinator.value_read.connect(
+            self.rigol_page.quick_setpoint_value_read
+        )
+        self.quick_control_coordinator.value_read.connect(
+            self.keithley_page.quick_setpoint_value_read
+        )
         self.anritsu_page.quick_controls_requested.connect(
             self._show_quick_controls
         )

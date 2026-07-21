@@ -88,4 +88,10 @@ def quick_control_safety_bounds(
         bounds[f"rigol.{channel}.offset"] = _effective_range(
             limits.offset, "voltage"
         )
+        bounds[f"rigol.{channel}.high_level"] = _effective_range(
+            limits.high_level, "voltage"
+        )
+        bounds[f"rigol.{channel}.low_level"] = _effective_range(
+            limits.low_level, "voltage"
+        )
     return bounds
