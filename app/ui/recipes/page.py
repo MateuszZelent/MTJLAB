@@ -645,7 +645,7 @@ class RecipePage(QWidget):
             drag_kind="device:anritsu_sg",
         )
 
-        outputs = group("Output control", "4")
+        outputs = group("Output control", "5")
         action(
             outputs,
             "Keithley A OUTPUT ON",
@@ -681,6 +681,15 @@ class RecipePage(QWidget):
             QStyle.StandardPixmap.SP_MediaPlay,
             lambda: self._library_add_output_on("rigol", 2),
             drag_kind="output:rigol_2",
+        )
+        action(
+            outputs,
+            "Anritsu SG RF OUTPUT ON",
+            "Enable RF with the required internal one-shot interlock",
+            "anritsu",
+            QStyle.StandardPixmap.SP_MediaPlay,
+            lambda: self._library_add_output_on("anritsu_sg", None),
+            drag_kind="output:anritsu_sg",
         )
 
         acquisition = group("Acquisition", "3")
@@ -756,7 +765,7 @@ class RecipePage(QWidget):
             drag_kind="safety:anritsu_sg",
         )
 
-        flow = group("Flow", "6")
+        flow = group("Flow", "4")
         action(
             flow, "Wait", "Add a settling delay", "timing",
             QStyle.StandardPixmap.SP_BrowserReload,
@@ -780,24 +789,6 @@ class RecipePage(QWidget):
             QStyle.StandardPixmap.SP_MessageBoxInformation,
             lambda: self._library_add_basic("comment"),
             drag_kind="flow:comment",
-        )
-        action(
-            flow,
-            "Anritsu SG ARM",
-            "Create one short-lived permission token for the next RF ON step",
-            "anritsu",
-            QStyle.StandardPixmap.SP_DialogApplyButton,
-            lambda: self._library_add_basic("arm_anritsu_sg_output"),
-            drag_kind="flow:arm_anritsu_sg_output",
-        )
-        action(
-            flow,
-            "Anritsu SG RF ON",
-            "Enable RF using a fresh ARM token; blocked by preflight unless approved",
-            "anritsu",
-            QStyle.StandardPixmap.SP_MediaPlay,
-            lambda: self._library_add_basic("set_anritsu_sg_output_on"),
-            drag_kind="flow:set_anritsu_sg_output_on",
         )
         layout.addStretch(1)
         hint = BodyLabel(
@@ -868,47 +859,55 @@ class RecipePage(QWidget):
     def _library_add_output_on(
         self,
         device: str,
-        channel: str | int,
+        channel: str | int | None,
         *,
         parent_id: str | None = None,
         branch: str | None = None,
         index: int | None = None,
     ) -> None:
-        if parent_id is None or branch is None:
-            parent_id, branch = self._builder_parent()
-        if parent_id == "__finally__":
-            raise ConfigurationError("OUTPUT ON cannot be added to Finally.")
-        if device == "keithley":
-            if channel not in {"A", "B"}:
-                raise ConfigurationError("Keithley OUTPUT ON requires channel A or B.")
-            node = {
-                "id": self._new_node_id("keithley-output-on"),
-                "type": "set_keithley_output",
-                "channel": channel,
-                "enabled": True,
-            }
-        elif device == "rigol":
-            if channel not in {1, 2}:
-                raise ConfigurationError("Rigol OUTPUT ON requires channel 1 or 2.")
-            node = {
-                "id": self._new_node_id("rigol-output-on"),
-                "type": "enable_rigol_output",
-                "channel": channel,
-            }
-        else:
-            raise ConfigurationError(f"Unknown output device {device!r}.")
-        source = add_recipe_node(
-            self.editor.toPlainText(),
-            parent_id=parent_id,
-            branch=branch,
-            index=index,
-            node=node,
-        )
-        self._apply_builder_source(
-            source,
-            f"Added {device} channel {channel} OUTPUT ON",
-            selected_node_id=str(node["id"]),
-        )
+        try:
+            if parent_id is None or branch is None:
+                parent_id, branch = self._builder_parent()
+            if parent_id == "__finally__":
+                raise ConfigurationError("OUTPUT ON cannot be added to Finally.")
+            if device == "keithley":
+                if channel not in {"A", "B"}:
+                    raise ConfigurationError("Keithley OUTPUT ON requires channel A or B.")
+                node = {
+                    "id": self._new_node_id("keithley-output-on"),
+                    "type": "set_keithley_output",
+                    "channel": channel,
+                    "enabled": True,
+                }
+            elif device == "rigol":
+                if channel not in {1, 2}:
+                    raise ConfigurationError("Rigol OUTPUT ON requires channel 1 or 2.")
+                node = {
+                    "id": self._new_node_id("rigol-output-on"),
+                    "type": "enable_rigol_output",
+                    "channel": channel,
+                }
+            elif device == "anritsu_sg":
+                node = {
+                    "id": self._new_node_id("anritsu-sg-output-on"),
+                    "type": "enable_anritsu_sg_output",
+                }
+            else:
+                raise ConfigurationError(f"Unknown output device {device!r}.")
+            source = add_recipe_node(
+                self.editor.toPlainText(),
+                parent_id=parent_id,
+                branch=branch,
+                index=index,
+                node=node,
+            )
+            self._apply_builder_source(
+                source,
+                f"Added {device} channel {channel} OUTPUT ON",
+                selected_node_id=str(node["id"]),
+            )
+        except Exception as exc:
+            QMessageBox.warning(self, "Add OUTPUT ON", str(exc))
 
     def _library_add_output_off(self, kind: str, *, channel: int | None = None) -> None:
         node: dict[str, object] = {
@@ -1067,6 +1066,15 @@ class RecipePage(QWidget):
                     raise ConfigurationError(f"Unknown safe-shutdown block {kind!r}.")
                 return
             if category == "output":
+                if kind == "anritsu_sg":
+                    self._library_add_output_on(
+                        "anritsu_sg",
+                        None,
+                        parent_id=parent_id,
+                        branch=branch,
+                        index=index,
+                    )
+                    return
                 device, separator, channel_text = kind.partition("_")
                 if not separator:
                     raise ConfigurationError(f"Unknown OUTPUT block {kind!r}.")
