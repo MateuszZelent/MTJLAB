@@ -97,11 +97,37 @@ class SettingsRepositoryTests(unittest.TestCase):
             repository._atomic_dump(raw)
             original = path.read_bytes()
 
-            with self.assertRaisesRegex(ConfigurationError, "measured_current_trip"):
+            with self.assertRaisesRegex(ConfigurationError, "Measured current trip"):
                 repair_settings_file(path)
 
             self.assertEqual(path.read_bytes(), original)
             self.assertFalse(path.with_suffix(".yml.bak").exists())
+
+    def test_startup_repair_preserves_explicitly_disabled_keithley_limits(self) -> None:
+        raw = deepcopy(SettingsRepository(SETTINGS_TEMPLATE).load().raw)
+        limits = raw["devices"]["keithley"]["safety"]["channels"]["A"][
+            "lab_limits"
+        ]
+        limits["source_current"] = {
+            "min": "-10 mA",
+            "max": "10 mA",
+            "max_abs": "10 mA",
+            "enabled": False,
+        }
+        limits["measured_current_trip"]["enabled"] = False
+        with tempfile.TemporaryDirectory() as temporary:
+            path = Path(temporary) / "settings.yml"
+            repository = SettingsRepository(path)
+            repository._atomic_dump(raw)
+
+            repair_settings_file(path)
+
+            loaded = repository.load().raw
+            preserved = loaded["devices"]["keithley"]["safety"]["channels"]["A"][
+                "lab_limits"
+            ]["source_current"]
+            self.assertEqual(preserved["max"], "10 mA")
+            self.assertFalse(preserved["enabled"])
 
     def test_load_repairs_anritsu_rf_requirement_without_inventing_power_limit(self) -> None:
         raw = deepcopy(SettingsRepository(SETTINGS_TEMPLATE).load().raw)

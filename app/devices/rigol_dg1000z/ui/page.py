@@ -468,6 +468,8 @@ class RigolPage(QWidget):
         value = getattr(limits, key)
         if key == "declared_dut_impedance":
             return value.min, "no profile maximum"
+        if not value.enabled:
+            return "HARDWARE", "HARDWARE"
         return value.min, value.max
 
     def _bounded(self, editor: QWidget, limit_key: str) -> LimitField:

@@ -55,17 +55,6 @@ root:
         type: acquire_spectrum
         trace: TRAC1
 
-  - id: anritsu-spectrum-f7562272
-    type: sequence
-    text: Anritsu MS2830A · acquire single spectrum
-    trace: TRAC1
-    device_module: anritsu
-    label: Anritsu MS2830A
-    operation: configure_selected_parameters
-    configuration_required: true
-    acquire_single: false
-    parameter_actions: []
-    children: []
 finally:
 - id: rigol-ch1-off-finally
   type: set_rigol_output

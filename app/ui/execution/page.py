@@ -12,6 +12,7 @@ from PySide6.QtWidgets import (
     QGridLayout,
     QHeaderView,
     QHBoxLayout,
+    QSizePolicy,
     QSplitter,
     QTreeWidgetItem,
     QVBoxLayout,
@@ -73,6 +74,16 @@ class RunMonitorPage(QWidget):
         self.current_measurements.setWordWrap(True)
         self.storage_rate = BodyLabel("Storage: —")
         self.storage_rate.setWordWrap(True)
+        for label in (
+            self.current_path,
+            self.current_setpoints,
+            self.current_measurements,
+            self.storage_rate,
+        ):
+            label.setMinimumWidth(0)
+            label.setSizePolicy(
+                QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred
+            )
         telemetry.addWidget(self.current_path, 0, 0)
         telemetry.addWidget(self.storage_rate, 0, 1)
         telemetry.addWidget(self.current_setpoints, 1, 0)
@@ -115,7 +126,10 @@ class RunMonitorPage(QWidget):
         self.warnings.setProperty("stationSurface", "raised")
         self.warnings.setMaximumHeight(95)
         self.warnings.setPlaceholderText("No run warnings.")
-        self.spectrum_preview = SpectrumPlotWidget(legend=False)
+        self.spectrum_preview = SpectrumPlotWidget(
+            legend=False, compact_toolbar=True
+        )
+        self.spectrum_preview.setMinimumWidth(0)
         self.spectrum_preview.set_labels(
             x="Frequency",
             x_unit="Hz",
@@ -123,19 +137,20 @@ class RunMonitorPage(QWidget):
             y_unit="dBm",
         )
         self.spectrum_preview.set_title("Latest stored spectrum checkpoint")
-        monitor_splitter = QSplitter(Qt.Orientation.Horizontal)
-        monitor_splitter.setChildrenCollapsible(False)
-        activity_splitter = QSplitter(Qt.Orientation.Vertical)
-        activity_splitter.setMinimumWidth(400)
-        activity_splitter.addWidget(self.steps)
-        activity_splitter.addWidget(self.events)
-        activity_splitter.setStretchFactor(0, 2)
-        activity_splitter.setStretchFactor(1, 1)
-        monitor_splitter.addWidget(activity_splitter)
-        monitor_splitter.addWidget(self.spectrum_preview)
-        monitor_splitter.setStretchFactor(0, 1)
-        monitor_splitter.setStretchFactor(1, 2)
-        monitor_splitter.setSizes((440, 800))
+        self.monitor_splitter = QSplitter(Qt.Orientation.Vertical)
+        self.monitor_splitter.setObjectName("executionMonitorSplitter")
+        self.monitor_splitter.setChildrenCollapsible(False)
+        self.activity_splitter = QSplitter(Qt.Orientation.Vertical)
+        self.activity_splitter.setMinimumWidth(0)
+        self.activity_splitter.addWidget(self.steps)
+        self.activity_splitter.addWidget(self.events)
+        self.activity_splitter.setStretchFactor(0, 2)
+        self.activity_splitter.setStretchFactor(1, 1)
+        self.monitor_splitter.addWidget(self.activity_splitter)
+        self.monitor_splitter.addWidget(self.spectrum_preview)
+        self.monitor_splitter.setStretchFactor(0, 1)
+        self.monitor_splitter.setStretchFactor(1, 2)
+        self.monitor_splitter.setSizes((360, 320))
         layout.addWidget(self.hero_card)
         monitor_layout.addWidget(self.heartbeat)
         monitor_layout.addWidget(self.eta)
@@ -146,7 +161,7 @@ class RunMonitorPage(QWidget):
         monitor_layout.addLayout(controls)
         layout.addWidget(self.monitor_card)
         layout.addWidget(self.warnings)
-        layout.addWidget(monitor_splitter, 1)
+        layout.addWidget(self.monitor_splitter, 1)
         self.pause_button.clicked.connect(self._request_pause)
         self.resume_button.clicked.connect(self._request_resume)
         self.stop_button.clicked.connect(self._request_safe_stop)
@@ -163,6 +178,29 @@ class RunMonitorPage(QWidget):
         self._eta_timer = QTimer(self)
         self._eta_timer.setInterval(1000)
         self._eta_timer.timeout.connect(self._update_eta)
+        self._last_layout_orientation: Qt.Orientation | None = None
+        self._update_monitor_layout(force=True)
+
+    def _update_monitor_layout(self, *, force: bool = False) -> None:
+        """Prevent the activity tree and spectrum from competing for width."""
+
+        orientation = (
+            Qt.Orientation.Horizontal
+            if self.width() >= 900
+            else Qt.Orientation.Vertical
+        )
+        if not force and orientation == self._last_layout_orientation:
+            return
+        self._last_layout_orientation = orientation
+        self.monitor_splitter.setOrientation(orientation)
+        if orientation == Qt.Orientation.Horizontal:
+            self.monitor_splitter.setSizes((400, max(480, self.width() - 420)))
+        else:
+            self.monitor_splitter.setSizes((360, 320))
+
+    def resizeEvent(self, event: object) -> None:
+        super().resizeEvent(event)  # type: ignore[arg-type]
+        self._update_monitor_layout()
 
     def run_started(
         self,
@@ -545,7 +583,10 @@ class RunMonitorPage(QWidget):
         self.pause_button.setEnabled(False)
         self.resume_button.setEnabled(False)
         run_result = result["result"]
-        self.state.setText(f"{run_result.state.value.upper()} • {run_result.stored_points} points")
+        state = run_result.state.value.upper()
+        if run_result.error and state == "SAFE":
+            state = "STOPPED SAFELY"
+        self.state.setText(f"{state} • {run_result.stored_points} points")
         self.events.appendPlainText(f"File: {result['path']}")
 
     def failed(self, error: str) -> None:

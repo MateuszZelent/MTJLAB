@@ -1078,7 +1078,7 @@ class KeithleyAdapter(DeviceAdapter):
                 f"Requested ramp step {request.max_step_si:.12g} SI exceeds configured "
                 f"maximum {configured_step:.12g} SI."
             )
-        if limits.point_settle_time is not None:
+        if limits.point_settle_time is not None and limits.point_settle_time.enabled:
             minimum_settle = parse_quantity(limits.point_settle_time.min, DIMENSION_TIME).si_value
             maximum_settle = parse_quantity(limits.point_settle_time.max, DIMENSION_TIME).si_value
             if not minimum_settle <= request.settle_time_s <= maximum_settle:

@@ -72,6 +72,7 @@ from app.recipes import (
 )
 from app.settings import SettingsRepository
 from app.settings.models import StationSettings
+from app.settings.validation import format_settings_validation_error
 from app.security import AccessPolicy, Permission
 from app.storage import Hdf5RunReader
 from app.ui.settings_page import SettingsPage
@@ -815,7 +816,11 @@ class MainWindow(FluentWindow):
             container[path[-1]] = replacement
             settings = StationSettings.model_validate(raw)
         except (ConfigurationError, ValueError, KeyError, TypeError) as exc:
-            QMessageBox.critical(self, "Invalid safety limits", str(exc))
+            QMessageBox.critical(
+                self,
+                "Invalid safety limits",
+                format_settings_validation_error(exc),
+            )
             return
 
         self.settings_page.stage_external_snapshot(settings, raw)
@@ -1301,6 +1306,7 @@ class MainWindow(FluentWindow):
             "run_fault",
             "shutdown_error",
             "watchdog_timeout",
+            "worker_cleanup_warning",
         } else (
             "warning" if name in {"compliance_detected", "run_aborted", "safe_finally_error"} else "info"
         )
@@ -1327,7 +1333,17 @@ class MainWindow(FluentWindow):
         self._set_run_ui_locked(False)
         self.run_monitor.complete(result)
         self.results_page.refresh()
-        self._log("Run Engine completed the measurement")
+        run_result = result["result"]
+        state = str(getattr(getattr(run_result, "state", None), "value", "unknown"))
+        error = getattr(run_result, "error", None)
+        if state == "fault":
+            message = str(error or "The measurement finished in a fault state.")
+            self._log(f"Run Engine finished in FAULT: {message}")
+            QMessageBox.critical(self, "Run fault", message)
+        elif error:
+            self._log(f"Run Engine stopped safely: {error}")
+        else:
+            self._log("Run Engine completed the measurement")
 
     def _run_failed(self, error: str) -> None:
         self._set_run_ui_locked(False)
@@ -2056,16 +2072,47 @@ class MainWindow(FluentWindow):
             critical=True,
         )
         self._save_workspace()
+        if not self.recipe_page.cancel_preflight():
+            self._audit_record(
+                "Application close blocked: recipe validation is still stopping",
+                severity="error",
+                category="application",
+                event_type="shutdown_blocked",
+                critical=True,
+            )
+            QMessageBox.warning(
+                self,
+                "Validation still stopping",
+                "Recipe validation is still active. Wait for cancellation to finish, "
+                "then close the application again.",
+            )
+            event.ignore()
+            return
+        if not self._run_controller.close():
+            self._audit_record(
+                "Application close blocked: measurement workers are still stopping",
+                severity="error",
+                category="application",
+                event_type="shutdown_blocked",
+                critical=True,
+            )
+            QMessageBox.warning(
+                self,
+                "Measurement still stopping",
+                "The application cannot close while a measurement or emergency-OFF "
+                "worker is still active. Outputs were sent an emergency-OFF request. "
+                "Wait for the stop to finish, then close the application again.",
+            )
+            event.ignore()
+            return
         self._keithley_defaults_timer.stop()
         self._pending_keithley_defaults = None
         self._keithley_defaults_thread.quit()
         self._keithley_defaults_thread.wait(5_000)
-        self.recipe_page.cancel_preflight()
         self.quick_controls_window.close()
         self.quick_control_coordinator.cancel_all("Application closing")
         self.anritsu_page._timer.stop()
         self.anritsu_page._analysis_controller.close()
-        self._run_controller.close()
         for controller in self._controllers.values():
             controller.close()
         try:

@@ -66,6 +66,16 @@ class FluentDialogTests(unittest.TestCase):
         finally:
             limit.close()
 
+    def test_disabled_limit_badge_does_not_clamp_the_editor(self) -> None:
+        editor = line_edit("4 mA")
+        limit = LimitField(editor, "DISABLED", "DISABLED")
+        try:
+            self.assertTrue(limit.validate_and_clamp())
+            self.assertEqual(editor.text(), "4 mA")
+            self.assertTrue(limit.validation_warning.isHidden())
+        finally:
+            limit.close()
+
     def test_native_dialog_buttons_receive_readable_light_and_dark_styles(self) -> None:
         box = QMessageBox()
         try:

@@ -7,7 +7,7 @@ name: Keithley B current × Rigol sine frequency × Anritsu reference processing
 # change only the selected setpoint and preserve every other device parameter.
 #
 # The station profile remains the independent hardware safety authority. This
-# recipe does not override device capabilities or approved laboratory limits.
+# recipe does not override device capabilities or configured laboratory limits.
 
 dut_limits:
   keithley:
@@ -71,18 +71,10 @@ root:
     output_load: HIGHZ
     dut_min_impedance: 50 ohm
 
-  - id: keithley-b-arm
-    type: arm_keithley_output
-    channel: B
-
   - id: keithley-b-output-on
     type: set_keithley_output
     channel: B
     enabled: true
-
-  - id: rigol-ch1-arm
-    type: arm_rigol_output
-    channel: 1
 
   - id: rigol-ch1-output-on
     type: set_rigol_output

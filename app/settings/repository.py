@@ -23,6 +23,7 @@ from app.domain.quantities import (
     parse_quantity,
 )
 from app.settings.models import StationSettings
+from app.settings.validation import format_settings_validation_error
 
 
 _SETTINGS_IO_LOCK = RLock()
@@ -114,7 +115,7 @@ class SettingsRepository:
         try:
             settings = StationSettings.model_validate(raw)
         except ValidationError as exc:
-            raise ConfigurationError(f"Invalid settings.yml:\n{exc}") from exc
+            raise ConfigurationError(format_settings_validation_error(exc)) from exc
         backup = None
         if defaults_added or known_issues_repaired or safety_limits_narrowed:
             # Persist only after the merged document validates.  This is a
@@ -204,7 +205,7 @@ class SettingsRepository:
         try:
             settings = StationSettings.model_validate(payload)
         except ValidationError as exc:
-            raise ConfigurationError(f"Invalid settings.yml:\n{exc}") from exc
+            raise ConfigurationError(format_settings_validation_error(exc)) from exc
         self._atomic_dump(payload)
         return settings
 
@@ -333,6 +334,8 @@ class SettingsRepository:
                 safe_default = default_limits.get(value_name)
                 if not all(isinstance(item, dict) for item in (value, trip, safe_default)):
                     continue
+                if value.get("enabled", True) is False or trip.get("enabled", True) is False:
+                    continue
                 if cls._range_contains(trip, value, dimension):
                     continue
                 if cls._range_contains(trip, safe_default, dimension):
@@ -345,6 +348,8 @@ class SettingsRepository:
                 trip = limits.get(trip_name)
                 safe_default = default_limits.get(value_name)
                 if not all(isinstance(item, dict) for item in (value, trip, safe_default)):
+                    continue
+                if value.get("enabled", True) is False or trip.get("enabled", True) is False:
                     continue
                 if cls._trip_covers_magnitude(trip, value, dimension):
                     continue

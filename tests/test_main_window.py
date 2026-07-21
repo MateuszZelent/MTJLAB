@@ -435,7 +435,7 @@ class MainWindowTests(unittest.TestCase):
                 )
                 page.limits_table.item(row, 2).setText("10 GHz")
                 page.limits_table.item(row, 3).setText("1 Hz")
-                with patch.object(QMessageBox, "critical"):
+                with patch("app.ui.settings_page.QMessageBox.critical"):
                     self.assertIsNone(page.validate_draft())
                 self.assertIn(page.limits_table.item(row, 2), page._limit_error_items)
                 self.assertIn(page.limits_table.item(row, 3), page._limit_error_items)
@@ -454,7 +454,7 @@ class MainWindowTests(unittest.TestCase):
                 safety["acquisition_allowed"] = True
                 safety["frequency"] = {"min": None, "max": None}
                 page._populate()
-                with patch.object(QMessageBox, "critical"):
+                with patch("app.ui.settings_page.QMessageBox.critical"):
                     self.assertIsNone(page.validate_draft())
                 expected = {
                     ("devices", "anritsu", "safety", "frequency", boundary)
@@ -561,7 +561,7 @@ class MainWindowTests(unittest.TestCase):
                     ].edit_button.toolTip(),
                 )
                 self.assertFalse(window.dashboard.save_assignments.isEnabled())
-                with patch.object(QMessageBox, "warning") as warning:
+                with patch("app.ui.shell.main_window.QMessageBox.warning") as warning:
                     window._save_discovered_assignments(
                         {
                             "rigol": (
@@ -1400,11 +1400,12 @@ class MainWindowTests(unittest.TestCase):
                 authenticated_username=TEST_ENGINEER,
             )
             try:
-                with patch.object(
-                    QMessageBox,
-                    "question",
+                with patch(
+                    "app.ui.shell.main_window.QMessageBox.question",
                     return_value=QMessageBox.StandardButton.Yes,
-                ), patch.object(QMessageBox, "critical") as critical:
+                ), patch(
+                    "app.ui.shell.main_window.QMessageBox.critical"
+                ) as critical:
                     window._save_moke_assignment("131.246.221.33:10001")
 
                 critical.assert_not_called()
@@ -1419,7 +1420,7 @@ class MainWindowTests(unittest.TestCase):
     def test_moke_connection_failure_is_visible_in_panel_and_dialog(self) -> None:
         window = MainWindow(".config/settings.yml", simulation=True)
         try:
-            with patch.object(QMessageBox, "warning") as warning:
+            with patch("app.ui.shell.main_window.QMessageBox.warning") as warning:
                 window._device_error(
                     "moke_box", "connect", "MOKE endpoint did not answer"
                 )
@@ -1578,7 +1579,9 @@ class MainWindowTests(unittest.TestCase):
             rigol.sweep_start.setText("1 MHz")
             rigol.sweep_stop.setText("501 MHz")
             rigol._controller.call = Mock()
-            with patch.object(QMessageBox, "warning") as warning:
+            with patch(
+                "app.devices.rigol_dg1000z.ui.page.QMessageBox.warning"
+            ) as warning:
                 rigol.configure_sweep()
             rigol._controller.call.assert_not_called()
             self.assertIn("sweep_stop", warning.call_args.args[2])
@@ -2118,7 +2121,9 @@ class MainWindowTests(unittest.TestCase):
             keithley.level.setText("5 V")
             keithley.compliance.setText("1 mA")
 
-            with patch.object(QMessageBox, "warning") as warning:
+            with patch(
+                "app.devices.keithley_2600.ui.page.QMessageBox.warning"
+            ) as warning:
                 keithley._output_toggled(True)
 
             keithley._controller.call.assert_not_called()
@@ -2157,7 +2162,9 @@ class MainWindowTests(unittest.TestCase):
             button = keithley.channel_cards["B"]["output_on_action"]
 
             self.assertTrue(button.isEnabled())
-            with patch.object(QMessageBox, "warning") as warning:
+            with patch(
+                "app.devices.keithley_2600.ui.page.QMessageBox.warning"
+            ) as warning:
                 button.click()
 
             keithley._controller.call.assert_not_called()
@@ -2474,7 +2481,9 @@ class MainWindowTests(unittest.TestCase):
             anritsu = window.anritsu_page
             anritsu._timer.start()
             anritsu._fetch_pending = True
-            with patch.object(QMessageBox, "warning") as modal_warning:
+            with patch(
+                "app.devices.anritsu_ms2830a.ui.page.QMessageBox.warning"
+            ) as modal_warning:
                 anritsu._error("fetch_current_trace", "VI_ERROR_TMO")
 
             modal_warning.assert_not_called()
@@ -2929,7 +2938,10 @@ class MainWindowTests(unittest.TestCase):
                         measure_current_range="AUTO",
                     ),
                 }
-                with patch.object(QMessageBox, "critical", return_value=None) as error:
+                with patch(
+                    "app.ui.shell.main_window.QMessageBox.critical",
+                    return_value=None,
+                ) as error:
                     window._save_keithley_readback_defaults(snapshots)
                 self.assertFalse(error.called, window.keithley_page.banner.label.text())
                 saved = SettingsRepository(path).load().raw["devices"]["keithley"][
@@ -2942,7 +2954,10 @@ class MainWindowTests(unittest.TestCase):
                 before_invalid_save = path.read_text(encoding="utf-8")
                 invalid = dict(snapshots)
                 invalid["B"] = replace(snapshots["B"], compliance="670 mV")
-                with patch.object(QMessageBox, "critical", return_value=None) as error:
+                with patch(
+                    "app.ui.shell.main_window.QMessageBox.critical",
+                    return_value=None,
+                ) as error:
                     window._save_keithley_readback_defaults(invalid)
                 self.assertTrue(error.called)
                 self.assertIn(
@@ -3614,7 +3629,9 @@ class MainWindowTests(unittest.TestCase):
                     "MAX  9 mA",
                 )
 
-                with patch.object(QMessageBox, "critical") as critical:
+                with patch(
+                    "app.ui.shell.main_window.QMessageBox.critical"
+                ) as critical:
                     window._device_error(
                         "keithley",
                         "apply_limit_settings",

@@ -176,7 +176,14 @@ class LimitField(QWidget):
                 for value in (self._minimum_value, self._maximum_value)
                 if value is not None
             ]
-            if any(value.startswith(">") or "n/a" in value or "no profile" in value for value in textual_bounds):
+            if any(
+                value.startswith(">")
+                or "n/a" in value
+                or "no profile" in value
+                or "disabled" in value
+                or "hardware" in value
+                for value in textual_bounds
+            ):
                 return True
             parsed = self._quantity_values()
             if parsed is None:

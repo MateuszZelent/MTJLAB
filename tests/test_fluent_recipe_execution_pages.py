@@ -5,7 +5,7 @@ import unittest
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
-from PySide6.QtCore import QPoint
+from PySide6.QtCore import QPoint, Qt
 from PySide6.QtWidgets import QApplication, QStackedWidget, QTabWidget, QToolBar
 from qfluentwidgets import (
     BodyLabel,
@@ -128,6 +128,22 @@ class FluentRecipeAndExecutionPageTests(unittest.TestCase):
                 page.selection_context.text(),
                 "Select a block in the measurement tree",
             )
+
+            window._navigate_to("execution")
+            self.application.processEvents()
+            monitor = window.run_monitor
+            self.assertEqual(
+                monitor.monitor_splitter.orientation(), Qt.Orientation.Vertical
+            )
+            self.assertFalse(
+                monitor.activity_splitter.geometry().intersects(
+                    monitor.spectrum_preview.geometry()
+                )
+            )
+            self.assertLessEqual(
+                monitor.spectrum_preview.geometry().right(),
+                monitor.monitor_splitter.width(),
+            )
         finally:
             window.close()
             self.application.processEvents()
@@ -185,6 +201,9 @@ class FluentRecipeAndExecutionPageTests(unittest.TestCase):
             self.application.processEvents()
 
             page = window.run_monitor
+            self.assertEqual(
+                page.monitor_splitter.orientation(), Qt.Orientation.Horizontal
+            )
             self.assertIsInstance(page.hero_card, CardWidget)
             self.assertIsInstance(page.monitor_card, CardWidget)
             self.assertIsInstance(page.pause_button, PushButton)

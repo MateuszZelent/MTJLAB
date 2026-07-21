@@ -10,6 +10,7 @@ from unittest.mock import Mock, patch
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 from PySide6.QtWidgets import (
+    QAbstractItemView,
     QApplication,
     QDialog,
     QDialogButtonBox,
@@ -18,8 +19,8 @@ from PySide6.QtWidgets import (
     QMessageBox,
     QTreeWidgetItem,
 )
-from PySide6.QtCore import Qt
-from PySide6.QtGui import QPalette
+from PySide6.QtCore import QMimeData, QPoint, Qt
+from PySide6.QtGui import QDragEnterEvent, QDragMoveEvent, QPalette
 from PySide6.QtTest import QTest
 from qfluentwidgets import (
     ComboBox, LineEdit, PlainTextEdit, PrimaryPushButton, PushButton,
@@ -404,7 +405,7 @@ finally: []
                         }
                     ],
                 ),
-                patch.object(QMessageBox, "information") as information,
+                patch("app.ui.recipes.page.QMessageBox.information") as information,
             ):
                 page._edit_selected_generator()
 
@@ -758,7 +759,7 @@ root:
                 page.tree.topLevelItem(index).text(0)
                 for index in range(page.tree.topLevelItemCount())
             ]
-            with patch.object(QMessageBox, "warning"):
+            with patch("app.ui.recipes.page.QMessageBox.warning"):
                 page._move_recipe_node(
                     keithley.id, anritsu.id, "children", 0
                 )
@@ -800,7 +801,7 @@ root:
             target_item.setExpanded(False)
             page.tree.setCurrentItem(source_item)
 
-            with patch.object(QMessageBox, "warning") as warning:
+            with patch("app.ui.recipes.page.QMessageBox.warning") as warning:
                 page._move_recipe_node(
                     source.id,
                     target.id,
@@ -851,6 +852,7 @@ root:
         tree.move_requested.connect(lambda *move: moves.append(move))
         event = Mock()
         event.mimeData().hasFormat.return_value = False
+        event.source.return_value = tree
 
         with (
             patch.object(tree, "itemAt", return_value=target_item),
@@ -864,6 +866,66 @@ root:
 
         self.assertEqual(moves, [("source", "target", "children", 0)])
         event.accept.assert_called_once_with()
+
+    def test_real_drag_hover_distinguishes_above_on_and_below_a_leaf(self) -> None:
+        tree = RecipeTreeWidget()
+        try:
+            tree.resize(640, 360)
+            root = QTreeWidgetItem(["Root"])
+            first = QTreeWidgetItem(["First"])
+            second = QTreeWidgetItem(["Second"])
+            root.setData(0, Qt.ItemDataRole.UserRole, RecipeNode("root", "sequence"))
+            first.setData(0, Qt.ItemDataRole.UserRole, RecipeNode("first", "comment"))
+            second.setData(0, Qt.ItemDataRole.UserRole, RecipeNode("second", "comment"))
+            root.addChildren([first, second])
+            tree.addTopLevelItem(root)
+            root.setExpanded(True)
+            tree.show()
+            self.application.processEvents()
+
+            mime = QMimeData()
+            mime.setData(tree.library_mime_type, b"flow:wait")
+            enter = QDragEnterEvent(
+                QPoint(10, 10),
+                Qt.DropAction.CopyAction,
+                mime,
+                Qt.MouseButton.LeftButton,
+                Qt.KeyboardModifier.NoModifier,
+            )
+            tree.dragEnterEvent(enter)
+            rect = tree.visualItemRect(second)
+            destinations: list[tuple[str, str, int] | None] = []
+            indicators = []
+            for y in (rect.top() + 1, rect.center().y(), rect.bottom() - 1):
+                move = QDragMoveEvent(
+                    QPoint(rect.center().x(), y),
+                    Qt.DropAction.CopyAction,
+                    mime,
+                    Qt.MouseButton.LeftButton,
+                    Qt.KeyboardModifier.NoModifier,
+                )
+                tree.dragMoveEvent(move)
+                indicators.append(tree.dropIndicatorPosition())
+                destinations.append(tree._drop_destination_at(move.position().toPoint()))
+
+            self.assertEqual(
+                indicators,
+                [
+                    QAbstractItemView.DropIndicatorPosition.AboveItem,
+                    QAbstractItemView.DropIndicatorPosition.OnItem,
+                    QAbstractItemView.DropIndicatorPosition.BelowItem,
+                ],
+            )
+            self.assertEqual(
+                destinations,
+                [
+                    ("root", "children", 1),
+                    ("root", "children", 2),
+                    ("root", "children", 2),
+                ],
+            )
+        finally:
+            tree.close()
 
     def test_logical_drop_index_ignores_projected_parameter_rows(self) -> None:
         parent = QTreeWidgetItem(["Device"])
@@ -1033,7 +1095,9 @@ root:
             )
             selector = dialog.parameter_selectors["advanced.rbw_mode"]
             selector.setCurrentIndex(selector.findData("set"))
-            with patch.object(QMessageBox, "warning") as warning:
+            with patch(
+                "app.devices.anritsu_ms2830a.ui.recipe_dialog.QMessageBox.warning"
+            ) as warning:
                 dialog.accept()
             warning.assert_called_once()
             self.assertEqual(dialog.result(), QDialog.DialogCode.Rejected)
@@ -1125,7 +1189,7 @@ root:
                 self.application.processEvents()
                 self.assertFalse(dialog.create_button.isEnabled())
                 self.assertIn("outside the allowed range", dialog.preview.text())
-                with patch.object(QMessageBox, "warning") as warning:
+                with patch("app.ui.recipes.sweep_editor.QMessageBox.warning") as warning:
                     dialog.accept()
                 warning.assert_called_once()
                 self.assertEqual(dialog.result(), QDialog.DialogCode.Rejected)
@@ -1850,6 +1914,55 @@ root:
         finally:
             dialog.close()
 
+    def test_action_dialog_validates_anritsu_logarithmic_power_units(self) -> None:
+        node = RecipeNode(
+            "sg",
+            "configure_anritsu_sg",
+            {"frequency": "1 GHz", "power": "-20 dBm"},
+        )
+        dialog = ActionNodeEditorDialog(node)
+        try:
+            power, _kind = dialog._editors["power"]
+            power.setText("1 V")
+            with patch(
+                "app.ui.recipes.common_dialogs.QMessageBox.warning"
+            ) as warning:
+                dialog.accept()
+            warning.assert_called_once()
+            self.assertEqual(dialog.result(), QDialog.DialogCode.Rejected)
+        finally:
+            dialog.close()
+
+    def test_legacy_anritsu_advanced_and_sg_nodes_open_scalar_editor(self) -> None:
+        page = RecipePage(simulation_settings())
+        try:
+            with patch.object(page, "_edit_action_node") as edit:
+                for node in (
+                    RecipeNode(
+                        "advanced",
+                        "configure_anritsu_advanced",
+                        {"rbw": "10 kHz", "sweep_time": "10 ms"},
+                    ),
+                    RecipeNode(
+                        "sg",
+                        "configure_anritsu_sg",
+                        {"frequency": "1 GHz", "power": "-20 dBm"},
+                    ),
+                ):
+                    item = QTreeWidgetItem([node.id])
+                    item.setData(0, Qt.ItemDataRole.UserRole, node)
+                    page.tree.clear()
+                    page.tree.addTopLevelItem(item)
+                    page.tree.setCurrentItem(item)
+                    page._edit_selected_device_settings()
+
+            self.assertEqual(
+                [call.args[0].type for call in edit.call_args_list],
+                ["configure_anritsu_advanced", "configure_anritsu_sg"],
+            )
+        finally:
+            page.close()
+
     def test_double_click_routes_every_recipe_node_to_an_editor(self) -> None:
         page = RecipePage(simulation_settings())
         try:
@@ -2230,6 +2343,31 @@ root:
             parsed = parse_recipe_text(page.editor.toPlainText())
             self.assertEqual(parsed.finally_nodes[-1].type, "set_rigol_output")
             self.assertFalse(parsed.finally_nodes[-1].data["enabled"])
+        finally:
+            page.close()
+
+    def test_finally_rejects_flow_and_device_blocks_without_changing_yaml(self) -> None:
+        page = RecipePage(simulation_settings())
+        try:
+            finally_item = next(
+                page.tree.topLevelItem(index)
+                for index in range(page.tree.topLevelItemCount())
+                if page.tree.topLevelItem(index).text(0).startswith("Finally")
+            )
+            page.tree.setCurrentItem(finally_item)
+            source = page.editor.toPlainText()
+            with patch("app.ui.recipes.page.QMessageBox.warning") as warning:
+                page._add_basic_node("wait")
+                page._library_add_device("rigol")
+                page._drop_library_block(
+                    "flow:repeat", "__finally__", "children", 0
+                )
+                page._drop_library_block(
+                    "device:anritsu", "__finally__", "children", 0
+                )
+
+            self.assertEqual(page.editor.toPlainText(), source)
+            self.assertEqual(warning.call_count, 4)
         finally:
             page.close()
 

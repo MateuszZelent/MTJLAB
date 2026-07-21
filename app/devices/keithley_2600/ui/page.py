@@ -221,6 +221,8 @@ class KeithleyConfigurationPanel(CardWidget):
         if key == "nplc":
             return 0.001, 25
         if key == "settle":
+            if not limits.point_settle_time.enabled:
+                return "DISABLED", "DISABLED"
             return limits.point_settle_time.min, limits.point_settle_time.max
         if mode == "measure_only" and key in {"level", "compliance", "source_range"}:
             return "N/A", "N/A"
@@ -235,6 +237,8 @@ class KeithleyConfigurationPanel(CardWidget):
                 if mode == "current"
                 else limits.current_compliance
             )
+            if not value.enabled:
+                return "HARDWARE", "HARDWARE"
             return value.min, value.max
         if key == "source_range":
             return "> 0", "3 A" if mode == "current" else "40 V"
@@ -1739,8 +1743,12 @@ class KeithleyPage(QWidget):
             missing = "; ".join(
                 item for item in channel_checks if item.startswith("✕")
             )
+            # Keep the action clickable while a connected device is blocked
+            # by the software profile.  The click is still rejected by
+            # _output_toggled() before dispatch, but it can now explain the
+            # exact unmet condition promised by the tooltip/readiness panel.
             card["output_on_action"].setEnabled(
-                channel_ready and not pending_enable
+                self._device_is_output_ready() and not pending_enable
             )
             card["output_on_action"].setToolTip(
                 (
@@ -2389,10 +2397,14 @@ class KeithleyPage(QWidget):
         limits = self._station_settings.keithley.safety.channels[self.channel.currentText()].lab_limits
         mode = self.mode.currentText()
         if key == "max_abs_power":
+            if not limits.max_abs_power_enabled:
+                return "DISABLED", "DISABLED"
             return "> 0", limits.max_abs_power
         if key == "nplc":
             return 0.001, 25
         if key == "settle":
+            if not limits.point_settle_time.enabled:
+                return "DISABLED", "DISABLED"
             return limits.point_settle_time.min, limits.point_settle_time.max
         if mode == "measure_only" and key in {"level", "compliance", "source_range"}:
             return "N/A", "N/A"
@@ -2403,6 +2415,8 @@ class KeithleyPage(QWidget):
             return bound.minimum_text, bound.maximum_text
         if key == "compliance":
             value = limits.voltage_compliance if mode == "current" else limits.current_compliance
+            if not value.enabled:
+                return "HARDWARE", "HARDWARE"
             return value.min, value.max
         if key == "source_range":
             return "> 0", "3 A" if mode == "current" else "40 V"

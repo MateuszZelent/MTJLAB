@@ -23,8 +23,10 @@ from app.safety.keithley import (
     validate_keithley_source,
 )
 from app.safety.rigol_current import validate_rigol_frequency_sweep, validate_rigol_waveform
+from app.safety.quick_controls import quick_control_safety_bounds
 from app.settings import SettingsRepository
 from app.settings.models import StationSettings
+from app.settings.validation import format_settings_validation_error
 from tests.helpers import SETTINGS_TEMPLATE, loaded_settings, simulation_settings
 
 
@@ -126,6 +128,30 @@ class QuantityAndSafetyTests(unittest.TestCase):
         ):
             StationSettings.model_validate(raw)
 
+    def test_settings_validation_message_is_concise_and_actionable(self) -> None:
+        raw = deepcopy(SettingsRepository(SETTINGS_TEMPLATE).load().raw)
+        limits = raw["devices"]["keithley"]["safety"]["channels"]["A"][
+            "lab_limits"
+        ]
+        limits["source_current"]["min"] = "-10 mA"
+        limits["source_current"]["max"] = "10 mA"
+
+        try:
+            StationSettings.model_validate(raw)
+        except ValueError as error:
+            message = format_settings_validation_error(error)
+        else:
+            self.fail("Expected an inconsistent Keithley range to be rejected")
+
+        self.assertIn("Keithley → Channel A → Safety limits", message)
+        self.assertIn("Measured current trip", message)
+        self.assertIn("source current range", message)
+        self.assertIn("How to fix", message)
+        self.assertIn("Disable limit", message)
+        self.assertNotIn("input_value", message)
+        self.assertNotIn("pydantic.dev", message)
+        self.assertNotIn("CommentedMap", message)
+
     def test_disabled_keithley_software_limits_are_not_enforced(self) -> None:
         raw = deepcopy(SettingsRepository(SETTINGS_TEMPLATE).load().raw)
         limits = raw["devices"]["keithley"]["safety"]["channels"]["A"][
@@ -172,6 +198,22 @@ class QuantityAndSafetyTests(unittest.TestCase):
                     source_range_si=4.0,
                 ),
             )
+
+    def test_disabled_ranges_do_not_remain_as_quick_control_ui_clamps(self) -> None:
+        raw = deepcopy(SettingsRepository(SETTINGS_TEMPLATE).load().raw)
+        raw["devices"]["keithley"]["safety"]["channels"]["A"]["lab_limits"][
+            "source_current"
+        ]["enabled"] = False
+        raw["devices"]["rigol"]["safety"]["channels"]["1"]["lab_limits"][
+            "frequency"
+        ]["enabled"] = False
+
+        bounds = quick_control_safety_bounds(StationSettings.model_validate(raw))
+
+        self.assertEqual(bounds["keithley.A.current"].minimum_text, "HARDWARE")
+        self.assertEqual(bounds["keithley.A.current"].maximum_text, "HARDWARE")
+        self.assertEqual(bounds["rigol.1.frequency"].minimum_si, 0.0)
+        self.assertEqual(bounds["rigol.1.frequency"].maximum_si, 30e6)
 
     def test_rigol_current_estimate_is_limited(self) -> None:
         settings = loaded_settings()

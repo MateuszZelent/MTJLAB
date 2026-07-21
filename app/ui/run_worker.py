@@ -41,7 +41,7 @@ def serialize_settings_snapshot(
     if not simulation:
         return settings_path.read_text(encoding="utf-8")
     stream = StringIO()
-    stream.write("# In-memory simulation profile; not persisted to settings.yml.\n")
+    stream.write("# SIMULATION: in-memory profile; not persisted to settings.yml.\n")
     YAML().dump(settings.model_dump(mode="python"), stream)
     return stream.getvalue()
 
@@ -115,6 +115,8 @@ class RunWorker(QObject):
         }
         moke_box: MokeBoxAdapter | None = None
         lakeshore: LakeShore475Adapter | None = None
+        completion: dict[str, object] | None = None
+        failure: str | None = None
         try:
             required_by_plan = set(
                 self._plan.required_devices
@@ -220,28 +222,58 @@ class RunWorker(QObject):
                     self._recovery.prelude_actions if self._recovery is not None else ()
                 ),
             )
-            self.finished.emit({"result": result, "path": str(writer.path)})
+            completion = {"result": result, "path": str(writer.path)}
         except Exception as exc:
+            failure = str(exc)
             if writer is not None:
                 try:
                     writer.close("faulted")
-                except Exception:
-                    pass
-            self.failed.emit(str(exc))
+                except Exception as close_exc:
+                    failure += f"; failed to close run file: {close_exc}"
         finally:
+            runner_owned_shutdown = self._runner is not None
             self._runner = None
-            # A run owns separate VISA sessions.  Release all of them on both
-            # success and failure; RecipeRunner has already requested its
-            # ordered emergency-off policy before this cleanup.
-            for device in devices.values():
-                try:
-                    device.emergency_off()
-                except Exception:
-                    pass
+            cleanup_errors: list[str] = []
+            # RecipeRunner owns the ordered, confirmed shutdown once it has
+            # been constructed. If setup failed earlier, issue emergency OFF
+            # here before releasing any session. In either case, do not tell
+            # the GUI that the run ended until every session is disconnected.
+            for name, device in reversed(tuple(devices.items())):
+                if not device.connected:
+                    continue
+                if not runner_owned_shutdown:
+                    try:
+                        device.emergency_off()
+                    except Exception as cleanup_exc:
+                        cleanup_errors.append(
+                            f"{name} emergency OFF: {cleanup_exc}"
+                        )
                 try:
                     device.disconnect()
-                except Exception:
-                    pass
+                except Exception as cleanup_exc:
+                    cleanup_errors.append(f"{name} disconnect: {cleanup_exc}")
+            if cleanup_errors:
+                self.event.emit(
+                    "worker_cleanup_warning",
+                    {
+                        "errors": tuple(cleanup_errors),
+                        "runner_owned_shutdown": runner_owned_shutdown,
+                    },
+                )
+                if not runner_owned_shutdown:
+                    detail = "; ".join(cleanup_errors)
+                    failure = (
+                        f"{failure}; emergency cleanup incomplete: {detail}"
+                        if failure
+                        else f"Emergency cleanup incomplete: {detail}"
+                    )
+
+        if failure is not None:
+            self.failed.emit(failure)
+        elif completion is not None:
+            self.finished.emit(completion)
+        else:
+            self.failed.emit("Run worker ended without a result.")
 
     def _required_devices(self) -> set[str]:
         return set(
@@ -454,35 +486,63 @@ class RunController(QObject):
         completed.deleteLater()
 
     def _finished(self, result: object) -> None:
-        self.finished.emit(result)
-        self._dispose()
+        if self._dispose():
+            self.finished.emit(result)
+        else:
+            self.failed.emit(
+                "The run finished, but its worker thread did not stop within 5 seconds. "
+                "The application remains in a fault state."
+            )
 
     def _failed(self, error: str) -> None:
-        self.failed.emit(error)
-        self._dispose()
+        stopped = self._dispose()
+        self.failed.emit(
+            error
+            if stopped
+            else error
+            + "; the run worker thread did not stop within 5 seconds."
+        )
 
-    def _dispose(self) -> None:
-        if self._thread is not None:
-            self._thread.quit()
-            self._thread.wait(5_000)
+    def _dispose(self, *, timeout_ms: int = 5_000) -> bool:
+        thread = self._thread
+        if thread is not None:
+            thread.quit()
+            if thread.isRunning() and not thread.wait(timeout_ms):
+                return False
         if self._worker is not None:
             self._worker.deleteLater()
-        if self._thread is not None:
-            self._thread.deleteLater()
+        if thread is not None:
+            thread.deleteLater()
         self._worker = None
         self._thread = None
         self._run_settings = None
+        self._run_outputs_forced_off = False
+        return True
 
-    def close(self) -> None:
+    def close(self, *, timeout_ms: int = 5_000) -> bool:
+        """Stop owned workers without discarding a still-running QThread."""
+
         self.request_stop()
-        if self._thread is not None:
-            self._thread.quit()
-            self._thread.wait(5_000)
-        self._worker = None
-        self._thread = None
-        if self._emergency_thread is not None:
-            self._emergency_thread.quit()
-            self._emergency_thread.wait(5_000)
+        if self.running and self._run_settings is not None:
+            self.request_emergency_stop(
+                self._run_settings,
+                simulation=self._run_simulation,
+            )
+        run_stopped = self._dispose(timeout_ms=timeout_ms)
+
+        emergency_stopped = True
+        emergency_thread = self._emergency_thread
+        if emergency_thread is not None:
+            emergency_thread.quit()
+            emergency_stopped = (
+                not emergency_thread.isRunning()
+                or emergency_thread.wait(timeout_ms)
+            )
+        if emergency_stopped and emergency_thread is not None:
+            emergency_thread.deleteLater()
+            if self._emergency_worker is not None:
+                self._emergency_worker.deleteLater()
             self._emergency_worker = None
             self._emergency_thread = None
+        return run_stopped and emergency_stopped
 

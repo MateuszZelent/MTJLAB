@@ -781,7 +781,10 @@ class RecipeTreeWidget(TreeWidget):
         self.setDragEnabled(True)
         self.setAcceptDrops(True)
         self.setDropIndicatorShown(True)
-        self.setDragDropMode(QAbstractItemView.DragDropMode.InternalMove)
+        # Both tree reordering and external Node Library payloads are legal.
+        # ``InternalMove`` prevents Qt from calculating an Above/On/Below
+        # indicator for external drags even when our handler accepts them.
+        self.setDragDropMode(QAbstractItemView.DragDropMode.DragDrop)
         self.setDefaultDropAction(Qt.DropAction.MoveAction)
 
     def startDrag(self, supported_actions: Any) -> None:

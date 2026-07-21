@@ -1386,7 +1386,14 @@ class RecipePage(QWidget):
         deliberately presented as a non-runnable historical sweep rather than a
         guessed recipe.
         """
-        self.cancel_preflight()
+        if not self.cancel_preflight():
+            QMessageBox.warning(
+                self,
+                "Validation still stopping",
+                "The historical result cannot replace the current workspace while "
+                "recipe validation is still active. Try again after cancellation finishes.",
+            )
+            return
         self._historical_sweep_active = True
         self._plan = None
         self.plan_preflight_changed.emit(None)
@@ -1783,15 +1790,21 @@ class RecipePage(QWidget):
         self._preflight_source = None
         self._preflight_outputs_forced_off = None
 
-    def cancel_preflight(self, *, wait_ms: int = 3_000) -> None:
+    def cancel_preflight(self, *, wait_ms: int = 3_000) -> bool:
         """Stop an in-flight validation before the owning window is destroyed."""
 
         thread = self._preflight_thread
         if thread is None or not thread.isRunning():
-            return
+            return True
         thread.requestInterruption()
         thread.quit()
-        thread.wait(wait_ms)
+        return thread.wait(wait_ms)
+
+    def closeEvent(self, event: QCloseEvent) -> None:
+        if not self.cancel_preflight():
+            event.ignore()
+            return
+        super().closeEvent(event)
 
     def _accept_preflight(
         self, recipe: object, plan: ExecutionPlan, estimate: PlanEstimate

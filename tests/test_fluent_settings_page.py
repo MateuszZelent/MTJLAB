@@ -18,6 +18,7 @@ from qfluentwidgets import (
 )
 
 from app.settings import SettingsRepository
+from app.settings.models import StationSettings
 from app.ui.settings_page import SettingsPage
 from app.ui.settings_page import _SafetyLimitValidationDelegate
 from app.ui.shell import MainWindow
@@ -87,6 +88,44 @@ class FluentSettingsPageTests(unittest.TestCase):
             self.application.processEvents()
             self.assertFalse(page._get_path(page._raw, target_path))
             self.assertTrue(page._dirty)
+        finally:
+            page.close()
+
+    def test_scalar_max_power_uses_the_same_explicit_unit_contract_as_yaml(self) -> None:
+        page = SettingsPage(SettingsRepository(".config/settings.yml"))
+        path = (
+            "devices",
+            "keithley",
+            "safety",
+            "channels",
+            "A",
+            "lab_limits",
+            "max_abs_power",
+        )
+        try:
+            item = page._limit_items_by_path[path]
+
+            item.setText("6700 uW")
+            self.application.processEvents()
+            self.assertNotIn(item, page._limit_error_items)
+
+            item.setText("6.7 mW")
+            self.application.processEvents()
+            self.assertNotIn(item, page._limit_error_items)
+            settings = StationSettings.model_validate(page._apply_tree_values())
+            self.assertEqual(
+                settings.keithley.safety.channels["A"].lab_limits.max_abs_power,
+                "6.7 mW",
+            )
+            self.assertEqual(
+                page.limits_table.item(item.row(), 4).text(), "explicit unit"
+            )
+
+            item.setText("6700")
+            self.application.processEvents()
+            self.assertIn(item, page._limit_error_items)
+            message = str(item.data(256 + 101))
+            self.assertIn("power unit", message)
         finally:
             page.close()
 

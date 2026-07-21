@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+import math
 
 from app.domain.quantities import format_quantity_auto, parse_quantity
 from app.settings.models import RangeSettings, StationSettings
@@ -23,6 +24,17 @@ def _effective_range(
     *,
     hard_maximum_si: float | None = None,
 ) -> QuickControlSafetyBound:
+    if not configured.enabled:
+        minimum = 0.0 if hard_maximum_si is not None else -math.inf
+        maximum = hard_maximum_si if hard_maximum_si is not None else math.inf
+        return QuickControlSafetyBound(
+            minimum,
+            maximum,
+            "HARDWARE",
+            format_quantity_auto(maximum, dimension)
+            if math.isfinite(maximum)
+            else "HARDWARE",
+        )
     configured_minimum = parse_quantity(configured.min, dimension).si_value
     configured_maximum = parse_quantity(configured.max, dimension).si_value
     minimum = configured_minimum

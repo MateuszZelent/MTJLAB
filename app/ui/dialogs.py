@@ -44,9 +44,10 @@ class StationAlertDialog(StationDialog):
         self.setWindowTitle(title)
         self.setModal(True)
         self.setProperty("stationSurface", "raised")
-        self.setMinimumWidth(360)
         parent_width = parent.width() if parent is not None else 720
-        self.setMaximumWidth(max(360, min(720, parent_width - 48)))
+        preferred_width = max(360, min(640, parent_width - 48))
+        self.setMinimumWidth(preferred_width)
+        self.setMaximumWidth(preferred_width)
 
         self.title_label = SubtitleLabel(title, self)
         self.title_label.setWordWrap(True)

@@ -78,6 +78,7 @@ from app.settings.diagnostics import (
     structural_diff,
 )
 from app.settings.models import StationSettings
+from app.settings.validation import format_settings_validation_error
 
 
 _LIMIT_VALIDATION_MESSAGE_ROLE = int(Qt.ItemDataRole.UserRole) + 101
@@ -1380,7 +1381,10 @@ class SettingsPage(QWidget):
         ]
         scope = " / ".join(scope_parts) or str(path[1])
         parameter = str(path[-1]).replace("_", " ")
-        unit = self._range_unit(value, value)
+        # The value itself always carries its unit and may use a different SI
+        # prefix after editing (for example 6700 uW -> 6.7 mW).  A duplicated
+        # fixed suffix would incorrectly imply that the editor is unitless.
+        unit = "explicit unit"
         values = (scope, parameter, value, "â€”", unit, "â€”", "Station configuration")
         for column, text in enumerate(values):
             item = QTableWidgetItem(text)
@@ -1418,7 +1422,12 @@ class SettingsPage(QWidget):
 
     @staticmethod
     def _limit_dimension(path: tuple[str | int, ...]) -> str | None:
-        parameter = str(path[-2]) if len(path) >= 2 else ""
+        leaf = str(path[-1]) if path else ""
+        parameter = (
+            str(path[-2])
+            if len(path) >= 2 and leaf in {"min", "max", "max_abs"}
+            else leaf
+        )
         exact = {
             "frequency": DIMENSION_FREQUENCY,
             "reference_level": DIMENSION_DBM,
@@ -1457,6 +1466,19 @@ class SettingsPage(QWidget):
         return None
 
     @staticmethod
+    def _dimension_unit_hint(dimension: str | None) -> str:
+        return {
+            DIMENSION_POWER: "a power unit (W, mW, uW or nW)",
+            DIMENSION_CURRENT: "a current unit (A, mA, uA or nA)",
+            DIMENSION_VOLTAGE: "a voltage unit (V, mV or uV)",
+            DIMENSION_FREQUENCY: "a frequency unit (Hz, kHz, MHz or GHz)",
+            DIMENSION_TIME: "a time unit (s, ms or us)",
+            DIMENSION_RESISTANCE: "a resistance unit (ohm, kohm or Mohm)",
+            DIMENSION_DBM: "dBm",
+            DIMENSION_DB: "dB",
+        }.get(dimension, "a number")
+
+    @staticmethod
     def _is_empty_limit_value(text: str) -> bool:
         return text.strip().lower() in {"", "null", "none"}
 
@@ -1481,9 +1503,7 @@ class SettingsPage(QWidget):
                     if value <= 0:
                         raise ValueError("Value must be greater than zero.")
             except (QuantityError, ValueError) as exc:
-                expected = (
-                    f" expected unit: {dimension}." if dimension else " expected a number."
-                )
+                expected = f" Enter {self._dimension_unit_hint(dimension)}."
                 self._set_limit_validation(
                     minimum, f"Invalid limit value:{expected} {exc}"
                 )
@@ -1503,7 +1523,7 @@ class SettingsPage(QWidget):
                         item.text(), dimension, require_unit=True
                     ).si_value
             except (QuantityError, ValueError) as exc:
-                expected = f" expected unit: {dimension}." if dimension else " expected a number."
+                expected = f" Enter {self._dimension_unit_hint(dimension)}."
                 self._set_limit_validation(item, f"Invalid {boundary} value:{expected} {exc}")
         if len(values) == 2 and values["minimum"] > values["maximum"]:
             message = "Minimum cannot exceed maximum."
@@ -1770,7 +1790,7 @@ class SettingsPage(QWidget):
         self, title: str, error: Exception, draft: dict[str, Any] | None = None
     ) -> None:
         self._show_validation_errors(error, draft)
-        QMessageBox.critical(self, title, str(error))
+        QMessageBox.critical(self, title, format_settings_validation_error(error))
 
     def validate_draft(self) -> StationSettings | None:
         try:

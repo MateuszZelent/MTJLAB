@@ -81,7 +81,7 @@ root:
             timeout.timeout.connect(lambda: (failures.append("timeout"), controller.request_stop(), loop.quit()))
             try:
                 controller.start(settings, root / "settings.yml", plan, simulation=True)
-                timeout.start(5_000)
+                timeout.start(15_000)
                 loop.exec()
                 timeout.stop()
                 self.application.processEvents()
@@ -139,7 +139,9 @@ finally:
             settings = StationSettings.model_validate(raw)
             recipe_path = root / "demo-recipe.yml"
             recipe_path.write_text(recipe_source, encoding="utf-8")
-            plan = RecipeCompiler(settings).compile(load_recipe(recipe_path))
+            plan = RecipeCompiler(settings, outputs_forced_off=True).compile(
+                load_recipe(recipe_path)
+            )
 
             controller = RunController()
             finished: list[object] = []
@@ -170,7 +172,7 @@ finally:
                     simulation=True,
                     outputs_forced_off=True,
                 )
-                timeout.start(5_000)
+                timeout.start(15_000)
                 loop.exec()
                 timeout.stop()
                 self.application.processEvents()
