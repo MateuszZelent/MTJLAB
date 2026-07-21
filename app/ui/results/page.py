@@ -22,7 +22,7 @@ from app.storage import (
     ThatecRunReader,
     read_pythat_run_data,
 )
-from app.ui.results.data_classifier import ResultDataKind, classify_result
+from app.ui.results.data_classifier import find_heatmap_rows
 from app.ui.results.file_browser import FileBrowserPanel
 from app.ui.results.heatmap_tab import HeatmapResultsTab
 from app.ui.results.metadata_panel import MetadataPanel
@@ -352,12 +352,12 @@ class ResultsPage(QWidget):
         """Handle file selection from the file browser."""
         self.resume_button.setEnabled(False)
         self.open_sweep_button.setEnabled(False)
+        self._thatec_tree_available = False
         self.metadata_panel.clear()
         self.sweep_tree.clear()
         self.spectrum_tab.clear()
         self.heatmap_tab.clear()
         self._set_heatmap_visible(False)
-        self._thatec_tree_available = False
 
         if path_or_none is None:
             self._selected_path = None
@@ -426,8 +426,7 @@ class ResultsPage(QWidget):
         self.spectrum_tab.load(path, self._thatec_run, points)
 
         # Heatmap tab (only for results with 2-D spectral data)
-        data_kind = classify_result(self._thatec_run)
-        if data_kind in (ResultDataKind.SPECTRUM_SWEEP, ResultDataKind.MIXED):
+        if find_heatmap_rows(self._thatec_run):
             self._set_heatmap_visible(True)
             self.heatmap_tab.load(path, self._thatec_run)
         else:

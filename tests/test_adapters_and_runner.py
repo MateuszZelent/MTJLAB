@@ -742,7 +742,11 @@ class AdapterAndRunnerTests(unittest.TestCase):
         adapter.configure_source(KeithleySourceRequest("B", "current", 0.001, 0.067))
         adapter.set_output("B", True)
 
-        with self.assertRaises(SafetyViolation):
+        with self.assertRaisesRegex(
+            SafetyViolation,
+            r"channel B measurement safety trip:.*Measured I=0.001 A, "
+            r"V=0.2 V.*Both outputs were commanded OFF and confirmed OFF",
+        ):
             adapter.measure("B")
 
         self.assertIn("smua.source.output = smua.OUTPUT_OFF", session.writes)

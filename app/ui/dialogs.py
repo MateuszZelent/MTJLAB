@@ -117,6 +117,7 @@ class StationMessageBox:
         secondary = next((button for button in available if button != primary), None)
 
         dialog = MessageBox(title, text, parent)
+        cls._make_message_readable(dialog, parent, title, text)
         dialog.yesButton.setText(cls._button_label(primary))
         if secondary is None:
             dialog.hideCancelButton()
@@ -129,6 +130,37 @@ class StationMessageBox:
         return primary if dialog.exec() == QDialog.DialogCode.Accepted else (
             secondary or cls.StandardButton.NoButton
         )
+
+    @staticmethod
+    def _make_message_readable(
+        dialog: MessageBox,
+        parent: QWidget | None,
+        title: str,
+        text: str,
+    ) -> None:
+        """Keep Fluent message content inside the visible modal card.
+
+        The upstream MessageBox sizes its card from a label width derived from
+        the top-level window.  In a page-owned overlay that can make the card
+        wider than its parent, leaving only a button visible.  Constraining and
+        wrapping both labels after construction keeps long device and safety
+        errors readable at normal and narrow window sizes.
+        """
+
+        parent_width = parent.width() if parent is not None else 720
+        card_width = max(328, min(720, parent_width - 48))
+        text_width = card_width - 48
+        dialog.titleLabel.setText(title)
+        dialog.titleLabel.setWordWrap(True)
+        dialog.titleLabel.setFixedWidth(text_width)
+        dialog.titleLabel.adjustSize()
+        dialog.contentLabel.setText(text)
+        dialog.contentLabel.setWordWrap(True)
+        dialog.contentLabel.setFixedWidth(text_width)
+        dialog.contentLabel.adjustSize()
+        dialog.setContentCopyable(True)
+        card_height = dialog.contentLabel.y() + dialog.contentLabel.height() + 105
+        dialog.widget.setFixedSize(card_width, card_height)
 
     @classmethod
     def _button_label(cls, button: QtMessageBox.StandardButton) -> str:

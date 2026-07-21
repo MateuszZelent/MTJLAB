@@ -186,7 +186,13 @@ class ThatecRunReader:
         row = ThatecRunReader.row(path, row_id)
         data = ThatecRunReader.row_slice(path, row_id, checkpoint)
         try:
-            values = np.asarray(data.values, dtype=float)
+            raw_values = np.asarray(data.values)
+            if np.iscomplexobj(raw_values):
+                raise ExecutionError(
+                    f"THATEC row {row_id} contains complex samples; select a real-valued "
+                    "component stored by the producer before plotting it."
+                )
+            values = np.asarray(raw_values, dtype=float)
         except (TypeError, ValueError) as exc:
             raise ExecutionError(
                 f"THATEC row {row_id} cannot be interpreted as real-valued spectrum data."

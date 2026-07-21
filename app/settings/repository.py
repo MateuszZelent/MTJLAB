@@ -41,6 +41,23 @@ class LoadedSettings:
     source: Path
 
 
+@dataclass(frozen=True, slots=True)
+class SettingsRepairReport:
+    """Describe a deterministic on-disk settings migration."""
+
+    source: Path
+    created: bool
+    defaults_added: bool
+    known_issues_repaired: bool
+    backup: Path | None
+
+    @property
+    def changed(self) -> bool:
+        """Return whether startup created or rewrote the settings file."""
+
+        return self.created or self.defaults_added or self.known_issues_repaired
+
+
 class SettingsRepository:
     """Read/write station configuration without silently accepting invalid YAML."""
 
@@ -52,7 +69,20 @@ class SettingsRepository:
 
     @_serialized_settings_io
     def load(self) -> LoadedSettings:
-        self.ensure_exists()
+        """Load settings after applying safe, deterministic file repairs."""
+
+        loaded, _report = self._load_and_repair()
+        return loaded
+
+    @_serialized_settings_io
+    def repair(self) -> SettingsRepairReport:
+        """Repair this settings file and return an idempotent migration report."""
+
+        _loaded, report = self._load_and_repair()
+        return report
+
+    def _load_and_repair(self) -> tuple[LoadedSettings, SettingsRepairReport]:
+        created = self.ensure_exists()
         if not self.path.is_file():
             raise ConfigurationError(f"Configuration file is missing: {self.path}")
         try:
@@ -67,18 +97,27 @@ class SettingsRepository:
         # comments and ordering remain intact, while new devices and newly
         # introduced nested fields arrive without per-device migration code.
         defaults = self._template_raw()
-        migrated = self._merge_missing_defaults(raw, defaults)
-        repaired = self.repair_known_issues(raw)
+        defaults_added = self._merge_missing_defaults(raw, defaults)
+        known_issues_repaired = self.repair_known_issues(raw)
         try:
             settings = StationSettings.model_validate(raw)
         except ValidationError as exc:
             raise ConfigurationError(f"Invalid settings.yml:\n{exc}") from exc
-        if migrated or repaired:
+        backup = None
+        if defaults_added or known_issues_repaired:
             # Persist only after the merged document validates.  This is a
             # schema upgrade, not an operator configuration change.
             # _atomic_dump also keeps a .bak.
-            self._atomic_dump(raw)
-        return LoadedSettings(settings=settings, raw=raw, source=self.path)
+            backup = self._atomic_dump(raw)
+        loaded = LoadedSettings(settings=settings, raw=raw, source=self.path)
+        report = SettingsRepairReport(
+            source=self.path,
+            created=created,
+            defaults_added=defaults_added,
+            known_issues_repaired=known_issues_repaired,
+            backup=backup,
+        )
+        return loaded, report
 
     def _template_raw(self) -> dict[str, Any]:
         try:
@@ -232,7 +271,7 @@ class SettingsRepository:
             changed = True
         return changed
 
-    def _atomic_dump(self, payload: dict[str, Any]) -> None:
+    def _atomic_dump(self, payload: dict[str, Any]) -> Path | None:
         """Replace the file only after a complete temporary YAML write succeeds."""
 
         self.path.parent.mkdir(parents=True, exist_ok=True)
@@ -240,6 +279,7 @@ class SettingsRepository:
             prefix=f".{self.path.name}.", suffix=".tmp", dir=self.path.parent, text=True
         )
         temp_path = Path(temp_name)
+        backup: Path | None = None
         try:
             with os.fdopen(fd, "w", encoding="utf-8", newline="\n") as stream:
                 self._yaml.dump(payload, stream)
@@ -249,6 +289,7 @@ class SettingsRepository:
                 backup = self.path.with_suffix(self.path.suffix + ".bak")
                 backup.write_bytes(self.path.read_bytes())
             self._replace_with_windows_retry(temp_path, self.path)
+            return backup
         except Exception:
             temp_path.unlink(missing_ok=True)
             raise
@@ -265,3 +306,9 @@ class SettingsRepository:
                 if attempt == 5:
                     raise
                 time.sleep(0.05 * (attempt + 1))
+
+
+def repair_settings_file(path: str | Path) -> SettingsRepairReport:
+    """Create or safely migrate the settings file required at application startup."""
+
+    return SettingsRepository(path).repair()

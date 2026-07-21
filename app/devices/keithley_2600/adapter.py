@@ -958,13 +958,18 @@ class KeithleyAdapter(DeviceAdapter):
                 current,
                 request.dut_envelope if request is not None else None,
             )
-        except SafetyViolation:
+        except SafetyViolation as exc:
             # A manual read must be as fail-safe as a recipe checkpoint: trip
             # limits are laboratory boundaries, so both outputs are disabled.
             self.emergency_off()
             if self._state is not DeviceState.UNKNOWN:
                 self._state = DeviceState.FAULT
-            raise
+            raise SafetyViolation(
+                f"Keithley channel {channel} measurement safety trip: {exc} "
+                f"Measured I={current:.9g} A, V={voltage:.9g} V and "
+                f"|P|={abs(voltage * current):.9g} W. Both outputs were "
+                "commanded OFF and confirmed OFF."
+            ) from exc
         try:
             self._check_errors()
         except Exception:

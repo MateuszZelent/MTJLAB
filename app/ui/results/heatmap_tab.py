@@ -20,7 +20,7 @@ from app.ui.dialogs import StationFileDialog as QFileDialog
 
 from app.storage import ThatecRow, ThatecRun, ThatecRunReader
 from app.ui.design_system import plot_theme, tokens_for
-from app.ui.results.data_classifier import find_spectrum_rows
+from app.ui.results.data_classifier import find_heatmap_rows
 
 
 class HeatmapPlotWidget(QWidget):
@@ -336,7 +336,7 @@ class HeatmapResultsTab(QWidget):
         """Prepare the tab with available spectrum rows from a THATEC result."""
         self._selected_path = path
         self._run = run
-        self._spectrum_rows = find_spectrum_rows(run)
+        self._spectrum_rows = find_heatmap_rows(run)
 
         self.row_combo.clear()
         self.heatmap.clear()
@@ -436,4 +436,3 @@ class HeatmapResultsTab(QWidget):
         row_id = self.row_combo.currentData()
         if row_id is not None:
             self.checkpoint_clicked.emit(row_id, checkpoint)
-

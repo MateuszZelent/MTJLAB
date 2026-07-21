@@ -47,6 +47,18 @@ def find_spectrum_rows(run: ThatecRun) -> list[ThatecRow]:
     return [row for row in run.rows.values() if len(row.shape) >= 2]
 
 
+def find_heatmap_rows(run: ThatecRun) -> list[ThatecRow]:
+    """Return single-trace spectral rows supported by the heatmap renderer.
+
+    A multi-trace array is fully browseable in the Spectrum tab, which lets
+    the operator choose its channel explicitly.  The heatmap has one colour
+    plane and therefore only accepts ``checkpoint x frequency`` rows until it
+    gains the same channel selector.
+    """
+
+    return [row for row in run.rows.values() if len(row.shape) == 2]
+
+
 def find_scalar_rows(run: ThatecRun) -> list[ThatecRow]:
     """Return rows with 1-D scalar data."""
     return [row for row in run.rows.values() if len(row.shape) == 1]

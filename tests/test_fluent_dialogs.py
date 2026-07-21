@@ -10,10 +10,10 @@ from PySide6.QtWidgets import (
     QFileDialog,
     QMessageBox,
 )
-from qfluentwidgets import PushButton, TransparentPushButton
+from qfluentwidgets import MessageBox, PushButton, TransparentPushButton
 
 from app.ui.design_system import apply_application_theme, tokens_for
-from app.ui.dialogs import StationDialog, StationFileDialog
+from app.ui.dialogs import StationDialog, StationFileDialog, StationMessageBox
 from app.ui.recipes.fluent_dialog import FluentRecipeDialog
 from app.ui.widgets import LimitEditDialog, LimitField, SpectrumPlotWidget
 from app.ui.common import line_edit
@@ -122,3 +122,30 @@ class FluentDialogTests(unittest.TestCase):
             self.assertNotEqual(observed["light"], observed["dark"])
         finally:
             box.close()
+
+    def test_station_message_box_keeps_long_error_inside_narrow_parent(self) -> None:
+        parent = StationDialog()
+        parent.resize(520, 400)
+        box = MessageBox(
+            "Keithley measurement stopped",
+            "Channel A measured current 3.83496 mA exceeded the configured "
+            "maximum 1.1 mA. Both outputs were commanded OFF and confirmed OFF.",
+            parent,
+        )
+        try:
+            StationMessageBox._make_message_readable(
+                box,
+                parent,
+                box.titleLabel.text(),
+                box.contentLabel.text(),
+            )
+            parent.show()
+            box.show()
+            self.application.processEvents()
+            self.assertLessEqual(box.widget.width(), parent.width() - 48)
+            self.assertGreater(box.contentLabel.height(), 14)
+            self.assertTrue(box.contentLabel.isVisible())
+            self.assertIn("3.83496 mA", box.contentLabel.text())
+        finally:
+            box.close()
+            parent.close()
