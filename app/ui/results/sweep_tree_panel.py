@@ -204,7 +204,7 @@ class SweepTreePanel(QWidget):
                 }
             )
         )
-        if len(record.shape) == 2:
+        if len(record.shape) >= 2:
             self.values_tree.clear()
             self.spectrum_requested.emit(record.id, checkpoint)
         else:

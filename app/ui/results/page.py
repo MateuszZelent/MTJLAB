@@ -330,7 +330,6 @@ class ResultsPage(QWidget):
         self.spectrum_tab.clear()
         self.heatmap_tab.clear()
         self._set_heatmap_visible(False)
-        self._thatec_tree_available = False
         self.file_browser.refresh()
         if not self.file_browser.has_files():
             self.metadata_panel.metadata.setPlainText(
@@ -358,6 +357,7 @@ class ResultsPage(QWidget):
         self.spectrum_tab.clear()
         self.heatmap_tab.clear()
         self._set_heatmap_visible(False)
+        self._thatec_tree_available = False
 
         if path_or_none is None:
             self._selected_path = None
