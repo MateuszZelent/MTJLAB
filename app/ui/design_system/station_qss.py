@@ -165,30 +165,3 @@ QSpinBox[validationState="error"], SpinBox[validationState="error"] {{
     border: 2px solid {tokens.danger};
 }}
 """
-
-
-def notification_banner_qss(tokens: ThemeTokens) -> str:
-    """Semantic, token-based treatment for the shared inline notification."""
-
-    return f"""
-/* station-notification-banner */
-CardWidget#notificationBanner {{
-    border-radius: 8px;
-}}
-CardWidget#notificationBanner[severity="info"] {{
-    background: {tokens.surface_raised};
-    border: 1px solid {tokens.accent};
-}}
-CardWidget#notificationBanner[severity="success"] {{
-    background: {tokens.surface_raised};
-    border: 1px solid {tokens.success};
-}}
-CardWidget#notificationBanner[severity="warning"] {{
-    background: {tokens.surface_raised};
-    border: 1px solid {tokens.caution};
-}}
-CardWidget#notificationBanner[severity="error"] {{
-    background: {tokens.surface_raised};
-    border: 1px solid {tokens.danger};
-}}
-"""

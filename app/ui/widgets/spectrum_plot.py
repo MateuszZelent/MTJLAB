@@ -287,8 +287,51 @@ class SpectrumPlotWidget(QWidget):
         self.peak_selected.emit(index)
 
     def auto_range(self) -> None:
-        self.plot.enableAutoRange()
-        self.plot.autoRange()
+        """Fit visible finite traces once without enabling a growing auto-range.
+
+        ``PlotItem.enableAutoRange()`` remains active after one click.  With a
+        live Keithley history that means every subsequent redraw re-applies
+        pyqtgraph's padding to the previous range, so repeated Reset clicks
+        appear to zoom out forever.  A Reset is intentionally a one-shot,
+        deterministic fit to the data that is visible now.
+        """
+
+        visible = [
+            data
+            for name, data in self._traces.items()
+            if name in self._curves and self._curves[name].isVisible()
+        ]
+        if not visible:
+            self.status_changed.emit("Reset unavailable: no visible finite trace data.")
+            return
+        x_values = np.concatenate([data[0] for data in visible])
+        y_values = np.concatenate([data[1] for data in visible])
+        if not x_values.size or not y_values.size:
+            self.status_changed.emit("Reset unavailable: no visible finite trace data.")
+            return
+        x_range = self._stable_data_range(x_values)
+        y_range = self._stable_data_range(y_values)
+        if x_range is None or y_range is None:
+            self.status_changed.emit("Reset unavailable: no visible finite trace data.")
+            return
+        view_box = self.plot.getViewBox()
+        view_box.disableAutoRange()
+        view_box.setRange(xRange=x_range, yRange=y_range, padding=0)
+
+    @staticmethod
+    def _stable_data_range(values: np.ndarray) -> tuple[float, float] | None:
+        """Return a fixed five-percent margin around finite values."""
+
+        finite = values[np.isfinite(values)]
+        if finite.size == 0:
+            return None
+        lower = float(np.min(finite))
+        upper = float(np.max(finite))
+        if np.isclose(lower, upper, rtol=0.0, atol=1e-15):
+            margin = max(abs(lower) * 0.05, 1.0)
+        else:
+            margin = (upper - lower) * 0.05
+        return lower - margin, upper + margin
 
     def peak_search(self) -> None:
         data = self._primary_data()

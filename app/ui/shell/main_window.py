@@ -259,6 +259,9 @@ class MainWindow(FluentWindow):
             self.quick_control_coordinator, self
         )
         self.quick_controls_window.restore_workspace()
+        self.quick_controls_window.output_requested.connect(
+            self._request_quick_control_output
+        )
         self.rigol_page.quick_setpoint_requested.connect(
             self.quick_control_coordinator.submit
         )
@@ -964,11 +967,32 @@ class MainWindow(FluentWindow):
     def _show_quick_controls(self) -> None:
         if not self.quick_controls_window._selected:
             self.quick_controls_window.choose_controls()
-        if self.quick_controls_window._selected:
-            self.quick_control_coordinator.refresh()
-            self.quick_controls_window.show()
-            self.quick_controls_window.raise_()
-            self.quick_controls_window.activateWindow()
+        # Output controls remain available even when the operator has not
+        # pinned a numeric quick-control row yet.
+        self.quick_control_coordinator.refresh()
+        self.quick_controls_window.show()
+        self.quick_controls_window.raise_()
+        self.quick_controls_window.activateWindow()
+
+    def _request_quick_control_output(
+        self, device: str, channel: str, enabled: bool
+    ) -> None:
+        """Send floating-window output requests through the owning device page."""
+
+        if device == "rigol":
+            if channel not in {"1", "2"}:
+                self._log(f"Rejected Quick controls Rigol channel {channel!r}")
+                return
+            self.rigol_page.channel.setCurrentText(channel)
+            self.rigol_page.request_output(enabled)
+            return
+        if device == "keithley":
+            if channel not in {"A", "B"}:
+                self._log(f"Rejected Quick controls Keithley channel {channel!r}")
+                return
+            self.keithley_page.request_channel_output(channel, enabled)
+            return
+        self._log(f"Rejected Quick controls output request for {device!r}")
 
     def _device_result(self, device: str, card: DeviceConnectionPanel, operation: str, result: object) -> None:
         if operation == "connect":

@@ -2000,6 +2000,14 @@ class KeithleyPage(QWidget):
         self._update_output_readiness()
         self._controller.call("set_output", (channel, False))
 
+    def request_channel_output(self, channel: str, enabled: bool) -> None:
+        """Route a floating-control request through the normal safety workflow."""
+
+        if channel not in self.channel_cards:
+            raise ValueError(f"Unknown Keithley channel {channel!r}.")
+        self.channel.setCurrentText(channel)
+        self._request_channel_output(channel, enabled)
+
     def _selected_live_channels(self) -> list[str]:
         return [
             channel

@@ -10,8 +10,10 @@ from PySide6.QtGui import QCloseEvent, QKeyEvent
 from PySide6.QtWidgets import QDialog, QHBoxLayout, QSizePolicy, QVBoxLayout, QWidget
 from qfluentwidgets import (
     BodyLabel,
+    CardWidget,
     CaptionLabel,
     CheckBox,
+    ComboBox,
     LineEdit,
     PrimaryPushButton,
     PushButton,
@@ -362,6 +364,8 @@ class QuickControlPicker(StationDialog):
 
 
 class QuickControlsWindow(StationDialog):
+    output_requested = Signal(str, str, bool)
+
     def __init__(self, coordinator: QuickControlCoordinator, parent: QWidget) -> None:
         super().__init__(parent)
         self.setWindowTitle("Quick peripheral controls")
@@ -379,6 +383,7 @@ class QuickControlsWindow(StationDialog):
         self.choose = PushButton("Choose...", self)
         header.addWidget(self.choose)
         self.layout_root.addLayout(header)
+        self._build_output_controls()
         self.content_host = QWidget(self)
         self.content_host.setMinimumWidth(0)
         self.content = QVBoxLayout(self.content_host)
@@ -395,6 +400,65 @@ class QuickControlsWindow(StationDialog):
         coordinator.state_changed.connect(self._state_changed)
         coordinator.value_read.connect(self._value_read)
         coordinator.bounds_changed.connect(self._refresh_limits)
+
+    def _build_output_controls(self) -> None:
+        """Expose deliberate output requests without bypassing device pages."""
+
+        card = CardWidget(self)
+        card.setObjectName("quickControlsOutputCard")
+        card.setProperty("stationSurface", "card")
+        layout = QVBoxLayout(card)
+        layout.setContentsMargins(10, 8, 10, 8)
+        layout.setSpacing(6)
+        title = StrongBodyLabel("Output control", card)
+        title.setObjectName("sectionTitle")
+        layout.addWidget(title)
+        note = CaptionLabel(
+            "ON uses the same safety validation and hardware readback as the "
+            "full device page. OFF requests a confirmed safe state.",
+            card,
+        )
+        note.setObjectName("muted")
+        note.setWordWrap(True)
+        layout.addWidget(note)
+        for device, label, channels in (
+            ("rigol", "Rigol DG1022Z", ("1", "2")),
+            ("keithley", "Keithley 2600", ("A", "B")),
+        ):
+            row = QHBoxLayout()
+            row.addWidget(BodyLabel(label, card))
+            channel = ComboBox(card)
+            channel.addItems(channels)
+            channel.setAccessibleName(f"{label} output channel")
+            channel.setToolTip("Choose the physical channel for this output request.")
+            row.addWidget(channel)
+            on = PrimaryPushButton("OUTPUT ON", card)
+            on.setObjectName("outputOnButton")
+            on.setToolTip(
+                "Request OUTPUT ON through the complete safety and readback workflow."
+            )
+            on.setAccessibleName(f"{label} selected channel output on")
+            off = PushButton("OUTPUT OFF", card)
+            off.setObjectName("outputOffButton")
+            off.setToolTip(
+                "Request OUTPUT OFF and verify the selected channel's readback."
+            )
+            off.setAccessibleName(f"{label} selected channel output off")
+            on.clicked.connect(
+                lambda _checked=False, name=device, selector=channel: self.output_requested.emit(
+                    name, selector.currentText(), True
+                )
+            )
+            off.clicked.connect(
+                lambda _checked=False, name=device, selector=channel: self.output_requested.emit(
+                    name, selector.currentText(), False
+                )
+            )
+            row.addWidget(on)
+            row.addWidget(off)
+            row.addStretch(1)
+            layout.addLayout(row)
+        self.layout_root.addWidget(card)
 
     def restore_workspace(self) -> None:
         settings = QSettings("LabControl", "LabControl")

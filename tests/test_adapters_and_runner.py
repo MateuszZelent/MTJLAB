@@ -29,6 +29,7 @@ from app.devices.rigol_dg1000z import (
     RigolModulationConfig,
 )
 from app.devices.rigol_dg1000z.module import _dispatch as dispatch_rigol
+from app.devices.simulators import RigolSimulator
 from app.devices.moke_box.models import MokeHallVoltageReading, hall_field_from_voltage
 from app.devices.lakeshore_475.models import (
     FieldUnit, GaussmeterReading, GaussmeterSnapshot, MeasurementMode,
@@ -145,6 +146,53 @@ class LakeShoreProbe:
 class AdapterAndRunnerTests(unittest.TestCase):
     def setUp(self) -> None:
         self.settings = simulation_settings()
+
+    def test_rigol_failed_live_mutation_invalidates_verified_carrier(self) -> None:
+        session = RigolSimulator()
+        adapter = RigolAdapter(
+            self.settings, session_factory=FakeVisaSessionFactory(session)
+        )
+        adapter.connect()
+        adapter.configure_channel(
+            RigolChannelConfig(
+                1,
+                "SIN",
+                1_000.0,
+                0.001,
+                -0.001,
+                dut_min_impedance_ohm=50.0,
+            )
+        )
+        session.command_errors[":SOUR1:FREQ"] = "-200,Injected update failure"
+
+        with self.assertRaises(DeviceError):
+            adapter.update_frequency(1, 2_000.0)
+
+        with self.assertRaisesRegex(SafetyViolation, "Configure and validate"):
+            adapter.last_channel_config(1)
+
+    def test_rigol_user_waveform_forces_and_verifies_frequency_mode(self) -> None:
+        session = RigolSimulator()
+        adapter = RigolAdapter(
+            self.settings, session_factory=FakeVisaSessionFactory(session)
+        )
+        adapter.connect()
+
+        adapter.configure_channel(
+            RigolChannelConfig(
+                1,
+                "USER",
+                1_000.0,
+                0.001,
+                -0.001,
+                dut_min_impedance_ohm=50.0,
+            )
+        )
+
+        mode_write = session.commands.index(":SOUR1:FUNC:ARB:MODE FREQ")
+        frequency_write = session.commands.index(":SOUR1:FREQ 1000")
+        self.assertLess(mode_write, frequency_write)
+        self.assertIn(":SOUR1:FUNC:ARB:MODE?", session.commands)
 
     def test_demo_mode_suppresses_every_output_on_action(self) -> None:
         rigol = DemoOutputProbe()
@@ -2720,6 +2768,15 @@ root:
         adapter.connect()
         adapter.configure_channel(RigolChannelConfig(1, "SQU", 1000, .001, -.001, dut_min_impedance_ohm=50))
         self.assertTrue(adapter.set_output(1, True))
+        output_on_index = session.writes.index(":OUTP1 ON")
+        for command in (
+            ":OUTP1:LOAD INF",
+            ":OUTP1:POL NORM",
+            ":OUTP1:MODE NORM",
+            ":OUTP1:SYNC OFF",
+        ):
+            self.assertIn(command, session.writes)
+            self.assertLess(session.writes.index(command), output_on_index)
 
     def test_runner_stores_one_checkpoint_for_a_spectrum(self) -> None:
         rigol_session = FakeVisaSession(

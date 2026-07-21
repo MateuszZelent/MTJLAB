@@ -616,6 +616,45 @@ class _AnritsuSpectrogramWindow(StationDialog):
         self.closed.emit()
 
 
+class _AnritsuSpectrumWindow(StationDialog):
+    """Always-on-top mirror of the current, already acquired spectrum."""
+
+    closed = Signal()
+
+    def __init__(self, parent: QWidget) -> None:
+        super().__init__(parent)
+        self.setWindowTitle("Anritsu MS2830A — floating spectrum")
+        self.setObjectName("anritsuSpectrumWindow")
+        self.setWindowFlag(Qt.WindowType.WindowStaysOnTopHint, True)
+        self.setModal(False)
+        self.resize(920, 620)
+        self.setMinimumSize(580, 400)
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(16, 14, 16, 14)
+        layout.setSpacing(8)
+        header = QHBoxLayout()
+        header.addWidget(StrongBodyLabel("Current spectrum", self))
+        header.addStretch(1)
+        layout.addLayout(header)
+        self.spectrum = SpectrumPlotWidget(legend=True, parent=self)
+        self.spectrum.set_title("Waiting for a completed spectrum")
+        self.spectrum.set_labels(
+            x="Frequency", x_unit="Hz", y="Amplitude", y_unit="dBm"
+        )
+        layout.addWidget(self.spectrum, 1)
+        self.status = CaptionLabel(
+            "This window mirrors completed traces; it does not start acquisition.",
+            self,
+        )
+        self.status.setObjectName("muted")
+        self.status.setWordWrap(True)
+        layout.addWidget(self.status)
+
+    def closeEvent(self, event: QCloseEvent) -> None:
+        super().closeEvent(event)
+        self.closed.emit()
+
+
 class AnritsuPage(QWidget):
     status = Signal(str)
     settings_readback_requested = Signal(object, object)
@@ -644,6 +683,7 @@ class AnritsuPage(QWidget):
         self._reference_spectrum: ReferenceSpectrum | None = None
         self._spectrogram_buffer = _SpectrogramBuffer()
         self._spectrogram_window: _AnritsuSpectrogramWindow | None = None
+        self._spectrum_window: _AnritsuSpectrumWindow | None = None
         self._cleanup_result: SpectrumCleanupResult | None = None
         self._detected_peaks: tuple[SpectrumPeak, ...] = ()
         self._last_peak_analysis_monotonic: float | None = None
@@ -947,10 +987,19 @@ class AnritsuPage(QWidget):
         self.open_peak_table = PrimaryPushButton(
             "Peak table…", self.signal_analysis_card
         )
+        self.open_floating_spectrum = PushButton(
+            "Open floating spectrum", self.signal_analysis_card
+        )
+        self.open_floating_spectrum.setToolTip(
+            "Open an always-on-top mirror of completed spectrum traces. "
+            "It never starts acquisition or changes analyser settings."
+        )
+        self.open_floating_spectrum.setAccessibleName("Open floating spectrum")
         analysis_controls.addWidget(self.auto_peak_detection, 1, 0)
         analysis_controls.addWidget(self.highlight_peaks, 1, 1)
         analysis_controls.addWidget(self.analyze_peaks, 1, 2)
         analysis_controls.addWidget(self.open_peak_table, 1, 3)
+        analysis_controls.addWidget(self.open_floating_spectrum, 0, 3)
         self.analysis_status = CaptionLabel(
             "Waiting for a completed spectrum.", self.signal_analysis_card
         )
@@ -1073,6 +1122,7 @@ class AnritsuPage(QWidget):
         self.open_spectrogram_window.clicked.connect(
             self._open_spectrogram_window
         )
+        self.open_floating_spectrum.clicked.connect(self._open_spectrum_window)
         self.cleanup_mode.currentIndexChanged.connect(
             self._signal_analysis_controls_changed
         )
@@ -2406,13 +2456,18 @@ class AnritsuPage(QWidget):
         )
 
     def _sync_peak_markers(self, *_args: object) -> None:
+        plots = [self.spectrum_plot]
+        if self._spectrum_window is not None:
+            plots.append(self._spectrum_window.spectrum)
         if not self.highlight_peaks.isChecked() or not self._detected_peaks:
-            self.spectrum_plot.clear_peak_markers()
+            for plot in plots:
+                plot.clear_peak_markers()
             return
-        self.spectrum_plot.set_peak_markers(
-            [peak.frequency_hz for peak in self._detected_peaks],
-            [peak.amplitude_dbm for peak in self._detected_peaks],
-        )
+        for plot in plots:
+            plot.set_peak_markers(
+                [peak.frequency_hz for peak in self._detected_peaks],
+                [peak.amplitude_dbm for peak in self._detected_peaks],
+            )
 
     def _open_peak_table(self) -> None:
         self._analyze_current_spectrum(force=True)
@@ -2592,6 +2647,26 @@ class AnritsuPage(QWidget):
         if floating is not None:
             floating.deleteLater()
 
+    def _open_spectrum_window(self) -> None:
+        """Show a non-controlling mirror of the current spectrum display."""
+
+        if self._spectrum_window is None:
+            floating = _AnritsuSpectrumWindow(self)
+            floating.closed.connect(self._spectrum_window_closed)
+            floating.spectrum.status_changed.connect(self.status.emit)
+            self._spectrum_window = floating
+        self._refresh_spectrum_display()
+        floating = self._spectrum_window
+        floating.show()
+        floating.raise_()
+        floating.activateWindow()
+
+    def _spectrum_window_closed(self) -> None:
+        floating = self._spectrum_window
+        self._spectrum_window = None
+        if floating is not None:
+            floating.deleteLater()
+
     def _spectrogram_matrix(
         self,
         *,
@@ -2743,32 +2818,51 @@ class AnritsuPage(QWidget):
                 if self.show_processed.isChecked():
                     traces.append(("Processed", signal, processed, processed_unit, "#ab47bc"))
 
-        for name in ("Raw", "Analysis", "Averaged", "Reference", "Processed"):
-            self.spectrum_plot.clear_trace(name)
+        plots = [self.spectrum_plot]
+        floating = self._spectrum_window
+        if floating is not None:
+            plots.append(floating.spectrum)
+        for plot in plots:
+            for name in ("Raw", "Analysis", "Averaged", "Reference", "Processed"):
+                plot.clear_trace(name)
         if not traces:
+            if floating is not None:
+                floating.spectrum.set_title("Waiting for a completed spectrum")
+                floating.status.setText(
+                    "Acquire a spectrum to update this read-only display."
+                )
             return
         if processed is not None and processed_unit != "dBm" and self.show_processed.isChecked():
             traces = [item for item in traces if item[0] == "Processed"]
         displayed = 0
         for name, trace, values, _unit, color in traces:
-            self.spectrum_plot.set_trace(
-                name,
-                trace.frequencies_hz,
-                values,
-                color=color,
-                primary=name in {"Processed", "Analysis", "Averaged", "Raw"},
-            )
+            for plot in plots:
+                plot.set_trace(
+                    name,
+                    trace.frequencies_hz,
+                    values,
+                    color=color,
+                    primary=name in {"Processed", "Analysis", "Averaged", "Raw"},
+                )
             displayed += sum(
                 math.isfinite(frequency) and math.isfinite(value)
                 for frequency, value in zip(trace.frequencies_hz, values, strict=True)
             )
         if displayed == 0:
             self.info.setText("No finite spectrum points are available for display.")
+            if floating is not None:
+                floating.status.setText("No finite spectrum points are available.")
             return
         active_unit = traces[-1][3]
-        self.spectrum_plot.set_labels(
-            x="Frequency", x_unit="Hz", y="Amplitude", y_unit=active_unit
-        )
+        for plot in plots:
+            plot.set_labels(
+                x="Frequency", x_unit="Hz", y="Amplitude", y_unit=active_unit
+            )
+        if floating is not None:
+            floating.spectrum.set_title("Current spectrum")
+            floating.status.setText(
+                f"Mirroring {displayed:,} finite value(s) from the completed trace."
+            )
 
     def _error(self, operation: str, error: str) -> None:
         if operation in {"read_advanced_spectrum", "configure_advanced_spectrum"}:

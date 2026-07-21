@@ -79,6 +79,7 @@ from app.settings.diagnostics import (
 )
 from app.settings.models import StationSettings
 from app.settings.validation import format_settings_validation_error
+from app.ui.widgets import show_toast
 
 
 _LIMIT_VALIDATION_MESSAGE_ROLE = int(Qt.ItemDataRole.UserRole) + 101
@@ -294,10 +295,7 @@ class SettingsPage(QWidget):
         )
         limits_description.setObjectName("muted")
         limits_description.setWordWrap(True)
-        self.limits_validation_banner = BodyLabel()
-        self.limits_validation_banner.setObjectName("settingsValidationBanner")
-        self.limits_validation_banner.setWordWrap(True)
-        self.limits_validation_banner.hide()
+        self._limit_validation_toast_message: str | None = None
         limits_card = CardWidget()
         limits_card.setObjectName("settingsTableCard")
         limits_card_layout = QVBoxLayout(limits_card)
@@ -330,7 +328,6 @@ class SettingsPage(QWidget):
         limits_card_layout.addWidget(self.limits_scroll)
         limits_layout.addWidget(limits_title)
         limits_layout.addWidget(limits_description)
-        limits_layout.addWidget(self.limits_validation_banner)
         limits_layout.addWidget(limits_card, 1)
         self.limits_page = limits_page
         self.tabs.addTab(limits_page, "Safety limits")
@@ -1575,12 +1572,11 @@ class SettingsPage(QWidget):
             safety_editor.setText(item.text())
         self._validate_limit_row(item.row())
         if self._limit_error_items:
-            self.limits_validation_banner.setText(
+            self._show_limit_validation_toast(
                 "Incorrect value or unit. Correct the red outlined field before saving."
             )
-            self.limits_validation_banner.show()
         else:
-            self.limits_validation_banner.hide()
+            self._limit_validation_toast_message = None
         self._sync_tree_from_limit(tuple(path), item.text())
         self._dirty = True
         if self._autosave_enabled:
@@ -1667,8 +1663,15 @@ class SettingsPage(QWidget):
             self._clear_validation_error(path)
         for item in tuple(self._limit_error_items):
             self._set_limit_validation(item, None)
-        self.limits_validation_banner.hide()
-        self.limits_validation_banner.clear()
+        self._limit_validation_toast_message = None
+
+    def _show_limit_validation_toast(self, message: str) -> None:
+        """Announce a new limit-validation problem without reflowing the tab."""
+
+        if message == self._limit_validation_toast_message:
+            return
+        self._limit_validation_toast_message = message
+        show_toast(self, message, severity="error", timeout_ms=8_000, title="Safety limits")
 
     def _set_limit_validation(self, item: QTableWidgetItem, message: str | None) -> None:
         """Update error metadata without recursively re-entering itemChanged."""
@@ -1801,10 +1804,9 @@ class SettingsPage(QWidget):
                         first_editor = editor
             if self._limit_error_items:
                 first = self._limit_error_items[0]
-                self.limits_validation_banner.setText(
+                self._show_limit_validation_toast(
                     "Correct the highlighted safety-limit fields before validating again."
                 )
-                self.limits_validation_banner.show()
                 self.tabs.setCurrentWidget(self.limits_page)
                 path = tuple(first.data(Qt.ItemDataRole.UserRole) or ())
                 editor = self._safety_limit_editors.get(path)

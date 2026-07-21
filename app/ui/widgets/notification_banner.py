@@ -1,44 +1,76 @@
-"""Non-modal inline operator notification."""
+"""Non-intrusive Fluent toast notifications.
+
+``NotificationBanner`` deliberately retains its former public API so device
+pages do not have to own a second notification mechanism.  Unlike the old
+inline card it occupies no layout space: messages are rendered by QFluent's
+overlay layer and therefore never move a page's controls or plots.
+"""
 
 from __future__ import annotations
 
-from PySide6.QtCore import QTimer
-from PySide6.QtWidgets import QHBoxLayout
-from qfluentwidgets import BodyLabel, CardWidget, FluentIcon, TransparentToolButton
+from PySide6.QtWidgets import QSizePolicy, QWidget
+from qfluentwidgets import InfoBar, InfoBarPosition
 
 
-class NotificationBanner(CardWidget):
-    def __init__(self, parent=None) -> None:
+_TOAST_METHODS = {
+    "info": InfoBar.info,
+    "success": InfoBar.success,
+    "warning": InfoBar.warning,
+    "error": InfoBar.error,
+}
+
+
+def show_toast(
+    parent: QWidget,
+    message: str,
+    *,
+    severity: str = "warning",
+    timeout_ms: int = 10_000,
+    title: str | None = None,
+) -> None:
+    """Present one page-scoped notification without changing its geometry."""
+
+    normalized = severity.strip().lower()
+    method = _TOAST_METHODS.get(normalized, InfoBar.warning)
+    owner = parent.window() if parent.window().isVisible() else parent
+    method(
+        title=title or normalized.title(),
+        content=message,
+        isClosable=True,
+        position=InfoBarPosition.TOP_RIGHT,
+        duration=-1 if timeout_ms <= 0 else timeout_ms,
+        parent=owner,
+    )
+
+
+class NotificationBanner(QWidget):
+    """Compatibility host for the former inline notification card.
+
+    Pages may keep an instance in their existing layout, but it stays hidden
+    with zero height for its complete lifetime.  ``show_message`` uses a toast
+    above that layout instead of making it reflow.
+    """
+
+    def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
-        self.setObjectName("notificationBanner")
-        layout = QHBoxLayout(self)
-        layout.setContentsMargins(10, 7, 7, 7)
-        self.label = BodyLabel()
-        self.label.setWordWrap(True)
-        self.label.setAccessibleName("Notification message")
-        self.close_button = TransparentToolButton(FluentIcon.CLOSE, self)
-        self.close_button.setAccessibleName("Dismiss notification")
-        self.close_button.setToolTip("Dismiss notification")
-        self.close_button.clicked.connect(self.hide)
-        layout.addWidget(self.label, 1)
-        layout.addWidget(self.close_button)
-        self._timer = QTimer(self)
-        self._timer.setSingleShot(True)
-        self._timer.timeout.connect(self.hide)
+        self.setObjectName("notificationToastHost")
+        self.setFixedHeight(0)
+        self.setSizePolicy(
+            QSizePolicy.Policy.Ignored,
+            QSizePolicy.Policy.Fixed,
+        )
         self.hide()
 
-    def show_message(self, message: str, *, severity: str = "warning", timeout_ms: int = 10_000) -> None:
-        normalized_severity = severity.strip().lower()
-        if normalized_severity not in {"info", "success", "warning", "error"}:
-            normalized_severity = "warning"
-        self.setProperty("severity", normalized_severity)
-        self.style().unpolish(self)
-        self.style().polish(self)
-        self.label.setText(message)
-        self.setAccessibleName(f"{normalized_severity.title()} notification")
-        self.setAccessibleDescription(message)
-        self.show()
-        if timeout_ms > 0:
-            self._timer.start(timeout_ms)
-        else:
-            self._timer.stop()
+    def show_message(
+        self,
+        message: str,
+        *,
+        severity: str = "warning",
+        timeout_ms: int = 10_000,
+    ) -> None:
+        show_toast(
+            self,
+            message,
+            severity=severity,
+            timeout_ms=timeout_ms,
+        )

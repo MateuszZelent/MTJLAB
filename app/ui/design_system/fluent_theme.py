@@ -17,7 +17,7 @@ from qfluentwidgets import (
 
 from app.ui.common.precision_stepper import install_precision_arrow_stepper
 
-from .station_qss import dialog_qss, event_log_qss, notification_banner_qss
+from .station_qss import dialog_qss, event_log_qss
 from .theme import effective_theme
 from .tokens import ThemeTokens, tokens_for
 
@@ -376,11 +376,6 @@ def _apply_station_card_frame(widget: QWidget, tokens: ThemeTokens) -> None:
     set_background = getattr(widget, "setBackgroundColor", None)
     if callable(set_background):
         set_background(QColor(tokens.surface))
-    notification_qss = (
-        notification_banner_qss(tokens)
-        if widget.objectName() == "notificationBanner"
-        else ""
-    )
     if marker in widget.styleSheet():
         base = widget.styleSheet().split(marker, 1)[0].rstrip()
     else:
@@ -392,7 +387,6 @@ def _apply_station_card_frame(widget: QWidget, tokens: ThemeTokens) -> None:
         "border: 1px solid palette(mid);"
         "border-radius: 8px;"
         "}"
-        f"\n{notification_qss}"
     )
 
 

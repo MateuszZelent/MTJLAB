@@ -312,7 +312,7 @@ class RigolSimulator(_BaseSimulator):
         assignment = re.match(r"^(:SOUR[12]:[A-Za-z0-9:]+)\s+(.+)$", command)
         if assignment and re.match(
             r"^:SOUR[12]:(?:"
-            r"FUNC:(?:SQU:DCYC|RAMP:SYMM|PULS:(?:WIDT|TRAN|TRAN:TRA))|"
+            r"FUNC:(?:ARB:MODE|SQU:DCYC|RAMP:SYMM|PULS:(?:WIDT|TRAN|TRAN:TRA))|"
             r"PULS:HOLD|MOD:TYPE|"
             r"(?:AM|FM|PM|ASK|FSK|PSK|PWM):(?:SOUR|INT:(?:FREQ|FUNC|RATE)|POL|DEPT|DEV(?::DCYC)?|AMPL|FREQ|PHAS)|"
             r"FREQ:(?:STAR|STOP)|"
