@@ -7,7 +7,7 @@ from dataclasses import dataclass
 from PySide6.QtCore import Signal
 from PySide6.QtGui import QResizeEvent
 from PySide6.QtWidgets import QGridLayout, QSizePolicy, QWidget
-from qfluentwidgets import BodyLabel, PrimaryPushButton
+from qfluentwidgets import BodyLabel, PrimaryPushButton, PushButton
 
 
 @dataclass(frozen=True, slots=True)
@@ -26,6 +26,7 @@ class StationSafetyStrip(QWidget):
     """Display station safety state and immediately request an E-STOP."""
 
     estop_requested = Signal()
+    save_settings_requested = Signal()
 
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
@@ -37,6 +38,12 @@ class StationSafetyStrip(QWidget):
         self.mode = BodyLabel()
         self.actor = BodyLabel()
         self.estop = PrimaryPushButton("E-STOP — disable all outputs")
+        self.save_settings = PushButton("SAVE SETTINGS")
+        self.save_settings.setAccessibleName("Save pending station settings")
+        self.save_settings.setToolTip(
+            "Validate and save pending Settings and device-form changes."
+        )
+        self.save_settings.clicked.connect(self.save_settings_requested)
         self.estop.setAccessibleName("Emergency stop and disable all outputs")
         self.estop.clicked.connect(self.estop_requested)
 
@@ -50,6 +57,7 @@ class StationSafetyStrip(QWidget):
             self.profile,
             self.mode,
             self.actor,
+            self.save_settings,
         ):
             widget.setMinimumWidth(0)
             widget.setSizePolicy(
@@ -73,27 +81,31 @@ class StationSafetyStrip(QWidget):
             self.profile,
             self.mode,
             self.actor,
+            self.save_settings,
             self.estop,
         )
         for widget in widgets:
             self._layout.removeWidget(widget)
-        for column in range(6):
+        for column in range(7):
             self._layout.setColumnStretch(column, 0)
         if compact:
             self._layout.addWidget(self.readiness, 0, 0)
             self._layout.addWidget(self.outputs, 0, 1)
-            self._layout.addWidget(self.estop, 0, 2)
+            self._layout.addWidget(self.save_settings, 0, 2)
+            self._layout.addWidget(self.estop, 0, 3)
             self._layout.addWidget(self.profile, 1, 0)
             self._layout.addWidget(self.mode, 1, 1)
-            self._layout.addWidget(self.actor, 1, 2)
+            self._layout.addWidget(self.actor, 1, 2, 1, 2)
             self._layout.setColumnStretch(0, 1)
             self._layout.setColumnStretch(1, 1)
             self._layout.setColumnStretch(2, 2)
+            self._layout.setColumnStretch(3, 2)
         else:
-            for column, widget in enumerate(widgets[:-1]):
+            for column, widget in enumerate(widgets[:-2]):
                 self._layout.addWidget(widget, 0, column)
                 self._layout.setColumnStretch(column, 1 if column < 4 else 2)
-            self._layout.addWidget(self.estop, 0, 5)
+            self._layout.addWidget(self.save_settings, 0, 5)
+            self._layout.addWidget(self.estop, 0, 6)
 
     def update_snapshot(self, snapshot: StationSafetySnapshot) -> None:
         """Synchronously render ``snapshot`` without performing station actions."""
@@ -119,4 +131,3 @@ class StationSafetyStrip(QWidget):
         for widget in (self.readiness, self.outputs):
             widget.style().unpolish(widget)
             widget.style().polish(widget)
-

@@ -41,8 +41,20 @@ __all__ = [
 class ActionNodeEditorDialog(FluentRecipeDialog):
     """Edit scalar fields of a non-device recipe action without raw YAML."""
 
-    _TIME_FIELDS = {"duration", "deadline", "sync_delay", "settle_time", "sweep_time"}
-    _FREQUENCY_FIELDS = {"frequency", "start_frequency", "stop_frequency", "rbw", "vbw"}
+    _TIME_FIELDS = {
+        "duration",
+        "deadline",
+        "sync_delay",
+        "settle_time",
+        "sweep_time",
+    }
+    _FREQUENCY_FIELDS = {
+        "frequency",
+        "start_frequency",
+        "stop_frequency",
+        "rbw",
+        "vbw",
+    }
 
     def __init__(
         self,
@@ -118,8 +130,7 @@ class ActionNodeEditorDialog(FluentRecipeDialog):
             combo = ComboBox(self)
             values: tuple[object, ...] = (
                 (1, 2)
-                if isinstance(value, int)
-                or "rigol" in self._node.type
+                if isinstance(value, int) or "rigol" in self._node.type
                 else ("A", "B")
             )
             for choice in values:
@@ -209,12 +220,20 @@ class ActionNodeEditorDialog(FluentRecipeDialog):
             if key in fields and self._literal(fields[key]):
                 parse_quantity(fields[key], "frequency")
         mode = str(fields.get("mode", ""))
-        if "level" in fields and mode in {"current", "voltage"} and self._literal(fields["level"]):
+        if (
+            "level" in fields
+            and mode in {"current", "voltage"}
+            and self._literal(fields["level"])
+        ):
             parse_quantity(
                 fields["level"],
                 DIMENSION_CURRENT if mode == "current" else DIMENSION_VOLTAGE,
             )
-        if "compliance" in fields and mode in {"current", "voltage"} and self._literal(fields["compliance"]):
+        if (
+            "compliance" in fields
+            and mode in {"current", "voltage"}
+            and self._literal(fields["compliance"])
+        ):
             parse_quantity(
                 fields["compliance"],
                 DIMENSION_VOLTAGE if mode == "current" else DIMENSION_CURRENT,

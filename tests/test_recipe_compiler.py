@@ -933,6 +933,56 @@ root:
                 parse_recipe_text(source)
             )
 
+    def test_output_on_authoring_action_expands_to_internal_rigol_arm_then_on(self) -> None:
+        raw = deepcopy(simulation_settings(approved=True).model_dump(mode="python"))
+        raw["devices"]["rigol"]["safety"]["allow_output_enable"] = True
+        source = """\
+schema_version: 1
+name: consolidated-rigol-output-on
+dut_limits:
+  rigol:
+    1:
+      minimum_impedance: 50 ohm
+      max_abs_current: 1 mA
+      max_abs_power: 1 mW
+root:
+  id: root
+  type: sequence
+  children:
+    - id: configure
+      type: configure_rigol
+      channel: 1
+      waveform: SIN
+      frequency: 1 kHz
+      high_level: 1 mV
+      low_level: -1 mV
+      dut_min_impedance: 50 ohm
+    - {id: output-on, type: enable_rigol_output, channel: 1}
+"""
+        plan = RecipeCompiler(StationSettings.model_validate(raw)).compile(
+            parse_recipe_text(source)
+        )
+        self.assertEqual(
+            [action.kind for action in plan.actions[-2:]],
+            ["arm_rigol_output", "set_rigol_output"],
+        )
+        self.assertEqual(
+            [action.node_id for action in plan.actions[-2:]],
+            ["output-on.rigol.arm", "output-on.rigol.output-on"],
+        )
+        self.assertTrue(plan.actions[-1].payload["enabled"])
+
+    def test_consolidated_output_on_is_rejected_in_finally(self) -> None:
+        source = """\
+schema_version: 1
+name: unsafe-finally-output-on
+root: {id: wait, type: wait, duration: 1 ms}
+finally:
+  - {id: output-on, type: enable_rigol_output, channel: 1}
+"""
+        with self.assertRaisesRegex(SafetyViolation, "not allowed in finally"):
+            RecipeCompiler(simulation_settings()).compile(parse_recipe_text(source))
+
     def test_rf_interlock_blocks_unapproved_recipe(self) -> None:
         recipe = load_recipe(
             ROOT / "recipes" / "example_energized_nested_sweep_template.yml"

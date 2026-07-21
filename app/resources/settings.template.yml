@@ -31,7 +31,7 @@ application:
   service_console_enabled: false
   require_operator_confirmation_before_arming: true
   require_second_confirmation_for_limit_override: true
-  settings_autosave: true
+  settings_autosave: false
   restore_last_recipe: true
 
 units:

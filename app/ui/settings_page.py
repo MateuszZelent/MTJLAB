@@ -220,10 +220,12 @@ class SettingsPage(QWidget):
         self._safety_limit_error_labels: dict[tuple[str | int, ...], QLabel] = {}
         self._changing = False
         self._dirty = False
+        self._autosave_enabled = False
         self._autosave_timer = QTimer(self)
         self._autosave_timer.setSingleShot(True)
         self._autosave_timer.setInterval(750)
-        self._autosave_timer.timeout.connect(lambda: self.save_draft(silent=True))
+        # Compatibility object only: persistence now requires an explicit
+        # SAVE SETTINGS / Save changes action.
         self._build()
         self.reload()
 
@@ -558,6 +560,20 @@ class SettingsPage(QWidget):
         self._update_subtitle()
         self._refresh_diagnostics()
 
+    def stage_external_snapshot(
+        self, settings: StationSettings, raw: dict[str, Any]
+    ) -> None:
+        """Replace the in-memory draft without persisting it."""
+
+        self._autosave_timer.stop()
+        self._settings = settings
+        self._raw = deepcopy(raw)
+        self._dirty = self._raw != self._persisted_raw
+        self._populate()
+        self._update_subtitle()
+        self._refresh_diagnostics()
+        self.status.emit("Unsaved settings changes; press SAVE SETTINGS")
+
     def _update_subtitle(self) -> None:
         if self._settings is None:
             return
@@ -824,9 +840,7 @@ class SettingsPage(QWidget):
             return
         self._clear_validation_error(path)
         self._dirty = True
-        autosave = bool(self._raw.get("application", {}).get("settings_autosave", False))
-        if autosave and not self._read_only:
-            self._autosave_timer.start()
+        if self._autosave_enabled:
             self.status.emit("Autosave pending…")
 
     def _add_items(
@@ -903,9 +917,7 @@ class SettingsPage(QWidget):
             elif isinstance(editor, QComboBox):
                 editor.setCurrentIndex(max(0, editor.findData(item.text(1))))
             self._dirty = True
-            autosave = bool(self._raw.get("application", {}).get("settings_autosave", False))
-            if autosave and not self._read_only:
-                self._autosave_timer.start()
+            if self._autosave_enabled:
                 self.status.emit("Autosave pending…")
 
     @staticmethod
@@ -1481,9 +1493,7 @@ class SettingsPage(QWidget):
             self.limits_validation_banner.hide()
         self._sync_tree_from_limit(tuple(path), item.text())
         self._dirty = True
-        autosave = bool(self._raw.get("application", {}).get("settings_autosave", False))
-        if autosave and not self._read_only:
-            self._autosave_timer.start()
+        if self._autosave_enabled:
             self.status.emit("Safety-limit autosave pending…")
 
     def _sync_tree_from_limit(self, path: tuple[str | int, ...], text: str) -> None:
@@ -1787,13 +1797,13 @@ class SettingsPage(QWidget):
             repaired = repair_result[0]
         except AuthorizationError as exc:
             if silent:
-                self.status.emit(f"Autosave rejected invalid settings: {exc}")
+                self.status.emit(f"Background save rejected invalid settings: {exc}")
             else:
                 QMessageBox.critical(self, "Changes not saved", str(exc))
             return False
         except (ConfigurationError, ValueError) as exc:
             if silent:
-                self.status.emit(f"Autosave rejected invalid settings: {exc}")
+                self.status.emit(f"Background save rejected invalid settings: {exc}")
             else:
                 self._validation_failed("Changes not saved", exc, locals().get("draft"))
             return False
@@ -1808,11 +1818,11 @@ class SettingsPage(QWidget):
         self._refresh_diagnostics()
         self.settings_saved.emit(settings)
         self.status.emit(
-            "Configuration autosaved and known inconsistencies repaired"
+            "Configuration saved and known inconsistencies repaired"
             if silent and repaired
             else "Configuration saved and known inconsistencies repaired"
             if repaired
-            else "Configuration autosaved"
+            else "Configuration saved"
             if silent
             else "Configuration saved"
         )

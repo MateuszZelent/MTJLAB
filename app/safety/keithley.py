@@ -13,6 +13,12 @@ from app.settings.models import KeithleyChannelSettings
 
 SourceMode = Literal["current", "voltage", "measure_only"]
 
+# Immutable 2602A range ceilings. These describe instrument range selectors,
+# not DUT trip thresholds. The adapter independently validates the documented
+# discrete ranges before writing TSP commands.
+KEITHLEY_2602A_MAX_VOLTAGE_RANGE_V = 40.0
+KEITHLEY_2602A_MAX_CURRENT_RANGE_A = 3.0
+
 
 @dataclass(frozen=True, slots=True)
 class KeithleySafetyEnvelope:
@@ -113,17 +119,18 @@ def validate_keithley_source(channel: KeithleyChannelSettings, request: Keithley
                 f"{worst_case_power:.9g} W exceeds the {power_limit_source} "
                 f"{max_power:.9g} W."
             )
-    source_dimension = DIMENSION_CURRENT if request.mode == "current" else DIMENSION_VOLTAGE
-    source_limits = limits.source_current if request.mode == "current" else limits.source_voltage
     source_required = abs(request.level_si)
+    source_range_max = (
+        KEITHLEY_2602A_MAX_CURRENT_RANGE_A
+        if request.mode == "current"
+        else KEITHLEY_2602A_MAX_VOLTAGE_RANGE_V
+    )
     _validate_manual_range(
         "source range",
         request.source_autorange,
         request.source_range_si,
         source_required,
-        source_limits.min,
-        source_limits.max,
-        source_dimension,
+        source_range_max,
     )
     voltage_required = abs(request.compliance_si if request.mode == "current" else request.level_si)
     current_required = abs(request.level_si if request.mode == "current" else request.compliance_si)
@@ -132,18 +139,14 @@ def validate_keithley_source(channel: KeithleyChannelSettings, request: Keithley
         request.measure_voltage_autorange,
         request.measure_voltage_range_si,
         voltage_required,
-        limits.measured_voltage_trip.min,
-        limits.measured_voltage_trip.max,
-        DIMENSION_VOLTAGE,
+        KEITHLEY_2602A_MAX_VOLTAGE_RANGE_V,
     )
     _validate_manual_range(
         "measure current range",
         request.measure_current_autorange,
         request.measure_current_range_si,
         current_required,
-        limits.measured_current_trip.min,
-        limits.measured_current_trip.max,
-        DIMENSION_CURRENT,
+        KEITHLEY_2602A_MAX_CURRENT_RANGE_A,
     )
 
 
@@ -152,9 +155,7 @@ def _validate_manual_range(
     autorange: bool,
     manual_range_si: float | None,
     required_si: float,
-    lower: str,
-    upper: str,
-    dimension: str,
+    hardware_max_si: float,
 ) -> None:
     if autorange:
         if manual_range_si is not None:
@@ -162,14 +163,10 @@ def _validate_manual_range(
         return
     if manual_range_si is None or manual_range_si <= 0:
         raise SafetyViolation(f"{name}: autorange=false requires a positive range.")
-    maximum = max(
-        abs(parse_quantity(lower, dimension).si_value),
-        abs(parse_quantity(upper, dimension).si_value),
-    )
-    if manual_range_si < required_si or manual_range_si > maximum:
+    if manual_range_si < required_si or manual_range_si > hardware_max_si:
         raise SafetyViolation(
             f"{name}={manual_range_si:.9g} does not cover required value {required_si:.9g} "
-            f"or exceeds the {maximum:.9g} SI limit."
+            f"or exceeds the 2602A hardware maximum {hardware_max_si:.9g} SI."
         )
 
 

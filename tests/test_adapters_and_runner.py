@@ -1363,6 +1363,52 @@ class AdapterAndRunnerTests(unittest.TestCase):
         self.assertEqual(result.state, ApplicationState.FAULT)
         self.assertEqual((keithley.calls, rigol.calls, anritsu.calls), (1, 1, 1))
 
+    def test_fault_runs_pending_finally_before_independent_station_shutdown(self) -> None:
+        from app.devices.simulators import SimulatedVisaFactory, simulated_station_settings
+
+        settings = simulated_station_settings(loaded_settings())
+        keithley = KeithleyAdapter(
+            settings, session_factory=SimulatedVisaFactory("keithley")
+        )
+        keithley.connect()
+        rigol = ShutdownProbe()
+        anritsu = ShutdownProbe()
+        writer = MemoryWriter()
+        plan = ExecutionPlan(
+            recipe_name="fault-runs-finally",
+            actions=(
+                PlanAction("broken", "not-supported", {}, {}),
+                PlanAction(
+                    "keithley-b-off",
+                    "set_keithley_output",
+                    {"channel": "B", "enabled": False},
+                    {},
+                    is_finally=True,
+                ),
+            ),
+            total_points=0,
+            sha256="fault-runs-finally",
+            recipe_source="schema_version: 1\n",
+        )
+
+        result = RecipeRunner(
+            rigol=rigol,  # type: ignore[arg-type]
+            keithley=keithley,
+            anritsu=anritsu,  # type: ignore[arg-type]
+            writer=writer,  # type: ignore[arg-type]
+        ).run(plan)
+
+        names = [name for name, _data, _severity in writer.events]
+        self.assertEqual(result.state, ApplicationState.FAULT)
+        self.assertIn("action_failed", names)
+        self.assertIn("safe_finally_finished", names)
+        self.assertLess(
+            names.index("safe_finally_finished"),
+            names.index("shutdown_action_started"),
+        )
+        self.assertEqual(keithley.state, DeviceState.OUTPUT_OFF)
+        self.assertEqual((rigol.calls, anritsu.calls), (1, 1))
+
     def test_runner_executes_hashed_shutdown_manifest_in_declared_order(self) -> None:
         keithley = ShutdownProbe()
         rigol = ShutdownProbe()

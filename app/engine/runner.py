@@ -148,6 +148,8 @@ class RecipeRunner:
         self._correlation_id = str(uuid4())
         self._start_watchdog()
         self._state = ApplicationState.RUNNING
+        current_action: PlanAction | None = None
+        attempted_finally: set[str] = set()
         try:
             self._emit(
                 "run_started",
@@ -182,6 +184,9 @@ class RecipeRunner:
                 plan.actions[start_action_index:], start=start_action_index
             ):
                 self._raise_if_stop_requested()
+                current_action = action
+                if action.is_finally:
+                    attempted_finally.add(action.node_id)
                 self._emit(
                     "action_started",
                     {
@@ -284,6 +289,7 @@ class RecipeRunner:
                     point_measurements.clear()
                     self._pause_at_point_if_requested()
                 self._emit("action_finished", {"node_id": action.node_id, "kind": action.kind})
+                current_action = None
                 self._record_safe_boundary_if_advanced(
                     stored_points=stored,
                     next_action_index=completed,
@@ -297,9 +303,30 @@ class RecipeRunner:
             return RunResult(self._state, completed, stored)
         except Exception as exc:
             if self._stop_requested.is_set() and not self._watchdog_timed_out.is_set():
-                return self._abort_safely(plan, completed, stored, point_measurements, str(exc))
+                return self._abort_safely(
+                    plan,
+                    completed,
+                    stored,
+                    point_measurements,
+                    str(exc),
+                    attempted_finally=attempted_finally,
+                )
             self._state = ApplicationState.FAULT
+            if current_action is not None:
+                self._emit_after_fault(
+                    "action_failed",
+                    {
+                        "node_id": current_action.node_id,
+                        "kind": current_action.kind,
+                        "error": str(exc),
+                    },
+                )
             self._emit_after_fault("run_fault", {"error": str(exc)})
+            self._run_pending_finally(
+                plan,
+                point_measurements,
+                attempted_node_ids=attempted_finally,
+            )
             self._safe_shutdown()
             self._state = ApplicationState.FAULT
             self._writer.close("faulted")
@@ -536,23 +563,17 @@ class RecipeRunner:
         stored: int,
         measurements: dict[str, float],
         reason: str,
+        *,
+        attempted_finally: set[str] | None = None,
     ) -> RunResult:
         """Run only preflight-approved cleanup actions after an operator stop."""
 
-        cleanup_ok = True
         self._emit_after_fault("run_aborting", {"reason": reason})
-        for action in plan.actions:
-            if not action.is_finally:
-                continue
-            try:
-                self._emit_after_fault("safe_finally_started", {"node_id": action.node_id, "kind": action.kind})
-                self._execute(action, measurements)
-                self._emit_after_fault("safe_finally_finished", {"node_id": action.node_id, "kind": action.kind})
-            except Exception as exc:
-                cleanup_ok = False
-                self._emit_after_fault(
-                    "safe_finally_error", {"node_id": action.node_id, "kind": action.kind, "error": str(exc)}
-                )
+        cleanup_ok = self._run_pending_finally(
+            plan,
+            measurements,
+            attempted_node_ids=attempted_finally,
+        )
         shutdown_ok = self._safe_shutdown()
         if cleanup_ok and shutdown_ok:
             self._state = ApplicationState.SAFE
@@ -563,6 +584,43 @@ class RecipeRunner:
         self._emit_after_fault("run_fault", {"error": "Safe stop was not confirmed: " + reason})
         self._writer.close("faulted")
         return RunResult(self._state, completed, stored, reason)
+
+    def _run_pending_finally(
+        self,
+        plan: ExecutionPlan,
+        measurements: dict[str, float],
+        *,
+        attempted_node_ids: set[str] | None = None,
+    ) -> bool:
+        """Attempt each not-yet-started approved Finally action exactly once."""
+
+        attempted = attempted_node_ids if attempted_node_ids is not None else set()
+        cleanup_ok = True
+        for action in plan.actions:
+            if not action.is_finally or action.node_id in attempted:
+                continue
+            attempted.add(action.node_id)
+            try:
+                self._emit_after_fault(
+                    "safe_finally_started",
+                    {"node_id": action.node_id, "kind": action.kind},
+                )
+                self._execute(action, measurements)
+                self._emit_after_fault(
+                    "safe_finally_finished",
+                    {"node_id": action.node_id, "kind": action.kind},
+                )
+            except Exception as exc:
+                cleanup_ok = False
+                self._emit_after_fault(
+                    "safe_finally_error",
+                    {
+                        "node_id": action.node_id,
+                        "kind": action.kind,
+                        "error": str(exc),
+                    },
+                )
+        return cleanup_ok
 
     def _execute(
         self, action: PlanAction, measurements: dict[str, float]
@@ -1132,7 +1190,11 @@ class RecipeRunner:
             "cancellation_requested": self._stop_requested.is_set(),
             "state_snapshot": self._runtime_state_snapshot(),
         }
-        severity = "error" if name in {"run_fault", "shutdown_error"} else "info"
+        severity = (
+            "error"
+            if name in {"action_failed", "run_fault", "shutdown_error"}
+            else "info"
+        )
         self._writer.append_event(name, payload, severity=severity)
         self._on_event(name, payload)
 

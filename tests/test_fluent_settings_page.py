@@ -68,7 +68,7 @@ class FluentSettingsPageTests(unittest.TestCase):
 
             self.assertLessEqual(page.minimumSizeHint().width(), host.scroll_area.viewport().width())
             self.assertTrue(page.save_button.isVisibleTo(window))
-            self.assertTrue(page.approve_button.isVisibleTo(window))
+            self.assertFalse(page.approve_button.isVisibleTo(window))
             self.assertLessEqual(
                 page.action_card.mapTo(window, page.action_card.rect().bottomRight()).x(),
                 window.rect().right(),

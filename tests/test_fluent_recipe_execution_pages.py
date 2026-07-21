@@ -15,6 +15,7 @@ from qfluentwidgets import (
     PrimaryPushButton,
     PushButton,
     SegmentedWidget,
+    TreeWidget,
 )
 
 from app.ui.shell import MainWindow
@@ -180,7 +181,10 @@ class FluentRecipeAndExecutionPageTests(unittest.TestCase):
             self.assertIsInstance(page.monitor_card, CardWidget)
             self.assertIsInstance(page.pause_button, PushButton)
             self.assertIsInstance(page.stop_button, PrimaryPushButton)
+            self.assertIsInstance(page.steps, TreeWidget)
             self.assertTrue(page.stop_button.isVisibleTo(window))
+            self.assertTrue(page.steps.isVisibleTo(window))
+            self.assertGreater(page.steps.geometry().height(), 120)
 
             sample = page.hero_card.mapTo(window, QPoint(40, 40))
             window._set_theme_mode("light", persist=False)

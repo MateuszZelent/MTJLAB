@@ -39,7 +39,12 @@ from app.devices.keithley_2600.ui import (
     KeithleyPage,
 )
 from app.devices.rigol_dg1000z.ui import RigolNodeEditorDialog
-from app.ui.recipes import DeviceParameterDialog, RecipeTreeWidget, SweepGeneratorDialog
+from app.ui.recipes import (
+    ActionNodeEditorDialog,
+    DeviceParameterDialog,
+    RecipeTreeWidget,
+    SweepGeneratorDialog,
+)
 from app.ui.recipes.page import (
     AnritsuAcquisitionEditorDialog,
     CommentEditorDialog,
@@ -428,12 +433,19 @@ finally: []
                     "Rigol DG1032Z",
                     "Anritsu configuration",
                     "Anritsu signal generator",
+                    "Keithley A OUTPUT ON",
+                    "Keithley B OUTPUT ON",
+                    "Rigol CH1 OUTPUT ON",
+                    "Rigol CH2 OUTPUT ON",
+                    "Anritsu SG RF OUTPUT ON",
                     "MOKE Hall (V + field)",
                     "Measure Lake Shore field",
                     "Acquire reference",
                     "Acquire spectrum once",
-                    "Keithley A → 0 + OFF",
-                    "Keithley B → 0 + OFF",
+                    "Keithley A OUTPUT OFF",
+                    "Keithley B OUTPUT OFF",
+                    "Keithley A RAMP TO ZERO + OFF (optional)",
+                    "Keithley B RAMP TO ZERO + OFF (optional)",
                     "Rigol CH1 OFF",
                     "Rigol CH2 OFF",
                     "Anritsu SG OFF",
@@ -441,10 +453,9 @@ finally: []
                     "Sequence / group",
                     "Repeat",
                     "Comment",
-                    "Anritsu SG ARM",
-                    "Anritsu SG RF ON",
                 ],
             )
+            self.assertFalse(any("ARM" in label for label in labels))
             self.assertNotIn("Sweep current", labels)
             self.assertNotIn("Set fixed voltage", labels)
             for broken_marker in ("Â", "â", "Ã", "�"):
@@ -1760,7 +1771,7 @@ root:
     def test_node_library_filters_actions_and_adds_a_tree_node(self) -> None:
         page = RecipePage(simulation_settings())
         try:
-            self.assertEqual(len(page._library_action_buttons), 19)
+            self.assertEqual(len(page._library_action_buttons), 24)
             page.library_search.setText("spectrum analyzer")
             visible = [button.text() for button in page._library_action_buttons if not button.isHidden()]
             self.assertEqual(
@@ -1771,6 +1782,75 @@ root:
             page._library_add_basic("wait")
             recipe = parse_recipe_text(page.editor.toPlainText())
             self.assertEqual(recipe.root.children[-1].type, "wait")
+        finally:
+            page.close()
+
+    def test_output_on_library_adds_authoring_actions_without_exposing_arm(self) -> None:
+        page = RecipePage(simulation_settings())
+        try:
+            page._library_add_output_on("keithley", "A")
+            page._library_add_output_on("rigol", 2)
+            page._library_add_output_on("anritsu_sg", None)
+            children = parse_recipe_text(page.editor.toPlainText()).root.children
+            self.assertEqual(
+                [(node.type, node.data.get("channel"), node.data.get("enabled")) for node in children[-3:]],
+                [
+                    ("set_keithley_output", "A", True),
+                    ("enable_rigol_output", 2, None),
+                    ("enable_anritsu_sg_output", None, None),
+                ],
+            )
+        finally:
+            page.close()
+
+    def test_action_dialog_edits_ramp_parameters_and_renders_at_two_sizes(self) -> None:
+        node = RecipeNode(
+            "ramp-a",
+            "ramp_keithley_to_zero",
+            {"channel": "A", "deadline": "10 s"},
+        )
+        dialog = ActionNodeEditorDialog(node)
+        try:
+            channel, _ = dialog._editors["channel"]
+            deadline, _ = dialog._editors["deadline"]
+            self.assertIsInstance(channel, ComboBox)
+            self.assertIsInstance(deadline, LineEdit)
+            channel.setCurrentIndex(channel.findData("B"))
+            deadline.setText("25 s")
+            self.assertEqual(
+                dialog.node_fields(), {"channel": "B", "deadline": "25 s"}
+            )
+
+            for width, height in ((720, 520), (500, 360)):
+                dialog.resize(width, height)
+                dialog.show()
+                self.application.processEvents()
+                self.assertTrue(dialog.isVisible())
+                self.assertGreater(dialog.geometry().width(), 0)
+                self.assertGreater(dialog.geometry().height(), 0)
+        finally:
+            dialog.close()
+
+    def test_double_click_routes_every_recipe_node_to_an_editor(self) -> None:
+        page = RecipePage(simulation_settings())
+        try:
+            recipe = parse_recipe_text(page.editor.toPlainText())
+            items: list[QTreeWidgetItem] = []
+
+            def collect(item: QTreeWidgetItem) -> None:
+                if isinstance(item.data(0, Qt.ItemDataRole.UserRole), RecipeNode):
+                    items.append(item)
+                for child_index in range(item.childCount()):
+                    collect(item.child(child_index))
+
+            for top_index in range(page.tree.topLevelItemCount()):
+                collect(page.tree.topLevelItem(top_index))
+            self.assertTrue(items)
+            with patch.object(page, "_edit_selected_node") as edit:
+                for item in items:
+                    page._open_node_editor(item, 0)
+            self.assertEqual(edit.call_count, len(items))
+            self.assertIsNotNone(recipe.root)
         finally:
             page.close()
 
@@ -2152,6 +2232,7 @@ finally: []
             self.assertIn("Empty", finally_item.text(1))
 
             page._library_add_keithley_shutdown("A")
+            page._library_add_output_off("set_keithley_output", channel="B")
             page._library_add_output_off("set_rigol_output", channel=2)
             page._library_add_output_off("set_anritsu_sg_output")
             parsed = parse_recipe_text(page.editor.toPlainText())
@@ -2163,12 +2244,14 @@ finally: []
                 [
                     ("ramp_keithley_to_zero", "A", None),
                     ("set_keithley_output", "A", False),
+                    ("set_keithley_output", "B", False),
                     ("set_rigol_output", 2, False),
                     ("set_anritsu_sg_output", None, False),
                 ],
             )
             labels = {button.text() for button in page._library_action_buttons}
-            self.assertIn("Keithley A → 0 + OFF", labels)
+            self.assertIn("Keithley A OUTPUT OFF", labels)
+            self.assertIn("Keithley A RAMP TO ZERO + OFF (optional)", labels)
             self.assertIn("Rigol CH2 OFF", labels)
             self.assertIn("Anritsu SG OFF", labels)
         finally:

@@ -730,17 +730,39 @@ class RecipePage(QWidget):
             drag_kind="flow:acquire_spectrum",
         )
 
-        safety = group("Safe shutdown", "5")
+        safety = group("Safe shutdown", "7")
         action(
-            safety, "Keithley A → 0 + OFF",
-            "Add an unconditional channel A ramp and OUTPUT OFF to Finally", "keithley",
+            safety,
+            "Keithley A OUTPUT OFF",
+            "Add an immediate channel A OUTPUT OFF to Finally (no ramp)",
+            "keithley",
+            QStyle.StandardPixmap.SP_MediaStop,
+            lambda: self._library_add_output_off(
+                "set_keithley_output", channel="A"
+            ),
+            drag_kind="safety:keithley_a_off",
+        )
+        action(
+            safety,
+            "Keithley B OUTPUT OFF",
+            "Add an immediate channel B OUTPUT OFF to Finally (no ramp)",
+            "keithley",
+            QStyle.StandardPixmap.SP_MediaStop,
+            lambda: self._library_add_output_off(
+                "set_keithley_output", channel="B"
+            ),
+            drag_kind="safety:keithley_b_off",
+        )
+        action(
+            safety, "Keithley A RAMP TO ZERO + OFF (optional)",
+            "Add a bounded channel A ramp followed by OUTPUT OFF to Finally", "keithley",
             QStyle.StandardPixmap.SP_MediaStop,
             lambda: self._library_add_keithley_shutdown("A"),
             drag_kind="safety:keithley_a",
         )
         action(
-            safety, "Keithley B → 0 + OFF",
-            "Add an unconditional channel B ramp and OUTPUT OFF to Finally", "keithley",
+            safety, "Keithley B RAMP TO ZERO + OFF (optional)",
+            "Add a bounded channel B ramp followed by OUTPUT OFF to Finally", "keithley",
             QStyle.StandardPixmap.SP_MediaStop,
             lambda: self._library_add_keithley_shutdown("B"),
             drag_kind="safety:keithley_b",
@@ -909,7 +931,9 @@ class RecipePage(QWidget):
         except Exception as exc:
             QMessageBox.warning(self, "Add OUTPUT ON", str(exc))
 
-    def _library_add_output_off(self, kind: str, *, channel: int | None = None) -> None:
+    def _library_add_output_off(
+        self, kind: str, *, channel: str | int | None = None
+    ) -> None:
         node: dict[str, object] = {
             "id": self._new_node_id("output-off"),
             "type": kind,
@@ -1054,7 +1078,12 @@ class RecipePage(QWidget):
                 )
                 return
             if category == "safety":
-                if kind in {"keithley_a", "keithley_b"}:
+                if kind in {"keithley_a_off", "keithley_b_off"}:
+                    self._library_add_output_off(
+                        "set_keithley_output",
+                        channel=kind.removesuffix("_off")[-1].upper(),
+                    )
+                elif kind in {"keithley_a", "keithley_b"}:
                     self._library_add_keithley_shutdown(kind[-1].upper())
                 elif kind in {"rigol_1", "rigol_2"}:
                     self._library_add_output_off(
@@ -2086,7 +2115,7 @@ class RecipePage(QWidget):
             return "FIXED", "#536577"
         if node.type in {"wait", "repeat", "sequence", "comment"}:
             return "FLOW", "#7253a6"
-        if node.type.startswith("set_") or node.type.startswith("ramp_"):
+        if node.type.startswith(("set_", "ramp_", "enable_")):
             return "SAFE", "#18844c"
         if node.type in {"acquire_reference", "acquire_spectrum", "measure_moke_hall"}:
             return "ACQUIRE", "#18844c"
@@ -2168,6 +2197,44 @@ class RecipePage(QWidget):
                 f"{node.data.get('frequency', '')}",
                 "Point update - OUTPUT unchanged",
                 QStyle.StandardPixmap.SP_MediaPlay,
+            )
+        if node.type == "enable_rigol_output":
+            return (
+                f"Rigol CH{node.data.get('channel', '?')} OUTPUT ON",
+                "Energization · internal one-shot interlock",
+                QStyle.StandardPixmap.SP_MediaPlay,
+            )
+        if node.type == "enable_anritsu_sg_output":
+            return (
+                "Anritsu SG RF OUTPUT ON",
+                "Energization · internal one-shot interlock",
+                QStyle.StandardPixmap.SP_MediaPlay,
+            )
+        if node.type == "set_keithley_output":
+            enabled = bool(node.data.get("enabled", False))
+            return (
+                f"Keithley {node.data.get('channel', '?')} OUTPUT "
+                f"{'ON' if enabled else 'OFF'}",
+                "Energization" if enabled else "Safety action",
+                QStyle.StandardPixmap.SP_MediaPlay
+                if enabled
+                else QStyle.StandardPixmap.SP_BrowserStop,
+            )
+        if node.type == "set_rigol_output":
+            enabled = bool(node.data.get("enabled", False))
+            return (
+                f"Rigol CH{node.data.get('channel', '?')} OUTPUT "
+                f"{'ON' if enabled else 'OFF'}",
+                "Energization" if enabled else "Safety action",
+                QStyle.StandardPixmap.SP_MediaPlay
+                if enabled
+                else QStyle.StandardPixmap.SP_BrowserStop,
+            )
+        if node.type == "ramp_keithley_to_zero":
+            return (
+                f"Ramp Keithley {node.data.get('channel', '?')} to zero",
+                f"Safety action · deadline {node.data.get('deadline', '10 s')}",
+                QStyle.StandardPixmap.SP_BrowserReload,
             )
         if node.type == "arm_anritsu_sg_output":
             return (
@@ -3020,7 +3087,10 @@ class RecipePage(QWidget):
         }:
             self._edit_anritsu_acquisition_node(node)
             return
-        if isinstance(node, RecipeNode) and node.type == "configure_anritsu_advanced":
+        if isinstance(node, RecipeNode) and node.type in {
+            "configure_anritsu_advanced",
+            "configure_anritsu_sg",
+        }:
             self._edit_action_node(node)
             return
         if isinstance(node, RecipeNode) and (

@@ -76,6 +76,14 @@ class StationSafetyStripTests(unittest.TestCase):
         strip.estop.click()
         self.assertEqual(emissions, [True])
 
+    def test_save_settings_button_is_adjacent_and_emits_explicit_request(self) -> None:
+        strip = StationSafetyStrip()
+        emissions: list[bool] = []
+        strip.save_settings_requested.connect(lambda: emissions.append(True))
+        strip.save_settings.click()
+        self.assertEqual(strip.save_settings.text(), "SAVE SETTINGS")
+        self.assertEqual(emissions, [True])
+
     def test_long_actor_identity_does_not_force_desktop_width(self) -> None:
         strip = StationSafetyStrip()
         strip.update_snapshot(

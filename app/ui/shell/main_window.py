@@ -114,12 +114,10 @@ class MainWindow(FluentWindow):
         self._keithley_defaults_generation = 0
         self._keithley_defaults_in_flight = False
         self._pending_keithley_defaults: tuple[int, dict[str, dict[str, Any]]] | None = None
+        self._active_keithley_defaults: tuple[int, dict[str, dict[str, Any]]] | None = None
         self._keithley_defaults_timer = QTimer(self)
         self._keithley_defaults_timer.setSingleShot(True)
         self._keithley_defaults_timer.setInterval(2_000)
-        self._keithley_defaults_timer.timeout.connect(
-            self._start_keithley_defaults_save
-        )
         self._keithley_defaults_thread = QThread(self)
         self._keithley_defaults_worker = KeithleyDefaultsSaveWorker(
             self._repository.path
@@ -194,6 +192,8 @@ class MainWindow(FluentWindow):
         self.safety_strip.estop.setText("E-STOP")
         self.safety_strip.estop.setMaximumWidth(96)
         self.safety_strip.estop.setFixedHeight(28)
+        self.safety_strip.save_settings.setFixedHeight(28)
+        self.safety_strip.save_settings.setMinimumWidth(126)
         self.safety_strip.estop.setProperty("visualPriority", "low")
         self.safety_strip.estop.setToolTip(
             "Confirm and disable every instrument output and abort acquisition."
@@ -524,7 +524,7 @@ class MainWindow(FluentWindow):
             self._queue_keithley_assignment_save
         )
         self.keithley_page.settings_defaults_requested.connect(
-            self._queue_keithley_defaults_autosave
+            self._stage_keithley_defaults
         )
         self.recipe_page.run_requested.connect(self._start_run)
         self.recipe_page.plan_preflight_changed.connect(self.dashboard.update_plan_preflight)
@@ -601,6 +601,7 @@ class MainWindow(FluentWindow):
         self.scan_shortcut = QShortcut(QKeySequence("F5"), self)
         self.scan_shortcut.activated.connect(self.dashboard._scan_visa)
         self.safety_strip.estop_requested.connect(self._emergency_off_all)
+        self.safety_strip.save_settings_requested.connect(self._save_all_settings)
         self._refresh_safety_strip()
 
     def _navigate_to(self, route: str) -> None:
@@ -744,12 +745,15 @@ class MainWindow(FluentWindow):
         mappings = {
             "level": "source_current" if mode == "current" else "source_voltage",
             "compliance": "voltage_compliance" if mode == "current" else "current_compliance",
-            "source_range": "source_current" if mode == "current" else "source_voltage",
-            "measure_voltage_range": "measured_voltage_trip",
-            "measure_current_range": "measured_current_trip",
             "settle": "point_settle_time",
             "max_abs_power": "max_abs_power",
         }
+        if key in {"source_range", "measure_voltage_range", "measure_current_range"}:
+            raise ConfigurationError(
+                "Instrument ranges are edited directly in the Keithley form after "
+                "disabling autorange. Their hardware limits are fixed and are not "
+                "DUT measured-value trip thresholds."
+            )
         mapped = mappings[key]
         path = ("devices", "keithley", "safety", "channels", channel, "lab_limits", mapped)
         return (
@@ -815,14 +819,17 @@ class MainWindow(FluentWindow):
             for part in path[:-1]:
                 container = container[part]
             container[path[-1]] = replacement
-            settings = self._repository.save_raw(raw)
+            settings = StationSettings.model_validate(raw)
         except (ConfigurationError, ValueError, KeyError, TypeError) as exc:
             QMessageBox.critical(self, "Invalid safety limits", str(exc))
             return
 
-        self.settings_page.reload()
-        self._settings_saved(settings)
-        self._log(f"Safety limits saved: {title}")
+        self.settings_page.stage_external_snapshot(settings, raw)
+        if scalar_limit:
+            field.editor.setText(str(replacement))
+        else:
+            field.set_limits(replacement["min"], replacement.get("max", "N/A"))
+        self._log(f"Safety limits staged: {title}; press SAVE SETTINGS")
 
     def _set_theme_mode(self, mode: str, *, persist: bool = True) -> None:
         theme = effective_theme(mode)
@@ -861,11 +868,6 @@ class MainWindow(FluentWindow):
             self._set_theme_mode("system", persist=False)
 
     def _persist_theme(self, theme: str) -> None:
-        if self.settings_page._dirty:
-            self.settings_page._autosave_timer.stop()
-            if not self.settings_page.save_draft(silent=True):
-                self._log("Theme was applied but not saved because Settings contains invalid values")
-                return
         try:
             loaded = self._repository.load()
             loaded.raw.setdefault("ui", {})["theme"] = theme
@@ -873,7 +875,10 @@ class MainWindow(FluentWindow):
         except ConfigurationError as exc:
             self._log(f"Theme was applied but could not be saved: {exc}")
             return
-        self.settings_page.reload()
+        if self.settings_page._dirty:
+            self.settings_page.accept_external_snapshot(self._settings, loaded.raw)
+        else:
+            self.settings_page.reload()
 
     def _restore_workspace(self) -> None:
         settings = QSettings("LabControl", "LabControl")
@@ -1165,6 +1170,7 @@ class MainWindow(FluentWindow):
         self.run_monitor.run_started(
             len(plan.actions),  # type: ignore[union-attr]
             estimate.nominal_duration_s,
+            plan_actions=plan.actions,  # type: ignore[union-attr]
         )
         self._set_run_ui_locked(True)
         self._navigate_to("execution")
@@ -1275,6 +1281,10 @@ class MainWindow(FluentWindow):
         self.run_monitor.run_started(
             remaining + len(checkpoint.prelude_actions),
             estimate.nominal_duration_s * remaining_fraction,
+            plan_actions=(
+                *checkpoint.prelude_actions,
+                *plan.actions[checkpoint.next_action_index :],
+            ),
         )
         self._set_run_ui_locked(True)
         self._navigate_to("execution")
@@ -1288,7 +1298,12 @@ class MainWindow(FluentWindow):
         if name == "run_started":
             value = payload.get("correlation_id") or payload.get("hash")
             self._run_correlation_id = str(value) if value else None
-        severity = "error" if name in {"run_fault", "shutdown_error", "watchdog_timeout"} else (
+        severity = "error" if name in {
+            "action_failed",
+            "run_fault",
+            "shutdown_error",
+            "watchdog_timeout",
+        } else (
             "warning" if name in {"compliance_detected", "run_aborted", "safe_finally_error"} else "info"
         )
         if name != "spectrum_preview":
@@ -1523,13 +1538,13 @@ class MainWindow(FluentWindow):
             payload[channel] = values
         return payload
 
-    def _queue_keithley_defaults_autosave(self, snapshots: object) -> None:
-        self._queue_keithley_defaults_save(snapshots, assignment=False)
+    def _stage_keithley_defaults(self, snapshots: object) -> None:
+        self._stage_keithley_defaults_save(snapshots, assignment=False)
 
     def _queue_keithley_assignment_save(self, snapshots: object) -> None:
-        self._queue_keithley_defaults_save(snapshots, assignment=True)
+        self._stage_keithley_defaults_save(snapshots, assignment=True)
 
-    def _queue_keithley_defaults_save(
+    def _stage_keithley_defaults_save(
         self, snapshots: object, *, assignment: bool
     ) -> None:
         try:
@@ -1538,7 +1553,6 @@ class MainWindow(FluentWindow):
                 action="saving Keithley defaults to settings.yml",
             )
             payload = self._keithley_snapshot_payload(snapshots)
-            validate_keithley_default_snapshots(self._settings, payload)
         except (
             AuthorizationError,
             ConfigurationError,
@@ -1563,10 +1577,38 @@ class MainWindow(FluentWindow):
         if assignment:
             self.keithley_page.readback_assignment_completed(True)
         self.keithley_page.banner.show_message(
-            "Keithley defaults changed; background save pending…",
-            timeout_ms=3_000,
+            "Keithley settings changed in memory. Press SAVE SETTINGS to validate "
+            "and write them to settings.yml.",
+            timeout_ms=6_000,
         )
-        self._keithley_defaults_timer.start(0 if assignment else 2_000)
+        self._log(f"KEITHLEY SETTINGS STAGED: generation {generation}; file unchanged")
+
+    def _save_all_settings(self) -> None:
+        """Persist the Settings draft and staged device defaults on demand."""
+
+        if self._keithley_defaults_in_flight:
+            self._log("SAVE SETTINGS ignored: a settings write is already running")
+            return
+        if not self.settings_page.save_draft():
+            return
+        pending = self._pending_keithley_defaults
+        if pending is None:
+            self._log("SAVE SETTINGS: settings.yml is current")
+            self.safety_strip.save_settings.setText("SAVED")
+            QTimer.singleShot(
+                1_500,
+                lambda: self.safety_strip.save_settings.setText("SAVE SETTINGS"),
+            )
+            return
+        _generation, payload = pending
+        try:
+            validate_keithley_default_snapshots(self._settings, payload)
+        except (ConfigurationError, SafetyViolation, KeyError, TypeError, ValueError) as exc:
+            QMessageBox.critical(self, "Keithley settings not saved", str(exc))
+            self.keithley_page.banner.show_message(f"Keithley settings not saved: {exc}")
+            self._log(f"SAVE SETTINGS REJECTED: {type(exc).__name__}: {exc}")
+            return
+        self._start_keithley_defaults_save()
 
     def _start_keithley_defaults_save(self) -> None:
         if self._keithley_defaults_in_flight:
@@ -1575,17 +1617,27 @@ class MainWindow(FluentWindow):
         if pending is None:
             return
         self._pending_keithley_defaults = None
+        self._active_keithley_defaults = pending
         self._keithley_defaults_in_flight = True
+        self.safety_strip.save_settings.setEnabled(False)
+        self.safety_strip.save_settings.setText("SAVING...")
         generation, payload = pending
         self._keithley_defaults_write_requested.emit(generation, payload)
         self._log(
-            f"KEITHLEY SETTINGS AUTOSAVE STARTED: generation {generation}"
+            f"KEITHLEY SETTINGS SAVE STARTED: generation {generation}"
         )
 
     def _keithley_defaults_saved(
         self, generation: int, persisted: object, raw: object
     ) -> None:
         self._keithley_defaults_in_flight = False
+        self._active_keithley_defaults = None
+        self.safety_strip.save_settings.setEnabled(True)
+        self.safety_strip.save_settings.setText("SAVED")
+        QTimer.singleShot(
+            1_500,
+            lambda: self.safety_strip.save_settings.setText("SAVE SETTINGS"),
+        )
         if isinstance(persisted, StationSettings) and isinstance(raw, dict):
             self._settings = (
                 simulated_station_settings(persisted)
@@ -1598,29 +1650,30 @@ class MainWindow(FluentWindow):
             self.quick_control_coordinator.set_settings(self._settings)
             self._refresh_safety_strip()
         self.keithley_page.banner.show_message(
-            "Keithley defaults saved in the background. The live instrument and "
+            "Keithley defaults saved after explicit SAVE SETTINGS. The live instrument and "
             "OUTPUT state were not changed.",
             severity="success",
             timeout_ms=4_000,
         )
         self._log(
-            f"KEITHLEY SETTINGS AUTOSAVE COMPLETED: generation {generation}"
+            f"KEITHLEY SETTINGS SAVE COMPLETED: generation {generation}"
         )
-        if self._pending_keithley_defaults is not None:
-            self._keithley_defaults_timer.start(0)
 
     def _keithley_defaults_save_failed(self, generation: int, error: str) -> None:
         self._keithley_defaults_in_flight = False
+        if self._pending_keithley_defaults is None:
+            self._pending_keithley_defaults = self._active_keithley_defaults
+        self._active_keithley_defaults = None
+        self.safety_strip.save_settings.setEnabled(True)
+        self.safety_strip.save_settings.setText("SAVE SETTINGS")
         self.keithley_page.readback_assignment_completed(False)
         QMessageBox.critical(self, "Keithley settings not saved", error)
         self.keithley_page.banner.show_message(
             f"Keithley background save failed: {error}"
         )
         self._log(
-            f"KEITHLEY SETTINGS AUTOSAVE FAILED: generation {generation}: {error}"
+            f"KEITHLEY SETTINGS SAVE FAILED: generation {generation}: {error}"
         )
-        if self._pending_keithley_defaults is not None:
-            self._keithley_defaults_timer.start(0)
 
     def _save_keithley_readback_defaults(self, snapshots: object) -> None:
         """Synchronous compatibility entry point used by tests and shutdown."""
@@ -2009,20 +2062,9 @@ class MainWindow(FluentWindow):
         )
         self._save_workspace()
         self._keithley_defaults_timer.stop()
-        pending_keithley_defaults = self._pending_keithley_defaults
         self._pending_keithley_defaults = None
         self._keithley_defaults_thread.quit()
         self._keithley_defaults_thread.wait(5_000)
-        if pending_keithley_defaults is not None:
-            _generation, payload = pending_keithley_defaults
-            try:
-                persist_keithley_default_snapshots(self._repository.path, payload)
-                self._log("KEITHLEY SETTINGS AUTOSAVE FLUSHED DURING SHUTDOWN")
-            except Exception as exc:
-                self._log(
-                    "KEITHLEY SETTINGS AUTOSAVE SHUTDOWN FLUSH FAILED: "
-                    f"{type(exc).__name__}: {exc}"
-                )
         self.recipe_page.cancel_preflight()
         self.quick_controls_window.close()
         self.quick_control_coordinator.cancel_all("Application closing")

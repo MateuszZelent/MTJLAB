@@ -204,6 +204,12 @@ class KeithleyConfigurationPanel(CardWidget):
             badge.setProperty("keithleyCompact", True)
         field.edit_button.setFixedSize(48, 28)
         field.edit_button.setText("Edit")
+        if key in {"source_range", "measure_voltage_range", "measure_current_range"}:
+            field.edit_button.hide()
+            field.setToolTip(
+                "Disable autorange and enter the requested instrument range directly. "
+                "The displayed maximum is the immutable 2602A hardware ceiling."
+            )
         self.limit_fields[key] = field
         return field
 
@@ -231,14 +237,11 @@ class KeithleyConfigurationPanel(CardWidget):
             )
             return value.min, value.max
         if key == "source_range":
-            value = limits.source_current if mode == "current" else limits.source_voltage
-            return "> 0", value.max_abs or value.max
+            return "> 0", "3 A" if mode == "current" else "40 V"
         if key == "measure_voltage_range":
-            values = limits.measured_voltage_trip
-            return "> 0", values.max_abs or values.max
+            return "> 0", "40 V"
         if key == "measure_current_range":
-            values = limits.measured_current_trip
-            return "> 0", values.max_abs or values.max
+            return "> 0", "3 A"
         return "NOT SET", "NOT SET"
 
     def refresh_limits(self, *_args: object) -> None:
@@ -2232,13 +2235,15 @@ class KeithleyPage(QWidget):
     ) -> None:
         if self._loading_form_snapshot:
             return
+        range_editor.setEnabled(not enabled)
         if enabled:
             range_editor.setText("AUTO")
             self._persist_form_defaults()
             return
         self.banner.show_message(
             f"Autorange disabled: enter an explicit {label} with a unit. "
-            "The change will be saved after the range is valid.",
+            "The draft will be validated when you press SAVE SETTINGS, "
+            "Apply/verify, or OUTPUT ON.",
             timeout_ms=8_000,
         )
         range_editor.setFocus()
@@ -2256,6 +2261,13 @@ class KeithleyPage(QWidget):
             self.keithley_form.labelForField(self.level_field).setText("Source voltage")
             self.keithley_form.labelForField(self.compliance_field).setText("Current limit (compliance)")
             self.keithley_form.labelForField(self.source_range_field).setText("Voltage source range")
+        self.source_range.setEnabled(not self.source_autorange.isChecked())
+        self.measure_voltage_range.setEnabled(
+            not self.measure_voltage_autorange.isChecked()
+        )
+        self.measure_current_range.setEnabled(
+            not self.measure_current_autorange.isChecked()
+        )
         self._update_output_readiness()
         self._update_ramp_defaults(reset_values=True)
 
@@ -2389,14 +2401,11 @@ class KeithleyPage(QWidget):
             value = limits.voltage_compliance if mode == "current" else limits.current_compliance
             return value.min, value.max
         if key == "source_range":
-            value = limits.source_current if mode == "current" else limits.source_voltage
-            return "> 0", value.max_abs or value.max
+            return "> 0", "3 A" if mode == "current" else "40 V"
         if key == "measure_voltage_range":
-            values = limits.measured_voltage_trip
-            return "> 0", values.max_abs or values.max
+            return "> 0", "40 V"
         if key == "measure_current_range":
-            values = limits.measured_current_trip
-            return "> 0", values.max_abs or values.max
+            return "> 0", "3 A"
         return "NOT SET", "NOT SET"
 
     def _keithley_bounded(self, key: str, editor: QWidget) -> LimitField:
@@ -2407,6 +2416,12 @@ class KeithleyPage(QWidget):
             badge.setProperty("keithleyCompact", True)
         field.edit_button.setFixedSize(48, 28)
         field.edit_button.setText("Edit")
+        if key in {"source_range", "measure_voltage_range", "measure_current_range"}:
+            field.edit_button.hide()
+            field.setToolTip(
+                "Disable autorange and enter the requested instrument range directly. "
+                "The displayed maximum is the immutable 2602A hardware ceiling."
+            )
         self._limit_fields[key] = field
         return field
 
@@ -2416,7 +2431,7 @@ class KeithleyPage(QWidget):
             field.validate_and_clamp()
 
     def set_settings(self, settings: StationSettings) -> None:
-        # Settings can be refreshed after an unrelated autosave.  The manual
+        # Settings can be refreshed after an unrelated explicit save. The manual
         # form is an active user draft and must not be replaced by persisted
         # defaults unless the page is being constructed or the user explicitly
         # imports device values.

@@ -279,7 +279,25 @@ class MainWindowTests(unittest.TestCase):
         window = MainWindow(".config/settings.yml", simulation=True)
         try:
             monitor = window.run_monitor
-            monitor.run_started(4, 2.0)
+            monitor.run_started(
+                4,
+                2.0,
+                plan_actions=(
+                    SimpleNamespace(
+                        node_id="measure-b",
+                        kind="measure_keithley",
+                        is_finally=False,
+                    ),
+                    SimpleNamespace(
+                        node_id="off-b",
+                        kind="set_keithley_output",
+                        is_finally=True,
+                    ),
+                ),
+            )
+            self.assertTrue(monitor.stop_button.isEnabled())
+            self.assertIn("Plan estimate:", monitor.total_estimate.text())
+            self.assertIn("0 of 4 actions", monitor.progress_summary.text())
             monitor.append_event(
                 "action_started",
                 {
@@ -299,6 +317,26 @@ class MainWindowTests(unittest.TestCase):
                     "spectrum_points": 101,
                 },
             )
+            monitor.append_event(
+                "action_finished",
+                {"node_id": "measure-b", "kind": "measure_keithley"},
+            )
+            monitor.append_event(
+                "safe_finally_started",
+                {"node_id": "off-b", "kind": "set_keithley_output"},
+            )
+            monitor.append_event(
+                "safe_finally_finished",
+                {"node_id": "off-b", "kind": "set_keithley_output"},
+            )
+            monitor.append_event(
+                "shutdown_action_started",
+                {"action": "keithley.outputs_off"},
+            )
+            monitor.append_event(
+                "shutdown_action_finished",
+                {"action": "keithley.outputs_off"},
+            )
             monitor.update_spectrum_preview(
                 {
                     "point_index": 0,
@@ -311,6 +349,23 @@ class MainWindowTests(unittest.TestCase):
             self.assertIn("0.067", monitor.current_measurements.text())
             self.assertIn("12.0 ms", monitor.storage_rate.text())
             self.assertEqual(monitor.spectrum_preview.trace_point_count("Stored spectrum"), 2)
+            self.assertIn("2 of 4 actions", monitor.progress_summary.text())
+            self.assertIn("estimated total:", monitor.eta.text())
+            self.assertEqual(monitor._step_items["measure-b"].text(2), "✓ DONE")
+            self.assertEqual(monitor._step_items["off-b"].text(2), "✓ DONE")
+            self.assertEqual(
+                monitor._step_items["shutdown:keithley.outputs_off"].text(2),
+                "✓ DONE",
+            )
+
+            stop_requests: list[bool] = []
+            monitor.run_started(1, 1.0)
+            monitor.stop_requested.connect(lambda: stop_requests.append(True))
+            monitor.stop_button.click()
+            self.assertEqual(stop_requests, [True])
+            self.assertFalse(monitor.stop_button.isEnabled())
+            self.assertEqual(monitor.stop_button.text(), "Stopping safely…")
+            self.assertEqual(monitor.state.text(), "STOPPING")
         finally:
             window.close()
             self.application.processEvents()
@@ -1384,7 +1439,7 @@ class MainWindowTests(unittest.TestCase):
             window.close()
             self.application.processEvents()
 
-    def test_limit_edit_is_autosaved_after_short_idle_period(self) -> None:
+    def test_limit_edit_requires_global_save_settings(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             path = Path(temporary) / "settings.yml"
             write_engineer_settings(path)
@@ -1405,6 +1460,13 @@ class MainWindowTests(unittest.TestCase):
                 self.assertIsNotNone(target)
                 target.setText(1, "900 kHz")
                 QTest.qWait(900)
+                before = SettingsRepository(path).load()
+                self.assertNotEqual(
+                    before.raw["devices"]["rigol"]["safety"]["channels"]["1"]["lab_limits"]["frequency"]["max"],
+                    "900 kHz",
+                )
+                self.assertTrue(window.settings_page._dirty)
+                window.safety_strip.save_settings.click()
                 loaded = SettingsRepository(path).load()
                 self.assertEqual(
                     loaded.raw["devices"]["rigol"]["safety"]["channels"]["1"]["lab_limits"]["frequency"]["max"],
@@ -3460,7 +3522,7 @@ class MainWindowTests(unittest.TestCase):
             window.close()
             self.application.processEvents()
 
-    def test_limit_edit_button_opens_popup_and_saves_the_range(self) -> None:
+    def test_limit_edit_button_opens_popup_and_stages_the_range(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             path = Path(temporary) / "settings.yml"
             write_engineer_settings(path)
@@ -3483,6 +3545,12 @@ class MainWindowTests(unittest.TestCase):
 
                 QTimer.singleShot(0, complete_dialog)
                 field.edit_button.click()
+                before_save = SettingsRepository(path).load()
+                self.assertNotEqual(
+                    before_save.raw["devices"]["keithley"]["safety"]["channels"]["B"]["lab_limits"]["source_current"]["max"],
+                    "9 mA",
+                )
+                window.safety_strip.save_settings.click()
                 loaded = SettingsRepository(path).load()
                 limits = loaded.raw["devices"]["keithley"]["safety"]["channels"]["B"]["lab_limits"]
                 self.assertEqual(limits["source_current"]["max"], "9 mA")
@@ -3554,7 +3622,7 @@ class MainWindowTests(unittest.TestCase):
                 window.close()
                 self.application.processEvents()
 
-    def test_keithley_maximum_power_limit_is_visible_and_saved(self) -> None:
+    def test_keithley_maximum_power_limit_is_staged_then_saved(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             path = Path(temporary) / "settings.yml"
             write_engineer_settings(path)
@@ -3578,6 +3646,13 @@ class MainWindowTests(unittest.TestCase):
 
                 QTimer.singleShot(0, complete_dialog)
                 field.edit_button.click()
+                self.assertEqual(
+                    SettingsRepository(path).load().settings.keithley.safety.channels[
+                        "B"
+                    ].lab_limits.max_abs_power,
+                    "670 uW",
+                )
+                window.safety_strip.save_settings.click()
                 saved = SettingsRepository(path).load().settings
                 self.assertEqual(
                     saved.keithley.safety.channels["B"].lab_limits.max_abs_power,
@@ -3612,7 +3687,7 @@ class MainWindowTests(unittest.TestCase):
             )
             self.assertIn("max_abs_power", channels[channel]["lab_limits"])
 
-    def test_keithley_form_values_autosave_to_channel_defaults(self) -> None:
+    def test_keithley_form_values_require_global_save_settings(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             path = Path(temporary) / "settings.yml"
             write_engineer_settings(path)
@@ -3634,6 +3709,15 @@ class MainWindowTests(unittest.TestCase):
                 ]["safety"]["channels"]["B"]["defaults"]
                 self.assertEqual(before_save["source_current"], "1 mA")
                 QTest.qWait(2_600)
+                still_unsaved = SettingsRepository(path).load().raw["devices"][
+                    "keithley"
+                ]["safety"]["channels"]["B"]["defaults"]
+                self.assertEqual(still_unsaved["source_current"], "1 mA")
+                window.safety_strip.save_settings.click()
+                for _attempt in range(30):
+                    if not window._keithley_defaults_in_flight:
+                        break
+                    QTest.qWait(100)
                 defaults = SettingsRepository(path).load().raw["devices"]["keithley"][
                     "safety"
                 ]["channels"]["B"]["defaults"]
@@ -3656,6 +3740,33 @@ class MainWindowTests(unittest.TestCase):
 
             self.assertEqual(keithley.level.text(), "3 mA")
             self.assertEqual(keithley.compliance.text(), "60 mV")
+        finally:
+            window.close()
+            self.application.processEvents()
+
+    def test_keithley_ranges_are_direct_manual_fields_not_trip_limit_editors(self) -> None:
+        window = MainWindow(".config/settings.yml", simulation=True)
+        try:
+            keithley = window.keithley_page
+            for key in (
+                "source_range",
+                "measure_voltage_range",
+                "measure_current_range",
+            ):
+                self.assertTrue(keithley._limit_fields[key].edit_button.isHidden())
+
+            self.assertFalse(keithley.measure_voltage_range.isEnabled())
+            keithley.measure_voltage_autorange.setChecked(False)
+            self.assertTrue(keithley.measure_voltage_range.isEnabled())
+            keithley.measure_voltage_range.setText("1 V")
+            keithley.measure_voltage_range.editingFinished.emit()
+            self.assertIsNotNone(window._pending_keithley_defaults)
+            self.assertEqual(
+                window._pending_keithley_defaults[1][keithley.channel.currentText()][
+                    "measure_voltage_range"
+                ],
+                "1 V",
+            )
         finally:
             window.close()
             self.application.processEvents()
@@ -3685,6 +3796,8 @@ class MainWindowTests(unittest.TestCase):
                     started = time.perf_counter()
                     window._queue_keithley_assignment_save(snapshots)
                     self.assertLess(time.perf_counter() - started, 0.2)
+                    self.assertFalse(window._keithley_defaults_in_flight)
+                    window.safety_strip.save_settings.click()
                     QTimer.singleShot(20, lambda: gui_ticks.append(True))
                     QTest.qWait(120)
                     self.assertEqual(gui_ticks, [True])
@@ -3698,7 +3811,7 @@ class MainWindowTests(unittest.TestCase):
                 window.close()
                 self.application.processEvents()
 
-    def test_settings_page_exposes_and_autosaves_keithley_maximum_power(self) -> None:
+    def test_settings_page_exposes_and_manually_saves_keithley_maximum_power(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             path = Path(temporary) / "settings.yml"
             write_engineer_settings(path)
@@ -3716,6 +3829,12 @@ class MainWindowTests(unittest.TestCase):
                 editor.setText("4 mW")
                 editor.editingFinished.emit()
                 QTest.qWait(900)
+                self.assertEqual(
+                    SettingsRepository(path).load().raw["devices"]["keithley"]
+                    ["safety"]["channels"]["B"]["lab_limits"]["max_abs_power"],
+                    "670 uW",
+                )
+                window.safety_strip.save_settings.click()
                 self.assertEqual(
                     SettingsRepository(path).load().raw["devices"]["keithley"]
                     ["safety"]["channels"]["B"]["lab_limits"]["max_abs_power"],

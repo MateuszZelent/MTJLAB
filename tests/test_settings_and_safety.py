@@ -281,6 +281,37 @@ class QuantityAndSafetyTests(unittest.TestCase):
                 KeithleySourceRequest("B", "current", 0.1, 1.0),
             )
 
+    def test_keithley_manual_ranges_use_hardware_not_trip_ceiling(self) -> None:
+        settings = SettingsRepository(SETTINGS_TEMPLATE).load().settings
+        channel = settings.keithley.safety.channels["B"]
+        validate_keithley_source(
+            channel,
+            KeithleySourceRequest(
+                "B",
+                "current",
+                1e-3,
+                67e-3,
+                source_autorange=False,
+                source_range_si=100e-3,
+                measure_voltage_autorange=False,
+                measure_voltage_range_si=1.0,
+                measure_current_autorange=False,
+                measure_current_range_si=100e-3,
+            ),
+        )
+        with self.assertRaisesRegex(SafetyViolation, "hardware maximum"):
+            validate_keithley_source(
+                channel,
+                KeithleySourceRequest(
+                    "B",
+                    "current",
+                    1e-3,
+                    67e-3,
+                    measure_voltage_autorange=False,
+                    measure_voltage_range_si=41.0,
+                ),
+            )
+
 
 if __name__ == "__main__":
     unittest.main()
