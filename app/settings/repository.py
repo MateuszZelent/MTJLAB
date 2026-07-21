@@ -179,14 +179,44 @@ class SettingsRepository:
 
         """
 
+        changed = False
+        profile = raw.get("profile")
+        if isinstance(profile, dict):
+            for obsolete_key in (
+                "state",
+                "approved_by",
+                "approved_at",
+                "approval_note",
+                "lock_outputs_when_unverified",
+                "lock_outputs_when_unapproved",
+            ):
+                if obsolete_key in profile:
+                    del profile[obsolete_key]
+                    changed = True
+
+        application = raw.get("application")
+        if (
+            isinstance(application, dict)
+            and "require_operator_confirmation_before_arming" in application
+        ):
+            del application["require_operator_confirmation_before_arming"]
+            changed = True
+
+        devices = raw.get("devices")
+        anritsu = devices.get("anritsu") if isinstance(devices, dict) else None
+        generator = (
+            anritsu.get("signal_generator") if isinstance(anritsu, dict) else None
+        )
+        if isinstance(generator, dict) and "arm_ttl" in generator:
+            del generator["arm_ttl"]
+            changed = True
+
         try:
             safety = raw["devices"]["anritsu"]["safety"]
         except (KeyError, TypeError):
-            return False
+            return changed
         if not isinstance(safety, dict):
-            return False
-
-        changed = False
+            return changed
         rf_input = safety.get("rf_input")
         if (
             isinstance(rf_input, dict)

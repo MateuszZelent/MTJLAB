@@ -167,6 +167,35 @@ class QuantityAndSafetyTests(unittest.TestCase):
                 "900 kHz",
             )
 
+    def test_repository_removes_obsolete_output_gate_fields_before_validation(self) -> None:
+        source = SETTINGS_TEMPLATE.read_text(encoding="utf-8")
+        with tempfile.TemporaryDirectory() as temporary:
+            path = Path(temporary) / "settings.yml"
+            path.write_text(source, encoding="utf-8")
+            repository = SettingsRepository(path)
+            raw = deepcopy(repository.load().raw)
+            raw["profile"].update(
+                {
+                    "state": "old-state",
+                    "approved_by": "old-user",
+                    "approved_at": "2026-01-01T00:00:00+00:00",
+                    "approval_note": "old-note",
+                    "lock_outputs_when_unverified": True,
+                }
+            )
+            raw["devices"]["anritsu"]["signal_generator"]["arm_ttl"] = "30 s"
+            with path.open("w", encoding="utf-8") as stream:
+                repository._yaml.dump(raw, stream)
+
+            loaded = repository.load()
+
+            self.assertEqual(set(loaded.raw["profile"]), {"id", "name"})
+            self.assertNotIn(
+                "arm_ttl",
+                loaded.raw["devices"]["anritsu"]["signal_generator"],
+            )
+            self.assertTrue(path.with_suffix(".yml.bak").is_file())
+
     def test_theme_change_preserves_station_configuration(self) -> None:
         source = SETTINGS_TEMPLATE.read_text(encoding="utf-8")
         with tempfile.TemporaryDirectory() as temporary:
