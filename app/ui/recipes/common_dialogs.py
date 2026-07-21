@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+from dataclasses import dataclass
 from typing import Any
 
 from PySide6.QtCore import QMimeData, Qt, Signal
@@ -41,6 +42,7 @@ __all__ = [
     "CommentEditorDialog",
     "FixedValueDialog",
     "KeithleySweepBuilderDialog",
+    "RecipeTreeMoveRequest",
     "RecipeTreeWidget",
     "SweepLibraryButton",
 ]
@@ -764,10 +766,26 @@ class SweepLibraryButton(PushButton):
             self._drag_start = None
 
 
+@dataclass(slots=True)
+class RecipeTreeMoveRequest:
+    """One synchronous, model-owned request to relocate a recipe node.
+
+    The tree is only a projection of the recipe source.  A receiving controller
+    must set ``accepted`` after it has committed and rendered the replacement
+    source; otherwise the Qt drop is rejected and the view is left untouched.
+    """
+
+    node_id: str
+    destination_parent_id: str
+    destination_branch: str
+    destination_index: int
+    accepted: bool = False
+
+
 class RecipeTreeWidget(TreeWidget):
     """Tree that requests a validated YAML move instead of mutating Qt items."""
 
-    move_requested = Signal(str, str, str, int)
+    move_requested = Signal(object)
     library_drop_requested = Signal(str, str, str, int)
     drop_rejected = Signal(str)
     library_mime_type = SweepLibraryButton.mime_type
@@ -876,7 +894,19 @@ class RecipeTreeWidget(TreeWidget):
             event.ignore()
             return
         parent_id, branch, index = destination
-        self.move_requested.emit(self._dragged_node_id, parent_id, branch, index)
+        request = RecipeTreeMoveRequest(
+            node_id=self._dragged_node_id,
+            destination_parent_id=parent_id,
+            destination_branch=branch,
+            destination_index=index,
+        )
+        self.move_requested.emit(request)
+        if not request.accepted:
+            # A model rejection must also reject the native drag transaction.
+            # Reporting MoveAction here would allow Qt to treat a failed recipe
+            # edit as a visual move and desynchronize the projection from YAML.
+            event.ignore()
+            return
         event.setDropAction(Qt.DropAction.MoveAction)
         event.accept()
 

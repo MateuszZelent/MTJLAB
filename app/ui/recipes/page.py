@@ -53,7 +53,7 @@ from app.ui.design_system import effective_theme
 from app.ui.recipes.device_parameters import DeviceParameterDialog
 from app.ui.recipes.common_dialogs import (
     ActionNodeEditorDialog, AnritsuAcquisitionEditorDialog, CommentEditorDialog, FixedValueDialog,
-    KeithleySweepBuilderDialog, RecipeTreeWidget, SweepLibraryButton,
+    KeithleySweepBuilderDialog, RecipeTreeMoveRequest, RecipeTreeWidget, SweepLibraryButton,
 )
 from app.devices.anritsu_ms2830a.ui.recipe_extension import (
     AnritsuAdvancedSpectrumPanel,
@@ -501,7 +501,7 @@ class RecipePage(QWidget):
         self.tree.currentItemChanged.connect(self._node_selected)
         self.tree.itemClicked.connect(self._operator_row_clicked)
         self.tree.itemDoubleClicked.connect(self._open_node_editor)
-        self.tree.move_requested.connect(self._move_recipe_node)
+        self.tree.move_requested.connect(self._handle_tree_move_request)
         self.tree.library_drop_requested.connect(self._drop_library_block)
         self.tree.drop_rejected.connect(self._tree_drop_rejected)
         self.edit_device_button.clicked.connect(
@@ -2949,7 +2949,7 @@ class RecipePage(QWidget):
         destination_parent_id: str,
         destination_branch: str,
         destination_index: int,
-    ) -> None:
+    ) -> bool:
         self._emit_tree_diagnostic(
             "TREE_MOVE_REQUESTED",
             node_id=node_id,
@@ -2966,6 +2966,11 @@ class RecipePage(QWidget):
                 destination_index=destination_index,
             )
             parse_recipe_text(moved_source, origin=self.path.text())
+            self._apply_builder_source(
+                moved_source,
+                f"Recipe node {node_id} moved to {destination_parent_id}.{destination_branch}",
+                selected_node_id=node_id,
+            )
         except Exception as exc:
             self._emit_tree_diagnostic(
                 "TREE_MOVE_REJECTED",
@@ -2977,11 +2982,17 @@ class RecipePage(QWidget):
                 error=str(exc),
             )
             QMessageBox.warning(self, "Recipe move rejected", str(exc))
-            return
-        self._apply_builder_source(
-            moved_source,
-            f"Recipe node {node_id} moved to {destination_parent_id}.{destination_branch}",
-            selected_node_id=node_id,
+            return False
+        return True
+
+    def _handle_tree_move_request(self, request: RecipeTreeMoveRequest) -> None:
+        """Commit a drag only when the source transaction has succeeded."""
+
+        request.accepted = self._move_recipe_node(
+            request.node_id,
+            request.destination_parent_id,
+            request.destination_branch,
+            request.destination_index,
         )
 
     def _find_tree_item(self, node_id: str) -> QTreeWidgetItem | None:

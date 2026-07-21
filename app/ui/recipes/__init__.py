@@ -7,6 +7,7 @@ from app.ui.recipes.common_dialogs import (
     CommentEditorDialog,
     FixedValueDialog,
     KeithleySweepBuilderDialog,
+    RecipeTreeMoveRequest,
     RecipeTreeWidget,
     SweepLibraryButton,
 )
@@ -19,6 +20,7 @@ __all__ = [
     "CommentEditorDialog",
     "FixedValueDialog",
     "KeithleySweepBuilderDialog",
+    "RecipeTreeMoveRequest",
     "RecipeTreeWidget",
     "SeamlessRoiCellDelegate",
     "SweepGeneratorDialog",

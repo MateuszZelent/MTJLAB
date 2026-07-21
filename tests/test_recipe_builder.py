@@ -42,6 +42,7 @@ from app.devices.rigol_dg1000z.ui import RigolNodeEditorDialog
 from app.ui.recipes import (
     ActionNodeEditorDialog,
     DeviceParameterDialog,
+    RecipeTreeMoveRequest,
     RecipeTreeWidget,
     SweepGeneratorDialog,
 )
@@ -759,9 +760,10 @@ root:
                 for index in range(page.tree.topLevelItemCount())
             ]
             with patch("app.ui.recipes.page.QMessageBox.warning"):
-                page._move_recipe_node(
+                accepted = page._move_recipe_node(
                     keithley.id, anritsu.id, "children", 0
                 )
+            self.assertFalse(accepted)
             self.assertEqual(page.editor.toPlainText(), source_before)
             self.assertEqual(
                 [
@@ -778,6 +780,94 @@ root:
                     for event in events
                 )
             )
+        finally:
+            page.close()
+
+    def test_drop_into_repeat_commits_the_source_and_preserves_the_tree(self) -> None:
+        page = RecipePage(simulation_settings())
+        try:
+            page.new_recipe(confirm=False)
+            page._library_add_basic("wait")
+            source = parse_recipe_text(page.editor.toPlainText()).root.children[-1]
+            page.tree.setCurrentItem(page.tree.topLevelItem(0))
+            page._library_add_basic("repeat")
+            before = parse_recipe_text(page.editor.toPlainText())
+            repeat = before.root.children[-1]
+            source_item = page._find_tree_item(source.id)
+            repeat_item = page._find_tree_item(repeat.id)
+            self.assertIsNotNone(source_item)
+            self.assertIsNotNone(repeat_item)
+            page.tree._dragged_node_id = source.id
+            event = Mock()
+            event.mimeData().hasFormat.return_value = False
+            event.source.return_value = page.tree
+
+            with (
+                patch("app.ui.recipes.page.QMessageBox.warning") as warning,
+                patch.object(page.tree, "itemAt", return_value=repeat_item),
+                patch.object(
+                    page.tree,
+                    "_drop_destination",
+                    return_value=(repeat.id, "children", len(repeat.children)),
+                ),
+            ):
+                page.tree.dropEvent(event)
+
+            warning.assert_not_called()
+            event.accept.assert_called_once_with()
+            updated = parse_recipe_text(page.editor.toPlainText())
+            updated_repeat = updated.root.children[-1]
+            self.assertEqual(updated_repeat.id, repeat.id)
+            self.assertIn(source.id, tuple(node.id for node in updated_repeat.children))
+            self.assertEqual(page.tree.topLevelItemCount(), 2)
+            self.assertIsNotNone(page._find_tree_item(repeat.id))
+            self.assertIsNotNone(page._find_tree_item(source.id))
+        finally:
+            page.close()
+
+    def test_rejected_move_that_would_empty_repeat_keeps_tree_and_yaml(self) -> None:
+        page = RecipePage(simulation_settings())
+        try:
+            page.new_recipe(confirm=False)
+            page._library_add_basic("repeat")
+            repeat = parse_recipe_text(page.editor.toPlainText()).root.children[-1]
+            placeholder = repeat.children[0]
+            source_before = page.editor.toPlainText()
+            root_item = page.tree.topLevelItem(0)
+            placeholder_item = page._find_tree_item(placeholder.id)
+            self.assertIsNotNone(placeholder_item)
+            labels_before = [
+                page.tree.topLevelItem(index).text(0)
+                for index in range(page.tree.topLevelItemCount())
+            ]
+            page.tree._dragged_node_id = placeholder.id
+            event = Mock()
+            event.mimeData().hasFormat.return_value = False
+            event.source.return_value = page.tree
+
+            with (
+                patch("app.ui.recipes.page.QMessageBox.warning"),
+                patch.object(page.tree, "itemAt", return_value=root_item),
+                patch.object(
+                    page.tree,
+                    "_drop_destination",
+                    return_value=("sequence-main", "children", 0),
+                ),
+            ):
+                page.tree.dropEvent(event)
+
+            event.ignore.assert_called_once_with()
+            event.accept.assert_not_called()
+            self.assertEqual(page.editor.toPlainText(), source_before)
+            self.assertEqual(
+                [
+                    page.tree.topLevelItem(index).text(0)
+                    for index in range(page.tree.topLevelItemCount())
+                ],
+                labels_before,
+            )
+            self.assertIsNotNone(page._find_tree_item(repeat.id))
+            self.assertIsNotNone(page._find_tree_item(placeholder.id))
         finally:
             page.close()
 
@@ -848,7 +938,19 @@ root:
         tree._dragged_node_id = "source"
         tree.setCurrentItem(target_item)
         moves: list[tuple[str, str, str, int]] = []
-        tree.move_requested.connect(lambda *move: moves.append(move))
+
+        def approve_move(request: RecipeTreeMoveRequest) -> None:
+            moves.append(
+                (
+                    request.node_id,
+                    request.destination_parent_id,
+                    request.destination_branch,
+                    request.destination_index,
+                )
+            )
+            request.accepted = True
+
+        tree.move_requested.connect(approve_move)
         event = Mock()
         event.mimeData().hasFormat.return_value = False
         event.source.return_value = tree
@@ -865,6 +967,36 @@ root:
 
         self.assertEqual(moves, [("source", "target", "children", 0)])
         event.accept.assert_called_once_with()
+
+    def test_rejected_drop_keeps_the_existing_qt_tree_unchanged(self) -> None:
+        tree = RecipeTreeWidget()
+        root = QTreeWidgetItem(["Root"])
+        source = QTreeWidgetItem(["Source"])
+        repeat = QTreeWidgetItem(["Repeat"])
+        root.setData(0, Qt.ItemDataRole.UserRole, RecipeNode("root", "sequence"))
+        source.setData(0, Qt.ItemDataRole.UserRole, RecipeNode("source", "comment"))
+        repeat.setData(0, Qt.ItemDataRole.UserRole, RecipeNode("repeat", "repeat"))
+        root.addChildren([source, repeat])
+        tree.addTopLevelItem(root)
+        tree._dragged_node_id = "source"
+        event = Mock()
+        event.mimeData().hasFormat.return_value = False
+        event.source.return_value = tree
+
+        with (
+            patch.object(tree, "itemAt", return_value=repeat),
+            patch.object(
+                tree,
+                "_drop_destination",
+                return_value=("repeat", "children", 0),
+            ),
+        ):
+            tree.dropEvent(event)
+
+        self.assertIs(source.parent(), root)
+        self.assertEqual(root.childCount(), 2)
+        event.ignore.assert_called_once_with()
+        event.accept.assert_not_called()
 
     def test_real_drag_hover_distinguishes_above_on_and_below_a_leaf(self) -> None:
         tree = RecipeTreeWidget()

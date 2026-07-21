@@ -950,6 +950,9 @@ class RigolPage(QWidget):
             form.addRow(label, widget)
         self.modulation_form = form
         self.mod_type.currentTextChanged.connect(self._update_modulation_parameter_ui)
+        self.mod_source.currentTextChanged.connect(
+            lambda _value: self._update_modulation_parameter_ui(self.mod_type.currentText())
+        )
         self._update_modulation_parameter_ui(self.mod_type.currentText())
         apply.clicked.connect(self.configure_modulation)
         self._set_help(apply, "Apply modulation", "Validates and applies modulation settings while the physical output remains OFF.")
@@ -979,6 +982,10 @@ class RigolPage(QWidget):
             label.setText(labels.get(kind, "Parameter"))
         if not self.mod_parameter.hasFocus():
             self.mod_parameter.setText(defaults.get(kind, "0"))
+        internal = self.mod_source.currentText() == "INT"
+        self.mod_rate.setEnabled(internal)
+        self.mod_shape.setEnabled(internal and kind in {"AM", "FM", "PM", "PWM"})
+        self.mod_polarity.setEnabled(kind in {"ASK", "FSK", "PSK"})
 
     def _sweep_tab(self) -> QWidget:
         tab = QWidget()
@@ -1201,7 +1208,11 @@ class RigolPage(QWidget):
                 enabled=self.mod_enabled.isChecked(),
                 modulation_type=kind,  # type: ignore[arg-type]
                 source=self.mod_source.currentText(),  # type: ignore[arg-type]
-                rate_hz=parse_quantity(self.mod_rate.text(), DIMENSION_FREQUENCY).si_value,
+                rate_hz=(
+                    parse_quantity(self.mod_rate.text(), DIMENSION_FREQUENCY).si_value
+                    if self.mod_source.currentText() == "INT"
+                    else 1.0
+                ),
                 parameter=parameter,
                 internal_shape=self.mod_shape.currentText(),  # type: ignore[arg-type]
                 polarity=self.mod_polarity.currentText(),  # type: ignore[arg-type]
@@ -1324,10 +1335,10 @@ class RigolPage(QWidget):
             self.status.emit("Rigol frequency counter settings verified")
         elif operation == "read_counter" and isinstance(result, RigolCounterReading):
             self.counter_readout.setText(
-                f"Frequency {format_quantity_auto(result.frequency_hz, DIMENSION_FREQUENCY)} Â· "
-                f"Period {format_quantity_auto(result.period_s, DIMENSION_TIME)} Â· "
-                f"Duty {result.duty_percent:.9g}% Â· +Width "
-                f"{format_quantity_auto(result.positive_width_s, DIMENSION_TIME)} Â· -Width "
+                f"Frequency {format_quantity_auto(result.frequency_hz, DIMENSION_FREQUENCY)} · "
+                f"Period {format_quantity_auto(result.period_s, DIMENSION_TIME)} · "
+                f"Duty {result.duty_percent:.9g}% · +Width "
+                f"{format_quantity_auto(result.positive_width_s, DIMENSION_TIME)} · -Width "
                 f"{format_quantity_auto(result.negative_width_s, DIMENSION_TIME)}"
             )
 

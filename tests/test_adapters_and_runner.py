@@ -2058,31 +2058,58 @@ root:
         adapter.wait_complete(deadline_s=0.05)
         self.assertEqual(session.timeout, 10_000)
 
-    def test_rigol_advanced_configuration_forces_output_off(self) -> None:
+    def test_rigol_advanced_modes_force_output_off_and_reject_implicit_switching(self) -> None:
         session = FakeVisaSession(
             responses={
                 "*IDN?": "Rigol Technologies,DG1032Z,DG1ZA172902039,00.01.08",
                 ":SYST:ERR?": "0,No error",
                 ":OUTP1?": "OFF",
-                ":SOUR1:MOD?": lambda _command: (
-                    "ON" if ":SOUR1:MOD ON" in session.writes else "OFF"
+                ":SOUR1:FUNC?": "SIN",
+                ":SOUR1:FREQ?": "1000",
+                ":SOUR1:VOLT:HIGH?": "0.001",
+                ":SOUR1:VOLT:LOW?": "-0.001",
+                ":SOUR1:MOD?": lambda _command: next(
+                    (write.rsplit(" ", 1)[-1] for write in reversed(session.writes) if write.startswith(":SOUR1:MOD ")),
+                    "OFF",
                 ),
-                ":SOUR1:SWE:STAT?": lambda _command: (
-                    "ON"
-                    if ":SOUR1:SWE:STAT ON" in session.writes
-                    else "OFF"
+                ":SOUR1:SWE:STAT?": lambda _command: next(
+                    (write.rsplit(" ", 1)[-1] for write in reversed(session.writes) if write.startswith(":SOUR1:SWE:STAT ")),
+                    "OFF",
                 ),
-                ":SOUR1:BURS:STAT?": lambda _command: (
-                    "ON" if ":SOUR1:BURS ON" in session.writes else "OFF"
+                ":SOUR1:BURS:STAT?": lambda _command: next(
+                    (write.rsplit(" ", 1)[-1] for write in reversed(session.writes) if write.startswith(":SOUR1:BURS ")),
+                    "OFF",
                 ),
                 ":SOUR1:PHAS?": "0",
+                ":SOUR1:HARM?": "OFF",
+                ":COUP?": "FREQ:OFF,PHASE:OFF,AMPL:OFF",
+                ":SOUR1:TRACK?": "OFF",
             }
         )
         adapter = RigolAdapter(self.settings, session_factory=FakeVisaSessionFactory(session))
         adapter.connect()
+        adapter.configure_channel(
+            RigolChannelConfig(
+                1, "SIN", 1000, 0.001, -0.001, dut_min_impedance_ohm=50
+            )
+        )
         adapter.configure_modulation(RigolModulationConfig(1, True, "AM", rate_hz=1000, parameter=50))
+        with self.assertRaisesRegex(SafetyViolation, "modulation is active"):
+            adapter.configure_frequency_sweep(
+                RigolFrequencySweepConfig(1, True, 100, 1000, 1.0, steps=10)
+            )
+        adapter.configure_modulation(
+            RigolModulationConfig(1, False, "AM", rate_hz=1000, parameter=50)
+        )
         adapter.configure_frequency_sweep(
             RigolFrequencySweepConfig(1, True, 100, 1000, 1.0, steps=10)
+        )
+        with self.assertRaisesRegex(SafetyViolation, "frequency sweep is active"):
+            adapter.configure_burst(
+                RigolBurstConfig(1, True, cycles=3, period_s=0.01)
+            )
+        adapter.configure_frequency_sweep(
+            RigolFrequencySweepConfig(1, False, 100, 1000, 1.0, steps=10)
         )
         adapter.configure_burst(RigolBurstConfig(1, True, cycles=3, period_s=0.01))
         self.assertIn(":OUTP1 OFF", session.writes)
@@ -2090,18 +2117,247 @@ root:
         self.assertIn(":SOUR1:SWE:STAT ON", session.writes)
         self.assertIn(":SOUR1:BURS ON", session.writes)
 
+    def test_rigol_external_modulation_does_not_write_internal_source_fields(self) -> None:
+        session = FakeVisaSession(
+            responses={
+                "*IDN?": "Rigol Technologies,DG1032Z,DG1ZA172902039,00.01.08",
+                ":SYST:ERR?": "0,No error",
+                ":OUTP1?": "OFF",
+                ":SOUR1:FUNC?": "SIN",
+                ":SOUR1:FREQ?": "1000",
+                ":SOUR1:VOLT:HIGH?": "0.001",
+                ":SOUR1:VOLT:LOW?": "-0.001",
+                ":SOUR1:MOD?": lambda _command: next(
+                    (write.rsplit(" ", 1)[-1] for write in reversed(session.writes) if write.startswith(":SOUR1:MOD ")),
+                    "OFF",
+                ),
+                ":SOUR1:SWE:STAT?": "OFF",
+                ":SOUR1:BURS:STAT?": "OFF",
+                ":SOUR1:PHAS?": "0",
+                ":SOUR1:HARM?": "OFF",
+                ":COUP?": "FREQ:OFF,PHASE:OFF,AMPL:OFF",
+                ":SOUR1:TRACK?": "OFF",
+            }
+        )
+        adapter = RigolAdapter(self.settings, session_factory=FakeVisaSessionFactory(session))
+        adapter.connect()
+        adapter.configure_channel(
+            RigolChannelConfig(
+                1, "SIN", 1000, 0.001, -0.001, dut_min_impedance_ohm=50
+            )
+        )
+
+        adapter.configure_modulation(
+            RigolModulationConfig(
+                1,
+                True,
+                "AM",
+                source="EXT",
+                rate_hz=float("nan"),
+                parameter=25,
+                internal_shape="ARB",
+            )
+        )
+
+        self.assertIn(":SOUR1:AM:SOUR EXT", session.writes)
+        self.assertNotIn(":SOUR1:AM:INT:FREQ nan", session.writes)
+        self.assertFalse(any(write.startswith(":SOUR1:AM:INT:FUNC") for write in session.writes))
+
+    def test_rigol_advanced_modes_can_always_be_disabled_without_valid_form_values(self) -> None:
+        session = FakeVisaSession(
+            responses={
+                "*IDN?": "Rigol Technologies,DG1032Z,DG1ZA172902039,00.01.08",
+                ":SYST:ERR?": "0,No error",
+                ":OUTP1?": "OFF",
+                ":SOUR1:MOD?": "OFF",
+                ":SOUR1:SWE:STAT?": "OFF",
+                ":SOUR1:BURS:STAT?": "OFF",
+                ":SOUR1:PHAS?": "0",
+            }
+        )
+        adapter = RigolAdapter(self.settings, session_factory=FakeVisaSessionFactory(session))
+        adapter.connect()
+
+        adapter.configure_modulation(
+            RigolModulationConfig(
+                1, False, "AM", rate_hz=float("nan"), parameter=float("nan")
+            )
+        )
+        adapter.configure_frequency_sweep(
+            RigolFrequencySweepConfig(
+                1, False, float("nan"), float("nan"), float("nan"), steps=-1
+            )
+        )
+        adapter.configure_burst(
+            RigolBurstConfig(
+                1, False, cycles=-1, period_s=float("nan"), delay_s=-1
+            )
+        )
+
+        self.assertIn(":SOUR1:MOD OFF", session.writes)
+        self.assertIn(":SOUR1:SWE:STAT OFF", session.writes)
+        self.assertIn(":SOUR1:BURS OFF", session.writes)
+
+    def test_rigol_rejects_independent_channel_edit_when_coupling_or_track_is_active(self) -> None:
+        for coupling, tracking, expected in (
+            ("FREQ:OFF,PHASE:OFF,AMPL:ON", "OFF", "coupling is active"),
+            ("FREQ:OFF,PHASE:OFF,AMPL:OFF", "INVERTED", "tracking is active"),
+        ):
+            with self.subTest(coupling=coupling, tracking=tracking):
+                session = FakeVisaSession(
+                    responses={
+                        "*IDN?": "Rigol Technologies,DG1032Z,DG1ZA172902039,00.01.08",
+                        ":SOUR1:MOD?": "OFF",
+                        ":SOUR1:SWE:STAT?": "OFF",
+                        ":SOUR1:BURS:STAT?": "OFF",
+                        ":SOUR1:PHAS?": "0",
+                        ":SOUR1:HARM?": "OFF",
+                        ":COUP?": coupling,
+                        ":SOUR1:TRACK?": tracking,
+                    }
+                )
+                adapter = RigolAdapter(
+                    self.settings, session_factory=FakeVisaSessionFactory(session)
+                )
+                adapter.connect()
+                writes_before = len(session.writes)
+
+                with self.assertRaisesRegex(SafetyViolation, expected):
+                    adapter.configure_channel(
+                        RigolChannelConfig(
+                            1,
+                            "SIN",
+                            1000,
+                            0.001,
+                            -0.001,
+                            dut_min_impedance_ohm=50,
+                        )
+                    )
+
+                self.assertNotIn(":SOUR1:FUNC SIN", session.writes[writes_before:])
+
+    def test_rigol_failed_output_on_transaction_forces_and_confirms_both_outputs_off(self) -> None:
+        raw = deepcopy(self.settings.model_dump(mode="python"))
+        raw["devices"]["rigol"]["safety"]["allow_output_enable"] = True
+        settings = StationSettings.model_validate(raw)
+        session = FakeVisaSession()
+
+        def output_one(_command: str) -> str:
+            # Simulate a failed ON readback. After the adapter sends the
+            # emergency OFF command, the same query confirms OFF.
+            last = next(
+                (write for write in reversed(session.writes[:-1]) if write.startswith(":OUTP1 ")),
+                ":OUTP1 OFF",
+            )
+            return last.rsplit(" ", 1)[-1]
+
+        session.responses.update(
+            {
+                "*IDN?": "Rigol Technologies,DG1032Z,DG1ZA172902039,00.01.08",
+                ":SYST:ERR?": "-100,Injected output failure",
+                ":OUTP1?": output_one,
+                ":OUTP2?": "OFF",
+                ":SOUR1:FUNC?": "SIN",
+                ":SOUR1:FREQ?": "1000",
+                ":SOUR1:VOLT:HIGH?": "0.001",
+                ":SOUR1:VOLT:LOW?": "-0.001",
+                ":SOUR1:MOD?": "OFF",
+                ":SOUR1:SWE:STAT?": "OFF",
+                ":SOUR1:BURS:STAT?": "OFF",
+                ":SOUR1:PHAS?": "0",
+                ":SOUR1:HARM?": "OFF",
+                ":COUP?": "FREQ:OFF,PHASE:OFF,AMPL:OFF",
+                ":SOUR1:TRACK?": "OFF",
+            }
+        )
+        adapter = RigolAdapter(settings, session_factory=FakeVisaSessionFactory(session))
+        adapter.connect()
+        # Configuration must see an empty error queue; inject the failure only
+        # for the following OUTPUT ON transaction.
+        session.responses[":SYST:ERR?"] = "0,No error"
+        adapter.configure_channel(
+            RigolChannelConfig(
+                1, "SIN", 1000, 0.001, -0.001, dut_min_impedance_ohm=50
+            )
+        )
+        session.responses[":SYST:ERR?"] = "-100,Injected output failure"
+
+        with self.assertRaisesRegex(DeviceError, "Rigol reported an error"):
+            adapter.set_output(1, True)
+
+        self.assertEqual(session.writes[-4:-2], [":OUTP1 OFF", ":OUTP2 OFF"])
+        self.assertEqual(adapter.state, DeviceState.OUTPUT_OFF)
+
+    def test_rigol_failed_live_frequency_readback_forces_outputs_off(self) -> None:
+        raw = deepcopy(self.settings.model_dump(mode="python"))
+        raw["devices"]["rigol"]["safety"]["allow_output_enable"] = True
+        settings = StationSettings.model_validate(raw)
+        session = FakeVisaSession()
+        inject_mismatch = {"enabled": False}
+
+        def output_one(_command: str) -> str:
+            last = next(
+                (write for write in reversed(session.writes[:-1]) if write.startswith(":OUTP1 ")),
+                ":OUTP1 OFF",
+            )
+            return last.rsplit(" ", 1)[-1]
+
+        session.responses.update(
+            {
+                "*IDN?": "Rigol Technologies,DG1032Z,DG1ZA172902039,00.01.08",
+                ":SYST:ERR?": "0,No error",
+                ":OUTP1?": output_one,
+                ":OUTP2?": "OFF",
+                ":SOUR1:FUNC?": "SIN",
+                ":SOUR1:FREQ?": lambda _command: (
+                    "1999" if inject_mismatch["enabled"] else "1000"
+                ),
+                ":SOUR1:VOLT:HIGH?": "0.001",
+                ":SOUR1:VOLT:LOW?": "-0.001",
+                ":SOUR1:MOD?": "OFF",
+                ":SOUR1:SWE:STAT?": "OFF",
+                ":SOUR1:BURS:STAT?": "OFF",
+                ":SOUR1:PHAS?": "0",
+                ":SOUR1:HARM?": "OFF",
+                ":COUP?": "FREQ:OFF,PHASE:OFF,AMPL:OFF",
+                ":SOUR1:TRACK?": "OFF",
+            }
+        )
+        adapter = RigolAdapter(settings, session_factory=FakeVisaSessionFactory(session))
+        adapter.connect()
+        adapter.configure_channel(
+            RigolChannelConfig(
+                1, "SIN", 1000, 0.001, -0.001, dut_min_impedance_ohm=50
+            )
+        )
+        adapter.set_output(1, True)
+        inject_mismatch["enabled"] = True
+
+        with self.assertRaisesRegex(DeviceError, "frequency readback"):
+            adapter.update_frequency(1, 2000)
+
+        self.assertEqual(session.writes[-4:-2], [":OUTP1 OFF", ":OUTP2 OFF"])
+        self.assertEqual(adapter.state, DeviceState.OUTPUT_OFF)
+
     def test_rigol_modulation_rejects_parameter_readback_mismatch(self) -> None:
         session = FakeVisaSession(
             responses={
                 "*IDN?": "Rigol Technologies,DG1032Z,DG1ZA172902039,00.01.08",
                 ":SYST:ERR?": "0,No error",
                 ":OUTP1?": "OFF",
+                ":SOUR1:FUNC?": "SIN",
+                ":SOUR1:FREQ?": "1000",
+                ":SOUR1:VOLT:HIGH?": "0.001",
+                ":SOUR1:VOLT:LOW?": "-0.001",
                 ":SOUR1:MOD?": lambda _command: (
                     "ON" if ":SOUR1:MOD ON" in session.writes else "OFF"
                 ),
                 ":SOUR1:SWE:STAT?": "OFF",
                 ":SOUR1:BURS:STAT?": "OFF",
                 ":SOUR1:PHAS?": "0",
+                ":SOUR1:HARM?": "OFF",
+                ":COUP?": "FREQ:OFF,PHASE:OFF,AMPL:OFF",
+                ":SOUR1:TRACK?": "OFF",
                 ":SOUR1:AM:DEPT?": "49",
             }
         )
@@ -2109,6 +2365,11 @@ root:
             self.settings, session_factory=FakeVisaSessionFactory(session)
         )
         adapter.connect()
+        adapter.configure_channel(
+            RigolChannelConfig(
+                1, "SIN", 1000, 0.001, -0.001, dut_min_impedance_ohm=50
+            )
+        )
 
         with self.assertRaisesRegex(DeviceError, "modulation readback failed"):
             adapter.configure_modulation(
