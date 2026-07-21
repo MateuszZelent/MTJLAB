@@ -14,7 +14,14 @@ import re
 
 from PySide6.QtCore import QEvent, QObject, Qt
 from PySide6.QtGui import QKeyEvent
-from PySide6.QtWidgets import QApplication, QAbstractSpinBox, QComboBox, QLineEdit, QWidget
+from PySide6.QtWidgets import (
+    QApplication,
+    QAbstractSpinBox,
+    QComboBox,
+    QFileDialog,
+    QLineEdit,
+    QWidget,
+)
 
 from app.domain.quantities import QuantityError, parse_quantity
 
@@ -98,11 +105,11 @@ def install_precision_arrow_stepper(application: QApplication) -> None:
 
 
 def _belongs_to_native_composite(editor: QLineEdit) -> bool:
-    """Leave spin boxes and editable combo boxes in control of arrow keys."""
+    """Leave native composites and file-path editors in control of arrow keys."""
 
     ancestor: QWidget | None = editor.parentWidget()
     while ancestor is not None:
-        if isinstance(ancestor, (QAbstractSpinBox, QComboBox)):
+        if isinstance(ancestor, (QAbstractSpinBox, QComboBox, QFileDialog)):
             return True
         ancestor = ancestor.parentWidget()
     return False

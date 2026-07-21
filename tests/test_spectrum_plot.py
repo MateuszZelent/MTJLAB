@@ -114,7 +114,7 @@ class SpectrumPlotTests(unittest.TestCase):
         finally:
             widget.close()
 
-    def test_csv_export_contains_each_visible_trace_and_refuses_overwrite(self) -> None:
+    def test_csv_export_contains_each_visible_trace_and_honours_overwrite(self) -> None:
         plot = SpectrumPlotWidget()
         try:
             plot.set_trace("Raw", [1, 2], [-10, -20], primary=True)
@@ -124,8 +124,12 @@ class SpectrumPlotTests(unittest.TestCase):
                 with path.open("r", encoding="utf-8", newline="") as stream:
                     rows = list(csv.DictReader(stream))
                 self.assertEqual([row["trace"] for row in rows], ["Raw", "Raw"])
-                with self.assertRaises(FileExistsError):
-                    plot._export_csv(path)
+                plot.set_trace("Raw", [3], [-30], primary=True)
+                plot._export_csv(path)
+                with path.open("r", encoding="utf-8", newline="") as stream:
+                    overwritten = list(csv.DictReader(stream))
+                self.assertEqual(len(overwritten), 1)
+                self.assertEqual(overwritten[0]["frequency_Hz"], "3.0")
         finally:
             plot.close()
 

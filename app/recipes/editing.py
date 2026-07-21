@@ -2,8 +2,8 @@
 
 from __future__ import annotations
 
-from io import StringIO
 from copy import deepcopy
+from io import StringIO
 from typing import Any
 
 from ruamel.yaml import YAML
@@ -72,6 +72,97 @@ def replace_recipe_node(source: str, *, node_id: str, node: dict[str, Any]) -> s
     target.clear()
     target.update(replacement)
     return _dump_validated(raw, "tree-builder edit")
+
+
+def wrap_recipe_nodes_in_repeat(
+    source: str,
+    *,
+    node_ids: tuple[str, ...],
+    repeat_id: str,
+    count: int,
+) -> str:
+    """Wrap contiguous sibling nodes in one validated Repeat transaction.
+
+    A Repeat is never materialized as an empty draft node.  The selected nodes
+    are detached and inserted into the new container in one in-memory YAML
+    transaction, and the strict recipe parser approves the complete result
+    before it is returned to the UI.
+    """
+
+    if not node_ids:
+        raise ConfigurationError("Select at least one recipe node to repeat.")
+    if len(set(node_ids)) != len(node_ids):
+        raise ConfigurationError("The Repeat selection contains a duplicate node.")
+    if (
+        not isinstance(count, int)
+        or isinstance(count, bool)
+        or not 1 <= count <= 100_000
+    ):
+        raise ConfigurationError("Repeat count must be an integer from 1 to 100000.")
+    if not isinstance(repeat_id, str) or not repeat_id.strip():
+        raise ConfigurationError("Repeat node identifier cannot be empty.")
+
+    raw = _load(source)
+    root = raw["root"]
+    if root.get("id") in node_ids:
+        raise ConfigurationError(
+            "The recipe root cannot be wrapped. Select its contents instead."
+        )
+    if _find(root, repeat_id) is not None:
+        raise ConfigurationError(f"Recipe node {repeat_id!r} already exists.")
+    finally_nodes = raw.setdefault("finally", [])
+    if not isinstance(finally_nodes, list):
+        raise ConfigurationError("recipe.finally must be a list.")
+    for candidate in finally_nodes:
+        if isinstance(candidate, dict) and _find(candidate, repeat_id) is not None:
+            raise ConfigurationError(f"Recipe node {repeat_id!r} already exists.")
+
+    locations: list[tuple[dict[str, Any], list[Any], int, str]] = []
+    for node_id in node_ids:
+        location = _locate(root, node_id, section="root")
+        if location is None:
+            location = _locate_list(finally_nodes, node_id, section="finally")
+        if location is None:
+            raise ConfigurationError(f"Recipe node {node_id!r} was not found.")
+        locations.append(location)
+
+    first_list = locations[0][1]
+    if any(
+        source_list is not first_list
+        for _node, source_list, _index, _section in locations
+    ):
+        raise ConfigurationError(
+            "Repeat can wrap only sibling nodes from the same recipe branch."
+        )
+    if any(
+        section != "root"
+        for _node, _source_list, _index, section in locations
+    ):
+        raise ConfigurationError(
+            "Finally safety actions cannot be wrapped in Repeat."
+        )
+    ordered = sorted(locations, key=lambda location: location[2])
+    indices = [index for _node, _source_list, index, _section in ordered]
+    expected = list(range(indices[0], indices[0] + len(indices)))
+    if indices != expected:
+        raise ConfigurationError(
+            "Repeat can wrap only a contiguous range of sibling nodes."
+        )
+
+    children = [
+        deepcopy(node) for node, _source_list, _index, _section in ordered
+    ]
+    del first_list[indices[0] : indices[-1] + 1]
+    first_list.insert(
+        indices[0],
+        {
+            "id": repeat_id,
+            "type": "repeat",
+            "count": count,
+            "children": children,
+        },
+    )
+    return _dump_validated(raw, "tree-builder wrap repeat")
 
 
 def _load(source: str) -> dict[str, Any]:

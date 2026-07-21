@@ -787,6 +787,35 @@ class SettingsPage(QWidget):
         else:
             editor = LineEdit()
             editor.setText(self._format_scalar(value))
+            # Free-text settings include paths, VISA resources, endpoints,
+            # serial numbers and other opaque identifiers.  A digits-only
+            # identifier must never be rewritten by the application-wide
+            # quantity stepper.  Explicit quantities remain steppable; the
+            # settings contract requires their unit to be present.
+            precision_steppable = False
+            if isinstance(value, float):
+                # YAML floating-point scalars are dimensionless numeric
+                # settings (for example NPLC) and use the written decimals.
+                precision_steppable = True
+            elif isinstance(value, str):
+                try:
+                    parse_quantity(value)
+                except (QuantityError, ValueError):
+                    pass
+                else:
+                    precision_steppable = True
+            elif value is None and path and str(path[-1]) in {
+                "max",
+                "max_abs",
+                "max_expected_power_at_connector",
+                "min",
+                "minimum_internal_attenuation",
+                "nominal",
+            }:
+                # Optional safety quantities start empty but become explicit
+                # number-plus-unit values when configured.
+                precision_steppable = True
+            editor.setProperty("precisionArrowStepping", precision_steppable)
             editor.editingFinished.connect(lambda path=path: self._form_changed(path))
         editor.setEnabled(editable)
         editor.setToolTip(" · ".join(str(part) for part in path))
@@ -1220,6 +1249,9 @@ class SettingsPage(QWidget):
         layout.addWidget(note)
         layout.addWidget(BodyLabel("Operating-system account"))
         account = LineEdit(dialog)
+        # Account names are identifiers even when an installation happens to
+        # use digits only; Up/Down must not rewrite them as numeric values.
+        account.setProperty("precisionArrowStepping", False)
         account.setText(username)
         account.setPlaceholderText("DOMAIN\\user")
         layout.addWidget(account)

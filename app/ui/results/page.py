@@ -27,6 +27,7 @@ from app.ui.results.file_browser import FileBrowserPanel
 from app.ui.results.heatmap_tab import HeatmapResultsTab
 from app.ui.results.metadata_panel import MetadataPanel
 from app.ui.results.spectrum_tab import SpectrumResultsTab
+from app.ui.results.state_card import ResultsStateCard
 from app.ui.results.sweep_tree_panel import SweepTreePanel
 
 
@@ -252,6 +253,9 @@ class ResultsPage(QWidget):
         result_card = CardWidget(self)
         result_layout = QVBoxLayout(result_card)
         result_layout.setContentsMargins(16, 12, 16, 16)
+        self.result_state = ResultsStateCard(result_card)
+        self.result_state.set_compact(True)
+        result_layout.addWidget(self.result_state)
         result_layout.addWidget(self.result_tabs)
         splitter.addWidget(result_card)
         splitter.setStretchFactor(0, 0)
@@ -263,6 +267,7 @@ class ResultsPage(QWidget):
         self.file_browser.file_selected.connect(self._on_file_selected)
         self.resume_button.clicked.connect(self._request_resume)
         self.open_sweep_button.clicked.connect(self._request_open_sweep)
+        self.result_state.action_requested.connect(self.browse_result_file)
 
         # Cross-tab coordination: sweep tree → spectrum
         self.sweep_tree.spectrum_requested.connect(
@@ -284,6 +289,18 @@ class ResultsPage(QWidget):
         # Initial state
         self._set_heatmap_visible(False)
         self.file_browser.refresh()
+        if self.file_browser.has_files():
+            self._show_result_state(
+                "Select a recorded result",
+                "Choose an HDF5 file to inspect metadata, the executed Sweep, and spectra.",
+                action_text="Open result file...",
+            )
+        else:
+            self._show_result_state(
+                "No recorded results yet",
+                "Open a THATEC/PyThat HDF5 file or choose another result directory.",
+                action_text="Open result file...",
+            )
 
     def resizeEvent(self, event: QResizeEvent) -> None:
         super().resizeEvent(event)
@@ -332,8 +349,15 @@ class ResultsPage(QWidget):
         self._set_heatmap_visible(False)
         self.file_browser.refresh()
         if not self.file_browser.has_files():
-            self.metadata_panel.metadata.setPlainText(
-                "No HDF5 files in the results directory."
+            self._show_result_state(
+                "No recorded results yet",
+                "Open a THATEC/PyThat HDF5 file or choose another result directory.",
+                action_text="Open result file...",
+            )
+        else:
+            self._show_result_state(
+                "Select a recorded result",
+                "Choose a file from the browser to inspect its immutable contents.",
             )
 
     def browse_result_file(self) -> None:
@@ -363,17 +387,35 @@ class ResultsPage(QWidget):
             self._selected_path = None
             self._thatec_run = None
             self._thatec_tree_available = False
+            if self.file_browser.has_files():
+                self._show_result_state(
+                    "Select a recorded result",
+                    "Choose a file from the browser to inspect its immutable contents.",
+                )
+            else:
+                self._show_result_state(
+                    "No recorded results yet",
+                    "Open a THATEC/PyThat HDF5 file or choose another result directory.",
+                    action_text="Open result file...",
+                )
             return
 
         path = Path(str(path_or_none))
         self._selected_path = path
+        self._show_result_state(
+            "Loading result",
+            f"Reading public and station metadata from {path.name}...",
+            loading=True,
+        )
 
         # --- Load THATEC tree ---
         try:
             self._thatec_run = ThatecRunReader.describe(path)
         except Exception as exc:
-            self.metadata_panel.metadata.setPlainText(
-                f"Cannot read result:\n{exc}"
+            self._show_result_state(
+                "Cannot read result",
+                str(exc),
+                action_text="Open another file...",
             )
             self._thatec_run = None
             return
@@ -431,6 +473,24 @@ class ResultsPage(QWidget):
             self.heatmap_tab.load(path, self._thatec_run)
         else:
             self._set_heatmap_visible(False)
+        self.result_state.hide()
+
+    def _show_result_state(
+        self,
+        title: str,
+        description: str,
+        *,
+        loading: bool = False,
+        action_text: str = "",
+    ) -> None:
+        self.result_state.show_state(
+            title=title,
+            description=description,
+            accessible_name=title,
+            loading=loading,
+            action_text=action_text,
+        )
+        self.result_state.show()
 
     # ------------------------------------------------------------------
     # Tab management

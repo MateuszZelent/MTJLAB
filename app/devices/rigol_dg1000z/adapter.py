@@ -66,7 +66,9 @@ class RigolModulationConfig:
     source: Literal["INT", "EXT"] = "INT"
     rate_hz: float = 100.0
     parameter: float = 1.0
-    internal_shape: Literal["SIN", "SQU", "RAMP", "NOIS", "ARB"] = "SIN"
+    internal_shape: Literal[
+        "SIN", "SQU", "TRI", "RAMP", "NRAMP", "NOIS", "USER", "ARB"
+    ] = "SIN"
     polarity: Literal["POS", "NEG"] = "POS"
 
 
@@ -84,7 +86,7 @@ class RigolFrequencySweepConfig:
     return_time_s: float = 0.0
     trigger_source: Literal["INT", "EXT", "MAN"] = "INT"
     trigger_slope: Literal["POS", "NEG"] = "POS"
-    trigger_output: bool = False
+    trigger_output: Literal["OFF", "POS", "NEG"] | bool = "OFF"
 
 
 @dataclass(frozen=True, slots=True)
@@ -98,9 +100,9 @@ class RigolBurstConfig:
     delay_s: float = 0.0
     trigger_source: Literal["INT", "EXT", "MAN"] = "INT"
     trigger_slope: Literal["POS", "NEG"] = "POS"
-    trigger_output: bool = False
+    trigger_output: Literal["OFF", "POS", "NEG"] | bool = "OFF"
     gate_polarity: Literal["POS", "NEG"] = "POS"
-    idle: Literal["FPT", "TOP", "CENT", "BOT"] = "FPT"
+    idle: Literal["FPT", "TOP", "CENTER", "BOTTOM", "CENT", "BOT"] = "FPT"
 
 
 @dataclass(frozen=True, slots=True)
@@ -182,11 +184,11 @@ class RigolAdapter(DeviceAdapter):
             self._identity = identity
             self._state = DeviceState.VERIFIED
             if self._settings.safety.outputs_off_on_connect:
-                self._write_all_outputs_off()
-                states = self._read_output_states()
-                if any(states.values()):
+                confirmed_off, shutdown_issues = self._attempt_all_outputs_off()
+                if not confirmed_off:
                     raise DeviceError(
-                        "Rigol did not confirm both outputs OFF during connection."
+                        "Rigol did not confirm both outputs OFF during connection: "
+                        + "; ".join(shutdown_issues)
                     )
             else:
                 self._read_output_states()
@@ -225,7 +227,11 @@ class RigolAdapter(DeviceAdapter):
 
         features = {"basic_waveform"}
         unsupported: set[str] = set()
-        if bool(self._settings.capabilities.get("probe_optional_commands", True)):
+        probe_optional = self._settings.capabilities.get(
+            "probe_optional_commands_on_connect",
+            self._settings.capabilities.get("probe_optional_commands", True),
+        )
+        if bool(probe_optional):
             session = self._require_session()
             for feature, query in (
                 ("modulation", ":SOUR1:MOD?"),
@@ -234,15 +240,19 @@ class RigolAdapter(DeviceAdapter):
                 ("phase_sync", ":SOUR1:PHAS?"),
                 ("counter", ":COUN?"),
                 ("harmonics", ":SOUR1:HARM?"),
+                ("waveform_sum", ":SOUR1:SUM?"),
                 ("coupling", ":COUP?"),
                 ("tracking", ":SOUR1:TRACK?"),
             ):
                 try:
-                    session.query(query)
+                    response = session.query(query)
                 except Exception:
                     unsupported.add(feature)
                 else:
-                    features.add(feature)
+                    if self._capability_response_valid(feature, response):
+                        features.add(feature)
+                    else:
+                        unsupported.add(feature)
             # Clear query errors so a rejected optional probe cannot leak into
             # the first production transaction.
             session.write("*CLS")
@@ -253,6 +263,40 @@ class RigolAdapter(DeviceAdapter):
             features=frozenset(features),
             unsupported_commands=frozenset(unsupported),
         )
+
+    @staticmethod
+    def _capability_response_valid(feature: str, response: str) -> bool:
+        normalized = str(response).strip().upper()
+        if feature in {
+            "modulation",
+            "frequency_sweep",
+            "burst",
+            "harmonics",
+            "waveform_sum",
+        }:
+            return normalized in {"0", "1", "OFF", "ON"}
+        if feature == "phase_sync":
+            try:
+                return math.isfinite(float(normalized))
+            except ValueError:
+                return False
+        if feature == "counter":
+            return normalized in {"0", "1", "OFF", "ON", "RUN", "STOP", "SINGLE"}
+        if feature == "tracking":
+            return normalized in {"0", "1", "OFF", "ON", "INV", "INVERTED"}
+        if feature == "coupling":
+            parts = [part.strip() for part in normalized.split(",")]
+            if len(parts) != 3:
+                return False
+            expected_names = ("FREQ", "PHASE", "AMPL")
+            for part, name in zip(parts, expected_names, strict=True):
+                if ":" not in part:
+                    return False
+                actual_name, state = (item.strip() for item in part.split(":", 1))
+                if actual_name != name or state not in {"0", "1", "OFF", "ON"}:
+                    return False
+            return True
+        return False
 
     def _assert_feature(self, feature: str) -> None:
         if not bool(self._settings.capabilities.get("fail_on_unknown_firmware_command", True)):
@@ -275,15 +319,12 @@ class RigolAdapter(DeviceAdapter):
         shutdown_error: Exception | None = None
         close_error: Exception | None = None
         if self._settings.safety.outputs_off_on_disconnect:
-            try:
-                self._write_all_outputs_off()
-                states = self._read_output_states()
-                if any(states.values()):
-                    raise DeviceError(
-                        "Rigol did not confirm both outputs OFF before disconnect."
-                    )
-            except Exception as exc:
-                shutdown_error = exc
+            confirmed_off, shutdown_issues = self._attempt_all_outputs_off()
+            if not confirmed_off:
+                shutdown_error = DeviceError(
+                    "Rigol did not confirm both outputs OFF before disconnect: "
+                    + "; ".join(shutdown_issues)
+                )
         try:
             session.close()
         except Exception as exc:
@@ -313,25 +354,62 @@ class RigolAdapter(DeviceAdapter):
 
     def _write_all_outputs_off(self) -> None:
         session = self._require_session()
-        session.write(":OUTP1 OFF")
-        session.write(":OUTP2 OFF")
+        failures: list[tuple[int, Exception]] = []
+        for channel in (1, 2):
+            try:
+                session.write(f":OUTP{channel} OFF")
+            except Exception as exc:
+                failures.append((channel, exc))
+        if failures:
+            self._state = DeviceState.UNKNOWN
+            detail = "; ".join(
+                f"CH{channel}: {str(exc).strip() or type(exc).__name__}"
+                for channel, exc in failures
+            )
+            raise DeviceError(
+                "Rigol OUTPUT OFF command failed after attempting both channels: "
+                + detail
+            ) from failures[0][1]
+
+    def _attempt_all_outputs_off(self) -> tuple[bool, tuple[str, ...]]:
+        """Attempt every shutdown action and confirm both physical outputs OFF."""
+
+        issues: list[str] = []
+        try:
+            self._write_all_outputs_off()
+        except Exception as exc:
+            issues.append(str(exc).strip() or type(exc).__name__)
+
+        states: dict[int, bool] | None = None
+        try:
+            states = self._read_output_states()
+        except Exception as exc:
+            issues.append(str(exc).strip() or type(exc).__name__)
+
+        if states is not None and set(states) == {1, 2} and not any(states.values()):
+            self._output_states = {1: False, 2: False}
+            self._state = DeviceState.OUTPUT_OFF
+            return True, tuple(issues)
+
+        if states is not None:
+            active = ", ".join(
+                f"CH{channel}" for channel, enabled in states.items() if enabled
+            )
+            issues.append(
+                f"readback still reports OUTPUT ON for {active or 'an unknown channel'}"
+            )
+        if not issues:
+            issues.append("both OFF readbacks were not available")
+        self._state = DeviceState.UNKNOWN
+        return False, tuple(issues)
 
     def emergency_off(self) -> None:
         if self._session is None:
             return
-        try:
-            self._write_all_outputs_off()
-            states = self._read_output_states()
-            if any(states.values()):
-                raise DeviceError(
-                    "Rigol did not confirm both outputs OFF after emergency shutdown."
-                )
-        except Exception:
-            self._state = DeviceState.UNKNOWN
-            raise
-        else:
-            self._output_states = {1: False, 2: False}
-            self._state = DeviceState.OUTPUT_OFF
+        # DeviceAdapter.emergency_off() is deliberately non-throwing so one
+        # failed instrument cannot prevent shutdown attempts for other devices.
+        # The aggregate state communicates whether both OFF readbacks succeeded.
+        self._attempt_all_outputs_off()
 
     def apply_limit_settings(self, station: object) -> None:
         if not isinstance(station, StationSettings):
@@ -361,13 +439,26 @@ class RigolAdapter(DeviceAdapter):
 
     def _read_output_states(self) -> dict[int, bool]:
         session = self._require_session()
-        states = {
-            channel: self._parse_output_state(
-                session.query(f":OUTP{channel}?"), channel=channel
-            )
-            for channel in (1, 2)
-        }
+        states: dict[int, bool] = {}
+        failures: list[tuple[int, Exception]] = []
+        for channel in (1, 2):
+            try:
+                states[channel] = self._parse_output_state(
+                    session.query(f":OUTP{channel}?"), channel=channel
+                )
+            except Exception as exc:
+                failures.append((channel, exc))
         self._output_states.update(states)
+        if failures:
+            self._state = DeviceState.UNKNOWN
+            detail = "; ".join(
+                f"CH{channel}: {str(exc).strip() or type(exc).__name__}"
+                for channel, exc in failures
+            )
+            raise DeviceError(
+                "Rigol OUTPUT readback failed after querying both channels: "
+                + detail
+            ) from failures[0][1]
         return states
 
     def _parse_output_state(self, response: str, *, channel: int) -> bool:
@@ -383,6 +474,19 @@ class RigolAdapter(DeviceAdapter):
             return False
         self._state = DeviceState.UNKNOWN
         raise DeviceError(f"Rigol returned an invalid {field}: {response!r}.")
+
+    @staticmethod
+    def _trigger_output_token(value: str | bool) -> str:
+        # Keep bool compatibility for older recipes/UI snapshots while using
+        # the documented POS|NEG|OFF SCPI domain on the wire.
+        if isinstance(value, bool):
+            return "POS" if value else "OFF"
+        normalized = str(value).strip().upper()
+        if normalized not in {"OFF", "POS", "NEG"}:
+            raise SafetyViolation(
+                "Rigol trigger output must be OFF, POS, or NEG."
+            )
+        return normalized
 
     def _update_aggregate_output_state(self) -> None:
         self._state = DeviceState.OUTPUT_ON if any(self._output_states.values()) else DeviceState.OUTPUT_OFF
@@ -414,7 +518,10 @@ class RigolAdapter(DeviceAdapter):
         if not channel.enabled:
             raise SafetyViolation(f"Rigol CH{config.channel} is disabled in the station profile.")
         self._assert_finite("phase", config.phase_deg)
+        if not 0 <= config.phase_deg <= 360:
+            raise SafetyViolation("Rigol carrier phase must be within 0..360 degrees.")
         estimate = self._validate_waveform_config(config)
+        self._validate_shape_parameters(config)
         session = self._require_session()
         prefix = f":SOUR{config.channel}"
         waveform = config.waveform.upper()
@@ -426,6 +533,11 @@ class RigolAdapter(DeviceAdapter):
         session.write(f"{prefix}:MOD OFF")
         session.write(f"{prefix}:SWE:STAT OFF")
         session.write(f"{prefix}:BURS OFF")
+        # Harmonic generation and waveform summing alter the physical output
+        # envelope but are not part of a basic carrier configuration.  Reset
+        # them explicitly instead of inheriting a front-panel state.
+        session.write(f"{prefix}:HARM OFF")
+        session.write(f"{prefix}:SUM OFF")
         self._modulation_enabled.discard(config.channel)
         self._last_modulation_config.pop(config.channel, None)
         self._sweep_enabled.discard(config.channel)
@@ -472,10 +584,17 @@ class RigolAdapter(DeviceAdapter):
             )
         updated = replace(config, frequency_hz=float(frequency_hz))
         self._validate_waveform_config(updated)
+        # Pulse timing limits depend on the period.  A frequency-only update
+        # can therefore make a previously valid width/edge configuration
+        # invalid even though the voltage/frequency envelope still passes.
+        self._validate_shape_parameters(updated)
         session = self._require_session()
         prefix = f":SOUR{channel}"
         output_before = self._parse_output_state(
             session.query(f":OUTP{channel}?"), channel=channel
+        )
+        self._verify_applied_configuration(
+            config, expected_output=output_before
         )
         if output_before:
             self._validate_active_quick_update(channel, updated)
@@ -532,6 +651,9 @@ class RigolAdapter(DeviceAdapter):
         prefix = f":SOUR{channel}"
         output_before = self._parse_output_state(
             session.query(f":OUTP{channel}?"), channel=channel
+        )
+        self._verify_applied_configuration(
+            config, expected_output=output_before
         )
         if output_before:
             self._validate_active_quick_update(channel, updated)
@@ -608,6 +730,9 @@ class RigolAdapter(DeviceAdapter):
             output_before = self._parse_output_state(
                 session.query(f":OUTP{channel}?"), channel=channel
             )
+            self._verify_applied_configuration(
+                config, expected_output=output_before
+            )
             if output_before:
                 self._validate_active_quick_update(channel, updated)
             # Do not re-apply the whole DC function while energised.  The
@@ -648,12 +773,11 @@ class RigolAdapter(DeviceAdapter):
         """Fail closed after a potentially partial update of an energised channel."""
 
         if output_was_on:
-            try:
-                self.emergency_off()
-            except Exception as shutdown_exc:
+            self.emergency_off()
+            if self._state != DeviceState.OUTPUT_OFF:
                 raise DeviceError(
-                    "Rigol live setpoint update failed and emergency shutdown could not be confirmed: "
-                    f"{shutdown_exc}"
+                    "Rigol live setpoint update failed and emergency shutdown "
+                    "could not confirm both outputs OFF."
                 ) from cause
         raise cause
 
@@ -678,6 +802,12 @@ class RigolAdapter(DeviceAdapter):
                     "Rigol modulation is active but its envelope was not configured and validated by this session."
                 )
             self._validate_modulation_envelope(updated, modulation)
+            self._verify_advanced_configuration(
+                channel,
+                "active modulation",
+                self._modulation_expected_fields(modulation),
+                require_output_off=False,
+            )
 
     def last_channel_config(self, channel: int) -> RigolChannelConfig:
         """Return the last configuration confirmed by instrument readback."""
@@ -719,7 +849,12 @@ class RigolAdapter(DeviceAdapter):
             dut_envelope=config.dut_envelope,
         )
 
-    def _verify_applied_configuration(self, expected: RigolChannelConfig) -> None:
+    def _verify_applied_configuration(
+        self,
+        expected: RigolChannelConfig,
+        *,
+        expected_output: bool = False,
+    ) -> None:
         """Reject silent quantisation or clamping after every write transaction.
 
         The DG1032Z may enforce a minimum Vpp and therefore alter LowL/HighL.
@@ -834,11 +969,16 @@ class RigolAdapter(DeviceAdapter):
                     mismatches.append(
                         f"{suffix} {actual_value:.9g} ≠ {expected_value:.9g}"
                     )
-        if actual_output:
-            mismatches.append("output turned on during a configuration transaction")
+        if actual_output != expected_output:
+            mismatches.append(
+                "OUTPUT "
+                f"{'ON' if actual_output else 'OFF'} != expected "
+                f"{'ON' if expected_output else 'OFF'}"
+            )
         if mismatches:
             raise DeviceError(
-                "Rigol applied a different configuration (output remains OFF): " + "; ".join(mismatches)
+                "Rigol configuration readback differs from the validated state: "
+                + "; ".join(mismatches)
             )
 
     @staticmethod
@@ -854,8 +994,13 @@ class RigolAdapter(DeviceAdapter):
     def _format_load(value: str | float) -> str:
         if isinstance(value, str) and value.strip().upper() in {"HIGHZ", "INF", "INFINITY"}:
             return "INF"
-        parsed = float(value)
-        if not 1 <= parsed <= 10_000:
+        try:
+            parsed = float(value)
+        except (TypeError, ValueError) as exc:
+            raise SafetyViolation(
+                "Rigol output load must be a numeric resistance or HIGHZ."
+            ) from exc
+        if not math.isfinite(parsed) or not 1 <= parsed <= 10_000:
             raise SafetyViolation("Rigol output load must be 1 ohm–10 kohm or HIGHZ.")
         return f"{parsed:.12g}"
 
@@ -883,37 +1028,111 @@ class RigolAdapter(DeviceAdapter):
                         raise SafetyViolation("Pulse width and edge times must be positive.")
                     session.write(f"{prefix}:FUNC:PULS:{suffix} {value:.12g}")
 
+    def _validate_shape_parameters(self, config: RigolChannelConfig) -> None:
+        """Validate shape-dependent values before the first configuration write."""
+
+        waveform = config.waveform.upper()
+        if waveform == "SQU" and config.square_duty_percent is not None:
+            self._assert_finite("duty cycle", config.square_duty_percent)
+            if not 0 < config.square_duty_percent < 100:
+                raise SafetyViolation("Duty cycle must be in the range (0, 100)%.")
+        if waveform == "RAMP" and config.ramp_symmetry_percent is not None:
+            self._assert_finite("ramp symmetry", config.ramp_symmetry_percent)
+            if not 0 <= config.ramp_symmetry_percent <= 100:
+                raise SafetyViolation("Ramp symmetry must be in the range 0..100%.")
+        if waveform != "PULS":
+            return
+        width = config.pulse_width_s
+        leading = config.pulse_leading_s
+        trailing = config.pulse_trailing_s
+        for name, value in (
+            ("pulse width", width),
+            ("pulse leading edge", leading),
+            ("pulse trailing edge", trailing),
+        ):
+            if value is not None:
+                self._assert_finite(name, value)
+                if value <= 0:
+                    raise SafetyViolation(f"Rigol {name} must be positive.")
+        if width is not None:
+            if width < 16e-9:
+                raise SafetyViolation("Rigol pulse width cannot be below 16 ns.")
+            period_s = 1.0 / config.frequency_hz
+            if width >= period_s:
+                raise SafetyViolation("Rigol pulse width must be shorter than its period.")
+        for name, edge in (("leading", leading), ("trailing", trailing)):
+            if edge is not None and edge < 10e-9:
+                raise SafetyViolation(f"Rigol pulse {name} edge cannot be below 10 ns.")
+            if edge is not None and width is not None and edge > 0.625 * width:
+                raise SafetyViolation(
+                    f"Rigol pulse {name} edge cannot exceed 0.625 × pulse width."
+                )
+
     def set_output(self, channel: int, enabled: bool) -> bool:
         channel_settings = self._channel_settings(channel)
-        if enabled:
-            self._assert_independent_channels()
-            self._synchronize_advanced_states(channel)
-            self._interlock().assert_can_enable(
-                device_name=f"Rigol CH{channel}",
-                device_allows_output=(
-                    self._settings.safety.allow_output_enable
-                    and channel_settings.enabled
-                ),
-            )
-            config = self._last_config.get(channel)
-            if config is None:
-                raise SafetyViolation("Configure and validate the Rigol channel before OUTPUT ON.")
-            self._validate_waveform_config(config)
-            if channel in self._modulation_enabled:
-                modulation = self._last_modulation_config.get(channel)
-                if modulation is None:
-                    raise SafetyViolation("Rigol modulation state is missing its validated envelope.")
-                self._validate_modulation_envelope(config, modulation)
-            if channel in self._sweep_enabled and channel not in self._last_sweep_config:
-                raise SafetyViolation("Rigol sweep is active without a locally validated configuration.")
-            if channel in self._burst_enabled and channel not in self._last_burst_config:
-                raise SafetyViolation("Rigol burst is active without a locally validated configuration.")
-            # Re-read the complete channel immediately before the single
-            # energising transition. This also proves OUTPUT is still OFF and
-            # detects front-panel or remote changes after configure.
-            self._verify_applied_configuration(config)
         session = self._require_session()
         try:
+            if enabled:
+                # Put the channel in a known de-energised state before any
+                # preflight query.  Every later failure enters the common
+                # two-channel shutdown fallback below.
+                session.write(f":OUTP{channel} OFF")
+                self._verify_output_off(channel)
+                self._assert_independent_channels()
+                self._synchronize_advanced_states(channel)
+                self._interlock().assert_can_enable(
+                    device_name=f"Rigol CH{channel}",
+                    device_allows_output=(
+                        self._settings.safety.allow_output_enable
+                        and channel_settings.enabled
+                    ),
+                )
+                config = self._last_config.get(channel)
+                if config is None:
+                    raise SafetyViolation(
+                        "Configure and validate the Rigol channel before OUTPUT ON."
+                    )
+                self._validate_waveform_config(config)
+                if channel in self._modulation_enabled:
+                    modulation = self._last_modulation_config.get(channel)
+                    if modulation is None:
+                        raise SafetyViolation(
+                            "Rigol modulation state is missing its validated envelope."
+                        )
+                    self._validate_modulation_envelope(config, modulation)
+                    self._verify_advanced_configuration(
+                        channel,
+                        "modulation before OUTPUT ON",
+                        self._modulation_expected_fields(modulation),
+                    )
+                if channel in self._sweep_enabled:
+                    sweep = self._last_sweep_config.get(channel)
+                    if sweep is None:
+                        raise SafetyViolation(
+                            "Rigol sweep is active without a locally validated configuration."
+                        )
+                    self._validate_sweep_envelope(config, sweep)
+                    self._verify_advanced_configuration(
+                        channel,
+                        "frequency sweep before OUTPUT ON",
+                        self._sweep_expected_fields(sweep),
+                    )
+                if channel in self._burst_enabled:
+                    burst = self._last_burst_config.get(channel)
+                    if burst is None:
+                        raise SafetyViolation(
+                            "Rigol burst is active without a locally validated configuration."
+                        )
+                    self._validate_burst_envelope(config, burst)
+                    self._verify_advanced_configuration(
+                        channel,
+                        "burst before OUTPUT ON",
+                        self._burst_expected_fields(burst),
+                    )
+                # Re-read the complete carrier immediately before the one
+                # energising transition; front-panel changes cannot reuse a
+                # stale cache entry.
+                self._verify_applied_configuration(config)
             session.write(f":OUTP{channel} {'ON' if enabled else 'OFF'}")
             self._check_errors()
             active = self._parse_output_state(
@@ -922,19 +1141,22 @@ class RigolAdapter(DeviceAdapter):
             if active != enabled:
                 raise DeviceError("Rigol did not confirm the requested output state.")
         except Exception as exc:
-            if enabled:
-                # The energising command may already have reached the
-                # instrument. Never return from a failed ON transaction while
-                # relying on an unverified output state.
-                try:
-                    self.emergency_off()
-                except Exception as shutdown_exc:
-                    raise DeviceError(
-                        "Rigol OUTPUT ON failed and emergency shutdown could not be confirmed: "
-                        f"{shutdown_exc}"
-                    ) from exc
-            else:
-                self._state = DeviceState.UNKNOWN
+            # Either mutation may have reached the instrument before the
+            # transport/error/readback failure.  OFF is idempotent, so always
+            # fall back to the complete two-channel shutdown sequence.
+            self.emergency_off()
+            if self._state != DeviceState.OUTPUT_OFF:
+                operation = "ON" if enabled else "OFF"
+                raise DeviceError(
+                    f"Rigol OUTPUT {operation} failed and emergency shutdown "
+                    "could not confirm both outputs OFF."
+                ) from exc
+            if not enabled:
+                reason = str(exc).strip() or type(exc).__name__
+                raise DeviceError(
+                    "Rigol channel OUTPUT OFF transaction failed, but the "
+                    "two-channel fallback confirmed both outputs OFF: " + reason
+                ) from exc
             raise
         self._output_states[channel] = active
         self._update_aggregate_output_state()
@@ -950,21 +1172,26 @@ class RigolAdapter(DeviceAdapter):
             "sweep": "frequency_sweep",
             "burst": "burst",
             "harmonics": "harmonics",
+            "waveform sum": "waveform_sum",
         }
         query_for = {
             "modulation": f"{source}:MOD?",
             "sweep": f"{source}:SWE:STAT?",
             "burst": f"{source}:BURS:STAT?",
             "harmonics": f"{source}:HARM?",
+            "waveform sum": f"{source}:SUM?",
         }
         states: dict[str, bool] = {}
-        for name, feature in feature_for.items():
-            if self._capabilities is not None and self._capabilities.supports(feature):
+        for name, _feature in feature_for.items():
+            try:
                 states[name] = self._parse_on_off(
                     session.query(query_for[name]), field=f"{name} state"
                 )
-            else:
-                states[name] = False
+            except Exception as exc:
+                self._state = DeviceState.UNKNOWN
+                raise DeviceError(
+                    f"Rigol could not confirm {name} state before OUTPUT ON."
+                ) from exc
         for active, enabled_set in (
             (states["modulation"], self._modulation_enabled),
             (states["sweep"], self._sweep_enabled),
@@ -980,6 +1207,11 @@ class RigolAdapter(DeviceAdapter):
                 "Rigol harmonics are active, but their worst-case output envelope is not controlled by this UI. "
                 "Disable harmonics on the instrument before OUTPUT ON."
             )
+        if states["waveform sum"]:
+            raise SafetyViolation(
+                "Rigol waveform summing is active, but its combined output envelope "
+                "has not been validated. Disable SUM on the instrument before OUTPUT ON."
+            )
         if len(active_names) > 1:
             raise SafetyViolation(
                 "Rigol reports conflicting advanced modes active: " + ", ".join(active_names) + "."
@@ -989,18 +1221,42 @@ class RigolAdapter(DeviceAdapter):
         """Prevent one channel edit from silently changing the other channel."""
 
         session = self._require_session()
-        if self._capabilities is not None and self._capabilities.supports("coupling"):
+        try:
             coupling = session.query(":COUP?").strip().upper()
-            if "ON" in coupling:
-                raise SafetyViolation(
-                    "Rigol channel coupling is active on the instrument. Disable frequency, phase, and amplitude coupling before using independent channel controls."
-                )
-        if self._capabilities is not None and self._capabilities.supports("tracking"):
+        except Exception as exc:
+            self._state = DeviceState.UNKNOWN
+            raise DeviceError(
+                "Rigol could not confirm channel coupling state."
+            ) from exc
+        parts = [part.strip() for part in coupling.split(",")]
+        names = [part.split(":", 1)[0] if ":" in part else "" for part in parts]
+        if len(parts) != 3 or names != ["FREQ", "PHASE", "AMPL"]:
+            self._state = DeviceState.UNKNOWN
+            raise DeviceError(f"Rigol returned invalid coupling state: {coupling!r}.")
+        coupling_states = [
+            self._parse_on_off(
+                part.split(":", 1)[1], field=f"coupling {part.split(':', 1)[0]} state"
+            )
+            for part in parts
+        ]
+        if any(coupling_states):
+            raise SafetyViolation(
+                "Rigol channel coupling is active on the instrument. Disable frequency, phase, and amplitude coupling before using independent channel controls."
+            )
+        try:
             tracking = session.query(":SOUR1:TRACK?").strip().upper()
-            if tracking not in {"0", "OFF"}:
-                raise SafetyViolation(
-                    "Rigol channel tracking is active on the instrument. Disable TRACK before using independent channel controls."
-                )
+        except Exception as exc:
+            self._state = DeviceState.UNKNOWN
+            raise DeviceError(
+                "Rigol could not confirm channel tracking state."
+            ) from exc
+        if tracking not in {"0", "OFF", "1", "ON", "INV", "INVERTED"}:
+            self._state = DeviceState.UNKNOWN
+            raise DeviceError(f"Rigol returned invalid tracking state: {tracking!r}.")
+        if tracking not in {"0", "OFF"}:
+            raise SafetyViolation(
+                "Rigol channel tracking is active on the instrument. Disable TRACK before using independent channel controls."
+            )
 
     def configure_output(self, config: RigolOutputConfig) -> None:
         """Configure the output path while proving that the carrier is OFF."""
@@ -1045,7 +1301,6 @@ class RigolAdapter(DeviceAdapter):
     def configure_modulation(self, config: RigolModulationConfig) -> None:
         """Configure modulation with the carrier output forced OFF."""
 
-        self._assert_feature("modulation")
         if not config.enabled:
             self._disable_advanced_mode(
                 channel=config.channel,
@@ -1056,6 +1311,7 @@ class RigolAdapter(DeviceAdapter):
             self._modulation_enabled.discard(config.channel)
             self._last_modulation_config.pop(config.channel, None)
             return
+        self._assert_feature("modulation")
         if config.enabled:
             self._assert_advanced_mode_exclusive(config.channel, "modulation")
         channel = self._channel_settings(config.channel)
@@ -1065,15 +1321,20 @@ class RigolAdapter(DeviceAdapter):
             raise SafetyViolation("Rigol modulation type is not allowed.")
         if config.source not in {"INT", "EXT"}:
             raise SafetyViolation("Rigol modulation source must be INT or EXT.")
-        if config.source == "INT" and config.internal_shape not in {"SIN", "SQU", "RAMP", "NOIS", "ARB"}:
+        if config.source == "INT" and config.internal_shape not in {
+            "SIN", "SQU", "TRI", "RAMP", "NRAMP", "NOIS", "USER", "ARB"
+        }:
             raise SafetyViolation("Rigol internal modulation waveform is not allowed.")
         if config.polarity not in {"POS", "NEG"}:
             raise SafetyViolation("Rigol modulation polarity must be POS or NEG.")
         if config.source == "INT":
             self._assert_finite("modulation rate", config.rate_hz)
         self._assert_finite("modulation parameter", config.parameter)
-        if config.source == "INT" and config.rate_hz <= 0:
-            raise SafetyViolation("Modulation frequency/rate must be positive.")
+        if config.source == "INT" and not 2e-3 <= config.rate_hz <= 1e6:
+            raise SafetyViolation(
+                "Rigol internal modulation rate must be within the documented "
+                "hardware range 2 mHz..1 MHz."
+            )
         rate_limits = channel.lab_limits.modulation_rate
         if config.source == "INT" and rate_limits.enabled:
             minimum = parse_quantity(rate_limits.min, "frequency").si_value
@@ -1082,8 +1343,10 @@ class RigolAdapter(DeviceAdapter):
                 raise SafetyViolation("Modulation rate is outside the configured Rigol frequency range.")
         if config.parameter < 0:
             raise SafetyViolation("The modulation parameter cannot be negative.")
-        if config.modulation_type in {"AM", "PWM"} and config.parameter > 100:
-            raise SafetyViolation(f"Rigol {config.modulation_type} percentage must be in the range 0..100%.")
+        if config.modulation_type == "AM" and config.parameter > 120:
+            raise SafetyViolation("Rigol AM depth must be in the range 0..120%.")
+        if config.modulation_type == "PWM" and config.parameter > 100:
+            raise SafetyViolation("Rigol PWM deviation must be in the range 0..100%.")
         if config.modulation_type in {"PM", "PSK"} and config.parameter > 360:
             raise SafetyViolation(f"Rigol {config.modulation_type} phase must be in the range 0..360 degrees.")
         self._validate_modulation_envelope(
@@ -1092,15 +1355,23 @@ class RigolAdapter(DeviceAdapter):
         session = self._require_session()
         source = f":SOUR{config.channel}"
         kind = config.modulation_type
+        internal_shape = "USER" if config.internal_shape == "ARB" else config.internal_shape
+        # Once the first command is sent, the previous advanced-mode snapshot
+        # is no longer evidence of the hardware state.  Restore the cache only
+        # after every field and OUTPUT-OFF state has been read back.
+        self._modulation_enabled.discard(config.channel)
+        self._last_modulation_config.pop(config.channel, None)
         session.write(f":OUTP{config.channel} OFF")
         self._verify_output_off(config.channel)
         session.write(f"{source}:MOD OFF")
         session.write(f"{source}:MOD:TYPE {kind}")
         session.write(f"{source}:{kind}:SOUR {config.source}")
+        if kind == "PWM":
+            session.write(f"{source}:PULS:HOLD DUTY")
         if config.source == "INT":
             if kind in {"AM", "FM", "PM", "PWM"}:
                 session.write(f"{source}:{kind}:INT:FREQ {config.rate_hz:.12g}")
-                session.write(f"{source}:{kind}:INT:FUNC {config.internal_shape}")
+                session.write(f"{source}:{kind}:INT:FUNC {internal_shape}")
             else:
                 session.write(f"{source}:{kind}:INT:RATE {config.rate_hz:.12g}")
         if kind in {"ASK", "FSK", "PSK"}:
@@ -1118,29 +1389,44 @@ class RigolAdapter(DeviceAdapter):
         session.write(f"{source}:MOD {'ON' if config.enabled else 'OFF'}")
         self._check_errors()
         self._verify_output_off(config.channel)
-        expected_fields: dict[str, str | float | int | bool] = {
+        self._verify_advanced_configuration(
+            config.channel, "modulation", self._modulation_expected_fields(config)
+        )
+        self._modulation_enabled.add(config.channel)
+        self._last_modulation_config[config.channel] = config
+
+    @staticmethod
+    def _modulation_expected_fields(
+        config: RigolModulationConfig,
+    ) -> dict[str, str | float | int | bool]:
+        kind = config.modulation_type
+        suffix = {
+            "AM": "DEPT",
+            "FM": "DEV",
+            "PM": "DEV",
+            "ASK": "AMPL",
+            "FSK": "FREQ",
+            "PSK": "PHAS",
+            "PWM": "DEV:DCYC",
+        }[kind]
+        fields: dict[str, str | float | int | bool] = {
             "MOD": config.enabled,
             "MOD:TYPE": kind,
             f"{kind}:SOUR": config.source,
             f"{kind}:{suffix}": config.parameter,
         }
+        if kind == "PWM":
+            fields["PULS:HOLD"] = "DUTY"
         if config.source == "INT":
+            shape = "USER" if config.internal_shape == "ARB" else config.internal_shape
             if kind in {"AM", "FM", "PM", "PWM"}:
-                expected_fields.update(
-                    {
-                        f"{kind}:INT:FREQ": config.rate_hz,
-                        f"{kind}:INT:FUNC": config.internal_shape,
-                    }
-                )
+                fields[f"{kind}:INT:FREQ"] = config.rate_hz
+                fields[f"{kind}:INT:FUNC"] = shape
             else:
-                expected_fields[f"{kind}:INT:RATE"] = config.rate_hz
+                fields[f"{kind}:INT:RATE"] = config.rate_hz
         if kind in {"ASK", "FSK", "PSK"}:
-            expected_fields[f"{kind}:POL"] = config.polarity
-        self._verify_advanced_configuration(
-            config.channel, "modulation", expected_fields
-        )
-        self._modulation_enabled.add(config.channel)
-        self._last_modulation_config[config.channel] = config
+            fields[f"{kind}:POL"] = config.polarity
+        return fields
 
     def _validate_modulation_envelope(
         self,
@@ -1157,7 +1443,23 @@ class RigolAdapter(DeviceAdapter):
             raise SafetyViolation(f"Rigol {waveform} cannot be used as a modulation carrier.")
         if kind == "PWM" and waveform != "PULS":
             raise SafetyViolation("Rigol PWM requires a pulse carrier waveform.")
+        if kind != "PWM" and waveform not in {"SIN", "SQU", "RAMP", "USER", "ARB"}:
+            raise SafetyViolation(
+                f"Rigol {kind} supports SIN, SQU, RAMP, or arbitrary carriers; "
+                f"{waveform} is not a documented carrier."
+            )
         parameter = float(modulation.parameter)
+        if kind == "PWM":
+            if carrier.pulse_width_s is None:
+                raise SafetyViolation(
+                    "Rigol PWM duty deviation requires an explicitly configured pulse width."
+                )
+            duty_percent = carrier.pulse_width_s * carrier.frequency_hz * 100.0
+            maximum_deviation = min(duty_percent, 100.0 - duty_percent)
+            if parameter > maximum_deviation:
+                raise SafetyViolation(
+                    "Rigol PWM duty deviation exceeds the configured pulse duty-cycle envelope."
+                )
         if kind in {"AM", "ASK"}:
             base_vpp = carrier.high_level_v - carrier.low_level_v
             candidate_vpp = (
@@ -1187,7 +1489,6 @@ class RigolAdapter(DeviceAdapter):
     def configure_frequency_sweep(self, config: RigolFrequencySweepConfig) -> None:
         """Configure the generator's internal frequency sweep at OUTPUT OFF."""
 
-        self._assert_feature("frequency_sweep")
         if not config.enabled:
             self._disable_advanced_mode(
                 channel=config.channel,
@@ -1198,6 +1499,7 @@ class RigolAdapter(DeviceAdapter):
             self._sweep_enabled.discard(config.channel)
             self._last_sweep_config.pop(config.channel, None)
             return
+        self._assert_feature("frequency_sweep")
         if config.enabled:
             self._assert_advanced_mode_exclusive(config.channel, "frequency sweep")
         channel = self._channel_settings(config.channel)
@@ -1216,12 +1518,24 @@ class RigolAdapter(DeviceAdapter):
             raise SafetyViolation("Rigol sweep spacing must be LIN, LOG, or STEP.")
         if config.trigger_source not in {"INT", "EXT", "MAN"} or config.trigger_slope not in {"POS", "NEG"}:
             raise SafetyViolation("Rigol sweep trigger contains an unsupported value.")
+        trigger_output = self._trigger_output_token(config.trigger_output)
         if isinstance(config.steps, bool) or not isinstance(config.steps, int):
             raise SafetyViolation("Rigol sweep step count must be an integer.")
         if config.start_hz <= 0 or config.stop_hz <= 0 or config.start_hz == config.stop_hz:
             raise SafetyViolation("Sweep requires positive, different start and stop frequencies.")
-        if config.duration_s <= 0 or min(config.start_hold_s, config.stop_hold_s, config.return_time_s) < 0:
-            raise SafetyViolation("Sweep time must be positive; hold/return times cannot be negative.")
+        if not 1e-3 <= config.duration_s <= 500:
+            raise SafetyViolation(
+                "Rigol sweep time must be within the documented hardware range 1 ms..500 s."
+            )
+        hold_times = (config.start_hold_s, config.stop_hold_s, config.return_time_s)
+        if min(hold_times) < 0 or max(hold_times) > 500:
+            raise SafetyViolation(
+                "Rigol sweep hold and return times must be within 0..500 s."
+            )
+        if not 2 <= config.steps <= 1024:
+            raise SafetyViolation(
+                "Rigol sweep step count must be within the documented hardware range 2..1024."
+            )
         advanced = channel.lab_limits
         if advanced.sweep_duration.enabled:
             duration_min = parse_quantity(advanced.sweep_duration.min, "time").si_value
@@ -1234,8 +1548,16 @@ class RigolAdapter(DeviceAdapter):
         if limits.enabled:
             for value, name in ((config.start_hz, "start"), (config.stop_hz, "stop")):
                 self._enforce_frequency(value, limits.min, limits.max, f"Sweep {name}")
+        carrier = self._last_config.get(config.channel)
+        if carrier is None:
+            raise SafetyViolation("Configure the Rigol carrier before enabling sweep.")
+        self._validate_sweep_envelope(carrier, config)
         session = self._require_session()
         source = f":SOUR{config.channel}"
+        # Do not retain a previously verified sweep after a partially applied
+        # transaction.  It is re-established only after complete readback.
+        self._sweep_enabled.discard(config.channel)
+        self._last_sweep_config.pop(config.channel, None)
         session.write(f":OUTP{config.channel} OFF")
         self._verify_output_off(config.channel)
         session.write(f"{source}:SWE:STAT OFF")
@@ -1250,7 +1572,7 @@ class RigolAdapter(DeviceAdapter):
             f"{source}:SWE:RTIM {config.return_time_s:.12g}",
             f"{source}:SWE:TRIG:SOUR {config.trigger_source}",
             f"{source}:SWE:TRIG:SLOP {config.trigger_slope}",
-            f"{source}:SWE:TRIG:TRIGO {'ON' if config.trigger_output else 'OFF'}",
+            f"{source}:SWE:TRIG:TRIGO {trigger_output}",
             f"{source}:SWE:STAT {'ON' if config.enabled else 'OFF'}",
         ):
             session.write(command)
@@ -1259,34 +1581,76 @@ class RigolAdapter(DeviceAdapter):
         self._verify_advanced_configuration(
             config.channel,
             "frequency sweep",
-            {
-                "FREQ:STAR": config.start_hz,
-                "FREQ:STOP": config.stop_hz,
-                "SWE:TIME": config.duration_s,
-                "SWE:SPAC": config.spacing,
-                "SWE:STEP": config.steps,
-                "SWE:HTIM:STAR": config.start_hold_s,
-                "SWE:HTIM:STOP": config.stop_hold_s,
-                "SWE:RTIM": config.return_time_s,
-                "SWE:TRIG:SOUR": config.trigger_source,
-                "SWE:TRIG:SLOP": config.trigger_slope,
-                "SWE:TRIG:TRIGO": config.trigger_output,
-                "SWE:STAT": config.enabled,
-            },
+            self._sweep_expected_fields(config),
         )
         self._sweep_enabled.add(config.channel)
         self._last_sweep_config[config.channel] = config
 
+    @staticmethod
+    def _sweep_expected_fields(
+        config: RigolFrequencySweepConfig,
+    ) -> dict[str, str | float | int | bool]:
+        return {
+            "FREQ:STAR": config.start_hz,
+            "FREQ:STOP": config.stop_hz,
+            "SWE:TIME": config.duration_s,
+            "SWE:SPAC": config.spacing,
+            "SWE:STEP": config.steps,
+            "SWE:HTIM:STAR": config.start_hold_s,
+            "SWE:HTIM:STOP": config.stop_hold_s,
+            "SWE:RTIM": config.return_time_s,
+            "SWE:TRIG:SOUR": config.trigger_source,
+            "SWE:TRIG:SLOP": config.trigger_slope,
+            "SWE:TRIG:TRIGO": RigolAdapter._trigger_output_token(
+                config.trigger_output
+            ),
+            "SWE:STAT": config.enabled,
+        }
+
+    def _validate_sweep_envelope(
+        self,
+        carrier: RigolChannelConfig,
+        sweep: RigolFrequencySweepConfig,
+    ) -> None:
+        waveform = carrier.waveform.upper()
+        if waveform not in {"SIN", "SQU", "RAMP", "USER", "ARB"}:
+            raise SafetyViolation(
+                "Rigol sweep supports SIN, SQU, RAMP, or arbitrary carriers; "
+                f"{waveform} is not a documented carrier."
+            )
+        for frequency_hz in (sweep.start_hz, sweep.stop_hz):
+            self._validate_waveform_config(
+                replace(carrier, frequency_hz=frequency_hz)
+            )
+
     def trigger_frequency_sweep(self, channel: int) -> None:
         self._assert_feature("frequency_sweep")
         self._channel_settings(channel)
-        self._require_session().write(f":SOUR{channel}:SWE:TRIG")
+        session = self._require_session()
+        source = f":SOUR{channel}:SWE"
+        if not self._parse_on_off(
+            session.query(f"{source}:STAT?"), field="frequency sweep state"
+        ):
+            raise SafetyViolation(
+                "Rigol frequency sweep must be enabled before a manual trigger."
+            )
+        trigger_source = session.query(f"{source}:TRIG:SOUR?").strip().upper()
+        if trigger_source != "MAN":
+            raise SafetyViolation(
+                "Rigol frequency sweep trigger source must be MAN before a manual trigger."
+            )
+        if not self._parse_output_state(
+            session.query(f":OUTP{channel}?"), channel=channel
+        ):
+            raise SafetyViolation(
+                "Rigol frequency sweep manual trigger requires the channel OUTPUT to be ON."
+            )
+        session.write(f"{source}:TRIG")
         self._check_errors()
 
     def configure_burst(self, config: RigolBurstConfig) -> None:
         """Configure burst/gate parameters while the carrier output is OFF."""
 
-        self._assert_feature("burst")
         if not config.enabled:
             self._disable_advanced_mode(
                 channel=config.channel,
@@ -1297,6 +1661,7 @@ class RigolAdapter(DeviceAdapter):
             self._burst_enabled.discard(config.channel)
             self._last_burst_config.pop(config.channel, None)
             return
+        self._assert_feature("burst")
         if config.enabled:
             self._assert_advanced_mode_exclusive(config.channel, "burst")
         channel = self._channel_settings(config.channel)
@@ -1312,12 +1677,31 @@ class RigolAdapter(DeviceAdapter):
             raise SafetyViolation("Rigol burst mode must be TRIG or GAT.")
         if config.trigger_source not in {"INT", "EXT", "MAN"} or config.trigger_slope not in {"POS", "NEG"}:
             raise SafetyViolation("Rigol burst trigger contains an unsupported value.")
-        if config.gate_polarity not in {"POS", "NEG"} or config.idle not in {"FPT", "TOP", "CENT", "BOT"}:
+        trigger_output = self._trigger_output_token(config.trigger_output)
+        if config.gate_polarity not in {"POS", "NEG"} or config.idle not in {
+            "FPT", "TOP", "CENTER", "BOTTOM", "CENT", "BOT"
+        }:
             raise SafetyViolation("Rigol burst gate/idle parameters are invalid.")
         if isinstance(config.cycles, bool) or not isinstance(config.cycles, int):
             raise SafetyViolation("Rigol burst cycle count must be an integer.")
-        if config.cycles < 1 or config.period_s <= 0 or config.delay_s < 0:
-            raise SafetyViolation("Burst requires cycles >= 1, period > 0, and delay >= 0.")
+        maximum_cycles = 500_000 if config.trigger_source == "INT" else 1_000_000
+        if not 1 <= config.cycles <= maximum_cycles:
+            raise SafetyViolation(
+                "Rigol burst cycle count must be within 1.."
+                f"{maximum_cycles} for the selected trigger source."
+            )
+        if not 2.0166e-6 <= config.period_s <= 500:
+            raise SafetyViolation(
+                "Rigol internal burst period must be within 2.0166 us..500 s."
+            )
+        if not 0 <= config.delay_s <= 100:
+            raise SafetyViolation("Rigol burst trigger delay must be within 0..100 s.")
+        if not 0 <= config.phase_deg <= 360:
+            raise SafetyViolation("Rigol burst phase must be within 0..360 degrees.")
+        if config.mode == "GAT" and config.trigger_source != "EXT":
+            raise SafetyViolation(
+                "Rigol gated burst requires the documented EXT trigger source."
+            )
         limits = channel.lab_limits
         if limits.burst_period.enabled:
             period_min = parse_quantity(limits.burst_period.min, "time").si_value
@@ -1326,8 +1710,19 @@ class RigolAdapter(DeviceAdapter):
                 raise SafetyViolation("Burst period is outside the configured range.")
         if limits.burst_cycles.enabled and not limits.burst_cycles.min <= config.cycles <= limits.burst_cycles.max:
             raise SafetyViolation("Burst cycle count is outside the configured range.")
+        carrier = self._last_config.get(config.channel)
+        if carrier is None:
+            raise SafetyViolation("Configure the Rigol carrier before enabling burst.")
+        self._validate_burst_envelope(carrier, config)
         session = self._require_session()
         source = f":SOUR{config.channel}"
+        idle_token = {"CENT": "CENTER", "BOT": "BOTTOM"}.get(
+            config.idle, config.idle
+        )
+        # A failed mutation leaves the hardware burst state uncertain, so the
+        # old snapshot must not be reused by a later OUTPUT-ON validation.
+        self._burst_enabled.discard(config.channel)
+        self._last_burst_config.pop(config.channel, None)
         session.write(f":OUTP{config.channel} OFF")
         self._verify_output_off(config.channel)
         session.write(f"{source}:BURS OFF")
@@ -1339,9 +1734,9 @@ class RigolAdapter(DeviceAdapter):
             f"{source}:BURS:TDEL {config.delay_s:.12g}",
             f"{source}:BURS:TRIG:SOUR {config.trigger_source}",
             f"{source}:BURS:TRIG:SLOP {config.trigger_slope}",
-            f"{source}:BURS:TRIG:TRIGO {'ON' if config.trigger_output else 'OFF'}",
+            f"{source}:BURS:TRIG:TRIGO {trigger_output}",
             f"{source}:BURS:GATE:POL {config.gate_polarity}",
-            f"{source}:BURS:IDLE {config.idle}",
+            f"{source}:BURS:IDLE {idle_token}",
             f"{source}:BURS {'ON' if config.enabled else 'OFF'}",
         ):
             session.write(command)
@@ -1350,22 +1745,41 @@ class RigolAdapter(DeviceAdapter):
         self._verify_advanced_configuration(
             config.channel,
             "burst",
-            {
-                "BURS:MODE": config.mode,
-                "BURS:NCYC": config.cycles,
-                "BURS:PHAS": config.phase_deg,
-                "BURS:INT:PER": config.period_s,
-                "BURS:TDEL": config.delay_s,
-                "BURS:TRIG:SOUR": config.trigger_source,
-                "BURS:TRIG:SLOP": config.trigger_slope,
-                "BURS:TRIG:TRIGO": config.trigger_output,
-                "BURS:GATE:POL": config.gate_polarity,
-                "BURS:IDLE": config.idle,
-                "BURS:STAT": config.enabled,
-            },
+            self._burst_expected_fields(config),
         )
         self._burst_enabled.add(config.channel)
         self._last_burst_config[config.channel] = config
+
+    @staticmethod
+    def _burst_expected_fields(
+        config: RigolBurstConfig,
+    ) -> dict[str, str | float | int | bool]:
+        idle = {"CENT": "CENTER", "BOT": "BOTTOM"}.get(config.idle, config.idle)
+        return {
+            "BURS:MODE": config.mode,
+            "BURS:NCYC": config.cycles,
+            "BURS:PHAS": config.phase_deg,
+            "BURS:INT:PER": config.period_s,
+            "BURS:TDEL": config.delay_s,
+            "BURS:TRIG:SOUR": config.trigger_source,
+            "BURS:TRIG:SLOP": config.trigger_slope,
+            "BURS:TRIG:TRIGO": RigolAdapter._trigger_output_token(
+                config.trigger_output
+            ),
+            "BURS:GATE:POL": config.gate_polarity,
+            "BURS:IDLE": idle,
+            "BURS:STAT": config.enabled,
+        }
+
+    def _validate_burst_envelope(
+        self,
+        carrier: RigolChannelConfig,
+        _burst: RigolBurstConfig,
+    ) -> None:
+        waveform = carrier.waveform.upper()
+        if waveform == "DC":
+            raise SafetyViolation("Rigol DC cannot be used as a burst carrier.")
+        self._validate_waveform_config(carrier)
 
     def _disable_advanced_mode(
         self,
@@ -1397,9 +1811,9 @@ class RigolAdapter(DeviceAdapter):
             "modulation": f"{source}:MOD?",
             "frequency sweep": f"{source}:SWE:STAT?",
             "burst": f"{source}:BURS:STAT?",
+            "harmonics": f"{source}:HARM?",
+            "waveform sum": f"{source}:SUM?",
         }
-        if self._capabilities is not None and self._capabilities.supports("harmonics"):
-            queries["harmonics"] = f"{source}:HARM?"
         active: list[str] = []
         for mode, query in queries.items():
             if mode == requested:
@@ -1421,7 +1835,29 @@ class RigolAdapter(DeviceAdapter):
     def trigger_burst(self, channel: int) -> None:
         self._assert_feature("burst")
         self._channel_settings(channel)
-        self._require_session().write(f":SOUR{channel}:BURS:TRIG")
+        session = self._require_session()
+        source = f":SOUR{channel}:BURS"
+        if not self._parse_on_off(
+            session.query(f"{source}:STAT?"), field="burst state"
+        ):
+            raise SafetyViolation("Rigol burst must be enabled before a manual trigger.")
+        mode = session.query(f"{source}:MODE?").strip().upper()
+        if mode != "TRIG":
+            raise SafetyViolation(
+                "Rigol manual burst trigger is available only in triggered burst mode."
+            )
+        trigger_source = session.query(f"{source}:TRIG:SOUR?").strip().upper()
+        if trigger_source != "MAN":
+            raise SafetyViolation(
+                "Rigol burst trigger source must be MAN before a manual trigger."
+            )
+        if not self._parse_output_state(
+            session.query(f":OUTP{channel}?"), channel=channel
+        ):
+            raise SafetyViolation(
+                "Rigol burst manual trigger requires the channel OUTPUT to be ON."
+            )
+        session.write(f"{source}:TRIG")
         self._check_errors()
 
     def synchronize_phases(self) -> None:
@@ -1446,6 +1882,13 @@ class RigolAdapter(DeviceAdapter):
         if not 0 <= config.sensitivity_percent <= 100:
             raise SafetyViolation("Rigol counter sensitivity must be between 0% and 100%.")
         session = self._require_session()
+        cached_ch2_output = self._last_output_config.get(2)
+        counter_enables_input = config.state != "OFF"
+        if counter_enables_input:
+            # Enabling the rear-panel counter disables CH2 SYNC on DG1000Z.
+            # Invalidate that snapshot before the first mutation and rebuild
+            # it from an explicit readback after the counter transaction.
+            self._last_output_config.pop(2, None)
         session.write(f":COUN:COUP {config.coupling}")
         if config.gate_time == "AUTO":
             session.write(":COUN:AUTO")
@@ -1454,7 +1897,12 @@ class RigolAdapter(DeviceAdapter):
         session.write(f":COUN:HF {'ON' if config.high_frequency_rejection else 'OFF'}")
         session.write(f":COUN:LEVE {config.trigger_level_v:.12g}")
         session.write(f":COUN:SENS {config.sensitivity_percent:.12g}")
-        session.write(f":COUN {config.state}")
+        if counter_enables_input:
+            session.write(":COUN ON")
+        if config.state in {"RUN", "STOP", "SINGLE"}:
+            session.write(f":COUN {config.state}")
+        elif config.state == "OFF":
+            session.write(":COUN OFF")
         self._check_errors()
         expected = {
             ":COUN:COUP?": config.coupling,
@@ -1475,6 +1923,9 @@ class RigolAdapter(DeviceAdapter):
                 if not self._same_number(actual, wanted, absolute=1e-6):
                     raise DeviceError(f"Rigol counter readback {query} returned {actual:.9g}, expected {wanted:.9g}.")
         state_response = session.query(":COUN?").strip().upper()
+        state_response = {"1": "ON", "0": "OFF"}.get(
+            state_response, state_response
+        )
         accepted_states = {
             "ON": {"ON", "RUN"},
             "RUN": {"RUN", "ON"},
@@ -1486,12 +1937,31 @@ class RigolAdapter(DeviceAdapter):
             raise DeviceError(
                 f"Rigol counter state readback returned {state_response}, expected one of {sorted(accepted_states)}."
             )
+        if counter_enables_input:
+            sync_response = session.query(":OUTP2:SYNC?").strip().upper()
+            sync_enabled = self._parse_on_off(
+                sync_response, field="CH2 SYNC state after counter enable"
+            )
+            if cached_ch2_output is not None:
+                self._last_output_config[2] = replace(
+                    cached_ch2_output, sync_enabled=sync_enabled
+                )
 
     def read_counter(self) -> RigolCounterReading:
         """Read the five documented counter results without changing output state."""
 
         self._assert_feature("counter")
-        values = self._require_session().query(":COUN:MEAS?").strip().split(",")
+        session = self._require_session()
+        state = session.query(":COUN?").strip().upper()
+        state = {"1": "ON", "0": "OFF"}.get(state, state)
+        if state not in {"ON", "RUN", "STOP", "SINGLE"}:
+            if state in {"OFF", "0"}:
+                raise SafetyViolation(
+                    "Enable the Rigol frequency counter before reading it."
+                )
+            self._state = DeviceState.UNKNOWN
+            raise DeviceError(f"Rigol returned invalid counter state: {state!r}.")
+        values = session.query(":COUN:MEAS?").strip().split(",")
         if len(values) != 5:
             raise DeviceError("Rigol counter returned an incomplete measurement.")
         try:
@@ -1516,6 +1986,8 @@ class RigolAdapter(DeviceAdapter):
         channel: int,
         operation: str,
         fields: dict[str, str | float | int | bool],
+        *,
+        require_output_off: bool = True,
     ) -> None:
         """Read back each advanced field after an OUTPUT-OFF transaction."""
 
@@ -1531,9 +2003,17 @@ class RigolAdapter(DeviceAdapter):
                         f"{suffix} {response} != {'ON' if expected else 'OFF'}"
                     )
             elif isinstance(expected, str):
-                if response != expected.upper():
+                expected_response = expected.upper()
+                # DG1000Z accepts STEP but documents/returns the abbreviated
+                # token STE for the sweep-spacing query.
+                if suffix == "SWE:SPAC":
+                    response = {"STE": "STEP"}.get(response, response)
+                    expected_response = {"STE": "STEP"}.get(
+                        expected_response, expected_response
+                    )
+                if response != expected_response:
                     mismatches.append(
-                        f"{suffix} {response} != {expected.upper()}"
+                        f"{suffix} {response} != {expected_response}"
                     )
             else:
                 try:
@@ -1549,7 +2029,8 @@ class RigolAdapter(DeviceAdapter):
                     mismatches.append(
                         f"{suffix} {actual_number:.12g} != {float(expected):.12g}"
                     )
-        self._verify_output_off(channel)
+        if require_output_off:
+            self._verify_output_off(channel)
         if mismatches:
             raise DeviceError(
                 f"Rigol {operation} readback failed (output remains OFF): "

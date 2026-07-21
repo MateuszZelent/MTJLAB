@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from weakref import WeakSet
 
 from PySide6.QtCore import QEvent, QObject
 from PySide6.QtGui import QColor, QPalette
@@ -76,12 +77,37 @@ class _DialogThemeFilter(QObject):
     def __init__(self, application: QApplication, tokens: ThemeTokens) -> None:
         super().__init__(application)
         self._tokens = tokens
+        self._shown_widgets: WeakSet[QWidget] = WeakSet()
+        self._fluent_background_widgets: WeakSet[QWidget] = WeakSet()
 
     def set_tokens(self, tokens: ThemeTokens) -> None:
         self._tokens = tokens
 
+    def track_visible_tree(self, root: QWidget) -> None:
+        """Remember visible Fluent controls without retaining deleted widgets."""
+
+        self._track_shown_widget(root)
+        for widget in root.findChildren(QWidget):
+            if widget.isVisibleTo(root):
+                self._track_shown_widget(widget)
+
+    def shown_widgets(self) -> tuple[QWidget, ...]:
+        return tuple(self._shown_widgets)
+
+    def fluent_background_widgets(self) -> tuple[QWidget, ...]:
+        return tuple(self._fluent_background_widgets)
+
+    def _track_shown_widget(self, widget: QWidget) -> None:
+        self._shown_widgets.add(widget)
+        self._track_fluent_background(widget)
+
+    def _track_fluent_background(self, widget: QWidget) -> None:
+        if _has_fluent_background_animation(widget):
+            self._fluent_background_widgets.add(widget)
+
     def eventFilter(self, watched: QObject, event: QEvent) -> bool:
         if event.type() == QEvent.Type.Show and isinstance(watched, QWidget):
+            self._track_shown_widget(watched)
             _apply_station_control_style(watched, self._tokens)
         elif (
             event.type() == QEvent.Type.DynamicPropertyChange
@@ -100,6 +126,12 @@ def _install_dialog_theme_filter(
         theme_filter = _DialogThemeFilter(application, tokens)
         application.installEventFilter(theme_filter)
         application._station_dialog_theme_filter = theme_filter
+        # Usually the filter is installed before MainWindow.show(). Seeding the
+        # already-visible trees also covers embedders and focused UI tests that
+        # apply their first station theme after showing a window.
+        for window in application.topLevelWidgets():
+            if window.isVisible():
+                theme_filter.track_visible_tree(window)
     else:
         theme_filter.set_tokens(tokens)
 
@@ -130,7 +162,7 @@ def _apply_application_palette(
         QPalette.ColorRole.BrightText: tokens.danger,
         QPalette.ColorRole.Highlight: tokens.accent,
         QPalette.ColorRole.HighlightedText: (
-            tokens.background if theme_name == "dark" else "#ffffff"
+            tokens.on_accent
         ),
         QPalette.ColorRole.Link: tokens.accent,
         QPalette.ColorRole.PlaceholderText: tokens.text_muted,
@@ -164,7 +196,17 @@ def _settle_fluent_background_animations(application: QApplication) -> None:
     colour in the same event turn.
     """
 
-    for widget in application.allWidgets():
+    theme_filter = getattr(application, "_station_dialog_theme_filter", None)
+    if not isinstance(theme_filter, _DialogThemeFilter):
+        return
+    for widget in theme_filter.fluent_background_widgets():
+        try:
+            visible = widget.isVisible()
+        except RuntimeError:
+            # A Python wrapper can briefly outlive its deleted Qt object.
+            continue
+        if not visible:
+            continue
         animation = getattr(widget, "backgroundColorAni", None)
         normal_background = getattr(widget, "_normalBackgroundColor", None)
         set_background = getattr(widget, "setBackgroundColor", None)
@@ -180,12 +222,30 @@ def _settle_fluent_background_animations(application: QApplication) -> None:
         widget.update()
 
 
+def _has_fluent_background_animation(widget: QWidget) -> bool:
+    return (
+        getattr(widget, "backgroundColorAni", None) is not None
+        and hasattr(widget, "bgColorObject")
+        and callable(getattr(widget, "_normalBackgroundColor", None))
+        and callable(getattr(widget, "setBackgroundColor", None))
+    )
+
+
 def _apply_station_control_styles(application: QApplication, tokens: ThemeTokens) -> None:
     """Retheme visible station controls; hidden widgets are handled on Show."""
 
-    for widget in application.allWidgets():
-        window = widget.window()
-        if window.isVisible() and widget.isVisibleTo(window):
+    theme_filter = getattr(application, "_station_dialog_theme_filter", None)
+    if not isinstance(theme_filter, _DialogThemeFilter):
+        return
+    for widget in theme_filter.shown_widgets():
+        try:
+            window = widget.window()
+            visible = window.isVisible() and widget.isVisibleTo(window)
+        except RuntimeError:
+            # Weak tracking does not keep widgets alive, but another Python
+            # owner can briefly retain a wrapper after Qt deletes the object.
+            continue
+        if visible:
             _apply_station_control_style(widget, tokens)
 
 
@@ -286,18 +346,22 @@ def _apply_station_button(widget: QWidget, tokens: ThemeTokens) -> None:
         "border: 1px solid palette(mid);"
         "}"
         "QPushButton[controlState=\"emergency\"] {"
-        f"color: {tokens.danger}; background-color: transparent;"
-        f"border: 1px solid {tokens.danger}; font-weight: 600;"
+        f"color: {tokens.on_emergency}; background-color: {tokens.emergency};"
+        f"border: 2px solid {tokens.emergency}; font-weight: 700;"
         "}"
         "QPushButton[controlState=\"emergency\"]:hover {"
-        "background-color: palette(alternate-base);"
+        f"color: {tokens.on_emergency}; background-color: {tokens.danger};"
+        f"border-color: {tokens.text_primary};"
+        "}"
+        "QPushButton[controlState=\"emergency\"]:focus {"
+        f"border-color: {tokens.focus};"
         "}"
         "QPushButton[controlState=\"confirmed\"] {"
-        f"color: #ffffff; background-color: {tokens.accent};"
+        f"color: {tokens.on_accent}; background-color: {tokens.accent};"
         f"border: 1px solid {tokens.accent};"
         "}"
         "QPushButton[controlState=\"energized\"] {"
-        f"color: #ffffff; background-color: {tokens.danger};"
+        f"color: {tokens.on_emergency}; background-color: {tokens.danger};"
         f"border: 1px solid {tokens.danger}; font-weight: 600;"
         "}"
     )

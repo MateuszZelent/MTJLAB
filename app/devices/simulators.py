@@ -152,6 +152,11 @@ class RigolSimulator(_BaseSimulator):
         self.modulation = {1: False, 2: False}
         self.sweep = {1: False, 2: False}
         self.burst = {1: False, 2: False}
+        self.harmonics = {1: False, 2: False}
+        self.waveform_sum = {1: False, 2: False}
+        self.phase = {1: 0.0, 2: 0.0}
+        self.coupling = {"FREQ": False, "PHASE": False, "AMPL": False}
+        self.tracking = "OFF"
         self.programmed_scpi: dict[str, str] = {}
         self.counter_state = "OFF"
         self.counter_coupling = "AC"
@@ -161,15 +166,18 @@ class RigolSimulator(_BaseSimulator):
         self.counter_sensitivity = 25.0
 
     def _write(self, command: str) -> None:
-        assignment = re.match(r"^(:[A-Za-z0-9:]+)\s+(.+)$", command)
-        if assignment:
-            self.programmed_scpi[assignment.group(1).upper()] = assignment.group(2)
+        if command.upper() in {"*CLS", ":SOUR1:PHAS:SYNC"}:
+            return
+        if re.match(r"^:SOUR[12]:(?:SWE|BURS):TRIG$", command, re.IGNORECASE):
+            return
         if command.upper() == ":COUN:AUTO":
             self.counter_gate = "USER1"
             return
         match = re.match(r"^:COUN\s+(ON|OFF|RUN|STOP|SINGLE)$", command, re.IGNORECASE)
         if match:
             self.counter_state = match.group(1).upper()
+            if self.counter_state != "OFF":
+                self.sync[2] = False
             return
         match = re.match(r"^:COUN:COUP\s+(AC|DC)$", command, re.IGNORECASE)
         if match:
@@ -239,6 +247,14 @@ class RigolSimulator(_BaseSimulator):
         if match:
             self.burst[int(match.group(1))] = match.group(2).upper() == "ON"
             return
+        match = re.match(r"^:SOUR([12]):HARM\s+(ON|OFF)$", command, re.IGNORECASE)
+        if match:
+            self.harmonics[int(match.group(1))] = match.group(2).upper() == "ON"
+            return
+        match = re.match(r"^:SOUR([12]):SUM\s+(ON|OFF)$", command, re.IGNORECASE)
+        if match:
+            self.waveform_sum[int(match.group(1))] = match.group(2).upper() == "ON"
+            return
         match = re.match(r"^:SOUR([12]):FUNC\s+(\w+)$", command, re.IGNORECASE)
         if match:
             self.waveform[int(match.group(1))] = match.group(2).upper()
@@ -259,6 +275,12 @@ class RigolSimulator(_BaseSimulator):
         )
         if match:
             self.frequency[int(match.group(1))] = float(match.group(2))
+            return
+        match = re.match(
+            rf"^:SOUR([12]):PHAS\s+({_SCPI_NUMBER})$", command, re.IGNORECASE
+        )
+        if match:
+            self.phase[int(match.group(1))] = float(match.group(2))
             return
         match = re.match(
             rf"^:SOUR([12]):VOLT:(HIGH|LOW)\s+({_SCPI_NUMBER})$",
@@ -282,6 +304,27 @@ class RigolSimulator(_BaseSimulator):
             amplitude = self.high[channel] - self.low[channel]
             self.high[channel] = value + amplitude / 2.0
             self.low[channel] = value - amplitude / 2.0
+            return
+
+        # Advanced and shape controls use readback of the exact same SCPI
+        # path.  Accept only documented paths emitted by RigolAdapter; an
+        # unknown spelling must fail instead of being mirrored as success.
+        assignment = re.match(r"^(:SOUR[12]:[A-Za-z0-9:]+)\s+(.+)$", command)
+        if assignment and re.match(
+            r"^:SOUR[12]:(?:"
+            r"FUNC:(?:SQU:DCYC|RAMP:SYMM|PULS:(?:WIDT|TRAN|TRAN:TRA))|"
+            r"PULS:HOLD|MOD:TYPE|"
+            r"(?:AM|FM|PM|ASK|FSK|PSK|PWM):(?:SOUR|INT:(?:FREQ|FUNC|RATE)|POL|DEPT|DEV(?::DCYC)?|AMPL|FREQ|PHAS)|"
+            r"FREQ:(?:STAR|STOP)|"
+            r"SWE:(?:TIME|SPAC|STEP|HTIM:(?:STAR|STOP)|RTIM|TRIG:(?:SOUR|SLOP|TRIGO))|"
+            r"BURS:(?:MODE|NCYC|PHAS|INT:PER|TDEL|TRIG:(?:SOUR|SLOP|TRIGO)|GATE:POL|IDLE)"
+            r")$",
+            assignment.group(1),
+            re.IGNORECASE,
+        ):
+            self.programmed_scpi[assignment.group(1).upper()] = assignment.group(2)
+            return
+        raise DeviceError(f"Rigol simulator: unsupported write {command!r}.")
 
     def _query(self, command: str) -> str:
         if command == "*IDN?":
@@ -343,9 +386,22 @@ class RigolSimulator(_BaseSimulator):
         match = re.match(r"^:SOUR([12]):BURS:STAT\?$", command, re.IGNORECASE)
         if match:
             return "ON" if self.burst[int(match.group(1))] else "OFF"
+        match = re.match(r"^:SOUR([12]):HARM\?$", command, re.IGNORECASE)
+        if match:
+            return "ON" if self.harmonics[int(match.group(1))] else "OFF"
+        match = re.match(r"^:SOUR([12]):SUM\?$", command, re.IGNORECASE)
+        if match:
+            return "ON" if self.waveform_sum[int(match.group(1))] else "OFF"
+        if command.upper() == ":COUP?":
+            return ",".join(
+                f"{name}:{'ON' if active else 'OFF'}"
+                for name, active in self.coupling.items()
+            )
+        if command.upper() == ":SOUR1:TRACK?":
+            return self.tracking
         match = re.match(r"^:SOUR([12]):PHAS\?$", command, re.IGNORECASE)
         if match:
-            return "0"
+            return f"{self.phase[int(match.group(1))]:.12g}"
         match = re.match(r"^:SOUR([12]):FUNC\?$", command, re.IGNORECASE)
         if match:
             return self.waveform[int(match.group(1))]
@@ -356,6 +412,11 @@ class RigolSimulator(_BaseSimulator):
         if match:
             values = self.high if match.group(2).upper() == "HIGH" else self.low
             return f"{values[int(match.group(1))]:.12g}"
+        leading_edge = re.match(
+            r"^(:SOUR[12]:FUNC:PULS:TRAN):LEAD\?$", command, re.IGNORECASE
+        )
+        if leading_edge and leading_edge.group(1).upper() in self.programmed_scpi:
+            return self.programmed_scpi[leading_edge.group(1).upper()]
         readback = re.match(r"^(:[A-Za-z0-9:]+)\?$", command)
         if readback and readback.group(1).upper() in self.programmed_scpi:
             return self.programmed_scpi[readback.group(1).upper()]

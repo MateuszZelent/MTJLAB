@@ -190,16 +190,8 @@ class MainWindow(FluentWindow):
         content_layout.setContentsMargins(12, 8, 12, 8)
         content_layout.setSpacing(8)
         self.safety_strip = StationSafetyStrip(self.fluent_content)
-        self.safety_strip.estop.setText("E-STOP")
-        self.safety_strip.estop.setMaximumWidth(96)
-        self.safety_strip.estop.setFixedHeight(28)
         self.safety_strip.save_settings.setFixedHeight(28)
         self.safety_strip.save_settings.setMinimumWidth(100)
-        self.safety_strip.estop.setProperty("visualPriority", "low")
-        self.safety_strip.estop.setProperty("controlState", "emergency")
-        self.safety_strip.estop.setToolTip(
-            "Confirm and disable every instrument output and abort acquisition."
-        )
         content_layout.addWidget(self.safety_strip)
         self.shell_splitter = QSplitter(
             Qt.Orientation.Vertical,
@@ -234,10 +226,14 @@ class MainWindow(FluentWindow):
         content_layout.addWidget(self.shell_splitter, 1)
         self.widgetLayout.addWidget(self.fluent_content)
         self.navigationInterface.setExpandWidth(248)
-        # Keep the expanded navigation in the layout at every supported window
-        # size. QFluentWidgets otherwise switches to MENU mode below ~934 px,
-        # reparents the panel to the window and overlays the measurement page.
-        self.navigationInterface.setMinimumExpandWidth(820)
+        # Below the standard Fluent breakpoint the compact 48 px rail leaves
+        # measurement pages enough width to preserve their control hierarchy.
+        # The full panel becomes a temporary MENU overlay only when the operator
+        # explicitly opens it; it must not consume 248 px at the 820 px minimum.
+        self._navigation_expand_threshold = 1_008
+        self.navigationInterface.setMinimumExpandWidth(
+            self._navigation_expand_threshold
+        )
 
         registry = self._composition.registry
         self.dashboard = DashboardPage(
@@ -904,8 +900,9 @@ class MainWindow(FluentWindow):
         splitter = settings.value("anritsu/splitter")
         if geometry is not None:
             self.restoreGeometry(geometry)
-        # Navigation is deliberately expanded at every launch. Collapsing it is
-        # an operator's current-session preference, never a persisted default.
+        # Navigation starts expanded whenever the window has enough room.
+        # Narrow windows start with the compact rail so page content remains
+        # operable; expansion remains an operator's current-session preference.
         self._navigation_expanded_preference = True
         self._navigation_layout_initialized = False
         if content_splitter is not None:
@@ -2037,7 +2034,10 @@ class MainWindow(FluentWindow):
                 application, self._configured_theme_mode
             )
             self._apply_navigation_surface(applied_theme.tokens.surface)
-        if self._navigation_expanded_preference:
+        if (
+            self._navigation_expanded_preference
+            and self.width() >= self._navigation_expand_threshold
+        ):
             self.navigationInterface.expand(useAni=False)
         # Fluent recalculates a navigation tree's size hint while its parent
         # panel is laid out. Re-toggling here prevents child rows from keeping
@@ -2083,6 +2083,12 @@ class MainWindow(FluentWindow):
         self._sync_apparatus_navigation_height()
 
     def closeEvent(self, event: QCloseEvent) -> None:
+        # RecipePage is hosted inside the Fluent stack, so its own closeEvent
+        # is not delivered when the application window closes. Ask it before
+        # persisting workspace state or beginning the shutdown sequence.
+        if not self.recipe_page.confirm_close():
+            event.ignore()
+            return
         self._audit_record(
             "Application safe shutdown started",
             category="application",

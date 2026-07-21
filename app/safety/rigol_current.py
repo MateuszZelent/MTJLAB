@@ -28,6 +28,18 @@ _DG1032Z_MAX_FREQUENCY_HZ = {
     "USER": 10e6,
 }
 
+# Output-characteristic limits from the DG1000Z data sheet.  Values are
+# expressed at the generator's physical, open-circuit output.  The manual
+# specifies half of these values when the front-panel load is set to 50 ohm;
+# the instrument only changes the displayed/programmed voltage, not its fixed
+# 50-ohm series source impedance.
+_DG1032Z_MAX_OPEN_CIRCUIT_PEAK_V = 10.0
+_DG1032Z_MIN_OPEN_CIRCUIT_VPP = 2e-3
+_DG1032Z_MAX_OPEN_CIRCUIT_VPP_BY_FREQUENCY = (
+    (10e6, 20.0),
+    (30e6, 10.0),
+)
+
 
 def rigol_hardware_frequency_max_hz(waveform: str | None = None) -> float:
     """Return the immutable DG1032Z ceiling used by UI and safety layers."""
@@ -38,6 +50,16 @@ def rigol_hardware_frequency_max_hz(waveform: str | None = None) -> float:
         waveform.strip().upper(),
         max(_DG1032Z_MAX_FREQUENCY_HZ.values()),
     )
+
+
+def _rigol_hardware_open_circuit_vpp_max(frequency_hz: float) -> float:
+    for upper_frequency_hz, maximum_vpp in _DG1032Z_MAX_OPEN_CIRCUIT_VPP_BY_FREQUENCY:
+        if frequency_hz <= upper_frequency_hz:
+            return maximum_vpp
+    # DG1032Z cannot produce a carrier above 30 MHz.  Returning the final
+    # documented tier keeps this helper conservative if called before the
+    # waveform-specific frequency guard.
+    return _DG1032Z_MAX_OPEN_CIRCUIT_VPP_BY_FREQUENCY[-1][1]
 
 
 @dataclass(frozen=True, slots=True)
@@ -64,9 +86,14 @@ class RigolSafetyEnvelope:
 def _open_circuit_voltage(displayed_v: float, output_load: str | float, source_ohm: float) -> float:
     if isinstance(output_load, str) and output_load.strip().upper() in {"HIGHZ", "INF", "INFINITY"}:
         return displayed_v
-    load_ohm = float(output_load)
-    if load_ohm <= 0:
-        raise SafetyViolation("Rigol output load must be positive or HIGHZ.")
+    try:
+        load_ohm = float(output_load)
+    except (TypeError, ValueError) as exc:
+        raise SafetyViolation(
+            "Rigol output load must be a resistance value or HIGHZ."
+        ) from exc
+    if not math.isfinite(load_ohm) or load_ohm <= 0:
+        raise SafetyViolation("Rigol output load must be finite and positive or HIGHZ.")
     return displayed_v * (source_ohm + load_ohm) / load_ohm
 
 
@@ -84,6 +111,9 @@ def estimate_rigol_current(
     low_v = parse_quantity(low_level, DIMENSION_VOLTAGE, require_unit=not isinstance(low_level, (int, float))).si_value
     source_ohm = parse_quantity(source_resistance, DIMENSION_RESISTANCE, require_unit=not isinstance(source_resistance, (int, float))).si_value
     dut_ohm = parse_quantity(dut_min_impedance, DIMENSION_RESISTANCE, require_unit=not isinstance(dut_min_impedance, (int, float))).si_value
+    numeric = (high_v, low_v, source_ohm, dut_ohm)
+    if not all(math.isfinite(value) for value in numeric):
+        raise SafetyViolation("Rigol voltage and impedance values must be finite.")
     if source_ohm <= 0 or dut_ohm <= 0:
         raise SafetyViolation("Source and DUT impedances must be positive.")
     open_high = _open_circuit_voltage(high_v, output_load, source_ohm)
@@ -132,6 +162,10 @@ def validate_rigol_waveform(
     freq_hz = parse_quantity(frequency, DIMENSION_FREQUENCY, require_unit=not isinstance(frequency, (int, float))).si_value
     high_v = parse_quantity(high_level, DIMENSION_VOLTAGE, require_unit=not isinstance(high_level, (int, float))).si_value
     low_v = parse_quantity(low_level, DIMENSION_VOLTAGE, require_unit=not isinstance(low_level, (int, float))).si_value
+    if not all(math.isfinite(value) for value in (freq_hz, high_v, low_v)):
+        raise SafetyViolation("Rigol frequency and voltage levels must be finite.")
+    if waveform_normalized not in {"DC", "NOIS"} and freq_hz <= 0:
+        raise SafetyViolation("Rigol waveform frequency must be positive.")
     if waveform_normalized == "DC" and not math.isclose(
         high_v, low_v, rel_tol=1e-12, abs_tol=1e-12
     ):
@@ -193,6 +227,35 @@ def validate_rigol_waveform(
         dut_min_impedance=dut_min_impedance,
         source_resistance=safety.fixed_source_resistance,
     )
+    open_circuit_peak_v = max(
+        abs(estimate.open_circuit_high_v),
+        abs(estimate.open_circuit_low_v),
+    )
+    if open_circuit_peak_v > _DG1032Z_MAX_OPEN_CIRCUIT_PEAK_V:
+        raise SafetyViolation(
+            "Rigol requested open-circuit level "
+            f"{open_circuit_peak_v:.9g} V exceeds the immutable DG1032Z "
+            f"hardware limit {_DG1032Z_MAX_OPEN_CIRCUIT_PEAK_V:.9g} V peak."
+        )
+    if waveform_normalized != "DC":
+        open_circuit_vpp = (
+            estimate.open_circuit_high_v - estimate.open_circuit_low_v
+        )
+        hardware_vpp_max = _rigol_hardware_open_circuit_vpp_max(
+            freq_hz if waveform_normalized != "NOIS" else 0.0
+        )
+        if open_circuit_vpp < _DG1032Z_MIN_OPEN_CIRCUIT_VPP:
+            raise SafetyViolation(
+                "Rigol requested open-circuit amplitude "
+                f"{open_circuit_vpp:.9g} Vpp is below the immutable DG1032Z "
+                f"minimum {_DG1032Z_MIN_OPEN_CIRCUIT_VPP:.9g} Vpp."
+            )
+        if open_circuit_vpp > hardware_vpp_max:
+            raise SafetyViolation(
+                "Rigol requested open-circuit amplitude "
+                f"{open_circuit_vpp:.9g} Vpp exceeds the immutable DG1032Z "
+                f"limit {hardware_vpp_max:.9g} Vpp at {freq_hz:.9g} Hz."
+            )
     current_limit = (
         parse_quantity(limits.estimated_load_current.max_abs or limits.estimated_load_current.max, DIMENSION_CURRENT).si_value
         if limits.estimated_load_current.enabled
@@ -241,10 +304,21 @@ def validate_rigol_frequency_sweep(
         raise SafetyViolation("Sweep values must be finite numbers.")
     if start_hz <= 0 or stop_hz <= 0 or start_hz == stop_hz:
         raise SafetyViolation("Sweep requires positive and different start/stop frequencies.")
-    if duration_s <= 0 or min(start_hold_s, stop_hold_s, return_time_s) < 0:
-        raise SafetyViolation("Sweep duration must be positive; hold and return times cannot be negative.")
+    if not 1e-3 <= duration_s <= 500:
+        raise SafetyViolation(
+            "Rigol sweep duration must be within the hardware range 1 ms..500 s."
+        )
+    hold_times = (start_hold_s, stop_hold_s, return_time_s)
+    if min(hold_times) < 0 or max(hold_times) > 500:
+        raise SafetyViolation(
+            "Rigol sweep hold and return times must be within 0..500 s."
+        )
     if isinstance(steps, bool) or not isinstance(steps, int):
         raise SafetyViolation("Sweep step count must be an integer.")
+    if not 2 <= steps <= 1024:
+        raise SafetyViolation(
+            "Rigol sweep step count must be within the hardware range 2..1024."
+        )
 
     limits = channel.lab_limits
     if limits.frequency.enabled:

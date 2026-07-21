@@ -35,14 +35,28 @@ class StationSafetyStrip(QWidget):
         self.outputs = BodyLabel()
         self.mode = BodyLabel()
         self.actor = BodyLabel()
-        self.estop = PrimaryPushButton("E-STOP — disable all outputs")
+        self.estop = PrimaryPushButton("E-STOP  |  ALL OUTPUTS OFF", self)
+        self.estop.setObjectName("stationEmergencyStopButton")
+        self.estop.setProperty("visualPriority", "high")
+        self.estop.setProperty("controlState", "emergency")
+        self.estop.setMinimumSize(184, 36)
         self.save_settings = PushButton("SAVE SETTINGS")
         self.save_settings.setAccessibleName("Save pending station settings")
         self.save_settings.setToolTip(
             "Validate and save pending Settings and device-form changes."
         )
         self.save_settings.clicked.connect(self.save_settings_requested)
-        self.estop.setAccessibleName("Emergency stop and disable all outputs")
+        self.estop.setAccessibleName(
+            "Emergency stop: disable all outputs and abort acquisition"
+        )
+        self.estop.setAccessibleDescription(
+            "Always available. Opens a confirmation before sending emergency OFF "
+            "and acquisition-abort requests to every instrument. Shortcut: Control Shift E."
+        )
+        self.estop.setToolTip(
+            "Emergency stop (Ctrl+Shift+E): confirm, disable every instrument "
+            "output and abort acquisition."
+        )
         self.estop.clicked.connect(self.estop_requested)
 
         self._layout = QGridLayout(self)
@@ -65,11 +79,10 @@ class StationSafetyStrip(QWidget):
             QSizePolicy.Policy.Preferred,
         )
         self.estop.setSizePolicy(
-            QSizePolicy.Policy.Preferred,
+            QSizePolicy.Policy.MinimumExpanding,
             QSizePolicy.Policy.Preferred,
         )
         self.save_settings.setMinimumWidth(100)
-        self.estop.setMinimumWidth(84)
         self._layout_mode: str | None = None
         self._reflow(mode="narrow")
 

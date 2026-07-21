@@ -281,7 +281,7 @@ class SweepGeneratorDialog(FluentRecipeDialog):
                 palette.setColor(role, QColor(color))
             palette.setColor(
                 QPalette.ColorRole.HighlightedText,
-                QColor(tokens.background if self.plot_theme == "dark" else "#ffffff"),
+                QColor(tokens.on_emergency),
             )
             widget.setPalette(palette)
             widget.setAutoFillBackground(True)

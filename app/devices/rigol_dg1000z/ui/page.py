@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import math
+from collections import defaultdict, deque
 from dataclasses import dataclass
 
 from PySide6.QtCore import Qt, Signal
@@ -59,6 +60,18 @@ class RigolConfigurationSnapshot:
     sync_delay: str = "0 s"
 
 
+@dataclass(frozen=True, slots=True)
+class _RigolUiOperation:
+    """Correlate an asynchronous controller completion with its UI request."""
+
+    request_id: int
+    operation: str
+    channel: int | None
+    purpose: str
+    payload: object
+    requested_output: bool | None = None
+
+
 class RigolPage(QWidget):
     status = Signal(str)
     quick_controls_requested = Signal()
@@ -74,6 +87,21 @@ class RigolPage(QWidget):
         self._limit_fields: dict[QWidget, LimitField] = {}
         self._pending_output_enable = False
         self._pending_output_channel: int | None = None
+        self._pending_output_request_id: int | None = None
+        self._pending_output_stage: str | None = None
+        self._next_ui_request_id = 0
+        self._queued_ui_operations: dict[str, deque[_RigolUiOperation]] = defaultdict(deque)
+        self._issuing_ui_operation: _RigolUiOperation | None = None
+        self._issuing_ui_operation_was_queued = False
+        self._confirmed_advanced_states: dict[int, dict[str, bool | None]] = {
+            channel: {"modulation": None, "sweep": None, "burst": None}
+            for channel in (1, 2)
+        }
+        self._confirmed_carrier_configs: dict[int, RigolChannelConfig | None] = {
+            1: None,
+            2: None,
+        }
+        self._pending_advanced_requests: dict[tuple[int, str], int] = {}
         self._device_state_value = "disconnected"
         self._output_states = {1: False, 2: False}
         self._output_state_known = {1: False, 2: False}
@@ -117,7 +145,7 @@ class RigolPage(QWidget):
         self.channel = ComboBox()
         self.channel.addItems(["1", "2"])
         self.waveform = ComboBox()
-        self.waveform.addItems(["SIN", "SQU", "RAMP", "PULS", "NOIS", "DC"])
+        self.waveform.addItems(["SIN", "SQU", "RAMP", "PULS", "NOIS", "USER", "DC"])
         self.waveform.setCurrentText("SIN")
         self.time_mode = ComboBox()
         self.time_mode.addItems(["Frequency", "Period"])
@@ -206,7 +234,7 @@ class RigolPage(QWidget):
         self.sync_phases_button = PushButton("Synchronize CH1/CH2 phases")
         self.sync_phases_button.setEnabled(False)
         self.output_on = PushButton("OUTPUT ON")
-        self.output_on.setCheckable(True)
+        self.output_on.setCheckable(False)
         self.output_off = PushButton("OUTPUT OFF")
         self.output_on.setEnabled(False)
         self.output_off.setEnabled(False)
@@ -267,9 +295,9 @@ class RigolPage(QWidget):
         insight = QWidget()
         insight_layout = QVBoxLayout(insight)
         insight_layout.setContentsMargins(10, 0, 0, 0)
-        preview_title = StrongBodyLabel("Waveform preview")
-        preview_title.setObjectName("sectionTitle")
-        insight_layout.addWidget(preview_title)
+        self.preview_title = StrongBodyLabel("Waveform preview")
+        self.preview_title.setObjectName("sectionTitle")
+        insight_layout.addWidget(self.preview_title)
         self.preview_plot = SpectrumPlotWidget(legend=False)
         self.preview_plot.set_labels(x="Normalized period", x_unit="", y="Voltage", y_unit="V")
         self.preview_plot.setMinimumHeight(260)
@@ -323,6 +351,7 @@ class RigolPage(QWidget):
         )
         self.output_on.clicked.connect(lambda: self.request_output(True))
         self.output_off.clicked.connect(lambda: self.request_output(False))
+        controller.request.connect(self._controller_request_queued)
         controller.result.connect(self._result)
         controller.error.connect(self._error)
         controller.state_changed.connect(self._device_state_changed)
@@ -339,6 +368,7 @@ class RigolPage(QWidget):
         self._sync_period_from_frequency()
         self._update_dynamic_controls()
         self._update_preview()
+        self._refresh_confirmed_advanced_controls()
         self._refresh_rigol_output_controls()
         self._install_rigol_help(
             configure=configure,
@@ -408,6 +438,7 @@ class RigolPage(QWidget):
         if field == "frequency":
             self.frequency.setText(format_quantity_auto(value_si, DIMENSION_FREQUENCY))
             self._sync_period_from_frequency()
+            self._record_visible_quick_readback(int(parts[1]))
             return
         editors = {
             "high_level": self.high_level,
@@ -423,6 +454,16 @@ class RigolPage(QWidget):
             self._sync_vpp_offset_from_levels()
         else:
             self._sync_levels_from_vpp_offset()
+        self._record_visible_quick_readback(int(parts[1]))
+
+    def _record_visible_quick_readback(self, channel: int) -> None:
+        try:
+            config = self._visible_channel_config()
+        except Exception:
+            self._confirmed_carrier_configs[channel] = None
+            return
+        if config.channel == channel:
+            self._confirmed_carrier_configs[channel] = config
 
     @staticmethod
     def _set_help(widget: QWidget, title: str, text: str) -> None:
@@ -443,7 +484,7 @@ class RigolPage(QWidget):
     ) -> None:
         help_items = {
             self.channel: ("Channel", "Selects physical output CH1 or CH2. Each channel has independent settings and safety limits."),
-            self.waveform: ("Waveform", "SIN is sine, SQU square, RAMP triangular/ramp, PULS pulse, NOIS noise and DC a constant voltage."),
+            self.waveform: ("Waveform", "SIN is sine, SQU square, RAMP triangular/ramp, PULS pulse, NOIS noise, USER selects the arbitrary waveform already stored in the generator, and DC is a constant voltage. This application does not upload or edit USER waveform samples."),
             self.time_mode: ("Time representation", "Choose whether the same repetition rate is entered as frequency or period. The application converts one into the other."),
             self.frequency: ("Frequency", "Number of waveform cycles per second. For a standard sine wave this and Amplitude are normally the only values you change."),
             self.period: ("Period", "Duration of one complete waveform cycle. Period equals 1/frequency."),
@@ -595,7 +636,12 @@ class RigolPage(QWidget):
 
     def set_settings(self, settings: StationSettings) -> None:
         self._station_settings = settings
+        self._confirmed_carrier_configs = {1: None, 2: None}
+        for channel in (1, 2):
+            for mode in ("modulation", "sweep", "burst"):
+                self._confirmed_advanced_states[channel][mode] = None
         self._refresh_rigol_limits()
+        self._refresh_confirmed_advanced_controls()
 
     def configuration_snapshot(self) -> RigolConfigurationSnapshot:
         """Return the visible carrier state without communicating with hardware."""
@@ -629,6 +675,270 @@ class RigolPage(QWidget):
             return f"{value_v * 1e3:.12g} mV"
         return f"{value_v:.12g} V"
 
+    def _new_ui_operation(
+        self,
+        operation: str,
+        payload: object,
+        *,
+        purpose: str,
+        request_id: int | None = None,
+    ) -> _RigolUiOperation:
+        if request_id is None:
+            self._next_ui_request_id += 1
+            request_id = self._next_ui_request_id
+        channel: int | None = None
+        requested_output: bool | None = None
+        if operation == "set_output":
+            try:
+                raw_channel, raw_enabled = payload  # type: ignore[misc]
+                channel = int(raw_channel)
+                requested_output = bool(raw_enabled)
+            except (TypeError, ValueError):
+                pass
+        else:
+            raw_channel = getattr(payload, "channel", None)
+            if raw_channel is not None:
+                try:
+                    channel = int(raw_channel)
+                except (TypeError, ValueError):
+                    pass
+        return _RigolUiOperation(
+            request_id=request_id,
+            operation=operation,
+            channel=channel,
+            purpose=purpose,
+            payload=payload,
+            requested_output=requested_output,
+        )
+
+    def _dispatch_ui_operation(
+        self,
+        operation: str,
+        payload: object,
+        *,
+        purpose: str,
+        request_id: int | None = None,
+    ) -> _RigolUiOperation:
+        request = self._new_ui_operation(
+            operation,
+            payload,
+            purpose=purpose,
+            request_id=request_id,
+        )
+        self._issue_ui_operation(request)
+        return request
+
+    def _issue_ui_operation(self, request: _RigolUiOperation) -> None:
+        self._issuing_ui_operation = request
+        self._issuing_ui_operation_was_queued = False
+        try:
+            self._controller.call(request.operation, request.payload)
+        finally:
+            self._issuing_ui_operation = None
+            self._issuing_ui_operation_was_queued = False
+
+    def _controller_request_queued(self, operation: str, payload: object) -> None:
+        """Record the worker FIFO position, including calls made outside this page."""
+
+        issuing = self._issuing_ui_operation
+        if issuing is not None and issuing.operation == operation:
+            request = issuing
+            self._issuing_ui_operation_was_queued = True
+        else:
+            request = self._new_ui_operation(
+                operation,
+                payload,
+                purpose="observed_external_request",
+            )
+        self._queued_ui_operations[operation].append(request)
+
+    def _completion_request(self, operation: str) -> _RigolUiOperation | None:
+        # A GUI-thread operation guard reports its error synchronously and does
+        # not emit controller.request. Associate that failure with the call
+        # currently being issued instead of consuming an older worker request.
+        issuing = self._issuing_ui_operation
+        if (
+            issuing is not None
+            and issuing.operation == operation
+            and not self._issuing_ui_operation_was_queued
+        ):
+            return issuing
+        queue = self._queued_ui_operations.get(operation)
+        if not queue:
+            return None
+        request = queue.popleft()
+        if not queue:
+            self._queued_ui_operations.pop(operation, None)
+        return request
+
+    def _set_pending_output(
+        self,
+        request: _RigolUiOperation,
+        *,
+        enable: bool,
+        stage: str,
+    ) -> None:
+        self._pending_output_enable = enable
+        self._pending_output_channel = request.channel
+        self._pending_output_request_id = request.request_id
+        self._pending_output_stage = stage
+        self._refresh_rigol_output_controls()
+
+    def _clear_pending_output(self, *, request_id: int | None = None) -> bool:
+        if (
+            request_id is not None
+            and self._pending_output_request_id != request_id
+        ):
+            return False
+        self._pending_output_enable = False
+        self._pending_output_channel = None
+        self._pending_output_request_id = None
+        self._pending_output_stage = None
+        self._refresh_rigol_output_controls()
+        return True
+
+    def _pending_output_matches(
+        self,
+        request: _RigolUiOperation | None,
+        *,
+        stage: str | None = None,
+    ) -> bool:
+        if request is None or self._pending_output_request_id is None:
+            return False
+        return (
+            request.request_id == self._pending_output_request_id
+            and request.channel == self._pending_output_channel
+            and (stage is None or self._pending_output_stage == stage)
+        )
+
+    def _advanced_controls(self) -> tuple[tuple[str, CheckBox, QPushButton], ...]:
+        controls: list[tuple[str, CheckBox, QPushButton]] = []
+        for name, checkbox_name, button_name in (
+            ("modulation", "mod_enabled", "mod_apply_button"),
+            ("sweep", "sweep_enabled", "sweep_apply_button"),
+            ("burst", "burst_enabled", "burst_apply_button"),
+        ):
+            checkbox = getattr(self, checkbox_name, None)
+            button = getattr(self, button_name, None)
+            if isinstance(checkbox, CheckBox) and isinstance(button, QPushButton):
+                controls.append((name, checkbox, button))
+        return tuple(controls)
+
+    def _refresh_confirmed_advanced_controls(self) -> None:
+        if not hasattr(self, "channel"):
+            return
+        channel = int(self.channel.currentText())
+        states = self._confirmed_advanced_states[channel]
+        for name, checkbox, apply_button in self._advanced_controls():
+            confirmed = states[name]
+            pending = (channel, name) in self._pending_advanced_requests
+            checkbox.blockSignals(True)
+            checkbox.setChecked(confirmed is True)
+            checkbox.blockSignals(False)
+            checkbox.setEnabled(not pending)
+            apply_button.setEnabled(not pending)
+            semantic = "pending" if pending else "unknown" if confirmed is None else "confirmed"
+            checkbox.setProperty("confirmationState", semantic)
+            if pending:
+                checkbox.setToolTip(
+                    f"CH{channel} {name}: waiting for hardware readback."
+                )
+            elif confirmed is None:
+                checkbox.setToolTip(
+                    f"CH{channel} {name}: hardware state has not been confirmed in this session."
+                )
+            else:
+                checkbox.setToolTip(
+                    f"CH{channel} {name}: hardware confirmed "
+                    f"{'ON' if confirmed else 'OFF'}."
+                )
+            checkbox.style().unpolish(checkbox)
+            checkbox.style().polish(checkbox)
+        self._refresh_manual_trigger_controls()
+
+    def _refresh_manual_trigger_controls(self, *_args: object) -> None:
+        if not all(
+            hasattr(self, name)
+            for name in (
+                "channel",
+                "sweep_trigger_button",
+                "burst_trigger_button",
+            )
+        ):
+            return
+        channel = int(self.channel.currentText())
+        output_on = (
+            self._output_state_known[channel] and self._output_states[channel]
+        )
+        states = self._confirmed_advanced_states[channel]
+        sweep_ready = (
+            output_on
+            and states["sweep"] is True
+            and self.sweep_trigger.currentText() == "MAN"
+        )
+        burst_ready = (
+            output_on
+            and states["burst"] is True
+            and self.burst_mode.currentText() == "TRIG"
+            and self.burst_trigger.currentText() == "MAN"
+        )
+        self.sweep_trigger_button.setEnabled(sweep_ready)
+        self.burst_trigger_button.setEnabled(burst_ready)
+        self.sweep_trigger_button.setToolTip(
+            "Ready: sweep is hardware-confirmed, source is MAN, and OUTPUT is ON."
+            if sweep_ready
+            else "Requires confirmed sweep ON, trigger source MAN, and physical OUTPUT ON."
+        )
+        self.burst_trigger_button.setToolTip(
+            "Ready: triggered burst is hardware-confirmed, source is MAN, and OUTPUT is ON."
+            if burst_ready
+            else "Requires confirmed burst ON in TRIG mode, source MAN, and physical OUTPUT ON."
+        )
+
+    def _queue_advanced_configuration(
+        self,
+        operation: str,
+        mode: str,
+        config: object,
+    ) -> None:
+        channel = int(getattr(config, "channel"))
+        key = (channel, mode)
+        if key in self._pending_advanced_requests:
+            return
+        request = self._new_ui_operation(
+            operation,
+            config,
+            purpose=f"advanced_{mode}",
+        )
+        self._pending_advanced_requests[key] = request.request_id
+        self._refresh_confirmed_advanced_controls()
+        self._issue_ui_operation(request)
+
+    def _complete_advanced_configuration(
+        self,
+        request: _RigolUiOperation | None,
+        *,
+        succeeded: bool,
+    ) -> None:
+        if request is None or request.channel not in (1, 2):
+            return
+        mode_for_operation = {
+            "configure_modulation": "modulation",
+            "configure_sweep": "sweep",
+            "configure_burst": "burst",
+        }
+        mode = mode_for_operation.get(request.operation)
+        if mode is None:
+            return
+        key = (request.channel, mode)
+        if self._pending_advanced_requests.get(key) == request.request_id:
+            self._pending_advanced_requests.pop(key, None)
+        if succeeded and hasattr(request.payload, "enabled"):
+            self._confirmed_advanced_states[request.channel][mode] = bool(
+                getattr(request.payload, "enabled")
+            )
+        self._refresh_confirmed_advanced_controls()
+
     def set_capabilities(self, capabilities: object) -> None:
         supports = getattr(capabilities, "supports", lambda _feature: False)
         features = (
@@ -637,6 +947,8 @@ class RigolPage(QWidget):
             ("burst", "BURST"),
             ("phase_sync", "PHASE SYNC"),
             ("counter", "COUNTER"),
+            ("harmonics", "HARMONICS (guarded)"),
+            ("waveform_sum", "SUM (guarded)"),
         )
         supported = [label for feature, label in features if supports(feature)]
         for index, feature in enumerate(("modulation", "frequency_sweep", "burst", "counter")):
@@ -679,10 +991,22 @@ class RigolPage(QWidget):
         elif normalized in {"disconnected", "fault", "unknown"}:
             for channel in (1, 2):
                 self._output_state_known[channel] = False
+                self._confirmed_carrier_configs[channel] = None
+                for mode in ("modulation", "sweep", "burst"):
+                    self._confirmed_advanced_states[channel][mode] = None
+            # Never let a late configure completion resume an energising
+            # transaction after a connection or fault transition.
+            self._pending_output_enable = False
+            self._pending_output_channel = None
+            self._pending_output_request_id = None
+            self._pending_output_stage = None
+            self._pending_advanced_requests.clear()
+            self._refresh_confirmed_advanced_controls()
         self._refresh_rigol_output_controls()
 
     def _selected_output_channel_changed(self, value: str) -> None:
         self.output_action_context.setText(f"Physical output · CH{value}")
+        self._refresh_confirmed_advanced_controls()
         self._refresh_rigol_output_controls()
 
     def _set_rigol_channel_output(self, channel: int, enabled: bool) -> None:
@@ -703,6 +1027,7 @@ class RigolPage(QWidget):
         }
         can_send_off = connected or self._device_state_value in {"fault", "unknown"}
         pending = self._pending_output_channel is not None
+        pending_enable = pending and self._pending_output_enable
         self.output_on.setChecked(enabled)
         self.output_on.setProperty(
             "controlState", "energized" if enabled else "available"
@@ -715,7 +1040,9 @@ class RigolPage(QWidget):
         # Unknown state blocks energising but retains a best-effort OFF action.
         self.output_on.setEnabled(connected and known and not pending)
         self.output_off.setEnabled(
-            can_send_off and (enabled or not known) and not pending
+            can_send_off
+            and (enabled or not known or pending_enable)
+            and not (pending and not self._pending_output_enable)
         )
         self.output_on.setToolTip(
             f"CH{channel} is confirmed OUTPUT ON."
@@ -723,13 +1050,16 @@ class RigolPage(QWidget):
             else f"Enable CH{channel} after validation and confirmed readback."
         )
         self.output_off.setToolTip(
-            f"Disable CH{channel} and confirm hardware readback."
+            "Cancel the pending OUTPUT ON sequence and request a confirmed OFF."
+            if pending_enable
+            else f"Disable CH{channel} and confirm hardware readback."
             if self.output_off.isEnabled()
             else f"CH{channel} is already confirmed OUTPUT OFF."
         )
         for widget in (self.output_on, self.output_channel_state):
             widget.style().unpolish(widget)
             widget.style().polish(widget)
+        self._refresh_manual_trigger_controls()
 
     def _update_dynamic_controls(self, *_args: object) -> None:
         waveform = self.waveform.currentText()
@@ -795,6 +1125,11 @@ class RigolPage(QWidget):
         amplitude = (high - low) / 2
         center = (high + low) / 2
         waveform = self.waveform.currentText()
+        self.preview_title.setText(
+            "Waveform preview unavailable for device USER memory"
+            if waveform == "USER"
+            else "Waveform preview"
+        )
         duty = self._bounded_number(self.duty.text(), 50.0, 0.01, 99.99) / 100
         symmetry = self._bounded_number(self.ramp_symmetry.text(), 50.0, 0.01, 99.99) / 100
         try:
@@ -933,10 +1268,13 @@ class RigolPage(QWidget):
         self.mod_rate = _line("1 kHz")
         self.mod_parameter = _line("50")
         self.mod_shape = ComboBox()
-        self.mod_shape.addItems(["SIN", "SQU", "RAMP", "NOIS", "ARB"])
+        self.mod_shape.addItems(
+            ["SIN", "SQU", "TRI", "RAMP", "NRAMP", "NOIS", "USER"]
+        )
         self.mod_polarity = ComboBox()
         self.mod_polarity.addItems(["POS", "NEG"])
         apply = PrimaryPushButton("Apply modulation while OUTPUT is OFF")
+        self.mod_apply_button = apply
         for label, widget in (
             ("State", self.mod_enabled),
             ("Typ", self.mod_type),
@@ -1000,15 +1338,18 @@ class RigolPage(QWidget):
         self.sweep_spacing = ComboBox()
         self.sweep_spacing.addItems(["LIN", "LOG", "STEP"])
         self.sweep_steps = SpinBox(self)
-        self.sweep_steps.setRange(2, 1_000_000)
+        self.sweep_steps.setRange(2, 1024)
         self.sweep_steps.setValue(10)
         self.sweep_trigger = ComboBox()
         self.sweep_trigger.addItems(["INT", "EXT", "MAN"])
         self.sweep_trigger_slope = ComboBox()
         self.sweep_trigger_slope.addItems(["POS", "NEG"])
-        self.sweep_trigger_out = CheckBox("Trigger output", self)
+        self.sweep_trigger_out = ComboBox()
+        self.sweep_trigger_out.addItems(["OFF", "POS", "NEG"])
         apply = PrimaryPushButton("Apply sweep while OUTPUT is OFF")
+        self.sweep_apply_button = apply
         trigger = PushButton("Trigger sweep")
+        self.sweep_trigger_button = trigger
         for label, widget in (
             ("State", self.sweep_enabled),
             ("Start", self._bounded(self.sweep_start, "frequency")),
@@ -1021,13 +1362,22 @@ class RigolPage(QWidget):
             ("Steps", self._bounded(self.sweep_steps, "sweep_steps")),
             ("Trigger source", self.sweep_trigger),
             ("Trigger slope", self.sweep_trigger_slope),
-            ("", self.sweep_trigger_out),
+            ("Trigger output", self.sweep_trigger_out),
             ("", apply),
             ("", trigger),
         ):
             form.addRow(label, widget)
         apply.clicked.connect(self.configure_sweep)
-        trigger.clicked.connect(lambda: self._controller.call("trigger_sweep", int(self.channel.currentText())))
+        trigger.clicked.connect(
+            lambda: self._dispatch_ui_operation(
+                "trigger_sweep",
+                int(self.channel.currentText()),
+                purpose="manual_sweep_trigger",
+            )
+        )
+        self.sweep_trigger.currentTextChanged.connect(
+            self._refresh_manual_trigger_controls
+        )
         self._set_help(apply, "Apply sweep", "Validates and programs the sweep while the physical output remains OFF.")
         self._set_help(trigger, "Manual sweep trigger", "Starts one sweep when Trigger source is MAN. It does not bypass output safety interlocks.")
         return self._scroll_widget(tab)
@@ -1048,13 +1398,16 @@ class RigolPage(QWidget):
         self.burst_trigger.addItems(["INT", "EXT", "MAN"])
         self.burst_trigger_slope = ComboBox()
         self.burst_trigger_slope.addItems(["POS", "NEG"])
-        self.burst_trigger_out = CheckBox("Trigger output", self)
+        self.burst_trigger_out = ComboBox()
+        self.burst_trigger_out.addItems(["OFF", "POS", "NEG"])
         self.burst_gate_polarity = ComboBox()
         self.burst_gate_polarity.addItems(["POS", "NEG"])
         self.burst_idle = ComboBox()
-        self.burst_idle.addItems(["FPT", "TOP", "CENT", "BOT"])
+        self.burst_idle.addItems(["FPT", "TOP", "CENTER", "BOTTOM"])
         apply = PrimaryPushButton("Apply burst while OUTPUT is OFF")
+        self.burst_apply_button = apply
         trigger = PushButton("Trigger burst")
+        self.burst_trigger_button = trigger
         for label, widget in (
             ("State", self.burst_enabled),
             ("Mode", self.burst_mode),
@@ -1064,7 +1417,7 @@ class RigolPage(QWidget):
             ("Delay", self.burst_delay),
             ("Trigger source", self.burst_trigger),
             ("Trigger slope", self.burst_trigger_slope),
-            ("", self.burst_trigger_out),
+            ("Trigger output", self.burst_trigger_out),
             ("Gate polarity", self.burst_gate_polarity),
             ("Idle", self.burst_idle),
             ("", apply),
@@ -1072,7 +1425,19 @@ class RigolPage(QWidget):
         ):
             form.addRow(label, widget)
         apply.clicked.connect(self.configure_burst)
-        trigger.clicked.connect(lambda: self._controller.call("trigger_burst", int(self.channel.currentText())))
+        trigger.clicked.connect(
+            lambda: self._dispatch_ui_operation(
+                "trigger_burst",
+                int(self.channel.currentText()),
+                purpose="manual_burst_trigger",
+            )
+        )
+        self.burst_trigger.currentTextChanged.connect(
+            self._refresh_manual_trigger_controls
+        )
+        self.burst_mode.currentTextChanged.connect(
+            self._refresh_manual_trigger_controls
+        )
         self._set_help(apply, "Apply burst", "Validates and programs burst settings while the physical output remains OFF.")
         self._set_help(trigger, "Manual burst trigger", "Emits one configured burst when Trigger source is MAN.")
         return self._scroll_widget(tab)
@@ -1135,43 +1500,50 @@ class RigolPage(QWidget):
         scroll.setWidget(content)
         return scroll
 
-    def configure(self) -> None:
+    def _visible_channel_config(self) -> RigolChannelConfig:
+        high_level, low_level = self._effective_levels()
+        frequency_hz = (
+            1.0
+            if self.waveform.currentText() in {"DC", "NOIS"}
+            else parse_quantity(self.frequency.text(), DIMENSION_FREQUENCY).si_value
+        )
+        config = RigolChannelConfig(
+            channel=int(self.channel.currentText()),
+            waveform=self.waveform.currentText(),
+            frequency_hz=frequency_hz,
+            high_level_v=high_level,
+            low_level_v=low_level,
+            output_load=self.load.text().strip(),
+            phase_deg=float(self.phase.text().replace(",", ".")),
+            square_duty_percent=float(self.duty.text().replace(",", ".")) if self.waveform.currentText() == "SQU" else None,
+            ramp_symmetry_percent=float(self.ramp_symmetry.text().replace(",", ".")) if self.waveform.currentText() == "RAMP" else None,
+            pulse_width_s=parse_quantity(self.pulse_width.text(), DIMENSION_TIME).si_value if self.waveform.currentText() == "PULS" else None,
+            pulse_leading_s=parse_quantity(self.pulse_leading.text(), DIMENSION_TIME).si_value if self.waveform.currentText() == "PULS" else None,
+            pulse_trailing_s=parse_quantity(self.pulse_trailing.text(), DIMENSION_TIME).si_value if self.waveform.currentText() == "PULS" else None,
+            dut_min_impedance_ohm=parse_quantity(self.dut_impedance.text(), DIMENSION_RESISTANCE).si_value,
+        )
+        validate_rigol_waveform(
+            channel=self._station_settings.rigol.safety.channels[str(config.channel)],
+            safety=self._station_settings.rigol.safety,
+            waveform=config.waveform,
+            frequency=config.frequency_hz,
+            high_level=config.high_level_v,
+            low_level=config.low_level_v,
+            output_load=config.output_load,
+            dut_min_impedance=config.dut_min_impedance_ohm,
+        )
+        return config
+
+    def configure(self, _checked: bool = False) -> None:
+        del _checked
         try:
-            high_level, low_level = self._effective_levels()
-            frequency_hz = (
-                1.0
-                if self.waveform.currentText() in {"DC", "NOIS"}
-                else parse_quantity(self.frequency.text(), DIMENSION_FREQUENCY).si_value
-            )
-            config = RigolChannelConfig(
-                channel=int(self.channel.currentText()),
-                waveform=self.waveform.currentText(),
-                frequency_hz=frequency_hz,
-                high_level_v=high_level,
-                low_level_v=low_level,
-                output_load=self.load.text().strip(),
-                phase_deg=float(self.phase.text().replace(",", ".")),
-                square_duty_percent=float(self.duty.text().replace(",", ".")) if self.waveform.currentText() == "SQU" else None,
-                ramp_symmetry_percent=float(self.ramp_symmetry.text().replace(",", ".")) if self.waveform.currentText() == "RAMP" else None,
-                pulse_width_s=parse_quantity(self.pulse_width.text(), DIMENSION_TIME).si_value if self.waveform.currentText() == "PULS" else None,
-                pulse_leading_s=parse_quantity(self.pulse_leading.text(), DIMENSION_TIME).si_value if self.waveform.currentText() == "PULS" else None,
-                pulse_trailing_s=parse_quantity(self.pulse_trailing.text(), DIMENSION_TIME).si_value if self.waveform.currentText() == "PULS" else None,
-                dut_min_impedance_ohm=parse_quantity(self.dut_impedance.text(), DIMENSION_RESISTANCE).si_value,
-            )
-            validate_rigol_waveform(
-                channel=self._station_settings.rigol.safety.channels[self.channel.currentText()],
-                safety=self._station_settings.rigol.safety,
-                waveform=config.waveform,
-                frequency=config.frequency_hz,
-                high_level=config.high_level_v,
-                low_level=config.low_level_v,
-                output_load=config.output_load,
-                dut_min_impedance=config.dut_min_impedance_ohm,
-            )
+            config = self._visible_channel_config()
         except Exception as exc:
             self.banner.show_message(f"Invalid waveform settings: {exc}")
             return
-        self._controller.call("configure", config)
+        self._dispatch_ui_operation(
+            "configure", config, purpose="manual_configure"
+        )
 
     def configure_output(self) -> None:
         try:
@@ -1188,9 +1560,21 @@ class RigolPage(QWidget):
         except Exception as exc:
             QMessageBox.warning(self, "Output Rigol", str(exc))
             return
-        self._controller.call("configure_output", config)
+        self._dispatch_ui_operation(
+            "configure_output", config, purpose="configure_output_path"
+        )
 
     def configure_modulation(self) -> None:
+        if not self.mod_enabled.isChecked():
+            config = RigolModulationConfig(
+                channel=int(self.channel.currentText()),
+                enabled=False,
+                modulation_type=self.mod_type.currentText(),  # type: ignore[arg-type]
+            )
+            self._queue_advanced_configuration(
+                "configure_modulation", "modulation", config
+            )
+            return
         try:
             kind = self.mod_type.currentText()
             if kind in {"FM", "FSK"}:
@@ -1218,11 +1602,27 @@ class RigolPage(QWidget):
                 polarity=self.mod_polarity.currentText(),  # type: ignore[arg-type]
             )
         except Exception as exc:
+            self._refresh_confirmed_advanced_controls()
             QMessageBox.warning(self, "Rigol modulation", str(exc))
             return
-        self._controller.call("configure_modulation", config)
+        self._queue_advanced_configuration(
+            "configure_modulation", "modulation", config
+        )
 
     def configure_sweep(self) -> None:
+        if not self.sweep_enabled.isChecked():
+            config = RigolFrequencySweepConfig(
+                channel=int(self.channel.currentText()),
+                enabled=False,
+                start_hz=1.0,
+                stop_hz=2.0,
+                duration_s=1.0,
+                steps=2,
+            )
+            self._queue_advanced_configuration(
+                "configure_sweep", "sweep", config
+            )
+            return
         try:
             config = RigolFrequencySweepConfig(
                 channel=int(self.channel.currentText()),
@@ -1237,7 +1637,7 @@ class RigolPage(QWidget):
                 return_time_s=parse_quantity(self.sweep_return_time.text(), DIMENSION_TIME).si_value,
                 trigger_source=self.sweep_trigger.currentText(),  # type: ignore[arg-type]
                 trigger_slope=self.sweep_trigger_slope.currentText(),  # type: ignore[arg-type]
-                trigger_output=self.sweep_trigger_out.isChecked(),
+                trigger_output=self.sweep_trigger_out.currentText(),
             )
             validate_rigol_frequency_sweep(
                 channel=self._station_settings.rigol.safety.channels[self.channel.currentText()],
@@ -1250,11 +1650,21 @@ class RigolPage(QWidget):
                 return_time_s=config.return_time_s,
             )
         except Exception as exc:
+            self._refresh_confirmed_advanced_controls()
             QMessageBox.warning(self, "Sweep Rigol", str(exc))
             return
-        self._controller.call("configure_sweep", config)
+        self._queue_advanced_configuration("configure_sweep", "sweep", config)
 
     def configure_burst(self) -> None:
+        if not self.burst_enabled.isChecked():
+            config = RigolBurstConfig(
+                channel=int(self.channel.currentText()),
+                enabled=False,
+            )
+            self._queue_advanced_configuration(
+                "configure_burst", "burst", config
+            )
+            return
         try:
             config = RigolBurstConfig(
                 channel=int(self.channel.currentText()),
@@ -1266,39 +1676,84 @@ class RigolPage(QWidget):
                 delay_s=parse_quantity(self.burst_delay.text(), "time").si_value,
                 trigger_source=self.burst_trigger.currentText(),  # type: ignore[arg-type]
                 trigger_slope=self.burst_trigger_slope.currentText(),  # type: ignore[arg-type]
-                trigger_output=self.burst_trigger_out.isChecked(),
+                trigger_output=self.burst_trigger_out.currentText(),
                 gate_polarity=self.burst_gate_polarity.currentText(),  # type: ignore[arg-type]
                 idle=self.burst_idle.currentText(),  # type: ignore[arg-type]
             )
         except Exception as exc:
+            self._refresh_confirmed_advanced_controls()
             QMessageBox.warning(self, "Burst Rigol", str(exc))
             return
-        self._controller.call("configure_burst", config)
+        self._queue_advanced_configuration("configure_burst", "burst", config)
 
     def request_output(self, enabled: bool) -> None:
         channel = int(self.channel.currentText())
         if (
             self._output_state_known[channel]
             and self._output_states[channel] == enabled
+            and not (
+                not enabled
+                and self._pending_output_request_id is not None
+                and self._pending_output_enable
+            )
         ):
             return
         if not enabled:
-            self._pending_output_enable = False
-            self._pending_output_channel = channel
-            self._refresh_rigol_output_controls()
-            self._controller.call("set_output", (channel, False))
+            # OFF cancels any not-yet-energised ON chain.  The in-flight
+            # configure may still complete, but its request id can no longer
+            # authorize a later OUTPUT ON.
+            self._clear_pending_output()
+            request = self._new_ui_operation(
+                "set_output",
+                (channel, False),
+                purpose="output_disable",
+            )
+            self._set_pending_output(request, enable=False, stage="set_output")
+            self._issue_ui_operation(request)
             return
-        if self._pending_output_enable:
+        if self._pending_output_request_id is not None:
             return
-        self._pending_output_enable = True
-        self._pending_output_channel = channel
-        self._refresh_rigol_output_controls()
-        self.status.emit(
-            f"Rigol CH{channel}: validating visible settings before OUTPUT ON"
+        try:
+            config = self._visible_channel_config()
+        except Exception as exc:
+            QMessageBox.warning(
+                self,
+                f"Rigol CH{channel} OUTPUT ON blocked",
+                str(exc).strip()
+                or "The visible Rigol settings could not be validated.",
+            )
+            return
+        request = self._new_ui_operation(
+            (
+                "set_output"
+                if self._confirmed_carrier_configs[channel] == config
+                else "configure"
+            ),
+            (
+                (channel, True)
+                if self._confirmed_carrier_configs[channel] == config
+                else config
+            ),
+            purpose=(
+                "output_enable"
+                if self._confirmed_carrier_configs[channel] == config
+                else "output_enable_validation"
+            ),
         )
-        self.configure()
+        stage = "set_output" if request.operation == "set_output" else "configure"
+        self._set_pending_output(request, enable=True, stage=stage)
+        self.status.emit(
+            f"Rigol CH{channel}: "
+            + (
+                "validating hardware readback before OUTPUT ON"
+                if request.operation == "set_output"
+                else "applying and validating visible settings before OUTPUT ON"
+            )
+        )
+        self._issue_ui_operation(request)
 
     def _result(self, operation: str, result: object) -> None:
+        request = self._completion_request(operation)
         if operation == "configure" and hasattr(result, "peak_absolute_current_a"):
             estimate = result
             self.estimate.setText(
@@ -1307,23 +1762,52 @@ class RigolPage(QWidget):
                 f"estimated DUT power: {estimate.peak_estimated_dut_power_w * 1e3:.6g} mW; "
                 f"Vth High/Low: {estimate.open_circuit_high_v:.6g} / {estimate.open_circuit_low_v:.6g} V"
             )
-            channel = self._pending_output_channel or int(self.channel.currentText())
+            channel = (
+                request.channel
+                if request is not None and request.channel in (1, 2)
+                else int(self.channel.currentText())
+            )
+            if request is not None and isinstance(
+                request.payload, RigolChannelConfig
+            ):
+                self._confirmed_carrier_configs[channel] = request.payload
             self._set_rigol_channel_output(channel, False)
-            if self._pending_output_enable:
+            for mode in ("modulation", "sweep", "burst"):
+                self._confirmed_advanced_states[channel][mode] = False
+            self._refresh_confirmed_advanced_controls()
+            if self._pending_output_matches(request, stage="configure"):
                 self.status.emit(
                     f"Rigol CH{channel}: settings valid; enabling OUTPUT"
                 )
-                self._controller.call("set_output", (channel, True))
+                output_request = self._new_ui_operation(
+                    "set_output",
+                    (channel, True),
+                    purpose="output_enable",
+                    request_id=request.request_id,
+                )
+                self._set_pending_output(
+                    output_request, enable=True, stage="set_output"
+                )
+                self._issue_ui_operation(output_request)
             else:
                 self.status.emit("Rigol configured while OUTPUT is OFF")
         elif operation in {"configure_modulation", "configure_sweep", "configure_burst"}:
+            self._complete_advanced_configuration(request, succeeded=True)
+            if request is not None and request.channel in (1, 2):
+                self._set_rigol_channel_output(request.channel, False)
             self.status.emit(f"Rigol: {operation} configured while OUTPUT is OFF")
         elif operation == "configure_output":
+            if request is not None and request.channel in (1, 2):
+                self._set_rigol_channel_output(request.channel, False)
             self.status.emit("Rigol: output path confirmed while OUTPUT is OFF")
         elif operation == "set_output":
-            channel = self._pending_output_channel or int(self.channel.currentText())
-            self._pending_output_enable = False
-            self._pending_output_channel = None
+            channel = (
+                request.channel
+                if request is not None and request.channel in (1, 2)
+                else int(self.channel.currentText())
+            )
+            if self._pending_output_matches(request, stage="set_output"):
+                self._clear_pending_output(request_id=request.request_id)
             self._set_rigol_channel_output(channel, bool(result))
             self.status.emit(
                 f"Rigol CH{channel} OUTPUT "
@@ -1343,6 +1827,7 @@ class RigolPage(QWidget):
             )
 
     def _error(self, operation: str, error: str) -> None:
+        request = self._completion_request(operation)
         if operation in {
             "configure",
             "set_output",
@@ -1356,10 +1841,28 @@ class RigolPage(QWidget):
             "configure_counter",
             "read_counter",
         }:
+            if operation in {
+                "configure_modulation",
+                "configure_sweep",
+                "configure_burst",
+            }:
+                self._complete_advanced_configuration(request, succeeded=False)
             if operation in {"configure", "set_output"}:
-                channel = self._pending_output_channel or int(self.channel.currentText())
-                self._pending_output_enable = False
-                self._pending_output_channel = None
-                self._output_state_known[channel] = False
+                channel = (
+                    request.channel
+                    if request is not None and request.channel in (1, 2)
+                    else int(self.channel.currentText())
+                )
+                if self._pending_output_matches(request):
+                    self._clear_pending_output(request_id=request.request_id)
+                if self._device_state_value in {"verified", "output_off"}:
+                    self._output_states[channel] = False
+                    self._output_state_known[channel] = True
+                else:
+                    self._output_state_known[channel] = False
                 self._refresh_rigol_output_controls()
-            QMessageBox.warning(self, "Rigol", error)
+            QMessageBox.warning(
+                self,
+                "Rigol",
+                error.strip() or f"Rigol operation {operation} failed without details.",
+            )

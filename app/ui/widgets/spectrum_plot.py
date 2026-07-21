@@ -115,8 +115,9 @@ class SpectrumPlotWidget(QWidget):
         self.peak_markers.sigClicked.connect(self._peak_marker_clicked)
         self._selected_peak_index: int | None = None
         self._last_mouse_x: float | None = None
+        self._last_readout_position: tuple[float, float] | None = None
         self._mouse_proxy = pg.SignalProxy(
-            self.plot.scene().sigMouseMoved, rateLimit=45, slot=self._mouse_moved
+            self.plot.scene().sigMouseMoved, rateLimit=30, slot=self._mouse_moved
         )
         self.marker.sigPositionChanged.connect(self._marker_changed)
         self.delta_marker.sigPositionChanged.connect(self._marker_changed)
@@ -132,6 +133,7 @@ class SpectrumPlotWidget(QWidget):
     ) -> None:
         self._x_label = x
         self._x_unit = x_unit
+        self._last_readout_position = None
         self.plot.setLabel("bottom", x, units=x_unit)
         self.plot.setLabel("left", y, units=y_unit)
 
@@ -229,6 +231,9 @@ class SpectrumPlotWidget(QWidget):
         self.marker.hide()
         self.delta_marker.hide()
         self.clear_peak_markers()
+        self._last_mouse_x = None
+        self._last_readout_position = None
+        self.readout.setText("X: -   Y: -")
 
     def set_peak_markers(
         self,
@@ -326,12 +331,16 @@ class SpectrumPlotWidget(QWidget):
         if not path:
             return
         suffix = Path(path).suffix.lower()
-        if "PNG" in selected or suffix == ".png":
-            ImageExporter(self.plot.plotItem).export(path)
-        elif "SVG" in selected or suffix == ".svg":
-            SVGExporter(self.plot.plotItem).export(path)
-        else:
-            self._export_csv(Path(path))
+        try:
+            if "PNG" in selected or suffix == ".png":
+                ImageExporter(self.plot.plotItem).export(path)
+            elif "SVG" in selected or suffix == ".svg":
+                SVGExporter(self.plot.plotItem).export(path)
+            else:
+                self._export_csv(Path(path))
+        except Exception as exc:
+            self.status_changed.emit(f"Spectrum export failed: {exc}")
+            return
         self.status_changed.emit(f"Spectrum exported to {path}")
 
     def _export_csv(self, path: Path) -> None:
@@ -340,7 +349,9 @@ class SpectrumPlotWidget(QWidget):
             for name, curve in self._curves.items()
             if curve.isVisible() and name in self._traces
         ]
-        with path.open("x", newline="", encoding="utf-8") as handle:
+        # The save dialog already obtains explicit overwrite consent.  Honour
+        # that decision instead of failing afterwards with FileExistsError.
+        with path.open("w", newline="", encoding="utf-8") as handle:
             writer = csv.writer(handle)
             x_header = self._x_label.lower().replace(" ", "_")
             if self._x_unit:
@@ -394,7 +405,29 @@ class SpectrumPlotWidget(QWidget):
         self._last_mouse_x = float(point.x())
         self.crosshair_x.setPos(point.x())
         self.crosshair_y.setPos(point.y())
+        if not self._readout_position_changed(float(point.x()), float(point.y())):
+            return
         self.readout.setText(f"X: {self._format_x_value(float(point.x()))}   Y: {point.y():.6g}")
+
+    def _readout_position_changed(self, x: float, y: float) -> bool:
+        """Limit text formatting while keeping the crosshair motion one-to-one."""
+
+        previous = self._last_readout_position
+        x_range, y_range = self.plot.viewRange()
+        x_per_pixel = abs(float(x_range[1]) - float(x_range[0])) / max(
+            self.plot.width(), 1
+        )
+        y_per_pixel = abs(float(y_range[1]) - float(y_range[0])) / max(
+            self.plot.height(), 1
+        )
+        changed = (
+            previous is None
+            or abs(x - previous[0]) >= 2.0 * x_per_pixel
+            or abs(y - previous[1]) >= 2.0 * y_per_pixel
+        )
+        if changed:
+            self._last_readout_position = (x, y)
+        return changed
 
     def _marker_changed(self) -> None:
         if not self.marker.isVisible():

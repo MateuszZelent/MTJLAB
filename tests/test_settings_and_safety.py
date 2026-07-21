@@ -374,6 +374,7 @@ class QuantityAndSafetyTests(unittest.TestCase):
                 reference_level_dbm=value,
                 points=101,
             )
+
         for value in (-120.01, 50.01):
             with self.assertRaisesRegex(SafetyViolation, "documented MS2830A range"):
                 validate_anritsu_spectrum(
@@ -383,6 +384,41 @@ class QuantityAndSafetyTests(unittest.TestCase):
                     reference_level_dbm=value,
                     points=101,
                 )
+
+    def test_rigol_safety_rejects_non_finite_values(self) -> None:
+        settings = simulation_settings()
+        rigol_channel = settings.rigol.safety.channels["1"]
+        for field, values in (
+            ("frequency", (float("nan"), 0.001, -0.001, "50 ohm")),
+            ("high level", (1000.0, float("inf"), -0.001, "50 ohm")),
+            ("low level", (1000.0, 0.001, float("nan"), "50 ohm")),
+            ("DUT impedance", (1000.0, 0.001, -0.001, float("nan"))),
+        ):
+            with self.subTest(field=field):
+                with self.assertRaisesRegex(SafetyViolation, "finite"):
+                    validate_rigol_waveform(
+                        channel=rigol_channel,
+                        safety=settings.rigol.safety,
+                        waveform="SIN",
+                        frequency=values[0],
+                        high_level=values[1],
+                        low_level=values[2],
+                        output_load="HIGHZ",
+                        dut_min_impedance=values[3],
+                    )
+        for load in (float("nan"), "not-a-load"):
+            with self.subTest(output_load=load):
+                with self.assertRaisesRegex(SafetyViolation, "output load"):
+                    validate_rigol_waveform(
+                        channel=rigol_channel,
+                        safety=settings.rigol.safety,
+                        waveform="SIN",
+                        frequency=1000.0,
+                        high_level=0.001,
+                        low_level=-0.001,
+                        output_load=load,
+                        dut_min_impedance=50.0,
+                    )
 
     def test_keithley_preflight_rejects_source_compliance_power(self) -> None:
         raw = deepcopy(SettingsRepository(SETTINGS_TEMPLATE).load().raw)

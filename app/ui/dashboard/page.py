@@ -248,11 +248,16 @@ class DashboardPage(QWidget):
         tcp_header.addWidget(tcp_title)
         tcp_header.addStretch(1)
         self.tcp_network = LineEdit(self.tcp_discovery_page)
+        # The application-wide arrow stepper is reserved for numeric values.
+        # Network identifiers can contain numeric-looking fragments but must
+        # remain opaque text.
+        self.tcp_network.setProperty("precisionArrowStepping", False)
         self.tcp_network.setText(self._moke_network_default(settings))
         self.tcp_network.setPlaceholderText("192.168.1.0/24 or start IP")
         self.tcp_network.setAccessibleName("Network CIDR or first IP for TCP port scan")
         self.tcp_network.setMaximumWidth(170)
         self.tcp_range_end = LineEdit(self.tcp_discovery_page)
+        self.tcp_range_end.setProperty("precisionArrowStepping", False)
         self.tcp_range_end.setPlaceholderText("optional end IP")
         self.tcp_range_end.setAccessibleName("Last IP for TCP port scan range")
         self.tcp_range_end.setMaximumWidth(135)

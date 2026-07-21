@@ -158,9 +158,9 @@ devices:
               max: "100 s"
             sweep_steps:
               min: 2
-              max: 10000
+              max: 1024
             burst_period:
-              min: "1 us"
+              min: "2.0166 us"
               max: "10 s"
             burst_cycles:
               min: 1
@@ -221,9 +221,9 @@ devices:
               max: "100 s"
             sweep_steps:
               min: 2
-              max: 10000
+              max: 1024
             burst_period:
-              min: "1 us"
+              min: "2.0166 us"
               max: "10 s"
             burst_cycles:
               min: 1

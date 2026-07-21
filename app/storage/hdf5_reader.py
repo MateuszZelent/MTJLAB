@@ -203,6 +203,31 @@ class Hdf5RunReader:
             return tuple(result)
 
     @staticmethod
+    def spectrum_point_count(path: str | Path, index: int) -> int:
+        """Return a stored spectrum size without materialising either data axis."""
+
+        if index < 0:
+            raise ExecutionError("Spectrum index cannot be negative.")
+        with Hdf5RunReader._open(path) as file:
+            spectra = file.get("spectra")
+            if spectra is None or str(index) not in spectra:
+                return 0
+            group = spectra[str(index)]
+            frequency = group.get("frequency_hz")
+            power = group.get("power_dbm")
+            if frequency is None or power is None:
+                raise ExecutionError(
+                    f"Spectrum {index} does not contain a complete data axis."
+                )
+            if frequency.ndim != 1 or power.ndim != 1:
+                raise ExecutionError(f"Spectrum {index} axes must be one-dimensional.")
+            if frequency.shape != power.shape or not frequency.shape[0]:
+                raise ExecutionError(
+                    f"Spectrum {index} has a mismatched or empty point count."
+                )
+            return int(frequency.shape[0])
+
+    @staticmethod
     def spectrum(path: str | Path, index: int, *, max_points: int | None = None) -> StoredSpectrum | None:
         if index < 0:
             raise ExecutionError("Spectrum index cannot be negative.")

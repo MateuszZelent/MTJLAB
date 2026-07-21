@@ -3,14 +3,18 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from decimal import Decimal, InvalidOperation
+from decimal import Decimal, DecimalException, InvalidOperation
 import re
 
 from app.domain.quantities import parse_quantity
 
 
 _QUANTITY = re.compile(
-    r"^\s*(?P<number>[+-]?(?:\d+(?:[.,]\d*)?|[.,]\d+)(?:[eE][+-]?\d+)?)\s*(?P<unit>\S.*)\s*$"
+    r"^\s*(?P<number>"
+    r"(?P<sign>[+-]?)"
+    r"(?P<mantissa>(?:\d+(?:[.,]\d*)?|[.,]\d+))"
+    r"(?P<exponent>[eE][+-]?\d+)?"
+    r")\s*(?P<unit>\S.*?)\s*$"
 )
 
 
@@ -43,7 +47,7 @@ def quantity_step_si(text: str, dimension: str) -> float:
         raise ValueError(f"Invalid numeric value {numeric_text!r}.") from exc
     if not number.is_finite():
         raise ValueError("Quick-control value must be finite.")
-    quantum = Decimal(1).scaleb(number.as_tuple().exponent)
+    quantum = _written_quantum(match)
     unit_scale = parse_quantity(f"1 {match.group('unit')}", dimension).si_value
     return float(abs(quantum) * Decimal(str(unit_scale)))
 
@@ -67,10 +71,18 @@ def step_quantity_text(
         number = Decimal(number_text)
     except InvalidOperation as exc:
         raise ValueError(f"Invalid numeric value {number_text!r}.") from exc
-    quantum = Decimal(1).scaleb(number.as_tuple().exponent)
-    updated = number + Decimal(direction) * quantum * multiplier
-    unit = match.group("unit").strip()
-    rendered = f"{format(updated, 'f')} {unit}"
+    try:
+        quantum = _written_quantum(match)
+        updated = number + Decimal(direction) * quantum * multiplier
+        unit = match.group("unit").strip()
+        rendered_number = _render_written_number(
+            match,
+            updated,
+            extra_quantum=quantum * multiplier,
+        )
+    except (DecimalException, OverflowError) as exc:
+        raise ValueError(f"Numeric value {number_text!r} cannot be stepped.") from exc
+    rendered = f"{rendered_number} {unit}"
     return rendered, parse_quantity(rendered, dimension).si_value
 
 
@@ -80,10 +92,73 @@ def render_quantity_si_like(text: str, dimension: str, value_si: float) -> str:
     match = _QUANTITY.fullmatch(text)
     if match is None:
         raise ValueError("Enter a number followed by an explicit unit.")
-    original = Decimal(match.group("number").replace(",", "."))
     unit = match.group("unit").strip()
     scale = Decimal(str(parse_quantity(f"1 {unit}", dimension).si_value))
     value_in_unit = Decimal(str(value_si)) / scale
-    quantum = Decimal(1).scaleb(original.as_tuple().exponent)
-    rendered = value_in_unit.quantize(quantum)
-    return f"{format(rendered, 'f')} {unit}"
+    # A safety boundary may be finer than the operator's current display
+    # precision (for example 0.15 A while the field shows 0.1 A).  Add only
+    # the digits required to represent that boundary exactly; rounding it
+    # back outside the limit would make the subsequent submit fail closed
+    # instead of landing on the configured bound.
+    boundary_quantum = Decimal(1).scaleb(
+        value_in_unit.normalize().as_tuple().exponent
+    )
+    rendered = _render_written_number(
+        match,
+        value_in_unit,
+        extra_quantum=boundary_quantum,
+    )
+    return f"{rendered} {unit}"
+
+
+def _written_quantum(match: re.Match[str]) -> Decimal:
+    """Return the value represented by the last written mantissa digit."""
+
+    mantissa = match.group("mantissa")
+    separator = "," if "," in mantissa else "."
+    decimal_places = (
+        len(mantissa.rsplit(separator, 1)[1]) if separator in mantissa else 0
+    )
+    exponent = match.group("exponent")
+    exponent_value = int(exponent[1:]) if exponent else 0
+    return Decimal(1).scaleb(exponent_value - decimal_places)
+
+
+def _render_written_number(
+    match: re.Match[str],
+    value: Decimal,
+    *,
+    extra_quantum: Decimal | None = None,
+) -> str:
+    """Render ``value`` with the input's decimal separator and exponent scale.
+
+    ``extra_quantum`` accounts for keyboard modifiers that deliberately request
+    a fraction of the normal step.  It may add a displayed digit, but never
+    removes precision the operator wrote.
+    """
+
+    mantissa = match.group("mantissa")
+    decimal_separator = "," if "," in mantissa else "."
+    original_places = (
+        len(mantissa.rsplit(decimal_separator, 1)[1])
+        if decimal_separator in mantissa
+        else 0
+    )
+    exponent = match.group("exponent") or ""
+    exponent_value = int(exponent[1:]) if exponent else 0
+    rendered_value = value.scaleb(-exponent_value) if exponent else value
+    decimal_places = original_places
+    if extra_quantum is not None:
+        displayed_quantum = (
+            extra_quantum.scaleb(-exponent_value) if exponent else extra_quantum
+        )
+        decimal_places = max(
+            decimal_places,
+            max(0, -displayed_quantum.normalize().as_tuple().exponent),
+        )
+    rendered = f"{rendered_value:.{decimal_places}f}"
+    if decimal_separator == ",":
+        rendered = rendered.replace(".", ",")
+    if match.group("sign") == "+" and not rendered.startswith(("+", "-")):
+        rendered = f"+{rendered}"
+    return f"{rendered}{exponent}"

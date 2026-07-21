@@ -1031,6 +1031,30 @@ class MainWindowTests(unittest.TestCase):
             window.close()
             self.application.processEvents()
 
+    def test_narrow_shell_compacts_navigation_and_keeps_estop_prominent(self) -> None:
+        window = MainWindow(".config/settings.yml", simulation=True)
+        try:
+            window.resize(820, 560)
+            window.show()
+            window._set_theme_mode("light", persist=False)
+            self.application.processEvents()
+
+            panel = window.navigationInterface.panel
+            estop = window.safety_strip.estop
+            self.assertTrue(panel.isCollapsed())
+            self.assertLessEqual(panel.width(), 48)
+            self.assertTrue(estop.isVisible())
+            self.assertGreaterEqual(estop.width(), 184)
+            self.assertGreaterEqual(estop.height(), 36)
+            self.assertEqual(estop.property("visualPriority"), "high")
+            self.assertEqual(estop.property("controlState"), "emergency")
+            self.assertIn("disable all outputs", estop.accessibleName().lower())
+            self.assertIn(tokens_for("light").emergency, estop.styleSheet())
+            self.assertIn(tokens_for("light").on_emergency, estop.styleSheet())
+        finally:
+            window.close()
+            self.application.processEvents()
+
     def test_dashboard_uses_one_concrete_label_per_registered_device(self) -> None:
         window = MainWindow(".config/settings.yml", simulation=True)
         try:

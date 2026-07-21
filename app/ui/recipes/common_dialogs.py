@@ -42,10 +42,56 @@ __all__ = [
     "CommentEditorDialog",
     "FixedValueDialog",
     "KeithleySweepBuilderDialog",
+    "RepeatCountDialog",
     "RecipeTreeMoveRequest",
     "RecipeTreeWidget",
     "SweepLibraryButton",
 ]
+
+
+class RepeatCountDialog(FluentRecipeDialog):
+    """Collect the count for an atomic Wrap in Repeat operation."""
+
+    def __init__(
+        self,
+        parent: QWidget | None = None,
+        *,
+        selection_label: str = "the selected block",
+        initial_count: int = 4,
+    ) -> None:
+        super().__init__(parent)
+        self.setWindowTitle("Wrap in Repeat")
+        self.setMinimumWidth(430)
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(24, 22, 24, 20)
+        layout.setSpacing(12)
+        title = StrongBodyLabel("Repeat this part of the sweep", self)
+        title.setObjectName("pageTitle")
+        layout.addWidget(title)
+        explanation = BodyLabel(
+            f"{selection_label} will become the child of one Repeat block. "
+            "The change is committed only after the complete recipe is valid.",
+            self,
+        )
+        explanation.setWordWrap(True)
+        explanation.setObjectName("muted")
+        layout.addWidget(explanation)
+        form = QFormLayout()
+        self.count = SpinBox(self)
+        self.count.setRange(1, 100_000)
+        self.count.setValue(max(1, min(initial_count, 100_000)))
+        self.count.setAccessibleName("Repeat count")
+        form.addRow("Repeat count", self.count)
+        layout.addLayout(form)
+        footer = QHBoxLayout()
+        footer.addStretch(1)
+        cancel = PushButton("Cancel", self)
+        apply = PrimaryPushButton("Wrap in Repeat", self)
+        footer.addWidget(cancel)
+        footer.addWidget(apply)
+        layout.addLayout(footer)
+        cancel.clicked.connect(self.reject)
+        apply.clicked.connect(self.accept)
 
 
 class ActionNodeEditorDialog(FluentRecipeDialog):
@@ -788,6 +834,7 @@ class RecipeTreeWidget(TreeWidget):
     move_requested = Signal(object)
     library_drop_requested = Signal(str, str, str, int)
     drop_rejected = Signal(str)
+    drag_status_changed = Signal(str, bool)
     library_mime_type = SweepLibraryButton.mime_type
     structural_role = int(Qt.ItemDataRole.UserRole) + 41
     else_container = "else"
@@ -831,12 +878,21 @@ class RecipeTreeWidget(TreeWidget):
         # recipe-specific MIME and boundary rules.
         super().dragEnterEvent(event)
         if event.mimeData().hasFormat(self.library_mime_type):
+            self.drag_status_changed.emit(
+                "Choose a highlighted gap or container for the new block.", True
+            )
             event.acceptProposedAction()
             return
         if event.source() is self and self._dragged_node_id is not None:
+            self.drag_status_changed.emit(
+                "Move the block to a highlighted gap or container.", True
+            )
             event.setDropAction(Qt.DropAction.MoveAction)
             event.accept()
             return
+        self.drag_status_changed.emit(
+            "This item cannot be dropped into the measurement tree.", False
+        )
         event.ignore()
 
     def dragMoveEvent(self, event: Any) -> None:
@@ -847,14 +903,33 @@ class RecipeTreeWidget(TreeWidget):
         library_drag = event.mimeData().hasFormat(self.library_mime_type)
         internal_drag = event.source() is self and self._dragged_node_id is not None
         if not library_drag and not internal_drag:
+            self.drag_status_changed.emit(
+                "This item cannot be dropped into the measurement tree.", False
+            )
             event.ignore()
             return
         destination = self._drop_destination_at(event.position().toPoint())
-        if destination is None or (
-            internal_drag and not self._internal_destination_allowed(destination)
-        ):
+        if destination is None:
+            self.drag_status_changed.emit(
+                "Drop on a container or between real recipe blocks.", False
+            )
             event.ignore()
             return
+        destination_error = (
+            self._internal_destination_error(destination) if internal_drag else None
+        )
+        if destination_error is not None:
+            self.drag_status_changed.emit(destination_error, False)
+            event.ignore()
+            return
+        destination_label = self._destination_label(destination)
+        if internal_drag:
+            source = self._find_node_item(self._dragged_node_id or "")
+            source_label = source.text(0) if source is not None else "Selected block"
+            message = f"Move {source_label} to {destination_label}."
+        else:
+            message = f"Insert the new block at {destination_label}."
+        self.drag_status_changed.emit(message, True)
         if library_drag:
             event.acceptProposedAction()
             return
@@ -865,6 +940,10 @@ class RecipeTreeWidget(TreeWidget):
         destination = self._drop_destination_at(event.position().toPoint())
         if event.mimeData().hasFormat(self.library_mime_type):
             if destination is None:
+                self.drop_rejected.emit(
+                    "Drop on a container or between real recipe blocks."
+                )
+                self.drag_status_changed.emit("", True)
                 event.ignore()
                 return
             parent_id, branch, index = destination
@@ -876,21 +955,28 @@ class RecipeTreeWidget(TreeWidget):
                 self.drop_rejected.emit(
                     "The dragged library block has an invalid text payload."
                 )
+                self.drag_status_changed.emit("", True)
                 event.ignore()
                 return
             if not kind:
                 self.drop_rejected.emit("The dragged library block is empty.")
+                self.drag_status_changed.emit("", True)
                 event.ignore()
                 return
             self.library_drop_requested.emit(kind, parent_id, branch, index)
+            self.drag_status_changed.emit("", True)
             event.acceptProposedAction()
             return
         if (
             event.source() is not self
             or self._dragged_node_id is None
             or destination is None
-            or not self._internal_destination_allowed(destination)
+            or self._internal_destination_error(destination) is not None
         ):
+            self.drop_rejected.emit(
+                "The selected destination is not valid; the tree was not changed."
+            )
+            self.drag_status_changed.emit("", True)
             event.ignore()
             return
         parent_id, branch, index = destination
@@ -905,10 +991,19 @@ class RecipeTreeWidget(TreeWidget):
             # A model rejection must also reject the native drag transaction.
             # Reporting MoveAction here would allow Qt to treat a failed recipe
             # edit as a visual move and desynchronize the projection from YAML.
+            self.drop_rejected.emit(
+                "The recipe model rejected this move; the previous tree was retained."
+            )
+            self.drag_status_changed.emit("", True)
             event.ignore()
             return
+        self.drag_status_changed.emit("", True)
         event.setDropAction(Qt.DropAction.MoveAction)
         event.accept()
+
+    def dragLeaveEvent(self, event: Any) -> None:
+        super().dragLeaveEvent(event)
+        self.drag_status_changed.emit("", True)
 
     def _drop_destination_at(self, position: Any) -> tuple[str, str, int] | None:
         target = self.itemAt(position)
@@ -959,11 +1054,16 @@ class RecipeTreeWidget(TreeWidget):
     def _internal_destination_allowed(
         self, destination: tuple[str, str, int]
     ) -> bool:
+        return self._internal_destination_error(destination) is None
+
+    def _internal_destination_error(
+        self, destination: tuple[str, str, int]
+    ) -> str | None:
         if self._dragged_node_id is None:
-            return False
+            return "The dragged recipe block is no longer available."
         source = self._find_node_item(self._dragged_node_id)
         if source is None:
-            return False
+            return "The dragged recipe block is no longer available."
         parent_id, _branch, _index = destination
         destination_parent = (
             None if parent_id == "__finally__" else self._find_node_item(parent_id)
@@ -973,13 +1073,23 @@ class RecipeTreeWidget(TreeWidget):
             or self.item_is_in_finally(destination_parent)
         )
         if self.item_is_in_finally(source) != destination_in_finally:
-            return False
+            return "Blocks cannot cross the Finally safety boundary."
         current = destination_parent
         while current is not None:
             if current is source:
-                return False
+                return "A block cannot be moved into itself or its own child."
             current = current.parent()
-        return True
+        return None
+
+    def _destination_label(self, destination: tuple[str, str, int]) -> str:
+        parent_id, branch, index = destination
+        if parent_id == "__finally__":
+            parent_label = "Finally"
+        else:
+            parent = self._find_node_item(parent_id)
+            parent_label = parent.text(0) if parent is not None else parent_id
+        branch_label = "Else" if branch == "else" else parent_label
+        return f"{branch_label}, position {index + 1}"
 
     def _drop_destination(self, target: QTreeWidgetItem) -> tuple[str, str, int] | None:
         indicator = self.dropIndicatorPosition()

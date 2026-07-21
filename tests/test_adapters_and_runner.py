@@ -83,6 +83,29 @@ class ShutdownProbe:
 
 
 @dataclass
+class RigolShutdownFaultSession(FakeVisaSession):
+    """Fault injector that records shutdown attempts which fail before VISA."""
+
+    fail_next_ch1_off_write: bool = False
+    fail_next_ch1_output_query: bool = False
+    attempted_commands: list[str] = field(default_factory=list)
+
+    def write(self, command: str) -> None:
+        self.attempted_commands.append(command)
+        if self.fail_next_ch1_off_write and command == ":OUTP1 OFF":
+            self.fail_next_ch1_off_write = False
+            raise DeviceError("injected CH1 OFF write failure")
+        super().write(command)
+
+    def query(self, command: str) -> str:
+        self.attempted_commands.append(command)
+        if self.fail_next_ch1_output_query and command == ":OUTP1?":
+            self.fail_next_ch1_output_query = False
+            raise DeviceError("injected CH1 OUTPUT query failure")
+        return super().query(command)
+
+
+@dataclass
 class DemoOutputProbe(ShutdownProbe):
     output_requests: list[tuple[object, bool]] = field(default_factory=list)
 
@@ -313,6 +336,160 @@ class AdapterAndRunnerTests(unittest.TestCase):
         clear_errors = keithley_session.writes.index("errorqueue.clear()")
         self.assertLess(keithley_session.writes.index("smua.source.output = smua.OUTPUT_OFF"), clear_errors)
         self.assertLess(keithley_session.writes.index("smub.source.output = smub.OUTPUT_OFF"), clear_errors)
+
+    def test_rigol_connect_fails_if_output_off_readback_is_not_confirmed(self) -> None:
+        session = FakeVisaSession(
+            responses={
+                "*IDN?": "Rigol Technologies,DG1032Z,DG1ZA172902039,00.01.08",
+                ":OUTP1?": "ON",
+                ":OUTP2?": "OFF",
+            }
+        )
+        adapter = RigolAdapter(
+            self.settings, session_factory=FakeVisaSessionFactory(session)
+        )
+
+        with self.assertRaisesRegex(DeviceError, "during connection"):
+            adapter.connect()
+
+        self.assertTrue(session.closed)
+        self.assertEqual(adapter.state, DeviceState.UNKNOWN)
+
+    def test_rigol_disconnect_reports_unconfirmed_output_off_after_closing_visa(self) -> None:
+        session = FakeVisaSession(
+            responses={
+                "*IDN?": "Rigol Technologies,DG1032Z,DG1ZA172902039,00.01.08",
+                ":OUTP1?": "OFF",
+                ":OUTP2?": "OFF",
+                ":SOUR1:MOD?": "OFF",
+                ":SOUR1:SWE:STAT?": "OFF",
+                ":SOUR1:BURS:STAT?": "OFF",
+                ":SOUR1:PHAS?": "0",
+            }
+        )
+        adapter = RigolAdapter(
+            self.settings, session_factory=FakeVisaSessionFactory(session)
+        )
+        adapter.connect()
+        session.responses[":OUTP1?"] = "ON"
+
+        with self.assertRaisesRegex(DeviceError, "OUTPUT OFF was not confirmed"):
+            adapter.disconnect()
+
+        self.assertTrue(session.closed)
+        self.assertEqual(adapter.state, DeviceState.UNKNOWN)
+
+    def test_rigol_emergency_off_attempts_both_channels_after_independent_failures(self) -> None:
+        session = RigolShutdownFaultSession(
+            responses={
+                "*IDN?": "Rigol Technologies,DG1032Z,DG1ZA172902039,00.01.08",
+                ":OUTP1?": "OFF",
+                ":OUTP2?": "OFF",
+            }
+        )
+        adapter = RigolAdapter(
+            self.settings, session_factory=FakeVisaSessionFactory(session)
+        )
+        adapter.connect()
+        session.attempted_commands.clear()
+        session.fail_next_ch1_off_write = True
+        session.fail_next_ch1_output_query = True
+
+        adapter.emergency_off()
+
+        self.assertEqual(
+            session.attempted_commands,
+            [":OUTP1 OFF", ":OUTP2 OFF", ":OUTP1?", ":OUTP2?"],
+        )
+        self.assertEqual(adapter.state, DeviceState.UNKNOWN)
+
+    def test_rigol_failed_channel_off_uses_two_channel_confirmed_fallback(self) -> None:
+        session = RigolShutdownFaultSession(
+            responses={
+                "*IDN?": "Rigol Technologies,DG1032Z,DG1ZA172902039,00.01.08",
+                ":OUTP1?": "OFF",
+                ":OUTP2?": "OFF",
+            }
+        )
+        adapter = RigolAdapter(
+            self.settings, session_factory=FakeVisaSessionFactory(session)
+        )
+        adapter.connect()
+        session.attempted_commands.clear()
+        session.fail_next_ch1_off_write = True
+
+        with self.assertRaisesRegex(DeviceError, "fallback confirmed both outputs OFF"):
+            adapter.set_output(1, False)
+
+        self.assertEqual(
+            session.attempted_commands,
+            [":OUTP1 OFF", ":OUTP1 OFF", ":OUTP2 OFF", ":OUTP1?", ":OUTP2?"],
+        )
+        self.assertEqual(adapter.state, DeviceState.OUTPUT_OFF)
+
+    def test_rigol_capability_probe_rejects_malformed_success_responses(self) -> None:
+        session = FakeVisaSession(
+            responses={
+                "*IDN?": "Rigol Technologies,DG1032Z,DG1ZA172902039,00.01.08",
+                ":OUTP1?": "OFF",
+                ":OUTP2?": "OFF",
+                ":SOUR1:MOD?": "unexpected",
+                ":SOUR1:SWE:STAT?": "OFF",
+                ":SOUR1:BURS:STAT?": "OFF",
+                ":SOUR1:PHAS?": "not-a-number",
+                ":COUN?": "maybe",
+                ":SOUR1:HARM?": "OFF",
+                ":COUP?": "OFF,OFF,OFF",
+                ":SOUR1:TRACK?": "unknown",
+            }
+        )
+        adapter = RigolAdapter(
+            self.settings, session_factory=FakeVisaSessionFactory(session)
+        )
+
+        adapter.connect()
+
+        capabilities = adapter.capabilities
+        self.assertIsNotNone(capabilities)
+        self.assertFalse(capabilities.supports("modulation"))
+        self.assertFalse(capabilities.supports("phase_sync"))
+        self.assertFalse(capabilities.supports("counter"))
+        self.assertFalse(capabilities.supports("coupling"))
+        self.assertFalse(capabilities.supports("tracking"))
+        self.assertTrue(capabilities.supports("frequency_sweep"))
+        self.assertTrue(capabilities.supports("burst"))
+        self.assertTrue(capabilities.supports("harmonics"))
+
+    def test_rigol_rejects_invalid_pulse_timing_before_any_configuration_write(self) -> None:
+        session = FakeVisaSession(
+            responses={
+                "*IDN?": "Rigol Technologies,DG1032Z,DG1ZA172902039,00.01.08",
+                ":OUTP1?": "OFF",
+                ":OUTP2?": "OFF",
+            }
+        )
+        adapter = RigolAdapter(
+            self.settings, session_factory=FakeVisaSessionFactory(session)
+        )
+        adapter.connect()
+        writes_before = len(session.writes)
+
+        with self.assertRaisesRegex(SafetyViolation, "leading edge cannot be below 10 ns"):
+            adapter.configure_channel(
+                RigolChannelConfig(
+                    1,
+                    "PULS",
+                    1000,
+                    0.001,
+                    -0.001,
+                    pulse_width_s=100e-6,
+                    pulse_leading_s=1e-9,
+                    pulse_trailing_s=20e-9,
+                    dut_min_impedance_ohm=50,
+                )
+            )
+
+        self.assertEqual(len(session.writes), writes_before)
 
     def test_limit_updates_keep_confirmed_off_instrument_sessions_open(self) -> None:
         raw = deepcopy(self.settings.model_dump(mode="python"))

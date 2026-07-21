@@ -37,7 +37,18 @@ from app.domain.errors import AuthorizationError, ConfigurationError
 from app.domain.quantities import DIMENSION_CURRENT, DIMENSION_DBM, DIMENSION_FREQUENCY, DIMENSION_TIME, DIMENSION_VOLTAGE, format_quantity_auto, parse_quantity
 from app.engine.compiler import ExecutionPlan, RecipeCompiler
 from app.engine.estimation import PlanEstimate, PlanEstimator
-from app.recipes import RecipeNode, RecipeRepository, add_recipe_node, delete_recipe_node, generate_sweep_points, generate_sweep_stage_points, move_recipe_node, parse_recipe_text, replace_recipe_node
+from app.recipes import (
+    RecipeNode,
+    RecipeRepository,
+    add_recipe_node,
+    delete_recipe_node,
+    generate_sweep_points,
+    generate_sweep_stage_points,
+    move_recipe_node,
+    parse_recipe_text,
+    replace_recipe_node,
+    wrap_recipe_nodes_in_repeat,
+)
 from app.recipes.parameter_registry import SWEEP_DIMENSIONS
 from app.recipes.parameter_registry import SWEEPABLE_PARAMETERS as _SWEEPABLE_PARAMETERS
 from app.recipes.parameter_registry import sweep_default as _sweep_default
@@ -49,11 +60,12 @@ from app.ui.dialogs import StationFileDialog as QFileDialog
 from app.ui.dialogs import StationMessageBox as QMessageBox
 from app.ui.common import human_duration as _human_duration
 from app.ui.common import line_edit as _line
-from app.ui.design_system import effective_theme
+from app.ui.design_system import ThemeTokens, effective_theme, tokens_for
 from app.ui.recipes.device_parameters import DeviceParameterDialog
 from app.ui.recipes.common_dialogs import (
     ActionNodeEditorDialog, AnritsuAcquisitionEditorDialog, CommentEditorDialog, FixedValueDialog,
-    KeithleySweepBuilderDialog, RecipeTreeMoveRequest, RecipeTreeWidget, SweepLibraryButton,
+    KeithleySweepBuilderDialog, RecipeTreeMoveRequest, RecipeTreeWidget,
+    RepeatCountDialog, SweepLibraryButton,
 )
 from app.devices.anritsu_ms2830a.ui.recipe_extension import (
     AnritsuAdvancedSpectrumPanel,
@@ -127,6 +139,13 @@ class RecipePage(QWidget):
         self._preflight_outputs_forced_off: bool | None = None
         self._repository = RecipeRepository()
         self._loading_source = False
+        # ``_tree_source`` is the only source represented by the visible tree.
+        # Manual YAML can diverge while it is being typed, but tree mutations
+        # remain locked until that draft has parsed and rendered atomically.
+        self._tree_source = ""
+        self._saved_source: str | None = None
+        self._saved_path: str | None = None
+        self._close_discard_confirmed = False
         self._tree_undo: list[str] = []
         self._tree_redo: list[str] = []
         self._autosave_timer = QTimer(self)
@@ -189,6 +208,7 @@ class RecipePage(QWidget):
         self.path.setText("recipes/example_nested_sweep.yml")
         self.path.setClearButtonEnabled(True)
         self.path.setAccessibleName("Recipe file path")
+        self.path.setProperty("precisionArrowStepping", False)
         self.restore_button = PushButton("Restore autosave")
         self.restore_button.setEnabled(False)
         self.execution_mode = ComboBox(self.document_card)
@@ -255,6 +275,12 @@ class RecipePage(QWidget):
             self.save_recipe,
             shortcut=QKeySequence.StandardKey.Save,
         )
+        self.apply_yaml_action = command_action(
+            "Apply YAML to tree",
+            QStyle.StandardPixmap.SP_DialogApplyButton,
+            self.apply_yaml_to_tree,
+            shortcut=QKeySequence("Ctrl+Shift+Return"),
+        )
         self.recipe_command_bar.addSeparator()
         self.undo_tree_action = command_action(
             "Undo",
@@ -303,6 +329,13 @@ class RecipePage(QWidget):
         path_label.setObjectName("recipePathLabel")
         path_line.addWidget(path_label)
         path_line.addWidget(self.path, 1)
+        self.document_state_badge = StrongBodyLabel("DRAFT", self.document_card)
+        self.document_state_badge.setObjectName("recipeDocumentState")
+        self.document_state_badge.setProperty("safetyState", "caution")
+        self.document_state_badge.setAccessibleName("Recipe document state")
+        path_line.addWidget(
+            self.document_state_badge, 0, Qt.AlignmentFlag.AlignVCenter
+        )
         path_line.addWidget(self.restore_button)
         document_layout.addLayout(path_line)
         execution_line = QGridLayout()
@@ -380,12 +413,18 @@ class RecipePage(QWidget):
         self.move_down_button = tool_button(
             "Down", "Move the selected node down (Alt+Down)", QStyle.StandardPixmap.SP_ArrowDown
         )
+        self.wrap_repeat_button = tool_button(
+            "Wrap in Repeat...",
+            "Repeat the selected block, or all root steps when the root is selected",
+            QStyle.StandardPixmap.SP_BrowserReload,
+        )
         builder_actions.addWidget(self.edit_device_button)
         builder_actions.addWidget(self.edit_generator_button)
         builder_actions.addWidget(self.delete_node_button)
         builder_actions.addWidget(self.duplicate_node_button)
         builder_actions.addWidget(self.move_up_button)
         builder_actions.addWidget(self.move_down_button)
+        builder_actions.addWidget(self.wrap_repeat_button)
         layout.addWidget(self.selection_card)
         self.workspace_splitter = QSplitter(Qt.Orientation.Horizontal)
         self.workspace_splitter.setObjectName("recipeWorkspaceSplitter")
@@ -425,6 +464,13 @@ class RecipePage(QWidget):
         self.workflow_tabs.addItem("tree", "Measurement tree")
         self.workflow_tabs.addItem("yaml", "YAML source")
         builder_layout.addWidget(self.workflow_tabs)
+        self.drag_feedback = CaptionLabel(
+            "Drag blocks between highlighted gaps; invalid targets are explained here.",
+            self.builder_container,
+        )
+        self.drag_feedback.setObjectName("muted")
+        self.drag_feedback.setWordWrap(True)
+        builder_layout.addWidget(self.drag_feedback)
         self.builder_stack = QStackedWidget()
         self.builder_stack.setMinimumWidth(390)
         self.builder_stack.addWidget(self.tree)
@@ -504,6 +550,7 @@ class RecipePage(QWidget):
         self.tree.move_requested.connect(self._handle_tree_move_request)
         self.tree.library_drop_requested.connect(self._drop_library_block)
         self.tree.drop_rejected.connect(self._tree_drop_rejected)
+        self.tree.drag_status_changed.connect(self._tree_drag_status_changed)
         self.edit_device_button.clicked.connect(
             self._edit_selected_device_settings
         )
@@ -512,7 +559,9 @@ class RecipePage(QWidget):
         self.duplicate_node_button.clicked.connect(self._duplicate_selected_node)
         self.move_up_button.clicked.connect(lambda: self._move_selected_sibling(-1))
         self.move_down_button.clicked.connect(lambda: self._move_selected_sibling(1))
+        self.wrap_repeat_button.clicked.connect(self._wrap_selected_in_repeat)
         self.open_editor_button.clicked.connect(self._open_current_node_editor)
+        self.path.textChanged.connect(self._path_changed)
         self.path.editingFinished.connect(self._update_repository_state)
         self.tree.customContextMenuRequested.connect(self._show_tree_context_menu)
         self._tree_shortcuts = (
@@ -637,7 +686,7 @@ class RecipePage(QWidget):
         self.library_search.setPlaceholderText("Search nodes and actions…")
         self.library_search.setClearButtonEnabled(True)
         layout.addWidget(self.library_search)
-        self._library_action_buttons: list[QToolButton] = []
+        self._library_action_buttons: list[QWidget] = []
 
         def group(title: str, badge: str) -> QVBoxLayout:
             group_frame = CardWidget(panel)
@@ -665,9 +714,13 @@ class RecipePage(QWidget):
             icon: QStyle.StandardPixmap,
             callback: object,
             *,
-            drag_kind: str,
+            drag_kind: str | None,
         ) -> None:
-            button = SweepLibraryButton(drag_kind)
+            button = (
+                SweepLibraryButton(drag_kind)
+                if drag_kind is not None
+                else PushButton()
+            )
             button.setObjectName("recipeLibraryAction")
             button.setProperty("deviceKind", kind)
             button.setProperty("libraryDescription", description)
@@ -873,10 +926,13 @@ class RecipePage(QWidget):
             drag_kind="flow:sequence",
         )
         action(
-            flow, "Repeat", "Add a repeat container", "structure",
+            flow,
+            "Wrap in Repeat...",
+            "Wrap the selected block, or every root step, in a non-empty Repeat",
+            "structure",
             QStyle.StandardPixmap.SP_DirIcon,
-            lambda: self._library_add_basic("repeat"),
-            drag_kind="flow:repeat",
+            self._wrap_selected_in_repeat,
+            drag_kind=None,
         )
         action(
             flow, "Comment", "Document this part of the measurement", "structure",
@@ -919,7 +975,23 @@ class RecipePage(QWidget):
 
     def _tree_drop_rejected(self, message: str) -> None:
         self.summary.setText(f"Drag-and-drop rejected: {message}")
+        self._tree_drag_status_changed(message, False)
         self.status.emit(f"TREE_DROP_REJECTED | {message}")
+
+    def _tree_drag_status_changed(self, message: str, valid: bool) -> None:
+        text = message.strip()
+        if not text:
+            text = (
+                "Apply the YAML draft before moving blocks."
+                if self._yaml_draft_pending()
+                else "Drag blocks between highlighted gaps; invalid targets are explained here."
+            )
+        self.drag_feedback.setText(text)
+        self.drag_feedback.setProperty(
+            "safetyState", "" if valid else "caution"
+        )
+        self.drag_feedback.style().unpolish(self.drag_feedback)
+        self.drag_feedback.style().polish(self.drag_feedback)
 
     def _filter_library_actions(self, query: str) -> None:
         needle = query.strip().casefold()
@@ -1025,7 +1097,7 @@ class RecipePage(QWidget):
             else:
                 raise ConfigurationError(f"Unknown output device {device!r}.")
             source = add_recipe_node(
-                self.editor.toPlainText(),
+                self._builder_source(),
                 parent_id=parent_id,
                 branch=branch,
                 index=index,
@@ -1054,7 +1126,7 @@ class RecipePage(QWidget):
     def _add_finally_nodes(
         self, nodes: list[dict[str, object]], status: str
     ) -> None:
-        source = self.editor.toPlainText()
+        source = self._builder_source()
         try:
             for node in nodes:
                 source = add_recipe_node(
@@ -1139,7 +1211,7 @@ class RecipePage(QWidget):
                 ],
             }
         source = add_recipe_node(
-            self.editor.toPlainText(),
+            self._builder_source(),
             parent_id=parent_id,
             branch=branch,
             index=index,
@@ -1271,7 +1343,7 @@ class RecipePage(QWidget):
         try:
             parent_id, branch = self._builder_parent()
             source = add_recipe_node(
-                self.editor.toPlainText(),
+                self._builder_source(),
                 parent_id=parent_id,
                 branch=branch,
                 node=self._fixed_node_from_dialog(definition, dialog),
@@ -1294,6 +1366,11 @@ class RecipePage(QWidget):
         self._plan = None
         self.run_button.setEnabled(False)
         self.plan_preflight_changed.emit(None)
+        self._refresh_document_state()
+
+    def _recipe_tokens(self) -> ThemeTokens:
+        mode = str(self._settings.ui.get("theme", "system"))
+        return tokens_for(effective_theme(mode))
 
     def set_keithley_snapshot_provider(self, provider: object) -> None:
         """Bind read-only access to the manual Keithley form state."""
@@ -1318,11 +1395,160 @@ class RecipePage(QWidget):
     def _source_changed(self) -> None:
         if self._loading_source:
             return
+        self._close_discard_confirmed = False
         self._plan = None
         self.run_button.setEnabled(False)
         self.plan_preflight_changed.emit(None)
-        self.summary.setText("YAML changed; compile it again before running.")
+        self.summary.setText(
+            "YAML draft changed. Apply it to the tree before using Tree Builder; "
+            "then validate it again before running."
+        )
         self._autosave_timer.start()
+        self._refresh_document_state()
+
+    def _path_changed(self, _text: str = "") -> None:
+        self._close_discard_confirmed = False
+        self._refresh_document_state()
+
+    def _yaml_draft_pending(self) -> bool:
+        return self.editor.toPlainText() != self._tree_source
+
+    def _is_document_dirty(self) -> bool:
+        if self._historical_sweep_active:
+            return False
+        source = self.editor.toPlainText()
+        if self._saved_source is None:
+            return bool(source.strip())
+        return (
+            source != self._saved_source
+            or self.path.text().strip() != (self._saved_path or "")
+        )
+
+    def _tree_editing_allowed(self) -> bool:
+        return not self._historical_sweep_active and not self._yaml_draft_pending()
+
+    def _set_tree_editing_enabled(self, enabled: bool) -> None:
+        self.tree.setDragEnabled(enabled)
+        self.tree.setAcceptDrops(enabled)
+        self.tree.setDropIndicatorShown(enabled)
+        self.library_panel.setEnabled(enabled)
+        for shortcut in getattr(self, "_tree_shortcuts", ()):
+            shortcut.setEnabled(enabled)
+        if not self._historical_sweep_active:
+            current = self.tree.currentItem()
+            self._node_selected(current, None)
+        if enabled:
+            self.tree.setToolTip(
+                "Drag a non-root node to reorder it or place it inside Sequence, "
+                "Sweep, Repeat or If. The complete YAML is validated before the "
+                "view changes; nodes cannot cross the Finally boundary."
+            )
+        else:
+            self.tree.setToolTip(
+                "Tree Builder is locked because the YAML draft has not been applied. "
+                "Correct the YAML and choose Apply YAML to tree."
+            )
+
+    def _refresh_document_state(self) -> None:
+        if not hasattr(self, "document_state_badge"):
+            return
+        pending = self._yaml_draft_pending()
+        dirty = self._is_document_dirty()
+        if self._historical_sweep_active:
+            text = "RECORDED"
+            safety_state = "verified"
+            tooltip = "This is an immutable historical execution."
+        elif pending:
+            text = "YAML DRAFT - APPLY"
+            safety_state = "caution"
+            tooltip = (
+                "The editor differs from the visible tree. Tree commands stay "
+                "locked until the complete YAML draft is valid and applied."
+            )
+        elif self._saved_source is None:
+            text = "DRAFT - UNSAVED"
+            safety_state = "caution"
+            tooltip = "This recipe draft does not have a saved YAML version yet."
+        elif dirty:
+            text = "DRAFT - UNSAVED"
+            safety_state = "caution"
+            tooltip = "The tree is current, but these recipe changes are not saved."
+        elif self._plan is None:
+            text = "SAVED - VALIDATION STALE"
+            safety_state = "caution"
+            tooltip = "The recipe is saved; validate it against the current station profile."
+        else:
+            text = "READY"
+            safety_state = "verified"
+            tooltip = "The saved recipe matches the visible tree and validated plan."
+        self.document_state_badge.setText(text)
+        self.document_state_badge.setToolTip(tooltip)
+        self.document_state_badge.setProperty("safetyState", safety_state)
+        self.document_state_badge.style().unpolish(self.document_state_badge)
+        self.document_state_badge.style().polish(self.document_state_badge)
+        self.apply_yaml_action.setEnabled(
+            pending and not self._historical_sweep_active
+        )
+        self.apply_yaml_action.setToolTip(
+            "Parse the complete YAML draft and replace the measurement tree atomically"
+            if pending
+            else "The YAML editor and measurement tree already match"
+        )
+        self.save_recipe_action.setEnabled(dirty)
+        self._set_tree_editing_enabled(self._tree_editing_allowed())
+        self._update_tree_history_controls()
+        self._tree_drag_status_changed("", True)
+
+    def _builder_source(self) -> str:
+        if not self._tree_editing_allowed():
+            raise ConfigurationError(
+                "Tree Builder is locked while the YAML draft differs from the tree. "
+                "Apply a valid YAML draft first."
+            )
+        return self._tree_source
+
+    def apply_yaml_to_tree(self, *, show_error: bool = True) -> bool:
+        """Commit the YAML editor draft as one validated document transaction."""
+
+        if self._historical_sweep_active:
+            return False
+        source = self.editor.toPlainText()
+        if source == self._tree_source:
+            self._refresh_document_state()
+            return True
+        try:
+            self._apply_builder_source(
+                source,
+                "Applied YAML draft to the measurement tree",
+            )
+        except Exception as exc:
+            self.summary.setText(
+                "YAML draft was not applied. The previous tree is still active and "
+                f"locked while you correct the source. {exc}"
+            )
+            self.status.emit(f"YAML draft rejected without changing the tree: {exc}")
+            self._refresh_document_state()
+            if show_error:
+                QMessageBox.warning(
+                    self,
+                    "Cannot apply YAML",
+                    "The complete YAML draft is invalid. The previous measurement "
+                    f"tree was retained.\n\n{exc}",
+                )
+            return False
+        return True
+
+    def _confirm_discard_unsaved(self, action: str) -> bool:
+        if not self._is_document_dirty():
+            return True
+        answer = QMessageBox.question(
+            self,
+            "Unsaved sweep",
+            f"{action} will discard changes that have not been saved. Continue?",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.Cancel,
+            QMessageBox.StandardButton.Cancel,
+        )
+        return answer == QMessageBox.StandardButton.Yes
 
     def load_editor(self, *, show_error: bool = True) -> None:
         self._leave_historical_sweep_mode()
@@ -1341,6 +1567,10 @@ class RecipePage(QWidget):
         self._loading_source = True
         self.editor.setPlainText(source)
         self._loading_source = False
+        self._autosave_timer.stop()
+        self._close_discard_confirmed = False
+        self._saved_source = source
+        self._saved_path = self.path.text().strip()
         self._tree_undo.clear()
         self._tree_redo.clear()
         self._update_tree_history_controls()
@@ -1351,6 +1581,7 @@ class RecipePage(QWidget):
         try:
             recipe = parse_recipe_text(source, origin=self.path.text())
             self._populate_recipe_tree(recipe.root, recipe.finally_nodes, None)
+            self._tree_source = source
             self.summary.setText("Recipe loaded. Compile it before running.")
             tree_rendered = True
         except Exception as exc:
@@ -1365,6 +1596,7 @@ class RecipePage(QWidget):
                 "see Event log for diagnostics."
             )
         self._update_repository_state()
+        self._refresh_document_state()
         self.status.emit(
             "Recipe loaded into the editor and measurement tree"
             if tree_rendered
@@ -1408,6 +1640,7 @@ class RecipePage(QWidget):
             self.edit_device_button,
             self.edit_generator_button, self.delete_node_button,
             self.duplicate_node_button, self.move_up_button, self.move_down_button,
+            self.wrap_repeat_button,
             self.open_editor_button,
         ):
             button.setEnabled(False)
@@ -1421,6 +1654,13 @@ class RecipePage(QWidget):
             "# reconstruct unrecorded safety policy as an executable YAML recipe.\n"
         )
         self._loading_source = False
+        historical_source = self.editor.toPlainText()
+        self._tree_source = historical_source
+        self._saved_source = historical_source
+        self._saved_path = self.path.text().strip()
+        self._autosave_timer.stop()
+        self._tree_undo.clear()
+        self._tree_redo.clear()
 
         root = QTreeWidgetItem([
             f"Historical THATEC Sweep — {run.path.name}",
@@ -1478,6 +1718,7 @@ class RecipePage(QWidget):
             "Historical THATEC Sweep loaded. It is read-only because the source result "
             "does not prove every safety and recipe field needed for re-execution."
         )
+        self._refresh_document_state()
         self.status.emit("Historical THATEC Sweep reconstructed")
 
     def load_reconstructed_thatec_sweep(
@@ -1497,6 +1738,9 @@ class RecipePage(QWidget):
         self._leave_historical_sweep_mode()
         self.path.setText(str(run.path))
         self._apply_builder_source(source, "Restored Sweep from THATEC labbook")
+        self._saved_source = None
+        self._saved_path = None
+        self._refresh_document_state()
         self.summary.setText(
             "Sweep restored from public THATEC labbook. Validate it against the current "
             "station profile before running."
@@ -1517,22 +1761,15 @@ class RecipePage(QWidget):
             self.edit_device_button,
             self.edit_generator_button, self.delete_node_button,
             self.duplicate_node_button, self.move_up_button, self.move_down_button,
+            self.wrap_repeat_button,
         ):
             button.setEnabled(True)
 
     def new_recipe(self, *, confirm: bool = True) -> None:
         """Start an empty, valid plan without touching the currently saved file."""
 
-        if confirm and self.editor.toPlainText().strip():
-            answer = QMessageBox.question(
-                self,
-                "New sweep",
-                "Start a new empty sweep? Unsaved changes in the editor will be replaced.",
-                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.Cancel,
-                QMessageBox.StandardButton.Cancel,
-            )
-            if answer != QMessageBox.StandardButton.Yes:
-                return
+        if confirm and not self._confirm_discard_unsaved("Starting a new sweep"):
+            return
         self._leave_historical_sweep_mode()
         source = (
             "schema_version: 1\n"
@@ -1545,9 +1782,12 @@ class RecipePage(QWidget):
         )
         self.path.setText(str(Path("recipes") / "untitled_sweep.yml"))
         self._apply_builder_source(source, "Created a new empty sweep")
+        self._saved_source = None
+        self._saved_path = None
         self._tree_undo.clear()
         self._tree_redo.clear()
         self._update_tree_history_controls()
+        self._refresh_document_state()
         self.status.emit("New empty sweep ready")
 
     def browse_recipe(self) -> None:
@@ -1566,6 +1806,8 @@ class RecipePage(QWidget):
         )
         if not selected:
             return
+        if not self._confirm_discard_unsaved("Loading another recipe"):
+            return
         self.path.setText(str(Path(selected)))
         self.load_editor()
 
@@ -1580,7 +1822,7 @@ class RecipePage(QWidget):
             str(initial_location),
             "HDF5 results (*.h5 *.hdf5);;All files (*)",
         )
-        if selected:
+        if selected and self._confirm_discard_unsaved("Loading a result"):
             self.load_hdf5_result(Path(selected))
 
     def load_hdf5_result(
@@ -1598,17 +1840,31 @@ class RecipePage(QWidget):
             else:
                 self.summary.setText(f"HDF5 result could not be loaded: {exc}")
 
-    def save_recipe(self) -> None:
-        source = self.editor.toPlainText()
+    def save_recipe(self) -> bool:
+        if self._historical_sweep_active:
+            QMessageBox.information(
+                self,
+                "Recorded sweep",
+                "Historical results are read-only and cannot replace a recipe YAML file.",
+            )
+            return False
+        if not self.apply_yaml_to_tree():
+            return False
+        source = self._tree_source
         try:
             result = self._repository.save(self.path.text(), source)
         except Exception as exc:
             QMessageBox.warning(self, "Recipe", f"YAML was not saved: {exc}")
-            return
+            return False
+        self._saved_source = source
+        self._saved_path = self.path.text().strip()
+        self._autosave_timer.stop()
         self.restore_button.setEnabled(False)
         self._update_repository_state()
         suffix = f"; previous version: {result.backup_path}" if result.backup_path else ""
         self.status.emit(f"Recipe saved atomically: {result.path}{suffix}")
+        self._refresh_document_state()
+        return True
 
     def restore_autosave(self) -> None:
         try:
@@ -1621,19 +1877,16 @@ class RecipePage(QWidget):
         if source is None:
             self.restore_button.setEnabled(False)
             return
-        previous = self.editor.toPlainText()
         try:
             self._apply_builder_source(source, "Unsaved recipe recovery restored")
         except Exception as exc:
             # Recovery deliberately also preserves temporarily invalid YAML.
             # Keep the last valid tree visible, but make the source/restoration
             # state explicit and keep Run disabled until validation succeeds.
-            if source != previous:
-                self._tree_undo.append(previous)
-                self._tree_redo.clear()
             self._loading_source = True
             self.editor.setPlainText(source)
             self._loading_source = False
+            self._close_discard_confirmed = False
             self._plan = None
             self.run_button.setEnabled(False)
             self.plan_preflight_changed.emit(None)
@@ -1644,13 +1897,19 @@ class RecipePage(QWidget):
             self.status.emit("Invalid autosave source restored for manual repair")
             self._update_tree_history_controls()
             self.restore_button.setEnabled(False)
+            self._refresh_document_state()
             return
         self.restore_button.setEnabled(False)
+        self._refresh_document_state()
         self.status.emit("Unsaved recipe recovery restored into the editor")
 
     def _autosave(self) -> None:
         source = self.editor.toPlainText()
-        if not source.strip() or not self.path.text().strip():
+        if (
+            not self._is_document_dirty()
+            or not source.strip()
+            or not self.path.text().strip()
+        ):
             return
         try:
             recovery = self._repository.autosave(self.path.text(), source)
@@ -1678,8 +1937,10 @@ class RecipePage(QWidget):
     def compile_recipe(self) -> None:
         """Synchronous preflight API used by deterministic tests and automation."""
 
+        if not self.apply_yaml_to_tree():
+            return
         try:
-            recipe = parse_recipe_text(self.editor.toPlainText(), origin=self.path.text())
+            recipe = parse_recipe_text(self._tree_source, origin=self.path.text())
             outputs_forced_off = (
                 self.execution_mode.currentData() == "demo_outputs_off"
             )
@@ -1710,7 +1971,9 @@ class RecipePage(QWidget):
             self.compile_recipe_action.setText("Cancelling…")
             self.summary.setText("Cancelling recipe validation…")
             return
-        source = self.editor.toPlainText()
+        if not self.apply_yaml_to_tree():
+            return
+        source = self._tree_source
         self._plan = None
         self.run_button.setEnabled(False)
         self.plan_preflight_changed.emit(None)
@@ -1756,6 +2019,7 @@ class RecipePage(QWidget):
                 "Recipe changed during validation; the stale result was discarded. "
                 "Validate the current source again."
             )
+            self._refresh_document_state()
             self.status.emit("Stale recipe validation discarded")
             return
         if not isinstance(plan, ExecutionPlan) or not isinstance(
@@ -1776,19 +2040,22 @@ class RecipePage(QWidget):
             error=error,
         )
         self.summary.setText(f"Validation blocked: {error}")
+        self._refresh_document_state()
         QMessageBox.warning(self, "Recipe", error)
 
     def _preflight_cancelled(self) -> None:
         self.summary.setText("Recipe validation cancelled; Run remains disabled.")
+        self._refresh_document_state()
         self.status.emit("Recipe validation cancelled")
 
     def _preflight_finished(self) -> None:
         self.compile_recipe_action.setText("Validate & preview")
-        self.compile_recipe_action.setEnabled(True)
+        self.compile_recipe_action.setEnabled(not self._historical_sweep_active)
         self._preflight_thread = None
         self._preflight_worker = None
         self._preflight_source = None
         self._preflight_outputs_forced_off = None
+        self._refresh_document_state()
 
     def cancel_preflight(self, *, wait_ms: int = 3_000) -> bool:
         """Stop an in-flight validation before the owning window is destroyed."""
@@ -1800,7 +2067,20 @@ class RecipePage(QWidget):
         thread.quit()
         return thread.wait(wait_ms)
 
+    def confirm_close(self) -> bool:
+        """Return whether the workspace may close without losing recipe edits."""
+
+        if self._close_discard_confirmed or not self._is_document_dirty():
+            return True
+        self._close_discard_confirmed = self._confirm_discard_unsaved(
+            "Closing the application"
+        )
+        return self._close_discard_confirmed
+
     def closeEvent(self, event: QCloseEvent) -> None:
+        if not self.confirm_close():
+            event.ignore()
+            return
         if not self.cancel_preflight():
             event.ignore()
             return
@@ -1826,6 +2106,7 @@ class RecipePage(QWidget):
                 "Validation succeeded, but the operator tree could not be rendered. "
                 "Run remains disabled."
             )
+            self._refresh_document_state()
             QMessageBox.warning(
                 self,
                 "Recipe preview",
@@ -1834,6 +2115,7 @@ class RecipePage(QWidget):
             return
         self._plan = plan
         self.run_button.setEnabled(True)
+        self._refresh_document_state()
         self.summary.setText(
             f"Plan: {len(plan.actions)} actions • {plan.total_points} checkpoints • "
             f"{plan.total_spectra} spectra • hash {plan.sha256}\n"
@@ -1858,6 +2140,7 @@ class RecipePage(QWidget):
         plan: object | None,
         selected_id: str | None = None,
     ) -> None:
+        tokens = self._recipe_tokens()
         current = self.tree.currentItem()
         current_node = (
             current.data(0, Qt.ItemDataRole.UserRole)
@@ -1932,7 +2215,7 @@ class RecipePage(QWidget):
             else "Empty — select an OFF action from Safe shutdown"
         )
         cleanup = QTreeWidgetItem(["Finally — safe shutdown", cleanup_detail, "●"])
-        cleanup.setIcon(0, self._tree_badge_icon("Safety", "#455363", "OFF"))
+        cleanup.setIcon(0, self._tree_badge_icon("Safety", tokens.neutral, "OFF"))
         cleanup.setData(0, Qt.ItemDataRole.UserRole, None)
         cleanup.setData(
             0,
@@ -2015,6 +2298,7 @@ class RecipePage(QWidget):
     ) -> None:
         """Render device overrides as read-only operator controls below the module."""
 
+        tokens = self._recipe_tokens()
         device_module = str(node.data.get("device_module", ""))
         if device_module not in {"keithley", "anritsu", "anritsu_sg", "rigol"}:
             return
@@ -2046,7 +2330,7 @@ class RecipePage(QWidget):
                 link_font.setUnderline(True)
                 row.setFont(0, link_font)
                 row.setData(
-                    0, Qt.ItemDataRole.ForegroundRole, QBrush(QColor("#1769aa"))
+                    0, Qt.ItemDataRole.ForegroundRole, QBrush(QColor(tokens.accent))
                 )
             row.setIcon(0, self._tree_badge_icon("Operator control", color, badge))
             if metadata is None:
@@ -2091,7 +2375,7 @@ class RecipePage(QWidget):
             if mode != "sweep":
                 informational_row(
                     [label, f"Set to {value}", "SET"],
-                    color="#536577",
+                    color=tokens.neutral,
                     badge="=",
                 )
                 continue
@@ -2110,7 +2394,7 @@ class RecipePage(QWidget):
             if not isinstance(segments, list) or not segments or dimension is None:
                 informational_row(
                     [label, "Sweep range requires ROI definition", "ROI"],
-                    color="#c77800",
+                    color=tokens.caution,
                     badge="!",
                 )
                 continue
@@ -2130,13 +2414,13 @@ class RecipePage(QWidget):
             except Exception:
                 informational_row(
                     [label, "Invalid sweep range", "ERROR"],
-                    color="#b4233a",
+                    color=tokens.danger,
                     badge="!",
                 )
                 continue
             sweep_row = informational_row(
                 [label, sweep_detail, "SWEEP"],
-                color="#1769aa",
+                color=tokens.accent,
                 badge="S",
                 metadata={
                     "kind": "sweep_parameter",
@@ -2178,15 +2462,18 @@ class RecipePage(QWidget):
                         "stage_index": index - 1,
                     },
                 )
-                stage.setIcon(0, self._tree_badge_icon("ROI stage", "#6f8aa3", str(index)))
+                stage.setIcon(
+                    0,
+                    self._tree_badge_icon("ROI stage", tokens.focus, str(index)),
+                )
                 stage_link_font = stage.font(0)
                 stage_link_font.setUnderline(True)
                 stage.setFont(0, stage_link_font)
                 stage.setData(
-                    0, Qt.ItemDataRole.ForegroundRole, QBrush(QColor("#1769aa"))
+                    0, Qt.ItemDataRole.ForegroundRole, QBrush(QColor(tokens.accent))
                 )
-                stage.setForeground(1, QBrush(QColor("#647588")))
-                stage.setForeground(2, QBrush(QColor("#647588")))
+                stage.setForeground(1, QBrush(QColor(tokens.text_muted)))
+                stage.setForeground(2, QBrush(QColor(tokens.text_muted)))
                 stage.setToolTip(
                     0,
                     "Click to open this stage directly in the ROI editor.",
@@ -2200,7 +2487,7 @@ class RecipePage(QWidget):
                     f"Acquire {node.data.get('trace', 'TRAC1')} at each parent-loop point",
                     "ACQUIRE",
                 ],
-                color="#18844c",
+                color=tokens.success,
                 badge="A",
             )
 
@@ -2213,7 +2500,7 @@ class RecipePage(QWidget):
                     f"Switch {output_policy.upper()} when entering this node",
                     output_policy.upper(),
                 ],
-                color="#18844c" if is_on else "#536577",
+                color=tokens.success if is_on else tokens.neutral,
                 badge="ON" if is_on else "OFF",
             )
 
@@ -2246,6 +2533,7 @@ class RecipePage(QWidget):
     ) -> None:
         """Expose every native sweep interval as a direct, editable ROI row."""
 
+        tokens = self._recipe_tokens()
         if node.type != "sweep":
             return
         target = str(node.data.get("target", ""))
@@ -2308,23 +2596,27 @@ class RecipePage(QWidget):
                 },
             )
             row.setIcon(
-                0, self._tree_badge_icon("ROI stage", "#6f8aa3", str(index))
+                0, self._tree_badge_icon("ROI stage", tokens.focus, str(index))
             )
             link_font = row.font(0)
             link_font.setUnderline(True)
             row.setFont(0, link_font)
-            row.setData(0, Qt.ItemDataRole.ForegroundRole, QBrush(QColor("#1769aa")))
-            row.setForeground(1, QBrush(QColor("#647588")))
-            row.setForeground(2, QBrush(QColor("#647588")))
+            row.setData(
+                0,
+                Qt.ItemDataRole.ForegroundRole,
+                QBrush(QColor(tokens.accent)),
+            )
+            row.setForeground(1, QBrush(QColor(tokens.text_muted)))
+            row.setForeground(2, QBrush(QColor(tokens.text_muted)))
             row.setToolTip(0, "Click to edit this ROI without changing loop children.")
             parent.addChild(row)
 
-    @staticmethod
-    def _tree_status(node: RecipeNode, detail: str) -> tuple[str, str]:
+    def _tree_status(self, node: RecipeNode, detail: str) -> tuple[str, str]:
+        tokens = self._recipe_tokens()
         if node.data.get("disabled") is True:
-            return "DISABLED", "#6b7785"
+            return "DISABLED", tokens.text_muted
         if node.data.get("configuration_required"):
-            return "SETUP", "#c77800"
+            return "SETUP", tokens.caution
         if (
             node.data.get("operation") == "configure_selected_parameters"
             and (
@@ -2333,23 +2625,23 @@ class RecipePage(QWidget):
                 or not isinstance(node.data.get("configuration"), dict)
             )
         ):
-            return "PREVIEW", "#b4233a"
+            return "PREVIEW", tokens.danger
         if detail.startswith("Sweep axis"):
-            return "SWEEP", "#1769aa"
+            return "SWEEP", tokens.accent
         if detail.startswith("Fixed setting") or detail.startswith("Fixed configuration"):
-            return "FIXED", "#536577"
+            return "FIXED", tokens.neutral
         if node.type in {"wait", "repeat", "sequence", "comment"}:
-            return "FLOW", "#7253a6"
+            return "FLOW", tokens.focus
         if node.type.startswith(("set_", "ramp_", "enable_")):
-            return "SAFE", "#18844c"
+            return "SAFE", tokens.success
         if node.type in {
             "acquire_reference",
             "acquire_spectrum",
             "measure_moke_hall",
             "measure_lakeshore_field",
         }:
-            return "ACQUIRE", "#18844c"
-        return "READY", "#536577"
+            return "ACQUIRE", tokens.success
+        return "READY", tokens.neutral
 
     def _tree_presentation(
         self, node: RecipeNode, count: int, compiled: bool
@@ -2718,47 +3010,47 @@ class RecipePage(QWidget):
         return node.id, detail + (f" • {count} action(s)" if compiled else ""), icon
 
     def _tree_node_icon(self, node: RecipeNode, fallback: QStyle.StandardPixmap) -> QIcon:
+        tokens = self._recipe_tokens()
         target = str(node.data.get("target", ""))
         if (
             target.startswith("keithley.")
             or node.type.startswith("configure_keithley")
             or node.type in {"measure_keithley", "update_keithley_level"}
         ):
-            return self._tree_badge_icon("Keithley", "#d94343", "K")
+            return self._tree_badge_icon("Keithley", tokens.danger, "K")
         if (
             target.startswith("rigol.")
             or node.type.startswith("configure_rigol")
             or node.type.startswith("set_rigol")
             or node.type == "update_rigol_frequency"
         ):
-            return self._tree_badge_icon("Rigol", "#d7a50b", "R")
+            return self._tree_badge_icon("Rigol", tokens.caution, "R")
         if (
             target.startswith("anritsu.")
             or "anritsu" in node.type
             or node.type in {"acquire_reference", "acquire_spectrum"}
         ):
-            return self._tree_badge_icon("Anritsu", "#269c5a", "A")
+            return self._tree_badge_icon("Anritsu", tokens.success, "A")
         if node.type == "measure_moke_hall":
-            return self._tree_badge_icon("MOKE Box", "#2478a5", "M")
+            return self._tree_badge_icon("MOKE Box", tokens.accent, "M")
         if node.type == "measure_lakeshore_field":
-            return self._tree_badge_icon("Lake Shore", "#2478a5", "L")
+            return self._tree_badge_icon("Lake Shore", tokens.focus, "L")
         module = node.data.get("device_module")
         if module == "keithley":
-            return self._tree_badge_icon("Keithley", "#d94343", "K")
+            return self._tree_badge_icon("Keithley", tokens.danger, "K")
         if module == "rigol":
-            return self._tree_badge_icon("Rigol", "#d7a50b", "R")
+            return self._tree_badge_icon("Rigol", tokens.caution, "R")
         if module == "anritsu":
-            return self._tree_badge_icon("Anritsu", "#269c5a", "A")
+            return self._tree_badge_icon("Anritsu", tokens.success, "A")
         if node.type in {"wait", "repeat"}:
-            return self._tree_badge_icon("Timing", "#8a55d7", "T")
+            return self._tree_badge_icon("Timing", tokens.focus, "T")
         if node.type == "sequence":
-            return self._tree_badge_icon("Structure", "#3178d4", "≡")
+            return self._tree_badge_icon("Structure", tokens.accent, "≡")
         if node.type.startswith("set_") or node.type.startswith("ramp_"):
-            return self._tree_badge_icon("Safety", "#455363", "OFF")
+            return self._tree_badge_icon("Safety", tokens.neutral, "OFF")
         return self.style().standardIcon(fallback)
 
-    @staticmethod
-    def _tree_badge_icon(_name: str, color: str, text: str) -> QIcon:
+    def _tree_badge_icon(self, _name: str, color: str, text: str) -> QIcon:
         pixmap = QPixmap(24, 24)
         pixmap.fill(Qt.GlobalColor.transparent)
         painter = QPainter(pixmap)
@@ -2766,7 +3058,7 @@ class RecipePage(QWidget):
         painter.setBrush(QColor(color))
         painter.setPen(Qt.PenStyle.NoPen)
         painter.drawRoundedRect(1, 1, 22, 22, 5, 5)
-        painter.setPen(QColor("#ffffff"))
+        painter.setPen(QColor(self._recipe_tokens().on_emergency))
         font = painter.font()
         font.setBold(True)
         font.setPointSize(8 if len(text) == 1 else 5)
@@ -2780,18 +3072,37 @@ class RecipePage(QWidget):
         item: QTreeWidgetItem | None,
         _previous: QTreeWidgetItem | None,
     ) -> None:
+        editable_now = self._tree_editing_allowed()
         selected_node = (
             item.data(0, Qt.ItemDataRole.UserRole) if item is not None else None
         )
         movable = (
-            isinstance(selected_node, RecipeNode)
+            editable_now
+            and isinstance(selected_node, RecipeNode)
             and item is not None
             and item.parent() is not None
+        )
+        wrap_possible = bool(
+            editable_now
+            and item is not None
+            and not self._tree_item_is_in_finally(item)
+            and (
+                (
+                    isinstance(selected_node, RecipeNode)
+                    and (item.parent() is not None or bool(selected_node.children))
+                )
+                or (
+                    RecipeTreeWidget.structural_kind(item)
+                    == RecipeTreeWidget.else_container
+                    and RecipeTreeWidget._logical_child_count(item) > 0
+                )
+            )
         )
         self.delete_node_button.setEnabled(movable)
         self.duplicate_node_button.setEnabled(movable)
         self.move_up_button.setEnabled(movable)
         self.move_down_button.setEnabled(movable)
+        self.wrap_repeat_button.setEnabled(wrap_possible)
         if item is None:
             self.selection_context.setText("Select a block in the measurement tree")
             self.inspector.clear()
@@ -2814,10 +3125,10 @@ class RecipePage(QWidget):
             self.inspector_summary.setText(
                 f"<b>{stage_label}</b><br>{parameter_id} · direct ROI editor"
             )
-            self.open_editor_button.setEnabled(True)
+            self.open_editor_button.setEnabled(editable_now)
             self.open_editor_button.setText("Edit ROI")
             self.edit_device_button.setEnabled(False)
-            self.edit_generator_button.setEnabled(True)
+            self.edit_generator_button.setEnabled(editable_now)
             self.inspector.setPlainText(
                 f"Device node: {owner_id}\n"
                 f"Parameter: {parameter_id}\n"
@@ -2898,9 +3209,9 @@ class RecipePage(QWidget):
             if is_comment
             else "Action settings"
         )
-        self.open_editor_button.setEnabled(True)
-        self.edit_device_button.setEnabled(has_device_settings)
-        self.edit_generator_button.setEnabled(has_roi)
+        self.open_editor_button.setEnabled(editable_now)
+        self.edit_device_button.setEnabled(editable_now and has_device_settings)
+        self.edit_generator_button.setEnabled(editable_now and has_roi)
         actions = (
             tuple(action for action in self._plan.actions if action.node_id == node.id)
             if self._plan is not None
@@ -2932,6 +3243,8 @@ class RecipePage(QWidget):
     def _operator_row_clicked(
         self, item: QTreeWidgetItem, _column: int
     ) -> None:
+        if not self._tree_editing_allowed():
+            return
         metadata = item.data(0, self.operator_row_role)
         if (
             isinstance(metadata, dict)
@@ -2959,7 +3272,7 @@ class RecipePage(QWidget):
         )
         try:
             moved_source = move_recipe_node(
-                self.editor.toPlainText(),
+                self._builder_source(),
                 node_id=node_id,
                 destination_parent_id=destination_parent_id,
                 destination_branch=destination_branch,
@@ -3015,6 +3328,7 @@ class RecipePage(QWidget):
     def _builder_parent(self) -> tuple[str, str]:
         """Return the selected container, or the root as the safe default."""
 
+        self._builder_source()
         current = self.tree.currentItem()
         item = current
         while item is not None:
@@ -3076,15 +3390,24 @@ class RecipePage(QWidget):
         return f"{prefix}-{uuid4().hex[:8]}"
 
     def _update_tree_history_controls(self) -> None:
-        can_undo = bool(self._tree_undo)
-        can_redo = bool(self._tree_redo)
+        editable = self._tree_editing_allowed()
+        can_undo = editable and bool(self._tree_undo)
+        can_redo = editable and bool(self._tree_redo)
         self.undo_tree_action.setEnabled(can_undo)
         self.redo_tree_action.setEnabled(can_redo)
         self.undo_tree_action.setToolTip(
-            "Undo the last Tree Builder operation" if self._tree_undo else "No Tree Builder operation to undo"
+            "Undo the last recipe edit"
+            if can_undo
+            else "Apply the YAML draft first"
+            if self._yaml_draft_pending()
+            else "No recipe edit to undo"
         )
         self.redo_tree_action.setToolTip(
-            "Redo the last Tree Builder operation" if self._tree_redo else "No Tree Builder operation to redo"
+            "Redo the last recipe edit"
+            if can_redo
+            else "Apply the YAML draft first"
+            if self._yaml_draft_pending()
+            else "No recipe edit to redo"
         )
 
     def _restore_tree_history_source(self, source: str, status: str) -> None:
@@ -3092,6 +3415,8 @@ class RecipePage(QWidget):
         self._loading_source = True
         self.editor.setPlainText(source)
         self._loading_source = False
+        self._close_discard_confirmed = False
+        self._tree_source = source
         self._plan = None
         self.run_button.setEnabled(False)
         self.plan_preflight_changed.emit(None)
@@ -3099,11 +3424,12 @@ class RecipePage(QWidget):
         self.summary.setText("Recipe tree changed; compile it again before running.")
         self._autosave_timer.start()
         self.status.emit(status)
+        self._refresh_document_state()
 
     def undo_tree_edit(self) -> None:
         if not self._tree_undo:
             return
-        current = self.editor.toPlainText()
+        current = self._tree_source
         source = self._tree_undo.pop()
         self._tree_redo.append(current)
         self._restore_tree_history_source(source, "Tree Builder change undone")
@@ -3112,7 +3438,7 @@ class RecipePage(QWidget):
     def redo_tree_edit(self) -> None:
         if not self._tree_redo:
             return
-        current = self.editor.toPlainText()
+        current = self._tree_source
         source = self._tree_redo.pop()
         self._tree_undo.append(current)
         self._restore_tree_history_source(source, "Tree Builder change redone")
@@ -3126,7 +3452,7 @@ class RecipePage(QWidget):
         selected_node_id: str | None = None,
     ) -> None:
         self._leave_historical_sweep_mode()
-        previous = self.editor.toPlainText()
+        previous = self._tree_source
         previous_plan = self._plan
         try:
             recipe = parse_recipe_text(source, origin="tree-builder")
@@ -3158,17 +3484,27 @@ class RecipePage(QWidget):
                 error=str(exc),
             )
             raise
-        if source != previous:
-            self._tree_undo.append(previous)
+        if source != previous and previous:
+            try:
+                parse_recipe_text(previous, origin="recipe-edit-history")
+            except Exception:
+                # Historical/result projections and a failed initial load are
+                # not executable recipe snapshots and must never enter Undo.
+                pass
+            else:
+                self._tree_undo.append(previous)
             self._tree_redo.clear()
         self._loading_source = True
         self.editor.setPlainText(source)
         self._loading_source = False
+        self._close_discard_confirmed = False
+        self._tree_source = source
         self.run_button.setEnabled(False)
         self.plan_preflight_changed.emit(None)
         self.summary.setText("Recipe tree changed; compile it again before running.")
         self._autosave_timer.start()
         self.status.emit(status)
+        self._refresh_document_state()
         self._update_tree_history_controls()
 
     def _emit_tree_diagnostic(self, event: str, **context: object) -> None:
@@ -3187,6 +3523,11 @@ class RecipePage(QWidget):
         branch: str | None = None,
         insert_index: int | None = None,
     ) -> None:
+        if kind == "repeat":
+            raise ConfigurationError(
+                "An empty Repeat is not a valid recipe block. Select an existing "
+                "block or the recipe root and use Wrap in Repeat."
+            )
         if parent_id is None or branch is None:
             parent_id, branch = self._builder_parent()
         node_id = self._new_node_id(kind)
@@ -3199,18 +3540,6 @@ class RecipePage(QWidget):
                         "id": self._new_node_id("comment"),
                         "type": "comment",
                         "text": "Add actions to this sequence",
-                    }
-                ],
-            },
-            "repeat": {
-                "id": node_id,
-                "type": "repeat",
-                "count": 2,
-                "children": [
-                    {
-                        "id": self._new_node_id("comment"),
-                        "type": "comment",
-                        "text": "Add repeated actions here",
                     }
                 ],
             },
@@ -3294,7 +3623,7 @@ class RecipePage(QWidget):
                     "Finally accepts only ramp-to-zero and OUTPUT OFF safety actions."
                 )
             source = add_recipe_node(
-                self.editor.toPlainText(),
+                self._builder_source(),
                 parent_id=parent_id,
                 branch=branch,
                 index=insert_index,
@@ -3307,6 +3636,69 @@ class RecipePage(QWidget):
             )
         except Exception as exc:
             QMessageBox.warning(self, "Add recipe node", str(exc))
+
+    def _wrap_selected_in_repeat(self) -> None:
+        """Wrap one subtree, or every root child, without an empty draft node."""
+
+        try:
+            self._builder_source()
+            item = self.tree.currentItem()
+            if item is None:
+                raise ConfigurationError(
+                    "Select a block, or select the recipe root to repeat all root steps."
+                )
+            if self._tree_item_is_in_finally(item):
+                raise ConfigurationError(
+                    "Finally safety actions cannot be wrapped in Repeat."
+                )
+            node = item.data(0, Qt.ItemDataRole.UserRole)
+            if isinstance(node, RecipeNode):
+                if item.parent() is None:
+                    node_ids = tuple(child.id for child in node.children)
+                    selection_label = f"All {len(node_ids)} root step(s)"
+                else:
+                    node_ids = (node.id,)
+                    selection_label = f'The selected block "{item.text(0)}"'
+            elif RecipeTreeWidget.structural_kind(item) == RecipeTreeWidget.else_container:
+                owner_item = item.parent()
+                owner = (
+                    owner_item.data(0, Qt.ItemDataRole.UserRole)
+                    if owner_item is not None
+                    else None
+                )
+                if not isinstance(owner, RecipeNode):
+                    raise ConfigurationError("The selected Else branch is not editable.")
+                node_ids = tuple(child.id for child in owner.else_children)
+                selection_label = f"All {len(node_ids)} Else step(s)"
+            else:
+                raise ConfigurationError(
+                    "Select a recipe block or the recipe root before wrapping."
+                )
+            if not node_ids:
+                raise ConfigurationError(
+                    "The selected container is empty. Add a real action before creating Repeat."
+                )
+            dialog = RepeatCountDialog(
+                self,
+                selection_label=selection_label,
+                initial_count=4,
+            )
+            if dialog.exec() != QDialog.DialogCode.Accepted:
+                return
+            repeat_id = self._new_node_id("repeat")
+            source = wrap_recipe_nodes_in_repeat(
+                self._builder_source(),
+                node_ids=node_ids,
+                repeat_id=repeat_id,
+                count=dialog.count.value(),
+            )
+            self._apply_builder_source(
+                source,
+                f"Wrapped {len(node_ids)} recipe node(s) in Repeat",
+                selected_node_id=repeat_id,
+            )
+        except Exception as exc:
+            QMessageBox.warning(self, "Wrap in Repeat", str(exc))
 
     def _add_device_controls(self, device: str | None = None) -> None:
         try:
@@ -3332,7 +3724,10 @@ class RecipePage(QWidget):
                     keithley_options=dialog.keithley_options(),
                 )
                 source = add_recipe_node(
-                    self.editor.toPlainText(), parent_id=parent_id, branch=branch, node=node
+                    self._builder_source(),
+                    parent_id=parent_id,
+                    branch=branch,
+                    node=node,
                 )
                 self._apply_builder_source(source, "Added Keithley sweep node")
             except Exception as exc:
@@ -3347,7 +3742,7 @@ class RecipePage(QWidget):
             return
         definitions = picker.selected()
         operation = picker.operation_kind()
-        source = self.editor.toPlainText()
+        source = self._builder_source()
         added = 0
         for definition in definitions:
             dialog: QDialog
@@ -3377,6 +3772,8 @@ class RecipePage(QWidget):
     def _edit_selected_node(self) -> None:
         """Open the most specific editor while keeping device and ROI tasks separate."""
 
+        if not self._tree_editing_allowed():
+            return
         item = self.tree.currentItem()
         operator_row = (
             item.data(0, self.operator_row_role) if item is not None else None
@@ -3427,7 +3824,7 @@ class RecipePage(QWidget):
         replacement.update(dialog.node_fields())
         try:
             source = replace_recipe_node(
-                self.editor.toPlainText(), node_id=node.id, node=replacement
+                self._builder_source(), node_id=node.id, node=replacement
             )
             self._apply_builder_source(
                 source,
@@ -3702,7 +4099,7 @@ class RecipePage(QWidget):
             output_policy=str(node.data.get("output_policy", "unchanged")),
         )
         source = replace_recipe_node(
-            self.editor.toPlainText(), node_id=node.id, node=replacement
+            self._builder_source(), node_id=node.id, node=replacement
         )
         self._apply_builder_source(
             source, f"Updated ROI for {parameter_id} in {node.id}"
@@ -3743,7 +4140,7 @@ class RecipePage(QWidget):
                 output_policy=dialog.selected_output_policy(),
             )
             source = replace_recipe_node(
-                self.editor.toPlainText(), node_id=node.id, node=replacement
+                self._builder_source(), node_id=node.id, node=replacement
             )
             self._apply_builder_source(source, f"Configured {replacement['label']}")
         except Exception as exc:
@@ -3793,7 +4190,7 @@ class RecipePage(QWidget):
                 trace=dialog.trace.currentText(),
             )
             source = replace_recipe_node(
-                self.editor.toPlainText(), node_id=node.id, node=replacement
+                self._builder_source(), node_id=node.id, node=replacement
             )
             self._apply_builder_source(source, "Configured Anritsu spectrum module")
         except Exception as exc:
@@ -3830,7 +4227,7 @@ class RecipePage(QWidget):
                 parameter_actions=dialog.planned_parameter_actions(),
             )
             source = replace_recipe_node(
-                self.editor.toPlainText(), node_id=node.id, node=replacement
+                self._builder_source(), node_id=node.id, node=replacement
             )
             self._apply_builder_source(
                 source, "Configured Anritsu signal-generator module · RF OFF"
@@ -3877,7 +4274,7 @@ class RecipePage(QWidget):
                 output_policy=dialog.selected_output_policy(),
             )
             source = replace_recipe_node(
-                self.editor.toPlainText(), node_id=node.id, node=replacement
+                self._builder_source(), node_id=node.id, node=replacement
             )
             self._apply_builder_source(
                 source,
@@ -3971,7 +4368,7 @@ class RecipePage(QWidget):
                 output_policy=str(node.data.get("output_policy", "unchanged")),
             )
             source = replace_recipe_node(
-                self.editor.toPlainText(), node_id=node.id, node=replacement
+                self._builder_source(), node_id=node.id, node=replacement
             )
             self._apply_builder_source(
                 source, f"Updated Rigol ROI for {parameter_id}"
@@ -4038,7 +4435,7 @@ class RecipePage(QWidget):
                 }
             )
             source = replace_recipe_node(
-                self.editor.toPlainText(), node_id=node.id, node=replacement
+                self._builder_source(), node_id=node.id, node=replacement
             )
             self._apply_builder_source(
                 source, f"Updated Keithley settings {node.id}"
@@ -4107,7 +4504,7 @@ class RecipePage(QWidget):
                 else:
                     replacement.pop(key, None)
             source = replace_recipe_node(
-                self.editor.toPlainText(), node_id=node.id, node=replacement
+                self._builder_source(), node_id=node.id, node=replacement
             )
             self._apply_builder_source(
                 source, f"Updated Rigol settings {node.id}"
@@ -4176,7 +4573,7 @@ class RecipePage(QWidget):
                 }
             )
             source = replace_recipe_node(
-                self.editor.toPlainText(), node_id=node.id, node=replacement
+                self._builder_source(), node_id=node.id, node=replacement
             )
             self._apply_builder_source(
                 source, f"Updated Anritsu settings {node.id}"
@@ -4594,7 +4991,7 @@ class RecipePage(QWidget):
                 trace=str(node.data.get("trace", "TRAC1")),
             )
             source = replace_recipe_node(
-                self.editor.toPlainText(), node_id=node.id, node=replacement
+                self._builder_source(), node_id=node.id, node=replacement
             )
             self._apply_builder_source(
                 source, f"Updated Anritsu ROI for {parameter_id}"
@@ -4610,7 +5007,7 @@ class RecipePage(QWidget):
         replacement["text"] = dialog.comment_text()
         try:
             source = replace_recipe_node(
-                self.editor.toPlainText(), node_id=node.id, node=replacement
+                self._builder_source(), node_id=node.id, node=replacement
             )
             self._apply_builder_source(source, f"Updated comment {node.id}")
         except Exception as exc:
@@ -4632,7 +5029,7 @@ class RecipePage(QWidget):
         replacement.update(dialog.node_fields())
         try:
             source = replace_recipe_node(
-                self.editor.toPlainText(), node_id=node.id, node=replacement
+                self._builder_source(), node_id=node.id, node=replacement
             )
             self._apply_builder_source(
                 source, f"Updated Anritsu acquisition {node.id}"
@@ -4809,6 +5206,8 @@ class RecipePage(QWidget):
     def _open_node_editor(self, item: QTreeWidgetItem, _column: int) -> None:
         """Open the appropriate parameter window from a direct tree interaction."""
 
+        if not self._tree_editing_allowed():
+            return
         self.tree.setCurrentItem(item)
         operator_row = item.data(0, self.operator_row_role)
         if isinstance(operator_row, dict):
@@ -4837,7 +5236,7 @@ class RecipePage(QWidget):
         replacement["level"] = dialog.value.text().strip()
         try:
             source = replace_recipe_node(
-                self.editor.toPlainText(), node_id=node.id, node=replacement
+                self._builder_source(), node_id=node.id, node=replacement
             )
             self._apply_builder_source(source, f"Updated fixed Keithley setting {node.id}")
         except Exception as exc:
@@ -4864,6 +5263,11 @@ class RecipePage(QWidget):
             return action
 
         add_action("New empty sweep", self.new_recipe)
+        if not self._tree_editing_allowed():
+            if self._yaml_draft_pending() and not self._historical_sweep_active:
+                add_action("Apply YAML to tree", self.apply_yaml_to_tree)
+            menu.exec(self.tree.viewport().mapToGlobal(point))
+            return
         menu.addSeparator()
         add_action(
             "Add sequence / group",
@@ -4873,6 +5277,7 @@ class RecipePage(QWidget):
             "Add device control / point generator",
             lambda: self._add_device_controls(),
         )
+        add_action("Wrap in Repeat...", self._wrap_selected_in_repeat)
         menu.addSeparator()
         edit_device = add_action(
             "Device settings", self._edit_selected_device_settings
@@ -4905,7 +5310,7 @@ class RecipePage(QWidget):
             if selected is not None
             else None
         )
-        editable = isinstance(node, RecipeNode)
+        editable = self._tree_editing_allowed() and isinstance(node, RecipeNode)
         has_device_settings = bool(
             editable
             and (
@@ -5084,7 +5489,7 @@ class RecipePage(QWidget):
         )
         try:
             source = replace_recipe_node(
-                self.editor.toPlainText(), node_id=node.id, node=replacement
+                self._builder_source(), node_id=node.id, node=replacement
             )
             self._apply_builder_source(source, f"Updated point generator {node.id}")
         except Exception as exc:
@@ -5182,7 +5587,7 @@ class RecipePage(QWidget):
             QMessageBox.information(self, "Delete node", "Select a recipe node first.")
             return
         try:
-            source = delete_recipe_node(self.editor.toPlainText(), node_id=node.id)
+            source = delete_recipe_node(self._builder_source(), node_id=node.id)
             self._apply_builder_source(source, f"Deleted {node.id}")
         except Exception as exc:
             QMessageBox.warning(self, "Delete node", str(exc))
@@ -5211,7 +5616,7 @@ class RecipePage(QWidget):
             replacement.pop("disabled", None)
         try:
             source = replace_recipe_node(
-                self.editor.toPlainText(), node_id=node.id, node=replacement
+                self._builder_source(), node_id=node.id, node=replacement
             )
             self._apply_builder_source(
                 source,
@@ -5242,7 +5647,7 @@ class RecipePage(QWidget):
         copy_id = str(copy["id"])
         try:
             source = add_recipe_node(
-                self.editor.toPlainText(),
+                self._builder_source(),
                 parent_id=parent_id,
                 branch=branch,
                 index=RecipeTreeWidget._logical_index(
@@ -5322,3 +5727,4 @@ class RecipePage(QWidget):
             self.summary.setText(
                 "Execution mode changed; validate the recipe again before running."
             )
+        self._refresh_document_state()
