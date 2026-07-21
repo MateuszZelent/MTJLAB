@@ -290,7 +290,8 @@ devices:
               min: "100 nA"
               max: "1 mA"
             voltage_compliance:
-              min: "1 mV"
+              # Series 2601A/2602A documented hardware minimum is 10 mV.
+              min: "10 mV"
               max: "100 mV"
             measured_current_trip:
               min: "-1.1 mA"
@@ -339,7 +340,8 @@ devices:
               min: "100 uA"
               max: "10 mA"
             voltage_compliance:
-              min: "1 mV"
+              # Series 2601A/2602A documented hardware minimum is 10 mV.
+              min: "10 mV"
               max: "67 mV"
             measured_current_trip:
               min: "-0.5 mA"

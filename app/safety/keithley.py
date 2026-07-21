@@ -74,6 +74,12 @@ def validate_keithley_source(channel: KeithleyChannelSettings, request: Keithley
         raise SafetyViolation("The Keithley channel is disabled in the station profile.")
     if request.nplc < 0.001 or request.nplc > 25:
         raise SafetyViolation("NPLC must be in the range 0.001–25.")
+    # Series 2600A firmware stores NPLC with 0.001 PLC resolution. Reject
+    # values that the instrument would silently round so the UI, persisted
+    # configuration and hardware readback always describe the same setting.
+    nplc_milli = round(request.nplc * 1000)
+    if not math.isclose(request.nplc, nplc_milli / 1000, rel_tol=0.0, abs_tol=1e-12):
+        raise SafetyViolation("NPLC must use 0.001 PLC increments.")
     if request.settle_time_s < 0:
         raise SafetyViolation("Settling time cannot be negative.")
     if request.sense_mode not in {"2wire", "4wire"}:

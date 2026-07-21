@@ -3432,11 +3432,71 @@ class MainWindowTests(unittest.TestCase):
                 keithley.level.editingFinished.emit()
                 keithley.compliance.setText("60 mV")
                 keithley.compliance.editingFinished.emit()
+                before_save = SettingsRepository(path).load().raw["devices"][
+                    "keithley"
+                ]["safety"]["channels"]["B"]["defaults"]
+                self.assertEqual(before_save["source_current"], "1 mA")
+                QTest.qWait(2_600)
                 defaults = SettingsRepository(path).load().raw["devices"]["keithley"][
                     "safety"
                 ]["channels"]["B"]["defaults"]
                 self.assertEqual(defaults["source_current"], "2 mA")
                 self.assertEqual(defaults["voltage_compliance"], "60 mV")
+            finally:
+                window.close()
+                self.application.processEvents()
+
+    def test_keithley_settings_refresh_preserves_the_active_form_draft(self) -> None:
+        window = MainWindow(".config/settings.yml", simulation=True)
+        try:
+            keithley = window.keithley_page
+            keithley.mode.setCurrentText("current")
+            keithley.level.setText("3 mA")
+            keithley.compliance.setText("60 mV")
+            keithley._remember_source_values()
+
+            keithley.set_settings(window._settings)
+
+            self.assertEqual(keithley.level.text(), "3 mA")
+            self.assertEqual(keithley.compliance.text(), "60 mV")
+        finally:
+            window.close()
+            self.application.processEvents()
+
+    def test_keithley_background_save_does_not_block_the_gui_thread(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            path = Path(temporary) / "settings.yml"
+            write_engineer_settings(path)
+            window = MainWindow(
+                path, simulation=False, authenticated_username=TEST_ENGINEER
+            )
+            try:
+                from app.ui import settings_workers
+
+                original_save = settings_workers.persist_keithley_default_snapshots
+
+                def slow_save(*args: object, **kwargs: object) -> object:
+                    time.sleep(0.4)
+                    return original_save(*args, **kwargs)
+
+                gui_ticks: list[bool] = []
+                snapshots = dict(window.keithley_page._channel_form_snapshots)
+                with patch(
+                    "app.ui.settings_workers.persist_keithley_default_snapshots",
+                    side_effect=slow_save,
+                ):
+                    started = time.perf_counter()
+                    window._queue_keithley_assignment_save(snapshots)
+                    self.assertLess(time.perf_counter() - started, 0.2)
+                    QTimer.singleShot(20, lambda: gui_ticks.append(True))
+                    QTest.qWait(120)
+                    self.assertEqual(gui_ticks, [True])
+                    self.assertTrue(window._keithley_defaults_in_flight)
+                    for _attempt in range(30):
+                        if not window._keithley_defaults_in_flight:
+                            break
+                        QTest.qWait(100)
+                self.assertFalse(window._keithley_defaults_in_flight)
             finally:
                 window.close()
                 self.application.processEvents()

@@ -5,17 +5,33 @@ from __future__ import annotations
 from copy import deepcopy
 from dataclasses import dataclass
 from importlib.resources import files
+from functools import wraps
 import os
 from pathlib import Path
 import tempfile
+from threading import RLock
 import time
-from typing import Any
+from typing import Any, Callable
 
 from pydantic import ValidationError
 from ruamel.yaml import YAML
 
 from app.domain.errors import ConfigurationError
 from app.settings.models import StationSettings
+
+
+_SETTINGS_IO_LOCK = RLock()
+
+
+def _serialized_settings_io(method: Callable[..., Any]) -> Callable[..., Any]:
+    """Serialize settings transactions across GUI and background writers."""
+
+    @wraps(method)
+    def locked(*args: Any, **kwargs: Any) -> Any:
+        with _SETTINGS_IO_LOCK:
+            return method(*args, **kwargs)
+
+    return locked
 
 
 @dataclass(slots=True)
@@ -34,6 +50,7 @@ class SettingsRepository:
         self._yaml.preserve_quotes = True
         self._yaml.default_flow_style = False
 
+    @_serialized_settings_io
     def load(self) -> LoadedSettings:
         self.ensure_exists()
         if not self.path.is_file():
@@ -94,6 +111,7 @@ class SettingsRepository:
                 changed = cls._merge_missing_defaults(current, default) or changed
         return changed
 
+    @_serialized_settings_io
     def ensure_exists(self) -> bool:
         """Create an unverified local profile from the packaged template once."""
 
@@ -125,6 +143,7 @@ class SettingsRepository:
 
         self.save_raw(settings.model_dump(mode="python"))
 
+    @_serialized_settings_io
     def save_raw(self, raw: dict[str, Any]) -> StationSettings:
         """Validate then atomically persist a UI-edited round-trip YAML document."""
 
@@ -136,6 +155,18 @@ class SettingsRepository:
             raise ConfigurationError(f"Invalid settings.yml:\n{exc}") from exc
         self._atomic_dump(payload)
         return settings
+
+    @_serialized_settings_io
+    def update_raw(
+        self,
+        transform: Callable[[dict[str, Any], StationSettings], dict[str, Any]],
+    ) -> tuple[StationSettings, dict[str, Any]]:
+        """Atomically load, transform, validate and save the latest document."""
+
+        loaded = self.load()
+        payload = transform(deepcopy(loaded.raw), loaded.settings)
+        persisted = self.save_raw(payload)
+        return persisted, payload
 
     @staticmethod
     def repair_known_issues(raw: dict[str, Any]) -> bool:

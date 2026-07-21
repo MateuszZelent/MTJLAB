@@ -536,6 +536,28 @@ class SettingsPage(QWidget):
         self._refresh_diagnostics()
         self.status.emit("settings.yml reloaded")
 
+    def accept_external_snapshot(
+        self, settings: StationSettings, raw: dict[str, Any]
+    ) -> None:
+        """Refresh a clean settings page after a background external save.
+
+        An open local draft keeps its widgets untouched.  ``save_draft`` merges
+        only locally changed leaves into the latest file, so that draft cannot
+        later overwrite the background update with stale values.
+        """
+
+        self._settings = settings
+        if self._dirty:
+            self.status.emit(
+                "External settings saved; the open local draft was preserved"
+            )
+            return
+        self._raw = deepcopy(raw)
+        self._persisted_raw = deepcopy(raw)
+        self._populate()
+        self._update_subtitle()
+        self._refresh_diagnostics()
+
     def _update_subtitle(self) -> None:
         if self._settings is None:
             return
@@ -1718,9 +1740,11 @@ class SettingsPage(QWidget):
         if not self._dirty:
             return True
         try:
-            draft = self._apply_tree_values()
-            repaired = self._repository.repair_known_issues(draft)
-            changed_paths = self._changed_leaf_paths(self._persisted_raw, draft)
+            local_draft = self._apply_tree_values()
+            local_changed_paths = self._changed_leaf_paths(
+                self._persisted_raw, local_draft
+            )
+            changed_paths = local_changed_paths
             general_edit_allowed = self._access.allows(Permission.EDIT_SETTINGS)
             operator_output_edit = (
                 bool(changed_paths)
@@ -1734,13 +1758,33 @@ class SettingsPage(QWidget):
                     action="saving station settings",
                 )
             if (
-                draft.get("access_control") != self._persisted_raw.get("access_control")
+                local_draft.get("access_control")
+                != self._persisted_raw.get("access_control")
                 and not self._access.allows(Permission.MANAGE_ROLES)
             ):
                 raise AuthorizationError(
                     "An engineer or service identity is required to change access-control settings."
                 )
-            settings = self._repository.save_raw(draft)
+            repair_result = [False]
+
+            def merge_latest(
+                latest: dict[str, Any], _settings: StationSettings
+            ) -> dict[str, Any]:
+                # A device page may have saved defaults in the background
+                # while this draft was open. Overlay only locally edited
+                # leaves onto the newest document under one repository lock.
+                draft = deepcopy(latest)
+                for path in local_changed_paths:
+                    self._set_path(
+                        draft,
+                        path,
+                        deepcopy(self._get_path(local_draft, path)),
+                    )
+                repair_result[0] = self._repository.repair_known_issues(draft)
+                return draft
+
+            settings, draft = self._repository.update_raw(merge_latest)
+            repaired = repair_result[0]
         except AuthorizationError as exc:
             if silent:
                 self.status.emit(f"Autosave rejected invalid settings: {exc}")

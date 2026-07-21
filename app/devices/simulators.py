@@ -376,6 +376,17 @@ class KeithleySimulator(_BaseSimulator):
         output = re.match(r"^print\((smu[ab])\.source\.output\)$", command)
         if output:
             return "1" if self.output[output.group(1)] else "0"
+        compliance = re.match(r"^print\((smu[ab])\.source\.compliance\)$", command)
+        if compliance:
+            smu = compliance.group(1)
+            if not self.output[smu]:
+                return "false"
+            resistance = self.resistance_ohm[smu]
+            if self.mode[smu] == "current":
+                active = abs(self.level[smu] * resistance) >= self.limit_voltage[smu]
+            else:
+                active = abs(self.level[smu] / resistance) >= self.limit_current[smu]
+            return "true" if active else "false"
         equality = re.match(
             r"^print\(((smu[ab]\.(?:(?:source|measure)\.[A-Za-z0-9_]+|sense))"
             r"\s*==\s*(smu[ab]\.[A-Z0-9_]+))\)$",

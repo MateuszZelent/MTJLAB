@@ -115,6 +115,22 @@ def build_keithley_ramp_levels(
 class KeithleyAdapter(DeviceAdapter):
     """Safe subset of TSP; raw Lua and dynamic namespace objects are never exposed."""
 
+    # Series 2601A/2602A nominal hardware ranges, Reference Manual Rev. E,
+    # section 2 "Available ranges". A range assignment is a requested maximum;
+    # reading rangeY returns the selected hardware range, not that request.
+    _MODEL_2602A_VOLTAGE_RANGES = (0.1, 1.0, 6.0, 40.0)
+    _MODEL_2602A_CURRENT_RANGES = (
+        100e-9,
+        1e-6,
+        10e-6,
+        100e-6,
+        1e-3,
+        10e-3,
+        100e-3,
+        1.0,
+        3.0,
+    )
+
     def __init__(self, station: StationSettings, *, session_factory: SessionFactory | None = None) -> None:
         super().__init__()
         self._station = station
@@ -234,10 +250,10 @@ class KeithleyAdapter(DeviceAdapter):
         }
         constant = constants[self._settings.safety.output_off_mode]
         session.write(f"{smu}.source.offmode = {smu}.{constant}")
-        confirmed = session.query(
+        response = session.query(
             f"print({smu}.source.offmode == {smu}.{constant})"
-        ).strip().upper()
-        if confirmed not in {"1", "TRUE"}:
+        )
+        if not self._parse_boolean_readback(f"{smu}.source.offmode", response):
             raise DeviceError(
                 f"Keithley did not confirm {smu}.source.offmode = {constant}."
             )
@@ -438,6 +454,7 @@ class KeithleyAdapter(DeviceAdapter):
             raise SafetyViolation("Keithley channel must be A or B.")
         channel = self._channel_settings(request.channel)
         validate_keithley_source(channel, request)
+        self._validate_model_hardware_request(request)
         smu = self._smu(request.channel)
         session = self._require_session()
         session.write(f"{smu}.source.output = {smu}.OUTPUT_OFF")
@@ -495,18 +512,43 @@ class KeithleyAdapter(DeviceAdapter):
                     f"{field} {actual:.12g} != {expected_value:.12g}"
                 )
 
+        def selected_range(
+            field: str, requested_value: float, available: tuple[float, ...]
+        ) -> None:
+            response = query(field)
+            try:
+                actual = float(response)
+            except ValueError as exc:
+                raise DeviceError(
+                    f"Keithley returned invalid numeric readback for {field}: "
+                    f"{response!r}."
+                ) from exc
+            expected_range = self._selected_hardware_range(requested_value, available)
+            if not math.isclose(actual, expected_range, rel_tol=1e-9, abs_tol=1e-12):
+                mismatches.append(
+                    f"{field} selected {actual:.12g}; expected hardware range "
+                    f"{expected_range:.12g} for request {requested_value:.12g}"
+                )
+
         def enum(field: str, expected_name: str, expected_numeric: int) -> None:
             response = query(field).upper()
             normalized = response.rsplit(".", 1)[-1]
-            accepted = {
-                expected_name,
-                str(expected_numeric),
-                f"{float(expected_numeric):g}",
-            }
-            if normalized not in accepted:
-                mismatches.append(
-                    f"{field} {response!r} != {expected_name}"
-                )
+            if normalized == expected_name:
+                return
+            try:
+                numeric_response = float(response)
+            except ValueError:
+                numeric_response = math.nan
+            if math.isfinite(numeric_response) and math.isclose(
+                numeric_response,
+                float(expected_numeric),
+                rel_tol=0.0,
+                abs_tol=1e-12,
+            ):
+                return
+            mismatches.append(
+                f"{field} {response!r} != {expected_name} ({expected_numeric})"
+            )
 
         if self._output_is_enabled(expected.channel):
             mismatches.append(f"{smu}.source.output is ON after configuration")
@@ -527,12 +569,16 @@ class KeithleyAdapter(DeviceAdapter):
             1 if expected.measure_current_autorange else 0,
         )
         if expected.measure_voltage_range_si is not None:
-            numeric(
-                f"{smu}.measure.rangev", expected.measure_voltage_range_si
+            selected_range(
+                f"{smu}.measure.rangev",
+                expected.measure_voltage_range_si,
+                self._MODEL_2602A_VOLTAGE_RANGES,
             )
         if expected.measure_current_range_si is not None:
-            numeric(
-                f"{smu}.measure.rangei", expected.measure_current_range_si
+            selected_range(
+                f"{smu}.measure.rangei",
+                expected.measure_current_range_si,
+                self._MODEL_2602A_CURRENT_RANGES,
             )
         if expected.mode != "measure_only":
             suffix = "i" if expected.mode == "current" else "v"
@@ -554,14 +600,78 @@ class KeithleyAdapter(DeviceAdapter):
                 1 if expected.source_autorange else 0,
             )
             if expected.source_range_si is not None:
-                numeric(
-                    f"{smu}.source.range{suffix}", expected.source_range_si
+                selected_range(
+                    f"{smu}.source.range{suffix}",
+                    expected.source_range_si,
+                    self._MODEL_2602A_CURRENT_RANGES
+                    if expected.mode == "current"
+                    else self._MODEL_2602A_VOLTAGE_RANGES,
                 )
         if mismatches:
             raise DeviceError(
                 "Keithley configuration readback mismatch: "
                 + "; ".join(mismatches)
             )
+
+    @staticmethod
+    def _selected_hardware_range(
+        requested_value: float, available: tuple[float, ...]
+    ) -> float:
+        requested = abs(requested_value)
+        for hardware_range in available:
+            if requested <= hardware_range or math.isclose(
+                requested, hardware_range, rel_tol=1e-12, abs_tol=1e-15
+            ):
+                return hardware_range
+        raise SafetyViolation(
+            f"Requested range {requested_value:.12g} SI exceeds the documented "
+            f"2602A hardware maximum {available[-1]:.12g} SI."
+        )
+
+    def _validate_model_hardware_request(self, request: KeithleySourceRequest) -> None:
+        """Apply immutable 2602A limits independently of editable YAML limits."""
+
+        model = self._identity_or_raise().model.upper().replace(" ", "")
+        if "2602A" not in model:
+            raise SafetyViolation(
+                f"Keithley hardware limits are not qualified for model {model!r}."
+            )
+        for value, ranges in (
+            (request.measure_voltage_range_si, self._MODEL_2602A_VOLTAGE_RANGES),
+            (request.measure_current_range_si, self._MODEL_2602A_CURRENT_RANGES),
+        ):
+            if value is not None:
+                self._selected_hardware_range(value, ranges)
+        if request.mode == "measure_only":
+            return
+        if request.mode == "current":
+            if abs(request.level_si) > 3.0:
+                raise SafetyViolation("2602A source current must not exceed ±3 A.")
+            if not 0.01 <= request.compliance_si <= 40.0:
+                raise SafetyViolation(
+                    "2602A voltage compliance must be between 10 mV and 40 V."
+                )
+            if abs(request.level_si) > 1.0 and request.compliance_si > 6.0:
+                raise SafetyViolation(
+                    "2602A continuous I-source operation above 1 A is limited "
+                    "to 6 V compliance."
+                )
+            ranges = self._MODEL_2602A_CURRENT_RANGES
+        else:
+            if abs(request.level_si) > 40.0:
+                raise SafetyViolation("2602A source voltage must not exceed ±40 V.")
+            if not 10e-9 <= request.compliance_si <= 3.0:
+                raise SafetyViolation(
+                    "2602A current compliance must be between 10 nA and 3 A."
+                )
+            if abs(request.level_si) > 6.0 and request.compliance_si > 1.0:
+                raise SafetyViolation(
+                    "2602A continuous V-source operation above 6 V is limited "
+                    "to 1 A compliance."
+                )
+            ranges = self._MODEL_2602A_VOLTAGE_RANGES
+        if request.source_range_si is not None:
+            self._selected_hardware_range(request.source_range_si, ranges)
 
     def update_source_level(
         self,
@@ -589,20 +699,20 @@ class KeithleyAdapter(DeviceAdapter):
         suffix = "i" if mode == "current" else "v"
         session = self._require_session()
         output_before = self._output_is_enabled(channel)
-        session.write(f"{smu}.source.level{suffix} = {updated.level_si:.12g}")
-        self._check_errors()
         try:
-            actual = float(session.query(f"print({smu}.source.level{suffix})"))
-        except DeviceError:
+            session.write(f"{smu}.source.level{suffix} = {updated.level_si:.12g}")
+            self._check_errors()
+            actual = self._query_finite_float(f"{smu}.source.level{suffix}")
+            output_after = self._output_is_enabled(channel)
+        except Exception:
             self.emergency_off()
             if self._state is not DeviceState.UNKNOWN:
                 self._state = DeviceState.FAULT
             raise
-        except (TypeError, ValueError) as exc:
-            raise DeviceError("Keithley returned an invalid source-level readback.") from exc
-        output_after = self._output_is_enabled(channel)
         if output_after != output_before:
-            raise DeviceError("Keithley OUTPUT state changed during a source-level update.")
+            self._fail_measurement_output_invariant(
+                "Keithley OUTPUT state changed during a source-level update."
+            )
         if not math.isclose(actual, updated.level_si, rel_tol=1e-9, abs_tol=1e-12):
             raise DeviceError(
                 f"Keithley source-level readback {actual:.12g} does not match "
@@ -639,17 +749,18 @@ class KeithleyAdapter(DeviceAdapter):
         field = "limitv" if mode == "current" else "limiti"
         session = self._require_session()
         output_before = self._output_is_enabled(channel)
-        session.write(f"{smu}.source.{field} = {updated.compliance_si:.12g}")
-        self._check_errors()
         try:
-            actual = float(session.query(f"print({smu}.source.{field})"))
-        except (TypeError, ValueError) as exc:
-            raise DeviceError(
-                "Keithley returned an invalid compliance readback."
-            ) from exc
-        output_after = self._output_is_enabled(channel)
+            session.write(f"{smu}.source.{field} = {updated.compliance_si:.12g}")
+            self._check_errors()
+            actual = self._query_finite_float(f"{smu}.source.{field}")
+            output_after = self._output_is_enabled(channel)
+        except Exception:
+            self.emergency_off()
+            if self._state is not DeviceState.UNKNOWN:
+                self._state = DeviceState.FAULT
+            raise
         if output_after != output_before:
-            raise DeviceError(
+            self._fail_measurement_output_invariant(
                 "Keithley OUTPUT state changed during a compliance update."
             )
         if not math.isclose(
@@ -768,11 +879,15 @@ class KeithleyAdapter(DeviceAdapter):
                 raise SafetyViolation("Configure a safe Keithley source before enabling OUTPUT.")
             validate_keithley_source(settings, request)
         smu = self._smu(channel)
-        self._require_session().write(
-            f"{smu}.source.output = {smu}.OUTPUT_ON" if enabled else f"{smu}.source.output = {smu}.OUTPUT_OFF"
-        )
-        self._check_errors()
-        active = self._output_is_enabled(channel)
+        try:
+            self._require_session().write(
+                f"{smu}.source.output = {smu}.OUTPUT_ON" if enabled else f"{smu}.source.output = {smu}.OUTPUT_OFF"
+            )
+            self._check_errors()
+            active = self._output_is_enabled(channel)
+        except Exception:
+            self.emergency_off()
+            raise
         if active != enabled:
             if enabled:
                 self.emergency_off()
@@ -814,7 +929,16 @@ class KeithleyAdapter(DeviceAdapter):
                 "Keithley measurement changed an OUTPUT state unexpectedly."
             )
         request = self._last_request.get(channel)
-        compliance_detected = self._at_compliance_limit(request, voltage=voltage, current=current)
+        try:
+            hardware_compliance = self._query_boolean(f"{smu}.source.compliance")
+        except Exception:
+            self.emergency_off()
+            if self._state is not DeviceState.UNKNOWN:
+                self._state = DeviceState.FAULT
+            raise
+        compliance_detected = hardware_compliance or self._at_compliance_limit(
+            request, voltage=voltage, current=current
+        )
         stop_required = compliance_detected and self._settings.safety.stop_on_compliance
         if stop_required:
             self.emergency_off()
@@ -833,7 +957,13 @@ class KeithleyAdapter(DeviceAdapter):
             if self._state is not DeviceState.UNKNOWN:
                 self._state = DeviceState.FAULT
             raise
-        self._check_errors()
+        try:
+            self._check_errors()
+        except Exception:
+            self.emergency_off()
+            if self._state is not DeviceState.UNKNOWN:
+                self._state = DeviceState.FAULT
+            raise
         return KeithleyMeasurement(
             channel,
             voltage,
@@ -884,20 +1014,19 @@ class KeithleyAdapter(DeviceAdapter):
         )
         level = request.level_si
         started = time.monotonic()
-        smu = self._smu(channel)
-        session = self._require_session()
-        while abs(level) > step:
-            if time.monotonic() - started > deadline_s:
-                self.emergency_off()
-                raise DeviceError("Keithley ramp-to-zero timed out.")
-            level -= step if level > 0 else -step
-            field = "leveli" if request.mode == "current" else "levelv"
-            session.write(f"{smu}.source.{field} = {level:.12g}")
-            if request.settle_time_s:
-                time.sleep(request.settle_time_s)
-        field = "leveli" if request.mode == "current" else "levelv"
-        session.write(f"{smu}.source.{field} = 0")
-        self.set_output(channel, False)
+        try:
+            while abs(level) > step:
+                if time.monotonic() - started > deadline_s:
+                    raise DeviceError("Keithley ramp-to-zero timed out.")
+                level -= step if level > 0 else -step
+                self.update_source_level(channel, mode=request.mode, level_si=level)
+                if request.settle_time_s:
+                    time.sleep(request.settle_time_s)
+            self.update_source_level(channel, mode=request.mode, level_si=0.0)
+            self.set_output(channel, False)
+        except Exception:
+            self.emergency_off()
+            raise
 
     def ramp_to_level(self, request: KeithleyRampRequest) -> KeithleyRampResult:
         """Ramp an already active source without ever enabling an output.
@@ -986,8 +1115,9 @@ class KeithleyAdapter(DeviceAdapter):
                     raise DeviceError("Keithley manual ramp exceeded its deadline.")
                 step_request = replace(current_request, level_si=level)
                 validate_keithley_source(channel_settings, step_request)
-                session.write(f"{smu}.source.{field} = {level:.12g}")
-                self._last_request[channel] = step_request
+                self.update_source_level(
+                    channel, mode=current_request.mode, level_si=level
+                )
                 if request.settle_time_s:
                     time.sleep(request.settle_time_s)
                 if time.monotonic() - started > request.deadline_s:

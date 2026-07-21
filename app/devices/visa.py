@@ -235,6 +235,9 @@ class FakeVisaSession:
                     if state:
                         return "1" if state.group(1) == "OUTPUT_ON" else "0"
                 return "0"
+            compliance = re.match(r"^print\((smu[ab])\.source\.compliance\)$", command)
+            if compliance:
+                return "0"
             keithley_readback = re.match(
                 r"^print\((smu[ab]\.(?:(?:source|measure)\.[A-Za-z0-9_]+|sense))\)$",
                 command,
@@ -247,7 +250,20 @@ class FakeVisaSession:
                 for write in reversed(self.writes[:-1]):
                     match = assignment.match(write)
                     if match:
-                        return match.group(1)
+                        assigned = match.group(1)
+                        range_match = re.search(r"\.range([vi])$", field)
+                        if range_match:
+                            try:
+                                requested = abs(float(assigned))
+                            except ValueError:
+                                return assigned
+                            ranges = (
+                                (0.1, 1.0, 6.0, 40.0)
+                                if range_match.group(1) == "v"
+                                else (100e-9, 1e-6, 10e-6, 100e-6, 1e-3, 10e-3, 100e-3, 1.0, 3.0)
+                            )
+                            return f"{next((item for item in ranges if requested <= item), ranges[-1]):.12g}"
+                        return assigned
             rigol_readback = re.match(
                 r"^:(OUTP\d+:LOAD|SOUR\d+:PHAS|"
                 r"SOUR\d+:FUNC:(?:SQU:DCYC|RAMP:SYMM|PULS:(?:WIDT|TRAN:LEAD|TRAN:TRA)))\?$",

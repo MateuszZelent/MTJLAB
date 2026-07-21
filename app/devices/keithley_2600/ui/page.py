@@ -1238,9 +1238,21 @@ class KeithleyPage(QWidget):
         ):
             editor.editingFinished.connect(self._persist_form_defaults)
         self.sense_mode.currentIndexChanged.connect(self._persist_form_defaults)
-        self.source_autorange.toggled.connect(self._persist_form_defaults)
-        self.measure_voltage_autorange.toggled.connect(self._persist_form_defaults)
-        self.measure_current_autorange.toggled.connect(self._persist_form_defaults)
+        self.source_autorange.toggled.connect(
+            lambda enabled: self._autorange_changed(
+                enabled, self.source_range, "source range"
+            )
+        )
+        self.measure_voltage_autorange.toggled.connect(
+            lambda enabled: self._autorange_changed(
+                enabled, self.measure_voltage_range, "voltage measurement range"
+            )
+        )
+        self.measure_current_autorange.toggled.connect(
+            lambda enabled: self._autorange_changed(
+                enabled, self.measure_current_range, "current measurement range"
+            )
+        )
         self._selected_channel_changed(self.channel.currentText())
         self._update_source_mode_ui()
         self._update_output_readiness()
@@ -2162,6 +2174,22 @@ class KeithleyPage(QWidget):
         self._remember_source_values()
         self.settings_defaults_requested.emit(dict(self._channel_form_snapshots))
 
+    def _autorange_changed(
+        self, enabled: bool, range_editor: QLineEdit, label: str
+    ) -> None:
+        if self._loading_form_snapshot:
+            return
+        if enabled:
+            range_editor.setText("AUTO")
+            self._persist_form_defaults()
+            return
+        self.banner.show_message(
+            f"Autorange disabled: enter an explicit {label} with a unit. "
+            "The change will be saved after the range is valid.",
+            timeout_ms=8_000,
+        )
+        range_editor.setFocus()
+
     def _update_source_mode_ui(self) -> None:
         mode = self.mode.currentText()
         source_visible = mode != "measure_only"
@@ -2335,19 +2363,23 @@ class KeithleyPage(QWidget):
             field.validate_and_clamp()
 
     def set_settings(self, settings: StationSettings) -> None:
+        # Settings can be refreshed after an unrelated autosave.  The manual
+        # form is an active user draft and must not be replaced by persisted
+        # defaults unless the page is being constructed or the user explicitly
+        # imports device values.
+        self._remember_source_values()
+        snapshots = dict(self._channel_form_snapshots)
+        active_channel = self.channel.currentText()
         self._station_settings = settings
         self.configuration_panel.set_settings(settings)
         self.max_abs_power.setText(
             settings.keithley.safety.channels[
-                self.channel.currentText()
+                active_channel
             ].lab_limits.max_abs_power
         )
-        self._channel_form_snapshots = {
-            channel: self._default_form_snapshot(channel) for channel in ("A", "B")
-        }
-        self._load_form_snapshot(
-            self._channel_form_snapshots[self.channel.currentText()]
-        )
+        self._channel_form_snapshots = snapshots
+        self._active_channel = active_channel
+        self._load_form_snapshot(self._channel_form_snapshots[active_channel])
         self._refresh_keithley_limits()
         self._update_output_readiness()
         self._update_ramp_defaults(reset_values=True)

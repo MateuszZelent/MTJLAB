@@ -3,10 +3,11 @@
 from __future__ import annotations
 
 from copy import deepcopy
+from dataclasses import asdict, is_dataclass
 from pathlib import Path
 from typing import Any
 
-from PySide6.QtCore import QSettings, QTimer, Qt, Signal
+from PySide6.QtCore import QSettings, QThread, QTimer, Qt, Signal
 from PySide6.QtGui import (
     QAction,
     QActionGroup,
@@ -59,7 +60,10 @@ from app.devices.anritsu_ms2830a import (
     AdvancedSpectrumSnapshot,
     AnritsuConfigurationSnapshot,
 )
-from app.devices.keithley_2600 import KeithleySourceRequest
+from app.devices.keithley_2600.settings_defaults import (
+    persist_keithley_default_snapshots,
+    validate_keithley_default_snapshots,
+)
 from app.devices.simulators import simulated_station_settings
 from app.engine.compiler import RecipeCompiler
 from app.engine.estimation import PlanEstimator
@@ -70,9 +74,9 @@ from app.recipes import (
 from app.settings import SettingsRepository
 from app.settings.models import StationSettings
 from app.security import AccessPolicy, Permission
-from app.safety.keithley import validate_keithley_source
 from app.storage import Hdf5RunReader
 from app.ui.settings_page import SettingsPage
+from app.ui.settings_workers import KeithleyDefaultsSaveWorker
 from app.ui.run_worker import RunController, serialize_settings_snapshot
 from app.ui.dashboard import DashboardPage, DeviceConnectionPanel
 from app.ui.execution import RunMonitorPage
@@ -93,6 +97,7 @@ class MainWindow(FluentWindow):
     """Local Qt client with manual control, live spectrum and safe settings."""
 
     theme_changed = Signal(str)
+    _keithley_defaults_write_requested = Signal(int, object)
 
     def __init__(
         self,
@@ -106,6 +111,36 @@ class MainWindow(FluentWindow):
         self._simulation = simulation
         persisted = self._repository.load().settings
         self._settings = simulated_station_settings(persisted) if simulation else persisted
+        self._keithley_defaults_generation = 0
+        self._keithley_defaults_in_flight = False
+        self._pending_keithley_defaults: tuple[int, dict[str, dict[str, Any]]] | None = None
+        self._keithley_defaults_timer = QTimer(self)
+        self._keithley_defaults_timer.setSingleShot(True)
+        self._keithley_defaults_timer.setInterval(2_000)
+        self._keithley_defaults_timer.timeout.connect(
+            self._start_keithley_defaults_save
+        )
+        self._keithley_defaults_thread = QThread(self)
+        self._keithley_defaults_worker = KeithleyDefaultsSaveWorker(
+            self._repository.path
+        )
+        self._keithley_defaults_worker.moveToThread(
+            self._keithley_defaults_thread
+        )
+        self._keithley_defaults_write_requested.connect(
+            self._keithley_defaults_worker.save,
+            Qt.ConnectionType.QueuedConnection,
+        )
+        self._keithley_defaults_worker.succeeded.connect(
+            self._keithley_defaults_saved
+        )
+        self._keithley_defaults_worker.failed.connect(
+            self._keithley_defaults_save_failed
+        )
+        self._keithley_defaults_thread.finished.connect(
+            self._keithley_defaults_worker.deleteLater
+        )
+        self._keithley_defaults_thread.start()
         self._pending_limit_rollbacks: dict[str, StationSettings] = {}
         self._access = AccessPolicy.from_settings(
             persisted,
@@ -486,10 +521,10 @@ class MainWindow(FluentWindow):
             self._save_anritsu_readback_defaults
         )
         self.keithley_page.settings_assignment_requested.connect(
-            self._save_keithley_readback_defaults
+            self._queue_keithley_assignment_save
         )
         self.keithley_page.settings_defaults_requested.connect(
-            self._save_keithley_readback_defaults
+            self._queue_keithley_defaults_autosave
         )
         self.recipe_page.run_requested.connect(self._start_run)
         self.recipe_page.plan_preflight_changed.connect(self.dashboard.update_plan_preflight)
@@ -1466,114 +1501,42 @@ class MainWindow(FluentWindow):
         )
         self._log("ANRITSU SETTINGS IMPORT SAVED: query-only readback persisted; adapter unchanged")
 
-    def _save_keithley_readback_defaults(self, snapshots: object) -> None:
-        """Validate and atomically persist query-only Keithley form assignments."""
-
+    @staticmethod
+    def _keithley_snapshot_payload(
+        snapshots: object,
+    ) -> dict[str, dict[str, Any]]:
         if not isinstance(snapshots, dict) or set(snapshots) != {"A", "B"}:
-            self.keithley_page.readback_assignment_completed(False)
-            self.keithley_page.banner.show_message(
-                "Keithley settings were not saved: incomplete A/B configuration."
-            )
-            return
+            raise ConfigurationError("Incomplete Keithley A/B form configuration.")
+        payload: dict[str, dict[str, Any]] = {}
+        for channel in ("A", "B"):
+            snapshot = snapshots[channel]
+            if is_dataclass(snapshot) and not isinstance(snapshot, type):
+                values = asdict(snapshot)
+            elif isinstance(snapshot, dict):
+                values = deepcopy(snapshot)
+            else:
+                raise ConfigurationError(
+                    f"Channel {channel}: invalid Keithley form snapshot."
+                )
+            payload[channel] = values
+        return payload
+
+    def _queue_keithley_defaults_autosave(self, snapshots: object) -> None:
+        self._queue_keithley_defaults_save(snapshots, assignment=False)
+
+    def _queue_keithley_assignment_save(self, snapshots: object) -> None:
+        self._queue_keithley_defaults_save(snapshots, assignment=True)
+
+    def _queue_keithley_defaults_save(
+        self, snapshots: object, *, assignment: bool
+    ) -> None:
         try:
             self._access.require(
                 Permission.EDIT_SETTINGS,
-                action="saving Keithley instrument readback to settings.yml",
+                action="saving Keithley defaults to settings.yml",
             )
-            loaded = self._repository.load()
-            raw = loaded.raw
-            for channel in ("A", "B"):
-                snapshot = snapshots[channel]
-                mode = str(snapshot.source_mode)
-                level_dimension = (
-                    DIMENSION_CURRENT if mode == "current" else DIMENSION_VOLTAGE
-                )
-                compliance_dimension = (
-                    DIMENSION_VOLTAGE if mode == "current" else DIMENSION_CURRENT
-                )
-
-                def manual_range(text: str, dimension: str, autorange: bool) -> float | None:
-                    if autorange:
-                        return None
-                    if text.strip().upper() == "AUTO":
-                        raise ValueError(
-                            f"Channel {channel}: manual range is AUTO while autorange is OFF."
-                        )
-                    return parse_quantity(text, dimension).si_value
-
-                request = KeithleySourceRequest(
-                    channel=channel,
-                    mode=mode,
-                    level_si=(
-                        0.0
-                        if mode == "measure_only"
-                        else parse_quantity(snapshot.source_level, level_dimension).si_value
-                    ),
-                    compliance_si=(
-                        0.0
-                        if mode == "measure_only"
-                        else parse_quantity(
-                            snapshot.compliance, compliance_dimension
-                        ).si_value
-                    ),
-                    nplc=float(str(snapshot.nplc).replace(",", ".")),
-                    settle_time_s=parse_quantity(
-                        snapshot.settling_time, DIMENSION_TIME
-                    ).si_value,
-                    sense_mode=snapshot.sense_mode,
-                    source_autorange=snapshot.source_autorange,
-                    source_range_si=manual_range(
-                        snapshot.source_range,
-                        level_dimension,
-                        snapshot.source_autorange,
-                    ),
-                    measure_voltage_autorange=snapshot.measure_voltage_autorange,
-                    measure_voltage_range_si=manual_range(
-                        snapshot.measure_voltage_range,
-                        DIMENSION_VOLTAGE,
-                        snapshot.measure_voltage_autorange,
-                    ),
-                    measure_current_autorange=snapshot.measure_current_autorange,
-                    measure_current_range_si=manual_range(
-                        snapshot.measure_current_range,
-                        DIMENSION_CURRENT,
-                        snapshot.measure_current_autorange,
-                    ),
-                )
-                try:
-                    validate_keithley_source(
-                        loaded.settings.keithley.safety.channels[channel], request
-                    )
-                except SafetyViolation as exc:
-                    raise SafetyViolation(
-                        f"Channel {channel}: {exc} To keep these device values, edit "
-                        f"Settings > Keithley > Channel {channel} safety limits first. "
-                        "No setting was saved."
-                    ) from exc
-                defaults = raw["devices"]["keithley"]["safety"]["channels"][
-                    channel
-                ]["defaults"]
-                defaults.update(
-                    {
-                        "source_mode": mode,
-                        "sense_mode": snapshot.sense_mode,
-                        "nplc": request.nplc,
-                        "settling_time": snapshot.settling_time,
-                        "source_autorange": snapshot.source_autorange,
-                        "source_range": snapshot.source_range,
-                        "measure_voltage_autorange": snapshot.measure_voltage_autorange,
-                        "measure_voltage_range": snapshot.measure_voltage_range,
-                        "measure_current_autorange": snapshot.measure_current_autorange,
-                        "measure_current_range": snapshot.measure_current_range,
-                    }
-                )
-                if mode == "current":
-                    defaults["source_current"] = snapshot.source_level
-                    defaults["voltage_compliance"] = snapshot.compliance
-                elif mode == "voltage":
-                    defaults["source_voltage"] = snapshot.source_level
-                    defaults["current_compliance"] = snapshot.compliance
-            persisted = self._repository.save_raw(raw)
+            payload = self._keithley_snapshot_payload(snapshots)
+            validate_keithley_default_snapshots(self._settings, payload)
         except (
             AuthorizationError,
             ConfigurationError,
@@ -1583,26 +1546,111 @@ class MainWindow(FluentWindow):
             ValueError,
         ) as exc:
             self.keithley_page.readback_assignment_completed(False)
-            self.keithley_page.set_settings(self._settings)
             QMessageBox.critical(self, "Keithley settings not saved", str(exc))
             self.keithley_page.banner.show_message(
-                f"Keithley readback was not saved: {exc}"
+                f"Keithley settings were not queued: {exc}"
             )
-            self._log(f"KEITHLEY SETTINGS IMPORT FAILED: {type(exc).__name__}: {exc}")
+            self._log(
+                f"KEITHLEY SETTINGS QUEUE FAILED: {type(exc).__name__}: {exc}"
+            )
             return
 
-        self._settings = simulated_station_settings(persisted) if self._simulation else persisted
-        self.keithley_page.readback_assignment_completed(True)
-        self.settings_page.reload()
-        self.keithley_page.set_settings(self._settings)
-        self.recipe_page.set_settings(self._settings)
-        self._refresh_safety_strip()
+        self._keithley_defaults_generation += 1
+        generation = self._keithley_defaults_generation
+        self._pending_keithley_defaults = (generation, payload)
+        if assignment:
+            self.keithley_page.readback_assignment_completed(True)
         self.keithley_page.banner.show_message(
-            "Keithley A/B defaults saved to settings.yml. Safety MIN/MAX, OUTPUT state, "
-            "and the live instrument were not changed.",
-            severity="success",
+            "Keithley defaults changed; background save pending…",
+            timeout_ms=3_000,
         )
-        self._log("KEITHLEY SETTINGS IMPORT SAVED: validated A/B defaults persisted")
+        self._keithley_defaults_timer.start(0 if assignment else 2_000)
+
+    def _start_keithley_defaults_save(self) -> None:
+        if self._keithley_defaults_in_flight:
+            return
+        pending = self._pending_keithley_defaults
+        if pending is None:
+            return
+        self._pending_keithley_defaults = None
+        self._keithley_defaults_in_flight = True
+        generation, payload = pending
+        self._keithley_defaults_write_requested.emit(generation, payload)
+        self._log(
+            f"KEITHLEY SETTINGS AUTOSAVE STARTED: generation {generation}"
+        )
+
+    def _keithley_defaults_saved(
+        self, generation: int, persisted: object, raw: object
+    ) -> None:
+        self._keithley_defaults_in_flight = False
+        if isinstance(persisted, StationSettings) and isinstance(raw, dict):
+            self._settings = (
+                simulated_station_settings(persisted)
+                if self._simulation
+                else persisted
+            )
+            self.settings_page.accept_external_snapshot(persisted, raw)
+            self.keithley_page.set_settings(self._settings)
+            self.recipe_page.set_settings(self._settings)
+            self.quick_control_coordinator.set_settings(self._settings)
+            self._refresh_safety_strip()
+        self.keithley_page.banner.show_message(
+            "Keithley defaults saved in the background. The live instrument and "
+            "OUTPUT state were not changed.",
+            severity="success",
+            timeout_ms=4_000,
+        )
+        self._log(
+            f"KEITHLEY SETTINGS AUTOSAVE COMPLETED: generation {generation}"
+        )
+        if self._pending_keithley_defaults is not None:
+            self._keithley_defaults_timer.start(0)
+
+    def _keithley_defaults_save_failed(self, generation: int, error: str) -> None:
+        self._keithley_defaults_in_flight = False
+        self.keithley_page.readback_assignment_completed(False)
+        QMessageBox.critical(self, "Keithley settings not saved", error)
+        self.keithley_page.banner.show_message(
+            f"Keithley background save failed: {error}"
+        )
+        self._log(
+            f"KEITHLEY SETTINGS AUTOSAVE FAILED: generation {generation}: {error}"
+        )
+        if self._pending_keithley_defaults is not None:
+            self._keithley_defaults_timer.start(0)
+
+    def _save_keithley_readback_defaults(self, snapshots: object) -> None:
+        """Synchronous compatibility entry point used by tests and shutdown."""
+
+        try:
+            self._access.require(
+                Permission.EDIT_SETTINGS,
+                action="saving Keithley defaults to settings.yml",
+            )
+            payload = self._keithley_snapshot_payload(snapshots)
+            persisted, raw = persist_keithley_default_snapshots(
+                self._repository.path, payload
+            )
+        except (
+            AuthorizationError,
+            ConfigurationError,
+            SafetyViolation,
+            KeyError,
+            TypeError,
+            ValueError,
+        ) as exc:
+            self.keithley_page.readback_assignment_completed(False)
+            QMessageBox.critical(self, "Keithley settings not saved", str(exc))
+            self.keithley_page.banner.show_message(
+                f"Keithley settings were not saved: {exc}"
+            )
+            self._log(
+                f"KEITHLEY SETTINGS IMPORT FAILED: {type(exc).__name__}: {exc}"
+            )
+            return
+        self._keithley_defaults_saved(0, persisted, raw)
+        self.keithley_page.readback_assignment_completed(True)
 
     def _save_discovered_assignments(self, payload: object) -> None:
         self._log(f"VISA ASSIGN RECEIVED: payload={payload!r}")
@@ -1958,6 +2006,21 @@ class MainWindow(FluentWindow):
             critical=True,
         )
         self._save_workspace()
+        self._keithley_defaults_timer.stop()
+        pending_keithley_defaults = self._pending_keithley_defaults
+        self._pending_keithley_defaults = None
+        self._keithley_defaults_thread.quit()
+        self._keithley_defaults_thread.wait(5_000)
+        if pending_keithley_defaults is not None:
+            _generation, payload = pending_keithley_defaults
+            try:
+                persist_keithley_default_snapshots(self._repository.path, payload)
+                self._log("KEITHLEY SETTINGS AUTOSAVE FLUSHED DURING SHUTDOWN")
+            except Exception as exc:
+                self._log(
+                    "KEITHLEY SETTINGS AUTOSAVE SHUTDOWN FLUSH FAILED: "
+                    f"{type(exc).__name__}: {exc}"
+                )
         self.recipe_page.cancel_preflight()
         self.quick_controls_window.close()
         self.quick_control_coordinator.cancel_all("Application closing")
