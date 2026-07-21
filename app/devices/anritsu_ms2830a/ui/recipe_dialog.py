@@ -114,10 +114,10 @@ class AnritsuNodeEditorDialog(FluentRecipeDialog):
         ):
             right_layout.addWidget(BodyLabel(label), row, 0)
             selector = ComboBox(self)
-            selector.addItem("Bez zmian", userData="unchanged")
-            selector.addItem("Ustaw", userData="set")
+            selector.addItem("Unchanged", userData="unchanged")
+            selector.addItem("Set", userData="set")
             if sweepable:
-                selector.addItem("Sweep — ROI wymagane", userData="sweep")
+                selector.addItem("Sweep — ROI required", userData="sweep")
             selector.currentIndexChanged.connect(self._selection_changed)
             self.parameter_selectors[parameter_id] = selector
             right_layout.addWidget(selector, row, 1)
@@ -133,7 +133,7 @@ class AnritsuNodeEditorDialog(FluentRecipeDialog):
         self.trace.setVisible(False)
         right_layout.addWidget(self.trace_label, operation_row + 1, 0)
         right_layout.addWidget(self.trace, operation_row + 1, 1)
-        self.open_roi_button = PrimaryPushButton("Przejdź do ROI…", self)
+        self.open_roi_button = PrimaryPushButton("Go to ROI…", self)
         self.open_roi_button.setEnabled(False)
         self.open_roi_button.clicked.connect(self._open_roi)
         right_layout.addWidget(
@@ -430,23 +430,23 @@ class AnritsuSignalGeneratorNodeEditorDialog(FluentRecipeDialog):
         ):
             field = self.frequency if parameter_id == "sg.frequency" else self.power
             selector = ComboBox(self)
-            selector.addItem("Bez zmian", userData="unchanged")
-            selector.addItem("Ustaw", userData="set")
-            selector.addItem("Sweep — ROI wymagane", userData="sweep")
+            selector.addItem("Unchanged", userData="unchanged")
+            selector.addItem("Set", userData="set")
+            selector.addItem("Sweep — ROI required", userData="sweep")
             selector.currentIndexChanged.connect(self._selection_changed)
             self.parameter_selectors[parameter_id] = selector
             form.addWidget(BodyLabel(label), row, 0)
             form.addWidget(field, row, 1)
             form.addWidget(selector, row, 2)
         layout.addLayout(form)
-        self.open_roi_button = PrimaryPushButton("Edytuj ROI…", self)
+        self.open_roi_button = PrimaryPushButton("Edit ROI…", self)
         self.open_roi_button.setEnabled(False)
         self.open_roi_button.clicked.connect(self._open_roi)
         layout.addWidget(self.open_roi_button)
         note = BodyLabel(
-            "Konfiguracja SG przy każdym punkcie pozostawia RF OFF. "
-            "Włączenie RF wymaga osobnych, jawnych kroków ARM i OUTPUT ON "
-            "wewnątrz pętli oraz przechodzi pełny preflight bezpieczeństwa."
+            "SG configuration at each point leaves RF OFF. Enabling RF requires "
+            "separate, explicit ARM and OUTPUT ON steps inside the loop and must "
+            "pass the complete safety preflight."
         )
         note.setObjectName("recipeHint")
         note.setWordWrap(True)

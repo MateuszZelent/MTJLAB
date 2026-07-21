@@ -369,6 +369,42 @@ class RecipeCompiler:
             for child in node.children:
                 self._visit(child, context, actions, is_finally=is_finally)
             return
+        if node.type in {"enable_rigol_output", "enable_anritsu_sg_output"}:
+            if is_finally:
+                raise SafetyViolation("An OUTPUT ON action is not allowed in finally.")
+            is_rigol = node.type == "enable_rigol_output"
+            channel: int | None = None
+            if is_rigol:
+                try:
+                    channel = int(node.data.get("channel", 0))
+                except (TypeError, ValueError) as exc:
+                    raise ConfigurationError(
+                        f"{node.id}: Rigol OUTPUT ON requires channel 1 or 2."
+                    ) from exc
+                if channel not in {1, 2}:
+                    raise ConfigurationError(
+                        f"{node.id}: Rigol OUTPUT ON requires channel 1 or 2."
+                    )
+            # Authoring exposes one deliberate OUTPUT ON block. The immutable
+            # execution plan retains the required one-shot interlock as two
+            # separately audited actions in exact ARM -> ON order.
+            device = "rigol" if is_rigol else "anritsu-sg"
+            arm_kind = "arm_rigol_output" if is_rigol else "arm_anritsu_sg_output"
+            output_kind = "set_rigol_output" if is_rigol else "set_anritsu_sg_output"
+            for suffix, kind in (("arm", arm_kind), ("output-on", output_kind)):
+                data: dict[str, Any] = {}
+                if channel is not None:
+                    data["channel"] = channel
+                if kind == output_kind:
+                    data["enabled"] = True
+                actions.append(
+                    self._compile_action(
+                        RecipeNode(f"{node.id}.{device}.{suffix}", kind, data),
+                        context,
+                        is_finally=False,
+                    )
+                )
+            return
         if node.type == "sweep":
             target = str(node.data["target"])
             try:

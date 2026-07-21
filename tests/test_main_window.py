@@ -1852,6 +1852,184 @@ class MainWindowTests(unittest.TestCase):
             window.close()
             self.application.processEvents()
 
+    def test_keithley_output_buttons_and_led_follow_confirmed_readback_state(self) -> None:
+        window = MainWindow(".config/settings.yml", simulation=True)
+        try:
+            keithley = window.keithley_page
+            keithley._device_state_changed("verified")
+
+            for channel in ("A", "B"):
+                card = keithley.channel_cards[channel]
+                self.assertEqual(card["led"].property("outputState"), "neutral")
+                self.assertEqual(card["output"].text(), "OUTPUT OFF")
+                self.assertEqual(
+                    card["output_on_action"].property("controlState"),
+                    "available",
+                )
+                self.assertFalse(card["output_on_action"].isChecked())
+                self.assertTrue(card["output_on_action"].isEnabled())
+                self.assertFalse(card["output_off_action"].isEnabled())
+
+            keithley._set_channel_output("A", True)
+            channel_a = keithley.channel_cards["A"]
+            channel_b = keithley.channel_cards["B"]
+            self.assertEqual(channel_a["led"].property("outputState"), "active")
+            self.assertEqual(channel_a["output"].text(), "OUTPUT ON")
+            self.assertEqual(
+                channel_a["output_on_action"].property("controlState"),
+                "energized",
+            )
+            self.assertTrue(channel_a["output_on_action"].isChecked())
+            self.assertTrue(channel_a["output_off_action"].isEnabled())
+            self.assertEqual(channel_b["led"].property("outputState"), "neutral")
+            self.assertFalse(channel_b["output_off_action"].isEnabled())
+
+            keithley._device_state_changed("disconnected")
+            for channel in ("A", "B"):
+                card = keithley.channel_cards[channel]
+                self.assertEqual(card["output"].text(), "OUTPUT UNKNOWN")
+                self.assertEqual(card["led"].property("outputState"), "neutral")
+                self.assertFalse(card["output_off_action"].isEnabled())
+        finally:
+            window.close()
+            self.application.processEvents()
+
+    def test_connection_buttons_distinguish_disconnected_and_connected_states(self) -> None:
+        window = MainWindow(".config/settings.yml", simulation=True)
+        try:
+            panel = window.connection_panels["keithley"]
+
+            panel.update_state("disconnected")
+            self.assertEqual(panel.connect_button.property("controlState"), "available")
+            self.assertTrue(panel.connect_button.isEnabled())
+            self.assertFalse(panel.disconnect_button.isEnabled())
+
+            panel.update_state("verified")
+            self.assertEqual(panel.connect_button.property("controlState"), "confirmed")
+            self.assertTrue(panel.connect_button.isEnabled())
+            self.assertTrue(panel.disconnect_button.isEnabled())
+            self.assertEqual(panel.state.property("deviceState"), "verified")
+
+            panel.set_connecting(True)
+            panel.update_state("output_off")
+            self.assertFalse(panel.connect_button.isEnabled())
+            self.assertFalse(panel.disconnect_button.isEnabled())
+            self.assertFalse(panel.test_button.isEnabled())
+            panel.set_connecting(False)
+            self.assertEqual(panel.state.text(), "OUTPUT OFF")
+            self.assertEqual(panel.connect_button.property("controlState"), "confirmed")
+            self.assertTrue(panel.disconnect_button.isEnabled())
+
+            panel.update_state("disconnected")
+            self.assertEqual(panel.connect_button.property("controlState"), "available")
+            self.assertFalse(panel.disconnect_button.isEnabled())
+        finally:
+            window.close()
+            self.application.processEvents()
+
+    def test_every_device_connection_panel_uses_the_same_confirmed_state_contract(self) -> None:
+        window = MainWindow(".config/settings.yml", simulation=True)
+        try:
+            self.assertGreaterEqual(len(window.connection_panels), 5)
+            for panel in window.connection_panels.values():
+                panel.update_state("disconnected")
+                self.assertEqual(
+                    panel.connect_button.property("controlState"), "available"
+                )
+                self.assertTrue(panel.connect_button.isEnabled())
+                self.assertFalse(panel.disconnect_button.isEnabled())
+
+                panel.update_state("verified")
+                self.assertEqual(
+                    panel.connect_button.property("controlState"), "confirmed"
+                )
+                self.assertTrue(panel.disconnect_button.isEnabled())
+        finally:
+            window.close()
+            self.application.processEvents()
+
+    def test_rigol_output_state_is_confirmed_and_independent_per_channel(self) -> None:
+        window = MainWindow(".config/settings.yml", simulation=True)
+        try:
+            rigol = window.rigol_page
+            rigol._controller.call = Mock()
+            rigol._device_state_changed("verified")
+
+            self.assertEqual(rigol.output_channel_state.text(), "CH1 OUTPUT OFF")
+            self.assertEqual(rigol.output_on.property("controlState"), "available")
+            self.assertTrue(rigol.output_on.isEnabled())
+            self.assertFalse(rigol.output_off.isEnabled())
+
+            rigol._pending_output_channel = 1
+            rigol._device_state_changed("output_on")
+            self.assertEqual(rigol.output_channel_state.text(), "CH1 OUTPUT UNKNOWN")
+            self.assertNotEqual(rigol.output_on.property("controlState"), "energized")
+            self.assertFalse(rigol.output_on.isChecked())
+            rigol._result("set_output", True)
+            self.assertEqual(rigol.output_channel_state.text(), "CH1 OUTPUT ON")
+            self.assertEqual(rigol.output_on.property("controlState"), "energized")
+            self.assertTrue(rigol.output_on.isChecked())
+            self.assertTrue(rigol.output_off.isEnabled())
+
+            rigol.channel.setCurrentText("2")
+            self.assertEqual(rigol.output_channel_state.text(), "CH2 OUTPUT OFF")
+            self.assertEqual(rigol.output_on.property("controlState"), "available")
+            self.assertFalse(rigol.output_on.isChecked())
+            self.assertFalse(rigol.output_off.isEnabled())
+
+            rigol.channel.setCurrentText("1")
+            self.assertEqual(rigol.output_channel_state.text(), "CH1 OUTPUT ON")
+            self.assertTrue(rigol.output_on.isChecked())
+
+            rigol._device_state_changed("unknown")
+            self.assertEqual(rigol.output_channel_state.text(), "CH1 OUTPUT UNKNOWN")
+            self.assertFalse(rigol.output_on.isEnabled())
+            self.assertTrue(rigol.output_off.isEnabled())
+        finally:
+            window.close()
+            self.application.processEvents()
+
+    def test_anritsu_rf_buttons_follow_confirmed_output_state(self) -> None:
+        window = MainWindow(".config/settings.yml", simulation=True)
+        try:
+            anritsu = window.anritsu_page
+            anritsu.set_capabilities(
+                DeviceCapabilities(
+                    device_name="anritsu",
+                    model="MS2830A",
+                    firmware="sim",
+                    features=frozenset({"spectrum_trace", "signal_generator"}),
+                    hardware_options=("020",),
+                )
+            )
+            anritsu._device_state_changed("verified")
+            self.assertEqual(anritsu.sg_status.text(), "●  RF OUTPUT OFF")
+            self.assertEqual(anritsu.sg_status.property("outputState"), "neutral")
+            self.assertFalse(anritsu.sg_on.isChecked())
+            self.assertFalse(anritsu.sg_off.isEnabled())
+
+            anritsu._set_sg_output_state(True)
+            anritsu._apply_page_state()
+            self.assertEqual(anritsu.sg_status.text(), "●  RF OUTPUT ON")
+            self.assertEqual(anritsu.sg_status.property("outputState"), "active")
+            self.assertEqual(anritsu.sg_on.property("controlState"), "energized")
+            self.assertTrue(anritsu.sg_on.isChecked())
+            self.assertTrue(anritsu.sg_on.isEnabled())
+            self.assertTrue(anritsu.sg_off.isEnabled())
+
+            anritsu._set_sg_output_state(None)
+            anritsu._apply_page_state()
+            self.assertIn("RF OUTPUT UNKNOWN", anritsu.sg_status.text())
+            self.assertFalse(anritsu.sg_on.isEnabled())
+            self.assertTrue(anritsu.sg_off.isEnabled())
+
+            anritsu._device_state_changed("disconnected")
+            self.assertFalse(anritsu.sg_on.isEnabled())
+            self.assertFalse(anritsu.sg_off.isEnabled())
+        finally:
+            window.close()
+            self.application.processEvents()
+
     def test_keithley_ui_rejects_five_volts_when_profile_allows_millivolts(self) -> None:
         window = MainWindow(".config/settings.yml", simulation=True)
         try:
@@ -1879,6 +2057,25 @@ class MainWindowTests(unittest.TestCase):
         try:
             keithley = window.keithley_page
             keithley._controller.call = Mock()
+            keithley._device_state_changed("verified")
+            channel = keithley._station_settings.keithley.safety.channels["B"]
+            channels = dict(keithley._station_settings.keithley.safety.channels)
+            channels["B"] = channel.model_copy(update={"enabled": False})
+            safety = keithley._station_settings.keithley.safety.model_copy(
+                update={"channels": channels}
+            )
+            keithley._station_settings = keithley._station_settings.model_copy(
+                update={
+                    "devices": keithley._station_settings.devices.model_copy(
+                        update={
+                            "keithley": keithley._station_settings.keithley.model_copy(
+                                update={"safety": safety}
+                            )
+                        }
+                    )
+                }
+            )
+            keithley._update_output_readiness()
             button = keithley.channel_cards["B"]["output_on_action"]
 
             self.assertTrue(button.isEnabled())
@@ -1888,7 +2085,7 @@ class MainWindowTests(unittest.TestCase):
             keithley._controller.call.assert_not_called()
             self.assertTrue(warning.called)
             message = warning.call_args.args[2]
-            self.assertIn("device connected and verified", message)
+            self.assertIn("channel B enabled", message)
             self.assertIn("No command was sent to Keithley", message)
         finally:
             window.close()

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 from typing import Any
 
 from PySide6.QtCore import QMimeData, Qt, Signal
@@ -27,6 +28,7 @@ from app.ui.recipes.sweep_editor import SweepGeneratorDialog
 from app.ui.recipes.fluent_dialog import FluentRecipeDialog
 
 __all__ = [
+    "ActionNodeEditorDialog",
     "AnritsuAcquisitionEditorDialog",
     "CommentEditorDialog",
     "FixedValueDialog",
@@ -34,6 +36,203 @@ __all__ = [
     "RecipeTreeWidget",
     "SweepLibraryButton",
 ]
+
+
+class ActionNodeEditorDialog(FluentRecipeDialog):
+    """Edit scalar fields of a non-device recipe action without raw YAML."""
+
+    _TIME_FIELDS = {"duration", "deadline", "sync_delay", "settle_time", "sweep_time"}
+    _FREQUENCY_FIELDS = {"frequency", "start_frequency", "stop_frequency", "rbw", "vbw"}
+
+    def __init__(
+        self,
+        node: RecipeNode,
+        parent: QWidget | None = None,
+        *,
+        in_finally: bool = False,
+    ) -> None:
+        super().__init__(parent)
+        self.setProperty("stationSurface", "page")
+        self._node = node
+        self._in_finally = in_finally
+        self._editors: dict[str, tuple[QWidget, str]] = {}
+        self.setWindowTitle(f"Action settings — {node.type.replace('_', ' ').title()}")
+        self.setMinimumSize(480, 280)
+        self.resize(620, 420)
+        layout = QVBoxLayout(self)
+        heading = StrongBodyLabel(node.type.replace("_", " ").title(), self)
+        heading.setObjectName("pageTitle")
+        layout.addWidget(heading)
+        note = BodyLabel(
+            "These values are stored in the recipe only. Hardware limits and output "
+            "interlocks are validated again during preflight and by the device adapter.",
+            self,
+        )
+        note.setObjectName("muted")
+        note.setWordWrap(True)
+        layout.addWidget(note)
+        form = QFormLayout()
+        form.setFieldGrowthPolicy(QFormLayout.FieldGrowthPolicy.ExpandingFieldsGrow)
+        for key, value in node.data.items():
+            if key == "disabled":
+                continue
+            editor, value_kind = self._editor_for(key, value)
+            if editor is None:
+                rendered = BodyLabel(json.dumps(value, ensure_ascii=False, default=str), self)
+                rendered.setWordWrap(True)
+                form.addRow(key.replace("_", " ").title(), rendered)
+                continue
+            self._editors[key] = (editor, value_kind)
+            form.addRow(self._field_label(key), editor)
+        if not self._editors:
+            empty = BodyLabel(
+                "This block has no configurable scalar parameters. Its behavior is "
+                "defined by its position and child actions.",
+                self,
+            )
+            empty.setObjectName("muted")
+            empty.setWordWrap(True)
+            form.addRow(empty)
+        layout.addLayout(form)
+        layout.addStretch(1)
+        footer = QHBoxLayout()
+        footer.addStretch(1)
+        self.cancel_button = PushButton("Cancel", self)
+        self.apply_button = PrimaryPushButton("Apply action settings", self)
+        footer.addWidget(self.cancel_button)
+        footer.addWidget(self.apply_button)
+        layout.addLayout(footer)
+        self.cancel_button.clicked.connect(self.reject)
+        self.apply_button.clicked.connect(self.accept)
+
+    @staticmethod
+    def _field_label(key: str) -> str:
+        return {
+            "enabled": "Output state",
+            "checkpoint": "Store as checkpoint",
+            "channel": "Channel",
+        }.get(key, key.replace("_", " ").title())
+
+    def _editor_for(self, key: str, value: object) -> tuple[QWidget | None, str]:
+        if key == "channel":
+            combo = ComboBox(self)
+            values: tuple[object, ...] = (
+                (1, 2)
+                if isinstance(value, int)
+                or "rigol" in self._node.type
+                else ("A", "B")
+            )
+            for choice in values:
+                combo.addItem(str(choice), userData=choice)
+            index = combo.findData(value)
+            combo.setCurrentIndex(index if index >= 0 else 0)
+            return combo, "choice"
+        if key == "enabled":
+            combo = ComboBox(self)
+            combo.addItem("OUTPUT OFF", userData=False)
+            if not self._in_finally:
+                combo.addItem("OUTPUT ON", userData=True)
+            index = combo.findData(bool(value))
+            combo.setCurrentIndex(index if index >= 0 else 0)
+            if self._in_finally:
+                combo.setEnabled(False)
+                combo.setToolTip("Finally actions may only switch outputs OFF.")
+            return combo, "choice"
+        mode_choices = (
+            ("NORM", "GAT")
+            if self._node.type == "configure_rigol_output"
+            else ("current", "voltage", "measure_only")
+        )
+        choices = {
+            "mode": mode_choices,
+            "sense_mode": ("2wire", "4wire"),
+            "device": ("rigol", "keithley", "anritsu"),
+            "operator": ("<", "<=", "==", "!=", ">=", ">"),
+            "trace": ("TRAC1",),
+            "polarity": ("NORM", "INV"),
+            "gate_polarity": ("NORM", "INV"),
+            "sync_polarity": ("NORM", "INV"),
+        }.get(key)
+        if choices is not None:
+            combo = ComboBox(self)
+            for choice in choices:
+                combo.addItem(choice, userData=choice)
+            index = combo.findData(str(value))
+            combo.setCurrentIndex(index if index >= 0 else 0)
+            return combo, "choice"
+        if isinstance(value, bool):
+            checkbox = CheckBox(self)
+            checkbox.setChecked(value)
+            return checkbox, "bool"
+        if isinstance(value, int):
+            spin = SpinBox(self)
+            spin.setRange(0, 100_000)
+            spin.setValue(value)
+            return spin, "int"
+        if isinstance(value, float):
+            line = LineEdit(self)
+            line.setText(f"{value:.12g}")
+            return line, "float"
+        if isinstance(value, str):
+            line = LineEdit(self)
+            line.setText(value)
+            return line, "str"
+        return None, "readonly"
+
+    def node_fields(self) -> dict[str, object]:
+        fields = dict(self._node.data)
+        for key, (editor, value_kind) in self._editors.items():
+            if value_kind == "choice":
+                assert isinstance(editor, ComboBox)
+                fields[key] = editor.currentData()
+            elif value_kind == "bool":
+                assert isinstance(editor, CheckBox)
+                fields[key] = editor.isChecked()
+            elif value_kind == "int":
+                assert isinstance(editor, SpinBox)
+                fields[key] = editor.value()
+            else:
+                assert isinstance(editor, LineEdit)
+                text = editor.text().strip()
+                fields[key] = float(text.replace(",", ".")) if value_kind == "float" else text
+        return fields
+
+    @staticmethod
+    def _literal(value: object) -> bool:
+        return not (isinstance(value, str) and value.startswith("${") and value.endswith("}"))
+
+    def _validate_fields(self, fields: dict[str, object]) -> None:
+        for key in self._TIME_FIELDS:
+            if key in fields and self._literal(fields[key]):
+                parse_quantity(fields[key], DIMENSION_TIME)
+        for key in self._FREQUENCY_FIELDS:
+            if key in fields and self._literal(fields[key]):
+                parse_quantity(fields[key], "frequency")
+        mode = str(fields.get("mode", ""))
+        if "level" in fields and mode in {"current", "voltage"} and self._literal(fields["level"]):
+            parse_quantity(
+                fields["level"],
+                DIMENSION_CURRENT if mode == "current" else DIMENSION_VOLTAGE,
+            )
+        if "compliance" in fields and mode in {"current", "voltage"} and self._literal(fields["compliance"]):
+            parse_quantity(
+                fields["compliance"],
+                DIMENSION_VOLTAGE if mode == "current" else DIMENSION_CURRENT,
+            )
+        for key in ("high_level", "low_level"):
+            if key in fields and self._literal(fields[key]):
+                parse_quantity(fields[key], DIMENSION_VOLTAGE)
+
+    def accept(self) -> None:
+        try:
+            fields = self.node_fields()
+            self._validate_fields(fields)
+            if self._in_finally and fields.get("enabled") is True:
+                raise ConfigurationError("Finally actions cannot enable outputs.")
+        except Exception as exc:
+            QMessageBox.warning(self, "Action settings", str(exc))
+            return
+        super().accept()
 
 
 class KeithleySweepBuilderDialog(SweepGeneratorDialog):

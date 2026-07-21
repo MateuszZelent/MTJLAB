@@ -679,6 +679,7 @@ class AnritsuPage(QWidget):
         self._reconnect_pending = False
         self._sg_supported = False
         self._sg_output_enabled = False
+        self._sg_output_known = False
         self._sg_armed = False
         self._timer = QTimer(self)
         self._timer.setInterval(500)
@@ -1150,6 +1151,7 @@ class AnritsuPage(QWidget):
         self.sg_status = BodyLabel("●  RF OUTPUT UNKNOWN")
         self.sg_status.setObjectName("anritsuSgIndicator")
         self.sg_status.setProperty("liveState", "off")
+        self.sg_status.setProperty("outputState", "neutral")
         grid.addWidget(self.sg_status, 0, 0, 1, 4)
         generator = self._station_settings.anritsu.signal_generator
         default_frequency = generator.frequency.min or "1 GHz"
@@ -1165,7 +1167,8 @@ class AnritsuPage(QWidget):
         self.sg_read = PushButton("Read current SG state")
         self.sg_configure = PrimaryPushButton("Configure while RF OFF")
         self.sg_arm = PushButton("ARM RF output")
-        self.sg_on = PrimaryPushButton("RF OUTPUT ON")
+        self.sg_on = PushButton("RF OUTPUT ON")
+        self.sg_on.setCheckable(True)
         self.sg_off = PushButton("RF OUTPUT OFF")
         self.sg_on.setObjectName("outputOnButton")
         self.sg_off.setObjectName("outputOffButton")
@@ -1434,18 +1437,34 @@ class AnritsuPage(QWidget):
     def _device_state_changed(self, state: str) -> None:
         if state == "disconnected":
             self._sg_armed = False
-            self._sg_output_enabled = False
+            self._set_sg_output_state(None)
             self._last_advanced_configuration = None
-            self.sg_status.setText("●  RF OUTPUT UNKNOWN")
-            self.sg_status.setProperty("liveState", "off")
             self._set_page_state(AnritsuPageState.DISCONNECTED)
         elif state in {"fault", "unknown"}:
+            self._set_sg_output_state(None)
             self._set_page_state(AnritsuPageState.ERROR)
+        elif state in {"verified", "output_off"}:
+            # Qualified connect and explicit aggregate OUTPUT OFF both prove
+            # the optional SG output is de-energised.
+            self._set_sg_output_state(False)
+            if self._page_state in {
+                AnritsuPageState.DISCONNECTED,
+                AnritsuPageState.ERROR,
+            }:
+                self._set_page_state(AnritsuPageState.IDLE)
+        elif state == "output_on":
+            self._set_sg_output_state(True)
+            if self._page_state in {
+                AnritsuPageState.DISCONNECTED,
+                AnritsuPageState.ERROR,
+            }:
+                self._set_page_state(AnritsuPageState.IDLE)
         elif self._page_state in {
             AnritsuPageState.DISCONNECTED,
             AnritsuPageState.ERROR,
         }:
             self._set_page_state(AnritsuPageState.IDLE)
+        self._apply_page_state()
 
     def _set_page_state(self, state: AnritsuPageState) -> None:
         self._page_state = state
@@ -1501,12 +1520,60 @@ class AnritsuPage(QWidget):
             connected
             and idle
             and self._sg_supported
-            and protocol_qualified
-            and self._sg_armed
-            and not self._sg_output_enabled
+            and (
+                self._sg_output_enabled
+                or (
+                    protocol_qualified
+                    and self._sg_armed
+                    and self._sg_output_known
+                )
+            )
         )
-        self.sg_off.setEnabled(connected and self._sg_supported)
+        self.sg_off.setEnabled(
+            connected
+            and self._sg_supported
+            and (self._sg_output_enabled or not self._sg_output_known)
+        )
+        self.sg_on.setChecked(self._sg_output_enabled and self._sg_output_known)
+        self.sg_on.setProperty(
+            "controlState",
+            "energized"
+            if self._sg_output_enabled and self._sg_output_known
+            else "available",
+        )
+        self.sg_on.setToolTip(
+            "RF OUTPUT is confirmed ON."
+            if self._sg_output_enabled and self._sg_output_known
+            else "Enable RF only after configuration, ARM and hardware readback."
+        )
+        self.sg_off.setToolTip(
+            "Disable RF OUTPUT and confirm hardware readback."
+            if self.sg_off.isEnabled()
+            else "RF OUTPUT is already confirmed OFF."
+        )
+        self.sg_on.style().unpolish(self.sg_on)
+        self.sg_on.style().polish(self.sg_on)
         self._update_advanced_availability()
+
+    def _set_sg_output_state(self, enabled: bool | None) -> None:
+        self._sg_output_known = enabled is not None
+        self._sg_output_enabled = bool(enabled) if enabled is not None else False
+        if enabled is True:
+            text = "●  RF OUTPUT ON"
+            state = "active"
+        elif enabled is False:
+            text = "●  RF OUTPUT OFF"
+            state = "neutral"
+        else:
+            text = "●  RF OUTPUT UNKNOWN — use RF OFF or E-STOP"
+            state = "neutral"
+        self.sg_status.setText(text)
+        self.sg_status.setProperty("outputState", state)
+        self.sg_status.setProperty(
+            "liveState", "on" if enabled is True else "off"
+        )
+        self.sg_status.style().unpolish(self.sg_status)
+        self.sg_status.style().polish(self.sg_status)
 
     def _update_signal_generator_limits(self) -> None:
         generator = self._station_settings.anritsu.signal_generator
@@ -1569,15 +1636,8 @@ class AnritsuPage(QWidget):
             format_quantity_auto(result.frequency_hz, DIMENSION_FREQUENCY)
         )
         self.sg_power.setText(f"{result.power_dbm:.9g} dBm")
-        self._sg_output_enabled = result.output_enabled
         self._sg_armed = False
-        state = "on" if result.output_enabled else "off"
-        self.sg_status.setText(
-            "●  RF OUTPUT ON" if result.output_enabled else "●  RF OUTPUT OFF"
-        )
-        self.sg_status.setProperty("liveState", state)
-        self.sg_status.style().unpolish(self.sg_status)
-        self.sg_status.style().polish(self.sg_status)
+        self._set_sg_output_state(result.output_enabled)
         self._apply_page_state()
 
     def signal_generator_snapshot(self) -> SignalGeneratorSnapshot:
@@ -2130,15 +2190,8 @@ class AnritsuPage(QWidget):
             self._apply_page_state()
             self.status.emit("Anritsu signal generator armed for one RF enable")
         elif operation == "set_signal_generator_output":
-            self._sg_output_enabled = bool(result)
             self._sg_armed = False
-            state = "on" if self._sg_output_enabled else "off"
-            self.sg_status.setText(
-                "●  RF OUTPUT ON" if self._sg_output_enabled else "●  RF OUTPUT OFF"
-            )
-            self.sg_status.setProperty("liveState", state)
-            self.sg_status.style().unpolish(self.sg_status)
-            self.sg_status.style().polish(self.sg_status)
+            self._set_sg_output_state(bool(result))
             self._apply_page_state()
             self.status.emit(
                 "Anritsu signal generator RF OUTPUT "
@@ -2779,8 +2832,7 @@ class AnritsuPage(QWidget):
         }:
             self._sg_armed = False
             if operation == "set_signal_generator_output":
-                self.sg_status.setText("●  RF OUTPUT UNKNOWN — use RF OFF or E-STOP")
-                self.sg_status.setProperty("liveState", "off")
+                self._set_sg_output_state(None)
             self._apply_page_state()
             self.banner.show_message(
                 f"Anritsu signal-generator operation {operation!r} failed: {error}",

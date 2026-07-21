@@ -879,6 +879,12 @@ root:
                 manual.configuration_panel.limit_values("level"),
                 dialog.configuration_panel.limit_values("level"),
             )
+            self.assertEqual(manual._panel_titles["channel_A"], "Channel A")
+            self.assertEqual(manual._panel_titles["plot_A"], "Plot for channel A")
+            self.assertEqual(
+                manual._panel_float_buttons["channel_A"].toolTip(),
+                "Open this panel in a separate floating window",
+            )
             self.assertFalse(dialog.findChild(type(manual.output_toggle), "outputOnButton"))
         finally:
             dialog.close()
@@ -1375,7 +1381,7 @@ root:
     def test_keithley_configuration_has_contextual_go_to_roi_button(self) -> None:
         dialog = KeithleyNodeEditorDialog(simulation_settings())
         try:
-            self.assertEqual(dialog.open_roi_button.text(), "Przejdź do ROI…")
+            self.assertEqual(dialog.open_roi_button.text(), "Go to ROI…")
             self.assertFalse(dialog.open_roi_button.isEnabled())
             source = dialog.parameter_selectors["source.level"]
             source.setCurrentIndex(source.findData("sweep"))
@@ -1392,6 +1398,55 @@ root:
             self.assertEqual(actions[0]["segments"][0]["points"], 3)
         finally:
             dialog.close()
+
+    def test_device_recipe_dialogs_use_english_actions_and_render_at_two_sizes(self) -> None:
+        keithley = KeithleyNodeEditorDialog(simulation_settings())
+        anritsu = AnritsuNodeEditorDialog(simulation_settings())
+        anritsu_sg = AnritsuSignalGeneratorNodeEditorDialog()
+        dialogs = (keithley, anritsu, anritsu_sg)
+        try:
+            for dialog in dialogs:
+                dialog.resize(1180, 760)
+                dialog.show()
+            self.application.processEvents()
+            for dialog in dialogs:
+                self.assertTrue(dialog.isVisible())
+                self.assertGreater(dialog.geometry().width(), 0)
+                self.assertGreater(dialog.geometry().height(), 0)
+
+            self.assertEqual(
+                keithley.parameter_selectors["source.level"].itemText(0),
+                "Unchanged",
+            )
+            self.assertEqual(
+                keithley.parameter_selectors["source.level"].itemText(1), "Set"
+            )
+            self.assertEqual(
+                keithley.parameter_selectors["source.level"].itemText(2),
+                "Sweep — ROI required",
+            )
+            self.assertEqual(keithley.output_policy.itemText(1), "OUTPUT ON at start")
+            self.assertEqual(keithley.open_roi_button.text(), "Go to ROI…")
+            self.assertEqual(
+                anritsu.parameter_selectors["spectrum.start_frequency"].itemText(0),
+                "Unchanged",
+            )
+            self.assertEqual(anritsu.open_roi_button.text(), "Go to ROI…")
+            self.assertEqual(
+                anritsu_sg.parameter_selectors["sg.frequency"].itemText(1), "Set"
+            )
+            self.assertEqual(anritsu_sg.open_roi_button.text(), "Edit ROI…")
+
+            for dialog in dialogs:
+                dialog.resize(720, 540)
+            self.application.processEvents()
+            for dialog in dialogs:
+                self.assertTrue(dialog.isVisible())
+                self.assertGreater(dialog.geometry().width(), 0)
+                self.assertGreater(dialog.geometry().height(), 0)
+        finally:
+            for dialog in dialogs:
+                dialog.close()
 
     def test_complete_keithley_roi_is_stored_and_summarized_as_sweep(self) -> None:
         page = RecipePage(simulation_settings())

@@ -68,6 +68,10 @@ class RigolPage(QWidget):
         self._station_settings = settings
         self._limit_fields: dict[QWidget, LimitField] = {}
         self._pending_output_enable = False
+        self._pending_output_channel: int | None = None
+        self._device_state_value = "disconnected"
+        self._output_states = {1: False, 2: False}
+        self._output_state_known = {1: False, 2: False}
         layout = QVBoxLayout(self)
         layout.setContentsMargins(18, 18, 18, 18)
         layout.setSpacing(14)
@@ -187,20 +191,25 @@ class RigolPage(QWidget):
         configure_output = PrimaryPushButton("Apply output path")
         self.sync_phases_button = PushButton("Synchronize CH1/CH2 phases")
         self.sync_phases_button.setEnabled(False)
-        self.output_on = PrimaryPushButton("OUTPUT ON")
+        self.output_on = PushButton("OUTPUT ON")
+        self.output_on.setCheckable(True)
         self.output_off = PushButton("OUTPUT OFF")
         self.output_on.setEnabled(False)
+        self.output_off.setEnabled(False)
         self.output_action_bar = CardWidget(self)
         self.output_action_bar.setObjectName("rigolOutputActionBar")
         output_action_layout = QHBoxLayout(self.output_action_bar)
         output_action_layout.setContentsMargins(12, 8, 12, 8)
         self.output_action_context = StrongBodyLabel("Physical output · CH1")
         self.output_action_context.setObjectName("sectionTitle")
+        self.output_channel_state = StrongBodyLabel("CH1 OUTPUT UNKNOWN")
+        self.output_channel_state.setProperty("outputState", "neutral")
         output_action_note = CaptionLabel(
             "OFF is always available. ON validates the visible waveform first."
         )
         output_action_note.setObjectName("muted")
         output_action_layout.addWidget(self.output_action_context)
+        output_action_layout.addWidget(self.output_channel_state)
         output_action_layout.addWidget(output_action_note, 1)
         output_action_layout.addWidget(self.output_on)
         output_action_layout.addWidget(self.output_off)
@@ -291,11 +300,7 @@ class RigolPage(QWidget):
         self.time_mode.currentTextChanged.connect(self._update_dynamic_controls)
         self.waveform.currentTextChanged.connect(self._update_preview)
         self.channel.currentTextChanged.connect(self._update_preview)
-        self.channel.currentTextChanged.connect(
-            lambda value: self.output_action_context.setText(
-                f"Physical output · CH{value}"
-            )
-        )
+        self.channel.currentTextChanged.connect(self._selected_output_channel_changed)
         self.channel.currentTextChanged.connect(self._refresh_rigol_limits)
         for field in (self.frequency, self.period, self.high_level, self.low_level, self.vpp, self.offset, self.duty, self.ramp_symmetry, self.pulse_width):
             field.textChanged.connect(self._update_preview)
@@ -303,6 +308,7 @@ class RigolPage(QWidget):
         self._sync_period_from_frequency()
         self._update_dynamic_controls()
         self._update_preview()
+        self._refresh_rigol_output_controls()
         self._install_rigol_help(
             configure=configure,
             shape_apply=shape_apply,
@@ -532,6 +538,7 @@ class RigolPage(QWidget):
 
     def _device_state_changed(self, state: str) -> None:
         normalized = str(state).strip().lower()
+        self._device_state_value = normalized
         self.device_state.setText(normalized.replace("_", " ").upper())
         semantic_state = {
             "verified": "verified",
@@ -544,11 +551,77 @@ class RigolPage(QWidget):
             widget.setProperty("deviceState", semantic_state)
             widget.style().unpolish(widget)
             widget.style().polish(widget)
-        self.output_on.setEnabled(
-            normalized in {"verified", "output_off"}
-            and not self._pending_output_enable
+        if normalized in {"verified", "output_off"}:
+            for channel in (1, 2):
+                self._output_states[channel] = False
+                self._output_state_known[channel] = True
+        elif normalized == "output_on":
+            # The controller state confirms that at least one physical output
+            # is active, but it does not identify CH1/CH2.  Never paint the
+            # currently selected channel as OFF on the strength of that
+            # aggregate state alone; wait for the channel-specific result.
+            if self._pending_output_channel is not None:
+                self._output_state_known[self._pending_output_channel] = False
+            elif not any(
+                self._output_state_known[channel] and self._output_states[channel]
+                for channel in (1, 2)
+            ):
+                for channel in (1, 2):
+                    self._output_state_known[channel] = False
+        elif normalized in {"disconnected", "fault", "unknown"}:
+            for channel in (1, 2):
+                self._output_state_known[channel] = False
+        self._refresh_rigol_output_controls()
+
+    def _selected_output_channel_changed(self, value: str) -> None:
+        self.output_action_context.setText(f"Physical output · CH{value}")
+        self._refresh_rigol_output_controls()
+
+    def _set_rigol_channel_output(self, channel: int, enabled: bool) -> None:
+        self._output_states[channel] = enabled
+        self._output_state_known[channel] = True
+        self._refresh_rigol_output_controls()
+
+    def _refresh_rigol_output_controls(self) -> None:
+        channel = int(self.channel.currentText())
+        known = self._output_state_known[channel]
+        enabled = self._output_states[channel] if known else False
+        connected = self._device_state_value in {
+            "connected",
+            "verified",
+            "output_off",
+            "output_on",
+            "compliance",
+        }
+        can_send_off = connected or self._device_state_value in {"fault", "unknown"}
+        pending = self._pending_output_channel is not None
+        self.output_on.setChecked(enabled)
+        self.output_on.setProperty(
+            "controlState", "energized" if enabled else "available"
         )
-        self.output_off.setEnabled(True)
+        state_text = "ON" if enabled else "OFF" if known else "UNKNOWN"
+        self.output_channel_state.setText(f"CH{channel} OUTPUT {state_text}")
+        self.output_channel_state.setProperty(
+            "outputState", "active" if enabled else "neutral"
+        )
+        # Unknown state blocks energising but retains a best-effort OFF action.
+        self.output_on.setEnabled(connected and known and not pending)
+        self.output_off.setEnabled(
+            can_send_off and (enabled or not known) and not pending
+        )
+        self.output_on.setToolTip(
+            f"CH{channel} is confirmed OUTPUT ON."
+            if enabled
+            else f"Enable CH{channel} after validation and confirmed readback."
+        )
+        self.output_off.setToolTip(
+            f"Disable CH{channel} and confirm hardware readback."
+            if self.output_off.isEnabled()
+            else f"CH{channel} is already confirmed OUTPUT OFF."
+        )
+        for widget in (self.output_on, self.output_channel_state):
+            widget.style().unpolish(widget)
+            widget.style().polish(widget)
 
     def _update_dynamic_controls(self, *_args: object) -> None:
         waveform = self.waveform.currentText()
@@ -1002,14 +1075,22 @@ class RigolPage(QWidget):
 
     def request_output(self, enabled: bool) -> None:
         channel = int(self.channel.currentText())
+        if (
+            self._output_state_known[channel]
+            and self._output_states[channel] == enabled
+        ):
+            return
         if not enabled:
             self._pending_output_enable = False
+            self._pending_output_channel = channel
+            self._refresh_rigol_output_controls()
             self._controller.call("set_output", (channel, False))
             return
         if self._pending_output_enable:
             return
         self._pending_output_enable = True
-        self.output_on.setEnabled(False)
+        self._pending_output_channel = channel
+        self._refresh_rigol_output_controls()
         self.status.emit(
             f"Rigol CH{channel}: validating visible settings before OUTPUT ON"
         )
@@ -1024,8 +1105,9 @@ class RigolPage(QWidget):
                 f"estimated DUT power: {estimate.peak_estimated_dut_power_w * 1e3:.6g} mW; "
                 f"Vth High/Low: {estimate.open_circuit_high_v:.6g} / {estimate.open_circuit_low_v:.6g} V"
             )
+            channel = self._pending_output_channel or int(self.channel.currentText())
+            self._set_rigol_channel_output(channel, False)
             if self._pending_output_enable:
-                channel = int(self.channel.currentText())
                 self.status.emit(
                     f"Rigol CH{channel}: settings valid; applying internal safety arm"
                 )
@@ -1038,16 +1120,18 @@ class RigolPage(QWidget):
             self.status.emit("Rigol: output path confirmed while OUTPUT is OFF")
         elif operation == "arm":
             if self._pending_output_enable:
-                channel = int(self.channel.currentText())
+                channel = self._pending_output_channel or int(self.channel.currentText())
                 self.status.emit(f"Rigol CH{channel}: enabling OUTPUT")
                 self._controller.call("set_output", (channel, True))
             else:
                 self.status.emit("Rigol armed for 30 seconds")
         elif operation == "set_output":
+            channel = self._pending_output_channel or int(self.channel.currentText())
             self._pending_output_enable = False
-            self.output_on.setEnabled(not bool(result))
+            self._pending_output_channel = None
+            self._set_rigol_channel_output(channel, bool(result))
             self.status.emit(
-                f"Rigol CH{self.channel.currentText()} OUTPUT "
+                f"Rigol CH{channel} OUTPUT "
                 f"{'ON' if bool(result) else 'OFF'}"
             )
         elif operation == "synchronize_phases":
@@ -1067,8 +1151,9 @@ class RigolPage(QWidget):
             "synchronize_phases",
         }:
             if operation in {"configure", "arm", "set_output"}:
+                channel = self._pending_output_channel or int(self.channel.currentText())
                 self._pending_output_enable = False
-                self.output_on.setEnabled(
-                    self.device_state.text() in {"VERIFIED", "OUTPUT OFF"}
-                )
+                self._pending_output_channel = None
+                self._output_state_known[channel] = False
+                self._refresh_rigol_output_controls()
             QMessageBox.warning(self, "Rigol", error)

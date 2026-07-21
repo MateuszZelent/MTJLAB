@@ -135,12 +135,21 @@ QWidget#settingsPage QLabel#settingsValidationBanner,
 QWidget#settingsPage QLabel#settingsFieldError {{
     color: {tokens.danger};
 }}
-QLabel[deviceState="verified"], QLabel[outputState="off"] {{
+QLabel[deviceState="verified"], QLabel[outputState="off"],
+QLabel[stationState="connected"], QLabel[stationState="verified"],
+QLabel[stationState="output_off"] {{
     color: {tokens.success};
 }}
+QLabel[outputState="neutral"] {{
+    color: {tokens.text_muted};
+}}
 QLabel[deviceState="fault"], QLabel[safetyState="danger"],
-QLabel[outputState="active"] {{
+QLabel[outputState="active"], QLabel[stationState="fault"],
+QLabel[stationState="unknown"], QLabel[stationState="output_on"] {{
     color: {tokens.danger};
+}}
+QLabel[stationState="disconnected"] {{
+    color: {tokens.text_muted};
 }}
 QLabel[safetyState="caution"], QLabel[deviceState="compliance"],
 QLabel[deviceState="active"] {{

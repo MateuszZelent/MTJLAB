@@ -11,6 +11,32 @@ from tests.helpers import ROOT, loaded_settings, simulation_settings
 
 
 class RecipeCompilerTests(unittest.TestCase):
+    def test_keithley_a_anritsu_recipe_stores_ten_raw_and_processed_spectra(self) -> None:
+        raw = deepcopy(simulation_settings(approved=True).model_dump(mode="python"))
+        raw["devices"]["keithley"]["safety"]["channels"]["A"]["enabled"] = True
+        plan = RecipeCompiler(StationSettings.model_validate(raw)).compile(
+            load_recipe(
+                ROOT / "recipes" / "keithley_a_100ua_anritsu_raw_processed_10.yml"
+            )
+        )
+
+        self.assertEqual(plan.total_points, 10)
+        self.assertEqual(plan.total_spectra, 10)
+        self.assertEqual(plan.required_devices, frozenset({"keithley", "anritsu"}))
+        kinds = [action.kind for action in plan.actions]
+        self.assertLess(kinds.index("configure_keithley"), kinds.index("set_keithley_output", 1))
+        self.assertLess(kinds.index("set_keithley_output", 1), kinds.index("acquire_reference"))
+        spectra = [action for action in plan.actions if action.kind == "acquire_spectrum"]
+        self.assertEqual(len(spectra), 10)
+        self.assertTrue(all(action.payload["store_raw"] for action in spectra))
+        self.assertTrue(all(action.payload["store_processed"] for action in spectra))
+        self.assertTrue(
+            all(action.payload["reference_operation"] == "difference_db" for action in spectra)
+        )
+        self.assertEqual(plan.actions[-2].kind, "ramp_keithley_to_zero")
+        self.assertEqual(plan.actions[-1].kind, "set_keithley_output")
+        self.assertFalse(plan.actions[-1].payload["enabled"])
+
     def test_thatec_fmr_analog_recipe_preserves_two_branches_in_24_combined_points(self) -> None:
         raw = deepcopy(simulation_settings(approved=True).model_dump(mode="python"))
         raw["devices"]["keithley"]["safety"]["allow_output_enable"] = True

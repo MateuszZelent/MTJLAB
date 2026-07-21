@@ -641,7 +641,7 @@ class RigolAdapter(DeviceAdapter):
                 raise SafetyViolation("Duty cycle must be in the range (0, 100)%.")
             session.write(f"{prefix}:FUNC:SQU:DCYC {config.square_duty_percent:.12g}")
         elif waveform == "RAMP" and config.ramp_symmetry_percent is not None:
-            self._assert_finite("symetria rampy", config.ramp_symmetry_percent)
+            self._assert_finite("ramp symmetry", config.ramp_symmetry_percent)
             if not 0 <= config.ramp_symmetry_percent <= 100:
                 raise SafetyViolation("Ramp symmetry must be in the range 0–100%.")
             session.write(f"{prefix}:FUNC:RAMP:SYMM {config.ramp_symmetry_percent:.12g}")
@@ -652,7 +652,7 @@ class RigolAdapter(DeviceAdapter):
                 ("TRAN:TRA", config.pulse_trailing_s),
             ):
                 if value is not None:
-                    self._assert_finite("parametr impulsu", value)
+                    self._assert_finite("pulse parameter", value)
                     if value <= 0:
                         raise SafetyViolation("Pulse width and edge times must be positive.")
                     session.write(f"{prefix}:FUNC:PULS:{suffix} {value:.12g}")
@@ -765,8 +765,8 @@ class RigolAdapter(DeviceAdapter):
             raise SafetyViolation("Rigol internal modulation waveform is not allowed.")
         if config.polarity not in {"POS", "NEG"}:
             raise SafetyViolation("Rigol modulation polarity must be POS or NEG.")
-        self._assert_finite("rate modulacji", config.rate_hz)
-        self._assert_finite("parametr modulacji", config.parameter)
+        self._assert_finite("modulation rate", config.rate_hz)
+        self._assert_finite("modulation parameter", config.parameter)
         if config.rate_hz <= 0:
             raise SafetyViolation("Modulation frequency/rate must be positive.")
         rate_limits = channel.lab_limits.modulation_rate

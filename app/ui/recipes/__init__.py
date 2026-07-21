@@ -2,6 +2,7 @@
 
 from app.ui.recipes.device_parameters import DeviceParameterDialog
 from app.ui.recipes.common_dialogs import (
+    ActionNodeEditorDialog,
     AnritsuAcquisitionEditorDialog,
     CommentEditorDialog,
     FixedValueDialog,
@@ -12,6 +13,7 @@ from app.ui.recipes.common_dialogs import (
 from app.ui.recipes.sweep_editor import SeamlessRoiCellDelegate, SweepGeneratorDialog
 
 __all__ = [
+    "ActionNodeEditorDialog",
     "DeviceParameterDialog",
     "AnritsuAcquisitionEditorDialog",
     "CommentEditorDialog",

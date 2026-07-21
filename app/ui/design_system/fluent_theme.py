@@ -206,13 +206,11 @@ def _apply_station_control_style(widget: QWidget, tokens: ThemeTokens) -> None:
 
 
 def _apply_station_button(widget: QWidget, tokens: ThemeTokens) -> None:
-    """Give every native and Fluent disabled button readable contrast."""
+    """Give buttons readable disabled and hardware-confirmed states."""
 
     if not isinstance(widget, QPushButton):
         return
     marker = "/* station-disabled-button */"
-    if marker in widget.styleSheet():
-        return
     base = widget.styleSheet().split(marker, 1)[0].rstrip()
     widget.setStyleSheet(
         f"{base}\n{marker}\n"
@@ -220,6 +218,14 @@ def _apply_station_button(widget: QWidget, tokens: ThemeTokens) -> None:
         "color: palette(placeholder-text);"
         "background-color: palette(alternate-base);"
         "border: 1px solid palette(mid);"
+        "}"
+        "QPushButton[controlState=\"confirmed\"] {"
+        f"color: #ffffff; background-color: {tokens.accent};"
+        f"border: 1px solid {tokens.accent};"
+        "}"
+        "QPushButton[controlState=\"energized\"] {"
+        f"color: #ffffff; background-color: {tokens.danger};"
+        f"border: 1px solid {tokens.danger}; font-weight: 600;"
         "}"
     )
 
@@ -293,10 +299,22 @@ def _apply_semantic_text(widget: QWidget, tokens: ThemeTokens) -> None:
         if isinstance(widget, CaptionLabel) or widget.objectName() == "muted"
         else tokens.text_primary
     )
-    if widget.property("deviceState") == "verified" or widget.property("outputState") == "off":
+    station_state = widget.property("stationState")
+    if (
+        widget.property("deviceState") == "verified"
+        or widget.property("outputState") == "off"
+        or station_state in {"connected", "verified", "output_off"}
+    ):
         color = tokens.success
-    elif widget.property("deviceState") == "fault" or widget.property("safetyState") == "danger" or widget.property("outputState") == "active":
+    elif (
+        widget.property("deviceState") == "fault"
+        or widget.property("safetyState") == "danger"
+        or widget.property("outputState") == "active"
+        or station_state in {"fault", "unknown", "output_on"}
+    ):
         color = tokens.danger
+    elif station_state == "disconnected":
+        color = tokens.text_muted
     elif widget.property("safetyState") == "caution" or widget.property("deviceState") in {"compliance", "active"}:
         color = tokens.caution
     palette = widget.palette()

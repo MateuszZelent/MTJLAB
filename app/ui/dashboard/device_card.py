@@ -185,7 +185,9 @@ class DeviceConnectionPanel(CardWidget):
         self.state = CaptionLabel("DISCONNECTED", self)
         self.state.setObjectName("stateDisconnected")
         layout.addWidget(self.state)
-        self.connect_button = PrimaryPushButton("Connect", self)
+        # Connection state must come from controller readback, not from a
+        # permanently accented call-to-action class.
+        self.connect_button = PushButton("Connect", self)
         self.disconnect_button = PushButton("Disconnect", self)
         self.test_button = PushButton("Test", self)
         self.test_button.setToolTip(
@@ -197,7 +199,10 @@ class DeviceConnectionPanel(CardWidget):
         self.connect_button.clicked.connect(self.connect_requested)
         self.disconnect_button.clicked.connect(self.disconnect_requested)
         self.test_button.clicked.connect(self.test_requested)
+        self._connection_state = "disconnected"
+        self._busy = False
         self.update_resource(resource)
+        self.update_state("disconnected")
 
     def update_resource(self, resource: str | None, backend: str | None = None) -> None:
         detail = resource or "No VISA resource configured"
@@ -207,10 +212,48 @@ class DeviceConnectionPanel(CardWidget):
         self._set_summary_error(False)
 
     def update_state(self, state: str) -> None:
-        self.state.setText(state.replace("_", " ").upper())
-        self.state.setObjectName("state" + "".join(part.title() for part in state.split("_")))
+        normalized = state.strip().lower().replace(" ", "_")
+        self._connection_state = normalized
+        self.state.setText(normalized.replace("_", " ").upper())
+        self.state.setObjectName("state" + "".join(part.title() for part in normalized.split("_")))
+        self.state.setProperty("deviceState", normalized)
         self.state.style().unpolish(self.state)
         self.state.style().polish(self.state)
+        self._apply_connection_controls()
+
+    def _apply_connection_controls(self) -> None:
+        if self._busy:
+            for button in (
+                self.connect_button,
+                self.disconnect_button,
+                self.test_button,
+            ):
+                button.setEnabled(False)
+            return
+        connected = self._connection_state in {
+            "connected",
+            "verified",
+            "output_off",
+            "output_on",
+            "compliance",
+        }
+        disconnected = self._connection_state == "disconnected"
+        self.connect_button.setProperty(
+            "controlState", "confirmed" if connected else "available"
+        )
+        self.connect_button.setEnabled(connected or disconnected)
+        self.disconnect_button.setEnabled(connected or not disconnected)
+        self.connect_button.setToolTip(
+            "Connected and verified." if connected else "Connect and verify the instrument."
+        )
+        self.disconnect_button.setToolTip(
+            "Disconnect the active instrument session."
+            if connected
+            else "No active instrument session to disconnect."
+        )
+        for button in (self.connect_button, self.disconnect_button):
+            button.style().unpolish(button)
+            button.style().polish(button)
 
     def update_identity(self, value: object) -> None:
         if idn := getattr(value, "idn", None):
@@ -241,7 +284,11 @@ class DeviceConnectionPanel(CardWidget):
         self.summary.style().polish(self.summary)
 
     def _set_busy(self, active: bool, label: str) -> None:
+        self._busy = active
         for button in (self.connect_button, self.disconnect_button, self.test_button):
             button.setEnabled(not active)
         if active:
             self.state.setText(label.upper())
+        else:
+            self.state.setText(self._connection_state.replace("_", " ").upper())
+            self._apply_connection_controls()

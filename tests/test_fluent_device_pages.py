@@ -83,7 +83,7 @@ class FluentDevicePageTests(unittest.TestCase):
                 self.assertEqual(card["output_on_action"].text(), "OUTPUT ON")
                 self.assertEqual(card["output_off_action"].text(), "OUTPUT OFF")
                 self.assertFalse(card["output_on_action"].isEnabled())
-                self.assertTrue(card["output_off_action"].isEnabled())
+                self.assertFalse(card["output_off_action"].isEnabled())
         finally:
             window.close()
             self.application.processEvents()
@@ -103,7 +103,7 @@ class FluentDevicePageTests(unittest.TestCase):
                 self.assertGreater(control.width(), 80)
                 self.assertGreater(control.height(), 24)
             self.assertFalse(rigol.output_on.isEnabled())
-            self.assertTrue(rigol.output_off.isEnabled())
+            self.assertFalse(rigol.output_off.isEnabled())
             self.assertTrue(rigol.output_action_bar.isVisibleTo(window))
             rigol.control_tabs.setCurrentIndex(2)
             self.application.processEvents()

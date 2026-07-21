@@ -49,7 +49,7 @@ from app.ui.common import line_edit as _line
 from app.ui.design_system import effective_theme
 from app.ui.recipes.device_parameters import DeviceParameterDialog
 from app.ui.recipes.common_dialogs import (
-    AnritsuAcquisitionEditorDialog, CommentEditorDialog, FixedValueDialog,
+    ActionNodeEditorDialog, AnritsuAcquisitionEditorDialog, CommentEditorDialog, FixedValueDialog,
     KeithleySweepBuilderDialog, RecipeTreeWidget, SweepLibraryButton,
 )
 from app.ui.recipes.legacy_device_extensions import (
@@ -645,6 +645,44 @@ class RecipePage(QWidget):
             drag_kind="device:anritsu_sg",
         )
 
+        outputs = group("Output control", "4")
+        action(
+            outputs,
+            "Keithley A OUTPUT ON",
+            "Enable channel A after an earlier validated Keithley configuration",
+            "keithley",
+            QStyle.StandardPixmap.SP_MediaPlay,
+            lambda: self._library_add_output_on("keithley", "A"),
+            drag_kind="output:keithley_a",
+        )
+        action(
+            outputs,
+            "Keithley B OUTPUT ON",
+            "Enable channel B after an earlier validated Keithley configuration",
+            "keithley",
+            QStyle.StandardPixmap.SP_MediaPlay,
+            lambda: self._library_add_output_on("keithley", "B"),
+            drag_kind="output:keithley_b",
+        )
+        action(
+            outputs,
+            "Rigol CH1 OUTPUT ON",
+            "Enable channel 1 with the required internal one-shot interlock",
+            "rigol",
+            QStyle.StandardPixmap.SP_MediaPlay,
+            lambda: self._library_add_output_on("rigol", 1),
+            drag_kind="output:rigol_1",
+        )
+        action(
+            outputs,
+            "Rigol CH2 OUTPUT ON",
+            "Enable channel 2 with the required internal one-shot interlock",
+            "rigol",
+            QStyle.StandardPixmap.SP_MediaPlay,
+            lambda: self._library_add_output_on("rigol", 2),
+            drag_kind="output:rigol_2",
+        )
+
         acquisition = group("Acquisition", "3")
         action(
             acquisition,
@@ -827,6 +865,51 @@ class RecipePage(QWidget):
             f"Added Keithley {channel} safe shutdown",
         )
 
+    def _library_add_output_on(
+        self,
+        device: str,
+        channel: str | int,
+        *,
+        parent_id: str | None = None,
+        branch: str | None = None,
+        index: int | None = None,
+    ) -> None:
+        if parent_id is None or branch is None:
+            parent_id, branch = self._builder_parent()
+        if parent_id == "__finally__":
+            raise ConfigurationError("OUTPUT ON cannot be added to Finally.")
+        if device == "keithley":
+            if channel not in {"A", "B"}:
+                raise ConfigurationError("Keithley OUTPUT ON requires channel A or B.")
+            node = {
+                "id": self._new_node_id("keithley-output-on"),
+                "type": "set_keithley_output",
+                "channel": channel,
+                "enabled": True,
+            }
+        elif device == "rigol":
+            if channel not in {1, 2}:
+                raise ConfigurationError("Rigol OUTPUT ON requires channel 1 or 2.")
+            node = {
+                "id": self._new_node_id("rigol-output-on"),
+                "type": "enable_rigol_output",
+                "channel": channel,
+            }
+        else:
+            raise ConfigurationError(f"Unknown output device {device!r}.")
+        source = add_recipe_node(
+            self.editor.toPlainText(),
+            parent_id=parent_id,
+            branch=branch,
+            index=index,
+            node=node,
+        )
+        self._apply_builder_source(
+            source,
+            f"Added {device} channel {channel} OUTPUT ON",
+            selected_node_id=str(node["id"]),
+        )
+
     def _library_add_output_off(self, kind: str, *, channel: int | None = None) -> None:
         node: dict[str, object] = {
             "id": self._new_node_id("output-off"),
@@ -982,6 +1065,23 @@ class RecipePage(QWidget):
                     self._library_add_output_off("set_anritsu_sg_output")
                 else:
                     raise ConfigurationError(f"Unknown safe-shutdown block {kind!r}.")
+                return
+            if category == "output":
+                device, separator, channel_text = kind.partition("_")
+                if not separator:
+                    raise ConfigurationError(f"Unknown OUTPUT block {kind!r}.")
+                channel: str | int = (
+                    channel_text.upper()
+                    if device == "keithley"
+                    else int(channel_text)
+                )
+                self._library_add_output_on(
+                    device,
+                    channel,
+                    parent_id=parent_id,
+                    branch=branch,
+                    index=index,
+                )
                 return
             if category != "flow":
                 return
@@ -2476,10 +2576,10 @@ class RecipePage(QWidget):
             else "Acquisition settings"
             if is_acquisition
             else "Edit comment"
+            if is_comment
+            else "Action settings"
         )
-        self.open_editor_button.setEnabled(
-            has_device_settings or has_roi or is_comment or is_acquisition
-        )
+        self.open_editor_button.setEnabled(True)
         self.edit_device_button.setEnabled(has_device_settings)
         self.edit_generator_button.setEnabled(has_roi)
         actions = (
@@ -2912,13 +3012,45 @@ class RecipePage(QWidget):
         }:
             self._edit_anritsu_acquisition_node(node)
             return
+        if isinstance(node, RecipeNode) and node.type == "configure_anritsu_advanced":
+            self._edit_action_node(node)
+            return
         if isinstance(node, RecipeNode) and (
             node.data.get("device_module")
             or self._legacy_device_configuration_node(node) is not None
         ):
             self._edit_selected_device_settings()
             return
-        self._edit_selected_roi()
+        if isinstance(node, RecipeNode) and node.type == "sweep":
+            self._edit_selected_roi()
+            return
+        if isinstance(node, RecipeNode):
+            self._edit_action_node(node)
+
+    def _edit_action_node(self, node: RecipeNode) -> None:
+        item = self.tree.currentItem()
+        dialog = ActionNodeEditorDialog(
+            node,
+            self,
+            in_finally=self._tree_item_is_in_finally(item),
+        )
+        if dialog.exec() != QDialog.DialogCode.Accepted:
+            return
+        replacement = self._node_to_mapping(node)
+        for key in tuple(node.data):
+            replacement.pop(key, None)
+        replacement.update(dialog.node_fields())
+        try:
+            source = replace_recipe_node(
+                self.editor.toPlainText(), node_id=node.id, node=replacement
+            )
+            self._apply_builder_source(
+                source,
+                f"Updated action settings for {node.id}",
+                selected_node_id=node.id,
+            )
+        except Exception as exc:
+            QMessageBox.warning(self, "Action settings", str(exc))
 
     def _edit_selected_roi(self) -> None:
         item = self.tree.currentItem()
@@ -4210,27 +4342,7 @@ class RecipePage(QWidget):
         node = item.data(0, Qt.ItemDataRole.UserRole)
         if not isinstance(node, RecipeNode):
             return
-        if (
-            node.type in {
-                "sweep",
-                "configure_keithley",
-                "configure_rigol",
-                "configure_anritsu",
-                "configure_anritsu_advanced",
-                "configure_anritsu_sg",
-                "acquire_reference",
-                "acquire_spectrum",
-                "comment",
-            }
-            or node.data.get("device_module")
-            in {"keithley", "anritsu", "anritsu_sg", "rigol"}
-        ):
-            self._edit_selected_node()
-            return
-        self.inspector.setFocus()
-        self.status.emit(
-            f"{node.id} is selected. Its full configuration is shown in the node inspector."
-        )
+        self._edit_selected_node()
 
     def _edit_selected_fixed_keithley(self, node: RecipeNode) -> None:
         channel = str(node.data.get("channel", ""))
@@ -4284,6 +4396,7 @@ class RecipePage(QWidget):
         edit_acquisition = add_action(
             "Acquisition settings", self._edit_selected_node
         )
+        edit_action = add_action("Action settings", self._edit_selected_node)
         toggle_enabled = add_action(
             "Enable selected node"
             if isinstance(node := (
@@ -4338,6 +4451,7 @@ class RecipePage(QWidget):
             editable
             and node.type in {"acquire_reference", "acquire_spectrum"}
         )
+        edit_action.setEnabled(editable)
         toggle_enabled.setEnabled(
             editable and not self._tree_item_is_in_finally(selected)
         )

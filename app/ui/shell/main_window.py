@@ -970,7 +970,9 @@ class MainWindow(FluentWindow):
             self._log(f"VISA ADAPTER REPLACE COMPLETE: {card.summary.text()}")
         elif operation == "test_communication" and isinstance(result, dict):
             card.set_testing(False)
-            card.update_state("verified")
+            # Communication test uses a temporary session and disconnects it;
+            # a successful identity check must not look like an active link.
+            card.update_state("disconnected")
             features = ", ".join(str(item) for item in result.get("features", ())) or "basic VISA"
             options = ", ".join(str(item) for item in result.get("hardware_options", ())) or "not reported"
             card.identity.setText(

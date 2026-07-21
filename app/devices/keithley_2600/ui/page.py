@@ -371,33 +371,33 @@ class KeithleyNodeEditorDialog(FluentRecipeDialog):
             parameter_layout.addWidget(BodyLabel(label), row, 0)
             selector = ComboBox(self)
             selector.setProperty("parameterId", parameter_id)
-            selector.addItem("Bez zmian", userData="unchanged")
-            selector.addItem("Ustaw", userData="set")
+            selector.addItem("Unchanged", userData="unchanged")
+            selector.addItem("Set", userData="set")
             if sweepable:
-                selector.addItem("Sweep — ROI wymagane", userData="sweep")
+                selector.addItem("Sweep — ROI required", userData="sweep")
             parameter_layout.addWidget(selector, row, 1)
             self.parameter_selectors[parameter_id] = selector
         output_row = 2 + len(definitions)
         parameter_layout.addWidget(BodyLabel("Output state"), output_row, 0)
         self.output_policy = ComboBox(self)
-        self.output_policy.addItem("Bez zmian", userData="unchanged")
-        self.output_policy.addItem("OUTPUT ON na początku", userData="on")
+        self.output_policy.addItem("Unchanged", userData="unchanged")
+        self.output_policy.addItem("OUTPUT ON at start", userData="on")
         self.output_policy.addItem("OUTPUT OFF", userData="off")
         parameter_layout.addWidget(self.output_policy, output_row, 1)
-        self.open_roi_button = PrimaryPushButton("Przejdź do ROI…", self)
+        self.open_roi_button = PrimaryPushButton("Go to ROI…", self)
         self.open_roi_button.setEnabled(False)
         self.open_roi_button.setToolTip(
             "Open the interval and point editor for the single parameter marked Sweep."
         )
         parameter_layout.addWidget(self.open_roi_button, output_row + 1, 0, 1, 2)
         self.roi_status = BodyLabel(
-            "Oznacz jeden parametr jako Sweep, aby zdefiniować ROI."
+            "Mark one parameter as Sweep to define an ROI."
         )
         self.roi_status.setObjectName("muted")
         self.roi_status.setWordWrap(True)
         parameter_layout.addWidget(self.roi_status, output_row + 2, 0, 1, 2)
         parameter_note = BodyLabel(
-            "Only rows marked Ustaw or Sweep are stored. Bez zmian keeps the current value "
+            "Only rows marked Set or Sweep are stored. Unchanged keeps the current value "
             "from the Keithley module. OUTPUT is only a plan declaration; this window never "
             "energizes the instrument."
         )
@@ -482,20 +482,20 @@ class KeithleyNodeEditorDialog(FluentRecipeDialog):
         self.open_roi_button.setEnabled(len(sweep_ids) == 1)
         if len(sweep_ids) > 1:
             self.roi_status.setText(
-                "Wybierz tylko jedną oś Sweep w tym węźle."
+                "Select exactly one Sweep axis in this node."
             )
             return
         if not sweep_ids:
             self.roi_status.setText(
-                "Oznacz jeden parametr jako Sweep, aby zdefiniować ROI."
+                "Mark one parameter as Sweep to define an ROI."
             )
             return
         parameter_id = sweep_ids[0]
         segments = self._loaded_segments_by_parameter.get(parameter_id)
         self.roi_status.setText(
-            f"ROI zapisane: {len(segments)} przedział(y)."
+            f"ROI saved: {len(segments)} segment(s)."
             if segments
-            else "ROI nie zostało jeszcze zdefiniowane."
+            else "No ROI has been defined yet."
         )
 
     def _store_roi_segments(
@@ -635,7 +635,7 @@ class KeithleyNodeEditorDialog(FluentRecipeDialog):
             QMessageBox.information(
                 self,
                 "Keithley node",
-                "Select Ustaw or Sweep for at least one parameter, or choose an OUTPUT action.",
+                "Select Set or Sweep for at least one parameter, or choose an OUTPUT action.",
             )
             return
         if self._validate():
@@ -941,7 +941,7 @@ class _KeithleyFloatingPanelWindow(StationDialog):
         self.setWindowFlag(Qt.WindowType.WindowStaysOnTopHint, True)
         self.setModal(False)
         self.setMinimumSize(460, 230)
-        self.resize(760, 360 if "wykres" in title.lower() else 270)
+        self.resize(760, 360 if "plot" in title.lower() else 270)
         layout = QVBoxLayout(self)
         layout.setContentsMargins(12, 12, 12, 12)
         layout.addWidget(panel)
@@ -964,6 +964,7 @@ class KeithleyPage(QWidget):
         self._station_settings = settings
         self._limit_fields: dict[str, LimitField] = {}
         self._output_states = {"A": False, "B": False}
+        self._output_state_known = {"A": False, "B": False}
         self._pending_channels: dict[str, str] = {}
         self._pending_output_enabled: dict[str, bool] = {}
         self._pending_config_modes: dict[str, str] = {}
@@ -1048,7 +1049,7 @@ class KeithleyPage(QWidget):
             panel = self._build_channel_card(channel_name)
             channel_grid.addWidget(
                 self._register_detachable_panel(
-                    f"channel_{channel_name}", panel, f"Kanał {channel_name}"
+                    f"channel_{channel_name}", panel, f"Channel {channel_name}"
                 ),
                 0,
                 column,
@@ -1184,7 +1185,7 @@ class KeithleyPage(QWidget):
             panel = self._build_keithley_history_panel(channel_name)
             self.history_layout.addWidget(
                 self._register_detachable_panel(
-                    f"plot_{channel_name}", panel, f"Wykres kanału {channel_name}"
+                    f"plot_{channel_name}", panel, f"Plot for channel {channel_name}"
                 ),
                 1,
             )
@@ -1318,8 +1319,8 @@ class KeithleyPage(QWidget):
         button = TransparentToolButton(FluentIcon.FULL_SCREEN, parent)
         button.setObjectName(f"keithleyFloatButton_{key}")
         button.setFixedSize(28, 28)
-        button.setToolTip("Otwórz ten panel w osobnym, pływającym oknie")
-        button.setAccessibleName("Otwórz panel w pływającym oknie")
+        button.setToolTip("Open this panel in a separate floating window")
+        button.setAccessibleName("Open panel in a floating window")
         button.clicked.connect(
             lambda _checked=False, panel_key=key: self._toggle_panel_floating(panel_key)
         )
@@ -1347,10 +1348,10 @@ class KeithleyPage(QWidget):
         placeholder_layout = QVBoxLayout(placeholder)
         placeholder_layout.setContentsMargins(14, 12, 14, 12)
         placeholder_layout.addWidget(StrongBodyLabel(self._panel_titles[key], placeholder))
-        note = BodyLabel("Panel jest otwarty w osobnym oknie.", placeholder)
+        note = BodyLabel("This panel is open in a separate window.", placeholder)
         note.setObjectName("muted")
         placeholder_layout.addWidget(note)
-        restore = PushButton("Przywróć panel", placeholder)
+        restore = PushButton("Restore panel", placeholder)
         restore.clicked.connect(
             lambda _checked=False, panel_key=key: self._dock_panel(panel_key)
         )
@@ -1368,8 +1369,8 @@ class KeithleyPage(QWidget):
         self._floating_panels[key] = floating
         button = self._panel_float_buttons[key]
         button.setIcon(FluentIcon.BACK_TO_WINDOW)
-        button.setToolTip("Przywróć ten panel na stronę Keithley")
-        button.setAccessibleName("Przywróć panel na stronę Keithley")
+        button.setToolTip("Restore this panel to the Keithley page")
+        button.setAccessibleName("Restore panel to the Keithley page")
         floating.show()
         floating.raise_()
         floating.activateWindow()
@@ -1388,8 +1389,8 @@ class KeithleyPage(QWidget):
         self._panel_slots[key].layout().addWidget(panel)
         button = self._panel_float_buttons[key]
         button.setIcon(FluentIcon.FULL_SCREEN)
-        button.setToolTip("Otwórz ten panel w osobnym, pływającym oknie")
-        button.setAccessibleName("Otwórz panel w pływającym oknie")
+        button.setToolTip("Open this panel in a separate floating window")
+        button.setAccessibleName("Open panel in a floating window")
         if close_window:
             floating.close()
         floating.deleteLater()
@@ -1530,7 +1531,8 @@ class KeithleyPage(QWidget):
         measure = PushButton(f"Measure CH {channel}")
         measure.setProperty("compact", True)
         measure.clicked.connect(lambda _checked=False, ch=channel: self.request_measurement(ch))
-        output_on_action = PrimaryPushButton("OUTPUT ON")
+        output_on_action = PushButton("OUTPUT ON")
+        output_on_action.setCheckable(True)
         output_off_action = PushButton("OUTPUT OFF")
         for button in (output_on_action, output_off_action):
             button.setProperty("compact", True)
@@ -1612,7 +1614,7 @@ class KeithleyPage(QWidget):
 
         for channel, card in self.channel_cards.items():
             self._set_help(card["card"], f"Channel {channel} overview", "Live overview of this channel. Voltage and current are direct readings; resistance and power are derived from the latest I/V pair.")
-            self._set_help(card["led"], f"Channel {channel} output LED", "Green is confirmed OUTPUT OFF, amber is OUTPUT ON, and grey means the output state is not known or the device is disconnected.")
+            self._set_help(card["led"], f"Channel {channel} output LED", "The indicator is lit only for confirmed OUTPUT ON. Grey means OUTPUT OFF, unknown, or disconnected; use the adjacent text to distinguish those states.")
             self._set_help(card["output"], f"Channel {channel} output state", "Shows the last state confirmed by a successful connect, configure, enable, ramp-off or compliance-stop operation.")
             self._set_help(card["voltage"], "Measured voltage", "Direct voltage reading returned by Keithley for this channel.")
             self._set_help(card["current"], "Measured current", "Direct current reading returned by Keithley for this channel.")
@@ -1731,7 +1733,7 @@ class KeithleyPage(QWidget):
                 item for item in channel_checks if item.startswith("✕")
             )
             card["output_on_action"].setEnabled(
-                not self._output_states[channel] and not pending_enable
+                self._device_is_output_ready() and not pending_enable
             )
             card["output_on_action"].setToolTip(
                 (
@@ -1740,9 +1742,17 @@ class KeithleyPage(QWidget):
                     else "Click for the blocking condition: " + missing
                 )
             )
-            # De-energising is never gated by ARM, profile approval, RBAC or
-            # audit health. An uncertain state still warrants a best-effort OFF.
-            card["output_off_action"].setEnabled(True)
+            # A confirmed OFF or disconnected channel has no OFF action to
+            # perform. An uncertain connected state still exposes best-effort
+            # OFF regardless of profile, RBAC or audit health.
+            confirmed_off = (
+                self._output_state_known[channel]
+                and not self._output_states[channel]
+            )
+            disconnected = self._device_state_value == "DISCONNECTED"
+            card["output_off_action"].setEnabled(
+                not pending_enable and not confirmed_off and not disconnected
+            )
 
     def _device_state_changed(self, state: str) -> None:
         normalized = state.upper()
@@ -1753,17 +1763,49 @@ class KeithleyPage(QWidget):
                 checkbox.setChecked(False)
             self._configured_channels.clear()
             self._output_states = {"A": False, "B": False}
-            self._reset_output_toggle()
+            self._output_state_known = {"A": False, "B": False}
+            self.output_toggle.blockSignals(True)
+            self.output_toggle.setChecked(False)
+            self.output_toggle.blockSignals(False)
+            self._style_output_toggle(False)
             for channel in ("A", "B"):
                 widgets = self.channel_cards[channel]
                 widgets["output"].setText("OUTPUT UNKNOWN")
+                widgets["output"].setProperty("outputState", "neutral")
                 widgets["led"].setProperty("outputState", "neutral")
-                widgets["led"].style().unpolish(widgets["led"])
-                widgets["led"].style().polish(widgets["led"])
+                widgets["output_on_action"].setChecked(False)
+                widgets["output_on_action"].setProperty(
+                    "controlState", "available"
+                )
+                for widget in (
+                    widgets["output"],
+                    widgets["led"],
+                    widgets["output_on_action"],
+                ):
+                    widget.style().unpolish(widget)
+                    widget.style().polish(widget)
         elif normalized == "VERIFIED":
             # Connection qualification explicitly forces and verifies both outputs OFF.
             self._set_channel_output("A", False)
             self._set_channel_output("B", False)
+        elif normalized in {"FAULT", "UNKNOWN"}:
+            self._output_state_known = {"A": False, "B": False}
+            for channel in ("A", "B"):
+                widgets = self.channel_cards[channel]
+                widgets["output"].setText("OUTPUT UNKNOWN")
+                widgets["output"].setProperty("outputState", "neutral")
+                widgets["led"].setProperty("outputState", "neutral")
+                widgets["output_on_action"].setChecked(False)
+                widgets["output_on_action"].setProperty(
+                    "controlState", "available"
+                )
+                for widget in (
+                    widgets["output"],
+                    widgets["led"],
+                    widgets["output_on_action"],
+                ):
+                    widget.style().unpolish(widget)
+                    widget.style().polish(widget)
         self._update_live_controls()
         self._update_output_readiness()
 
@@ -1833,11 +1875,22 @@ class KeithleyPage(QWidget):
 
     def _set_channel_output(self, channel: str, enabled: bool) -> None:
         self._output_states[channel] = enabled
+        self._output_state_known[channel] = True
         widgets = self.channel_cards[channel]
         widgets["output"].setText("OUTPUT ON" if enabled else "OUTPUT OFF")
-        widgets["led"].setProperty("outputState", "active" if enabled else "off")
-        widgets["led"].style().unpolish(widgets["led"])
-        widgets["led"].style().polish(widgets["led"])
+        widgets["output"].setProperty("outputState", "active" if enabled else "neutral")
+        widgets["led"].setProperty("outputState", "active" if enabled else "neutral")
+        widgets["output_on_action"].setChecked(enabled)
+        widgets["output_on_action"].setProperty(
+            "controlState", "energized" if enabled else "available"
+        )
+        for widget in (
+            widgets["output"],
+            widgets["led"],
+            widgets["output_on_action"],
+        ):
+            widget.style().unpolish(widget)
+            widget.style().polish(widget)
         widgets["output_on_action"].setText("OUTPUT ON")
         widgets["output_off_action"].setText("OUTPUT OFF")
         if channel == self.channel.currentText():
