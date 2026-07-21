@@ -9,6 +9,8 @@ from app.storage.thatec_reader import (
     ThatecRowData,
     ThatecRun,
     ThatecRunReader,
+    ThatecSpectrum,
+    ThatecSpectrumTrace,
     ThatecTreeNode,
 )
 from app.storage.pythat_reader import PyThatRunData, read_pythat_run_data
@@ -33,6 +35,8 @@ __all__ = [
     "ThatecRowData",
     "ThatecRun",
     "ThatecRunReader",
+    "ThatecSpectrum",
+    "ThatecSpectrumTrace",
     "ThatecTreeNode",
     "PyThatRunData",
     "read_pythat_run_data",

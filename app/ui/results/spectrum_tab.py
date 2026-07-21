@@ -12,40 +12,82 @@ from PySide6.QtWidgets import (
     QVBoxLayout,
     QWidget,
 )
-from qfluentwidgets import BodyLabel, PushButton, TreeWidget
+from qfluentwidgets import BodyLabel, ComboBox, PushButton, SpinBox, TreeWidget
 
 from app.storage import (
     Hdf5RunReader,
     StoredPoint,
     ThatecRun,
     ThatecRunReader,
+    ThatecSpectrum,
 )
+from app.ui.results.data_classifier import find_spectrum_rows
 from app.ui.widgets import SpectrumPlotWidget
 
 
 class SpectrumResultsTab(QWidget):
-    """Browse individual spectra stored in an HDF5 result file.
+    """Browse private Lab Control and public THATEC/PyThat spectra.
 
-    Supports both the private ``Hdf5RunReader.spectrum`` API (Lab Control
-    HDF5 files with ``/spectra``) and the public THATEC 2-D row format
-    (``ThatecRunReader.row_slice``).
+    Private files expose individual committed points in ``/points`` and
+    ``/spectra``.  Public THATEC/PyThat files instead expose spectral rows in
+    ``/measurement``.  Both are read-only and never contact an instrument.
     """
 
     status_changed = Signal(str)
-    device_state_changed = Signal(dict)  # emitted with point.device_states on selection
+    device_state_changed = Signal(dict)
 
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
         self._selected_path: Path | None = None
         self._run: ThatecRun | None = None
         self._stored_points: tuple[StoredPoint, ...] = ()
+        self._public_spectrum: ThatecSpectrum | None = None
 
         layout = QVBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(8)
+
+        # Public THATEC/PyThat files can contain spectra without the private
+        # Lab Control /points group. Browse published rows directly.
+        public_selector = QVBoxLayout()
+        public_selector.setContentsMargins(0, 0, 0, 0)
+        public_selector.setSpacing(4)
+        row_selector = QHBoxLayout()
+        row_selector.addWidget(BodyLabel("Public spectrum row:", self))
+        self.thatec_row_combo = ComboBox(self)
+        self.thatec_row_combo.setMinimumWidth(280)
+        self.thatec_row_combo.setAccessibleName("Public spectrum row")
+        self.thatec_row_combo.setToolTip(
+            "Choose a spectral row stored in the public THATEC/PyThat result."
+        )
+        row_selector.addWidget(self.thatec_row_combo, 1)
+        row_selector.addWidget(BodyLabel("Checkpoint:", self))
+        self.thatec_checkpoint = SpinBox(self)
+        self.thatec_checkpoint.setRange(0, 0)
+        self.thatec_checkpoint.setAccessibleName("Spectrum checkpoint")
+        row_selector.addWidget(self.thatec_checkpoint)
+        self.show_thatec_button = PushButton("Show spectrum", self)
+        self.show_thatec_button.setEnabled(False)
+        self.show_thatec_button.setToolTip(
+            "Read the selected public spectrum without contacting an instrument."
+        )
+        row_selector.addWidget(self.show_thatec_button)
+        public_selector.addLayout(row_selector)
+
+        trace_selector = QHBoxLayout()
+        trace_selector.addWidget(BodyLabel("Trace component:", self))
+        self.thatec_trace_combo = ComboBox(self)
+        self.thatec_trace_combo.setEnabled(False)
+        self.thatec_trace_combo.setAccessibleName("Spectrum trace component")
+        self.thatec_trace_combo.setToolTip(
+            "Choose a channel from a multi-trace public spectrum."
+        )
+        trace_selector.addWidget(self.thatec_trace_combo, 1)
+        public_selector.addLayout(trace_selector)
+        layout.addLayout(public_selector)
 
         splitter = QSplitter(Qt.Orientation.Vertical)
 
-        # --- Points list ---
         self.points = TreeWidget(self)
         self.points.setHeaderLabels(["Point", "State", "UTC time", "Data"])
         self.points.setMinimumHeight(120)
@@ -54,45 +96,41 @@ class SpectrumResultsTab(QWidget):
         self.points.setColumnWidth(2, 210)
         splitter.addWidget(self.points)
 
-        # --- Navigation ---
-        nav = QHBoxLayout()
-        self.prev_button = PushButton("← Previous", self)
-        self.next_button = PushButton("Next →", self)
+        navigation = QHBoxLayout()
+        self.prev_button = PushButton("Previous", self)
+        self.next_button = PushButton("Next", self)
         self.prev_button.setEnabled(False)
         self.next_button.setEnabled(False)
-        nav.addWidget(self.prev_button)
-        nav.addWidget(self.next_button)
-        nav.addStretch(1)
-        nav_widget = QWidget()
-        nav_widget.setLayout(nav)
-        splitter.addWidget(nav_widget)
+        navigation.addWidget(self.prev_button)
+        navigation.addWidget(self.next_button)
+        navigation.addStretch(1)
+        navigation_widget = QWidget()
+        navigation_widget.setLayout(navigation)
+        splitter.addWidget(navigation_widget)
 
-        # --- Spectrum plot ---
         self.spectrum_plot = SpectrumPlotWidget(legend=False)
-        self.spectrum_plot.set_title("Select a point containing a stored spectrum")
+        self.spectrum_plot.set_title("Select a stored or public spectrum")
         self.spectrum_plot.setMinimumHeight(280)
         splitter.addWidget(self.spectrum_plot)
 
         splitter.setStretchFactor(0, 0)
         splitter.setStretchFactor(1, 0)
         splitter.setStretchFactor(2, 1)
-
         layout.addWidget(splitter, 1)
 
         self.spectrum_info = BodyLabel(
             "Spectra are read from HDF5 without contacting instruments."
         )
         self.spectrum_info.setObjectName("muted")
+        self.spectrum_info.setWordWrap(True)
         layout.addWidget(self.spectrum_info)
 
-        # --- Connections ---
         self.points.currentItemChanged.connect(self._on_point_selected)
         self.prev_button.clicked.connect(self._go_previous)
         self.next_button.clicked.connect(self._go_next)
-
-    # ------------------------------------------------------------------
-    # Public API
-    # ------------------------------------------------------------------
+        self.thatec_row_combo.currentIndexChanged.connect(self._thatec_row_changed)
+        self.show_thatec_button.clicked.connect(self._load_selected_thatec_spectrum)
+        self.thatec_trace_combo.currentIndexChanged.connect(self._render_thatec_trace)
 
     def load(
         self,
@@ -100,72 +138,63 @@ class SpectrumResultsTab(QWidget):
         run: ThatecRun,
         points: tuple[StoredPoint, ...],
     ) -> None:
-        """Load stored points and prepare the spectrum browser."""
+        """Load private point data and public spectral rows from one file."""
+
         self._selected_path = path
         self._run = run
         self._stored_points = points
         self._populate_points(points)
+        self._populate_thatec_rows()
+        if self.thatec_row_combo.count():
+            self._load_selected_thatec_spectrum()
 
     def show_thatec_spectrum(self, row_id: str, checkpoint: int) -> None:
-        """Display a THATEC 2-D row slice as a spectrum plot.
+        """Select a public spectrum requested by the tree or heatmap."""
 
-        Called from the sweep tree panel when a spectral node is selected.
-        """
         if self._selected_path is None or self._run is None:
             return
-        row = self._run.rows.get(row_id)
-        if row is None or len(row.shape) < 2:
+        row_index = self.thatec_row_combo.findData(row_id)
+        if row_index < 0:
+            self.spectrum_info.setText(
+                f"THATEC row {row_id} does not contain a displayable spectrum."
+            )
             return
-        try:
-            data = ThatecRunReader.row_slice(self._selected_path, row_id, checkpoint)
-        except Exception as exc:
-            self.spectrum_info.setText(f"Cannot read THATEC spectrum: {exc}")
-            return
-        offset, multiplier = (
-            (data.scale[0], data.scale[1])
-            if len(data.scale) >= 2
-            else (0.0, 1.0)
+        self.thatec_row_combo.setCurrentIndex(row_index)
+        self.thatec_checkpoint.setValue(
+            max(0, min(checkpoint, self.thatec_checkpoint.maximum()))
         )
-        x_values = tuple(
-            offset + multiplier * index for index in range(len(data.values))
-        )
-        self.spectrum_plot.set_trace(
-            "Selected THATEC spectrum",
-            x_values,
-            tuple(float(v) for v in data.values),
-            primary=True,
-        )
-        label = row.control_name or row_id
-        self.spectrum_plot.set_title(f"{label} — checkpoint {checkpoint}")
-        self.spectrum_plot.auto_range()
-        self.spectrum_info.setText(
-            f"THATEC spectrum: {label}, checkpoint {checkpoint}, "
-            f"{len(data.values)} points"
-        )
+        self._load_selected_thatec_spectrum()
 
     def clear(self) -> None:
         """Reset the tab to its empty state."""
+
         self.points.clear()
         self._clear_spectrum()
         self._stored_points = ()
         self._selected_path = None
         self._run = None
-
-    # ------------------------------------------------------------------
-    # Points list
-    # ------------------------------------------------------------------
+        self._public_spectrum = None
+        self.thatec_row_combo.blockSignals(True)
+        self.thatec_row_combo.clear()
+        self.thatec_row_combo.blockSignals(False)
+        self.thatec_checkpoint.setRange(0, 0)
+        self.thatec_trace_combo.blockSignals(True)
+        self.thatec_trace_combo.clear()
+        self.thatec_trace_combo.blockSignals(False)
+        self.thatec_trace_combo.setEnabled(False)
+        self.show_thatec_button.setEnabled(False)
 
     def _populate_points(self, points: tuple[StoredPoint, ...]) -> None:
         self.points.clear()
         self._clear_spectrum()
         for point in points:
             fields = {**point.setpoints, **point.measurements}
-            suffix = " • spectrum" if point.has_spectrum else ""
+            suffix = " - spectrum" if point.has_spectrum else ""
             item = QTreeWidgetItem(
                 [
                     str(point.index),
                     point.status,
-                    point.timestamp_utc or "—",
+                    point.timestamp_utc or "-",
                     f"{len(fields)} values{suffix}",
                 ]
             )
@@ -173,9 +202,97 @@ class SpectrumResultsTab(QWidget):
             item.setToolTip(3, self._point_tooltip(point))
             self.points.addTopLevelItem(item)
 
-    # ------------------------------------------------------------------
-    # Spectrum display
-    # ------------------------------------------------------------------
+    def _populate_thatec_rows(self) -> None:
+        self._public_spectrum = None
+        self.thatec_row_combo.blockSignals(True)
+        self.thatec_row_combo.clear()
+        if self._run is not None:
+            for row in find_spectrum_rows(self._run):
+                label = row.control_name or row.device_name or row.id
+                checkpoints = row.shape[0] if row.shape else 0
+                sample_shape = " x ".join(str(size) for size in row.shape[1:])
+                self.thatec_row_combo.addItem(
+                    f"{label} ({checkpoints} checkpoints x {sample_shape})",
+                    userData=row.id,
+                )
+        self.thatec_row_combo.blockSignals(False)
+        self._thatec_row_changed()
+
+    def _thatec_row_changed(self, *_args: object) -> None:
+        row_id = self.thatec_row_combo.currentData()
+        row = self._run.rows.get(str(row_id)) if self._run is not None else None
+        self._public_spectrum = None
+        self.thatec_trace_combo.blockSignals(True)
+        self.thatec_trace_combo.clear()
+        self.thatec_trace_combo.blockSignals(False)
+        self.thatec_trace_combo.setEnabled(False)
+        if row is None or len(row.shape) < 2:
+            self.thatec_checkpoint.setRange(0, 0)
+            self.show_thatec_button.setEnabled(False)
+            return
+        self.thatec_checkpoint.setRange(0, max(0, row.shape[0] - 1))
+        self.show_thatec_button.setEnabled(True)
+
+    def _load_selected_thatec_spectrum(self) -> None:
+        row_id = self.thatec_row_combo.currentData()
+        if self._selected_path is None or row_id is None:
+            return
+        checkpoint = self.thatec_checkpoint.value()
+        try:
+            spectrum = ThatecRunReader.spectrum_slice(
+                self._selected_path, str(row_id), checkpoint
+            )
+        except Exception as exc:
+            self._public_spectrum = None
+            self.thatec_trace_combo.clear()
+            self.thatec_trace_combo.setEnabled(False)
+            self.spectrum_info.setText(
+                f"Cannot read public THATEC/PyThat spectrum: {exc}"
+            )
+            return
+        self._public_spectrum = spectrum
+        self.thatec_trace_combo.blockSignals(True)
+        self.thatec_trace_combo.clear()
+        for index, trace in enumerate(spectrum.traces):
+            self.thatec_trace_combo.addItem(trace.name, userData=index)
+        self.thatec_trace_combo.setCurrentIndex(0)
+        self.thatec_trace_combo.blockSignals(False)
+        self.thatec_trace_combo.setEnabled(bool(spectrum.traces))
+        self._render_thatec_trace()
+
+    def _render_thatec_trace(self, *_args: object) -> None:
+        spectrum = self._public_spectrum
+        trace_index = self.thatec_trace_combo.currentData()
+        if spectrum is None or trace_index is None:
+            return
+        try:
+            trace = spectrum.traces[int(trace_index)]
+        except (IndexError, ValueError):
+            return
+        self._clear_spectrum()
+        self.spectrum_plot.set_labels(
+            x=spectrum.x_label,
+            x_unit=spectrum.x_unit,
+            y=spectrum.y_label,
+            y_unit=spectrum.y_unit,
+        )
+        self.spectrum_plot.set_trace(
+            trace.name,
+            spectrum.x_values,
+            trace.values,
+            primary=True,
+        )
+        row = self._run.rows.get(spectrum.row_id) if self._run is not None else None
+        label = row.control_name if row is not None and row.control_name else spectrum.row_id
+        self.spectrum_plot.set_title(
+            f"{label} - checkpoint {spectrum.checkpoint} - {trace.name}"
+        )
+        self.spectrum_plot.auto_range()
+        self.spectrum_info.setText(
+            "Public THATEC/PyThat spectrum: "
+            f"{label}, checkpoint {spectrum.checkpoint}, {trace.name}, "
+            f"{len(spectrum.x_values)} samples from {spectrum.source_shape}."
+        )
 
     def _on_point_selected(
         self,
@@ -192,18 +309,21 @@ class SpectrumResultsTab(QWidget):
             return
         self.device_state_changed.emit(point.device_states)
         if not point.has_spectrum:
-            self.spectrum_info.setText("This checkpoint contains no spectrum.")
+            self.spectrum_info.setText("This checkpoint contains no stored spectrum.")
             return
         try:
             trace = Hdf5RunReader.spectrum(
                 self._selected_path, point.index, max_points=2_000
             )
         except Exception as exc:
-            self.spectrum_info.setText(f"Cannot read spectrum: {exc}")
+            self.spectrum_info.setText(f"Cannot read stored spectrum: {exc}")
             return
         if trace is None:
-            self.spectrum_info.setText("No spectrum for the selected checkpoint.")
+            self.spectrum_info.setText("No stored spectrum for the selected checkpoint.")
             return
+        self.spectrum_plot.set_labels(
+            x="Frequency", x_unit="Hz", y="Power", y_unit="dBm"
+        )
         self.spectrum_plot.set_trace(
             "Stored spectrum",
             trace.frequencies_hz,
@@ -215,15 +335,10 @@ class SpectrumResultsTab(QWidget):
         )
         self.spectrum_plot.auto_range()
         self.spectrum_info.setText(
-            f"{trace.source_point_count} points in file; "
-            f"interactive peak-preserving display • "
-            f"{trace.acquired_at_utc or 'missing time'} • "
+            f"{trace.source_point_count} points in file; interactive peak-preserving "
+            f"display; {trace.acquired_at_utc or 'missing time'}; "
             f"max {max(trace.powers_dbm):.4g} dBm"
         )
-
-    # ------------------------------------------------------------------
-    # Navigation
-    # ------------------------------------------------------------------
 
     def _go_previous(self) -> None:
         current = self.points.currentItem()
@@ -249,17 +364,11 @@ class SpectrumResultsTab(QWidget):
             return
         index = self.points.indexOfTopLevelItem(current)
         self.prev_button.setEnabled(index > 0)
-        self.next_button.setEnabled(
-            index < self.points.topLevelItemCount() - 1
-        )
-
-    # ------------------------------------------------------------------
-    # Helpers
-    # ------------------------------------------------------------------
+        self.next_button.setEnabled(index < self.points.topLevelItemCount() - 1)
 
     def _clear_spectrum(self) -> None:
         self.spectrum_plot.clear()
-        self.spectrum_plot.set_title("Select a point containing a stored spectrum")
+        self.spectrum_plot.set_title("Select a stored or public spectrum")
         self.spectrum_info.setText(
             "Spectra are read from HDF5 without contacting instruments."
         )
@@ -275,4 +384,3 @@ class SpectrumResultsTab(QWidget):
             "device_states": point.device_states,
         }
         return json.dumps(payload, ensure_ascii=False, indent=2, sort_keys=True)
-

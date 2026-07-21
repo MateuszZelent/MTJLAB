@@ -58,7 +58,6 @@ class StationSafetyStripTests(unittest.TestCase):
             StationSafetySnapshot(
                 ready=False,
                 active_outputs=2,
-                profile_state="LOCKED",
                 simulation=True,
                 actor="operator",
                 roles=("operator",),
@@ -90,7 +89,6 @@ class StationSafetyStripTests(unittest.TestCase):
             StationSafetySnapshot(
                 ready=True,
                 active_outputs=0,
-                profile_state="APPROVED",
                 simulation=False,
                 actor="LAB\\operator-with-a-deliberately-long-identity",
                 roles=("engineer", "operator", "service"),

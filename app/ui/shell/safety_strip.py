@@ -16,7 +16,6 @@ class StationSafetySnapshot:
 
     ready: bool
     active_outputs: int
-    profile_state: str
     simulation: bool
     actor: str
     roles: tuple[str, ...]
@@ -34,7 +33,6 @@ class StationSafetyStrip(QWidget):
 
         self.readiness = BodyLabel()
         self.outputs = BodyLabel()
-        self.profile = BodyLabel()
         self.mode = BodyLabel()
         self.actor = BodyLabel()
         self.estop = PrimaryPushButton("E-STOP — disable all outputs")
@@ -54,7 +52,6 @@ class StationSafetyStrip(QWidget):
         for widget in (
             self.readiness,
             self.outputs,
-            self.profile,
             self.mode,
             self.actor,
         ):
@@ -90,7 +87,6 @@ class StationSafetyStrip(QWidget):
         widgets = (
             self.readiness,
             self.outputs,
-            self.profile,
             self.mode,
             self.actor,
             self.save_settings,
@@ -98,7 +94,7 @@ class StationSafetyStrip(QWidget):
         )
         for widget in widgets:
             self._layout.removeWidget(widget)
-        for column in range(7):
+        for column in range(6):
             self._layout.setColumnStretch(column, 0)
         self._layout.setHorizontalSpacing(6 if mode == "narrow" else 12)
         if mode == "narrow":
@@ -106,9 +102,8 @@ class StationSafetyStrip(QWidget):
             self._layout.addWidget(self.outputs, 0, 1)
             self._layout.addWidget(self.save_settings, 1, 0)
             self._layout.addWidget(self.estop, 1, 1)
-            self._layout.addWidget(self.profile, 2, 0)
-            self._layout.addWidget(self.mode, 2, 1)
-            self._layout.addWidget(self.actor, 3, 0, 1, 2)
+            self._layout.addWidget(self.mode, 2, 0)
+            self._layout.addWidget(self.actor, 2, 1)
             self._layout.setColumnStretch(0, 1)
             self._layout.setColumnStretch(1, 1)
         elif mode == "compact":
@@ -116,9 +111,8 @@ class StationSafetyStrip(QWidget):
             self._layout.addWidget(self.outputs, 0, 1)
             self._layout.addWidget(self.save_settings, 0, 2)
             self._layout.addWidget(self.estop, 0, 3)
-            self._layout.addWidget(self.profile, 1, 0)
-            self._layout.addWidget(self.mode, 1, 1)
-            self._layout.addWidget(self.actor, 1, 2, 1, 2)
+            self._layout.addWidget(self.mode, 1, 0)
+            self._layout.addWidget(self.actor, 1, 1, 1, 3)
             self._layout.setColumnStretch(0, 1)
             self._layout.setColumnStretch(1, 1)
             self._layout.setColumnStretch(2, 2)
@@ -127,8 +121,8 @@ class StationSafetyStrip(QWidget):
             for column, widget in enumerate(widgets[:-2]):
                 self._layout.addWidget(widget, 0, column)
                 self._layout.setColumnStretch(column, 1 if column < 4 else 2)
-            self._layout.addWidget(self.save_settings, 0, 5)
-            self._layout.addWidget(self.estop, 0, 6)
+            self._layout.addWidget(self.save_settings, 0, 4)
+            self._layout.addWidget(self.estop, 0, 5)
 
     def update_snapshot(self, snapshot: StationSafetySnapshot) -> None:
         """Synchronously render ``snapshot`` without performing station actions."""
@@ -146,7 +140,6 @@ class StationSafetyStrip(QWidget):
         self.outputs.setProperty(
             "outputState", "off" if snapshot.active_outputs == 0 else "active"
         )
-        self.profile.setText(f"Profile {snapshot.profile_state}")
         self.mode.setText("SIMULATION" if snapshot.simulation else "HARDWARE")
         roles = ", ".join(snapshot.roles) or "no role"
         self.actor.setText(f"{snapshot.actor} · {roles}")

@@ -37,7 +37,7 @@ class FileBrowserPanel(QWidget):
 
         actions = QHBoxLayout()
         refresh = PushButton("Refresh file list", self)
-        open_file = PrimaryPushButton("Open HDF5 file…", self)
+        open_file = PrimaryPushButton("Open HDF5 / PyThat file…", self)
         actions.addWidget(refresh)
         actions.addWidget(open_file)
         actions.addStretch(1)
@@ -146,4 +146,3 @@ class FileBrowserPanel(QWidget):
         item = self._find_item_by_path(self._selected_path)
         if item is not None:
             self.runs.setCurrentItem(item)
-

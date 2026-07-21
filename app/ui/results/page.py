@@ -167,6 +167,7 @@ class ResultsPage(QWidget):
         super().__init__(parent)
         self._selected_path: Path | None = None
         self._thatec_run = None
+        self._thatec_tree_available = False
 
         layout = QVBoxLayout(self)
 
@@ -323,11 +324,13 @@ class ResultsPage(QWidget):
         """Refresh the file list and clear result views."""
         self.resume_button.setEnabled(False)
         self.open_sweep_button.setEnabled(False)
+        self._thatec_tree_available = False
         self.metadata_panel.clear()
         self.sweep_tree.clear()
         self.spectrum_tab.clear()
         self.heatmap_tab.clear()
         self._set_heatmap_visible(False)
+        self._thatec_tree_available = False
         self.file_browser.refresh()
         if not self.file_browser.has_files():
             self.metadata_panel.metadata.setPlainText(
@@ -359,6 +362,7 @@ class ResultsPage(QWidget):
         if path_or_none is None:
             self._selected_path = None
             self._thatec_run = None
+            self._thatec_tree_available = False
             return
 
         path = Path(str(path_or_none))
@@ -367,7 +371,6 @@ class ResultsPage(QWidget):
         # --- Load THATEC tree ---
         try:
             self._thatec_run = ThatecRunReader.describe(path)
-            tree = ThatecRunReader.tree(path)
         except Exception as exc:
             self.metadata_panel.metadata.setPlainText(
                 f"Cannot read result:\n{exc}"
@@ -375,18 +378,32 @@ class ResultsPage(QWidget):
             self._thatec_run = None
             return
 
+        # A public PyThat-compatible measurement can legitimately omit the
+        # optional visual tree. That must not hide its spectra or metadata.
+        try:
+            tree = ThatecRunReader.tree(path)
+            self._thatec_tree_available = True
+        except Exception:
+            tree = ()
+            self._thatec_tree_available = False
+
         # Sweep tree panel
         self.sweep_tree.load(path, self._thatec_run, tree)
-        self.open_sweep_button.setEnabled(True)
+        self.open_sweep_button.setEnabled(self._thatec_tree_available)
 
         # --- Load private HDF5 detail (if available) ---
         try:
             detail = Hdf5RunReader.detail(path)
             points = Hdf5RunReader.points(path)
-            pythat_data = read_pythat_run_data(path)
         except Exception:
             detail = None
             points = ()
+
+        # PyThat enriches metadata when available, but it must not suppress
+        # the core HDF5 browser when an optional bridge cannot open a file.
+        try:
+            pythat_data = read_pythat_run_data(path)
+        except Exception:
             pythat_data = None
 
         # Resume button
@@ -438,7 +455,11 @@ class ResultsPage(QWidget):
 
     def _request_open_sweep(self) -> None:
         """Open the public THATEC execution tree in the dedicated Sweep workspace."""
-        if self._thatec_run is None or self._selected_path is None:
+        if (
+            self._thatec_run is None
+            or self._selected_path is None
+            or not self._thatec_tree_available
+        ):
             return
         try:
             tree = ThatecRunReader.tree(self._selected_path)

@@ -103,6 +103,25 @@ class QuantityAndSafetyTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "point_settle_time"):
             StationSettings.model_validate(raw)
 
+    def test_keithley_trip_limits_must_cover_source_and_compliance_envelopes(self) -> None:
+        raw = deepcopy(SettingsRepository(SETTINGS_TEMPLATE).load().raw)
+        limits = raw["devices"]["keithley"]["safety"]["channels"]["A"][
+            "lab_limits"
+        ]
+        limits["source_current"]["max"] = "4 mA"
+        with self.assertRaisesRegex(ValueError, "measured_current_trip.*source_current"):
+            StationSettings.model_validate(raw)
+
+        raw = deepcopy(SettingsRepository(SETTINGS_TEMPLATE).load().raw)
+        limits = raw["devices"]["keithley"]["safety"]["channels"]["A"][
+            "lab_limits"
+        ]
+        limits["voltage_compliance"]["max"] = "670 mV"
+        with self.assertRaisesRegex(
+            ValueError, "measured_voltage_trip.*voltage_compliance"
+        ):
+            StationSettings.model_validate(raw)
+
     def test_rigol_current_estimate_is_limited(self) -> None:
         settings = loaded_settings()
         estimate = validate_rigol_waveform(

@@ -94,7 +94,11 @@ class Hdf5RunReader:
         if not output_dir.exists():
             return ()
         summaries: list[RunSummary] = []
-        for path in sorted(output_dir.glob("*.h5"), key=lambda item: item.stat().st_mtime, reverse=True):
+        paths = {
+            *output_dir.glob("*.h5"),
+            *output_dir.glob("*.hdf5"),
+        }
+        for path in sorted(paths, key=lambda item: item.stat().st_mtime, reverse=True):
             try:
                 summaries.append(Hdf5RunReader.summary(path))
             except ExecutionError:
@@ -109,7 +113,9 @@ class Hdf5RunReader:
                             created_at_utc=None,
                             status="THATEC",
                             point_count=max(shapes, default=0),
-                            spectrum_count=sum(len(row.shape) == 2 for row in run.rows.values()),
+                            spectrum_count=sum(
+                                len(row.shape) >= 2 for row in run.rows.values()
+                            ),
                             plan_sha256=None,
                             application_version=None,
                         )

@@ -221,6 +221,34 @@ class KeithleyChannelLimits(StrictModel):
         self.voltage_compliance.checked(DIMENSION_VOLTAGE)
         self.measured_current_trip.checked(DIMENSION_CURRENT)
         self.measured_voltage_trip.checked(DIMENSION_VOLTAGE)
+        self._require_trip_contains(
+            "source_current",
+            self.source_current,
+            "measured_current_trip",
+            self.measured_current_trip,
+            DIMENSION_CURRENT,
+        )
+        self._require_trip_contains(
+            "source_voltage",
+            self.source_voltage,
+            "measured_voltage_trip",
+            self.measured_voltage_trip,
+            DIMENSION_VOLTAGE,
+        )
+        self._require_compliance_inside_trip(
+            "current_compliance",
+            self.current_compliance,
+            "measured_current_trip",
+            self.measured_current_trip,
+            DIMENSION_CURRENT,
+        )
+        self._require_compliance_inside_trip(
+            "voltage_compliance",
+            self.voltage_compliance,
+            "measured_voltage_trip",
+            self.measured_voltage_trip,
+            DIMENSION_VOLTAGE,
+        )
         if parse_quantity(self.max_abs_power, DIMENSION_POWER).si_value <= 0:
             raise ValueError("max_abs_power must be positive")
         if parse_quantity(self.ramp_current_step_max, DIMENSION_CURRENT).si_value <= 0:
@@ -231,6 +259,46 @@ class KeithleyChannelLimits(StrictModel):
             raise ValueError("sweep_points_max must be at least 2")
         self.point_settle_time.checked(DIMENSION_TIME)
         return self
+
+    @staticmethod
+    def _require_trip_contains(
+        source_name: str,
+        source: RangeSettings,
+        trip_name: str,
+        trip: RangeSettings,
+        dimension: str,
+    ) -> None:
+        source_min = parse_quantity(source.min, dimension).si_value
+        source_max = parse_quantity(source.max, dimension).si_value
+        trip_min = parse_quantity(trip.min, dimension).si_value
+        trip_max = parse_quantity(trip.max, dimension).si_value
+        if source_min < trip_min or source_max > trip_max:
+            raise ValueError(
+                f"{trip_name} [{trip.min}, {trip.max}] must contain the complete "
+                f"{source_name} range [{source.min}, {source.max}]."
+            )
+
+    @staticmethod
+    def _require_compliance_inside_trip(
+        compliance_name: str,
+        compliance: RangeSettings,
+        trip_name: str,
+        trip: RangeSettings,
+        dimension: str,
+    ) -> None:
+        compliance_max = max(
+            abs(parse_quantity(compliance.min, dimension).si_value),
+            abs(parse_quantity(compliance.max, dimension).si_value),
+        )
+        trip_max_abs = max(
+            abs(parse_quantity(trip.min, dimension).si_value),
+            abs(parse_quantity(trip.max, dimension).si_value),
+        )
+        if compliance_max > trip_max_abs:
+            raise ValueError(
+                f"{trip_name} [{trip.min}, {trip.max}] must cover the maximum "
+                f"{compliance_name} magnitude {compliance.max}."
+            )
 
 
 class KeithleyChannelSettings(StrictModel):

@@ -630,9 +630,6 @@ class MainWindow(FluentWindow):
             StationSafetySnapshot(
                 ready=self.dashboard.evaluate_readiness().ready,
                 active_outputs=active_outputs,
-                profile_state=(
-                    "NOT REQUIRED"
-                ),
                 simulation=self._simulation,
                 actor=self._access.identity.username,
                 roles=tuple(
