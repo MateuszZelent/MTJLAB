@@ -17,6 +17,11 @@ from pydantic import ValidationError
 from ruamel.yaml import YAML
 
 from app.domain.errors import ConfigurationError
+from app.domain.quantities import (
+    DIMENSION_CURRENT,
+    DIMENSION_VOLTAGE,
+    parse_quantity,
+)
 from app.settings.models import StationSettings
 
 
@@ -49,13 +54,19 @@ class SettingsRepairReport:
     created: bool
     defaults_added: bool
     known_issues_repaired: bool
+    safety_limits_narrowed: bool
     backup: Path | None
 
     @property
     def changed(self) -> bool:
         """Return whether startup created or rewrote the settings file."""
 
-        return self.created or self.defaults_added or self.known_issues_repaired
+        return (
+            self.created
+            or self.defaults_added
+            or self.known_issues_repaired
+            or self.safety_limits_narrowed
+        )
 
 
 class SettingsRepository:
@@ -99,12 +110,13 @@ class SettingsRepository:
         defaults = self._template_raw()
         defaults_added = self._merge_missing_defaults(raw, defaults)
         known_issues_repaired = self.repair_known_issues(raw)
+        safety_limits_narrowed = self.repair_legacy_keithley_limits(raw, defaults)
         try:
             settings = StationSettings.model_validate(raw)
         except ValidationError as exc:
             raise ConfigurationError(f"Invalid settings.yml:\n{exc}") from exc
         backup = None
-        if defaults_added or known_issues_repaired:
+        if defaults_added or known_issues_repaired or safety_limits_narrowed:
             # Persist only after the merged document validates.  This is a
             # schema upgrade, not an operator configuration change.
             # _atomic_dump also keeps a .bak.
@@ -115,6 +127,7 @@ class SettingsRepository:
             created=created,
             defaults_added=defaults_added,
             known_issues_repaired=known_issues_repaired,
+            safety_limits_narrowed=safety_limits_narrowed,
             backup=backup,
         )
         return loaded, report
@@ -270,6 +283,125 @@ class SettingsRepository:
             safety["reference_level"] = documented_reference
             changed = True
         return changed
+
+    @classmethod
+    def repair_legacy_keithley_limits(
+        cls,
+        raw: dict[str, Any],
+        defaults: dict[str, Any],
+    ) -> bool:
+        """Replace incompatible legacy Keithley envelopes with safe template ranges.
+
+        This migration only narrows a source or compliance range when its
+        existing trip envelope does not cover it.  The replacement is accepted
+        only when the current packaged default fits inside the station's
+        existing trip envelope; trip thresholds are never widened.
+        """
+
+        try:
+            channels = raw["devices"]["keithley"]["safety"]["channels"]
+            default_channels = defaults["devices"]["keithley"]["safety"][
+                "channels"
+            ]
+        except (KeyError, TypeError):
+            return False
+        if not isinstance(channels, dict) or not isinstance(default_channels, dict):
+            return False
+
+        changed = False
+        source_pairs = (
+            ("source_current", "measured_current_trip", DIMENSION_CURRENT),
+            ("source_voltage", "measured_voltage_trip", DIMENSION_VOLTAGE),
+        )
+        compliance_pairs = (
+            ("current_compliance", "measured_current_trip", DIMENSION_CURRENT),
+            ("voltage_compliance", "measured_voltage_trip", DIMENSION_VOLTAGE),
+        )
+        for channel_name, channel in channels.items():
+            default_channel = default_channels.get(channel_name)
+            if not isinstance(channel, dict) or not isinstance(default_channel, dict):
+                continue
+            limits = channel.get("lab_limits")
+            default_limits = default_channel.get("lab_limits")
+            if not isinstance(limits, dict) or not isinstance(default_limits, dict):
+                continue
+
+            channel_narrowed = False
+            for value_name, trip_name, dimension in source_pairs:
+                value = limits.get(value_name)
+                trip = limits.get(trip_name)
+                safe_default = default_limits.get(value_name)
+                if not all(isinstance(item, dict) for item in (value, trip, safe_default)):
+                    continue
+                if cls._range_contains(trip, value, dimension):
+                    continue
+                if cls._range_contains(trip, safe_default, dimension):
+                    limits[value_name] = deepcopy(safe_default)
+                    changed = True
+                    channel_narrowed = True
+
+            for value_name, trip_name, dimension in compliance_pairs:
+                value = limits.get(value_name)
+                trip = limits.get(trip_name)
+                safe_default = default_limits.get(value_name)
+                if not all(isinstance(item, dict) for item in (value, trip, safe_default)):
+                    continue
+                if cls._trip_covers_magnitude(trip, value, dimension):
+                    continue
+                if cls._trip_covers_magnitude(trip, safe_default, dimension):
+                    limits[value_name] = deepcopy(safe_default)
+                    changed = True
+                    channel_narrowed = True
+            if channel_narrowed and isinstance(default_channel.get("defaults"), dict):
+                # Legacy form defaults may now lie outside the narrowed lab
+                # envelope.  Reset only this channel's form snapshot; this also
+                # guarantees that its persisted default output state is OFF.
+                channel["defaults"] = deepcopy(default_channel["defaults"])
+        return changed
+
+    @staticmethod
+    def _range_contains(
+        outer: dict[str, Any],
+        inner: dict[str, Any],
+        dimension: str,
+    ) -> bool:
+        """Compare explicit-unit ranges in SI without guessing malformed values."""
+
+        try:
+            outer_min = parse_quantity(outer["min"], dimension).si_value
+            outer_max = parse_quantity(outer["max"], dimension).si_value
+            inner_min = parse_quantity(inner["min"], dimension).si_value
+            inner_max = parse_quantity(inner["max"], dimension).si_value
+        except (KeyError, TypeError, ValueError):
+            return False
+        return (
+            outer_min <= outer_max
+            and inner_min <= inner_max
+            and outer_min <= inner_min
+            and inner_max <= outer_max
+        )
+
+    @staticmethod
+    def _trip_covers_magnitude(
+        trip: dict[str, Any],
+        value: dict[str, Any],
+        dimension: str,
+    ) -> bool:
+        """Match the model's absolute compliance-versus-trip invariant in SI."""
+
+        try:
+            trip_min = parse_quantity(trip["min"], dimension).si_value
+            trip_max = parse_quantity(trip["max"], dimension).si_value
+            value_min = parse_quantity(value["min"], dimension).si_value
+            value_max = parse_quantity(value["max"], dimension).si_value
+        except (KeyError, TypeError, ValueError):
+            return False
+        return (
+            trip_min <= trip_max
+            and value_min <= value_max
+            and max(abs(value_min), abs(value_max))
+            <= max(abs(trip_min), abs(trip_max))
+        )
 
     def _atomic_dump(self, payload: dict[str, Any]) -> Path | None:
         """Replace the file only after a complete temporary YAML write succeeds."""

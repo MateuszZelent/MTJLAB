@@ -6,11 +6,103 @@ import tempfile
 import unittest
 from unittest.mock import patch
 
-from app.settings.repository import SettingsRepository
+from app.domain.errors import ConfigurationError
+from app.settings.repository import SettingsRepository, repair_settings_file
 from tests.helpers import SETTINGS_TEMPLATE
 
 
 class SettingsRepositoryTests(unittest.TestCase):
+    def test_startup_repair_migrates_legacy_fields_and_narrows_keithley_limits(self) -> None:
+        raw = deepcopy(SettingsRepository(SETTINGS_TEMPLATE).load().raw)
+        raw["profile"]["state"] = "approved"
+        raw["devices"]["anritsu"]["signal_generator"]["arm_ttl"] = "30 s"
+        raw["devices"]["keithley"]["safety"]["allow_output_enable"] = True
+        channels = raw["devices"]["keithley"]["safety"]["channels"]
+        channels["A"]["lab_limits"]["source_current"] = {
+            "min": "-10 mA",
+            "max": "10 mA",
+            "max_abs": "10 mA",
+        }
+        channels["B"]["lab_limits"]["source_current"] = {
+            "min": "-0.15 A",
+            "max": "0.15 A",
+            "max_abs": "0.15 A",
+        }
+        channels["B"]["defaults"]["source_current"] = "100 mA"
+        channels["B"]["defaults"]["output_enabled"] = True
+        with tempfile.TemporaryDirectory() as temporary:
+            path = Path(temporary) / "settings.yml"
+            repository = SettingsRepository(path)
+            repository._atomic_dump(raw)
+
+            report = repair_settings_file(path)
+
+            self.assertTrue(report.changed)
+            self.assertTrue(report.known_issues_repaired)
+            self.assertTrue(report.safety_limits_narrowed)
+            self.assertEqual(report.backup, path.with_suffix(".yml.bak"))
+            self.assertTrue(report.backup.is_file())
+            loaded = repository.load().raw
+            self.assertEqual(
+                loaded["devices"]["keithley"]["safety"]["channels"]["A"]
+                ["lab_limits"]["source_current"],
+                {"min": "-1 mA", "max": "1 mA", "max_abs": "1 mA"},
+            )
+            self.assertEqual(
+                loaded["devices"]["keithley"]["safety"]["channels"]["B"]
+                ["lab_limits"]["source_current"],
+                {"min": "0 A", "max": "10 mA", "max_abs": "10 mA"},
+            )
+            self.assertTrue(
+                loaded["devices"]["keithley"]["safety"]["allow_output_enable"]
+            )
+            self.assertEqual(
+                loaded["devices"]["keithley"]["safety"]["channels"]["B"]
+                ["defaults"]["source_current"],
+                "1 mA",
+            )
+            self.assertFalse(
+                loaded["devices"]["keithley"]["safety"]["channels"]["B"]
+                ["defaults"]["output_enabled"]
+            )
+            self.assertNotIn("state", loaded["profile"])
+            self.assertNotIn(
+                "arm_ttl",
+                loaded["devices"]["anritsu"]["signal_generator"],
+            )
+
+            backup_before = report.backup.read_bytes()
+            repeated = repair_settings_file(path)
+            self.assertFalse(repeated.changed)
+            self.assertIsNone(repeated.backup)
+            self.assertEqual(report.backup.read_bytes(), backup_before)
+
+    def test_startup_repair_refuses_to_widen_a_too_narrow_trip_limit(self) -> None:
+        raw = deepcopy(SettingsRepository(SETTINGS_TEMPLATE).load().raw)
+        limits = raw["devices"]["keithley"]["safety"]["channels"]["A"][
+            "lab_limits"
+        ]
+        limits["source_current"] = {
+            "min": "-10 mA",
+            "max": "10 mA",
+            "max_abs": "10 mA",
+        }
+        limits["measured_current_trip"] = {
+            "min": "-10 uA",
+            "max": "10 uA",
+        }
+        with tempfile.TemporaryDirectory() as temporary:
+            path = Path(temporary) / "settings.yml"
+            repository = SettingsRepository(path)
+            repository._atomic_dump(raw)
+            original = path.read_bytes()
+
+            with self.assertRaisesRegex(ConfigurationError, "measured_current_trip"):
+                repair_settings_file(path)
+
+            self.assertEqual(path.read_bytes(), original)
+            self.assertFalse(path.with_suffix(".yml.bak").exists())
+
     def test_load_repairs_anritsu_rf_requirement_without_inventing_power_limit(self) -> None:
         raw = deepcopy(SettingsRepository(SETTINGS_TEMPLATE).load().raw)
         safety = raw["devices"]["anritsu"]["safety"]

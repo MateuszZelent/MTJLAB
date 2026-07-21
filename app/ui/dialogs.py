@@ -4,8 +4,8 @@ from __future__ import annotations
 
 from PySide6.QtCore import QEvent, Qt
 from PySide6.QtWidgets import QFileDialog, QMessageBox as QtMessageBox, QWidget
-from PySide6.QtWidgets import QDialog
-from qfluentwidgets import MessageBox
+from PySide6.QtWidgets import QDialog, QHBoxLayout, QVBoxLayout
+from qfluentwidgets import BodyLabel, PrimaryPushButton, PushButton, SubtitleLabel
 
 
 class StationDialog(QDialog):
@@ -26,6 +26,79 @@ class StationDialog(QDialog):
             self.update()
             for child in self.findChildren(QWidget):
                 child.update()
+
+
+class StationAlertDialog(StationDialog):
+    """Reliable Fluent alert that keeps its text above the modal surface."""
+
+    def __init__(
+        self,
+        parent: QWidget | None,
+        title: str,
+        text: str,
+        primary: QtMessageBox.StandardButton,
+        secondary: QtMessageBox.StandardButton | None,
+        default_button: QtMessageBox.StandardButton,
+    ) -> None:
+        super().__init__(parent)
+        self.setWindowTitle(title)
+        self.setModal(True)
+        self.setProperty("stationSurface", "raised")
+        self.setMinimumWidth(360)
+        parent_width = parent.width() if parent is not None else 720
+        self.setMaximumWidth(max(360, min(720, parent_width - 48)))
+
+        self.title_label = SubtitleLabel(title, self)
+        self.title_label.setWordWrap(True)
+        self.content_label = BodyLabel(text, self)
+        self.content_label.setWordWrap(True)
+        self.content_label.setTextInteractionFlags(
+            Qt.TextInteractionFlag.TextSelectableByMouse
+            | Qt.TextInteractionFlag.TextSelectableByKeyboard
+        )
+
+        self.primary_button = PrimaryPushButton(
+            StationMessageBox._button_label(primary), self
+        )
+        self.primary_button.setMinimumWidth(120)
+        self.primary_button.clicked.connect(lambda: self._finish(primary, True))
+        self.secondary_button: PushButton | None = None
+        if secondary is not None:
+            self.secondary_button = PushButton(
+                StationMessageBox._button_label(secondary), self
+            )
+            self.secondary_button.setMinimumWidth(120)
+            self.secondary_button.clicked.connect(
+                lambda: self._finish(secondary, False)
+            )
+
+        buttons = QHBoxLayout()
+        buttons.setSpacing(12)
+        buttons.addStretch(1)
+        if self.secondary_button is not None:
+            buttons.addWidget(self.secondary_button)
+        buttons.addWidget(self.primary_button)
+
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(24, 22, 24, 20)
+        layout.setSpacing(12)
+        layout.addWidget(self.title_label)
+        layout.addWidget(self.content_label)
+        layout.addSpacing(8)
+        layout.addLayout(buttons)
+
+        self.selected_button = QtMessageBox.StandardButton.NoButton
+        if default_button == secondary and self.secondary_button is not None:
+            self.secondary_button.setFocus()
+        else:
+            self.primary_button.setFocus()
+
+    def _finish(self, button: QtMessageBox.StandardButton, accepted: bool) -> None:
+        self.selected_button = button
+        if accepted:
+            self.accept()
+        else:
+            self.reject()
 
 
 class StationMessageBox:
@@ -116,51 +189,16 @@ class StationMessageBox:
         )
         secondary = next((button for button in available if button != primary), None)
 
-        dialog = MessageBox(title, text, parent)
-        cls._make_message_readable(dialog, parent, title, text)
-        dialog.yesButton.setText(cls._button_label(primary))
-        if secondary is None:
-            dialog.hideCancelButton()
-        else:
-            dialog.cancelButton.setText(cls._button_label(secondary))
-            if default_button == secondary:
-                dialog.cancelButton.setFocus()
-            else:
-                dialog.yesButton.setFocus()
-        return primary if dialog.exec() == QDialog.DialogCode.Accepted else (
-            secondary or cls.StandardButton.NoButton
+        dialog = StationAlertDialog(
+            parent,
+            title,
+            text,
+            primary,
+            secondary,
+            default_button,
         )
-
-    @staticmethod
-    def _make_message_readable(
-        dialog: MessageBox,
-        parent: QWidget | None,
-        title: str,
-        text: str,
-    ) -> None:
-        """Keep Fluent message content inside the visible modal card.
-
-        The upstream MessageBox sizes its card from a label width derived from
-        the top-level window.  In a page-owned overlay that can make the card
-        wider than its parent, leaving only a button visible.  Constraining and
-        wrapping both labels after construction keeps long device and safety
-        errors readable at normal and narrow window sizes.
-        """
-
-        parent_width = parent.width() if parent is not None else 720
-        card_width = max(328, min(720, parent_width - 48))
-        text_width = card_width - 48
-        dialog.titleLabel.setText(title)
-        dialog.titleLabel.setWordWrap(True)
-        dialog.titleLabel.setFixedWidth(text_width)
-        dialog.titleLabel.adjustSize()
-        dialog.contentLabel.setText(text)
-        dialog.contentLabel.setWordWrap(True)
-        dialog.contentLabel.setFixedWidth(text_width)
-        dialog.contentLabel.adjustSize()
-        dialog.setContentCopyable(True)
-        card_height = dialog.contentLabel.y() + dialog.contentLabel.height() + 105
-        dialog.widget.setFixedSize(card_width, card_height)
+        dialog.exec()
+        return dialog.selected_button
 
     @classmethod
     def _button_label(cls, button: QtMessageBox.StandardButton) -> str:
