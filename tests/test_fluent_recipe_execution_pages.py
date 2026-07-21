@@ -79,11 +79,11 @@ class FluentRecipeAndExecutionPageTests(unittest.TestCase):
             self.assertEqual(page.run_button.text(), "Run demo")
             self.assertIn("RAW/processed", page.execution_mode_hint.text())
             page.set_settings(
-                simulation_settings(approved=page._settings.outputs_locked)
+                simulation_settings()
             )
             self.assertEqual(
                 page.recipe_profile_badge.text(),
-                "PROFILE APPROVAL NOT REQUIRED",
+                "LIMITS + READBACK ACTIVE",
             )
             self.assertEqual(
                 page.recipe_profile_badge.property("safetyState"),

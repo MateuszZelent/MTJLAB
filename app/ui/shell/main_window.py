@@ -24,7 +24,6 @@ from PySide6.QtWidgets import (
     QDialog,
     QHBoxLayout,
     QLineEdit,
-    QMessageBox,
     QPushButton,
     QSplitter,
     QVBoxLayout,
@@ -76,6 +75,7 @@ from app.settings.models import StationSettings
 from app.security import AccessPolicy, Permission
 from app.storage import Hdf5RunReader
 from app.ui.settings_page import SettingsPage
+from app.ui.dialogs import StationMessageBox as QMessageBox
 from app.ui.settings_workers import KeithleyDefaultsSaveWorker
 from app.ui.run_worker import RunController, serialize_settings_snapshot
 from app.ui.dashboard import DashboardPage, DeviceConnectionPanel
@@ -195,12 +195,9 @@ class MainWindow(FluentWindow):
         self.safety_strip.save_settings.setFixedHeight(28)
         self.safety_strip.save_settings.setMinimumWidth(100)
         self.safety_strip.estop.setProperty("visualPriority", "low")
+        self.safety_strip.estop.setProperty("controlState", "emergency")
         self.safety_strip.estop.setToolTip(
             "Confirm and disable every instrument output and abort acquisition."
-        )
-        self.safety_strip.estop.setStyleSheet(
-            "background: transparent; border: 1px solid palette(mid); "
-            "border-radius: 6px; color: palette(text); padding: 3px 10px;"
         )
         content_layout.addWidget(self.safety_strip)
         self.shell_splitter = QSplitter(
@@ -332,7 +329,7 @@ class MainWindow(FluentWindow):
                 enabled = False
                 reason = (
                     "Safety-limit editing is disabled in simulation mode. "
-                    "Open the hardware station profile to edit approved limits."
+                    "Open the hardware station settings to edit configured limits."
                 )
             elif not self._access.allows(Permission.EDIT_SETTINGS):
                 enabled = False
@@ -1062,7 +1059,6 @@ class MainWindow(FluentWindow):
             if not bool(enabled):
                 return
         energizing_operations = {
-            "arm",
             "configure",
             "configure_output",
             "configure_modulation",
@@ -1076,7 +1072,6 @@ class MainWindow(FluentWindow):
             "quick_setpoint",
             "configure_signal_generator",
             "configure_advanced_spectrum",
-            "arm_signal_generator",
             "set_signal_generator_output",
         }
         permission = (
@@ -1095,8 +1090,6 @@ class MainWindow(FluentWindow):
         if self._audit_healthy:
             return
         energizing = operation in {
-            "arm",
-            "arm_signal_generator",
             "trigger_sweep",
             "trigger_burst",
             "ramp_to_level",
@@ -1113,7 +1106,7 @@ class MainWindow(FluentWindow):
             energizing = bool(payload)
         if energizing:
             raise ConfigurationError(
-                "The durable audit log is unavailable. ARM and OUTPUT ON are locked; "
+                "The durable audit log is unavailable. OUTPUT ON is locked; "
                 "OUTPUT OFF and E-STOP remain available."
             )
 
@@ -1133,13 +1126,6 @@ class MainWindow(FluentWindow):
             self._assert_audit_ready_for_run()
         except (AuthorizationError, ConfigurationError) as exc:
             QMessageBox.critical(self, "Run not started", str(exc))
-            return
-        if self._settings.outputs_locked:
-            QMessageBox.warning(
-                self,
-                "Unverified profile",
-                "Approve the profile in Settings before running a recipe.",
-            )
             return
         connected = [name for name, state in self._device_states.items() if state != "disconnected"]
         if connected:
@@ -1212,13 +1198,6 @@ class MainWindow(FluentWindow):
         if path is None:
             QMessageBox.warning(self, "Resume run", "No valid run file was selected.")
             return
-        if self._settings.outputs_locked:
-            QMessageBox.warning(
-                self,
-                "Unverified profile",
-                "Approve the current safety profile before resuming a run.",
-            )
-            return
         connected = [
             name for name, state in self._device_states.items() if state != "disconnected"
         ]
@@ -1244,10 +1223,12 @@ class MainWindow(FluentWindow):
             if current_settings_source != detail.settings_yaml:
                 raise ConfigurationError(
                     "The current settings differ from the immutable run snapshot. "
-                    "Restore and approve the exact profile before resuming."
+                    "Restore the exact station configuration before resuming."
                 )
             recipe = parse_recipe_text(detail.recipe_yaml, origin=str(path))
-            plan = RecipeCompiler(self._settings).compile(recipe)
+            plan = RecipeCompiler(
+                self._settings, outputs_forced_off=outputs_forced_off
+            ).compile(recipe)
             checkpoint = RunRecoveryManager().inspect(path, plan)
             if (
                 checkpoint.stored_points >= plan.total_points
@@ -1810,9 +1791,7 @@ class MainWindow(FluentWindow):
             self._log(f"VISA ASSIGN FAILED: {type(exc).__name__}: {exc}")
             QMessageBox.critical(self, "VISA assignments not saved", str(exc))
             return
-        self._log(
-            f"VISA ASSIGN SAVED: settings.yml updated atomically; profile state={settings.profile.state}"
-        )
+        self._log("VISA ASSIGN SAVED: settings.yml updated atomically")
         self.settings_page.reload()
         self._settings_saved(settings)
         self.dashboard.mark_assignments_saved(assignments)
@@ -1835,8 +1814,7 @@ class MainWindow(FluentWindow):
             self,
             "Assign MOKE Box",
             f"Save {endpoint} as the MOKE Box endpoint?\n\n"
-            "The read-only VOUT response was verified. VOUT control will remain disabled. "
-            "Changing the hardware profile revokes its approval.",
+            "The read-only VOUT response was verified. VOUT control will remain disabled.",
             QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.Cancel,
             QMessageBox.StandardButton.Cancel,
         )
@@ -1858,7 +1836,7 @@ class MainWindow(FluentWindow):
         self.settings_page.reload()
         self._settings_saved(settings)
         self.dashboard.tcp_discovery_info.setText(
-            f"MOKE Box assigned to {endpoint}. Read-only control is ready; profile approval was revoked."
+            f"MOKE Box assigned to {endpoint}. Read-only control is ready."
         )
         self._log(f"MOKE BOX ASSIGN SUCCESS: endpoint={endpoint!r}; VOUT control remains disabled")
 
@@ -1950,7 +1928,7 @@ class MainWindow(FluentWindow):
                 self.dashboard.update_audit_health(False)
             if first_failure and hasattr(self, "log"):
                 self.log.appendPlainText(
-                    "CRITICAL: durable audit logging failed; ARM, OUTPUT ON and new runs are locked: "
+                    "CRITICAL: durable audit logging failed; OUTPUT ON and new runs are locked: "
                     + str(exc)
                 )
 

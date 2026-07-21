@@ -106,7 +106,7 @@ def build_keithley_ramp_levels(
     steps = max(1, math.ceil(abs(target_si - start_si) / max_step_si))
     if steps > max_points:
         raise SafetyViolation(
-            f"Keithley ramp requires {steps} points; approved maximum is {max_points}."
+            f"Keithley ramp requires {steps} points; configured maximum is {max_points}."
         )
     delta = target_si - start_si
     return tuple(target_si if index == steps else start_si + delta * index / steps for index in range(1, steps + 1))
@@ -874,10 +874,18 @@ class KeithleyAdapter(DeviceAdapter):
             raise SafetyViolation("Keithley channel must be A or B.")
         settings = self._channel_settings(channel)
         if enabled:
+            if not self._settings.safety.allow_output_enable:
+                raise SafetyViolation(
+                    "Keithley OUTPUT ON is disabled in the station configuration."
+                )
             request = self._last_request.get(channel)
             if request is None:
                 raise SafetyViolation("Configure a safe Keithley source before enabling OUTPUT.")
             validate_keithley_source(settings, request)
+            # Re-read the complete programmed source immediately before the
+            # single energising transition. This also proves OUTPUT is still
+            # OFF and detects front-panel or remote changes after configure.
+            self._verify_applied_configuration(request)
         smu = self._smu(channel)
         try:
             self._require_session().write(
@@ -905,7 +913,7 @@ class KeithleyAdapter(DeviceAdapter):
         observed_before = self._read_output_states()
         if observed_before != expected_output_states:
             self._fail_measurement_output_invariant(
-                "Keithley output readback changed outside the approved control path "
+                "Keithley output readback changed outside the configured control path "
                 "before measurement."
             )
         try:
@@ -1032,7 +1040,7 @@ class KeithleyAdapter(DeviceAdapter):
         """Ramp an already active source without ever enabling an output.
 
         The actual starting level is queried from the instrument. Every point
-        is checked against the approved source/DUT envelope and followed by an
+        is checked against the configured source/DUT envelope and followed by an
         atomic I/V measurement. Any transport, compliance or limit failure
         attempts to turn both SMU outputs off.
         """
@@ -1053,17 +1061,17 @@ class KeithleyAdapter(DeviceAdapter):
         channel_settings = self._channel_settings(channel)
         limits = channel_settings.lab_limits
         dimension = "current" if current_request.mode == "current" else "voltage"
-        approved_step = parse_quantity(
+        configured_step = parse_quantity(
             limits.ramp_current_step_max
             if current_request.mode == "current"
             else limits.ramp_voltage_step_max,
             dimension,
         ).si_value
-        step_tolerance = max(abs(approved_step), 1.0) * 1e-12
-        if request.max_step_si > approved_step + step_tolerance:
+        step_tolerance = max(abs(configured_step), 1.0) * 1e-12
+        if request.max_step_si > configured_step + step_tolerance:
             raise SafetyViolation(
-                f"Requested ramp step {request.max_step_si:.12g} SI exceeds approved "
-                f"maximum {approved_step:.12g} SI."
+                f"Requested ramp step {request.max_step_si:.12g} SI exceeds configured "
+                f"maximum {configured_step:.12g} SI."
             )
         if limits.point_settle_time is not None:
             minimum_settle = parse_quantity(limits.point_settle_time.min, DIMENSION_TIME).si_value

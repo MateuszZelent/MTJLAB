@@ -66,6 +66,19 @@ class FluentTabView(QWidget):
     def setTabEnabled(self, index: int, enabled: bool) -> None:
         self.navigation.widget(self._routes[index]).setEnabled(enabled)
         self.stack.widget(index).setEnabled(enabled)
+        if not enabled and self.currentIndex() == index:
+            replacement = next(
+                (
+                    candidate
+                    for candidate in range(self.count())
+                    if candidate != index
+                    and self.isTabVisible(candidate)
+                    and self.isTabEnabled(candidate)
+                ),
+                -1,
+            )
+            if replacement >= 0:
+                self.setCurrentIndex(replacement)
 
     def isTabEnabled(self, index: int) -> bool:
         return self.navigation.widget(self._routes[index]).isEnabled()
@@ -74,7 +87,11 @@ class FluentTabView(QWidget):
         self.navigation.widget(self._routes[index]).setVisible(visible)
         if not visible and self.currentIndex() == index:
             replacement = next(
-                (candidate for candidate in range(self.count()) if self.isTabVisible(candidate)),
+                (
+                    candidate
+                    for candidate in range(self.count())
+                    if self.isTabVisible(candidate) and self.isTabEnabled(candidate)
+                ),
                 -1,
             )
             if replacement >= 0:

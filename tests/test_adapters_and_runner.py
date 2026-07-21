@@ -85,7 +85,6 @@ class ShutdownProbe:
 @dataclass
 class DemoOutputProbe(ShutdownProbe):
     output_requests: list[tuple[object, bool]] = field(default_factory=list)
-    arm_calls: int = 0
 
     def io_timeout(self, _timeout_s: float):
         return nullcontext()
@@ -95,15 +94,9 @@ class DemoOutputProbe(ShutdownProbe):
         self.state = DeviceState.OUTPUT_ON if enabled else DeviceState.OUTPUT_OFF
         return enabled
 
-    def arm_output(self, _channel: object) -> None:
-        self.arm_calls += 1
-
     def set_signal_generator_output(self, enabled: bool) -> None:
         self.output_requests.append(("SG", enabled))
         self.state = DeviceState.OUTPUT_ON if enabled else DeviceState.OUTPUT_OFF
-
-    def arm_signal_generator_output(self) -> None:
-        self.arm_calls += 1
 
 
 @dataclass
@@ -130,13 +123,12 @@ class AdapterAndRunnerTests(unittest.TestCase):
     def setUp(self) -> None:
         self.settings = simulation_settings()
 
-    def test_demo_mode_suppresses_every_arm_and_output_on_action(self) -> None:
+    def test_demo_mode_suppresses_every_output_on_action(self) -> None:
         rigol = DemoOutputProbe()
         keithley = DemoOutputProbe()
         anritsu = DemoOutputProbe()
         writer = MemoryWriter()
         actions = (
-            PlanAction("rigol-arm", "arm_rigol_output", {"channel": 1}, {}),
             PlanAction(
                 "rigol-on", "set_rigol_output", {"channel": 1, "enabled": True}, {}
             ),
@@ -146,7 +138,6 @@ class AdapterAndRunnerTests(unittest.TestCase):
                 {"channel": "A", "enabled": True},
                 {},
             ),
-            PlanAction("anritsu-arm", "arm_anritsu_sg_output", {}, {}),
             PlanAction(
                 "anritsu-on", "set_anritsu_sg_output", {"enabled": True}, {}
             ),
@@ -170,8 +161,6 @@ class AdapterAndRunnerTests(unittest.TestCase):
 
         self.assertEqual(result.state, ApplicationState.SAFE)
         self.assertIsNone(result.error)
-        self.assertEqual(rigol.arm_calls, 0)
-        self.assertEqual(anritsu.arm_calls, 0)
         self.assertTrue(rigol.output_requests)
         self.assertTrue(keithley.output_requests)
         self.assertTrue(anritsu.output_requests)
@@ -187,7 +176,7 @@ class AdapterAndRunnerTests(unittest.TestCase):
             for name, data, _severity in writer.events
             if name == "demo_output_action_suppressed"
         ]
-        self.assertEqual(len(suppressed), 5)
+        self.assertEqual(len(suppressed), 3)
 
     def test_demo_mode_faults_if_initial_output_off_cannot_be_confirmed(self) -> None:
         rigol = DemoOutputProbe(fail=True)
@@ -279,7 +268,7 @@ class AdapterAndRunnerTests(unittest.TestCase):
         self.assertEqual(point.measurements["lakeshore.frequency_hz"], 60.0)
         self.assertEqual(point.measurements["lakeshore.mode_code"], 2.0)
 
-    def test_rigol_cannot_enable_output_with_unapproved_profile(self) -> None:
+    def test_rigol_cannot_enable_output_without_output_permission(self) -> None:
         session = FakeVisaSession(
             responses={
                 "*IDN?": "Rigol Technologies,DG1032Z,DG1ZA172902039,00.01.08",
@@ -420,7 +409,6 @@ class AdapterAndRunnerTests(unittest.TestCase):
 
     def test_keithley_rejects_unconfirmed_output_state(self) -> None:
         raw = deepcopy(self.settings.model_dump(mode="python"))
-        raw["profile"]["state"] = "approved"
         raw["devices"]["keithley"]["safety"]["allow_output_enable"] = True
         settings = StationSettings.model_validate(raw)
         session = FakeVisaSession(
@@ -456,7 +444,7 @@ class AdapterAndRunnerTests(unittest.TestCase):
 
         self.assertEqual(tuple(session.writes), writes_before)
 
-    def test_keithley_output_uses_channel_limits_without_legacy_permission_flag(self) -> None:
+    def test_keithley_output_requires_output_permission(self) -> None:
         raw = deepcopy(simulation_settings(approved=False).model_dump(mode="python"))
         raw["devices"]["keithley"]["safety"]["allow_output_enable"] = False
         settings = StationSettings.model_validate(raw)
@@ -474,8 +462,8 @@ class AdapterAndRunnerTests(unittest.TestCase):
             KeithleySourceRequest("B", "current", 0.001, 0.067)
         )
 
-        self.assertTrue(adapter.set_output("B", True))
-        self.assertEqual(adapter.state, DeviceState.OUTPUT_ON)
+        with self.assertRaisesRegex(SafetyViolation, "disabled"):
+            adapter.set_output("B", True)
 
     def test_device_state_remains_on_when_another_channel_is_disabled(self) -> None:
         raw = deepcopy(simulation_settings(approved=True).model_dump(mode="python"))
@@ -508,7 +496,6 @@ class AdapterAndRunnerTests(unittest.TestCase):
         rigol = RigolAdapter(settings, session_factory=FakeVisaSessionFactory(rigol_session))
         rigol.connect()
         rigol.configure_channel(RigolChannelConfig(1, "SQU", 1000, 0.001, -0.001, dut_min_impedance_ohm=50))
-        rigol.arm_output(1)
         rigol.set_output(1, True)
         rigol.set_output(2, False)
         self.assertEqual(rigol.state, DeviceState.OUTPUT_ON)
@@ -544,7 +531,6 @@ class AdapterAndRunnerTests(unittest.TestCase):
                 1, "SQU", 1000, 0.001, -0.001, dut_min_impedance_ohm=50
             )
         )
-        adapter.arm_output(1)
         adapter.set_output(1, True)
 
         actual = adapter.update_levels(
@@ -592,7 +578,6 @@ class AdapterAndRunnerTests(unittest.TestCase):
         adapter.configure_channel(
             RigolChannelConfig(1, "SQU", 1000, 0.001, -0.001, dut_min_impedance_ohm=50)
         )
-        adapter.arm_output(1)
         adapter.set_output(1, True)
 
         self.assertAlmostEqual(adapter.update_amplitude_vpp(1, 0.004), 0.004)
@@ -1151,6 +1136,7 @@ class AdapterAndRunnerTests(unittest.TestCase):
 
     def test_keithley_reads_both_channel_configurations_using_queries_only(self) -> None:
         raw = deepcopy(self.settings.model_dump(mode="python"))
+        raw["devices"]["keithley"]["safety"]["allow_output_enable"] = True
         raw["devices"]["keithley"]["safety"]["channels"]["A"]["enabled"] = True
         settings = StationSettings.model_validate(raw)
         session = FakeVisaSession(
@@ -1700,7 +1686,7 @@ class AdapterAndRunnerTests(unittest.TestCase):
         self.assertNotIn("TRAC:TYPE?", session.writes)
         self.assertNotIn("INIT:CONT ON", session.writes)
 
-    def test_anritsu_signal_generator_is_hidden_behind_qualified_limits_and_arm(self) -> None:
+    def test_anritsu_signal_generator_requires_qualified_limits_and_readback(self) -> None:
         from app.devices.simulators import SimulatedVisaFactory
 
         raw = simulation_settings(approved=True).model_dump(mode="python")
@@ -1708,7 +1694,6 @@ class AdapterAndRunnerTests(unittest.TestCase):
             "control_protocol": "basic_scpi",
             "frequency": {"min": "250 kHz", "max": "3.6 GHz"},
             "power": {"min": "-100 dBm", "max": "0 dBm"},
-            "arm_ttl": "30 s",
         }
         raw["devices"]["anritsu"]["safety"]["signal_generator_output_allowed"] = True
         settings = StationSettings.model_validate(raw)
@@ -1722,7 +1707,6 @@ class AdapterAndRunnerTests(unittest.TestCase):
             adapter.read_signal_generator_configuration()
         snapshot = adapter.configure_signal_generator(SignalGeneratorConfig(1e9, -20.0))
         self.assertFalse(snapshot.output_enabled)
-        adapter.arm_signal_generator_output(ttl_s=1.0)
         self.assertTrue(adapter.set_signal_generator_output(True))
         self.assertEqual(adapter.state, DeviceState.OUTPUT_ON)
         self.assertFalse(adapter.set_signal_generator_output(False))
@@ -1947,7 +1931,7 @@ root:
         ]
         self.assertTrue(configured)
 
-    def test_anritsu_signal_generator_recipe_uses_arm_output_and_finally_off(self) -> None:
+    def test_anritsu_signal_generator_recipe_uses_output_and_finally_off(self) -> None:
         from app.devices.simulators import SimulatedVisaFactory
 
         raw = simulation_settings(approved=True).model_dump(mode="python")
@@ -1955,7 +1939,6 @@ root:
             "control_protocol": "basic_scpi",
             "frequency": {"min": "250 kHz", "max": "3.6 GHz"},
             "power": {"min": "-100 dBm", "max": "0 dBm"},
-            "arm_ttl": "30 s",
         }
         raw["devices"]["anritsu"]["safety"]["signal_generator_output_allowed"] = True
         settings = StationSettings.model_validate(raw)
@@ -1971,7 +1954,6 @@ root:
   type: sequence
   children:
     - {id: config, type: configure_anritsu_sg, frequency: 1 GHz, power: -20 dBm}
-    - {id: arm, type: arm_anritsu_sg_output}
     - {id: on, type: set_anritsu_sg_output, enabled: true}
     - {id: point, type: checkpoint, label: sg-on}
 finally:
@@ -2005,7 +1987,6 @@ finally:
             "control_protocol": "basic_scpi",
             "frequency": {"min": "250 kHz", "max": "3.6 GHz"},
             "power": {"min": "-100 dBm", "max": "0 dBm"},
-            "arm_ttl": "30 s",
         }
         raw["devices"]["anritsu"]["safety"]["signal_generator_output_allowed"] = True
         settings = StationSettings.model_validate(raw)
@@ -2017,14 +1998,13 @@ root:
   id: root
   type: sequence
   children:
-    - {id: arm, type: arm_anritsu_sg_output}
     - {id: on, type: set_anritsu_sg_output, enabled: true}
 """
         )
         with self.assertRaisesRegex(SafetyViolation, "complete recipe.dut_limits"):
             RecipeCompiler(settings).compile(recipe)
 
-    def test_anritsu_rejects_frequency_outside_the_approved_profile(self) -> None:
+    def test_anritsu_rejects_frequency_outside_configured_limits(self) -> None:
         session = FakeVisaSession(responses={"*IDN?": "ANRITSU,MS2830A,123456,1.0"})
         adapter = AnritsuAdapter(self.settings, session_factory=FakeVisaSessionFactory(session))
         adapter.connect()
@@ -2039,7 +2019,6 @@ root:
             "control_protocol": "basic_scpi",
             "frequency": {"min": "250 kHz", "max": "3.6 GHz"},
             "power": {"min": "-100 dBm", "max": "0 dBm"},
-            "arm_ttl": "30 s",
         }
         settings = StationSettings.model_validate(raw)
         session = FakeVisaSession(
@@ -2280,7 +2259,7 @@ root:
         self.assertIn("smub.source.output = smub.OUTPUT_OFF", session.writes)
         self.assertEqual(adapter.state, DeviceState.FAULT)
 
-    def test_rigol_requires_one_shot_arm_before_enabling_output(self) -> None:
+    def test_rigol_enables_output_after_configuration_and_readback(self) -> None:
         raw = deepcopy(simulation_settings(approved=True).model_dump(mode="python"))
         raw["devices"]["rigol"]["safety"]["allow_output_enable"] = True
         settings = StationSettings.model_validate(raw)
@@ -2298,9 +2277,6 @@ root:
         adapter = RigolAdapter(settings, session_factory=FakeVisaSessionFactory(session))
         adapter.connect()
         adapter.configure_channel(RigolChannelConfig(1, "SQU", 1000, .001, -.001, dut_min_impedance_ohm=50))
-        with self.assertRaises(SafetyViolation):
-            adapter.set_output(1, True)
-        adapter.arm_output(1)
         self.assertTrue(adapter.set_output(1, True))
 
     def test_runner_stores_one_checkpoint_for_a_spectrum(self) -> None:

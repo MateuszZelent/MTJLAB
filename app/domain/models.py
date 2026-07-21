@@ -12,7 +12,6 @@ class ApplicationState(StrEnum):
     DISCONNECTED = "disconnected"
     CONNECTED = "connected"
     VERIFIED = "verified"
-    ARMED = "armed"
     RUNNING = "running"
     PAUSED = "paused"
     STOPPING = "stopping"

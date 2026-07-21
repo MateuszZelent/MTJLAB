@@ -108,7 +108,7 @@ def _enforce_range(name: str, value: float, minimum: str, maximum: str, dimensio
     tolerance = max(abs(lower), abs(upper), 1.0) * 1e-12
     if value < lower - tolerance or value > upper + tolerance:
         raise SafetyViolation(
-            f"{name}={value:.9g} is outside the approved [{lower:.9g}, {upper:.9g}] SI range."
+            f"{name}={value:.9g} is outside the configured [{lower:.9g}, {upper:.9g}] SI range."
         )
 
 
@@ -216,7 +216,7 @@ def validate_rigol_frequency_sweep(
     stop_hold_s: float = 0.0,
     return_time_s: float = 0.0,
 ) -> None:
-    """Validate all sweep values against the approved channel profile."""
+    """Validate all sweep values against the configured channel limits."""
 
     numeric = (start_hz, stop_hz, duration_s, start_hold_s, stop_hold_s, return_time_s)
     if not all(math.isfinite(value) for value in numeric):
@@ -234,5 +234,5 @@ def validate_rigol_frequency_sweep(
     _enforce_range("sweep_duration", duration_s, limits.sweep_duration.min, limits.sweep_duration.max, "time")
     if not limits.sweep_steps.min <= steps <= limits.sweep_steps.max:
         raise SafetyViolation(
-            f"sweep_steps={steps} outside approved range [{limits.sweep_steps.min}, {limits.sweep_steps.max}]."
+            f"sweep_steps={steps} outside configured range [{limits.sweep_steps.min}, {limits.sweep_steps.max}]."
         )

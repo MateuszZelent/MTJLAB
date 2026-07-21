@@ -12,7 +12,7 @@ from uuid import uuid4
 
 from PySide6.QtCore import QMimeData, QSize, QSettings, QThread, QTimer, Qt, Signal
 from PySide6.QtGui import QAction, QActionGroup, QBrush, QCloseEvent, QColor, QDrag, QIcon, QKeySequence, QPainter, QPixmap, QShortcut
-from PySide6.QtWidgets import QAbstractItemView, QApplication, QComboBox, QCheckBox, QDialog, QDialogButtonBox, QFormLayout, QFrame, QHBoxLayout, QHeaderView, QLabel, QLineEdit, QMainWindow, QMenu, QMessageBox, QPlainTextEdit, QPushButton, QSizePolicy, QSplitter, QSpinBox, QStackedWidget, QStyle, QToolButton, QTreeWidget, QTreeWidgetItem, QVBoxLayout, QWidget
+from PySide6.QtWidgets import QAbstractItemView, QApplication, QComboBox, QCheckBox, QDialog, QDialogButtonBox, QFormLayout, QFrame, QHBoxLayout, QHeaderView, QLabel, QLineEdit, QMenu, QPlainTextEdit, QPushButton, QSizePolicy, QSplitter, QSpinBox, QStackedWidget, QStyle, QToolButton, QTreeWidget, QTreeWidgetItem, QVBoxLayout, QWidget
 from qfluentwidgets import (
     BodyLabel,
     CaptionLabel,
@@ -45,6 +45,7 @@ from app.settings.models import StationSettings
 from app.storage import Hdf5RunReader, ThatecDevice, ThatecRow, ThatecRun, ThatecRunReader, ThatecTreeNode
 from app.ui.common import human_bytes as _human_bytes
 from app.ui.dialogs import StationFileDialog as QFileDialog
+from app.ui.dialogs import StationMessageBox as QMessageBox
 from app.ui.common import human_duration as _human_duration
 from app.ui.common import line_edit as _line
 from app.ui.design_system import effective_theme
@@ -53,7 +54,7 @@ from app.ui.recipes.common_dialogs import (
     ActionNodeEditorDialog, AnritsuAcquisitionEditorDialog, CommentEditorDialog, FixedValueDialog,
     KeithleySweepBuilderDialog, RecipeTreeWidget, SweepLibraryButton,
 )
-from app.ui.recipes.legacy_device_extensions import (
+from app.devices.anritsu_ms2830a.ui.recipe_extension import (
     AnritsuAdvancedSpectrumPanel,
     AnritsuConfigurationSnapshot,
     AnritsuNodeEditorDialog,
@@ -61,15 +62,19 @@ from app.ui.recipes.legacy_device_extensions import (
     AnritsuPageState,
     AnritsuSignalGeneratorNodeEditorDialog,
     AnritsuSpectrumConfigurationPanel,
+    SignalGeneratorSnapshot,
+)
+from app.devices.keithley_2600.ui.recipe_extension import (
     KeithleyConfigurationPanel,
     KeithleyConfigurationSnapshot,
     KeithleyNodeEditorDialog,
     KeithleyPage,
+    _keithley_roi_definition,
+)
+from app.devices.rigol_dg1000z.ui.recipe_extension import (
     RigolConfigurationSnapshot,
     RigolNodeEditorDialog,
     RigolPage,
-    SignalGeneratorSnapshot,
-    _keithley_roi_definition,
 )
 from app.ui.recipes.sweep_editor import SweepGeneratorDialog
 from app.ui.widgets import LimitEditDialog, LimitField, SpectrumPlotWidget
@@ -112,6 +117,7 @@ class RecipePage(QWidget):
         self._preflight_thread: QThread | None = None
         self._preflight_worker: RecipePreflightWorker | None = None
         self._preflight_source: str | None = None
+        self._preflight_outputs_forced_off: bool | None = None
         self._repository = RecipeRepository()
         self._loading_source = False
         self._tree_undo: list[str] = []
@@ -144,15 +150,14 @@ class RecipePage(QWidget):
         hero_copy.addWidget(subtitle)
         hero_layout.addLayout(hero_copy, 1)
         self.recipe_profile_badge = StrongBodyLabel(
-            "PROFILE APPROVAL NOT REQUIRED",
+            "LIMITS + READBACK ACTIVE",
             hero,
         )
         self.recipe_profile_badge.setObjectName("recipeProfileBadge")
-        self.recipe_profile_badge.setProperty(
-            "safetyState", "verified"
-        )
+        self.recipe_profile_badge.setProperty("safetyState", "verified")
         self.recipe_profile_badge.setToolTip(
-            "Device permissions, limits, ARM and hardware readback govern output operations."
+            "Device permissions, laboratory and DUT limits, explicit OUTPUT "
+            "actions and hardware readback govern output operations."
         )
         hero_layout.addWidget(self.recipe_profile_badge, 0, Qt.AlignmentFlag.AlignVCenter)
         layout.addWidget(hero)
@@ -471,6 +476,7 @@ class RecipePage(QWidget):
         self.tree.itemDoubleClicked.connect(self._open_node_editor)
         self.tree.move_requested.connect(self._move_recipe_node)
         self.tree.library_drop_requested.connect(self._drop_library_block)
+        self.tree.drop_rejected.connect(self._tree_drop_rejected)
         self.edit_device_button.clicked.connect(
             self._edit_selected_device_settings
         )
@@ -637,6 +643,7 @@ class RecipePage(QWidget):
             button = SweepLibraryButton(drag_kind)
             button.setObjectName("recipeLibraryAction")
             button.setProperty("deviceKind", kind)
+            button.setProperty("libraryDescription", description)
             button.setText(text)
             button.setToolTip(description)
             button.setIcon(self.style().standardIcon(icon))
@@ -646,7 +653,11 @@ class RecipePage(QWidget):
             button.setSizePolicy(
                 QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Fixed
             )
-            button.clicked.connect(callback)  # type: ignore[arg-type]
+            button.clicked.connect(
+                lambda _checked=False, command=callback, label=text: (
+                    self._invoke_library_action(label, command)
+                )
+            )
             target_layout.addWidget(button)
             self._library_action_buttons.append(button)
 
@@ -672,7 +683,7 @@ class RecipePage(QWidget):
         action(
             devices,
             "Anritsu signal generator",
-            "Configure RF frequency or power; RF remains OFF until explicit ARM/ON steps",
+            "Configure RF frequency or power; RF remains OFF until an explicit OUTPUT ON step",
             "anritsu",
             QStyle.StandardPixmap.SP_ComputerIcon,
             lambda: self._library_add_device("anritsu_sg"),
@@ -726,7 +737,7 @@ class RecipePage(QWidget):
             drag_kind="output:anritsu_sg",
         )
 
-        acquisition = group("Acquisition", "3")
+        acquisition = group("Acquisition", "4")
         action(
             acquisition,
             "MOKE Hall (V + field)",
@@ -860,6 +871,29 @@ class RecipePage(QWidget):
         scroll.setWidget(panel)
         return scroll
 
+    def _invoke_library_action(self, label: str, callback: object) -> None:
+        """Keep every library click inside a controlled UI error boundary."""
+
+        try:
+            if not callable(callback):
+                raise ConfigurationError(
+                    f"Library action {label!r} is not available."
+                )
+            callback()
+        except Exception as exc:
+            self.status.emit(
+                f"Library action rejected without changing the plan: {exc}"
+            )
+            QMessageBox.warning(
+                self,
+                "Cannot add block",
+                f"{label} was not added. The measurement tree is unchanged.\n\n{exc}",
+            )
+
+    def _tree_drop_rejected(self, message: str) -> None:
+        self.summary.setText(f"Drag-and-drop rejected: {message}")
+        self.status.emit(f"TREE_DROP_REJECTED | {message}")
+
     def _filter_library_actions(self, query: str) -> None:
         needle = query.strip().casefold()
         for button in self._library_action_buttons:
@@ -867,16 +901,29 @@ class RecipePage(QWidget):
             button.setVisible(not needle or needle in haystack)
 
     def _update_lakeshore_library_availability(self) -> None:
-        enabled = self._settings.lakeshore_gaussmeter.enabled and bool(
+        lakeshore_enabled = self._settings.lakeshore_gaussmeter.enabled and bool(
             self._settings.lakeshore_gaussmeter.resource
+        )
+        moke_enabled = self._settings.moke_box.enabled and bool(
+            self._settings.moke_box.endpoint
         )
         for button in self._library_action_buttons:
             if button.property("deviceKind") == "lakeshore_gaussmeter":
-                button.setEnabled(enabled)
-                if not enabled:
+                button.setEnabled(lakeshore_enabled)
+                if not lakeshore_enabled:
                     button.setToolTip(
                         "Configure enabled=true and a VISA resource for Lake Shore 475 in Settings before adding this read-only checkpoint."
                     )
+                else:
+                    button.setToolTip(str(button.property("libraryDescription")))
+            elif button.property("deviceKind") == "moke_box":
+                button.setEnabled(moke_enabled)
+                if not moke_enabled:
+                    button.setToolTip(
+                        "Configure enabled=true and a verified endpoint for MOKE Box in Settings before adding this read-only checkpoint."
+                    )
+                else:
+                    button.setToolTip(str(button.property("libraryDescription")))
 
     def _library_add_basic(
         self,
@@ -1072,7 +1119,7 @@ class RecipePage(QWidget):
             )
             self.summary.setText(
                 "Anritsu SG added. Double-click it to configure frequency/power; "
-                "RF remains OFF until explicit ARM/ON actions."
+                "RF remains OFF until an explicit OUTPUT ON action."
             )
         elif device == "anritsu":
             self._apply_builder_source(
@@ -1105,7 +1152,9 @@ class RecipePage(QWidget):
         try:
             category, separator, kind = drag_kind.partition(":")
             if not separator:
-                return
+                raise ConfigurationError(
+                    f"Malformed library block identifier {drag_kind!r}."
+                )
             if category == "device":
                 self._library_add_device(
                     kind, parent_id=parent_id, branch=branch, index=index
@@ -1155,7 +1204,9 @@ class RecipePage(QWidget):
                 )
                 return
             if category != "flow":
-                return
+                raise ConfigurationError(
+                    f"Unknown library block category {category!r}."
+                )
             self._library_add_basic(
                 kind,
                 parent_id=parent_id,
@@ -1194,14 +1245,11 @@ class RecipePage(QWidget):
     def set_settings(self, settings: StationSettings) -> None:
         self._settings = settings
         self._update_lakeshore_library_availability()
-        self.recipe_profile_badge.setText(
-            "PROFILE APPROVAL NOT REQUIRED"
-        )
-        self.recipe_profile_badge.setProperty(
-            "safetyState", "verified"
-        )
+        self.recipe_profile_badge.setText("LIMITS + READBACK ACTIVE")
+        self.recipe_profile_badge.setProperty("safetyState", "verified")
         self.recipe_profile_badge.setToolTip(
-            "Device permissions, limits, ARM and hardware readback govern output operations."
+            "Device permissions, laboratory and DUT limits, explicit OUTPUT "
+            "actions and hardware readback govern output operations."
         )
         self.recipe_profile_badge.style().unpolish(self.recipe_profile_badge)
         self.recipe_profile_badge.style().polish(self.recipe_profile_badge)
@@ -1261,10 +1309,12 @@ class RecipePage(QWidget):
         self._plan = None
         self.run_button.setEnabled(False)
         self.plan_preflight_changed.emit(None)
+        tree_rendered = False
         try:
             recipe = parse_recipe_text(source, origin=self.path.text())
             self._populate_recipe_tree(recipe.root, recipe.finally_nodes, None)
             self.summary.setText("Recipe loaded. Compile it before running.")
+            tree_rendered = True
         except Exception as exc:
             self._emit_tree_diagnostic(
                 "TREE_LOAD_REJECTED",
@@ -1277,7 +1327,11 @@ class RecipePage(QWidget):
                 "see Event log for diagnostics."
             )
         self._update_repository_state()
-        self.status.emit("Recipe loaded into the editor")
+        self.status.emit(
+            "Recipe loaded into the editor and measurement tree"
+            if tree_rendered
+            else "Recipe source loaded; invalid measurement tree was not applied"
+        )
 
     @property
     def historical_sweep_active(self) -> bool:
@@ -1512,14 +1566,40 @@ class RecipePage(QWidget):
         self.status.emit(f"Recipe saved atomically: {result.path}{suffix}")
 
     def restore_autosave(self) -> None:
-        source = self._repository.load_recovery(self.path.text())
+        try:
+            source = self._repository.load_recovery(self.path.text())
+        except Exception as exc:
+            QMessageBox.warning(
+                self, "Restore autosave", f"Cannot load autosave recovery: {exc}"
+            )
+            return
         if source is None:
             self.restore_button.setEnabled(False)
             return
-        self.editor.setPlainText(source)
-        self._tree_undo.clear()
-        self._tree_redo.clear()
-        self._update_tree_history_controls()
+        previous = self.editor.toPlainText()
+        try:
+            self._apply_builder_source(source, "Unsaved recipe recovery restored")
+        except Exception as exc:
+            # Recovery deliberately also preserves temporarily invalid YAML.
+            # Keep the last valid tree visible, but make the source/restoration
+            # state explicit and keep Run disabled until validation succeeds.
+            if source != previous:
+                self._tree_undo.append(previous)
+                self._tree_redo.clear()
+            self._loading_source = True
+            self.editor.setPlainText(source)
+            self._loading_source = False
+            self._plan = None
+            self.run_button.setEnabled(False)
+            self.plan_preflight_changed.emit(None)
+            self.summary.setText(
+                "Autosave source restored, but its YAML is invalid; the previous "
+                f"tree remains visible until the source is corrected. {exc}"
+            )
+            self.status.emit("Invalid autosave source restored for manual repair")
+            self._update_tree_history_controls()
+            self.restore_button.setEnabled(False)
+            return
         self.restore_button.setEnabled(False)
         self.status.emit("Unsaved recipe recovery restored into the editor")
 
@@ -1536,8 +1616,14 @@ class RecipePage(QWidget):
         self.restore_button.setToolTip(f"Unsaved editor recovery: {recovery}")
 
     def _update_repository_state(self) -> None:
-        versions = self._repository.versions(self.path.text())
-        recovery = self._repository.has_newer_recovery(self.path.text())
+        try:
+            versions = self._repository.versions(self.path.text())
+            recovery = self._repository.has_newer_recovery(self.path.text())
+        except Exception as exc:
+            self.restore_button.setEnabled(False)
+            self.version_label.setText(f"Version history unavailable: {exc}")
+            self.status.emit(f"Recipe repository state unavailable: {exc}")
+            return
         self.restore_button.setEnabled(recovery)
         self.version_label.setText(
             f"Immutable previous versions: {len(versions)}"
@@ -1549,7 +1635,12 @@ class RecipePage(QWidget):
 
         try:
             recipe = parse_recipe_text(self.editor.toPlainText(), origin=self.path.text())
-            plan = RecipeCompiler(self._settings).compile(recipe)
+            outputs_forced_off = (
+                self.execution_mode.currentData() == "demo_outputs_off"
+            )
+            plan = RecipeCompiler(
+                self._settings, outputs_forced_off=outputs_forced_off
+            ).compile(recipe)
             estimate = PlanEstimator(self._settings).estimate(plan)
         except Exception as exc:
             self._emit_tree_diagnostic(
@@ -1579,6 +1670,8 @@ class RecipePage(QWidget):
         self.run_button.setEnabled(False)
         self.plan_preflight_changed.emit(None)
         self._preflight_source = source
+        outputs_forced_off = self.execution_mode.currentData() == "demo_outputs_off"
+        self._preflight_outputs_forced_off = outputs_forced_off
         self.compile_recipe_action.setText("Cancel validation")
         self.summary.setText(
             "Validating recipe and estimating time/data size in the background…"
@@ -1586,7 +1679,10 @@ class RecipePage(QWidget):
         self.status.emit("Recipe validation started")
         thread = QThread(self)
         worker = RecipePreflightWorker(
-            self._settings, source, self.path.text()
+            self._settings,
+            source,
+            self.path.text(),
+            outputs_forced_off=outputs_forced_off,
         )
         worker.moveToThread(thread)
         thread.started.connect(worker.run)
@@ -1604,7 +1700,13 @@ class RecipePage(QWidget):
     def _preflight_succeeded(
         self, recipe: object, plan: object, estimate: object
     ) -> None:
-        if self._preflight_source != self.editor.toPlainText():
+        current_outputs_forced_off = (
+            self.execution_mode.currentData() == "demo_outputs_off"
+        )
+        if (
+            self._preflight_source != self.editor.toPlainText()
+            or self._preflight_outputs_forced_off != current_outputs_forced_off
+        ):
             self.summary.setText(
                 "Recipe changed during validation; the stale result was discarded. "
                 "Validate the current source again."
@@ -1641,6 +1743,7 @@ class RecipePage(QWidget):
         self._preflight_thread = None
         self._preflight_worker = None
         self._preflight_source = None
+        self._preflight_outputs_forced_off = None
 
     def cancel_preflight(self, *, wait_ms: int = 3_000) -> None:
         """Stop an in-flight validation before the owning window is destroyed."""
@@ -1655,9 +1758,31 @@ class RecipePage(QWidget):
     def _accept_preflight(
         self, recipe: object, plan: ExecutionPlan, estimate: PlanEstimate
     ) -> None:
+        try:
+            self._populate_recipe_tree(
+                recipe.root, recipe.finally_nodes, plan  # type: ignore[attr-defined]
+            )
+        except Exception as exc:
+            self._plan = None
+            self.run_button.setEnabled(False)
+            self.plan_preflight_changed.emit(None)
+            self._emit_tree_diagnostic(
+                "TREE_PREFLIGHT_RENDER_REJECTED",
+                error_type=type(exc).__name__,
+                error=str(exc),
+            )
+            self.summary.setText(
+                "Validation succeeded, but the operator tree could not be rendered. "
+                "Run remains disabled."
+            )
+            QMessageBox.warning(
+                self,
+                "Recipe preview",
+                f"The validated plan could not be displayed safely:\n\n{exc}",
+            )
+            return
         self._plan = plan
         self.run_button.setEnabled(True)
-        self._populate_recipe_tree(recipe.root, recipe.finally_nodes, plan)  # type: ignore[attr-defined]
         self.summary.setText(
             f"Plan: {len(plan.actions)} actions • {plan.total_points} checkpoints • "
             f"{plan.total_spectra} spectra • hash {plan.sha256}\n"
@@ -1670,7 +1795,7 @@ class RecipePage(QWidget):
                 if estimate.warnings
                 else "Warnings: none from static preflight\n"
             )
-            + "Compilation sends no instrument commands. Execution requires an approved profile and Run Engine."
+            + "Compilation sends no instrument commands. Execution uses Run Engine and revalidates device and DUT limits."
         )
         self.status.emit("Recipe compiled")
         self.plan_preflight_changed.emit((plan, estimate))
@@ -1727,6 +1852,7 @@ class RecipePage(QWidget):
             item.setFont(2, status_font)
             item.setData(0, Qt.ItemDataRole.UserRole, node)
             if parent is None:
+                item.setFlags(item.flags() & ~Qt.ItemFlag.ItemIsDragEnabled)
                 top_level_items.append(item)
             else:
                 parent.addChild(item)
@@ -1734,8 +1860,16 @@ class RecipePage(QWidget):
             self._add_native_sweep_roi_rows(node, item)
             for child in node.children:
                 add_node(child, item)
-            if node.else_children:
+            if node.type == "if":
                 else_item = QTreeWidgetItem(["Else branch", "Conditional alternative", "●"])
+                else_item.setData(
+                    0,
+                    RecipeTreeWidget.structural_role,
+                    RecipeTreeWidget.else_container,
+                )
+                else_item.setFlags(
+                    else_item.flags() & ~Qt.ItemFlag.ItemIsDragEnabled
+                )
                 item.addChild(else_item)
                 for child in node.else_children:
                     add_node(child, else_item)
@@ -1749,6 +1883,12 @@ class RecipePage(QWidget):
         cleanup = QTreeWidgetItem(["Finally — safe shutdown", cleanup_detail, "●"])
         cleanup.setIcon(0, self._tree_badge_icon("Safety", "#455363", "OFF"))
         cleanup.setData(0, Qt.ItemDataRole.UserRole, None)
+        cleanup.setData(
+            0,
+            RecipeTreeWidget.structural_role,
+            RecipeTreeWidget.finally_container,
+        )
+        cleanup.setFlags(cleanup.flags() & ~Qt.ItemFlag.ItemIsDragEnabled)
         cleanup.setToolTip(
             0,
             "Select this row, then click a Safe shutdown action in the Node library. "
@@ -2151,7 +2291,12 @@ class RecipePage(QWidget):
             return "FLOW", "#7253a6"
         if node.type.startswith(("set_", "ramp_", "enable_")):
             return "SAFE", "#18844c"
-        if node.type in {"acquire_reference", "acquire_spectrum", "measure_moke_hall"}:
+        if node.type in {
+            "acquire_reference",
+            "acquire_spectrum",
+            "measure_moke_hall",
+            "measure_lakeshore_field",
+        }:
             return "ACQUIRE", "#18844c"
         return "READY", "#536577"
 
@@ -2270,12 +2415,6 @@ class RecipePage(QWidget):
                 f"Safety action · deadline {node.data.get('deadline', '10 s')}",
                 QStyle.StandardPixmap.SP_BrowserReload,
             )
-        if node.type == "arm_anritsu_sg_output":
-            return (
-                "ARM Anritsu SG RF output",
-                "One-shot safety permission",
-                QStyle.StandardPixmap.SP_DialogApplyButton,
-            )
         if node.type == "set_anritsu_sg_output":
             enabled = bool(node.data.get("enabled", False))
             return (
@@ -2293,6 +2432,12 @@ class RecipePage(QWidget):
             return (
                 "Measure MOKE Hall 1 voltage + field",
                 "Read-only checkpoint · one AD7734 sample",
+                QStyle.StandardPixmap.SP_DialogApplyButton,
+            )
+        if node.type == "measure_lakeshore_field":
+            return (
+                "Measure Lake Shore field",
+                "Read-only gaussmeter checkpoint",
                 QStyle.StandardPixmap.SP_DialogApplyButton,
             )
         if node.type == "wait":
@@ -2544,6 +2689,8 @@ class RecipePage(QWidget):
             return self._tree_badge_icon("Anritsu", "#269c5a", "A")
         if node.type == "measure_moke_hall":
             return self._tree_badge_icon("MOKE Box", "#2478a5", "M")
+        if node.type == "measure_lakeshore_field":
+            return self._tree_badge_icon("Lake Shore", "#2478a5", "L")
         module = node.data.get("device_module")
         if module == "keithley":
             return self._tree_badge_icon("Keithley", "#d94343", "K")
@@ -2582,6 +2729,18 @@ class RecipePage(QWidget):
         item: QTreeWidgetItem | None,
         _previous: QTreeWidgetItem | None,
     ) -> None:
+        selected_node = (
+            item.data(0, Qt.ItemDataRole.UserRole) if item is not None else None
+        )
+        movable = (
+            isinstance(selected_node, RecipeNode)
+            and item is not None
+            and item.parent() is not None
+        )
+        self.delete_node_button.setEnabled(movable)
+        self.duplicate_node_button.setEnabled(movable)
+        self.move_up_button.setEnabled(movable)
+        self.move_down_button.setEnabled(movable)
         if item is None:
             self.selection_context.setText("Select a block in the measurement tree")
             self.inspector.clear()
@@ -2794,29 +2953,61 @@ class RecipePage(QWidget):
     def _builder_parent(self) -> tuple[str, str]:
         """Return the selected container, or the root as the safe default."""
 
-        item = self.tree.currentItem()
-        if item is not None:
-            if item.text(0).startswith("Finally"):
+        current = self.tree.currentItem()
+        item = current
+        while item is not None:
+            structural = RecipeTreeWidget.structural_kind(item)
+            if structural == RecipeTreeWidget.finally_container:
                 return "__finally__", "children"
+            if structural == RecipeTreeWidget.else_container:
+                owner_item = item.parent()
+                owner = (
+                    owner_item.data(0, Qt.ItemDataRole.UserRole)
+                    if owner_item is not None
+                    else None
+                )
+                if isinstance(owner, RecipeNode) and owner.type == "if":
+                    return owner.id, "else"
             node = item.data(0, Qt.ItemDataRole.UserRole)
-            if isinstance(node, RecipeNode) and node.type in {"sequence", "sweep", "repeat", "if"}:
+            if isinstance(node, RecipeNode) and node.type in {
+                "sequence",
+                "sweep",
+                "repeat",
+                "if",
+            }:
+                # A selected leaf belongs to the nearest container, whereas a
+                # selected container is itself the insertion target.
                 return node.id, "children"
-            parent = item.parent()
-            if parent is not None:
-                if parent.text(0).startswith("Finally"):
-                    return "__finally__", "children"
-                if parent.text(0).startswith("Else") and parent.parent() is not None:
-                    owner = parent.parent().data(0, Qt.ItemDataRole.UserRole)
-                    if isinstance(owner, RecipeNode):
-                        return owner.id, "else"
-                owner = parent.data(0, Qt.ItemDataRole.UserRole)
-                if isinstance(owner, RecipeNode):
-                    return owner.id, "children"
+            item = item.parent()
         root = self.tree.topLevelItem(0)
         node = root.data(0, Qt.ItemDataRole.UserRole) if root is not None else None
         if isinstance(node, RecipeNode):
             return node.id, "children"
         raise ConfigurationError("Load a valid recipe before editing its tree.")
+
+    @staticmethod
+    def _tree_parent_destination(
+        parent: QTreeWidgetItem | None,
+    ) -> tuple[str, str] | None:
+        if parent is None:
+            return None
+        structural = RecipeTreeWidget.structural_kind(parent)
+        if structural == RecipeTreeWidget.finally_container:
+            return "__finally__", "children"
+        if structural == RecipeTreeWidget.else_container:
+            owner_item = parent.parent()
+            owner = (
+                owner_item.data(0, Qt.ItemDataRole.UserRole)
+                if owner_item is not None
+                else None
+            )
+            if isinstance(owner, RecipeNode) and owner.type == "if":
+                return owner.id, "else"
+            return None
+        owner = parent.data(0, Qt.ItemDataRole.UserRole)
+        if isinstance(owner, RecipeNode):
+            return owner.id, "children"
+        return None
 
     @staticmethod
     def _new_node_id(prefix: str) -> str:
@@ -2983,6 +3174,11 @@ class RecipePage(QWidget):
             "wait": {"id": node_id, "type": "wait", "duration": "100 ms"},
             "measure_keithley": {"id": node_id, "type": "measure_keithley", "channel": "B"},
             "measure_moke_hall": {"id": node_id, "type": "measure_moke_hall"},
+            "measure_lakeshore_field": {
+                "id": node_id,
+                "type": "measure_lakeshore_field",
+                "checkpoint": True,
+            },
             "acquire_reference": {
                 "id": node_id,
                 "type": "acquire_reference",
@@ -3018,10 +3214,6 @@ class RecipePage(QWidget):
                 "id": node_id,
                 "type": "set_anritsu_sg_output",
                 "enabled": False,
-            },
-            "arm_anritsu_sg_output": {
-                "id": node_id,
-                "type": "arm_anritsu_sg_output",
             },
             "set_anritsu_sg_output_on": {
                 "id": node_id,
@@ -3457,19 +3649,19 @@ class RecipePage(QWidget):
         )
         if dialog.exec() != QDialog.DialogCode.Accepted:
             return
-        snapshot = dialog.configuration_snapshot()
-        parameter_actions = self._edit_keithley_rois(
-            snapshot, dialog.planned_parameter_actions()
-        )
-        if parameter_actions is None:
-            return
-        replacement = self._configured_keithley_node(
-            node,
-            snapshot,
-            parameter_actions=parameter_actions,
-            output_policy=dialog.selected_output_policy(),
-        )
         try:
+            snapshot = dialog.configuration_snapshot()
+            parameter_actions = self._edit_keithley_rois(
+                snapshot, dialog.planned_parameter_actions()
+            )
+            if parameter_actions is None:
+                return
+            replacement = self._configured_keithley_node(
+                node,
+                snapshot,
+                parameter_actions=parameter_actions,
+                output_policy=dialog.selected_output_policy(),
+            )
             source = replace_recipe_node(
                 self.editor.toPlainText(), node_id=node.id, node=replacement
             )
@@ -3480,31 +3672,27 @@ class RecipePage(QWidget):
     def _edit_anritsu_module_node(self, node: RecipeNode) -> None:
         snapshot = self._current_anritsu_snapshot()
         configuration = node.data.get("configuration")
-        if isinstance(configuration, dict):
-            try:
-                snapshot = replace(
-                    snapshot,
-                    start_hz=parse_quantity(
-                        configuration["start_frequency"], DIMENSION_FREQUENCY
-                    ).si_value,
-                    stop_hz=parse_quantity(
-                        configuration["stop_frequency"], DIMENSION_FREQUENCY
-                    ).si_value,
-                    reference_level_dbm=parse_quantity(
-                        configuration["reference_level"], DIMENSION_DBM
-                    ).si_value,
-                    points=int(configuration["points"]),
-                )
-            except (KeyError, TypeError, ValueError, ConfigurationError):
-                pass
         raw_actions = node.data.get("parameter_actions")
         actions = (
             [dict(action) for action in raw_actions if isinstance(action, dict)]
             if isinstance(raw_actions, list)
             else []
         )
-        for action in actions:
-            snapshot = self._anritsu_snapshot_with_override(snapshot, action)
+        try:
+            if isinstance(configuration, dict):
+                snapshot = self._anritsu_snapshot_from_mapping(
+                    configuration, fallback=snapshot
+                )
+            for action in actions:
+                snapshot = self._anritsu_snapshot_with_override(snapshot, action)
+        except Exception as exc:
+            QMessageBox.warning(
+                self,
+                "Anritsu node",
+                "The stored Anritsu snapshot is invalid and cannot be opened "
+                f"safely. Correct the YAML or remove the node.\n\n{exc}",
+            )
+            return
         dialog = AnritsuNodeEditorDialog(
             self._settings, self, snapshot=snapshot
         )
@@ -3515,15 +3703,15 @@ class RecipePage(QWidget):
         )
         if dialog.exec() != QDialog.DialogCode.Accepted:
             return
-        snapshot = dialog.configuration_panel.configuration_snapshot()
-        replacement = self._configured_anritsu_node(
-            node,
-            snapshot=snapshot,
-            parameter_actions=dialog.planned_parameter_actions(),
-            acquire_single=dialog.acquire_single.isChecked(),
-            trace=dialog.trace.currentText(),
-        )
         try:
+            snapshot = dialog.configuration_panel.configuration_snapshot()
+            replacement = self._configured_anritsu_node(
+                node,
+                snapshot=snapshot,
+                parameter_actions=dialog.planned_parameter_actions(),
+                acquire_single=dialog.acquire_single.isChecked(),
+                trace=dialog.trace.currentText(),
+            )
             source = replace_recipe_node(
                 self.editor.toPlainText(), node_id=node.id, node=replacement
             )
@@ -3554,13 +3742,13 @@ class RecipePage(QWidget):
         )
         if dialog.exec() != QDialog.DialogCode.Accepted:
             return
-        replacement = self._configured_anritsu_sg_node(
-            node,
-            frequency=dialog.frequency.text().strip(),
-            power=dialog.power.text().strip(),
-            parameter_actions=dialog.planned_parameter_actions(),
-        )
         try:
+            replacement = self._configured_anritsu_sg_node(
+                node,
+                frequency=dialog.frequency.text().strip(),
+                power=dialog.power.text().strip(),
+                parameter_actions=dialog.planned_parameter_actions(),
+            )
             source = replace_recipe_node(
                 self.editor.toPlainText(), node_id=node.id, node=replacement
             )
@@ -3575,9 +3763,17 @@ class RecipePage(QWidget):
         configuration = node.data.get("configuration")
         if isinstance(configuration, dict):
             try:
-                snapshot = RigolConfigurationSnapshot(**configuration)
-            except TypeError:
-                pass
+                snapshot = self._rigol_snapshot_from_mapping(
+                    configuration, fallback=snapshot
+                )
+            except Exception as exc:
+                QMessageBox.warning(
+                    self,
+                    "Rigol node",
+                    "The stored Rigol snapshot is invalid and cannot be opened "
+                    f"safely. Correct the YAML or remove the node.\n\n{exc}",
+                )
+                return
         raw_actions = node.data.get("parameter_actions")
         actions = (
             [dict(action) for action in raw_actions if isinstance(action, dict)]
@@ -3593,13 +3789,13 @@ class RecipePage(QWidget):
         )
         if dialog.exec() != QDialog.DialogCode.Accepted:
             return
-        replacement = self._configured_rigol_node(
-            node,
-            snapshot=dialog.configuration_snapshot(),
-            parameter_actions=dialog.planned_parameter_actions(),
-            output_policy=dialog.selected_output_policy(),
-        )
         try:
+            replacement = self._configured_rigol_node(
+                node,
+                snapshot=dialog.configuration_snapshot(),
+                parameter_actions=dialog.planned_parameter_actions(),
+                output_policy=dialog.selected_output_policy(),
+            )
             source = replace_recipe_node(
                 self.editor.toPlainText(), node_id=node.id, node=replacement
             )
@@ -3680,28 +3876,28 @@ class RecipePage(QWidget):
         )
         if dialog.exec() != QDialog.DialogCode.Accepted:
             return
-        action["segments"] = dialog.segment_data()
-        configuration = node.data.get("configuration")
         try:
-            snapshot = (
-                RigolConfigurationSnapshot(**configuration)
-                if isinstance(configuration, dict)
-                else self._current_rigol_snapshot()
-            )
-        except TypeError:
+            action["segments"] = dialog.segment_data()
+            configuration = node.data.get("configuration")
             snapshot = self._current_rigol_snapshot()
-        replacement = self._configured_rigol_node(
-            node,
-            snapshot=snapshot,
-            parameter_actions=actions,
-            output_policy=str(node.data.get("output_policy", "unchanged")),
-        )
-        source = replace_recipe_node(
-            self.editor.toPlainText(), node_id=node.id, node=replacement
-        )
-        self._apply_builder_source(
-            source, f"Updated Rigol ROI for {parameter_id}"
-        )
+            if isinstance(configuration, dict):
+                snapshot = self._rigol_snapshot_from_mapping(
+                    configuration, fallback=snapshot
+                )
+            replacement = self._configured_rigol_node(
+                node,
+                snapshot=snapshot,
+                parameter_actions=actions,
+                output_policy=str(node.data.get("output_policy", "unchanged")),
+            )
+            source = replace_recipe_node(
+                self.editor.toPlainText(), node_id=node.id, node=replacement
+            )
+            self._apply_builder_source(
+                source, f"Updated Rigol ROI for {parameter_id}"
+            )
+        except Exception as exc:
+            QMessageBox.warning(self, "Rigol ROI editor", str(exc))
 
     def _edit_legacy_keithley_configuration(self, node: RecipeNode) -> None:
         snapshot = replace(
@@ -3741,29 +3937,34 @@ class RecipePage(QWidget):
         )
         if dialog.exec() != QDialog.DialogCode.Accepted:
             return
-        updated = dialog.configuration_snapshot()
-        replacement = self._node_to_mapping(node)
-        replacement.update(
-            {
-                "channel": updated.channel,
-                "mode": updated.source_mode,
-                "level": updated.source_level,
-                "compliance": updated.compliance,
-                "nplc": float(updated.nplc.replace(",", ".")),
-                "settle_time": updated.settling_time,
-                "sense_mode": updated.sense_mode,
-                "source_autorange": updated.source_autorange,
-                "source_range": updated.source_range,
-                "measure_voltage_autorange": updated.measure_voltage_autorange,
-                "measure_voltage_range": updated.measure_voltage_range,
-                "measure_current_autorange": updated.measure_current_autorange,
-                "measure_current_range": updated.measure_current_range,
-            }
-        )
-        source = replace_recipe_node(
-            self.editor.toPlainText(), node_id=node.id, node=replacement
-        )
-        self._apply_builder_source(source, f"Updated Keithley settings {node.id}")
+        try:
+            updated = dialog.configuration_snapshot()
+            replacement = self._node_to_mapping(node)
+            replacement.update(
+                {
+                    "channel": updated.channel,
+                    "mode": updated.source_mode,
+                    "level": updated.source_level,
+                    "compliance": updated.compliance,
+                    "nplc": float(updated.nplc.replace(",", ".")),
+                    "settle_time": updated.settling_time,
+                    "sense_mode": updated.sense_mode,
+                    "source_autorange": updated.source_autorange,
+                    "source_range": updated.source_range,
+                    "measure_voltage_autorange": updated.measure_voltage_autorange,
+                    "measure_voltage_range": updated.measure_voltage_range,
+                    "measure_current_autorange": updated.measure_current_autorange,
+                    "measure_current_range": updated.measure_current_range,
+                }
+            )
+            source = replace_recipe_node(
+                self.editor.toPlainText(), node_id=node.id, node=replacement
+            )
+            self._apply_builder_source(
+                source, f"Updated Keithley settings {node.id}"
+            )
+        except Exception as exc:
+            QMessageBox.warning(self, "Keithley settings", str(exc))
 
     def _edit_legacy_rigol_configuration(self, node: RecipeNode) -> None:
         snapshot = RigolConfigurationSnapshot(
@@ -3799,35 +4000,40 @@ class RecipePage(QWidget):
         )
         if dialog.exec() != QDialog.DialogCode.Accepted:
             return
-        updated = dialog.configuration_snapshot()
-        replacement = self._node_to_mapping(node)
-        replacement.update(
-            {
-                "channel": updated.channel,
-                "waveform": updated.waveform,
-                "frequency": updated.frequency,
-                "high_level": updated.high_level,
-                "low_level": updated.low_level,
-                "output_load": updated.output_load,
-                "phase_deg": float(updated.phase_deg.replace(",", ".")),
-                "dut_min_impedance": updated.dut_min_impedance,
-            }
-        )
-        for key, value, waveform in (
-            ("square_duty_percent", updated.square_duty_percent, "SQU"),
-            ("ramp_symmetry_percent", updated.ramp_symmetry_percent, "RAMP"),
-            ("pulse_width", updated.pulse_width, "PULS"),
-            ("pulse_leading", updated.pulse_leading, "PULS"),
-            ("pulse_trailing", updated.pulse_trailing, "PULS"),
-        ):
-            if updated.waveform == waveform:
-                replacement[key] = value
-            else:
-                replacement.pop(key, None)
-        source = replace_recipe_node(
-            self.editor.toPlainText(), node_id=node.id, node=replacement
-        )
-        self._apply_builder_source(source, f"Updated Rigol settings {node.id}")
+        try:
+            updated = dialog.configuration_snapshot()
+            replacement = self._node_to_mapping(node)
+            replacement.update(
+                {
+                    "channel": updated.channel,
+                    "waveform": updated.waveform,
+                    "frequency": updated.frequency,
+                    "high_level": updated.high_level,
+                    "low_level": updated.low_level,
+                    "output_load": updated.output_load,
+                    "phase_deg": float(updated.phase_deg.replace(",", ".")),
+                    "dut_min_impedance": updated.dut_min_impedance,
+                }
+            )
+            for key, value, waveform in (
+                ("square_duty_percent", updated.square_duty_percent, "SQU"),
+                ("ramp_symmetry_percent", updated.ramp_symmetry_percent, "RAMP"),
+                ("pulse_width", updated.pulse_width, "PULS"),
+                ("pulse_leading", updated.pulse_leading, "PULS"),
+                ("pulse_trailing", updated.pulse_trailing, "PULS"),
+            ):
+                if updated.waveform == waveform:
+                    replacement[key] = value
+                else:
+                    replacement.pop(key, None)
+            source = replace_recipe_node(
+                self.editor.toPlainText(), node_id=node.id, node=replacement
+            )
+            self._apply_builder_source(
+                source, f"Updated Rigol settings {node.id}"
+            )
+        except Exception as exc:
+            QMessageBox.warning(self, "Rigol settings", str(exc))
 
     def _edit_legacy_anritsu_configuration(self, node: RecipeNode) -> None:
         current = self._current_anritsu_snapshot()
@@ -3878,20 +4084,25 @@ class RecipePage(QWidget):
         )
         if dialog.exec() != QDialog.DialogCode.Accepted:
             return
-        updated = dialog.configuration_panel.configuration_snapshot()
-        replacement = self._node_to_mapping(node)
-        replacement.update(
-            {
-                "start_frequency": f"{updated.start_hz:.12g} Hz",
-                "stop_frequency": f"{updated.stop_hz:.12g} Hz",
-                "reference_level": f"{updated.reference_level_dbm:.12g} dBm",
-                "points": updated.points,
-            }
-        )
-        source = replace_recipe_node(
-            self.editor.toPlainText(), node_id=node.id, node=replacement
-        )
-        self._apply_builder_source(source, f"Updated Anritsu settings {node.id}")
+        try:
+            updated = dialog.configuration_panel.configuration_snapshot()
+            replacement = self._node_to_mapping(node)
+            replacement.update(
+                {
+                    "start_frequency": f"{updated.start_hz:.12g} Hz",
+                    "stop_frequency": f"{updated.stop_hz:.12g} Hz",
+                    "reference_level": f"{updated.reference_level_dbm:.12g} dBm",
+                    "points": updated.points,
+                }
+            )
+            source = replace_recipe_node(
+                self.editor.toPlainText(), node_id=node.id, node=replacement
+            )
+            self._apply_builder_source(
+                source, f"Updated Anritsu settings {node.id}"
+            )
+        except Exception as exc:
+            QMessageBox.warning(self, "Anritsu settings", str(exc))
 
     @staticmethod
     def _configured_rigol_node(
@@ -3972,15 +4183,59 @@ class RecipePage(QWidget):
     def _current_rigol_snapshot(self) -> RigolConfigurationSnapshot:
         provider = self._rigol_snapshot_provider
         if callable(provider):
-            snapshot = provider()
+            try:
+                snapshot = provider()
+            except Exception as exc:
+                self.status.emit(
+                    f"Rigol form snapshot unavailable; using safe defaults: {exc}"
+                )
+                snapshot = None
             if isinstance(snapshot, RigolConfigurationSnapshot):
                 return snapshot
         return RigolConfigurationSnapshot()
 
+    @staticmethod
+    def _rigol_snapshot_from_mapping(
+        configuration: dict[str, object],
+        *,
+        fallback: RigolConfigurationSnapshot,
+    ) -> RigolConfigurationSnapshot:
+        values: dict[str, object] = {}
+        for field in fallback.__dataclass_fields__:
+            if field not in configuration:
+                continue
+            value = configuration[field]
+            if field == "channel":
+                values[field] = int(value)
+            elif field == "sync_enabled":
+                if isinstance(value, bool):
+                    values[field] = value
+                elif isinstance(value, str) and value.strip().casefold() in {
+                    "true",
+                    "false",
+                }:
+                    values[field] = value.strip().casefold() == "true"
+                else:
+                    raise ConfigurationError(
+                        "Rigol sync_enabled must be a YAML boolean."
+                    )
+            else:
+                values[field] = str(value)
+        snapshot = replace(fallback, **values)
+        if snapshot.channel not in {1, 2}:
+            raise ConfigurationError("Rigol output channel must be 1 or 2.")
+        return snapshot
+
     def _current_anritsu_snapshot(self) -> AnritsuConfigurationSnapshot:
         provider = self._anritsu_snapshot_provider
         if callable(provider):
-            snapshot = provider()
+            try:
+                snapshot = provider()
+            except Exception as exc:
+                self.status.emit(
+                    f"Anritsu form snapshot unavailable; using safe defaults: {exc}"
+                )
+                snapshot = None
             if isinstance(snapshot, AnritsuConfigurationSnapshot):
                 return snapshot
         return AnritsuConfigurationSnapshot(
@@ -3996,7 +4251,11 @@ class RecipePage(QWidget):
         if callable(provider):
             try:
                 snapshot = provider()
-            except (ConfigurationError, ValueError):
+            except Exception as exc:
+                self.status.emit(
+                    "Anritsu SG form snapshot unavailable; using safe defaults: "
+                    f"{exc}"
+                )
                 snapshot = None
             if isinstance(snapshot, SignalGeneratorSnapshot):
                 return snapshot
@@ -4013,32 +4272,58 @@ class RecipePage(QWidget):
         )
 
     @staticmethod
+    def _anritsu_snapshot_from_mapping(
+        configuration: dict[str, object],
+        *,
+        fallback: AnritsuConfigurationSnapshot,
+    ) -> AnritsuConfigurationSnapshot:
+        snapshot = replace(
+            fallback,
+            start_hz=parse_quantity(
+                configuration["start_frequency"], DIMENSION_FREQUENCY
+            ).si_value,
+            stop_hz=parse_quantity(
+                configuration["stop_frequency"], DIMENSION_FREQUENCY
+            ).si_value,
+            reference_level_dbm=parse_quantity(
+                configuration["reference_level"], DIMENSION_DBM
+            ).si_value,
+            points=int(configuration["points"]),
+        )
+        if snapshot.start_hz >= snapshot.stop_hz:
+            raise ConfigurationError(
+                "Anritsu start frequency must be below stop frequency."
+            )
+        if snapshot.points < 2:
+            raise ConfigurationError("Anritsu spectrum requires at least 2 points.")
+        return snapshot
+
+    @staticmethod
     def _anritsu_snapshot_with_override(
         snapshot: AnritsuConfigurationSnapshot,
         override: dict[str, object],
     ) -> AnritsuConfigurationSnapshot:
+        if override.get("mode") != "set":
+            return snapshot
         parameter_id = str(override.get("parameter_id", ""))
         value = str(override.get("value", ""))
-        try:
-            if parameter_id == "spectrum.start_frequency":
-                return replace(
-                    snapshot,
-                    start_hz=parse_quantity(value, DIMENSION_FREQUENCY).si_value,
-                )
-            if parameter_id == "spectrum.stop_frequency":
-                return replace(
-                    snapshot,
-                    stop_hz=parse_quantity(value, DIMENSION_FREQUENCY).si_value,
-                )
-            if parameter_id == "spectrum.reference_level":
-                return replace(
-                    snapshot,
-                    reference_level_dbm=parse_quantity(value, DIMENSION_DBM).si_value,
-                )
-            if parameter_id == "spectrum.points":
-                return replace(snapshot, points=int(value))
-        except (ConfigurationError, ValueError):
-            return snapshot
+        if parameter_id == "spectrum.start_frequency":
+            return replace(
+                snapshot,
+                start_hz=parse_quantity(value, DIMENSION_FREQUENCY).si_value,
+            )
+        if parameter_id == "spectrum.stop_frequency":
+            return replace(
+                snapshot,
+                stop_hz=parse_quantity(value, DIMENSION_FREQUENCY).si_value,
+            )
+        if parameter_id == "spectrum.reference_level":
+            return replace(
+                snapshot,
+                reference_level_dbm=parse_quantity(value, DIMENSION_DBM).si_value,
+            )
+        if parameter_id == "spectrum.points":
+            return replace(snapshot, points=int(value))
         return snapshot
 
     @staticmethod
@@ -4213,37 +4498,29 @@ class RecipePage(QWidget):
         dialog.select_interval(stage_index if isinstance(stage_index, int) else None)
         if dialog.exec() != QDialog.DialogCode.Accepted:
             return
-        action["segments"] = dialog.segment_data()
-        configuration = node.data.get("configuration")
-        snapshot = self._current_anritsu_snapshot()
-        if isinstance(configuration, dict):
-            try:
-                snapshot = replace(
-                    snapshot,
-                    start_hz=parse_quantity(
-                        configuration["start_frequency"], DIMENSION_FREQUENCY
-                    ).si_value,
-                    stop_hz=parse_quantity(
-                        configuration["stop_frequency"], DIMENSION_FREQUENCY
-                    ).si_value,
-                    reference_level_dbm=parse_quantity(
-                        configuration["reference_level"], DIMENSION_DBM
-                    ).si_value,
-                    points=int(configuration["points"]),
+        try:
+            action["segments"] = dialog.segment_data()
+            configuration = node.data.get("configuration")
+            snapshot = self._current_anritsu_snapshot()
+            if isinstance(configuration, dict):
+                snapshot = self._anritsu_snapshot_from_mapping(
+                    configuration, fallback=snapshot
                 )
-            except (KeyError, TypeError, ValueError, ConfigurationError):
-                pass
-        replacement = self._configured_anritsu_node(
-            node,
-            snapshot=snapshot,
-            parameter_actions=actions,
-            acquire_single=bool(node.data.get("acquire_single", False)),
-            trace=str(node.data.get("trace", "TRAC1")),
-        )
-        source = replace_recipe_node(
-            self.editor.toPlainText(), node_id=node.id, node=replacement
-        )
-        self._apply_builder_source(source, f"Updated Anritsu ROI for {parameter_id}")
+            replacement = self._configured_anritsu_node(
+                node,
+                snapshot=snapshot,
+                parameter_actions=actions,
+                acquire_single=bool(node.data.get("acquire_single", False)),
+                trace=str(node.data.get("trace", "TRAC1")),
+            )
+            source = replace_recipe_node(
+                self.editor.toPlainText(), node_id=node.id, node=replacement
+            )
+            self._apply_builder_source(
+                source, f"Updated Anritsu ROI for {parameter_id}"
+            )
+        except Exception as exc:
+            QMessageBox.warning(self, "Anritsu ROI editor", str(exc))
 
     def _edit_comment_node(self, node: RecipeNode) -> None:
         dialog = CommentEditorDialog(str(node.data.get("text", "")), self)
@@ -4413,7 +4690,13 @@ class RecipePage(QWidget):
     def _current_keithley_snapshot(self) -> KeithleyConfigurationSnapshot:
         provider = self._keithley_snapshot_provider
         if callable(provider):
-            snapshot = provider()
+            try:
+                snapshot = provider()
+            except Exception as exc:
+                self.status.emit(
+                    f"Keithley form snapshot unavailable; using safe defaults: {exc}"
+                )
+                snapshot = None
             if isinstance(snapshot, KeithleyConfigurationSnapshot):
                 return snapshot
         return KeithleyConfigurationSnapshot()
@@ -4487,18 +4770,29 @@ class RecipePage(QWidget):
         item = self.tree.itemAt(point)
         if item is not None:
             self.tree.setCurrentItem(item)
+        else:
+            self.tree.clearSelection()
+            self.tree.setCurrentItem(None)
         menu = RoundMenu(parent=self.tree)
 
         def add_action(text: str, callback: Callable[[], None]) -> QAction:
             action = QAction(text, menu)
-            action.triggered.connect(callback)
+            action.triggered.connect(
+                lambda _checked=False, command=callback: command()
+            )
             menu.addAction(action)
             return action
 
         add_action("New empty sweep", self.new_recipe)
         menu.addSeparator()
-        add_action("Add node", self._add_basic_node)
-        add_action("Add device control / point generator", self._add_device_controls)
+        add_action(
+            "Add sequence / group",
+            lambda: self._add_basic_node("sequence"),
+        )
+        add_action(
+            "Add device control / point generator",
+            lambda: self._add_device_controls(),
+        )
         menu.addSeparator()
         edit_device = add_action(
             "Device settings", self._edit_selected_device_settings
@@ -4563,12 +4857,18 @@ class RecipePage(QWidget):
             editable
             and node.type in {"acquire_reference", "acquire_spectrum"}
         )
-        edit_action.setEnabled(editable)
+        edit_action.setEnabled(
+            editable
+            and not has_device_settings
+            and not has_roi
+            and node.type
+            not in {"comment", "acquire_reference", "acquire_spectrum"}
+        )
         toggle_enabled.setEnabled(
             editable and not self._tree_item_is_in_finally(selected)
         )
         duplicate.setEnabled(editable and selected.parent() is not None)
-        delete.setEnabled(editable)
+        delete.setEnabled(editable and selected.parent() is not None)
         move_up.setEnabled(editable and selected.parent() is not None)
         move_down.setEnabled(editable and selected.parent() is not None)
         menu.exec(self.tree.viewport().mapToGlobal(point))
@@ -4664,13 +4964,15 @@ class RecipePage(QWidget):
             )
             return
         if target.startswith("keithley."):
-            dialog: SweepGeneratorDialog = KeithleySweepBuilderDialog(
-                self._settings, self, initial_segments=segments
-            )
             _device, channel, mode = target.split(".")
+            dialog: SweepGeneratorDialog = KeithleySweepBuilderDialog(
+                self._settings,
+                self,
+                initial_segments=segments,
+                initial_channel=channel,
+                initial_mode=mode,
+            )
             assert isinstance(dialog, KeithleySweepBuilderDialog)
-            dialog.channel.setCurrentText(channel)
-            dialog.mode.setCurrentText(mode)
             existing_config = next(
                 (child for child in node.children if child.type == "configure_keithley"), None
             )
@@ -4807,15 +5109,7 @@ class RecipePage(QWidget):
 
     @staticmethod
     def _tree_item_is_in_finally(item: QTreeWidgetItem | None) -> bool:
-        current = item
-        while current is not None:
-            if (
-                current.data(0, Qt.ItemDataRole.UserRole) is None
-                and current.text(0).startswith("Finally")
-            ):
-                return True
-            current = current.parent()
-        return False
+        return RecipeTreeWidget.item_is_in_finally(item)
 
     def _toggle_selected_node_disabled(self) -> None:
         item = self.tree.currentItem()
@@ -4855,18 +5149,15 @@ class RecipePage(QWidget):
                 self, "Duplicate node", "Select a non-root recipe node to duplicate."
             )
             return
-        if parent.text(0).startswith("Else") and parent.parent() is not None:
-            owner = parent.parent().data(0, Qt.ItemDataRole.UserRole)
-            if not isinstance(owner, RecipeNode):
-                return
-            parent_id, branch = owner.id, "else"
-        elif parent.text(0).startswith("Finally"):
-            parent_id, branch = "__finally__", "children"
-        else:
-            owner = parent.data(0, Qt.ItemDataRole.UserRole)
-            if not isinstance(owner, RecipeNode):
-                return
-            parent_id, branch = owner.id, "children"
+        destination = self._tree_parent_destination(parent)
+        if destination is None:
+            QMessageBox.warning(
+                self,
+                "Duplicate node",
+                "The selected node has no editable recipe parent.",
+            )
+            return
+        parent_id, branch = destination
         copy = self._clone_node_mapping(self._node_to_mapping(node))
         copy_id = str(copy["id"])
         try:
@@ -4910,7 +5201,10 @@ class RecipePage(QWidget):
         parent = item.parent() if item is not None else None
         if not isinstance(node, RecipeNode) or parent is None:
             return
-        parent_id, branch = self._builder_parent()
+        destination = self._tree_parent_destination(parent)
+        if destination is None:
+            return
+        parent_id, branch = destination
         index = RecipeTreeWidget._logical_index(parent, item, below=False)
         count = RecipeTreeWidget._logical_child_count(parent)
         if delta < 0:
@@ -4939,3 +5233,12 @@ class RecipePage(QWidget):
             if demo
             else "Normal measurement: OUTPUT actions in the recipe are executed."
         )
+        if self._preflight_thread is not None and self._preflight_thread.isRunning():
+            self._preflight_thread.requestInterruption()
+        if self._plan is not None:
+            self._plan = None
+            self.run_button.setEnabled(False)
+            self.plan_preflight_changed.emit(None)
+            self.summary.setText(
+                "Execution mode changed; validate the recipe again before running."
+            )

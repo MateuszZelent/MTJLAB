@@ -474,7 +474,6 @@ finally: []
                     "Comment",
                 ],
             )
-            self.assertFalse(any("ARM" in label for label in labels))
             self.assertNotIn("Sweep current", labels)
             self.assertNotIn("Set fixed voltage", labels)
             for broken_marker in ("Â", "â", "Ã", "�"):
@@ -1804,7 +1803,7 @@ root:
         finally:
             page.close()
 
-    def test_output_on_library_adds_authoring_actions_without_exposing_arm(self) -> None:
+    def test_output_on_library_adds_direct_authoring_actions(self) -> None:
         page = RecipePage(simulation_settings())
         try:
             page._library_add_output_on("keithley", "A")

@@ -8,12 +8,13 @@ from typing import Any
 from PySide6.QtCore import Qt
 from PySide6.QtWidgets import (
     QCheckBox, QComboBox, QDialog, QDialogButtonBox, QFormLayout, QFrame,
-    QHBoxLayout, QLabel, QLineEdit, QMessageBox, QPushButton, QSplitter, QVBoxLayout, QWidget,
+    QHBoxLayout, QLabel, QLineEdit, QPushButton, QSplitter, QVBoxLayout, QWidget,
 )
 from qfluentwidgets import (
     BodyLabel,
     CardWidget, CheckBox, ComboBox, PrimaryPushButton, PushButton,
 )
+from app.ui.dialogs import StationMessageBox as QMessageBox
 
 from app.devices.rigol_dg1000z.ui.page import RigolConfigurationSnapshot
 from app.devices.rigol_dg1000z import RigolChannelConfig
@@ -338,5 +339,4 @@ class RigolNodeEditorDialog(FluentRecipeDialog):
                 QMessageBox.warning(self, "Rigol configuration", str(exc))
                 return
         super().accept()
-
 

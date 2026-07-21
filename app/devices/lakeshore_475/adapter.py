@@ -127,7 +127,7 @@ class LakeShore475Adapter(DeviceAdapter):
             if (identity.manufacturer or "").upper() not in {"LSCI", "LAKE SHORE"} or "MODEL475" not in idn:
                 raise ConnectionError(f"Unexpected Lake Shore Model 475 identity: {identity.idn}")
             if self._config.require_serial_match and identity.serial != self._config.expected_serial:
-                raise ConnectionError("Instrument serial number differs from the approved value.")
+                raise ConnectionError("Instrument serial number differs from the configured value.")
             self._session = session
             self._connection = connection
             self._official_model = official_model

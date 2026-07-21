@@ -16,14 +16,14 @@ class AccessControlTests(unittest.TestCase):
         raw["access_control"]["user_roles"] = assignments or {}
         return StationSettings.model_validate(raw)
 
-    def test_unassigned_os_user_is_operator_and_cannot_change_safety_profile(self) -> None:
+    def test_unassigned_os_user_is_operator_and_cannot_edit_settings(self) -> None:
         policy = AccessPolicy.from_settings(self._settings(), username="LAB\\alice")
         self.assertEqual(policy.identity.roles, frozenset({Role.OPERATOR}))
         self.assertTrue(policy.allows(Permission.OPERATE_OUTPUT))
         self.assertTrue(policy.allows(Permission.RUN_RECIPE))
         self.assertFalse(policy.allows(Permission.EDIT_SETTINGS))
         with self.assertRaisesRegex(AuthorizationError, "Access denied"):
-            policy.require(Permission.APPROVE_PROFILE, action="profile approval")
+            policy.require(Permission.EDIT_SETTINGS, action="station settings edit")
 
     def test_exact_case_insensitive_assignment_grants_engineer_permissions(self) -> None:
         policy = AccessPolicy.from_settings(
@@ -32,7 +32,6 @@ class AccessControlTests(unittest.TestCase):
         )
         self.assertEqual(policy.identity.roles, frozenset({Role.ENGINEER}))
         self.assertTrue(policy.allows(Permission.EDIT_SETTINGS))
-        self.assertTrue(policy.allows(Permission.APPROVE_PROFILE))
         self.assertTrue(policy.allows(Permission.MANAGE_ROLES))
         self.assertFalse(policy.allows(Permission.SERVICE_DIAGNOSTICS))
 

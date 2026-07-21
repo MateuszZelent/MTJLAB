@@ -1,19 +1,12 @@
 # Measurement station configuration.
-#
-# WARNING: the profile starts as UNVERIFIED. The application cannot enable
-# any output until an authorized person confirms instrument models,
-# DUT connections and laboratory limits.
+# Device permissions, laboratory limits and hardware readback are enforced
+# directly; there is no separate profile confirmation workflow.
 
 schema_version: 1
 
 profile:
   id: "default-lab-profile"
   name: "Default station profile"
-  state: "unverified"          # unverified | approved | revoked
-  approved_by:
-  approved_at:
-  approval_note: "Profile approval is required after settings changes."
-  lock_outputs_when_unverified: true
 
 # The operating-system login is the authentication boundary. Every local user
 # is an operator by default. Grant engineer/service only to exact OS account
@@ -29,7 +22,6 @@ application:
   log_level: "INFO"
   audit_log_directory: "logs"
   service_console_enabled: false
-  require_operator_confirmation_before_arming: true
   require_second_confirmation_for_limit_override: true
   settings_autosave: false
   restore_last_recipe: true
@@ -406,7 +398,6 @@ devices:
       power:
         min:
         max:
-      arm_ttl: "30 s"
     advanced_spectrum:
       # Read-only queries can be used for diagnostics. Writes remain locked
       # until this exact SCPI family passes HIL on a listed firmware version.

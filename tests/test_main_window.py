@@ -138,13 +138,9 @@ class MainWindowTests(unittest.TestCase):
         try:
             window._audit_healthy = False
             with self.assertRaisesRegex(Exception, "audit log is unavailable"):
-                window._guard_manual_operation("arm", 1)
-            with self.assertRaisesRegex(Exception, "audit log is unavailable"):
                 window._guard_manual_operation("set_output", (1, True))
             with self.assertRaisesRegex(Exception, "audit log is unavailable"):
                 window._guard_manual_operation("ramp_to_level", object())
-            with self.assertRaisesRegex(Exception, "audit log is unavailable"):
-                window._guard_manual_operation("arm_signal_generator", None)
             with self.assertRaisesRegex(Exception, "audit log is unavailable"):
                 window._guard_manual_operation("set_signal_generator_output", True)
             window._guard_manual_operation("set_output", (1, False))
@@ -534,7 +530,6 @@ class MainWindowTests(unittest.TestCase):
                 # Operators may save only the dedicated Rigol manual-output
                 # permission; general station configuration stays read-only.
                 self.assertTrue(window.settings_page.save_button.isEnabled())
-                self.assertFalse(window.settings_page.approve_button.isEnabled())
                 rigol_enabled = None
                 iterator = QTreeWidgetItemIterator(
                     window.settings_page.trees["rigol"]
@@ -585,7 +580,7 @@ class MainWindowTests(unittest.TestCase):
                 window.close()
                 self.application.processEvents()
 
-    def test_engineer_approval_is_bound_to_authenticated_os_identity(self) -> None:
+    def test_engineer_can_edit_station_settings_and_roles(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             settings_path = Path(temporary) / "settings.yml"
             write_engineer_settings(settings_path)
@@ -596,18 +591,10 @@ class MainWindowTests(unittest.TestCase):
             )
             try:
                 self.assertTrue(window.settings_page.save_button.isEnabled())
-                self.assertTrue(window.settings_page.approve_button.isEnabled())
                 self.assertTrue(window.settings_page.add_role_button.isEnabled())
-                phrase = f"APPROVE {window._settings.profile.id}"
-                with patch(
-                    "app.ui.settings_page.QInputDialog.getText",
-                    return_value=(phrase, True),
-                ):
-                    window.settings_page.approve_profile()
                 loaded = SettingsRepository(settings_path).load().settings
-                self.assertEqual(loaded.profile.state, "approved")
-                self.assertEqual(loaded.profile.approved_by, TEST_ENGINEER)
-                self.assertIn("authenticated engineer", loaded.profile.approval_note)
+                self.assertEqual(loaded.profile.id, "default-lab-profile")
+                self.assertEqual(loaded.profile.name, "Default station profile")
             finally:
                 window.close()
                 self.application.processEvents()
@@ -707,7 +694,6 @@ class MainWindowTests(unittest.TestCase):
             for label in ("OUTPUT ON", "OUTPUT OFF"):
                 self.assertIn(label, buttons)
                 self.assertTrue(buttons[label].toolTip())
-            self.assertNotIn("ARM (30 s)", buttons)
         finally:
             window.close()
             self.application.processEvents()
@@ -1524,7 +1510,7 @@ class MainWindowTests(unittest.TestCase):
             rigol.configure()
             rigol._controller.call.assert_not_called()
             self.assertFalse(rigol.banner.isHidden())
-            self.assertIn("outside the approved", rigol.banner.label.text())
+            self.assertIn("outside the configured", rigol.banner.label.text())
 
         finally:
             window.close()
@@ -1902,22 +1888,16 @@ class MainWindowTests(unittest.TestCase):
             window.close()
             self.application.processEvents()
 
-    def test_keithley_manual_output_does_not_require_profile_approval(self) -> None:
+    def test_keithley_manual_output_uses_explicit_output_permission(self) -> None:
         window = MainWindow(".config/settings.yml", simulation=True)
         try:
             keithley = window.keithley_page
             keithley._controller.call = Mock()
-            profile = keithley._station_settings.profile.model_copy(
-                update={"state": "unverified"}
-            )
-            keithley._station_settings = keithley._station_settings.model_copy(
-                update={"profile": profile}
-            )
             keithley._device_state_changed("verified")
             button = keithley.channel_cards["B"]["output_on_action"]
 
             self.assertTrue(button.isEnabled())
-            self.assertNotIn("profile approved", keithley.output_readiness.text())
+            self.assertIn("output permission enabled", keithley.output_readiness.text())
             with patch.object(
                 QMessageBox,
                 "warning",

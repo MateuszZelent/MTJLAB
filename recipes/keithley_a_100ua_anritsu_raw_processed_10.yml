@@ -46,8 +46,8 @@ root:
       measure_voltage_autorange: true
       measure_current_autorange: true
 
-    # Keithley does not have a separate recipe ARM action.  OUTPUT is enabled
-    # once here, after configuration, and remains enabled throughout the sweep.
+    # OUTPUT is enabled once here, after configuration, and remains enabled
+    # throughout the sweep.
     - id: keithley-a-output-on
       type: set_keithley_output
       channel: A
@@ -89,11 +89,6 @@ root:
           store_processed: true
 
 finally:
-  - id: keithley-a-ramp-zero-finally
-    type: ramp_keithley_to_zero
-    channel: A
-    deadline: "30 s"
-
   - id: keithley-a-output-off-finally
     type: set_keithley_output
     channel: A

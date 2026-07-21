@@ -11,7 +11,7 @@ name: "FMR thaTEC tree analog: Keithley A +/- sweep, Lake Shore field, Anritsu s
 #   Anritsu MS46xx S12/S21     -> MS2830A raw spectrum + reference difference
 #
 # This is a structurally analogous measurement, not an S-parameter-equivalent
-# VNA measurement.  The approved profile must explicitly enable Keithley A,
+# VNA measurement. The station configuration must explicitly enable Keithley A,
 # Lake Shore 475 and Anritsu acquisition before hardware execution.  Keithley B
 # is intentionally not used: its qualified station range is unipolar 0..10 mA.
 

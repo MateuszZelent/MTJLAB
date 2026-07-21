@@ -8,13 +8,14 @@ from typing import Any
 from PySide6.QtCore import Qt
 from PySide6.QtWidgets import (
     QCheckBox, QComboBox, QDialog, QDialogButtonBox, QFormLayout, QFrame,
-    QGridLayout, QHBoxLayout, QLabel, QLineEdit, QMessageBox, QPushButton,
-    QSplitter, QStackedWidget, QTabWidget, QVBoxLayout, QWidget,
+    QGridLayout, QHBoxLayout, QLabel, QLineEdit, QPushButton,
+    QSplitter, QStackedWidget, QVBoxLayout, QWidget,
 )
 from qfluentwidgets import (
     BodyLabel,
     CardWidget, CheckBox, ComboBox, LineEdit, PrimaryPushButton, PushButton, SegmentedWidget,
 )
+from app.ui.dialogs import StationMessageBox as QMessageBox
 
 from app.devices.anritsu_ms2830a import AnritsuConfigurationSnapshot, SignalGeneratorSnapshot
 from app.devices.anritsu_ms2830a.ui.page import (
@@ -140,9 +141,10 @@ class AnritsuNodeEditorDialog(FluentRecipeDialog):
             self.open_roi_button, operation_row + 2, 0, 1, 2
         )
         note = BodyLabel(
-            "Only selected parameters are stored. Unselected values remain exactly "
-            "as currently configured in the Anritsu module. Spectrum acquisition "
-            "is a separate Acquire spectrum once block placed inside the loop."
+            "The complete visible core spectrum snapshot is stored and applied. Set and "
+            "Sweep expose explicit plan rows; advanced settings are applied only when "
+            "selected. Spectrum acquisition is a separate Acquire spectrum once block "
+            "placed inside the loop."
         )
         note.setObjectName("recipeHint")
         note.setWordWrap(True)
@@ -350,7 +352,21 @@ class AnritsuNodeEditorDialog(FluentRecipeDialog):
             advanced.preamplifier.setChecked(value.strip().lower() == "true")
 
     def accept(self) -> None:
-        actions = self.planned_parameter_actions()
+        try:
+            snapshot = self.configuration_panel.configuration_snapshot()
+            if snapshot.start_hz >= snapshot.stop_hz:
+                raise ConfigurationError(
+                    "Anritsu stop frequency must be greater than start frequency."
+                )
+            actions = self.planned_parameter_actions()
+            if any(
+                str(action.get("parameter_id", "")).startswith("advanced.")
+                for action in actions
+            ):
+                self.advanced_panel.configuration()
+        except Exception as exc:
+            QMessageBox.warning(self, "Anritsu node", str(exc))
+            return
         action_by_parameter = {
             str(action["parameter_id"]): action for action in actions
         }
@@ -444,9 +460,10 @@ class AnritsuSignalGeneratorNodeEditorDialog(FluentRecipeDialog):
         self.open_roi_button.clicked.connect(self._open_roi)
         layout.addWidget(self.open_roi_button)
         note = BodyLabel(
-            "SG configuration at each point leaves RF OFF. Enabling RF requires "
-            "separate, explicit ARM and OUTPUT ON steps inside the loop and must "
-            "pass the complete safety preflight."
+            "The complete visible SG snapshot is stored and applied with RF OFF; "
+            "Unchanged still uses the visible value, Set exposes an explicit row, and "
+            "Sweep defines the ROI axis. Enabling RF requires a separate, explicit "
+            "OUTPUT ON step and must pass the complete safety preflight."
         )
         note.setObjectName("recipeHint")
         note.setWordWrap(True)

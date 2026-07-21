@@ -52,7 +52,7 @@ def assert_anritsu_acquisition_allowed(safety: AnritsuSafety) -> None:
 def validate_anritsu_dut_input(
     safety: AnritsuSafety, max_expected_input_dbm: float | None
 ) -> None:
-    """Intersect the experiment RF declaration with the approved station input limit."""
+    """Intersect the experiment RF declaration with the configured station input limit."""
 
     assert_anritsu_acquisition_allowed(safety)
     if max_expected_input_dbm is None:
@@ -61,7 +61,7 @@ def validate_anritsu_dut_input(
         raise SafetyViolation("The DUT maximum expected Anritsu input must be finite.")
     profile_value = safety.rf_input.max_expected_power_at_connector
     if profile_value is None:
-        raise SafetyViolation("The station profile has no approved Anritsu RF input limit.")
+        raise SafetyViolation("The station configuration has no Anritsu RF input limit.")
     profile_max_dbm = parse_quantity(profile_value, DIMENSION_DBM).si_value
     if max_expected_input_dbm > profile_max_dbm:
         raise SafetyViolation(
@@ -91,7 +91,7 @@ def validate_anritsu_spectrum(
     frequency_max = parse_quantity(safety.frequency.max, DIMENSION_FREQUENCY).si_value
     if start_hz < frequency_min or stop_hz > frequency_max:
         raise SafetyViolation(
-            f"Anritsu range {start_hz:.9g}–{stop_hz:.9g} Hz is outside the approved range "
+            f"Anritsu range {start_hz:.9g}–{stop_hz:.9g} Hz is outside the configured range "
             f"of {frequency_min:.9g}–{frequency_max:.9g} Hz."
         )
     reference_min = ANRITSU_REFERENCE_LEVEL_MIN_DBM
@@ -132,21 +132,21 @@ def validate_anritsu_signal_generator(
     if frequency_hz <= 0:
         raise SafetyViolation("Anritsu SG frequency must be positive.")
     if generator.frequency.min is None or generator.frequency.max is None:
-        raise SafetyViolation("Define the approved Anritsu SG frequency range first.")
+        raise SafetyViolation("Define the Anritsu SG frequency range first.")
     if generator.power.min is None or generator.power.max is None:
-        raise SafetyViolation("Define the approved Anritsu SG power range first.")
+        raise SafetyViolation("Define the Anritsu SG power range first.")
     frequency_min = parse_quantity(generator.frequency.min, DIMENSION_FREQUENCY).si_value
     frequency_max = parse_quantity(generator.frequency.max, DIMENSION_FREQUENCY).si_value
     power_min = parse_quantity(generator.power.min, DIMENSION_DBM).si_value
     power_max = parse_quantity(generator.power.max, DIMENSION_DBM).si_value
     if not frequency_min <= frequency_hz <= frequency_max:
         raise SafetyViolation(
-            f"Anritsu SG frequency {frequency_hz:.9g} Hz is outside the approved range "
+            f"Anritsu SG frequency {frequency_hz:.9g} Hz is outside the configured range "
             f"{frequency_min:.9g}–{frequency_max:.9g} Hz."
         )
     if not power_min <= power_dbm <= power_max:
         raise SafetyViolation(
-            f"Anritsu SG power {power_dbm:.9g} dBm is outside the approved range "
+            f"Anritsu SG power {power_dbm:.9g} dBm is outside the configured range "
             f"{power_min:.9g}–{power_max:.9g} dBm."
         )
 
@@ -217,7 +217,7 @@ def validate_anritsu_advanced_spectrum(
             raise SafetyViolation("Anritsu attenuation must be 0..60 dB in 2 dB steps.")
         if minimum_db is not None and attenuation_db < minimum_db:
             raise SafetyViolation(
-                f"Anritsu attenuation {attenuation_db:g} dB is below the approved minimum "
+                f"Anritsu attenuation {attenuation_db:g} dB is below the configured minimum "
                 f"{minimum_db:g} dB."
             )
 

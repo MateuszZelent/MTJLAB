@@ -75,8 +75,8 @@ class SettingsRepository:
             raise ConfigurationError(f"Invalid settings.yml:\n{exc}") from exc
         if migrated or repaired:
             # Persist only after the merged document validates.  This is a
-            # schema upgrade, not an operator configuration change, so existing
-            # approval metadata is preserved. _atomic_dump also keeps a .bak.
+            # schema upgrade, not an operator configuration change.
+            # _atomic_dump also keeps a .bak.
             self._atomic_dump(raw)
         return LoadedSettings(settings=settings, raw=raw, source=self.path)
 
@@ -113,7 +113,7 @@ class SettingsRepository:
 
     @_serialized_settings_io
     def ensure_exists(self) -> bool:
-        """Create an unverified local profile from the packaged template once."""
+        """Create a local station configuration from the packaged template once."""
 
         if self.path.exists():
             return False
@@ -176,6 +176,7 @@ class SettingsRepository:
         require that declaration.  Disabling the requirement is the schema's
         explicit opt-out; it does not create a fictitious RF power limit and
         does not enable acquisition by itself.
+
         """
 
         try:

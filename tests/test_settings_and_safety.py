@@ -33,7 +33,7 @@ class QuantityAndSafetyTests(unittest.TestCase):
             loaded = repository.load()
 
             self.assertTrue(path.is_file())
-            self.assertEqual(loaded.settings.profile.state, "unverified")
+            self.assertEqual(loaded.settings.profile.id, "default-lab-profile")
             self.assertIsNone(loaded.settings.rigol.connection.resource)
             self.assertIsNone(loaded.settings.rigol.identity.expected_serial)
             original = path.read_bytes()
@@ -80,15 +80,14 @@ class QuantityAndSafetyTests(unittest.TestCase):
             1e-6,
         )
 
-    def test_station_profile_approval_does_not_lock_outputs(self) -> None:
+    def test_station_configuration_uses_explicit_output_permissions(self) -> None:
         settings = loaded_settings()
-        self.assertFalse(settings.outputs_locked)
+        self.assertFalse(settings.rigol.safety.allow_output_enable)
+        self.assertFalse(settings.keithley.safety.allow_output_enable)
+        self.assertFalse(settings.anritsu.safety.signal_generator_output_allowed)
         self.assertFalse(settings.rigol.identity.require_serial_match)
         self.assertIsNone(settings.rigol.identity.expected_serial)
         self.assertIsNone(settings.rigol.connection.resource)
-        raw = deepcopy(SettingsRepository(SETTINGS_TEMPLATE).load().raw)
-        raw["profile"]["lock_outputs_when_unverified"] = False
-        self.assertFalse(StationSettings.model_validate(raw).outputs_locked)
 
     def test_keithley_settling_time_limits_are_required_for_every_channel(self) -> None:
         settings = loaded_settings()
@@ -154,52 +153,31 @@ class QuantityAndSafetyTests(unittest.TestCase):
                 dut_min_impedance="50 ohm",
             )
 
-    def test_repository_does_not_require_reapproval_after_configuration_change(self) -> None:
+    def test_repository_persists_configuration_change(self) -> None:
         source = SETTINGS_TEMPLATE.read_text(encoding="utf-8")
         with tempfile.TemporaryDirectory() as temporary:
             path = Path(temporary) / "settings.yml"
             path.write_text(source, encoding="utf-8")
             repository = SettingsRepository(path)
-            approved = deepcopy(repository.load().raw)
-            approved["profile"].update(
-                {
-                    "state": "approved",
-                    "approved_by": "Operator Test",
-                    "approved_at": "2026-01-01T00:00:00+00:00",
-                    "approval_note": "Zatwierdzono testowo.",
-                }
-            )
-            self.assertEqual(repository.save_raw(approved).profile.state, "approved")
-
             changed = deepcopy(repository.load().raw)
             changed["devices"]["rigol"]["safety"]["channels"]["1"]["lab_limits"]["frequency"]["max"] = "900 kHz"
             saved = repository.save_raw(changed)
+            self.assertEqual(
+                saved.rigol.safety.channels["1"].lab_limits.frequency.max,
+                "900 kHz",
+            )
 
-            self.assertEqual(saved.profile.state, "approved")
-            self.assertEqual(saved.profile.approved_by, "Operator Test")
-            self.assertFalse(saved.outputs_locked)
-            self.assertEqual(repository.load().settings.profile.state, "approved")
-
-    def test_theme_change_does_not_revoke_safety_approval(self) -> None:
+    def test_theme_change_preserves_station_configuration(self) -> None:
         source = SETTINGS_TEMPLATE.read_text(encoding="utf-8")
         with tempfile.TemporaryDirectory() as temporary:
             path = Path(temporary) / "settings.yml"
             path.write_text(source, encoding="utf-8")
             repository = SettingsRepository(path)
-            approved = deepcopy(repository.load().raw)
-            approved["profile"].update(
-                {
-                    "state": "approved",
-                    "approved_by": "Operator Test",
-                    "approved_at": "2026-01-01T00:00:00+00:00",
-                    "approval_note": "Approved for test.",
-                }
-            )
-            repository.save_raw(approved)
             changed = deepcopy(repository.load().raw)
             changed["ui"]["theme"] = "light"
             saved = repository.save_raw(changed)
-            self.assertEqual(saved.profile.state, "approved")
+            self.assertEqual(saved.ui["theme"], "light")
+            self.assertEqual(saved.profile.id, "default-lab-profile")
 
     def test_safety_boundaries_reject_nan_and_infinity(self) -> None:
         settings = loaded_settings()

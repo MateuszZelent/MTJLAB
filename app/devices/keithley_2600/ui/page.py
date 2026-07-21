@@ -17,9 +17,9 @@ from PySide6.QtWidgets import (
     QAbstractItemView, QApplication, QCheckBox, QComboBox, QDialog,
     QDialogButtonBox, QFormLayout, QFrame, QGridLayout,
     QBoxLayout, QHBoxLayout, QHeaderView, QLabel, QLineEdit, QListWidget,
-    QListWidgetItem, QMainWindow, QMenu, QMessageBox, QPlainTextEdit,
+    QListWidgetItem, QMenu, QPlainTextEdit,
     QProgressBar, QPushButton, QSplitter, QSpinBox,
-    QSizePolicy, QStyledItemDelegate, QStyle, QTabWidget,
+    QSizePolicy, QStyledItemDelegate, QStyle,
     QTableWidgetItem, QToolButton, QTreeWidget, QTreeWidgetItem,
     QVBoxLayout, QWidget,
 )
@@ -45,7 +45,7 @@ from app.recipes.parameter_registry import SWEEP_DIMENSIONS
 from app.safety.keithley import validate_keithley_source
 from app.settings.models import StationSettings
 from app.ui.common import line_edit as _line
-from app.ui.dialogs import StationDialog
+from app.ui.dialogs import StationDialog, StationMessageBox as QMessageBox
 from app.ui.widgets import LimitField, NotificationBanner, SpectrumPlotWidget
 from app.ui.recipes.fluent_dialog import FluentRecipeDialog
 from app.ui.workers import DeviceController
@@ -400,9 +400,10 @@ class KeithleyNodeEditorDialog(FluentRecipeDialog):
         self.roi_status.setWordWrap(True)
         parameter_layout.addWidget(self.roi_status, output_row + 2, 0, 1, 2)
         parameter_note = BodyLabel(
-            "Only rows marked Set or Sweep are stored. Unchanged keeps the current value "
-            "from the Keithley module. OUTPUT is only a plan declaration; this window never "
-            "energizes the instrument."
+            "The complete visible Keithley snapshot is stored and applied with OUTPUT OFF. "
+            "Set marks a value as an explicit plan row; Sweep turns one value into the ROI "
+            "axis. Unchanged still uses the visible snapshot value. OUTPUT is only a plan "
+            "declaration; this window never energizes the instrument."
         )
         parameter_note.setObjectName("muted")
         parameter_note.setWordWrap(True)
@@ -1586,7 +1587,7 @@ class KeithleyPage(QWidget):
         help_items = {
             self.channel: ("Channel", "Selects SMU channel A or B. Both channels are electrically independent and have separate source values, measurements and safety limits."),
             self.mode: ("Source mode", "Current forces the Source current and uses Voltage limit (compliance) as its protection. Voltage forces the Source voltage and uses Current limit (compliance). Measure only does not program or enable a source."),
-            self.level: ("Source value", "The quantity Keithley actively tries to force. In Current mode this is current; in Voltage mode this is voltage. MIN/MAX are the laboratory-approved range for this programmed value."),
+            self.level: ("Source value", "The quantity Keithley actively tries to force. In Current mode this is current; in Voltage mode this is voltage. MIN/MAX are the configured laboratory range for this programmed value."),
             self.compliance: ("Opposite-quantity safety limit", "The protection limit shown directly below the source setpoint. Current mode exposes Voltage limit (compliance); Voltage mode exposes Current limit (compliance). Reaching it means the requested source value cannot be maintained."),
             self.nplc: ("NPLC", "Number of power-line cycles integrated for one measurement. Higher values reduce noise but make readings slower. For 50 Hz mains, NPLC 1 integrates for approximately 20 ms."),
             self.settle: ("Settling time", "Delay allowed after changing a source point before a measurement is taken. Longer settling can improve stability but increases sweep duration."),
@@ -1604,7 +1605,7 @@ class KeithleyPage(QWidget):
             self.live_interval: ("Live request interval", "Time between read requests. With both channels selected, A and B alternate, so each channel updates approximately every two request intervals."),
             self.live_timing: ("Effective live timing", "Shows both the request interval and the effective update period for each selected channel."),
             self.ramp_target: ("Ramp target", "Final Current or Voltage source level. It is validated against the channel laboratory limits and active DUT envelope before any command is sent."),
-            self.ramp_step: ("Maximum ramp step", "Largest allowed change between adjacent source points. The adapter rejects values above the approved ramp_current_step_max or ramp_voltage_step_max."),
+            self.ramp_step: ("Maximum ramp step", "Largest allowed change between adjacent source points. The adapter rejects values above the configured ramp_current_step_max or ramp_voltage_step_max."),
             self.ramp_settle: ("Ramp dwell", "Time allowed after every source step before the atomic I/V safety measurement."),
             self.ramp_deadline: ("Ramp deadline", "Maximum wall-clock time for the complete operation. Timeout triggers a best-effort OFF of both SMU outputs."),
             self.ramp_preview_button: ("Preview ramp", "Calculates the finite point sequence without contacting the instrument. Execution still queries the actual starting source level."),
@@ -1626,8 +1627,8 @@ class KeithleyPage(QWidget):
             self._set_help(card["compliance"], "Compliance indicator", "ACTIVE means the measured opposite quantity reached the programmed compliance threshold. The safety policy may immediately disable outputs.")
             self._set_help(card["select"], f"Select channel {channel}", "Makes this channel active in the configuration form without changing its electrical output.")
             self._set_help(card["measure"], f"Measure channel {channel}", "Requests one voltage/current reading for this channel without enabling its output.")
-            self._set_help(card["output_on_action"], f"Channel {channel} OUTPUT ON", "Validates and confirms the visible source settings, configures with OUTPUT OFF, applies the internal safety unlock and only then energizes this channel.")
-            self._set_help(card["output_off_action"], f"Channel {channel} OUTPUT OFF", "Disables this channel immediately and verifies the hardware readback. OUTPUT OFF is never blocked by profile state or audit health.")
+            self._set_help(card["output_on_action"], f"Channel {channel} OUTPUT ON", "Validates and confirms the visible source settings, configures with OUTPUT OFF, verifies readback and only then energizes this channel.")
+            self._set_help(card["output_off_action"], f"Channel {channel} OUTPUT OFF", "Disables this channel immediately and verifies the hardware readback. OUTPUT OFF is never blocked by audit health.")
         self.workspace_splitter.setToolTip(
             "Source controls and independent A/B time histories remain visible together. "
             "Resistance is derived as |V/I| and is not complex AC impedance."
@@ -1654,6 +1655,7 @@ class KeithleyPage(QWidget):
         channel = channel or self.channel.currentText()
         safety = self._station_settings.keithley.safety
         checks = [
+            (safety.allow_output_enable, "Keithley output permission enabled"),
             (safety.channels[channel].enabled, f"channel {channel} enabled"),
             (self._device_is_output_ready(), "device connected and verified"),
         ]
@@ -1673,6 +1675,8 @@ class KeithleyPage(QWidget):
             )
         if not self._station_settings.keithley.safety.channels[channel].enabled:
             steps.append(f"enable channel {channel} in station settings")
+        if not self._station_settings.keithley.safety.allow_output_enable:
+            steps.append("enable Keithley output permission in station settings")
         if steps:
             return "To enable OUTPUT: " + "; then ".join(steps) + "."
         return (
@@ -1736,7 +1740,7 @@ class KeithleyPage(QWidget):
                 item for item in channel_checks if item.startswith("✕")
             )
             card["output_on_action"].setEnabled(
-                self._device_is_output_ready() and not pending_enable
+                channel_ready and not pending_enable
             )
             card["output_on_action"].setToolTip(
                 (

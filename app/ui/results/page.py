@@ -127,7 +127,17 @@ class _FluentResultSections(QWidget):
         self.navigation.widget(self._routes[index]).setVisible(visible)
         self.compact_navigation.setItemEnabled(index, visible)
         if not visible and self.stack.currentIndex() == index:
-            self.setCurrentIndex(0)
+            replacement = next(
+                (
+                    candidate
+                    for candidate in range(self.stack.count())
+                    if self.navigation.widget(self._routes[candidate]).isVisible()
+                    and self.compact_navigation.isItemEnabled(candidate)
+                ),
+                -1,
+            )
+            if replacement >= 0:
+                self.setCurrentIndex(replacement)
 
 
 

@@ -121,17 +121,10 @@ class RigolAdapter(DeviceAdapter):
         self._last_config: dict[int, RigolChannelConfig] = {}
         self._last_output_config: dict[int, RigolOutputConfig] = {}
         self._modulation_enabled: set[int] = set()
-        self._armed_until: dict[int, float] = {}
         self._output_states: dict[int, bool] = {1: False, 2: False}
 
     def _interlock(self) -> OutputInterlock:
-        # Manual Rigol operation is guarded by the explicit device/channel
-        # enable flags and validated electrical limits.  It does not require
-        # the station profile document to be in the recipe-approval state.
-        return OutputInterlock(
-            profile_approved=self._station.profile.state == "approved",
-            profile_locks_outputs=False,
-        )
+        return OutputInterlock()
 
     def _require_session(self) -> InstrumentSession:
         if self._session is None:
@@ -248,7 +241,6 @@ class RigolAdapter(DeviceAdapter):
                 self._last_config.clear()
                 self._last_output_config.clear()
                 self._modulation_enabled.clear()
-                self._armed_until.clear()
                 self._output_states = {1: False, 2: False}
                 self._state = DeviceState.DISCONNECTED
 
@@ -265,7 +257,6 @@ class RigolAdapter(DeviceAdapter):
         except Exception:
             self._state = DeviceState.UNKNOWN
         else:
-            self._armed_until.clear()
             self._output_states = {1: False, 2: False}
             self._state = DeviceState.OUTPUT_OFF
 
@@ -288,7 +279,6 @@ class RigolAdapter(DeviceAdapter):
         self._settings = station.rigol
         self._last_config.clear()
         self._last_output_config.clear()
-        self._armed_until.clear()
 
     def _read_output_states(self) -> dict[int, bool]:
         session = self._require_session()
@@ -660,11 +650,26 @@ class RigolAdapter(DeviceAdapter):
     def set_output(self, channel: int, enabled: bool) -> bool:
         channel_settings = self._channel_settings(channel)
         if enabled:
+            self._interlock().assert_can_enable(
+                device_name=f"Rigol CH{channel}",
+                device_allows_output=(
+                    self._settings.safety.allow_output_enable
+                    and channel_settings.enabled
+                ),
+            )
             config = self._last_config.get(channel)
             if config is None:
                 raise SafetyViolation("Configure and validate the Rigol channel before OUTPUT ON.")
             self._validate_waveform_config(config)
-            self._assert_armed(channel, channel_settings.enabled)
+            if channel in self._modulation_enabled:
+                raise SafetyViolation(
+                    "Rigol OUTPUT ON is blocked while modulation is active because "
+                    "the DUT current model does not yet qualify the modulation envelope."
+                )
+            # Re-read the complete channel immediately before the single
+            # energising transition. This also proves OUTPUT is still OFF and
+            # detects front-panel or remote changes after configure.
+            self._verify_applied_configuration(config)
         session = self._require_session()
         session.write(f":OUTP{channel} {'ON' if enabled else 'OFF'}")
         self._check_errors()
@@ -673,8 +678,6 @@ class RigolAdapter(DeviceAdapter):
             raise DeviceError("Rigol did not confirm the requested output state.")
         self._output_states[channel] = active
         self._update_aggregate_output_state()
-        if not enabled:
-            self._armed_until.pop(channel, None)
         return active
 
     def configure_output(self, config: RigolOutputConfig) -> None:
@@ -716,40 +719,6 @@ class RigolAdapter(DeviceAdapter):
         self._last_output_config[config.channel] = config
         self._state = DeviceState.OUTPUT_OFF
 
-    def arm_output(self, channel: int, *, ttl_s: float = 30.0) -> float:
-        """Validate and arm one channel for a short, one-shot output-enable window."""
-
-        channel_settings = self._channel_settings(channel)
-        self._interlock().assert_can_enable(
-            device_name=f"Rigol CH{channel}",
-            device_allows_output=self._settings.safety.allow_output_enable and channel_settings.enabled,
-        )
-        config = self._last_config.get(channel)
-        if config is None:
-            raise SafetyViolation("Configure and validate the Rigol channel first.")
-        self._validate_waveform_config(config)
-        if channel in self._modulation_enabled:
-            raise SafetyViolation(
-                "Cannot ARM Rigol while modulation is active: the DUT current model does not yet "
-                "qualify the modulation envelope. Disable modulation or perform extended qualification."
-            )
-        if ttl_s <= 0 or ttl_s > 120:
-            raise SafetyViolation("Rigol ARM duration must be in the range (0, 120] s.")
-        expires = time.monotonic() + ttl_s
-        self._armed_until[channel] = expires
-        return expires
-
-    def _assert_armed(self, channel: int, channel_enabled: bool) -> None:
-        self._interlock().assert_can_enable(
-            device_name=f"Rigol CH{channel}",
-            device_allows_output=self._settings.safety.allow_output_enable and channel_enabled,
-        )
-        expiry = self._armed_until.pop(channel, None)
-        if expiry is None:
-            raise SafetyViolation("ARM the Rigol channel first.")
-        if time.monotonic() > expiry:
-            raise SafetyViolation("Rigol ARM window expired; ARM the channel again.")
-
     def configure_modulation(self, config: RigolModulationConfig) -> None:
         """Configure modulation with the carrier output forced OFF."""
 
@@ -773,7 +742,7 @@ class RigolAdapter(DeviceAdapter):
         minimum = parse_quantity(rate_limits.min, "frequency").si_value
         maximum = parse_quantity(rate_limits.max, "frequency").si_value
         if not minimum <= config.rate_hz <= maximum:
-            raise SafetyViolation("Modulation rate is outside the approved Rigol frequency range.")
+            raise SafetyViolation("Modulation rate is outside the configured Rigol frequency range.")
         if config.parameter < 0:
             raise SafetyViolation("The modulation parameter cannot be negative.")
         session = self._require_session()
@@ -840,7 +809,7 @@ class RigolAdapter(DeviceAdapter):
         for name, value in (
             ("start sweep", config.start_hz),
             ("stop sweep", config.stop_hz),
-            ("czas sweep", config.duration_s),
+            ("sweep duration", config.duration_s),
             ("start hold sweep", config.start_hold_s),
             ("stop hold sweep", config.stop_hold_s),
             ("return time sweep", config.return_time_s),
@@ -860,9 +829,9 @@ class RigolAdapter(DeviceAdapter):
         duration_min = parse_quantity(advanced.sweep_duration.min, "time").si_value
         duration_max = parse_quantity(advanced.sweep_duration.max, "time").si_value
         if not duration_min <= config.duration_s <= duration_max:
-            raise SafetyViolation("Sweep time is outside the approved range.")
+            raise SafetyViolation("Sweep time is outside the configured range.")
         if not advanced.sweep_steps.min <= config.steps <= advanced.sweep_steps.max:
-            raise SafetyViolation("Sweep step count is outside the approved range.")
+            raise SafetyViolation("Sweep step count is outside the configured range.")
         limits = channel.lab_limits.frequency
         for value, name in ((config.start_hz, "start"), (config.stop_hz, "stop")):
             self._enforce_frequency(value, limits.min, limits.max, f"Sweep {name}")
@@ -939,9 +908,9 @@ class RigolAdapter(DeviceAdapter):
         period_min = parse_quantity(limits.burst_period.min, "time").si_value
         period_max = parse_quantity(limits.burst_period.max, "time").si_value
         if not period_min <= config.period_s <= period_max:
-            raise SafetyViolation("Burst period is outside the approved range.")
+            raise SafetyViolation("Burst period is outside the configured range.")
         if not limits.burst_cycles.min <= config.cycles <= limits.burst_cycles.max:
-            raise SafetyViolation("Burst cycle count is outside the approved range.")
+            raise SafetyViolation("Burst cycle count is outside the configured range.")
         session = self._require_session()
         source = f":SOUR{config.channel}"
         session.write(f":OUTP{config.channel} OFF")
@@ -1094,4 +1063,4 @@ class RigolAdapter(DeviceAdapter):
         upper = parse_quantity(upper_text, "frequency").si_value
         tolerance = max(abs(lower), abs(upper), 1.0) * 1e-12
         if value < lower - tolerance or value > upper + tolerance:
-            raise SafetyViolation(f"{name}={value:.9g} Hz is outside the approved {lower:.9g}–{upper:.9g} Hz range.")
+            raise SafetyViolation(f"{name}={value:.9g} Hz is outside the configured {lower:.9g}–{upper:.9g} Hz range.")

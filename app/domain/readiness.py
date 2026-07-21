@@ -69,24 +69,20 @@ def evaluate_station_readiness(
     """Build a deterministic, presentation-independent readiness checklist."""
 
     items: list[ReadinessItem] = []
-    approved = not settings.outputs_locked
     items.append(
         ReadinessItem(
             "profile",
-            "Safety profile",
-            (
-                f"Approved: {settings.profile.name}"
-                if approved
-                else f"{settings.profile.state.title()}; energy-producing operations are locked"
-            ),
-            ReadinessLevel.PASS if approved else ReadinessLevel.FAIL,
+            "Station configuration",
+            f"{settings.profile.name}; device permissions, limits and readback "
+            "are authoritative",
+            ReadinessLevel.PASS,
         )
     )
     items.append(
         ReadinessItem(
             "audit",
             "Durable audit log",
-            "Writable and active" if audit_healthy else "Unavailable; ARM and new runs are locked",
+            "Writable and active" if audit_healthy else "Unavailable; OUTPUT ON and new runs are locked",
             ReadinessLevel.PASS if audit_healthy else ReadinessLevel.FAIL,
         )
     )
@@ -113,7 +109,7 @@ def evaluate_station_readiness(
         elif not resource:
             level = ReadinessLevel.FAIL if is_required else ReadinessLevel.WARNING
             detail = "No connection resource assigned"
-        elif state in {"output_on", "armed", "compliance", "fault", "unknown"}:
+        elif state in {"output_on", "compliance", "fault", "unknown"}:
             level = ReadinessLevel.FAIL
             detail = f"Unsafe/manual state: {state.replace('_', ' ')}"
         elif device in errors:
@@ -180,7 +176,7 @@ def evaluate_station_readiness(
                 "dut",
                 "DUT safety declaration",
                 (
-                    "Compiler validated the recipe DUT envelope against approved laboratory limits"
+                    "Compiler validated the recipe DUT envelope against configured laboratory limits"
                     if energized
                     else "Plan contains no OUTPUT ON action"
                 ),

@@ -4,9 +4,10 @@ from __future__ import annotations
 
 from PySide6.QtCore import Qt
 from PySide6.QtWidgets import (
-    QListWidgetItem, QMessageBox, QHBoxLayout, QVBoxLayout, QWidget,
+    QListWidgetItem, QHBoxLayout, QVBoxLayout, QWidget,
 )
 from qfluentwidgets import BodyLabel, ComboBox, ListWidget, PrimaryPushButton, PushButton
+from app.ui.dialogs import StationMessageBox as QMessageBox
 
 from collections.abc import Mapping, Sequence
 
@@ -26,7 +27,12 @@ class DeviceParameterDialog(FluentRecipeDialog):
     ) -> None:
         super().__init__(parent)
         self.setProperty("stationSurface", "page")
-        self._definitions = tuple(dict(definition) for definition in (definitions or SWEEPABLE_PARAMETERS))
+        source_definitions = (
+            SWEEPABLE_PARAMETERS if definitions is None else definitions
+        )
+        self._definitions = tuple(
+            dict(definition) for definition in source_definitions
+        )
         self.setWindowTitle("Add device controls")
         self.setMinimumSize(460, 420)
         layout = QVBoxLayout(self)
@@ -51,6 +57,7 @@ class DeviceParameterDialog(FluentRecipeDialog):
         self.device.currentTextChanged.connect(self._refresh)
         self.open_button.clicked.connect(self.accept)
         self.cancel_button.clicked.connect(self.reject)
+        self.open_button.setEnabled(bool(devices))
         if initial_device is not None:
             self.device.setCurrentText(initial_device)
         self._refresh()
@@ -81,4 +88,3 @@ class DeviceParameterDialog(FluentRecipeDialog):
             QMessageBox.information(self, "Device controls", "Select at least one controllable field.")
             return
         super().accept()
-

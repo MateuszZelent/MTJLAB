@@ -8,7 +8,7 @@ from dataclasses import dataclass
 from PySide6.QtCore import Qt, Signal
 from PySide6.QtWidgets import (
     QFormLayout, QFrame, QGridLayout, QHBoxLayout,
-    QMessageBox, QPushButton, QSplitter,
+    QPushButton, QSplitter,
     QVBoxLayout, QWidget,
 )
 from qfluentwidgets import (
@@ -29,6 +29,7 @@ from app.safety.rigol_current import validate_rigol_frequency_sweep, validate_ri
 from app.safety.quick_controls import quick_control_safety_bounds
 from app.settings.models import StationSettings
 from app.ui.common import line_edit as _line
+from app.ui.dialogs import StationMessageBox as QMessageBox
 from app.ui.widgets import FluentTabView, LimitField, NotificationBanner, SpectrumPlotWidget
 from app.ui.workers import DeviceController
 
@@ -218,8 +219,8 @@ class RigolPage(QWidget):
         layout.insertWidget(2, self.output_action_bar)
         self.output_scroll = self._form_page(
             "Output path and SYNC",
-            "OUTPUT ON validates the visible channel settings, performs an internal "
-            "short-lived safety arm and enables the selected output.",
+            "OUTPUT ON validates and applies the visible channel settings, confirms "
+            "the output is OFF, then enables the selected output.",
             (
                 ("Generator load setting", self.load),
                 ("Output polarity", self.output_polarity),
@@ -269,7 +270,7 @@ class RigolPage(QWidget):
         self.estimate.setObjectName("muted")
         self.estimate.setWordWrap(True)
         safety_layout.addWidget(self.estimate)
-        warning = BodyLabel("⚠ This estimate is not a measurement. Verify DUT impedance and profile limits before ARM.")
+        warning = BodyLabel("⚠ This estimate is not a measurement. Verify DUT impedance and configured limits before OUTPUT ON.")
         warning.setObjectName("rigolWarning")
         warning.setWordWrap(True)
         safety_layout.addWidget(warning)
@@ -395,10 +396,10 @@ class RigolPage(QWidget):
             configure_output: ("Apply output path", "Configures load, polarity, gate and SYNC settings while OUTPUT remains OFF."),
             output_on: (
                 "OUTPUT ON",
-                "Validates and applies the visible channel settings, performs an "
-                "internal short-lived safety arm and energizes the physical BNC output.",
+                "Validates and applies the visible channel settings, confirms OUTPUT OFF "
+                "and then energizes the physical BNC output.",
             ),
-            output_off: ("OUTPUT OFF", "Immediately requests the selected physical output to be disabled. No ARM is required."),
+            output_off: ("OUTPUT OFF", "Immediately requests the selected physical output to be disabled."),
         }
         for widget, (title, description) in help_items.items():
             self._set_help(widget, title, description)
@@ -1062,17 +1063,6 @@ class RigolPage(QWidget):
             return
         self._controller.call("configure_burst", config)
 
-    def arm_output(self) -> None:
-        channel = self.channel.currentText()
-        answer = QMessageBox.question(
-            self,
-            "ARM Rigol",
-            f"Arm Rigol CH{channel} for 30 seconds? This does not enable the output yet.",
-            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.Cancel,
-        )
-        if answer == QMessageBox.StandardButton.Yes:
-            self._controller.call("arm", int(channel))
-
     def request_output(self, enabled: bool) -> None:
         channel = int(self.channel.currentText())
         if (
@@ -1109,22 +1099,15 @@ class RigolPage(QWidget):
             self._set_rigol_channel_output(channel, False)
             if self._pending_output_enable:
                 self.status.emit(
-                    f"Rigol CH{channel}: settings valid; applying internal safety arm"
+                    f"Rigol CH{channel}: settings valid; enabling OUTPUT"
                 )
-                self._controller.call("arm", channel)
+                self._controller.call("set_output", (channel, True))
             else:
                 self.status.emit("Rigol configured while OUTPUT is OFF")
         elif operation in {"configure_modulation", "configure_sweep", "configure_burst"}:
             self.status.emit(f"Rigol: {operation} configured while OUTPUT is OFF")
         elif operation == "configure_output":
             self.status.emit("Rigol: output path confirmed while OUTPUT is OFF")
-        elif operation == "arm":
-            if self._pending_output_enable:
-                channel = self._pending_output_channel or int(self.channel.currentText())
-                self.status.emit(f"Rigol CH{channel}: enabling OUTPUT")
-                self._controller.call("set_output", (channel, True))
-            else:
-                self.status.emit("Rigol armed for 30 seconds")
         elif operation == "set_output":
             channel = self._pending_output_channel or int(self.channel.currentText())
             self._pending_output_enable = False
@@ -1141,7 +1124,6 @@ class RigolPage(QWidget):
         if operation in {
             "configure",
             "set_output",
-            "arm",
             "configure_modulation",
             "configure_output",
             "configure_sweep",
@@ -1150,7 +1132,7 @@ class RigolPage(QWidget):
             "trigger_burst",
             "synchronize_phases",
         }:
-            if operation in {"configure", "arm", "set_output"}:
+            if operation in {"configure", "set_output"}:
                 channel = self._pending_output_channel or int(self.channel.currentText())
                 self._pending_output_enable = False
                 self._pending_output_channel = None

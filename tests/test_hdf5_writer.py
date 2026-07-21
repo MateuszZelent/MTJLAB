@@ -494,7 +494,7 @@ root:
             writer = Hdf5RunWriter(
                 path,
                 recipe_source="name: verified\n",
-                settings_source="profile:\n  state: approved\n",
+                settings_source="profile:\n  id: test\n  name: Test\n",
                 plan_hash="plan-hash",
                 device_idn={"rigol": "RIGOL,DG1032Z"},
                 device_capabilities={"rigol": {"features": ["basic_waveform"]}},

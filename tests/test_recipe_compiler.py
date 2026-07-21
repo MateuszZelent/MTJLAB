@@ -14,6 +14,7 @@ class RecipeCompilerTests(unittest.TestCase):
     def test_keithley_a_anritsu_recipe_stores_ten_raw_and_processed_spectra(self) -> None:
         raw = deepcopy(simulation_settings(approved=True).model_dump(mode="python"))
         raw["devices"]["keithley"]["safety"]["channels"]["A"]["enabled"] = True
+        raw["devices"]["keithley"]["safety"]["allow_output_enable"] = True
         plan = RecipeCompiler(StationSettings.model_validate(raw)).compile(
             load_recipe(
                 ROOT / "recipes" / "keithley_a_100ua_anritsu_raw_processed_10.yml"
@@ -33,7 +34,7 @@ class RecipeCompilerTests(unittest.TestCase):
         self.assertTrue(
             all(action.payload["reference_operation"] == "difference_db" for action in spectra)
         )
-        self.assertEqual(plan.actions[-2].kind, "ramp_keithley_to_zero")
+        self.assertNotIn("ramp_keithley_to_zero", kinds)
         self.assertEqual(plan.actions[-1].kind, "set_keithley_output")
         self.assertFalse(plan.actions[-1].payload["enabled"])
 
@@ -331,7 +332,6 @@ root:
       output_load: HIGHZ
       dut_min_impedance: "50 ohm"
     - {id: keithley-on, type: set_keithley_output, channel: B, enabled: true}
-    - {id: rigol-arm, type: arm_rigol_output, channel: 1}
     - {id: rigol-on, type: set_rigol_output, channel: 1, enabled: true}
     - id: keithley-current
       type: sweep
@@ -657,7 +657,7 @@ root:
         )
         self.assertFalse(
             any(
-                action.kind in {"arm_rigol_output", "set_rigol_output"}
+                action.kind == "set_rigol_output"
                 for action in plan.actions
             )
         )
@@ -813,7 +813,7 @@ root:
             )
         )
 
-    def test_anritsu_sg_axis_requires_fresh_arm_before_rf_on_at_every_point(self) -> None:
+    def test_anritsu_sg_axis_uses_direct_rf_on_at_every_point(self) -> None:
         source = """\
 schema_version: 1
 name: anritsu-sg-energized-provider
@@ -833,7 +833,6 @@ root:
       segments:
         - {start: 1 GHz, stop: 1.1 GHz, points: 2}
   children:
-    - {id: arm, type: arm_anritsu_sg_output}
     - {id: rf-on, type: set_anritsu_sg_output, enabled: true}
     - {id: spectrum, type: acquire_spectrum, trace: TRAC1}
     - {id: rf-off, type: set_anritsu_sg_output, enabled: false}
@@ -857,12 +856,10 @@ root:
             [action.kind for action in plan.actions],
             [
                 "configure_anritsu_sg",
-                "arm_anritsu_sg_output",
                 "set_anritsu_sg_output",
                 "acquire_spectrum",
                 "set_anritsu_sg_output",
                 "configure_anritsu_sg",
-                "arm_anritsu_sg_output",
                 "set_anritsu_sg_output",
                 "acquire_spectrum",
                 "set_anritsu_sg_output",
@@ -902,7 +899,7 @@ root:
         with self.assertRaisesRegex(Exception, "requires an earlier configuration"):
             RecipeCompiler(simulation_settings()).compile(parse_recipe_text(source))
 
-    def test_preflight_rejects_output_on_without_one_shot_arm(self) -> None:
+    def test_preflight_accepts_output_on_after_configuration(self) -> None:
         raw = deepcopy(simulation_settings(approved=True).model_dump(mode="python"))
         raw["devices"]["rigol"]["safety"]["allow_output_enable"] = True
         source = """\
@@ -928,12 +925,13 @@ root:
       dut_min_impedance: 50 ohm
     - {id: output-on, type: set_rigol_output, channel: 1, enabled: true}
 """
-        with self.assertRaisesRegex(Exception, "requires an earlier one-shot ARM"):
-            RecipeCompiler(StationSettings.model_validate(raw)).compile(
-                parse_recipe_text(source)
-            )
+        plan = RecipeCompiler(StationSettings.model_validate(raw)).compile(
+            parse_recipe_text(source)
+        )
+        self.assertEqual(plan.actions[-1].kind, "set_rigol_output")
+        self.assertTrue(plan.actions[-1].payload["enabled"])
 
-    def test_output_on_authoring_action_expands_to_internal_rigol_arm_then_on(self) -> None:
+    def test_output_on_authoring_action_expands_to_direct_rigol_output(self) -> None:
         raw = deepcopy(simulation_settings(approved=True).model_dump(mode="python"))
         raw["devices"]["rigol"]["safety"]["allow_output_enable"] = True
         source = """\
@@ -962,14 +960,8 @@ root:
         plan = RecipeCompiler(StationSettings.model_validate(raw)).compile(
             parse_recipe_text(source)
         )
-        self.assertEqual(
-            [action.kind for action in plan.actions[-2:]],
-            ["arm_rigol_output", "set_rigol_output"],
-        )
-        self.assertEqual(
-            [action.node_id for action in plan.actions[-2:]],
-            ["output-on.rigol.arm", "output-on.rigol.output-on"],
-        )
+        self.assertEqual(plan.actions[-1].kind, "set_rigol_output")
+        self.assertEqual(plan.actions[-1].node_id, "output-on.rigol.output-on")
         self.assertTrue(plan.actions[-1].payload["enabled"])
 
     def test_consolidated_output_on_is_rejected_in_finally(self) -> None:
@@ -1015,7 +1007,7 @@ finally:
         self.assertFalse(plan.actions[-1].payload["enabled"])
         self.assertTrue(plan.actions[-1].is_finally)
 
-    def test_energized_template_uses_direct_keithley_output_and_rigol_arm(self) -> None:
+    def test_energized_template_uses_direct_output_actions(self) -> None:
         raw = deepcopy(simulation_settings(approved=True).model_dump(mode="python"))
         raw["devices"]["rigol"]["safety"]["allow_output_enable"] = True
         raw["devices"]["keithley"]["safety"]["allow_output_enable"] = True
@@ -1023,8 +1015,7 @@ finally:
         recipe = load_recipe(ROOT / "recipes" / "example_energized_nested_sweep_template.yml")
         plan = RecipeCompiler(settings).compile(recipe)
         self.assertEqual(plan.total_points, 2000)
-        self.assertIn("arm_rigol_output", tuple(action.kind for action in plan.actions))
-        self.assertNotIn("arm_keithley_output", tuple(action.kind for action in plan.actions))
+        self.assertIn("set_rigol_output", tuple(action.kind for action in plan.actions))
         self.assertIn("set_keithley_output", tuple(action.kind for action in plan.actions))
 
     def test_recipe_rejects_duplicate_node_id(self) -> None:
@@ -1304,7 +1295,7 @@ root:
         with self.assertRaisesRegex(SafetyViolation, "exceeds the station limit"):
             RecipeCompiler(simulation_settings()).compile(parse_recipe_text(source))
 
-    def test_keithley_output_on_uses_station_limits_without_extra_permission_or_dut_block(self) -> None:
+    def test_keithley_output_on_requires_permission_and_dut_limits_but_demo_does_not(self) -> None:
         source = """\
 schema_version: 1
 name: missing-dut-envelope
@@ -1324,10 +1315,20 @@ root:
       enabled: true
 """
         settings = simulation_settings(approved=False)
-        plan = RecipeCompiler(settings).compile(parse_recipe_text(source))
+        with self.assertRaisesRegex(SafetyViolation, "output permission is disabled"):
+            RecipeCompiler(settings).compile(parse_recipe_text(source))
 
+        raw = settings.model_dump(mode="python")
+        raw["devices"]["keithley"]["safety"]["allow_output_enable"] = True
+        permitted = StationSettings.model_validate(raw)
+        with self.assertRaisesRegex(SafetyViolation, "complete recipe.dut_limits"):
+            RecipeCompiler(permitted).compile(parse_recipe_text(source))
+
+        demo = RecipeCompiler(settings, outputs_forced_off=True).compile(
+            parse_recipe_text(source)
+        )
         self.assertEqual(
-            [action.kind for action in plan.actions],
+            [action.kind for action in demo.actions],
             ["configure_keithley", "set_keithley_output"],
         )
 

@@ -508,7 +508,6 @@ root:
       output_load: HIGHZ
       dut_min_impedance: "50 ohm"
     - {id: keithley-on, type: set_keithley_output, channel: B, enabled: true}
-    - {id: rigol-arm, type: arm_rigol_output, channel: 1}
     - {id: rigol-on, type: set_rigol_output, channel: 1, enabled: true}
     - id: current
       type: sweep
@@ -726,9 +725,6 @@ root:
       type: set_keithley_output
       channel: B
       enabled: true
-    - id: arm-rigol
-      type: arm_rigol_output
-      channel: 1
     - id: on-rigol
       type: set_rigol_output
       channel: 1

@@ -4,7 +4,6 @@ from __future__ import annotations
 
 from abc import ABC, abstractmethod
 from contextlib import contextmanager
-from dataclasses import dataclass
 import math
 from typing import Protocol, runtime_checkable
 
@@ -32,18 +31,10 @@ class SessionFactory(Protocol):
     def open(self, resource: str, backend: str, timeout_ms: int) -> InstrumentSession: ...
 
 
-@dataclass(frozen=True, slots=True)
 class OutputInterlock:
     """Central rule that prevents a device adapter from enabling energy output."""
 
-    profile_approved: bool
-    profile_locks_outputs: bool
-
     def assert_can_enable(self, *, device_name: str, device_allows_output: bool) -> None:
-        if self.profile_locks_outputs and not self.profile_approved:
-            raise SafetyViolation(
-                f"{device_name} output is locked because the station profile is not approved."
-            )
         if not device_allows_output:
             raise SafetyViolation(
                 f"{device_name} output is locked in settings.yml (allow_output_enable=false)."
@@ -81,7 +72,7 @@ def validate_identity(
         )
     if require_serial_match and identity.serial != expected_serial:
         raise ConnectionError(
-            f"Instrument serial number differs from the approved value: {identity.serial!r}."
+            f"Instrument serial number differs from the configured value: {identity.serial!r}."
         )
 
 

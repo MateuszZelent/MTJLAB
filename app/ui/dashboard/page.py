@@ -9,7 +9,6 @@ from PySide6.QtGui import QResizeEvent
 from PySide6.QtWidgets import (
     QGridLayout,
     QHBoxLayout,
-    QMessageBox,
     QSizePolicy,
     QStackedWidget,
     QVBoxLayout,
@@ -53,7 +52,7 @@ from app.ui.dashboard.device_card import DeviceCard
 from app.ui.dashboard.discovery_surfaces import SavedInstrumentsView, TcpDiscoveryResultsView
 from app.ui.dashboard.visa_results import VisaResultState, VisaResultsView
 from app.ui.discovery_worker import MokeIdentificationWorker, TcpDiscoveryWorker, VisaDiscoveryWorker
-from app.ui.dialogs import StationDialog
+from app.ui.dialogs import StationDialog, StationMessageBox as QMessageBox
 
 
 class DashboardPage(QWidget):
@@ -213,7 +212,7 @@ class DashboardPage(QWidget):
         self.save_assignments = PushButton("Save assignments", self.visa_discovery_page)
         self.save_assignments.setEnabled(False)
         self.save_assignments.setToolTip(
-            "Persist selected VISA addresses. This changes the safety profile and revokes its approval."
+            "Persist the selected VISA addresses in the station configuration."
         )
         discovery_header.addWidget(self.scan_button)
         discovery_header.addWidget(self.save_assignments)
@@ -503,7 +502,7 @@ class DashboardPage(QWidget):
         self._assignment_allowed = allowed
         self.visa_results.set_assignment_allowed(allowed)
         self.save_assignments.setToolTip(
-            "Persist selected VISA addresses. This changes the safety profile and revokes its approval."
+            "Persist the selected VISA addresses in the station configuration."
             if allowed
             else "An engineer or service role is required to change VISA assignments."
         )

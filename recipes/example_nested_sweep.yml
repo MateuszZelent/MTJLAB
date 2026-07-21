@@ -1,8 +1,8 @@
 schema_version: 1
 name: Keithley B current × Rigol CH1 high level × Anritsu spectrum
 
-# Safe, executable 100 × 20 example. It deliberately contains no ARM or
-# OUTPUT ON action, so compiling or simulating it cannot energise a source.
+# Safe, executable 100 × 20 example. It deliberately contains no OUTPUT ON
+# action, so compiling or simulating it cannot energise a source.
 root:
   id: sequence-main
   type: sequence

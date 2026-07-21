@@ -14,7 +14,9 @@ from qfluentwidgets import (
     setTheme,
 )
 
-from .station_qss import dialog_qss, event_log_qss
+from app.ui.common.precision_stepper import install_precision_arrow_stepper
+
+from .station_qss import dialog_qss, event_log_qss, notification_banner_qss
 from .theme import effective_theme
 from .tokens import ThemeTokens, tokens_for
 
@@ -26,6 +28,7 @@ class AppliedTheme:
 
 
 def apply_application_theme(application: QApplication, mode: str) -> AppliedTheme:
+    install_precision_arrow_stepper(application)
     name = effective_theme(mode)
     tokens = tokens_for(name)
     # Application properties describe the last requested theme, not proof
@@ -80,6 +83,12 @@ class _DialogThemeFilter(QObject):
     def eventFilter(self, watched: QObject, event: QEvent) -> bool:
         if event.type() == QEvent.Type.Show and isinstance(watched, QWidget):
             _apply_station_control_style(watched, self._tokens)
+        elif (
+            event.type() == QEvent.Type.DynamicPropertyChange
+            and isinstance(watched, QWidget)
+            and bytes(event.propertyName()) == b"validationState"
+        ):
+            apply_validation_style(watched, tokens=self._tokens)
         return False
 
 
@@ -189,6 +198,14 @@ def _apply_station_control_style(widget: QWidget, tokens: ThemeTokens) -> None:
         widget.setStyleSheet(dialog_qss(tokens))
     _apply_station_surface(widget, tokens)
     _apply_semantic_text(widget, tokens)
+    if widget.property("validationState") is not None:
+        apply_validation_style(widget, tokens=tokens)
+    if widget.objectName() in {
+        "inlineValidationWarning",
+        "settingsFieldError",
+        "settingsValidationBanner",
+    }:
+        _apply_inline_validation_warning_style(widget, tokens)
     _apply_station_card_frame(widget, tokens)
     _apply_station_button(widget, tokens)
     if widget.objectName() == "eventLogText":
@@ -205,6 +222,55 @@ def _apply_station_control_style(widget: QWidget, tokens: ThemeTokens) -> None:
     widget.setProperty("stationControlTheme", tokens.background)
 
 
+def apply_validation_style(
+    editor: QWidget,
+    warning: QWidget | None = None,
+    *,
+    tokens: ThemeTokens | None = None,
+) -> None:
+    """Apply the shared semantic validation treatment to an editor and label."""
+
+    resolved_tokens = tokens or _current_tokens()
+    marker = "/* station-validation */"
+    base = editor.styleSheet().split(marker, 1)[0].rstrip()
+    if editor.property("validationState") == "error":
+        editor.setStyleSheet(
+            f"{base}\n{marker}\n"
+            "QLineEdit, LineEdit, QComboBox, ComboBox, QSpinBox, SpinBox {"
+            f"border: 2px solid {resolved_tokens.danger};"
+            "}"
+        )
+    else:
+        editor.setStyleSheet(base)
+    if warning is not None:
+        _apply_inline_validation_warning_style(warning, resolved_tokens)
+
+
+def _current_tokens() -> ThemeTokens:
+    application = QApplication.instance()
+    theme_name = (
+        application.property("stationAppliedTheme")
+        if application is not None
+        else None
+    )
+    if theme_name not in {"light", "dark"}:
+        theme_name = "dark" if isDarkTheme() else "light"
+    return tokens_for(theme_name)
+
+
+def _apply_inline_validation_warning_style(
+    warning: QWidget, tokens: ThemeTokens
+) -> None:
+    marker = "/* station-inline-validation */"
+    base = warning.styleSheet().split(marker, 1)[0].rstrip()
+    warning.setStyleSheet(
+        f"{base}\n{marker}\n"
+        "QLabel, BodyLabel {"
+        f"color: {tokens.danger}; font-weight: 600;"
+        "}"
+    )
+
+
 def _apply_station_button(widget: QWidget, tokens: ThemeTokens) -> None:
     """Give buttons readable disabled and hardware-confirmed states."""
 
@@ -218,6 +284,13 @@ def _apply_station_button(widget: QWidget, tokens: ThemeTokens) -> None:
         "color: palette(placeholder-text);"
         "background-color: palette(alternate-base);"
         "border: 1px solid palette(mid);"
+        "}"
+        "QPushButton[controlState=\"emergency\"] {"
+        f"color: {tokens.danger}; background-color: transparent;"
+        f"border: 1px solid {tokens.danger}; font-weight: 600;"
+        "}"
+        "QPushButton[controlState=\"emergency\"]:hover {"
+        "background-color: palette(alternate-base);"
         "}"
         "QPushButton[controlState=\"confirmed\"] {"
         f"color: #ffffff; background-color: {tokens.accent};"
@@ -239,9 +312,15 @@ def _apply_station_card_frame(widget: QWidget, tokens: ThemeTokens) -> None:
     set_background = getattr(widget, "setBackgroundColor", None)
     if callable(set_background):
         set_background(QColor(tokens.surface))
+    notification_qss = (
+        notification_banner_qss(tokens)
+        if widget.objectName() == "notificationBanner"
+        else ""
+    )
     if marker in widget.styleSheet():
-        return
-    base = widget.styleSheet().split(marker, 1)[0].rstrip()
+        base = widget.styleSheet().split(marker, 1)[0].rstrip()
+    else:
+        base = widget.styleSheet().rstrip()
     widget.setStyleSheet(
         f"{base}\n{marker}\n"
         "CardWidget {"
@@ -249,6 +328,7 @@ def _apply_station_card_frame(widget: QWidget, tokens: ThemeTokens) -> None:
         "border: 1px solid palette(mid);"
         "border-radius: 8px;"
         "}"
+        f"\n{notification_qss}"
     )
 
 

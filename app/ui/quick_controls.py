@@ -95,7 +95,7 @@ class QuickControlCoordinator(QObject):
         self._send_next(device)
 
     def set_settings(self, settings: StationSettings) -> None:
-        """Refresh UI preflight bounds from the active approved station profile."""
+        """Refresh UI preflight bounds from the active station configuration."""
 
         resolved = quick_control_safety_bounds(settings)
         self._bounds = {
@@ -184,6 +184,14 @@ class QuickControlCoordinator(QObject):
 
 class QuantityStepEdit(LineEdit):
     step_requested = Signal(int, object)
+
+    def __init__(self, parent: QWidget | None = None) -> None:
+        super().__init__(parent)
+        # Quick controls already provide a precision-aware stepper that also
+        # clamps against the live safety envelope.  Keep that guarded path in
+        # charge instead of allowing the generic text-field stepper to bypass
+        # it before this widget receives the key event.
+        self.setProperty("precisionArrowStepping", False)
 
     def keyPressEvent(self, event: QKeyEvent) -> None:
         if event.key() in {Qt.Key.Key_Up, Qt.Key.Key_Down}:

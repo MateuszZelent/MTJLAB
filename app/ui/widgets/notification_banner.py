@@ -15,8 +15,10 @@ class NotificationBanner(CardWidget):
         layout.setContentsMargins(10, 7, 7, 7)
         self.label = BodyLabel()
         self.label.setWordWrap(True)
+        self.label.setAccessibleName("Notification message")
         self.close_button = TransparentToolButton(FluentIcon.CLOSE, self)
         self.close_button.setAccessibleName("Dismiss notification")
+        self.close_button.setToolTip("Dismiss notification")
         self.close_button.clicked.connect(self.hide)
         layout.addWidget(self.label, 1)
         layout.addWidget(self.close_button)
@@ -26,11 +28,14 @@ class NotificationBanner(CardWidget):
         self.hide()
 
     def show_message(self, message: str, *, severity: str = "warning", timeout_ms: int = 10_000) -> None:
-        self.setProperty("severity", severity)
+        normalized_severity = severity.strip().lower()
+        if normalized_severity not in {"info", "success", "warning", "error"}:
+            normalized_severity = "warning"
+        self.setProperty("severity", normalized_severity)
         self.style().unpolish(self)
         self.style().polish(self)
         self.label.setText(message)
-        self.setAccessibleName(f"{severity.title()} notification")
+        self.setAccessibleName(f"{normalized_severity.title()} notification")
         self.setAccessibleDescription(message)
         self.show()
         if timeout_ms > 0:

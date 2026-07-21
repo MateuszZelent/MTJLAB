@@ -30,7 +30,6 @@ def _dispatch(adapter: DeviceAdapter, operation: str, payload: object) -> object
         "single_sweep": lambda: adapter.acquire_single_sweep(str(payload or "TRAC1")),
         "read_signal_generator": adapter.read_signal_generator_configuration,
         "configure_signal_generator": lambda: adapter.configure_signal_generator(payload),
-        "arm_signal_generator": adapter.arm_signal_generator_output,
         "set_signal_generator_output": lambda: adapter.set_signal_generator_output(bool(payload)),
     }
     try:

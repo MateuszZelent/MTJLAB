@@ -1,9 +1,8 @@
-"""Editable, validated station settings page with explicit approval workflow."""
+"""Editable, validated station settings page."""
 
 from __future__ import annotations
 
 from copy import deepcopy
-from datetime import datetime, timezone
 import json
 from types import UnionType
 from typing import Any, Literal, Union, get_args, get_origin
@@ -19,10 +18,8 @@ from PySide6.QtWidgets import (
     QDialog,
     QCheckBox,
     QComboBox,
-    QInputDialog,
     QLabel,
     QLineEdit,
-    QMessageBox,
     QFormLayout,
     QFrame,
     QGridLayout,
@@ -73,7 +70,7 @@ from app.domain.quantities import (
 )
 from app.security import AccessPolicy, Permission
 from app.ui.dialogs import StationFileDialog as QFileDialog
-from app.ui.dialogs import StationDialog
+from app.ui.dialogs import StationDialog, StationMessageBox as QMessageBox
 from app.settings import SettingsRepository
 from app.settings.diagnostics import (
     configuration_diagnostics,
@@ -185,9 +182,6 @@ class SettingsPage(QWidget):
     status = Signal(str)
 
     _PROTECTED_PATHS = {
-        ("profile", "state"),
-        ("profile", "approved_by"),
-        ("profile", "approved_at"),
         ("devices", "anritsu", "safety", "reference_level", "min"),
         ("devices", "anritsu", "safety", "reference_level", "max"),
     }
@@ -323,7 +317,7 @@ class SettingsPage(QWidget):
             limits_header.setSectionResizeMode(column, QHeaderView.ResizeMode.Interactive)
             self.limits_table.setColumnWidth(column, 170)
         self.limits_table.itemChanged.connect(self._limit_changed)
-        # Retained as the draft model for compatibility with the profile editor.
+        # Retained as the draft model used by the station settings editor.
         # The operator-facing editor below is intentionally card based.
         self.limits_table.hide()
         self.limits_scroll = ScrollArea()
@@ -381,7 +375,7 @@ class SettingsPage(QWidget):
         diagnostics_layout.setSpacing(12)
         diagnostics_title = StrongBodyLabel("Configuration diagnostics")
         diagnostics_title.setObjectName("sectionTitle")
-        diagnostics_description = BodyLabel("Read-only checks for the active station profile.")
+        diagnostics_description = BodyLabel("Read-only checks for the active station configuration.")
         diagnostics_description.setObjectName("muted")
         diagnostics_card = CardWidget()
         diagnostics_card.setObjectName("settingsTableCard")
@@ -428,15 +422,12 @@ class SettingsPage(QWidget):
         self.diff_button = PushButton(FluentIcon.DOCUMENT, "Show changes…")
         self.validate_button = PushButton("Validate")
         self.save_button = PrimaryPushButton(FluentIcon.SAVE, "Save changes")
-        self.approve_button = PrimaryPushButton("Approve profile…")
-        self.approve_button.hide()
         for index, button in enumerate((
             self.reload_button,
             self.discard_button,
             self.diff_button,
             self.validate_button,
             self.save_button,
-            self.approve_button,
         )):
             button.setMinimumWidth(136)
             buttons.addWidget(button, index // 3, index % 3)
@@ -448,7 +439,6 @@ class SettingsPage(QWidget):
         self.diff_button.clicked.connect(self.show_changes)
         self.validate_button.clicked.connect(self.validate_draft)
         self.save_button.clicked.connect(self.save_draft)
-        self.approve_button.clicked.connect(self.approve_profile)
         self.add_role_button.clicked.connect(self._add_role_assignment)
         self.edit_role_button.clicked.connect(self._edit_role_assignment)
         self.remove_role_button.clicked.connect(self._remove_role_assignment)
@@ -458,9 +448,6 @@ class SettingsPage(QWidget):
             self.validate_button.setEnabled(False)
             self.save_button.setEnabled(False)
             self.discard_button.setEnabled(False)
-        self.approve_button.setEnabled(
-            not self._base_read_only and self._access.allows(Permission.APPROVE_PROFILE)
-        )
         self._update_role_controls()
 
     def resizeEvent(self, event: QResizeEvent) -> None:
@@ -484,10 +471,6 @@ class SettingsPage(QWidget):
         self.validate_button.setEnabled(can_edit)
         self.save_button.setEnabled(can_edit)
         self.discard_button.setEnabled(can_edit)
-        self.approve_button.setEnabled(
-            not self._base_read_only
-            and access_policy.allows(Permission.APPROVE_PROFILE)
-        )
         self._update_role_controls()
         self.reload()
 
@@ -577,8 +560,6 @@ class SettingsPage(QWidget):
     def _update_subtitle(self) -> None:
         if self._settings is None:
             return
-        state = self._settings.profile.state
-        locked = "profile approval not required"
         mode = (
             " • limited edit: Rigol output permission only"
             if self._read_only and self._can_edit_operator_output()
@@ -587,8 +568,9 @@ class SettingsPage(QWidget):
             else ""
         )
         self._subtitle.setText(
-            f"File: {self._repository.path}  •  Profile: {self._settings.profile.name}  •  "
-            f"State: {state}  •  {locked}  •  User: {self._access.identity.display_name}{mode}"
+            f"File: {self._repository.path}  •  Configuration: "
+            f"{self._settings.profile.name}  •  User: "
+            f"{self._access.identity.display_name}{mode}"
         )
 
     def _refresh_diagnostics(self) -> None:
@@ -1311,7 +1293,7 @@ class SettingsPage(QWidget):
         maximum = self._format_scalar(value.get("max"))
         unit = self._range_unit(minimum, maximum)
         default = self._default_for_limit(path)
-        values = (scope, parameter, minimum, maximum, unit, default, "Laboratory profile")
+        values = (scope, parameter, minimum, maximum, unit, default, "Station configuration")
         for column, text in enumerate(values):
             item = QTableWidgetItem(text)
             if column in {2, 3}:
@@ -1343,7 +1325,7 @@ class SettingsPage(QWidget):
         scope = " / ".join(scope_parts) or str(path[1])
         parameter = str(path[-1]).replace("_", " ")
         unit = self._range_unit(value, value)
-        values = (scope, parameter, value, "â€”", unit, "â€”", "Laboratory profile")
+        values = (scope, parameter, value, "â€”", unit, "â€”", "Station configuration")
         for column, text in enumerate(values):
             item = QTableWidgetItem(text)
             if column == 2:
@@ -1860,51 +1842,3 @@ class SettingsPage(QWidget):
                     )
             return changed
         return {path} if before != after else set()
-
-    def approve_profile(self) -> None:
-        if not self._require_access(Permission.APPROVE_PROFILE, "approving the safety profile"):
-            return
-        if self._dirty:
-            answer = QMessageBox.question(
-                self,
-                "Unsaved changes",
-                "Save changes first? Approval will apply to the saved profile.",
-                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.Cancel,
-            )
-            if answer != QMessageBox.StandardButton.Yes:
-                return
-            self.save_draft()
-            if self._dirty:
-                return
-        if self._settings is None:
-            return
-        operator = self._access.identity.username
-        phrase = f"APPROVE {self._settings.profile.id}"
-        confirmation, ok = QInputDialog.getText(
-            self,
-            "Confirmation",
-            f"Enter exactly: {phrase}",
-        )
-        if not ok or confirmation.strip() != phrase:
-            QMessageBox.warning(self, "Not approved", "The confirmation phrase is incorrect.")
-            return
-        draft = deepcopy(self._raw)
-        draft["profile"]["state"] = "approved"
-        draft["profile"]["approved_by"] = operator
-        draft["profile"]["approved_at"] = datetime.now(timezone.utc).isoformat()
-        draft["profile"]["approval_note"] = (
-            "Profile approved by an authenticated engineer/service identity in the GUI."
-        )
-        try:
-            settings = self._repository.save_raw(draft)
-        except ConfigurationError as exc:
-            QMessageBox.critical(self, "Not approved", str(exc))
-            return
-        self._raw = draft
-        self._persisted_raw = deepcopy(draft)
-        self._settings = settings
-        self._populate()
-        self._update_subtitle()
-        self._refresh_diagnostics()
-        self.settings_saved.emit(settings)
-        self.status.emit("Profile approved")

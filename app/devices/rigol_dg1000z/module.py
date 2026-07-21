@@ -24,7 +24,6 @@ def _dispatch(adapter: DeviceAdapter, operation: str, payload: object) -> object
     actions = {
         "configure": lambda: adapter.configure_channel(payload),
         "configure_output": lambda: adapter.configure_output(payload),
-        "arm": lambda: adapter.arm_output(payload),
         "configure_modulation": lambda: adapter.configure_modulation(payload),
         "configure_sweep": lambda: adapter.configure_frequency_sweep(payload),
         "trigger_sweep": lambda: adapter.trigger_frequency_sweep(payload),

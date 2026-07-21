@@ -5,7 +5,7 @@ from __future__ import annotations
 import time
 from datetime import datetime, timedelta
 
-from PySide6.QtCore import QTimer, Qt, Signal
+from PySide6.QtCore import QEvent, QTimer, Qt, Signal
 from PySide6.QtGui import QBrush, QColor
 from PySide6.QtWidgets import (
     QAbstractItemView,
@@ -26,9 +26,11 @@ from qfluentwidgets import (
     PushButton,
     StrongBodyLabel,
     TreeWidget,
+    isDarkTheme,
 )
 
 from app.ui.common import human_duration as _human_duration
+from app.ui.design_system import tokens_for
 from app.ui.widgets import SpectrumPlotWidget
 
 
@@ -122,7 +124,9 @@ class RunMonitorPage(QWidget):
         )
         self.spectrum_preview.set_title("Latest stored spectrum checkpoint")
         monitor_splitter = QSplitter(Qt.Orientation.Horizontal)
+        monitor_splitter.setChildrenCollapsible(False)
         activity_splitter = QSplitter(Qt.Orientation.Vertical)
+        activity_splitter.setMinimumWidth(400)
         activity_splitter.addWidget(self.steps)
         activity_splitter.addWidget(self.events)
         activity_splitter.setStretchFactor(0, 2)
@@ -131,6 +135,7 @@ class RunMonitorPage(QWidget):
         monitor_splitter.addWidget(self.spectrum_preview)
         monitor_splitter.setStretchFactor(0, 1)
         monitor_splitter.setStretchFactor(1, 2)
+        monitor_splitter.setSizes((440, 800))
         layout.addWidget(self.hero_card)
         monitor_layout.addWidget(self.heartbeat)
         monitor_layout.addWidget(self.eta)
@@ -142,12 +147,15 @@ class RunMonitorPage(QWidget):
         layout.addWidget(self.monitor_card)
         layout.addWidget(self.warnings)
         layout.addWidget(monitor_splitter, 1)
-        self.pause_button.clicked.connect(self.pause_requested)
-        self.resume_button.clicked.connect(self.resume_requested)
+        self.pause_button.clicked.connect(self._request_pause)
+        self.resume_button.clicked.connect(self._request_resume)
         self.stop_button.clicked.connect(self._request_safe_stop)
         self._eta_started = 0.0
+        self._paused_started = 0.0
+        self._paused_total_s = 0.0
         self._model_duration_s = 0.0
         self._planned_actions = 0
+        self._demo_outputs_off = False
         self._step_items: dict[str, QTreeWidgetItem] = {}
         self._step_totals: dict[str, int] = {}
         self._step_completed: dict[str, int] = {}
@@ -165,6 +173,7 @@ class RunMonitorPage(QWidget):
         execution_mode: str = "measurement",
     ) -> None:
         demo = execution_mode == "demo_outputs_off"
+        self._demo_outputs_off = demo
         self.state.setText("DEMO — OUTPUTS OFF" if demo else "RUNNING")
         self.state.setToolTip(
             (
@@ -191,6 +200,8 @@ class RunMonitorPage(QWidget):
         self.storage_rate.setText("Storage: waiting for first checkpoint")
         self.heartbeat.setText("Heartbeat: waiting for first operation")
         self._eta_started = time.monotonic()
+        self._paused_started = 0.0
+        self._paused_total_s = 0.0
         self._model_duration_s = max(0.0, estimated_duration_s)
         expected_finish = datetime.now().astimezone() + timedelta(
             seconds=self._model_duration_s
@@ -211,6 +222,36 @@ class RunMonitorPage(QWidget):
         self.pause_button.setEnabled(False)
         self.resume_button.setEnabled(False)
         self.stop_requested.emit()
+
+    def _request_pause(self) -> None:
+        if not self.pause_button.isEnabled():
+            return
+        self.state.setText("PAUSE REQUESTED")
+        self.pause_button.setEnabled(False)
+        self.resume_button.setEnabled(False)
+        self.pause_requested.emit()
+
+    def _request_resume(self) -> None:
+        if not self.resume_button.isEnabled():
+            return
+        self.state.setText(
+            "DEMO — OUTPUTS OFF" if self._demo_outputs_off else "RUNNING"
+        )
+        self.pause_button.setEnabled(True)
+        self.resume_button.setEnabled(False)
+        self._end_pause()
+        self.resume_requested.emit()
+
+    def _begin_pause(self) -> None:
+        if not self._paused_started:
+            self._paused_started = time.monotonic()
+
+    def _end_pause(self) -> None:
+        if self._paused_started:
+            self._paused_total_s += max(
+                0.0, time.monotonic() - self._paused_started
+            )
+            self._paused_started = 0.0
 
     def _build_step_list(self, plan_actions: object) -> None:
         self.steps.clear()
@@ -262,7 +303,7 @@ class RunMonitorPage(QWidget):
         total = self._step_totals.get(node_id, 1)
         if state == "running":
             item.setText(2, "● RUNNING")
-            item.setForeground(2, QBrush(QColor("#1769aa")))
+            self._set_step_state(item, state)
             self.steps.setCurrentItem(item)
             self.steps.scrollToItem(item)
             self._active_step = item
@@ -271,14 +312,44 @@ class RunMonitorPage(QWidget):
             completed = min(total, self._step_completed.get(node_id, 0) + 1)
             self._step_completed[node_id] = completed
             item.setText(2, "✓ DONE" if total == 1 else f"✓ {completed}/{total}")
-            item.setForeground(2, QBrush(QColor("#18844c")))
+            self._set_step_state(item, state)
             self._active_step = None
             return
         item.setText(2, "✕ FAILED")
-        item.setForeground(2, QBrush(QColor("#b4233a")))
+        self._set_step_state(item, "failed")
         self.steps.setCurrentItem(item)
         self.steps.scrollToItem(item)
         self._active_step = item
+
+    def event(self, event: QEvent) -> bool:
+        if event.type() in {
+            QEvent.Type.ApplicationPaletteChange,
+            QEvent.Type.PaletteChange,
+            QEvent.Type.StyleChange,
+        } and hasattr(self, "steps"):
+            self._refresh_step_colours()
+        return super().event(event)
+
+    def _set_step_state(self, item: QTreeWidgetItem, state: str) -> None:
+        item.setData(2, Qt.ItemDataRole.UserRole, state)
+        item.setForeground(2, self._step_brush(state))
+
+    def _refresh_step_colours(self) -> None:
+        for index in range(self.steps.topLevelItemCount()):
+            item = self.steps.topLevelItem(index)
+            state = item.data(2, Qt.ItemDataRole.UserRole)
+            if isinstance(state, str):
+                item.setForeground(2, self._step_brush(state))
+
+    @staticmethod
+    def _step_brush(state: str) -> QBrush:
+        tokens = tokens_for("dark" if isDarkTheme() else "light")
+        color = {
+            "running": tokens.accent,
+            "done": tokens.success,
+            "failed": tokens.danger,
+        }.get(state, tokens.text_primary)
+        return QBrush(QColor(color))
 
     def _mark_shutdown(self, action: str, state: str) -> None:
         node_id = f"shutdown:{action}"
@@ -298,7 +369,16 @@ class RunMonitorPage(QWidget):
             self.eta.setText("ETA: —")
             self.progress_summary.setText("0 of 0 actions • 0%")
             return
-        elapsed = max(0.0, time.monotonic() - self._eta_started)
+        now = time.monotonic()
+        elapsed = max(0.0, now - self._eta_started)
+        current_pause_s = (
+            max(0.0, now - self._paused_started)
+            if self._paused_started
+            else 0.0
+        )
+        active_elapsed = max(
+            0.0, elapsed - self._paused_total_s - current_pause_s
+        )
         completed = self.progress.value()
         total = max(1, self.progress.maximum())
         visible_total = self._planned_actions
@@ -311,17 +391,17 @@ class RunMonitorPage(QWidget):
             f"{min(completed, visible_total)} of {visible_total} actions • {percentage}%"
         )
         empirical_remaining = (
-            elapsed / completed * max(0, total - completed)
+            active_elapsed / completed * max(0, total - completed)
             if completed
             else 0.0
         )
-        model_remaining = max(0.0, self._model_duration_s - elapsed)
+        model_remaining = max(0.0, self._model_duration_s - active_elapsed)
         remaining = (
             0.0
             if visible_total and completed >= visible_total
             else max(empirical_remaining, model_remaining)
         )
-        estimated_total = elapsed + remaining
+        estimated_total = active_elapsed + remaining
         expected_finish = datetime.now().astimezone() + timedelta(seconds=remaining)
         self.eta.setText(
             f"Elapsed: {_human_duration(elapsed)} • "
@@ -349,6 +429,14 @@ class RunMonitorPage(QWidget):
             )
             self._update_eta()
         elif name in {"action_started", "recovery_prelude_started"}:
+            self._end_pause()
+            self.state.setText(
+                "DEMO — OUTPUTS OFF"
+                if self._demo_outputs_off
+                else "RUNNING"
+            )
+            self.pause_button.setEnabled(True)
+            self.resume_button.setEnabled(False)
             self._mark_step(
                 str(data.get("node_id", "—")),
                 str(data.get("kind", "—")),
@@ -400,6 +488,7 @@ class RunMonitorPage(QWidget):
         elif name == "shutdown_error":
             self._mark_shutdown(str(data.get("action", "unknown")), "failed")
         if name == "pause_pending":
+            self._begin_pause()
             self.state.setText("PAUSED")
             self.pause_button.setEnabled(False)
             self.resume_button.setEnabled(True)

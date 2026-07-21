@@ -34,11 +34,14 @@ class RecipePreflightWorker(QObject):
         settings: StationSettings,
         source: str,
         origin: str,
+        *,
+        outputs_forced_off: bool = False,
     ) -> None:
         super().__init__()
         self._settings = settings
         self._source = source
         self._origin = origin
+        self._outputs_forced_off = bool(outputs_forced_off)
 
     @Slot()
     def run(self) -> None:
@@ -48,6 +51,7 @@ class RecipePreflightWorker(QObject):
             plan = RecipeCompiler(
                 self._settings,
                 cancellation_requested=thread.isInterruptionRequested,
+                outputs_forced_off=self._outputs_forced_off,
             ).compile(recipe)
             if thread.isInterruptionRequested():
                 self.cancelled.emit()
@@ -181,8 +185,6 @@ class InstrumentWorker(QObject):
             if operation == "set_output":
                 channel, enabled = payload  # type: ignore[misc]
                 return self._adapter.set_output(channel, enabled)
-            if operation == "arm":
-                return self._adapter.arm_output(payload)  # type: ignore[arg-type]
             if operation == "configure_modulation":
                 return self._adapter.configure_modulation(payload)  # type: ignore[arg-type]
             if operation == "configure_sweep":
@@ -232,8 +234,6 @@ class InstrumentWorker(QObject):
                 return self._adapter.read_signal_generator_configuration()
             if operation == "configure_signal_generator":
                 return self._adapter.configure_signal_generator(payload)  # type: ignore[arg-type]
-            if operation == "arm_signal_generator":
-                return self._adapter.arm_signal_generator_output()
             if operation == "set_signal_generator_output":
                 return self._adapter.set_signal_generator_output(bool(payload))
         raise ValueError(f"Unsupported operation {operation!r}.")

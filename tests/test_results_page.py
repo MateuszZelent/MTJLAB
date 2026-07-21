@@ -35,7 +35,7 @@ class ResultsPageTests(unittest.TestCase):
             writer = Hdf5RunWriter(
                 output_dir / "run.h5",
                 recipe_source="name: browser-test\n",
-                settings_source="profile:\n  state: approved\n",
+                settings_source="profile:\n  id: test\n  name: Test\n",
                 plan_hash="a" * 64,
                 device_idn={"rigol": "RIGOL,DG1032Z"},
                 simulation_metadata={
@@ -86,7 +86,7 @@ class ResultsPageTests(unittest.TestCase):
             writer = Hdf5RunWriter(
                 path,
                 recipe_source="schema_version: 1\nname: interrupted\n",
-                settings_source="profile:\n  state: approved\n",
+                settings_source="profile:\n  id: test\n  name: Test\n",
                 plan_hash="b" * 64,
                 device_idn={},
             )

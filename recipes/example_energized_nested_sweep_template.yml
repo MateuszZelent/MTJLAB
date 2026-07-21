@@ -2,10 +2,10 @@ schema_version: 1
 name: "TEMPLATE — Keithley B current × Rigol CH1 × Anritsu (energised)"
 
 # This 100 × 20 template reproduces the requested measurement topology.
-# It is intentionally blocked by the distributed station profile.  Before
-# compiling it for hardware, an authorised person must approve the profile,
-# enable both output permissions, qualify Anritsu standard_scpi_opc and test a
-# single point on a laboratory load.
+# It is intentionally blocked by the distributed station configuration. Before
+# compiling it for hardware, an authorised person must enable both output
+# permissions, qualify Anritsu standard_scpi_opc and test a single point on a
+# laboratory load.
 
 dut_limits:
   keithley:
@@ -67,9 +67,6 @@ root:
               low_level: "-1 mV"
               output_load: HIGHZ
               dut_min_impedance: "50 ohm"
-            - id: rigol-ch1-arm
-              type: arm_rigol_output
-              channel: 1
             - id: rigol-ch1-on
               type: set_rigol_output
               channel: 1

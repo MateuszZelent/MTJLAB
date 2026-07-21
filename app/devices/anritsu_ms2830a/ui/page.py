@@ -17,7 +17,7 @@ from PySide6.QtGui import QCloseEvent, QResizeEvent
 from PySide6.QtWidgets import (
     QComboBox, QDialog, QDialogButtonBox,
     QFormLayout, QFrame, QGridLayout, QHBoxLayout, QLabel, QLineEdit,
-    QMessageBox, QProgressBar, QSplitter, QSpinBox,
+    QProgressBar, QSplitter, QSpinBox,
     QSizePolicy, QToolButton, QVBoxLayout, QWidget,
 )
 from qfluentwidgets import (
@@ -54,7 +54,7 @@ from app.storage import ReferenceHdf5Store
 from app.ui.common import line_edit as _line
 from app.ui.design_system import plot_theme, tokens_for
 from app.ui.dialogs import StationFileDialog as QFileDialog
-from app.ui.dialogs import StationDialog
+from app.ui.dialogs import StationDialog, StationMessageBox as QMessageBox
 from app.ui.widgets import FluentTabView, LimitField, NotificationBanner, SpectrumPlotWidget
 from app.ui.workers import DeviceController
 
@@ -123,8 +123,8 @@ class AnritsuSpectrumConfigurationPanel(CardWidget):
         layout.addLayout(form)
         if plan_mode:
             note = BodyLabel(
-                "Plan editing is offline. Only selected overrides are stored; "
-                "no VISA command is sent to Anritsu."
+                "Plan editing is offline. The visible core spectrum snapshot is stored; "
+                "no VISA command is sent to Anritsu from this window."
             )
             note.setObjectName("recipeHint")
             note.setWordWrap(True)
@@ -680,7 +680,7 @@ class AnritsuPage(QWidget):
         self._sg_supported = False
         self._sg_output_enabled = False
         self._sg_output_known = False
-        self._sg_armed = False
+        self._sg_configured = False
         self._timer = QTimer(self)
         self._timer.setInterval(500)
         self._timer.timeout.connect(self.fetch_live)
@@ -1089,9 +1089,9 @@ class AnritsuPage(QWidget):
         controller.error.connect(self._error)
         controller.state_changed.connect(self._device_state_changed)
         help_items = {
-            self.read_configuration: "Read Start, Stop, Reference level, and Points from the connected analyser. This sends query commands only and never changes the instrument or approved safety limits.",
+            self.read_configuration: "Read Start, Stop, Reference level, and Points from the connected analyser. This sends query commands only and never changes the instrument or configured safety limits.",
             self.read_and_save_configuration: "Read the current basic and advanced Spectrum settings using query commands, preview them, then save them as settings.yml defaults. No instrument setting or safety limit is changed.",
-            self.single: "Read the currently displayed TRAC1 spectrum using SCPI queries only. This does not configure or trigger the analyser and does not require an approved safety profile.",
+            self.single: "Read the currently displayed TRAC1 spectrum using SCPI queries only. This does not configure or trigger the analyser.",
             self.average_count: "Number of complete spectra to average. 200 is common in the Thatec workflow. Averaging is performed in linear mW, not directly in dBm.",
             self.acquire_average: "Passively read N traces at the Live refresh interval and average power in linear mW. No analyser setting or trigger mode is changed.",
             self.cancel_average: "Stop temporal averaging. Already collected temporary frames are discarded; completed raw/reference data are unchanged.",
@@ -1135,8 +1135,8 @@ class AnritsuPage(QWidget):
         explanation = BodyLabel(
             "This panel is shown only when *OPT? reports option 020/120/021/121. "
             "Configuration explicitly enters SG mode and proves RF OUTPUT OFF. "
-            "RF ON additionally requires a qualified protocol, approved limits, profile approval "
-            "and a fresh one-shot ARM."
+            "RF ON additionally requires a qualified protocol, configured limits and "
+            "a successful hardware readback."
         )
         explanation.setWordWrap(True)
         explanation.setObjectName("muted")
@@ -1166,7 +1166,6 @@ class AnritsuPage(QWidget):
         grid.addWidget(self.sg_power, 2, 1, 1, 3)
         self.sg_read = PushButton("Read current SG state")
         self.sg_configure = PrimaryPushButton("Configure while RF OFF")
-        self.sg_arm = PushButton("ARM RF output")
         self.sg_on = PushButton("RF OUTPUT ON")
         self.sg_on.setCheckable(True)
         self.sg_off = PushButton("RF OUTPUT OFF")
@@ -1175,15 +1174,13 @@ class AnritsuPage(QWidget):
         for button in (
             self.sg_read,
             self.sg_configure,
-            self.sg_arm,
             self.sg_on,
             self.sg_off,
         ):
             button.setProperty("compact", True)
         grid.addWidget(self.sg_read, 3, 0, 1, 2)
         grid.addWidget(self.sg_configure, 3, 2, 1, 2)
-        grid.addWidget(self.sg_arm, 4, 0)
-        grid.addWidget(self.sg_on, 4, 1)
+        grid.addWidget(self.sg_on, 4, 0, 1, 2)
         grid.addWidget(self.sg_off, 4, 2, 1, 2)
         self.sg_limits = BodyLabel()
         self.sg_limits.setWordWrap(True)
@@ -1195,7 +1192,6 @@ class AnritsuPage(QWidget):
             lambda: self._controller.call("read_signal_generator")
         )
         self.sg_configure.clicked.connect(self.configure_signal_generator)
-        self.sg_arm.clicked.connect(self.arm_signal_generator)
         self.sg_on.clicked.connect(self.enable_signal_generator)
         self.sg_off.clicked.connect(
             lambda: self._controller.call("set_signal_generator_output", False)
@@ -1317,7 +1313,7 @@ class AnritsuPage(QWidget):
                 self,
                 "Enable Anritsu preamplifier",
                 "The preamplifier changes the RF input path and may overload at high input power. "
-                "Confirm that the approved expected input and attenuation are correct.",
+                "Confirm that the configured expected input and attenuation are correct.",
                 QMessageBox.StandardButton.Ok | QMessageBox.StandardButton.Cancel,
                 QMessageBox.StandardButton.Cancel,
             )
@@ -1436,7 +1432,7 @@ class AnritsuPage(QWidget):
 
     def _device_state_changed(self, state: str) -> None:
         if state == "disconnected":
-            self._sg_armed = False
+            self._sg_configured = False
             self._set_sg_output_state(None)
             self._last_advanced_configuration = None
             self._set_page_state(AnritsuPageState.DISCONNECTED)
@@ -1509,25 +1505,14 @@ class AnritsuPage(QWidget):
         self.sg_configure.setEnabled(
             connected and idle and self._sg_supported and protocol_qualified
         )
-        self.sg_arm.setEnabled(
-            connected
-            and idle
-            and self._sg_supported
-            and protocol_qualified
-            and not self._sg_output_enabled
-        )
         self.sg_on.setEnabled(
             connected
             and idle
             and self._sg_supported
-            and (
-                self._sg_output_enabled
-                or (
-                    protocol_qualified
-                    and self._sg_armed
-                    and self._sg_output_known
-                )
-            )
+            and protocol_qualified
+            and self._sg_configured
+            and self._sg_output_known
+            and not self._sg_output_enabled
         )
         self.sg_off.setEnabled(
             connected
@@ -1544,7 +1529,7 @@ class AnritsuPage(QWidget):
         self.sg_on.setToolTip(
             "RF OUTPUT is confirmed ON."
             if self._sg_output_enabled and self._sg_output_known
-            else "Enable RF only after configuration, ARM and hardware readback."
+            else "Enable RF only after configuration and hardware readback."
         )
         self.sg_off.setToolTip(
             "Disable RF OUTPUT and confirm hardware readback."
@@ -1590,7 +1575,7 @@ class AnritsuPage(QWidget):
         )
         permission = self._station_settings.anritsu.safety.signal_generator_output_allowed
         self.sg_limits.setText(
-            f"Protocol: {protocol} | Approved frequency: {frequency} | Approved RF power: "
+            f"Protocol: {protocol} | Configured frequency: {frequency} | Configured RF power: "
             f"{power} | RF output permission: {'enabled' if permission else 'disabled'}"
         )
 
@@ -1605,20 +1590,9 @@ class AnritsuPage(QWidget):
         except Exception as exc:
             self.banner.show_message(f"Invalid signal-generator settings: {exc}")
             return
-        self._sg_armed = False
+        self._sg_configured = False
+        self._apply_page_state()
         self._controller.call("configure_signal_generator", config)
-
-    def arm_signal_generator(self) -> None:
-        answer = QMessageBox.warning(
-            self,
-            "ARM Anritsu RF output",
-            "ARM permits one RF OUTPUT ON action for a short time. Confirm the RF cable, "
-            "dummy load/DUT power rating, attenuation and emergency stop before continuing.",
-            QMessageBox.StandardButton.Ok | QMessageBox.StandardButton.Cancel,
-            QMessageBox.StandardButton.Cancel,
-        )
-        if answer == QMessageBox.StandardButton.Ok:
-            self._controller.call("arm_signal_generator")
 
     def enable_signal_generator(self) -> None:
         answer = QMessageBox.warning(
@@ -1636,7 +1610,6 @@ class AnritsuPage(QWidget):
             format_quantity_auto(result.frequency_hz, DIMENSION_FREQUENCY)
         )
         self.sg_power.setText(f"{result.power_dbm:.9g} dBm")
-        self._sg_armed = False
         self._set_sg_output_state(result.output_enabled)
         self._apply_page_state()
 
@@ -1691,7 +1664,7 @@ class AnritsuPage(QWidget):
             "Trace points: 11, 21, 41, 51, 101, 201, 251, 401, 501, 1001, 2001, "
             "5001, 10001 | Device averaging: 2 to 9999.\n"
             "Application polling: 10 ms to 5 s | Application averaging: 1 to 9999. "
-            "Approved safety badges above may intentionally be stricter."
+            "Configured safety badges above may intentionally be stricter."
         )
         self._hardware_details_text = (
             "Detected hardware options\n"
@@ -2144,7 +2117,7 @@ class AnritsuPage(QWidget):
             point_index = self.points.findData(result.points)
             if point_index < 0:
                 raise ValueError(
-                    f"Instrument returned {result.points} points outside the approved UI choices."
+                    f"Instrument returned {result.points} points outside the configured UI choices."
                 )
             self.points.setCurrentIndex(point_index)
             self.banner.show_message(
@@ -2179,18 +2152,11 @@ class AnritsuPage(QWidget):
             "configure_signal_generator",
         } and isinstance(result, SignalGeneratorSnapshot):
             self._show_signal_generator_snapshot(result)
+            self._sg_configured = operation == "configure_signal_generator"
+            self._apply_page_state()
             verb = "configured and verified" if operation == "configure_signal_generator" else "read"
             self.status.emit(f"Anritsu signal generator {verb}; RF state confirmed")
-        elif operation == "arm_signal_generator":
-            self._sg_armed = True
-            self.sg_status.setText("●  RF ARMED — one enable permitted")
-            self.sg_status.setProperty("liveState", "starting")
-            self.sg_status.style().unpolish(self.sg_status)
-            self.sg_status.style().polish(self.sg_status)
-            self._apply_page_state()
-            self.status.emit("Anritsu signal generator armed for one RF enable")
         elif operation == "set_signal_generator_output":
-            self._sg_armed = False
             self._set_sg_output_state(bool(result))
             self._apply_page_state()
             self.status.emit(
@@ -2827,10 +2793,10 @@ class AnritsuPage(QWidget):
         if operation in {
             "read_signal_generator",
             "configure_signal_generator",
-            "arm_signal_generator",
             "set_signal_generator_output",
         }:
-            self._sg_armed = False
+            if operation in {"configure_signal_generator", "set_signal_generator_output"}:
+                self._sg_configured = False
             if operation == "set_signal_generator_output":
                 self._set_sg_output_state(None)
             self._apply_page_state()

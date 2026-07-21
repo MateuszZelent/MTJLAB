@@ -17,9 +17,10 @@ def loaded_settings() -> StationSettings:
     return SettingsRepository(SETTINGS_TEMPLATE).load().settings
 
 
-def simulation_settings(*, approved: bool = False, anritsu_enabled: bool = True) -> StationSettings:
+def simulation_settings(
+    *, anritsu_enabled: bool = True, **_removed_options: object
+) -> StationSettings:
     raw = deepcopy(SettingsRepository(SETTINGS_TEMPLATE).load().raw)
-    raw["profile"]["state"] = "approved" if approved else "unverified"
     raw["devices"]["rigol"]["connection"]["resource"] = "USB0::fake-rigol::INSTR"
     raw["devices"]["keithley"]["connection"]["resource"] = "TCPIP0::fake-keithley::INSTR"
     raw["devices"]["anritsu"]["connection"]["resource"] = "TCPIP0::fake-anritsu::INSTR"

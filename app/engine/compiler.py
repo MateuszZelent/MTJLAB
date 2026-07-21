@@ -97,11 +97,13 @@ class RecipeCompiler:
         settings: StationSettings,
         *,
         cancellation_requested: Callable[[], bool] | None = None,
+        outputs_forced_off: bool = False,
     ) -> None:
         self._settings = settings
         self._max_actions = int(settings.execution.get("max_expanded_points", 100_000)) * 10
         self._dut_limits = ExperimentDutLimits()
         self._cancellation_requested = cancellation_requested
+        self._outputs_forced_off = bool(outputs_forced_off)
 
     def _check_cancelled(self) -> None:
         if (
@@ -186,7 +188,6 @@ class RecipeCompiler:
         """Reject update/energisation sequences that cannot be valid at runtime."""
 
         configured: set[tuple[str, str]] = set()
-        armed: set[tuple[str, str]] = set()
         for action in actions:
             if action.is_finally:
                 continue
@@ -201,7 +202,6 @@ class RecipeCompiler:
                 key = ("anritsu_sg", "RF")
             if key is not None:
                 configured.add(key)
-                armed.discard(key)
                 continue
 
             update_device: str | None = None
@@ -219,22 +219,6 @@ class RecipeCompiler:
                         f"{action.node_id}: {kind} requires an earlier configuration "
                         f"for {update_device} channel {update_channel}."
                     )
-                continue
-
-            arm_device: str | None = None
-            arm_channel: str | None = None
-            if kind == "arm_rigol_output":
-                arm_device, arm_channel = "rigol", str(payload["channel"])
-            elif kind == "arm_anritsu_sg_output":
-                arm_device, arm_channel = "anritsu_sg", "RF"
-            if arm_device is not None and arm_channel is not None:
-                arm_key = (arm_device, arm_channel)
-                if arm_key not in configured:
-                    raise ConfigurationError(
-                        f"{action.node_id}: {kind} requires an earlier configuration "
-                        f"for {arm_device} channel {arm_channel}."
-                    )
-                armed.add(arm_key)
                 continue
 
             output_device: str | None = None
@@ -255,14 +239,6 @@ class RecipeCompiler:
                         f"{action.node_id}: {kind} requires an earlier configuration "
                         f"for {output_device} channel {output_channel}."
                     )
-                if output_device != "keithley" and output_key not in armed:
-                    raise ConfigurationError(
-                        f"{action.node_id}: {kind} requires an earlier one-shot ARM "
-                        f"for {output_device} channel {output_channel}."
-                    )
-                armed.discard(output_key)
-            else:
-                armed.discard(output_key)
 
     def _safe_shutdown_actions(self, required_devices: frozenset[str]) -> tuple[str, ...]:
         allowed = {
@@ -385,25 +361,23 @@ class RecipeCompiler:
                     raise ConfigurationError(
                         f"{node.id}: Rigol OUTPUT ON requires channel 1 or 2."
                     )
-            # Authoring exposes one deliberate OUTPUT ON block. The immutable
-            # execution plan retains the required one-shot interlock as two
-            # separately audited actions in exact ARM -> ON order.
+            # Authoring and execution both expose one deliberate OUTPUT ON
+            # transition. Configuration, limits and readback remain separate
+            # fail-closed gates; there is no intermediate output state.
             device = "rigol" if is_rigol else "anritsu-sg"
-            arm_kind = "arm_rigol_output" if is_rigol else "arm_anritsu_sg_output"
             output_kind = "set_rigol_output" if is_rigol else "set_anritsu_sg_output"
-            for suffix, kind in (("arm", arm_kind), ("output-on", output_kind)):
-                data: dict[str, Any] = {}
-                if channel is not None:
-                    data["channel"] = channel
-                if kind == output_kind:
-                    data["enabled"] = True
-                actions.append(
-                    self._compile_action(
-                        RecipeNode(f"{node.id}.{device}.{suffix}", kind, data),
-                        context,
-                        is_finally=False,
-                    )
+            data: dict[str, Any] = {"enabled": True}
+            if channel is not None:
+                data["channel"] = channel
+            actions.append(
+                self._compile_action(
+                    RecipeNode(
+                        f"{node.id}.{device}.output-on", output_kind, data
+                    ),
+                    context,
+                    is_finally=False,
                 )
+            )
             return
         if node.type == "sweep":
             target = str(node.data["target"])
@@ -845,21 +819,17 @@ class RecipeCompiler:
         if output_policy not in {"unchanged", "on", "off"}:
             raise ConfigurationError(f"{node.id}: invalid Rigol output policy.")
         if output_policy == "on":
-            for suffix, kind, data in (
-                ("arm", "arm_rigol_output", {"channel": channel}),
-                (
-                    "output-on",
-                    "set_rigol_output",
-                    {"channel": channel, "enabled": True},
-                ),
-            ):
-                actions.append(
-                    self._compile_action(
-                        RecipeNode(f"{node.id}.{suffix}", kind, data),
-                        context,
-                        is_finally=False,
-                    )
+            actions.append(
+                self._compile_action(
+                    RecipeNode(
+                        f"{node.id}.output-on",
+                        "set_rigol_output",
+                        {"channel": channel, "enabled": True},
+                    ),
+                    context,
+                    is_finally=False,
                 )
+            )
         elif output_policy == "off":
             actions.append(
                 self._compile_action(
@@ -1105,8 +1075,8 @@ class RecipeCompiler:
     ) -> None:
         """Compile a complete Anritsu SG snapshot and one optional local axis.
 
-        ``configure_anritsu_sg`` always leaves RF disabled. Energisation therefore
-        remains an explicit ARM/ON child flow and is revalidated for every point.
+        ``configure_anritsu_sg`` always leaves RF disabled. Energisation remains
+        an explicit OUTPUT ON child action and is revalidated for every point.
         """
 
         if is_finally:
@@ -1464,13 +1434,14 @@ class RecipeCompiler:
                 store_processed = self._optional_boolean(
                     data, "store_processed", operation != "none", node.id
                 )
+                if not store_raw:
+                    raise ConfigurationError(
+                        f"{node.id}: RAW spectrum storage is required for scientific "
+                        "provenance and processed-spectrum grid identity."
+                    )
                 if store_processed and operation == "none":
                     raise ConfigurationError(
                         f"{node.id}: store_processed requires a reference_operation."
-                    )
-                if not store_raw and not store_processed:
-                    raise ConfigurationError(
-                        f"{node.id}: at least one of store_raw/store_processed must be true."
                     )
                 payload.update(
                     {
@@ -1495,22 +1466,17 @@ class RecipeCompiler:
                 raise ConfigurationError("set_rigol_output requires channel 1 or 2.")
             enabled = self._require_boolean(data, "enabled", node.id)
             self._assert_output_action_allowed("rigol", enabled)
-            if enabled:
+            if enabled and not self._outputs_forced_off:
                 self._require_complete_dut_limits("rigol", channel)
             payload = {"channel": channel, "enabled": enabled}
-        elif node.type == "arm_rigol_output":
-            channel = int(data.get("channel", 0))
-            if channel not in {1, 2}:
-                raise ConfigurationError("arm_rigol_output requires channel 1 or 2.")
-            self._assert_output_action_allowed("rigol", True)
-            self._require_complete_dut_limits("rigol", channel)
-            payload = {"channel": channel}
         elif node.type == "set_keithley_output":
             channel = str(data.get("channel", ""))
             if channel not in {"A", "B"}:
                 raise ConfigurationError("set_keithley_output requires channel A or B.")
             enabled = self._require_boolean(data, "enabled", node.id)
             self._assert_output_action_allowed("keithley", enabled)
+            if enabled and not self._outputs_forced_off:
+                self._require_complete_dut_limits("keithley", channel)
             payload = {"channel": channel, "enabled": enabled}
         elif node.type == "ramp_keithley_to_zero":
             channel = str(data.get("channel", ""))
@@ -1520,14 +1486,10 @@ class RecipeCompiler:
             if deadline <= 0 or deadline > 120:
                 raise SafetyViolation("Keithley ramp deadline must be in the range (0, 120] s.")
             payload = {"channel": channel, "deadline_s": deadline}
-        elif node.type == "arm_anritsu_sg_output":
-            self._assert_output_action_allowed("anritsu_sg", True)
-            self._require_complete_dut_limits("anritsu_sg", "RF")
-            payload = {}
         elif node.type == "set_anritsu_sg_output":
             enabled = self._require_boolean(data, "enabled", node.id)
             self._assert_output_action_allowed("anritsu_sg", enabled)
-            if enabled:
+            if enabled and not self._outputs_forced_off:
                 self._require_complete_dut_limits("anritsu_sg", "RF")
             payload = {"enabled": enabled}
         else:
@@ -1570,23 +1532,20 @@ class RecipeCompiler:
         return parse_quantity(value, dimension).si_value
 
     def _assert_output_action_allowed(self, device: str, enabled: bool) -> None:
-        if not enabled:
+        if not enabled or self._outputs_forced_off:
             return
-        if self._settings.outputs_locked:
-            raise SafetyViolation("The recipe cannot enable output because the profile is not approved.")
         if device == "rigol":
             permitted = self._settings.rigol.safety.allow_output_enable
         elif device == "keithley":
-            # Keithley output permission is defined by its channel enable flag
-            # and validated station min/max limits. The legacy global flag is
-            # retained in YAML only for backwards compatibility.
-            permitted = True
+            permitted = self._settings.keithley.safety.allow_output_enable
         elif device == "anritsu_sg":
             permitted = self._settings.anritsu.safety.signal_generator_output_allowed
         else:
             raise ConfigurationError(f"Unknown output device {device!r}.")
         if not permitted:
-            raise SafetyViolation(f"The recipe cannot enable {device}: allow_output_enable=false.")
+            raise SafetyViolation(
+                f"The recipe cannot enable {device}: its output permission is disabled."
+            )
 
     def _require_complete_dut_limits(self, device: str, channel: str | int) -> None:
         if device == "anritsu_sg":

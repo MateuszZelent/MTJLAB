@@ -26,7 +26,6 @@ class Permission(StrEnum):
     RUN_RECIPE = "run_recipe"
     EMERGENCY_STOP = "emergency_stop"
     EDIT_SETTINGS = "edit_settings"
-    APPROVE_PROFILE = "approve_profile"
     ASSIGN_VISA = "assign_visa"
     MANAGE_ROLES = "manage_roles"
     SERVICE_DIAGNOSTICS = "service_diagnostics"
@@ -52,7 +51,6 @@ _ROLE_PERMISSIONS: dict[Role, frozenset[Permission]] = {
             Permission.RUN_RECIPE,
             Permission.EMERGENCY_STOP,
             Permission.EDIT_SETTINGS,
-            Permission.APPROVE_PROFILE,
             Permission.ASSIGN_VISA,
             Permission.MANAGE_ROLES,
         }

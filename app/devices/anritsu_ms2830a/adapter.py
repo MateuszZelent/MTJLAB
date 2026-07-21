@@ -202,7 +202,6 @@ class AnritsuAdapter(DeviceAdapter):
         self._session: InstrumentSession | None = None
         self._live = False
         self._restore_continuous_after_live = False
-        self._sg_armed_until = 0.0
         self._last_sg_config: SignalGeneratorConfig | None = None
         self._sg_output_enabled = False
 
@@ -292,7 +291,6 @@ class AnritsuAdapter(DeviceAdapter):
             self._session = None
             self._identity = None
             self._capabilities = None
-            self._sg_armed_until = 0.0
             self._last_sg_config = None
             self._sg_output_enabled = False
             self._state = DeviceState.DISCONNECTED
@@ -315,7 +313,6 @@ class AnritsuAdapter(DeviceAdapter):
         session, self._session = self._session, None
         self._live = False
         self._restore_continuous_after_live = False
-        self._sg_armed_until = 0.0
         self._last_sg_config = None
         self._sg_output_enabled = False
         if session is not None:
@@ -361,7 +358,6 @@ class AnritsuAdapter(DeviceAdapter):
             self._state = DeviceState.UNKNOWN
         else:
             self._live = False
-            self._sg_armed_until = 0.0
             self._state = DeviceState.VERIFIED
 
     def apply_limit_settings(self, station: object) -> None:
@@ -389,7 +385,6 @@ class AnritsuAdapter(DeviceAdapter):
         self._station = station
         self._settings = station.anritsu
         self._last_sg_config = None
-        self._sg_armed_until = 0.0
 
     def _assert_signal_generator_supported(self) -> None:
         if self._capabilities is None or not self._capabilities.supports("signal_generator"):
@@ -408,7 +403,6 @@ class AnritsuAdapter(DeviceAdapter):
                 self._state = DeviceState.UNKNOWN
                 raise DeviceError("Anritsu SG did not confirm RF OUTPUT OFF.")
             self._sg_output_enabled = False
-            self._sg_armed_until = 0.0
         session.write("INST SPECT")
 
     @staticmethod
@@ -476,65 +470,60 @@ class AnritsuAdapter(DeviceAdapter):
             self._state = DeviceState.UNKNOWN
             raise DeviceError("Anritsu SG configuration readback mismatch: " + "; ".join(mismatches))
         self._last_sg_config = config
-        self._sg_armed_until = 0.0
         self._state = DeviceState.OUTPUT_OFF
         return actual
 
-    def arm_signal_generator_output(self, *, ttl_s: float | None = None) -> float:
-        """Open a short, one-shot enable window after revalidating the configured setpoint."""
-
-        self._assert_signal_generator_supported()
-        if self._station.outputs_locked:
-            raise SafetyViolation("Anritsu SG output requires an approved station profile.")
-        if not self._settings.safety.signal_generator_output_allowed:
-            raise SafetyViolation("Anritsu SG output is disabled in the safety profile.")
-        if self._last_sg_config is None:
-            raise SafetyViolation("Configure and verify the Anritsu SG while RF is OFF first.")
-        validate_anritsu_signal_generator(
-            self._settings,
-            frequency_hz=self._last_sg_config.frequency_hz,
-            power_dbm=self._last_sg_config.power_dbm,
-        )
-        duration = ttl_s
-        if duration is None:
-            duration = parse_quantity(
-                self._settings.signal_generator.arm_ttl, DIMENSION_TIME
-            ).si_value
-        if not math.isfinite(duration) or duration <= 0 or duration > 60:
-            raise SafetyViolation("Anritsu SG ARM duration must be in the range 0–60 s.")
-        snapshot = self.read_signal_generator_configuration()
-        if snapshot.output_enabled:
-            raise SafetyViolation("Cannot ARM Anritsu SG because RF output is already ON.")
-        self._sg_armed_until = time.monotonic() + duration
-        return self._sg_armed_until
-
     def set_signal_generator_output(self, enabled: bool) -> bool:
-        """Enable RF only inside the one-shot ARM window; OFF is always available."""
+        """Apply one explicit RF transition; OFF is always available."""
 
         self._assert_signal_generator_supported()
         session = self._require_session()
         if not enabled:
             session.write("OUTP 0")
             active = self._parse_output_state(session.query("OUTP?"))
-            self._sg_armed_until = 0.0
             self._sg_output_enabled = active
             self._state = DeviceState.UNKNOWN if active else DeviceState.OUTPUT_OFF
             if active:
                 raise DeviceError("Anritsu SG did not confirm RF OUTPUT OFF.")
             return False
-        if self._station.outputs_locked or not self._settings.safety.signal_generator_output_allowed:
+        if not self._settings.safety.signal_generator_output_allowed:
             raise SafetyViolation("Anritsu SG RF output is locked by the station profile.")
         if self._last_sg_config is None:
             raise SafetyViolation("Configure and verify the Anritsu SG before RF OUTPUT ON.")
-        if time.monotonic() > self._sg_armed_until:
-            self._sg_armed_until = 0.0
-            raise SafetyViolation("Anritsu SG ARM window expired; ARM again.")
         validate_anritsu_signal_generator(
             self._settings,
             frequency_hz=self._last_sg_config.frequency_hz,
             power_dbm=self._last_sg_config.power_dbm,
         )
-        self._sg_armed_until = 0.0
+        snapshot = self.read_signal_generator_configuration()
+        if snapshot.output_enabled:
+            raise SafetyViolation(
+                "Anritsu SG RF output is already ON; use RF OFF before a new "
+                "validated transition."
+            )
+        validate_anritsu_signal_generator(
+            self._settings,
+            frequency_hz=snapshot.frequency_hz,
+            power_dbm=snapshot.power_dbm,
+        )
+        if not (
+            math.isclose(
+                snapshot.frequency_hz,
+                self._last_sg_config.frequency_hz,
+                rel_tol=1e-9,
+                abs_tol=1.0,
+            )
+            and math.isclose(
+                snapshot.power_dbm,
+                self._last_sg_config.power_dbm,
+                rel_tol=0.0,
+                abs_tol=0.01,
+            )
+        ):
+            raise SafetyViolation(
+                "Anritsu SG readback changed after configuration; apply and verify "
+                "the visible frequency and power again before RF OUTPUT ON."
+            )
         session.write("OUTP 1")
         active = self._parse_output_state(session.query("OUTP?"))
         self._sg_output_enabled = active

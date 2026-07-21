@@ -16,7 +16,6 @@ from tests.helpers import SETTINGS_TEMPLATE
 class StationReadinessTests(unittest.TestCase):
     def _settings(self, output_directory: Path) -> StationSettings:
         raw = deepcopy(SettingsRepository(SETTINGS_TEMPLATE).load().raw)
-        raw["profile"]["state"] = "approved"
         raw["storage"]["output_directory"] = str(output_directory)
         raw["devices"]["rigol"]["connection"]["resource"] = "USB0::rigol::INSTR"
         raw["devices"]["keithley"]["connection"]["resource"] = "GPIB0::22::INSTR"
@@ -40,7 +39,7 @@ class StationReadinessTests(unittest.TestCase):
     def _estimate() -> PlanEstimate:
         return PlanEstimate(1.0, 1.5, 1024, 0, 0, 0, 0, ())
 
-    def test_approved_safe_station_is_ready_and_reports_plan_estimates(self) -> None:
+    def test_configured_safe_station_is_ready_and_reports_plan_estimates(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             settings = self._settings(Path(directory) / "results")
             readiness = evaluate_station_readiness(

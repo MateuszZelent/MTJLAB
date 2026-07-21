@@ -9,7 +9,7 @@ from PySide6.QtCore import QMimeData, Qt, Signal
 from PySide6.QtGui import QDrag
 from PySide6.QtWidgets import (
     QAbstractItemView, QApplication, QFormLayout, QHBoxLayout,
-    QMessageBox, QTreeWidgetItem, QVBoxLayout, QWidget,
+    QTreeWidgetItem, QVBoxLayout, QWidget,
 )
 from qfluentwidgets import (
     BodyLabel, CardWidget, CheckBox, ComboBox, LineEdit, PlainTextEdit,
@@ -24,6 +24,7 @@ from app.recipes.parameter_registry import SWEEPABLE_PARAMETERS as _SWEEPABLE_PA
 from app.recipes.parameter_registry import sweep_default as _sweep_default
 from app.settings.models import StationSettings
 from app.ui.common import line_edit as _line
+from app.ui.dialogs import StationMessageBox as QMessageBox
 from app.ui.recipes.sweep_editor import SweepGeneratorDialog
 from app.ui.recipes.fluent_dialog import FluentRecipeDialog
 
@@ -260,12 +261,29 @@ class KeithleySweepBuilderDialog(SweepGeneratorDialog):
     def __init__(
         self, settings: StationSettings, parent: QWidget | None = None,
         *, initial_segments: list[dict[str, object]] | None = None,
+        initial_channel: str = "B",
+        initial_mode: str = "current",
     ) -> None:
         self._settings = settings
-        definition = next(item for item in _SWEEPABLE_PARAMETERS if item["target"] == "keithley.B.current")
+        if initial_channel not in {"A", "B"}:
+            raise ConfigurationError("Keithley sweep channel must be A or B.")
+        if initial_mode not in {"current", "voltage"}:
+            raise ConfigurationError(
+                "Keithley sweep source mode must be current or voltage."
+            )
+        definition = next(
+            item
+            for item in _SWEEPABLE_PARAMETERS
+            if item["target"]
+            == f"keithley.{initial_channel}.{initial_mode}"
+        )
         super().__init__(dict(definition), parent, initial_segments=initial_segments)
         self.setWindowTitle("Keithley 2600 — sweep builder")
-        self.resize(980, 650)
+        # Keep the ROI table and preview side by side at the normal desktop
+        # size; the Keithley-specific settings card adds substantial height
+        # above the generic generator.
+        self.setMinimumSize(900, 650)
+        self.resize(1180, 720)
         parameters = CardWidget(self)
         parameters.setObjectName("recipeEditorParameters")
         parameter_layout = QVBoxLayout(parameters)
@@ -276,10 +294,14 @@ class KeithleySweepBuilderDialog(SweepGeneratorDialog):
         form = QFormLayout()
         self.channel = ComboBox(self)
         self.channel.addItems(("A", "B"))
-        self.channel.setCurrentText("B")
+        self.channel.setCurrentText(initial_channel)
         self.mode = ComboBox(self)
         self.mode.addItems(("current", "voltage"))
-        self.compliance = _line("67 mV")
+        self.mode.setCurrentText(initial_mode)
+        self._last_default_compliance = self._default_compliance(
+            initial_channel, initial_mode
+        )
+        self.compliance = _line(self._last_default_compliance)
         self.nplc = _line("1")
         self.settle_time = _line("100 ms")
         self.sense_mode = ComboBox(self)
@@ -302,18 +324,58 @@ class KeithleySweepBuilderDialog(SweepGeneratorDialog):
         self.limit_status.setObjectName("recipeLimitStatus")
         self.limit_status.setWordWrap(True)
         parameter_layout.addWidget(self.limit_status)
-        self.layout().insertWidget(1, parameters)
+        segment_layout = self.segment_panel.layout()
+        if not isinstance(segment_layout, QVBoxLayout):
+            raise RuntimeError("Keithley sweep segment panel has no vertical layout.")
+        segment_layout.insertWidget(0, parameters)
         self.channel.currentTextChanged.connect(self._parameter_changed)
         self.mode.currentTextChanged.connect(self._parameter_changed)
         self._parameter_changed()
+        self._update_responsive_layout()
+
+    def _update_responsive_layout(self) -> None:
+        """Keep Keithley settings beside the plot at supported dialog widths."""
+
+        if self.width() >= 1040:
+            self.segments.setHorizontalScrollBarPolicy(
+                Qt.ScrollBarPolicy.ScrollBarAlwaysOff
+            )
+            super()._update_responsive_layout()
+            return
+        if self.width() >= 860 and hasattr(self, "splitter"):
+            self.splitter.setOrientation(Qt.Orientation.Horizontal)
+            self.segment_panel.setMinimumWidth(390)
+            self.segments.setMinimumWidth(0)
+            self.plot_panel.setMinimumWidth(350)
+            self.segments.setHorizontalScrollBarPolicy(
+                Qt.ScrollBarPolicy.ScrollBarAsNeeded
+            )
+            available = max(780, self.splitter.width())
+            left = max(390, min(500, round(available * 0.52)))
+            self.splitter.setSizes([left, max(350, available - left)])
+            self._resize_segment_columns()
+            return
+        super()._update_responsive_layout()
 
     def _parameter_changed(self) -> None:
         target = f"keithley.{self.channel.currentText()}.{self.mode.currentText()}"
         definition = next(item for item in _SWEEPABLE_PARAMETERS if item["target"] == target)
         previous_dimension = self.definition["dimension"]
+        previous_default = self._last_default_compliance
+        next_default = self._default_compliance(
+            self.channel.currentText(), self.mode.currentText()
+        )
+        if (
+            previous_dimension != definition["dimension"]
+            or not self.compliance.text().strip()
+            or self.compliance.text().strip() == previous_default
+        ):
+            self.compliance.setText(next_default)
+        self._last_default_compliance = next_default
         self.definition = dict(definition)
         self.setWindowTitle(f"Keithley 2600 — {definition['label']} sweep")
-        self.plot.setLabel("left", definition["label"])
+        self._set_plot_labels()
+        self._refresh_safety_bound()
         if previous_dimension != definition["dimension"]:
             self.segments.blockSignals(True)
             self.segments.setRowCount(0)
@@ -322,9 +384,20 @@ class KeithleySweepBuilderDialog(SweepGeneratorDialog):
         else:
             self._refresh_preview()
 
+    def _default_compliance(self, channel: str, mode: str) -> str:
+        limits = self._settings.keithley.safety.channels[channel].lab_limits
+        return (
+            limits.voltage_compliance.max
+            if mode == "current"
+            else limits.current_compliance.max
+        )
+
     def _refresh_preview(self) -> None:
         super()._refresh_preview()
         if not hasattr(self, "limit_status"):
+            return
+        if not self.create_button.isEnabled():
+            self.limit_status.setText("")
             return
         try:
             points = generate_sweep_points(self.segment_data(), self.definition["dimension"])
@@ -343,13 +416,13 @@ class KeithleySweepBuilderDialog(SweepGeneratorDialog):
             return
         if outside:
             self.limit_status.setText(
-                f"BLOCKER — {len(outside):,} point(s) exceed approved range "
+                f"BLOCKER — {len(outside):,} point(s) exceed configured range "
                 f"{low:.6g} … {high:.6g} SI. Apply is blocked by compiler preflight."
             )
             self.limit_status.setProperty("severity", "blocker")
         else:
             self.limit_status.setText(
-                f"✓ All {len(points):,} planned points are inside the approved station range."
+                f"✓ All {len(points):,} planned points are inside the configured station range."
             )
             self.limit_status.setProperty("severity", "ok")
         self.limit_status.style().unpolish(self.limit_status)
@@ -486,7 +559,11 @@ class AnritsuAcquisitionEditorDialog(FluentRecipeDialog):
         index = self.reference_operation.findData(operation)
         self.reference_operation.setCurrentIndex(index if index >= 0 else 0)
         self.store_raw = CheckBox("Store raw spectrum", self)
-        self.store_raw.setChecked(bool(node.data.get("store_raw", True)))
+        self.store_raw.setChecked(True)
+        self.store_raw.setEnabled(False)
+        self.store_raw.setToolTip(
+            "RAW is always stored as the scientific source record and frequency-grid provenance."
+        )
         self.store_processed = CheckBox("Store processed spectrum", self)
         self.store_processed.setChecked(
             bool(node.data.get("store_processed", operation != "none"))
@@ -535,17 +612,8 @@ class AnritsuAcquisitionEditorDialog(FluentRecipeDialog):
         return fields
 
     def accept(self) -> None:
-        if (
-            not self._reference_only
-            and not self.store_raw.isChecked()
-            and not self.store_processed.isChecked()
-        ):
-            QMessageBox.warning(
-                self,
-                "Anritsu acquisition",
-                "Store at least the raw or processed spectrum.",
-            )
-            return
+        # RAW remains checked and disabled above; processed storage is an
+        # optional derived record selected independently.
         super().accept()
 
 
@@ -628,6 +696,7 @@ class SweepLibraryButton(PushButton):
         self.drag_kind = drag_kind
         self.setProperty("dragKind", drag_kind)
         self._drag_start = None
+        self._drag_performed = False
 
     def drag_mime_data(self) -> QMimeData:
         mime = QMimeData()
@@ -635,7 +704,12 @@ class SweepLibraryButton(PushButton):
         return mime
 
     def mousePressEvent(self, event: Any) -> None:
-        self._drag_start = event.position().toPoint()
+        self._drag_performed = False
+        self._drag_start = (
+            event.position().toPoint()
+            if event.button() == Qt.MouseButton.LeftButton
+            else None
+        )
         super().mousePressEvent(event)
 
     def mouseMoveEvent(self, event: Any) -> None:
@@ -645,13 +719,32 @@ class SweepLibraryButton(PushButton):
             and (event.position().toPoint() - self._drag_start).manhattanLength()
             >= QApplication.startDragDistance()
         ):
+            self._drag_performed = True
             drag = QDrag(self)
             drag.setMimeData(self.drag_mime_data())
-            drag.setPixmap(self.icon().pixmap(24, 24))
-            drag.exec(Qt.DropAction.CopyAction)
-            self._drag_start = None
+            preview = self.grab()
+            if not preview.isNull():
+                drag.setPixmap(preview)
+                drag.setHotSpot(self._drag_start)
+            try:
+                drag.exec(Qt.DropAction.CopyAction)
+            finally:
+                self._drag_start = None
+                self.setDown(False)
             return
         super().mouseMoveEvent(event)
+
+    def mouseReleaseEvent(self, event: Any) -> None:
+        if self._drag_performed:
+            self.setDown(False)
+            self._drag_performed = False
+            self._drag_start = None
+            event.accept()
+            return
+        try:
+            super().mouseReleaseEvent(event)
+        finally:
+            self._drag_start = None
 
 
 class RecipeTreeWidget(TreeWidget):
@@ -659,7 +752,11 @@ class RecipeTreeWidget(TreeWidget):
 
     move_requested = Signal(str, str, str, int)
     library_drop_requested = Signal(str, str, str, int)
+    drop_rejected = Signal(str)
     library_mime_type = SweepLibraryButton.mime_type
+    structural_role = int(Qt.ItemDataRole.UserRole) + 41
+    else_container = "else"
+    finally_container = "finally"
 
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
@@ -681,6 +778,10 @@ class RecipeTreeWidget(TreeWidget):
         )
         if not isinstance(node, RecipeNode):
             return
+        # The document root has no legal parent. Starting a drag for it only
+        # produces a rejection after the user has already completed the gesture.
+        if item.parent() is None:
+            return
         self._dragged_node_id = node.id
         try:
             super().startDrag(supported_actions)
@@ -691,60 +792,158 @@ class RecipeTreeWidget(TreeWidget):
         if event.mimeData().hasFormat(self.library_mime_type):
             event.acceptProposedAction()
             return
-        super().dragEnterEvent(event)
+        if event.source() is self and self._dragged_node_id is not None:
+            event.setDropAction(Qt.DropAction.MoveAction)
+            event.accept()
+            return
+        event.ignore()
 
     def dragMoveEvent(self, event: Any) -> None:
-        if event.mimeData().hasFormat(self.library_mime_type):
+        library_drag = event.mimeData().hasFormat(self.library_mime_type)
+        internal_drag = event.source() is self and self._dragged_node_id is not None
+        if not library_drag and not internal_drag:
+            event.ignore()
+            return
+        destination = self._drop_destination_at(event.position().toPoint())
+        if destination is None or (
+            internal_drag and not self._internal_destination_allowed(destination)
+        ):
+            event.ignore()
+            return
+        if library_drag:
             event.acceptProposedAction()
             return
-        super().dragMoveEvent(event)
+        event.setDropAction(Qt.DropAction.MoveAction)
+        event.accept()
 
     def dropEvent(self, event: Any) -> None:
-        target = self.itemAt(event.position().toPoint())
+        destination = self._drop_destination_at(event.position().toPoint())
         if event.mimeData().hasFormat(self.library_mime_type):
-            if target is None:
-                event.ignore()
-                return
-            destination = self._drop_destination(target)
             if destination is None:
                 event.ignore()
                 return
             parent_id, branch, index = destination
-            kind = bytes(event.mimeData().data(self.library_mime_type)).decode("utf-8")
+            try:
+                kind = bytes(event.mimeData().data(self.library_mime_type)).decode(
+                    "utf-8"
+                ).strip()
+            except UnicodeDecodeError:
+                self.drop_rejected.emit(
+                    "The dragged library block has an invalid text payload."
+                )
+                event.ignore()
+                return
+            if not kind:
+                self.drop_rejected.emit("The dragged library block is empty.")
+                event.ignore()
+                return
             self.library_drop_requested.emit(kind, parent_id, branch, index)
             event.acceptProposedAction()
             return
-        if self._dragged_node_id is None or target is None:
-            event.ignore()
-            return
-        destination = self._drop_destination(target)
-        if destination is None:
+        if (
+            event.source() is not self
+            or self._dragged_node_id is None
+            or destination is None
+            or not self._internal_destination_allowed(destination)
+        ):
             event.ignore()
             return
         parent_id, branch, index = destination
         self.move_requested.emit(self._dragged_node_id, parent_id, branch, index)
+        event.setDropAction(Qt.DropAction.MoveAction)
         event.accept()
+
+    def _drop_destination_at(self, position: Any) -> tuple[str, str, int] | None:
+        target = self.itemAt(position)
+        if target is not None:
+            return self._drop_destination(target)
+        # Empty viewport space is a useful, predictable root append target.
+        root = self.topLevelItem(0)
+        root_node = (
+            root.data(0, Qt.ItemDataRole.UserRole) if root is not None else None
+        )
+        if isinstance(root_node, RecipeNode):
+            return root_node.id, "children", self._logical_child_count(root)
+        return None
+
+    @classmethod
+    def structural_kind(cls, item: QTreeWidgetItem | None) -> str | None:
+        if item is None:
+            return None
+        value = item.data(0, cls.structural_role)
+        return str(value) if value in {cls.else_container, cls.finally_container} else None
+
+    @classmethod
+    def item_is_in_finally(cls, item: QTreeWidgetItem | None) -> bool:
+        current = item
+        while current is not None:
+            if cls.structural_kind(current) == cls.finally_container:
+                return True
+            current = current.parent()
+        return False
+
+    def _find_node_item(self, node_id: str) -> QTreeWidgetItem | None:
+        def visit(item: QTreeWidgetItem) -> QTreeWidgetItem | None:
+            node = item.data(0, Qt.ItemDataRole.UserRole)
+            if isinstance(node, RecipeNode) and node.id == node_id:
+                return item
+            for child_index in range(item.childCount()):
+                found = visit(item.child(child_index))
+                if found is not None:
+                    return found
+            return None
+
+        for top_index in range(self.topLevelItemCount()):
+            found = visit(self.topLevelItem(top_index))
+            if found is not None:
+                return found
+        return None
+
+    def _internal_destination_allowed(
+        self, destination: tuple[str, str, int]
+    ) -> bool:
+        if self._dragged_node_id is None:
+            return False
+        source = self._find_node_item(self._dragged_node_id)
+        if source is None:
+            return False
+        parent_id, _branch, _index = destination
+        destination_parent = (
+            None if parent_id == "__finally__" else self._find_node_item(parent_id)
+        )
+        destination_in_finally = (
+            parent_id == "__finally__"
+            or self.item_is_in_finally(destination_parent)
+        )
+        if self.item_is_in_finally(source) != destination_in_finally:
+            return False
+        current = destination_parent
+        while current is not None:
+            if current is source:
+                return False
+            current = current.parent()
+        return True
 
     def _drop_destination(self, target: QTreeWidgetItem) -> tuple[str, str, int] | None:
         indicator = self.dropIndicatorPosition()
         target_node = target.data(0, Qt.ItemDataRole.UserRole)
         if (
-            indicator is QAbstractItemView.DropIndicatorPosition.OnItem
+            indicator == QAbstractItemView.DropIndicatorPosition.OnItem
             and isinstance(target_node, RecipeNode)
             and target_node.type in {"sequence", "sweep", "repeat", "if"}
         ):
             return target_node.id, "children", self._logical_child_count(target)
         if (
-            indicator is QAbstractItemView.DropIndicatorPosition.OnItem
-            and target.text(0).startswith("Else")
+            indicator == QAbstractItemView.DropIndicatorPosition.OnItem
+            and self.structural_kind(target) == self.else_container
             and target.parent() is not None
         ):
             parent_node = target.parent().data(0, Qt.ItemDataRole.UserRole)
             if isinstance(parent_node, RecipeNode) and parent_node.type == "if":
                 return parent_node.id, "else", self._logical_child_count(target)
         if (
-            indicator is QAbstractItemView.DropIndicatorPosition.OnItem
-            and target.text(0).startswith("Finally")
+            indicator == QAbstractItemView.DropIndicatorPosition.OnItem
+            and self.structural_kind(target) == self.finally_container
         ):
             return "__finally__", "children", self._logical_child_count(target)
 
@@ -761,11 +960,17 @@ class RecipeTreeWidget(TreeWidget):
             parent,
             target,
             below=indicator
-            is QAbstractItemView.DropIndicatorPosition.BelowItem,
+            in {
+                QAbstractItemView.DropIndicatorPosition.BelowItem,
+                QAbstractItemView.DropIndicatorPosition.OnItem,
+            },
         )
-        if parent.text(0).startswith("Finally"):
+        if self.structural_kind(parent) == self.finally_container:
             return "__finally__", "children", index
-        if parent.text(0).startswith("Else") and parent.parent() is not None:
+        if (
+            self.structural_kind(parent) == self.else_container
+            and parent.parent() is not None
+        ):
             owner = parent.parent().data(0, Qt.ItemDataRole.UserRole)
             return (owner.id, "else", index) if isinstance(owner, RecipeNode) else None
         owner = parent.data(0, Qt.ItemDataRole.UserRole)

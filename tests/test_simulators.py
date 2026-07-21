@@ -116,7 +116,8 @@ class SimulatorTests(unittest.TestCase):
 
     def test_all_simulated_instruments_support_safe_core_operations(self) -> None:
         settings = simulated_station_settings(loaded_settings())
-        self.assertFalse(settings.outputs_locked)
+        self.assertFalse(settings.rigol.safety.allow_output_enable)
+        self.assertFalse(settings.keithley.safety.allow_output_enable)
         rigol = RigolAdapter(settings, session_factory=SimulatedVisaFactory("rigol"))
         keithley = KeithleyAdapter(settings, session_factory=SimulatedVisaFactory("keithley"))
         anritsu = AnritsuAdapter(settings, session_factory=SimulatedVisaFactory("anritsu"))
@@ -324,7 +325,6 @@ class SimulatorTests(unittest.TestCase):
                     {},
                 ),
                 PlanAction("keithley-on", "set_keithley_output", {"channel": "B", "enabled": True}, {}),
-                PlanAction("rigol-arm", "arm_rigol_output", {"channel": 1}, {}),
                 PlanAction("rigol-on", "set_rigol_output", {"channel": 1, "enabled": True}, {}),
                 PlanAction("spectrum", "acquire_spectrum", {"trace": "TRAC1"}, {}),
             ),

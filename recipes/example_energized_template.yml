@@ -2,9 +2,9 @@ schema_version: 1
 name: "TEMPLATE — energised single-point measurement"
 
 # This is deliberately a template rather than the default recipe.  It may be
-# compiled only after an authorised operator has approved the profile,
-# enabled the per-device output permission and verified the physical DUT path.
-# It demonstrates the required explicit ARM → OUTPUT ON transitions.
+# compiled only after an authorised operator has enabled the per-device output
+# permission and verified the physical DUT path. It demonstrates explicit
+# OUTPUT ON transitions after configuration.
 
 dut_limits:
   keithley:
@@ -50,9 +50,6 @@ root:
       type: set_keithley_output
       channel: B
       enabled: true
-    - id: rigol-ch1-arm
-      type: arm_rigol_output
-      channel: 1
     - id: rigol-ch1-on
       type: set_rigol_output
       channel: 1

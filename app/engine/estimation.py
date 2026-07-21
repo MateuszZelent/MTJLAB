@@ -130,11 +130,11 @@ class PlanEstimator:
             hdf5_bytes += latest_spectrum_points * 8
         csv_bytes = plan.total_points * 1024 if self._settings.storage.get("write_csv_summary") else 0
         if energized:
-            warnings.append("The plan contains OUTPUT ON actions and requires explicit DUT/ARM review.")
+            warnings.append("The plan contains OUTPUT ON actions and requires explicit DUT and cabling review.")
         if plan.total_points == 0:
             warnings.append("The plan stores no checkpoints.")
         if plan.total_points >= 2_000:
-            warnings.append("Large run: qualify duration and available disk space before ARM.")
+            warnings.append("Large run: qualify duration and available disk space before OUTPUT ON.")
         if plan.total_spectra and spectrum_values == 0:
             warnings.append("Spectrum size could not be estimated from the configuration sequence.")
         return PlanEstimate(

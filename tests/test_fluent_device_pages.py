@@ -128,7 +128,6 @@ class FluentDevicePageTests(unittest.TestCase):
             self.application.processEvents()
             for control in (
                 anritsu.sg_configure,
-                anritsu.sg_arm,
                 anritsu.sg_on,
                 anritsu.sg_off,
             ):

@@ -359,7 +359,9 @@ class RecipeRunner:
         retries = self._policy.retry_count if self._can_retry(action) else 0
         for attempt in range(retries + 1):
             deadline_s = self._policy.deadline_for(action)
-            self._arm_watchdog(action, attempt=attempt + 1, deadline_s=deadline_s)
+            self._begin_action_watchdog(
+                action, attempt=attempt + 1, deadline_s=deadline_s
+            )
             started = time.monotonic()
             try:
                 adapter = self._adapter_for_action(action)
@@ -391,7 +393,7 @@ class RecipeRunner:
                 )
                 self._interruptible_wait(self._policy.retry_backoff_s)
             finally:
-                self._disarm_watchdog()
+                self._clear_action_watchdog()
         raise ExecutionError(f"Action {action.node_id!r} exhausted its retry policy.")
 
     def _can_retry(self, action: PlanAction) -> bool:
@@ -451,9 +453,11 @@ class RecipeRunner:
         thread, self._watchdog_thread = self._watchdog_thread, None
         if thread is not None and thread is not threading.current_thread():
             thread.join(timeout=max(0.1, self._policy.heartbeat_interval_s * 2))
-        self._disarm_watchdog()
+        self._clear_action_watchdog()
 
-    def _arm_watchdog(self, action: PlanAction, *, attempt: int, deadline_s: float) -> None:
+    def _begin_action_watchdog(
+        self, action: PlanAction, *, attempt: int, deadline_s: float
+    ) -> None:
         now = time.monotonic()
         with self._watchdog_lock:
             self._watchdog_action = {
@@ -465,7 +469,7 @@ class RecipeRunner:
             self._watchdog_started_monotonic = now
             self._watchdog_deadline_monotonic = now + deadline_s
 
-    def _disarm_watchdog(self) -> None:
+    def _clear_action_watchdog(self) -> None:
         with self._watchdog_lock:
             self._watchdog_action = None
             self._watchdog_deadline_monotonic = 0.0
@@ -583,7 +587,7 @@ class RecipeRunner:
         *,
         attempted_finally: set[str] | None = None,
     ) -> RunResult:
-        """Run only preflight-approved cleanup actions after an operator stop."""
+        """Run only preflight-selected cleanup actions after an operator stop."""
 
         self._emit_after_fault("run_aborting", {"reason": reason})
         cleanup_ok = self._run_pending_finally(
@@ -609,7 +613,7 @@ class RecipeRunner:
         *,
         attempted_node_ids: set[str] | None = None,
     ) -> bool:
-        """Attempt each not-yet-started approved Finally action exactly once."""
+        """Attempt each not-yet-started selected Finally action exactly once."""
 
         attempted = attempted_node_ids if attempted_node_ids is not None else set()
         cleanup_ok = True
@@ -643,19 +647,6 @@ class RecipeRunner:
         self, action: PlanAction, measurements: dict[str, float]
     ) -> _AcquiredSpectrum | None:
         payload = action.payload
-        if self.outputs_forced_off and action.kind in {
-            "arm_rigol_output",
-            "arm_anritsu_sg_output",
-        }:
-            self._emit(
-                "demo_output_action_suppressed",
-                {
-                    "node_id": action.node_id,
-                    "kind": action.kind,
-                    "reason": "Demo mode keeps every source output forced OFF.",
-                },
-            )
-            return None
         if action.kind == "configure_rigol":
             config = payload["config"]
             self._rigol.configure_channel(config)
@@ -820,8 +811,6 @@ class RecipeRunner:
             self._active_safety_context[f"rigol.{payload['channel']}"] = context
             self._record_device_state("rigol", f"channel_{payload['channel']}", requested=payload, actual=context)
             self._emit_demo_suppression(action, requested_enabled, actual_enabled)
-        elif action.kind == "arm_rigol_output":
-            self._rigol.arm_output(payload["channel"])
         elif action.kind == "set_keithley_output":
             requested_enabled = bool(payload["enabled"])
             effective_enabled = requested_enabled and not self.outputs_forced_off
@@ -834,8 +823,6 @@ class RecipeRunner:
             self._active_safety_context[f"keithley.{payload['channel']}"] = context
             self._record_device_state("keithley", f"channel_{payload['channel']}", requested=payload, actual=context)
             self._emit_demo_suppression(action, requested_enabled, actual_enabled)
-        elif action.kind == "arm_anritsu_sg_output":
-            self._anritsu.arm_signal_generator_output()
         elif action.kind == "set_anritsu_sg_output":
             requested_enabled = bool(payload["enabled"])
             effective_enabled = requested_enabled and not self.outputs_forced_off

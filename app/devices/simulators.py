@@ -735,15 +735,10 @@ def simulated_station_settings(settings: StationSettings) -> StationSettings:
     """Create an in-memory profile that routes every device to a simulator.
 
     The persisted lab profile is never modified.  RF acquisition is enabled
-    only inside this synthetic runtime profile, while the profile still starts
-    unverified and therefore keeps energy outputs locked.
+    only inside this synthetic runtime profile.
     """
 
     raw = settings.model_dump(mode="python")
-    raw["profile"]["state"] = "approved"
-    raw["profile"]["approved_by"] = "SIMULATION"
-    raw["profile"]["approved_at"] = "in-memory"
-    raw["profile"]["approval_note"] = "Synthetic profile; not persisted to settings.yml."
     raw["devices"]["rigol"]["connection"]["resource"] = "SIM::RIGOL::INSTR"
     raw["devices"]["rigol"]["identity"]["require_serial_match"] = False
     raw["devices"]["rigol"]["identity"]["expected_serial"] = None

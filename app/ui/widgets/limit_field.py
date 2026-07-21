@@ -15,6 +15,7 @@ from PySide6.QtWidgets import (
 )
 from qfluentwidgets import BodyLabel, LineEdit, PrimaryPushButton, PushButton, StrongBodyLabel
 from app.ui.dialogs import StationDialog
+from app.ui.design_system import apply_validation_style
 
 from app.domain.quantities import (
     DIMENSION_CURRENT,
@@ -29,7 +30,7 @@ from app.domain.quantities import (
 
 
 class LimitField(QWidget):
-    """A value editor with an always-visible approved MIN/MAX range."""
+    """A value editor with an always-visible configured MIN/MAX range."""
 
     edit_requested = Signal()
 
@@ -63,10 +64,10 @@ class LimitField(QWidget):
         layout.addLayout(row)
         self.validation_warning = BodyLabel()
         self.validation_warning.setObjectName("inlineValidationWarning")
-        self.validation_warning.setStyleSheet("color: #d84343; font-weight: 600;")
         self.validation_warning.setWordWrap(True)
         self.validation_warning.hide()
         layout.addWidget(self.validation_warning)
+        apply_validation_style(self.editor, self.validation_warning)
         self.set_limits(minimum, maximum)
         editing_finished = getattr(editor, "editingFinished", None)
         if editing_finished is not None:
@@ -87,19 +88,30 @@ class LimitField(QWidget):
             label.style().unpolish(label)
             label.style().polish(label)
         self.setToolTip(
-            "Approved laboratory range. The operation is rejected before SCPI is sent "
+            "Configured laboratory range. The operation is rejected before SCPI is sent "
             "when a value or sweep endpoint is outside this range."
         )
 
     def _show_validation_warning(self, message: str) -> None:
         self.validation_warning.setText(f"Warning: {message}")
         self.validation_warning.show()
-        self.editor.setStyleSheet("border: 2px solid #d84343;")
+        self.editor.setProperty("validationState", "error")
+        self._refresh_editor_style()
 
     def _clear_validation_warning(self) -> None:
         self.validation_warning.clear()
         self.validation_warning.hide()
-        self.editor.setStyleSheet("")
+        self.editor.setProperty("validationState", "normal")
+        self._refresh_editor_style()
+
+    def _refresh_editor_style(self) -> None:
+        """Re-evaluate the shared token-based validation selector."""
+
+        apply_validation_style(self.editor, self.validation_warning)
+        style = self.editor.style()
+        style.unpolish(self.editor)
+        style.polish(self.editor)
+        self.editor.update()
 
     def _quantity_values(
         self,
@@ -190,13 +202,20 @@ class LimitField(QWidget):
             self._show_validation_warning(f"Value exceeded MAX and has been changed to {replacement}.")
             return False
         if isinstance(self.editor, QLineEdit):
-            normalized = (
-                f"{value:.12g}"
-                if dimension is None
-                else format_quantity_auto(value, dimension)
-            )
-            self.editor.setText(normalized)
-            self._last_valid = normalized
+            if self.editor.property("precisionArrowStepInProgress"):
+                # Arrow stepping is deliberately based on the least
+                # significant written digit.  Keep that unit and precision
+                # after validating the safety range so consecutive presses
+                # remain predictable (for example 0.001 mA -> 0.002 mA).
+                self._last_valid = self.editor.text().strip()
+            else:
+                normalized = (
+                    f"{value:.12g}"
+                    if dimension is None
+                    else format_quantity_auto(value, dimension)
+                )
+                self.editor.setText(normalized)
+                self._last_valid = normalized
         self._clear_validation_warning()
         return True
 

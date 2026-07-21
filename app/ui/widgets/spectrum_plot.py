@@ -88,11 +88,18 @@ class SpectrumPlotWidget(QWidget):
             self.plot.addLegend(offset=(10, 10))
         root.addWidget(self.plot, 1)
 
-        self.crosshair_x = pg.InfiniteLine(angle=90, movable=False, pen=pg.mkPen("#78909c", width=1))
-        self.crosshair_y = pg.InfiniteLine(angle=0, movable=False, pen=pg.mkPen("#78909c", width=1))
-        self.marker = pg.InfiniteLine(angle=90, movable=True, pen=pg.mkPen("#ffb300", width=2), label="M1")
+        initial_tokens = tokens_for(self._theme_name)
+        self.crosshair_x = pg.InfiniteLine(
+            angle=90, movable=False, pen=pg.mkPen(initial_tokens.plot_grid, width=1)
+        )
+        self.crosshair_y = pg.InfiniteLine(
+            angle=0, movable=False, pen=pg.mkPen(initial_tokens.plot_grid, width=1)
+        )
+        self.marker = pg.InfiniteLine(
+            angle=90, movable=True, pen=pg.mkPen(initial_tokens.plot_reference, width=2), label="M1"
+        )
         self.delta_marker = pg.InfiniteLine(
-            angle=90, movable=True, pen=pg.mkPen("#ab47bc", width=2), label="Δ"
+            angle=90, movable=True, pen=pg.mkPen(initial_tokens.plot_reference, width=2), label="Δ"
         )
         for item in (self.crosshair_x, self.crosshair_y, self.marker, self.delta_marker):
             self.plot.addItem(item, ignoreBounds=True)
@@ -148,6 +155,13 @@ class SpectrumPlotWidget(QWidget):
             curve = self._curves.get(name)
             if curve is not None:
                 curve.setPen(pg.mkPen(palette.measurement, width=1.6))
+        for name, color in (
+            ("Max hold", tokens_for(theme).danger),
+            ("Min hold", tokens_for(theme).success),
+        ):
+            curve = self._curves.get(name)
+            if curve is not None:
+                curve.setPen(pg.mkPen(color, width=1.3))
 
     def set_trace(
         self,
@@ -163,7 +177,8 @@ class SpectrumPlotWidget(QWidget):
         caller_supplied_color = color is not None
         token_owned_primary = not caller_supplied_color and primary
         if color is None:
-            color = plot_theme(tokens_for(self._theme_name)).measurement if primary else "#2196f3"
+            palette = plot_theme(tokens_for(self._theme_name))
+            color = palette.measurement if primary else palette.reference
         x_values = np.asarray(x, dtype=float)
         y_values = np.asarray(y, dtype=float)
         if x_values.ndim != 1 or y_values.ndim != 1 or x_values.size != y_values.size:
@@ -293,10 +308,10 @@ class SpectrumPlotWidget(QWidget):
         self._marker_changed()
 
     def toggle_max_hold(self) -> None:
-        self._toggle_hold("Max hold", "#ef5350")
+        self._toggle_hold("Max hold", tokens_for(self._theme_name).danger)
 
     def toggle_min_hold(self) -> None:
-        self._toggle_hold("Min hold", "#66bb6a")
+        self._toggle_hold("Min hold", tokens_for(self._theme_name).success)
 
     def clear_holds(self) -> None:
         self._max_hold = None
@@ -358,8 +373,8 @@ class SpectrumPlotWidget(QWidget):
 
     def _update_holds(self, x_values: np.ndarray, y_values: np.ndarray) -> None:
         for name, operation, attribute, color in (
-            ("Max hold", np.maximum, "_max_hold", "#ef5350"),
-            ("Min hold", np.minimum, "_min_hold", "#66bb6a"),
+            ("Max hold", np.maximum, "_max_hold", tokens_for(self._theme_name).danger),
+            ("Min hold", np.minimum, "_min_hold", tokens_for(self._theme_name).success),
         ):
             curve = self._curves.get(name)
             if curve is None or not curve.isVisible():

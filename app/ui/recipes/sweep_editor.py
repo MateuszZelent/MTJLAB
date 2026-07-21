@@ -12,7 +12,7 @@ from PySide6.QtGui import QColor, QPalette
 from PySide6.QtWidgets import (
     QAbstractItemView, QApplication, QDialog, QFormLayout, QHBoxLayout,
     QHeaderView, QLineEdit, QSplitter, QStyledItemDelegate,
-    QTableWidgetItem, QVBoxLayout, QWidget, QMessageBox,
+    QTableWidgetItem, QVBoxLayout, QWidget,
 )
 from qfluentwidgets import (
     BodyLabel, CaptionLabel, ComboBox, LineEdit, PrimaryPushButton, PushButton, TableWidget,
@@ -22,6 +22,7 @@ from app.recipes.parameter_registry import sweep_default as _sweep_default
 from app.domain.errors import ConfigurationError
 from app.recipes import estimate_sweep_point_count, generate_sweep_points, generate_sweep_stage_points
 from app.ui.common import line_edit as _line
+from app.ui.dialogs import StationMessageBox as QMessageBox
 from app.ui.design_system import effective_theme, plot_theme, tokens_for
 from app.ui.recipes.fluent_dialog import FluentRecipeDialog
 from app.safety.quick_controls import QuickControlSafetyBound, quick_control_safety_bounds
@@ -187,6 +188,21 @@ class SweepGeneratorDialog(FluentRecipeDialog):
                 )
             owner = owner.parentWidget()
         return None
+
+    def _refresh_safety_bound(self) -> None:
+        """Refresh the visible limit contract after changing the sweep target."""
+
+        self._safety_bound = self._resolve_safety_bound()
+        if self._safety_bound is None:
+            self.safety_limits.setText(
+                "Safety range: final limits are validated during recipe preflight."
+            )
+            return
+        self.safety_limits.setText(
+            "Allowed sweep range  ·  "
+            f"MIN {self._safety_bound.minimum_text}  ·  "
+            f"MAX {self._safety_bound.maximum_text}"
+        )
 
     def _validate_safety_bounds(self, points: tuple[Any, ...]) -> None:
         if self._safety_bound is None:
@@ -497,6 +513,7 @@ class SweepGeneratorDialog(FluentRecipeDialog):
                     f"BLOCKER — {point_count:,} points exceed the 100,000 point "
                     "plan limit. Reduce the point count or increase the step."
                 )
+                self.create_button.setEnabled(False)
                 return
             stages = generate_sweep_stage_points(
                 segments, self.definition["dimension"]

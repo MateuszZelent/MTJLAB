@@ -32,11 +32,6 @@ class StrictModel(BaseModel):
 class ProfileSettings(StrictModel):
     id: str
     name: str
-    state: Literal["unverified", "approved", "revoked"]
-    approved_by: str | None = None
-    approved_at: str | None = None
-    approval_note: str | None = None
-    lock_outputs_when_unverified: bool = True
 
 
 RoleName = Literal["operator", "engineer", "service"]
@@ -265,7 +260,7 @@ class KeithleySettings(StrictModel):
 
 
 class OptionalRangeSettings(StrictModel):
-    """Range intentionally left incomplete until RF limits are approved."""
+    """Range intentionally left incomplete until RF limits are configured."""
 
     min: str | None
     max: str | None
@@ -356,14 +351,10 @@ class AnritsuSignalGeneratorSettings(StrictModel):
     power: OptionalRangeSettings = Field(
         default_factory=lambda: OptionalRangeSettings(min=None, max=None)
     )
-    arm_ttl: str = "30 s"
-
     @model_validator(mode="after")
     def validate_contract(self) -> "AnritsuSignalGeneratorSettings":
         self.frequency.checked_if_complete(DIMENSION_FREQUENCY)
         self.power.checked_if_complete(DIMENSION_DBM)
-        if parse_quantity(self.arm_ttl, DIMENSION_TIME).si_value <= 0:
-            raise ValueError("Anritsu SG arm_ttl must be positive")
         return self
 
 
@@ -490,12 +481,6 @@ class StationSettings(StrictModel):
     @model_validator(mode="after")
     def validate_devices(self) -> "StationSettings":
         return self
-
-    @property
-    def outputs_locked(self) -> bool:
-        """Profile approval is informational; device safety gates are authoritative."""
-
-        return False
 
     @property
     def rigol(self) -> RigolSettings:
