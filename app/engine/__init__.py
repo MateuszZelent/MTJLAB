@@ -9,10 +9,11 @@ from app.engine.compiler import (
 from app.engine.estimation import PlanEstimate, PlanEstimator
 from app.engine.recovery import RecoveryCheckpoint, RunRecoveryManager
 from app.engine.policy import ExecutionPolicy
-from app.engine.runner import RunResult, RecipeRunner
+from app.engine.runner import ExecutionMode, RunResult, RecipeRunner
 
 __all__ = [
     "ExecutionPlan",
+    "ExecutionMode",
     "ExecutionPolicy",
     "PlanEstimate",
     "PlanEstimator",

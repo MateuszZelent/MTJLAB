@@ -38,6 +38,11 @@ class ResultsPageTests(unittest.TestCase):
                 settings_source="profile:\n  state: approved\n",
                 plan_hash="a" * 64,
                 device_idn={"rigol": "RIGOL,DG1032Z"},
+                simulation_metadata={
+                    "enabled": False,
+                    "execution_mode": "demo_outputs_off",
+                    "outputs_forced_off": True,
+                },
             )
             writer.append_event("run_started", {"timestamp_utc": "2026-01-01T00:00:00+00:00"})
             writer.append(
@@ -58,6 +63,8 @@ class ResultsPageTests(unittest.TestCase):
                 page.runs.setCurrentItem(page.runs.topLevelItem(0))
                 self.application.processEvents()
                 self.assertIn("State: completed", page.metadata.toPlainText())
+                self.assertIn("Execution provenance:", page.metadata.toPlainText())
+                self.assertIn("demo_outputs_off", page.metadata.toPlainText())
                 self.assertFalse(page.resume_button.isEnabled())
                 self.assertIn("browser-test", page.recipe_snapshot.toPlainText())
                 self.assertEqual(page.details_tabs.tabText(3), "PyThat data")

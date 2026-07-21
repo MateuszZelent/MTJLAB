@@ -94,6 +94,26 @@ class SimulatorTests(unittest.TestCase):
             with self.subTest(invalid=invalid), self.assertRaises(ValueError):
                 SimulatedVisaFactory("keithley", keithley_noise_fraction=invalid)
 
+    def test_keithley_simulator_accepts_signed_scientific_setpoints(self) -> None:
+        raw = deepcopy(
+            simulated_station_settings(loaded_settings()).model_dump(mode="python")
+        )
+        raw["devices"]["keithley"]["safety"]["channels"]["A"]["enabled"] = True
+        settings = StationSettings.model_validate(raw)
+        keithley = KeithleyAdapter(
+            settings, session_factory=SimulatedVisaFactory("keithley")
+        )
+        keithley.connect()
+        keithley.configure_source(
+            KeithleySourceRequest("A", "current", 100e-6, 0.1)
+        )
+
+        actual = keithley.update_source_level(
+            "A", mode="current", level_si=88.8888888889e-6
+        )
+
+        self.assertAlmostEqual(actual, 88.8888888889e-6)
+
     def test_all_simulated_instruments_support_safe_core_operations(self) -> None:
         settings = simulated_station_settings(loaded_settings())
         self.assertFalse(settings.outputs_locked)

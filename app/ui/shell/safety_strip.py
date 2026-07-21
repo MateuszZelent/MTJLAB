@@ -57,24 +57,36 @@ class StationSafetyStrip(QWidget):
             self.profile,
             self.mode,
             self.actor,
-            self.save_settings,
         ):
             widget.setMinimumWidth(0)
             widget.setSizePolicy(
                 QSizePolicy.Policy.Ignored,
                 QSizePolicy.Policy.Preferred,
             )
-        self._compact_layout: bool | None = None
-        self._reflow(compact=True)
+        self.save_settings.setSizePolicy(
+            QSizePolicy.Policy.Preferred,
+            QSizePolicy.Policy.Preferred,
+        )
+        self.estop.setSizePolicy(
+            QSizePolicy.Policy.Preferred,
+            QSizePolicy.Policy.Preferred,
+        )
+        self.save_settings.setMinimumWidth(100)
+        self.estop.setMinimumWidth(84)
+        self._layout_mode: str | None = None
+        self._reflow(mode="narrow")
 
     def resizeEvent(self, event: QResizeEvent) -> None:
         super().resizeEvent(event)
-        self._reflow(compact=event.size().width() < 760)
+        width = event.size().width()
+        self._reflow(
+            mode="narrow" if width < 520 else "compact" if width < 900 else "wide"
+        )
 
-    def _reflow(self, *, compact: bool) -> None:
-        if self._compact_layout == compact:
+    def _reflow(self, *, mode: str) -> None:
+        if self._layout_mode == mode:
             return
-        self._compact_layout = compact
+        self._layout_mode = mode
         widgets = (
             self.readiness,
             self.outputs,
@@ -88,7 +100,18 @@ class StationSafetyStrip(QWidget):
             self._layout.removeWidget(widget)
         for column in range(7):
             self._layout.setColumnStretch(column, 0)
-        if compact:
+        self._layout.setHorizontalSpacing(6 if mode == "narrow" else 12)
+        if mode == "narrow":
+            self._layout.addWidget(self.readiness, 0, 0)
+            self._layout.addWidget(self.outputs, 0, 1)
+            self._layout.addWidget(self.save_settings, 1, 0)
+            self._layout.addWidget(self.estop, 1, 1)
+            self._layout.addWidget(self.profile, 2, 0)
+            self._layout.addWidget(self.mode, 2, 1)
+            self._layout.addWidget(self.actor, 3, 0, 1, 2)
+            self._layout.setColumnStretch(0, 1)
+            self._layout.setColumnStretch(1, 1)
+        elif mode == "compact":
             self._layout.addWidget(self.readiness, 0, 0)
             self._layout.addWidget(self.outputs, 0, 1)
             self._layout.addWidget(self.save_settings, 0, 2)

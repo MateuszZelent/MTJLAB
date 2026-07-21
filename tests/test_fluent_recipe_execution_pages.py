@@ -11,6 +11,7 @@ from qfluentwidgets import (
     BodyLabel,
     CardWidget,
     CommandBar,
+    ComboBox,
     LineEdit,
     PrimaryPushButton,
     PushButton,
@@ -45,6 +46,7 @@ class FluentRecipeAndExecutionPageTests(unittest.TestCase):
             self.assertIsInstance(page.selection_card, CardWidget)
             self.assertIsInstance(page.status_card, CardWidget)
             self.assertIsInstance(page.path, LineEdit)
+            self.assertIsInstance(page.execution_mode, ComboBox)
             self.assertIsInstance(page.summary, BodyLabel)
             self.assertIsInstance(page.run_button, PrimaryPushButton)
             self.assertIsInstance(page.open_editor_button, PrimaryPushButton)
@@ -70,6 +72,12 @@ class FluentRecipeAndExecutionPageTests(unittest.TestCase):
                 )
             )
             self.assertEqual(page.path.accessibleName(), "Recipe file path")
+            self.assertEqual(page.execution_mode.currentData(), "measurement")
+            page.execution_mode.setCurrentIndex(1)
+            self.application.processEvents()
+            self.assertEqual(page.execution_mode.currentData(), "demo_outputs_off")
+            self.assertEqual(page.run_button.text(), "Run demo")
+            self.assertIn("RAW/processed", page.execution_mode_hint.text())
             page.set_settings(
                 simulation_settings(approved=page._settings.outputs_locked)
             )
@@ -185,6 +193,13 @@ class FluentRecipeAndExecutionPageTests(unittest.TestCase):
             self.assertTrue(page.stop_button.isVisibleTo(window))
             self.assertTrue(page.steps.isVisibleTo(window))
             self.assertGreater(page.steps.geometry().height(), 120)
+            page.run_started(
+                1,
+                1.0,
+                execution_mode="demo_outputs_off",
+            )
+            self.assertEqual(page.state.text(), "DEMO — OUTPUTS OFF")
+            self.assertIn("forced OFF", page.state.toolTip())
 
             sample = page.hero_card.mapTo(window, QPoint(40, 40))
             window._set_theme_mode("light", persist=False)

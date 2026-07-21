@@ -18,6 +18,7 @@ from qfluentwidgets import (
     CaptionLabel,
     CardWidget,
     CommandBar,
+    ComboBox,
     LineEdit,
     PlainTextEdit,
     PrimaryPushButton,
@@ -76,7 +77,7 @@ from app.ui.workers import RecipePreflightWorker
 
 class RecipePage(QWidget):
     status = Signal(str)
-    run_requested = Signal(object)
+    run_requested = Signal(object, bool)
     plan_preflight_changed = Signal(object)
     operator_row_role = int(Qt.ItemDataRole.UserRole) + 17
 
@@ -174,6 +175,23 @@ class RecipePage(QWidget):
         self.path.setAccessibleName("Recipe file path")
         self.restore_button = PushButton("Restore autosave")
         self.restore_button.setEnabled(False)
+        self.execution_mode = ComboBox(self.document_card)
+        self.execution_mode.setObjectName("recipeExecutionMode")
+        self.execution_mode.setAccessibleName("Sweep execution mode")
+        self.execution_mode.addItem(
+            "Measurement — recipe controls outputs",
+            userData="measurement",
+        )
+        self.execution_mode.addItem(
+            "Demo — outputs forced OFF",
+            userData="demo_outputs_off",
+        )
+        self.execution_mode.setMinimumWidth(260)
+        self.execution_mode.setToolTip(
+            "Demo sends configurations and every sweep setpoint to real devices, "
+            "acquires and stores Anritsu spectra, but replaces every OUTPUT ON with "
+            "confirmed OUTPUT OFF."
+        )
         self.run_button = PrimaryPushButton("Run plan")
         self.run_button.setEnabled(False)
 
@@ -270,8 +288,21 @@ class RecipePage(QWidget):
         path_line.addWidget(path_label)
         path_line.addWidget(self.path, 1)
         path_line.addWidget(self.restore_button)
-        path_line.addWidget(self.run_button)
         document_layout.addLayout(path_line)
+        execution_line = QHBoxLayout()
+        execution_line.setSpacing(8)
+        execution_label = CaptionLabel("Execution mode", self.document_card)
+        execution_line.addWidget(execution_label)
+        execution_line.addWidget(self.execution_mode)
+        self.execution_mode_hint = CaptionLabel(
+            "Normal measurement: OUTPUT actions in the recipe are executed.",
+            self.document_card,
+        )
+        self.execution_mode_hint.setObjectName("muted")
+        self.execution_mode_hint.setWordWrap(True)
+        execution_line.addWidget(self.execution_mode_hint, 1)
+        execution_line.addWidget(self.run_button)
+        document_layout.addLayout(execution_line)
         layout.addWidget(self.document_card)
         self.selection_card = CardWidget(self)
         self.selection_card.setObjectName("recipeSelectionCard")
@@ -431,6 +462,9 @@ class RecipePage(QWidget):
         layout.addWidget(self.status_card)
         self.restore_button.clicked.connect(self.restore_autosave)
         self.run_button.clicked.connect(self.request_run)
+        self.execution_mode.currentIndexChanged.connect(
+            self._execution_mode_changed
+        )
         self.editor.textChanged.connect(self._source_changed)
         self.tree.currentItemChanged.connect(self._node_selected)
         self.tree.itemClicked.connect(self._operator_row_clicked)
@@ -4889,4 +4923,19 @@ class RecipePage(QWidget):
 
     def request_run(self) -> None:
         if self._plan is not None:
-            self.run_requested.emit(self._plan)
+            self.run_requested.emit(
+                self._plan,
+                self.execution_mode.currentData() == "demo_outputs_off",
+            )
+
+    def _execution_mode_changed(self, _index: int = -1) -> None:
+        demo = self.execution_mode.currentData() == "demo_outputs_off"
+        self.run_button.setText("Run demo" if demo else "Run plan")
+        self.execution_mode_hint.setText(
+            (
+                "DEMO: configurations, setpoints and Anritsu RAW/processed spectra "
+                "run normally; every source OUTPUT remains confirmed OFF."
+            )
+            if demo
+            else "Normal measurement: OUTPUT actions in the recipe are executed."
+        )

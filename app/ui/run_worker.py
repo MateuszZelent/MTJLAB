@@ -25,7 +25,7 @@ from app.devices.simulation import SimulationContext
 from app.engine.compiler import ExecutionPlan, required_devices_for_actions
 from app.engine.policy import ExecutionPolicy
 from app.engine.recovery import RecoveryCheckpoint
-from app.engine.runner import RecipeRunner
+from app.engine.runner import ExecutionMode, RecipeRunner
 from app.settings.models import StationSettings
 from app.storage import Hdf5RunWriter
 
@@ -60,6 +60,7 @@ class RunWorker(QObject):
         recovery: RecoveryCheckpoint | None = None,
         operator_context: dict[str, object] | None = None,
         simulation_seed: int | None = None,
+        outputs_forced_off: bool = False,
         parent: QObject | None = None,
     ) -> None:
         super().__init__(parent)
@@ -70,6 +71,7 @@ class RunWorker(QObject):
         self._recovery = recovery
         self._operator_context = dict(operator_context or {})
         self._simulation_seed = simulation_seed
+        self._outputs_forced_off = bool(outputs_forced_off)
         self._runner: RecipeRunner | None = None
 
     @Slot()
@@ -170,10 +172,8 @@ class RunWorker(QObject):
                     },
                     expected_points=self._plan.total_points,
                     operator_context=self._operator_context,
-                    simulation_metadata=(
-                        simulation_context.metadata(tuple(sorted(required)))
-                        if simulation_context is not None
-                        else {"enabled": False}
+                    simulation_metadata=self._execution_metadata(
+                        simulation_context, required
                     ),
                     csv_summary_path=output_dir / f"{run_stem}.csv" if self._settings.storage.get("write_csv_summary") else None,
                 )
@@ -202,6 +202,11 @@ class RunWorker(QObject):
                 on_event=lambda name, data: self.event.emit(name, data),
                 on_telemetry=lambda name, data: self.event.emit(name, data),
                 policy=ExecutionPolicy.from_settings(self._settings),
+                execution_mode=(
+                    ExecutionMode.DEMO_OUTPUTS_OFF
+                    if self._outputs_forced_off
+                    else ExecutionMode.MEASUREMENT
+                ),
             )
             result = self._runner.run(
                 self._plan,
@@ -249,6 +254,26 @@ class RunWorker(QObject):
             self._settings_path,
             simulation=self._simulation,
         )
+
+    def _execution_metadata(
+        self,
+        simulation_context: SimulationContext | None,
+        required_devices: set[str],
+    ) -> dict[str, object]:
+        metadata = (
+            simulation_context.metadata(tuple(sorted(required_devices)))
+            if simulation_context is not None
+            else {"enabled": False}
+        )
+        return {
+            **metadata,
+            "execution_mode": (
+                ExecutionMode.DEMO_OUTPUTS_OFF.value
+                if self._outputs_forced_off
+                else ExecutionMode.MEASUREMENT.value
+            ),
+            "outputs_forced_off": self._outputs_forced_off,
+        }
 
     # These methods intentionally only set thread-safe Event flags on
     # RecipeRunner; they are safe to call directly from the GUI thread while
@@ -331,6 +356,7 @@ class RunController(QObject):
         self._emergency_worker: EmergencyStopWorker | None = None
         self._run_settings: StationSettings | None = None
         self._run_simulation = False
+        self._run_outputs_forced_off = False
         self._watchdog_estop_started = False
 
     @property
@@ -346,11 +372,13 @@ class RunController(QObject):
         simulation: bool = False,
         recovery: RecoveryCheckpoint | None = None,
         operator_context: dict[str, object] | None = None,
+        outputs_forced_off: bool = False,
     ) -> None:
         if self.running:
             raise RuntimeError("A measurement is already running.")
         self._run_settings = settings
         self._run_simulation = simulation
+        self._run_outputs_forced_off = bool(outputs_forced_off)
         self._watchdog_estop_started = False
         self._thread = QThread(self)
         self._worker = RunWorker(
@@ -360,6 +388,7 @@ class RunController(QObject):
             simulation,
             recovery,
             operator_context=operator_context,
+            outputs_forced_off=outputs_forced_off,
         )
         self._worker.moveToThread(self._thread)
         self._thread.started.connect(self._worker.run)

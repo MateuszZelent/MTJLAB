@@ -134,7 +134,7 @@ root:
       channel: B
       mode: current
       level: "${keithley.B.current}"
-      compliance: 1 mV
+      compliance: 10 mV
     - id: checkpoint
       type: checkpoint
       label: generated

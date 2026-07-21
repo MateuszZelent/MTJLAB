@@ -238,10 +238,11 @@ class DeviceConnectionPanel(CardWidget):
             "compliance",
         }
         disconnected = self._connection_state == "disconnected"
+        retryable = self._connection_state == "fault"
         self.connect_button.setProperty(
             "controlState", "confirmed" if connected else "available"
         )
-        self.connect_button.setEnabled(connected or disconnected)
+        self.connect_button.setEnabled(connected or disconnected or retryable)
         self.disconnect_button.setEnabled(connected or not disconnected)
         self.connect_button.setToolTip(
             "Connected and verified." if connected else "Connect and verify the instrument."

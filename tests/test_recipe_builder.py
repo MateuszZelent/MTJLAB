@@ -66,6 +66,25 @@ class RecipeBuilderTests(unittest.TestCase):
     def setUpClass(cls) -> None:
         cls.application = QApplication.instance() or QApplication([])
 
+    def test_run_request_carries_explicit_demo_outputs_off_policy(self) -> None:
+        page = RecipePage(simulation_settings())
+        requests: list[tuple[object, bool]] = []
+        plan = object()
+        try:
+            page._plan = plan
+            page.run_requested.connect(
+                lambda selected, demo: requests.append((selected, demo))
+            )
+
+            page.execution_mode.setCurrentIndex(1)
+            page.request_run()
+            page.execution_mode.setCurrentIndex(0)
+            page.request_run()
+
+            self.assertEqual(requests, [(plan, True), (plan, False)])
+        finally:
+            page.close()
+
     def test_tree_builder_exposes_node_actions_and_yaml_as_secondary_tab(self) -> None:
         page = RecipePage(simulation_settings())
         try:

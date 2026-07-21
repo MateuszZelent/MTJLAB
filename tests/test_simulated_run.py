@@ -4,6 +4,7 @@ from pathlib import Path
 import tempfile
 import unittest
 from copy import deepcopy
+from dataclasses import replace
 import json
 
 import h5py
@@ -19,7 +20,7 @@ from app.devices.rigol_dg1000z import RigolAdapter
 from app.devices.rigol_dg1000z.adapter import RigolChannelConfig
 from app.devices.simulators import SimulatedVisaFactory, simulated_station_settings
 from app.devices.simulation import SimulationContext
-from app.engine import RecipeCompiler, RecipeRunner
+from app.engine import ExecutionMode, RecipeCompiler, RecipeRunner
 from app.engine.compiler import ExecutionPlan, PlanAction
 from app.recipes import load_recipe, parse_recipe_text
 from app.storage import Hdf5RunWriter
@@ -31,6 +32,177 @@ from tests.helpers import loaded_settings
 
 
 class SimulatedRunTests(unittest.TestCase):
+    def test_demo_recipe_keeps_outputs_off_and_stores_anritsu_raw_processed(self) -> None:
+        recipe_path = (
+            Path(__file__).resolve().parents[1]
+            / "recipes"
+            / "keithley_a_100ua_anritsu_raw_processed_10.yml"
+        )
+        recipe = load_recipe(recipe_path)
+        raw = deepcopy(
+            simulated_station_settings(loaded_settings()).model_dump(mode="python")
+        )
+        raw["devices"]["keithley"]["safety"]["allow_output_enable"] = True
+        raw["devices"]["keithley"]["safety"]["channels"]["A"]["enabled"] = True
+        settings = StationSettings.model_validate(raw)
+        compiled = RecipeCompiler(settings).compile(recipe)
+        plan = replace(
+            compiled,
+            actions=tuple(
+                replace(action, payload={**action.payload, "duration_s": 0.0})
+                if action.kind == "wait"
+                else action
+                for action in compiled.actions
+            ),
+        )
+        context = SimulationContext(seed=2_026_0721)
+        rigol = RigolAdapter(
+            settings,
+            session_factory=SimulatedVisaFactory("rigol", context=context),
+        )
+        keithley = KeithleyAdapter(
+            settings,
+            session_factory=SimulatedVisaFactory("keithley", context=context),
+        )
+        anritsu = AnritsuAdapter(
+            settings,
+            session_factory=SimulatedVisaFactory("anritsu", context=context),
+        )
+        for device in (rigol, keithley, anritsu):
+            device.connect()
+        events: list[tuple[str, dict[str, object]]] = []
+
+        with tempfile.TemporaryDirectory() as temporary:
+            target = Path(temporary) / "demo-keithley-a-100ua.h5"
+            writer = Hdf5RunWriter(
+                target,
+                recipe_source=recipe.source_text,
+                settings_source="simulation: true\n",
+                plan_hash=plan.sha256,
+                device_idn={},
+                expected_points=plan.total_points,
+                simulation_metadata={
+                    **context.metadata(("rigol", "keithley", "anritsu")),
+                    "execution_mode": ExecutionMode.DEMO_OUTPUTS_OFF.value,
+                    "outputs_forced_off": True,
+                },
+            )
+            result = RecipeRunner(
+                rigol=rigol,
+                keithley=keithley,
+                anritsu=anritsu,
+                writer=writer,
+                on_event=lambda name, data: events.append((name, data)),
+                execution_mode=ExecutionMode.DEMO_OUTPUTS_OFF,
+            ).run(plan)
+
+            self.assertIsNone(result.error)
+            self.assertEqual(result.stored_points, 10)
+            self.assertFalse(any(rigol._output_states.values()))
+            self.assertFalse(any(keithley._output_states.values()))
+            self.assertFalse(anritsu._sg_output_enabled)
+            self.assertEqual(
+                sum(
+                    name == "action_started"
+                    and data.get("node_id") == "keithley-a-current-point"
+                    for name, data in events
+                ),
+                10,
+            )
+            self.assertTrue(
+                any(name == "demo_output_action_suppressed" for name, _ in events)
+            )
+            detail = Hdf5RunReader.detail(target)
+            self.assertTrue(detail.simulation_metadata["outputs_forced_off"])
+            self.assertEqual(
+                detail.simulation_metadata["execution_mode"],
+                ExecutionMode.DEMO_OUTPUTS_OFF.value,
+            )
+            points = Hdf5RunReader.points(target)
+            self.assertEqual(len(points), 10)
+            self.assertTrue(all(point.metadata["outputs_forced_off"] for point in points))
+            with h5py.File(target, "r") as file:
+                self.assertEqual(len(file["spectra"]), 10)
+                self.assertIn("reference/power_dbm", file)
+                for index in range(10):
+                    spectrum = file[f"spectra/{index}"]
+                    self.assertEqual(len(spectrum["power_dbm"]), 5001)
+                    self.assertEqual(len(spectrum["processed_values"]), 5001)
+                    self.assertEqual(spectrum.attrs["processed_unit"], "dB")
+                    self.assertEqual(
+                        spectrum.attrs["processing_operation"], "difference_db"
+                    )
+
+    def test_keithley_a_100ua_recipe_runs_ten_raw_and_processed_points(self) -> None:
+        recipe_path = (
+            Path(__file__).resolve().parents[1]
+            / "recipes"
+            / "keithley_a_100ua_anritsu_raw_processed_10.yml"
+        )
+        recipe = load_recipe(recipe_path)
+        raw = deepcopy(
+            simulated_station_settings(loaded_settings()).model_dump(mode="python")
+        )
+        raw["devices"]["keithley"]["safety"]["allow_output_enable"] = True
+        raw["devices"]["keithley"]["safety"]["channels"]["A"]["enabled"] = True
+        settings = StationSettings.model_validate(raw)
+        compiled = RecipeCompiler(settings).compile(recipe)
+        plan = replace(
+            compiled,
+            actions=tuple(
+                replace(action, payload={**action.payload, "duration_s": 0.0})
+                if action.kind == "wait"
+                else action
+                for action in compiled.actions
+            ),
+        )
+        self.assertEqual((plan.total_points, plan.total_spectra), (10, 10))
+
+        with tempfile.TemporaryDirectory() as temporary:
+            target = Path(temporary) / "keithley-a-100ua.h5"
+            rigol = RigolAdapter(
+                settings, session_factory=SimulatedVisaFactory("rigol")
+            )
+            keithley = KeithleyAdapter(
+                settings, session_factory=SimulatedVisaFactory("keithley")
+            )
+            anritsu = AnritsuAdapter(
+                settings, session_factory=SimulatedVisaFactory("anritsu")
+            )
+            for device in (rigol, keithley, anritsu):
+                device.connect()
+            writer = Hdf5RunWriter(
+                target,
+                recipe_source=recipe.source_text,
+                settings_source="simulation: true\n",
+                plan_hash=plan.sha256,
+                device_idn={},
+                expected_points=plan.total_points,
+            )
+
+            result = RecipeRunner(
+                rigol=rigol,
+                keithley=keithley,
+                anritsu=anritsu,
+                writer=writer,
+            ).run(plan)
+
+            self.assertIsNone(result.error)
+            self.assertEqual(result.stored_points, 10)
+            self.assertFalse(keithley._output_states["A"])
+            self.assertEqual(Hdf5RunReader.detail(target).summary.status, "completed")
+            with h5py.File(target, "r") as file:
+                self.assertEqual(len(file["spectra"]), 10)
+                self.assertIn("reference/power_dbm", file)
+                for index in range(10):
+                    spectrum = file[f"spectra/{index}"]
+                    self.assertEqual(len(spectrum["power_dbm"]), 5001)
+                    self.assertEqual(len(spectrum["processed_values"]), 5001)
+                    self.assertEqual(spectrum.attrs["processed_unit"], "dB")
+                    self.assertEqual(
+                        spectrum.attrs["processing_operation"], "difference_db"
+                    )
+
     def test_rigol_frequency_sweep_stores_one_reference_per_processed_point(self) -> None:
         recipe_path = (
             Path(__file__).resolve().parents[1]

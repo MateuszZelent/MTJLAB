@@ -13,6 +13,8 @@ from app.devices.simulation import SimulationContext
 from app.domain.errors import ConnectionError, DeviceError
 from app.settings.models import StationSettings
 
+_SCPI_NUMBER = r"[+-]?(?:\d+(?:\.\d*)?|\.\d+)(?:[eE][+-]?\d+)?"
+
 
 @dataclass(frozen=True, slots=True)
 class SimulatorFault:
@@ -184,7 +186,11 @@ class RigolSimulator(_BaseSimulator):
         if match:
             self.sync_polarity[int(match.group(1))] = match.group(2).upper()
             return
-        match = re.match(r"^:OUTP([12]):SYNC:DEL\s+([+-]?[\d.eE]+)$", command, re.IGNORECASE)
+        match = re.match(
+            rf"^:OUTP([12]):SYNC:DEL\s+({_SCPI_NUMBER})$",
+            command,
+            re.IGNORECASE,
+        )
         if match:
             self.sync_delay[int(match.group(1))] = float(match.group(2))
             return
@@ -205,7 +211,7 @@ class RigolSimulator(_BaseSimulator):
             self.waveform[int(match.group(1))] = match.group(2).upper()
             return
         match = re.match(
-            r"^:SOUR([12]):APPL:DC\s+DEF,DEF,([+-]?[\d.eE]+)$",
+            rf"^:SOUR([12]):APPL:DC\s+DEF,DEF,({_SCPI_NUMBER})$",
             command,
             re.IGNORECASE,
         )
@@ -215,11 +221,17 @@ class RigolSimulator(_BaseSimulator):
             self.high[channel] = value
             self.low[channel] = value
             return
-        match = re.match(r"^:SOUR([12]):FREQ\s+([+-]?[\d.eE]+)$", command, re.IGNORECASE)
+        match = re.match(
+            rf"^:SOUR([12]):FREQ\s+({_SCPI_NUMBER})$", command, re.IGNORECASE
+        )
         if match:
             self.frequency[int(match.group(1))] = float(match.group(2))
             return
-        match = re.match(r"^:SOUR([12]):VOLT:(HIGH|LOW)\s+([+-]?[\d.eE]+)$", command, re.IGNORECASE)
+        match = re.match(
+            rf"^:SOUR([12]):VOLT:(HIGH|LOW)\s+({_SCPI_NUMBER})$",
+            command,
+            re.IGNORECASE,
+        )
         if match:
             channel, level, value = int(match.group(1)), match.group(2).upper(), float(match.group(3))
             if level == "HIGH":
@@ -348,11 +360,15 @@ class KeithleySimulator(_BaseSimulator):
         if mode:
             self.mode[mode.group(1)] = "current" if mode.group(2) == "OUTPUT_DCAMPS" else "voltage"
             return
-        level = re.match(r"^(smu[ab])\.source\.level[iv]\s*=\s*([+-]?[\d.eE]+)$", command)
+        level = re.match(
+            rf"^(smu[ab])\.source\.level[iv]\s*=\s*({_SCPI_NUMBER})$", command
+        )
         if level:
             self.level[level.group(1)] = float(level.group(2))
             return
-        limit = re.match(r"^(smu[ab])\.source\.limit([vi])\s*=\s*([+-]?[\d.eE]+)$", command)
+        limit = re.match(
+            rf"^(smu[ab])\.source\.limit([vi])\s*=\s*({_SCPI_NUMBER})$", command
+        )
         if limit:
             target, quantity, value = limit.group(1), limit.group(2), float(limit.group(3))
             if quantity == "v":
@@ -487,13 +503,15 @@ class AnritsuSimulator(_BaseSimulator):
                 raise DeviceError("Anritsu simulator: OUTP is available only in SG mode.")
             self.sg_output = output.group(1).upper() in {"ON", "1"}
             return
-        sg_frequency = re.match(r"^FREQ\s+([+-]?[\d.eE]+)HZ$", command, re.IGNORECASE)
+        sg_frequency = re.match(
+            rf"^FREQ\s+({_SCPI_NUMBER})HZ$", command, re.IGNORECASE
+        )
         if sg_frequency:
             if self.instrument_mode != "SG":
                 raise DeviceError("Anritsu simulator: SG FREQ requires SG mode.")
             self.sg_frequency_hz = float(sg_frequency.group(1))
             return
-        sg_power = re.match(r"^POW\s+([+-]?[\d.eE]+)$", command, re.IGNORECASE)
+        sg_power = re.match(rf"^POW\s+({_SCPI_NUMBER})$", command, re.IGNORECASE)
         if sg_power:
             if self.instrument_mode != "SG":
                 raise DeviceError("Anritsu simulator: SG POW requires SG mode.")
@@ -523,12 +541,14 @@ class AnritsuSimulator(_BaseSimulator):
                 switch.group(2).upper() in {"ON", "1"},
             )
             return
-        rbw = re.match(r"^BAND\s+([+-]?[\d.eE]+)HZ$", command, re.IGNORECASE)
+        rbw = re.match(rf"^BAND\s+({_SCPI_NUMBER})HZ$", command, re.IGNORECASE)
         if rbw:
             self.rbw_auto = False
             self.rbw_hz = float(rbw.group(1))
             return
-        vbw = re.match(r"^BAND:VID\s+([+-]?[\d.eE]+)HZ$", command, re.IGNORECASE)
+        vbw = re.match(
+            rf"^BAND:VID\s+({_SCPI_NUMBER})HZ$", command, re.IGNORECASE
+        )
         if vbw:
             self.vbw_auto = False
             self.vbw_hz = float(vbw.group(1))
@@ -546,20 +566,24 @@ class AnritsuSimulator(_BaseSimulator):
             self.detector = detector.group(1).upper()
             return
         attenuation = re.match(
-            r"^POW:ATT\s+([+-]?[\d.eE]+)(?:DB)?$", command, re.IGNORECASE
+            rf"^POW:ATT\s+({_SCPI_NUMBER})(?:DB)?$", command, re.IGNORECASE
         )
         if attenuation:
             self.attenuation_auto = False
             self.attenuation_db = float(attenuation.group(1))
             return
         sweep_time = re.match(
-            r"^SWE:TIME\s+([+-]?[\d.eE]+)S$", command, re.IGNORECASE
+            rf"^SWE:TIME\s+({_SCPI_NUMBER})S$", command, re.IGNORECASE
         )
         if sweep_time:
             self.sweep_time_auto = False
             self.sweep_time_s = float(sweep_time.group(1))
             return
-        match = re.match(r"^FREQ:(STAR|STOP)\s+([+-]?[\d.eE]+)HZ$", command, re.IGNORECASE)
+        match = re.match(
+            rf"^FREQ:(STAR|STOP)\s+({_SCPI_NUMBER})HZ$",
+            command,
+            re.IGNORECASE,
+        )
         if match:
             value = float(match.group(2))
             if match.group(1).upper() == "STAR":
@@ -571,7 +595,11 @@ class AnritsuSimulator(_BaseSimulator):
         if match:
             self.points = int(match.group(1))
             return
-        match = re.match(r"^DISP:WIND:TRAC:Y:RLEV\s+([+-]?[\d.eE]+)$", command, re.IGNORECASE)
+        match = re.match(
+            rf"^DISP:WIND:TRAC:Y:RLEV\s+({_SCPI_NUMBER})$",
+            command,
+            re.IGNORECASE,
+        )
         if match:
             self.reference_level = float(match.group(1))
             return

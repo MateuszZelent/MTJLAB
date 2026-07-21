@@ -18,6 +18,7 @@ from app.devices.simulators import simulated_station_settings
 from app.engine import RecipeCompiler
 from app.recipes import load_recipe
 from app.settings.models import StationSettings
+from app.storage import Hdf5RunReader
 from app.ui.run_worker import RunController
 from tests.helpers import loaded_settings
 
@@ -94,6 +95,101 @@ root:
                 with h5py.File(files[0], "r") as file:
                     self.assertEqual(file["run"].attrs["status"], "completed")
                     self.assertIn("SIMULATION", file["run/settings_yaml"].asstr()[()])
+            finally:
+                controller.close()
+
+    def test_demo_run_worker_persists_forced_off_mode_and_anritsu_spectrum(self) -> None:
+        recipe_source = """\
+schema_version: 1
+name: qthread-demo-outputs-off
+root:
+  id: root
+  type: sequence
+  children:
+    - id: anritsu
+      type: configure_anritsu
+      start_frequency: "1 MHz"
+      stop_frequency: "2 MHz"
+      reference_level: "0 dBm"
+      points: 101
+    - id: keithley
+      type: configure_keithley
+      channel: A
+      mode: current
+      level: "100 uA"
+      compliance: "100 mV"
+    - id: keithley-on
+      type: set_keithley_output
+      channel: A
+      enabled: true
+    - id: spectrum
+      type: acquire_spectrum
+      trace: TRAC1
+finally:
+  - id: keithley-off
+    type: set_keithley_output
+    channel: A
+    enabled: false
+"""
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            raw = simulated_station_settings(loaded_settings()).model_dump(mode="python")
+            raw["storage"]["output_directory"] = str(root / "measurements")
+            raw["devices"]["keithley"]["safety"]["channels"]["A"]["enabled"] = True
+            settings = StationSettings.model_validate(raw)
+            recipe_path = root / "demo-recipe.yml"
+            recipe_path.write_text(recipe_source, encoding="utf-8")
+            plan = RecipeCompiler(settings).compile(load_recipe(recipe_path))
+
+            controller = RunController()
+            finished: list[object] = []
+            failures: list[str] = []
+            events: list[tuple[str, object]] = []
+            loop = QEventLoop()
+            timeout = QTimer()
+            timeout.setSingleShot(True)
+            controller.finished.connect(
+                lambda result: (finished.append(result), loop.quit())
+            )
+            controller.failed.connect(
+                lambda error: (failures.append(error), loop.quit())
+            )
+            controller.event.connect(lambda name, data: events.append((name, data)))
+            timeout.timeout.connect(
+                lambda: (
+                    failures.append("timeout"),
+                    controller.request_stop(),
+                    loop.quit(),
+                )
+            )
+            try:
+                controller.start(
+                    settings,
+                    root / "settings.yml",
+                    plan,
+                    simulation=True,
+                    outputs_forced_off=True,
+                )
+                timeout.start(5_000)
+                loop.exec()
+                timeout.stop()
+                self.application.processEvents()
+
+                self.assertFalse(failures)
+                self.assertEqual(len(finished), 1)
+                self.assertTrue(
+                    any(name == "demo_output_action_suppressed" for name, _ in events)
+                )
+                files = list((root / "measurements").glob("*.h5"))
+                self.assertEqual(len(files), 1)
+                detail = Hdf5RunReader.detail(files[0])
+                self.assertEqual(detail.summary.status, "completed")
+                self.assertTrue(detail.simulation_metadata["outputs_forced_off"])
+                self.assertEqual(
+                    detail.simulation_metadata["execution_mode"],
+                    "demo_outputs_off",
+                )
+                self.assertEqual(detail.summary.spectrum_count, 1)
             finally:
                 controller.close()
 

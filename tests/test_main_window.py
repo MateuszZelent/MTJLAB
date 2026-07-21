@@ -19,6 +19,7 @@ from PySide6.QtWidgets import QApplication, QLabel, QMessageBox, QPushButton, QS
 from PySide6.QtTest import QTest
 
 from app.domain.models import DeviceCapabilities
+from app.engine import ExecutionPlan, PlanAction
 from app.domain.quick_controls import QuickControlCommand
 from app.devices.discovery import DiscoveredInstrument
 from app.devices.moke_box.models import MokeHallVoltageReading
@@ -850,6 +851,39 @@ class MainWindowTests(unittest.TestCase):
             window.close()
             self.application.processEvents()
 
+    def test_demo_run_selection_reaches_controller_and_execution_monitor(self) -> None:
+        window = MainWindow(".config/settings.yml", simulation=True)
+        try:
+            plan = ExecutionPlan(
+                recipe_name="demo-ui-contract",
+                actions=(
+                    PlanAction(
+                        node_id="demo-wait",
+                        kind="wait",
+                        payload={"duration_s": 0.1},
+                        setpoints_si={},
+                    ),
+                ),
+                total_points=0,
+                sha256="demo-ui-contract",
+                recipe_source="schema_version: 1\nname: demo-ui-contract\n",
+            )
+            window._run_controller.start = Mock()
+
+            window._start_run(plan, True)
+
+            window._run_controller.start.assert_called_once()
+            self.assertTrue(
+                window._run_controller.start.call_args.kwargs[
+                    "outputs_forced_off"
+                ]
+            )
+            self.assertEqual(window.run_monitor.state.text(), "DEMO — OUTPUTS OFF")
+            self.assertIn("forced OFF", window.run_monitor.state.toolTip())
+        finally:
+            window.close()
+            self.application.processEvents()
+
     def test_each_device_and_spectrum_analysis_have_distinct_background_threads(self) -> None:
         window = MainWindow(".config/settings.yml", simulation=True)
         device_threads = [controller._thread for controller in window._controllers.values()]
@@ -1531,9 +1565,9 @@ class MainWindowTests(unittest.TestCase):
         try:
             rigol = window.rigol_page
             field = rigol._limit_fields[rigol.frequency]
-            rigol.frequency.setText("100000 kHz")
+            rigol.frequency.setText("10000 kHz")
             rigol.frequency.editingFinished.emit()
-            self.assertEqual(rigol.frequency.text(), "100 MHz")
+            self.assertEqual(rigol.frequency.text(), "10 MHz")
             self.assertTrue(field.validation_warning.isHidden())
 
             rigol.frequency.setText("1e9")
@@ -1596,6 +1630,7 @@ class MainWindowTests(unittest.TestCase):
             self.assertEqual(keithley._limit_fields["settle"].minimum.text(), "MIN  1 ms")
             self.assertEqual(keithley._limit_fields["settle"].maximum.text(), "MAX  10 s")
             keithley.channel.setCurrentText("B")
+            keithley.mode.setCurrentText("current")
             self.application.processEvents()
             current_bound = shared_bounds["keithley.B.current"]
             self.assertEqual(
@@ -1664,6 +1699,7 @@ class MainWindowTests(unittest.TestCase):
             window.resize(1600, 900)
             window.show()
             window._navigate_to("keithley")
+            keithley.mode.setCurrentText("current")
             self.application.processEvents()
 
             self.assertEqual(keithley.keithley_form.labelForField(keithley.level_field).text(), "Source current")

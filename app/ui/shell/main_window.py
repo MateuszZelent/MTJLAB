@@ -193,7 +193,7 @@ class MainWindow(FluentWindow):
         self.safety_strip.estop.setMaximumWidth(96)
         self.safety_strip.estop.setFixedHeight(28)
         self.safety_strip.save_settings.setFixedHeight(28)
-        self.safety_strip.save_settings.setMinimumWidth(126)
+        self.safety_strip.save_settings.setMinimumWidth(100)
         self.safety_strip.estop.setProperty("visualPriority", "low")
         self.safety_strip.estop.setToolTip(
             "Confirm and disable every instrument output and abort acquisition."
@@ -1123,7 +1123,7 @@ class MainWindow(FluentWindow):
                 "The durable audit log is unavailable. A measurement run cannot start."
             )
 
-    def _start_run(self, plan: object) -> None:
+    def _start_run(self, plan: object, outputs_forced_off: bool = False) -> None:
         try:
             self._require_permission(
                 Permission.RUN_RECIPE,
@@ -1163,6 +1163,7 @@ class MainWindow(FluentWindow):
                 plan,  # type: ignore[arg-type]
                 simulation=self._simulation,
                 operator_context=self._access.identity.as_context(),
+                outputs_forced_off=outputs_forced_off,
             )
         except Exception as exc:
             QMessageBox.critical(self, "Run not started", str(exc))
@@ -1171,10 +1172,17 @@ class MainWindow(FluentWindow):
             len(plan.actions),  # type: ignore[union-attr]
             estimate.nominal_duration_s,
             plan_actions=plan.actions,  # type: ignore[union-attr]
+            execution_mode=(
+                "demo_outputs_off" if outputs_forced_off else "measurement"
+            ),
         )
         self._set_run_ui_locked(True)
         self._navigate_to("execution")
-        self._log("Run Engine started")
+        self._log(
+            "Run Engine started in DEMO mode; all source outputs are forced OFF"
+            if outputs_forced_off
+            else "Run Engine started"
+        )
 
     def _open_historical_thatec_sweep(self, run: object, tree: object) -> None:
         """Switch from Results to the immutable Sweep reconstructed from THATEC."""
@@ -1225,6 +1233,9 @@ class MainWindow(FluentWindow):
             return
         try:
             detail = Hdf5RunReader.detail(path)
+            outputs_forced_off = bool(
+                detail.simulation_metadata.get("outputs_forced_off", False)
+            )
             current_settings_source = serialize_settings_snapshot(
                 self._settings,
                 self._repository.path,
@@ -1272,6 +1283,7 @@ class MainWindow(FluentWindow):
                 simulation=self._simulation,
                 recovery=checkpoint,
                 operator_context=self._access.identity.as_context(),
+                outputs_forced_off=outputs_forced_off,
             )
         except Exception as exc:
             QMessageBox.critical(self, "Resume not started", str(exc))
@@ -1285,12 +1297,20 @@ class MainWindow(FluentWindow):
                 *checkpoint.prelude_actions,
                 *plan.actions[checkpoint.next_action_index :],
             ),
+            execution_mode=(
+                "demo_outputs_off" if outputs_forced_off else "measurement"
+            ),
         )
         self._set_run_ui_locked(True)
         self._navigate_to("execution")
         self._log(
             f"Run recovery started at safe checkpoint {checkpoint.stored_points}; "
-            f"discarding {discarded} unsafe tail point(s)"
+            f"discarding {discarded} unsafe tail point(s); "
+            + (
+                "DEMO outputs remain forced OFF"
+                if outputs_forced_off
+                else "measurement output policy restored"
+            )
         )
 
     def _run_event(self, name: str, data: object) -> None:

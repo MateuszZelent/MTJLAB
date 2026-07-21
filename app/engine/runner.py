@@ -32,6 +32,13 @@ EventCallback = Callable[[str, dict[str, object]], None]
 TelemetryCallback = Callable[[str, dict[str, object]], None]
 
 
+class ExecutionMode(str, Enum):
+    """Hardware execution policy selected for one immutable run."""
+
+    MEASUREMENT = "measurement"
+    DEMO_OUTPUTS_OFF = "demo_outputs_off"
+
+
 @dataclass(frozen=True, slots=True)
 class RunResult:
     state: ApplicationState
@@ -65,6 +72,7 @@ class RecipeRunner:
         on_event: EventCallback | None = None,
         on_telemetry: TelemetryCallback | None = None,
         policy: ExecutionPolicy | None = None,
+        execution_mode: ExecutionMode = ExecutionMode.MEASUREMENT,
     ) -> None:
         self._rigol = rigol
         self._keithley = keithley
@@ -75,6 +83,7 @@ class RecipeRunner:
         self._on_event = on_event or (lambda _name, _data: None)
         self._on_telemetry = on_telemetry or (lambda _name, _data: None)
         self._policy = policy or ExecutionPolicy()
+        self._execution_mode = ExecutionMode(execution_mode)
         self._stop_requested = threading.Event()
         self._pause_requested = threading.Event()
         self._resume_requested = threading.Event()
@@ -159,8 +168,12 @@ class RecipeRunner:
                     "hash": plan.sha256,
                     "start_action_index": start_action_index,
                     "stored_points": stored_points,
+                    "execution_mode": self._execution_mode.value,
+                    "outputs_forced_off": self.outputs_forced_off,
                 },
             )
+            if self.outputs_forced_off:
+                self._confirm_demo_outputs_off()
             for action in recovery_prelude:
                 if action.kind not in {
                     "configure_rigol",
@@ -213,6 +226,8 @@ class RecipeRunner:
                             "monotonic_s": time.monotonic(),
                             "compliance_channels": compliance_channels,
                             "safety_context": self._safety_context_snapshot(),
+                            "execution_mode": self._execution_mode.value,
+                            "outputs_forced_off": self.outputs_forced_off,
                         },
                     )
                     write_started = time.monotonic()
@@ -258,6 +273,8 @@ class RecipeRunner:
                                 if acquisition is not None
                                 else None
                             ),
+                            "execution_mode": self._execution_mode.value,
+                            "outputs_forced_off": self.outputs_forced_off,
                         },
                     )
                     write_started = time.monotonic()
@@ -626,6 +643,19 @@ class RecipeRunner:
         self, action: PlanAction, measurements: dict[str, float]
     ) -> _AcquiredSpectrum | None:
         payload = action.payload
+        if self.outputs_forced_off and action.kind in {
+            "arm_rigol_output",
+            "arm_anritsu_sg_output",
+        }:
+            self._emit(
+                "demo_output_action_suppressed",
+                {
+                    "node_id": action.node_id,
+                    "kind": action.kind,
+                    "reason": "Demo mode keeps every source output forced OFF.",
+                },
+            )
+            return None
         if action.kind == "configure_rigol":
             config = payload["config"]
             self._rigol.configure_channel(config)
@@ -779,32 +809,45 @@ class RecipeRunner:
             self._active_safety_context[key] = context
             self._record_device_state("rigol", f"channel_{payload['channel']}", requested=payload, actual=context)
         elif action.kind == "set_rigol_output":
-            self._rigol.set_output(payload["channel"], payload["enabled"])
-            self._rigol_output_active[payload["channel"]] = bool(payload["enabled"])
+            requested_enabled = bool(payload["enabled"])
+            effective_enabled = requested_enabled and not self.outputs_forced_off
+            actual_enabled = self._rigol.set_output(
+                payload["channel"], effective_enabled
+            )
+            self._rigol_output_active[payload["channel"]] = actual_enabled
             context = self._active_safety_context.get(f"rigol.{payload['channel']}", {})
-            context["output_enabled"] = bool(payload["enabled"])
+            context["output_enabled"] = actual_enabled
             self._active_safety_context[f"rigol.{payload['channel']}"] = context
             self._record_device_state("rigol", f"channel_{payload['channel']}", requested=payload, actual=context)
+            self._emit_demo_suppression(action, requested_enabled, actual_enabled)
         elif action.kind == "arm_rigol_output":
             self._rigol.arm_output(payload["channel"])
         elif action.kind == "set_keithley_output":
+            requested_enabled = bool(payload["enabled"])
+            effective_enabled = requested_enabled and not self.outputs_forced_off
             actual_enabled = self._keithley.set_output(
-                payload["channel"], payload["enabled"]
+                payload["channel"], effective_enabled
             )
             self._keithley_output_active[payload["channel"]] = actual_enabled
             context = self._active_safety_context.get(f"keithley.{payload['channel']}", {})
             context["output_enabled"] = actual_enabled
             self._active_safety_context[f"keithley.{payload['channel']}"] = context
             self._record_device_state("keithley", f"channel_{payload['channel']}", requested=payload, actual=context)
+            self._emit_demo_suppression(action, requested_enabled, actual_enabled)
         elif action.kind == "arm_anritsu_sg_output":
             self._anritsu.arm_signal_generator_output()
         elif action.kind == "set_anritsu_sg_output":
-            self._anritsu.set_signal_generator_output(payload["enabled"])
-            self._anritsu_sg_output_active = bool(payload["enabled"])
+            requested_enabled = bool(payload["enabled"])
+            effective_enabled = requested_enabled and not self.outputs_forced_off
+            self._anritsu.set_signal_generator_output(effective_enabled)
+            self._anritsu_sg_output_active = effective_enabled
             context = self._active_safety_context.get("anritsu.sg", {})
-            context["output_enabled"] = bool(payload["enabled"])
+            context["output_enabled"] = effective_enabled
             self._active_safety_context["anritsu.sg"] = context
             self._record_device_state("anritsu", "signal_generator", requested=payload, actual=context)
+            self._emit_demo_suppression(
+                action, requested_enabled, effective_enabled
+            )
         elif action.kind == "ramp_keithley_to_zero":
             self._keithley.ramp_to_zero(payload["channel"], deadline_s=payload["deadline_s"])
             self._keithley_zeroed[payload["channel"]] = True
@@ -1145,6 +1188,8 @@ class RecipeRunner:
 
         return {
             "application": self._state.value,
+            "execution_mode": self._execution_mode.value,
+            "outputs_forced_off": self.outputs_forced_off,
             "devices": {
                 "rigol": self._rigol.state.value,
                 "keithley": self._keithley.state.value,
@@ -1154,6 +1199,62 @@ class RecipeRunner:
             "keithley_outputs": dict(self._keithley_output_active),
             "anritsu_sg_output": self._anritsu_sg_output_active,
         }
+
+    @property
+    def outputs_forced_off(self) -> bool:
+        return self._execution_mode is ExecutionMode.DEMO_OUTPUTS_OFF
+
+    def _confirm_demo_outputs_off(self) -> None:
+        """Establish and confirm the demo invariant before any recipe action."""
+
+        errors: list[str] = []
+        for name, device in (
+            ("keithley", self._keithley),
+            ("rigol", self._rigol),
+            ("anritsu", self._anritsu),
+        ):
+            self._emit("demo_output_guard_started", {"device": name})
+            try:
+                device.emergency_off()
+                if device.state is DeviceState.UNKNOWN:
+                    raise ExecutionError(
+                        "The instrument did not confirm OUTPUT OFF."
+                    )
+            except Exception as exc:
+                errors.append(f"{name}: {exc}")
+                self._emit_after_fault(
+                    "demo_output_guard_error",
+                    {"device": name, "error": str(exc)},
+                )
+            else:
+                self._emit("demo_output_guard_confirmed", {"device": name})
+        self._rigol_output_active = {1: False, 2: False}
+        self._keithley_output_active = {"A": False, "B": False}
+        self._anritsu_sg_output_active = False
+        if errors:
+            raise ExecutionError(
+                "Demo mode could not confirm all outputs OFF: " + "; ".join(errors)
+            )
+
+    def _emit_demo_suppression(
+        self, action: PlanAction, requested_enabled: bool, actual_enabled: bool
+    ) -> None:
+        if not (self.outputs_forced_off and requested_enabled):
+            return
+        if actual_enabled:
+            raise ExecutionError(
+                f"Demo mode output guard failed for {action.node_id!r}: OUTPUT is ON."
+            )
+        self._emit(
+            "demo_output_action_suppressed",
+            {
+                "node_id": action.node_id,
+                "kind": action.kind,
+                "requested_enabled": True,
+                "actual_enabled": False,
+                "reason": "Demo mode replaced OUTPUT ON with confirmed OUTPUT OFF.",
+            },
+        )
 
     def _record_safe_boundary_if_advanced(
         self,
@@ -1192,7 +1293,12 @@ class RecipeRunner:
         }
         severity = (
             "error"
-            if name in {"action_failed", "run_fault", "shutdown_error"}
+            if name in {
+                "action_failed",
+                "demo_output_guard_error",
+                "run_fault",
+                "shutdown_error",
+            }
             else "info"
         )
         self._writer.append_event(name, payload, severity=severity)

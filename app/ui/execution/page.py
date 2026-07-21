@@ -162,8 +162,18 @@ class RunMonitorPage(QWidget):
         estimated_duration_s: float = 0.0,
         *,
         plan_actions: object = (),
+        execution_mode: str = "measurement",
     ) -> None:
-        self.state.setText("RUNNING")
+        demo = execution_mode == "demo_outputs_off"
+        self.state.setText("DEMO — OUTPUTS OFF" if demo else "RUNNING")
+        self.state.setToolTip(
+            (
+                "Configurations, setpoints and acquisitions are executing while "
+                "every source output is forced OFF."
+            )
+            if demo
+            else "Normal measurement execution; recipe OUTPUT actions are active."
+        )
         self._planned_actions = max(0, actions)
         self.progress.setRange(0, max(actions, 1))
         self.progress.setValue(0)

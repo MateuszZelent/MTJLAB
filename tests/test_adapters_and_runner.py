@@ -3,6 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from copy import deepcopy
+from contextlib import nullcontext
 import threading
 import time
 import unittest
@@ -43,7 +44,7 @@ from app.domain.quantities import (
     parse_quantity,
 )
 from app.engine.compiler import ExecutionPlan, PlanAction, RecipeCompiler
-from app.engine.runner import RecipeRunner
+from app.engine.runner import ExecutionMode, RecipeRunner
 from app.recipes import parse_recipe_text
 from app.safety.keithley import KeithleySafetyEnvelope
 from app.settings.models import StationSettings
@@ -82,6 +83,30 @@ class ShutdownProbe:
 
 
 @dataclass
+class DemoOutputProbe(ShutdownProbe):
+    output_requests: list[tuple[object, bool]] = field(default_factory=list)
+    arm_calls: int = 0
+
+    def io_timeout(self, _timeout_s: float):
+        return nullcontext()
+
+    def set_output(self, channel: object, enabled: bool) -> bool:
+        self.output_requests.append((channel, enabled))
+        self.state = DeviceState.OUTPUT_ON if enabled else DeviceState.OUTPUT_OFF
+        return enabled
+
+    def arm_output(self, _channel: object) -> None:
+        self.arm_calls += 1
+
+    def set_signal_generator_output(self, enabled: bool) -> None:
+        self.output_requests.append(("SG", enabled))
+        self.state = DeviceState.OUTPUT_ON if enabled else DeviceState.OUTPUT_OFF
+
+    def arm_signal_generator_output(self) -> None:
+        self.arm_calls += 1
+
+
+@dataclass
 class HallProbe:
     reading: MokeHallVoltageReading
     reads: int = 0
@@ -104,6 +129,93 @@ class LakeShoreProbe:
 class AdapterAndRunnerTests(unittest.TestCase):
     def setUp(self) -> None:
         self.settings = simulation_settings()
+
+    def test_demo_mode_suppresses_every_arm_and_output_on_action(self) -> None:
+        rigol = DemoOutputProbe()
+        keithley = DemoOutputProbe()
+        anritsu = DemoOutputProbe()
+        writer = MemoryWriter()
+        actions = (
+            PlanAction("rigol-arm", "arm_rigol_output", {"channel": 1}, {}),
+            PlanAction(
+                "rigol-on", "set_rigol_output", {"channel": 1, "enabled": True}, {}
+            ),
+            PlanAction(
+                "keithley-on",
+                "set_keithley_output",
+                {"channel": "A", "enabled": True},
+                {},
+            ),
+            PlanAction("anritsu-arm", "arm_anritsu_sg_output", {}, {}),
+            PlanAction(
+                "anritsu-on", "set_anritsu_sg_output", {"enabled": True}, {}
+            ),
+        )
+        plan = ExecutionPlan(
+            "demo-output-guard",
+            actions,
+            0,
+            "demo-output-guard",
+            "schema_version: 1\n",
+            required_devices=frozenset({"rigol", "keithley", "anritsu"}),
+        )
+
+        result = RecipeRunner(
+            rigol=rigol,  # type: ignore[arg-type]
+            keithley=keithley,  # type: ignore[arg-type]
+            anritsu=anritsu,  # type: ignore[arg-type]
+            writer=writer,  # type: ignore[arg-type]
+            execution_mode=ExecutionMode.DEMO_OUTPUTS_OFF,
+        ).run(plan)
+
+        self.assertEqual(result.state, ApplicationState.SAFE)
+        self.assertIsNone(result.error)
+        self.assertEqual(rigol.arm_calls, 0)
+        self.assertEqual(anritsu.arm_calls, 0)
+        self.assertTrue(rigol.output_requests)
+        self.assertTrue(keithley.output_requests)
+        self.assertTrue(anritsu.output_requests)
+        self.assertFalse(
+            any(
+                enabled
+                for probe in (rigol, keithley, anritsu)
+                for _channel, enabled in probe.output_requests
+            )
+        )
+        suppressed = [
+            data
+            for name, data, _severity in writer.events
+            if name == "demo_output_action_suppressed"
+        ]
+        self.assertEqual(len(suppressed), 5)
+
+    def test_demo_mode_faults_if_initial_output_off_cannot_be_confirmed(self) -> None:
+        rigol = DemoOutputProbe(fail=True)
+        keithley = DemoOutputProbe()
+        anritsu = DemoOutputProbe()
+        writer = MemoryWriter()
+        plan = ExecutionPlan(
+            "demo-output-guard-failure",
+            (),
+            0,
+            "demo-output-guard-failure",
+            "schema_version: 1\n",
+        )
+
+        result = RecipeRunner(
+            rigol=rigol,  # type: ignore[arg-type]
+            keithley=keithley,  # type: ignore[arg-type]
+            anritsu=anritsu,  # type: ignore[arg-type]
+            writer=writer,  # type: ignore[arg-type]
+            execution_mode=ExecutionMode.DEMO_OUTPUTS_OFF,
+        ).run(plan)
+
+        self.assertEqual(result.state, ApplicationState.FAULT)
+        self.assertIn("could not confirm all outputs OFF", result.error or "")
+        self.assertGreaterEqual(rigol.calls, 2)
+        self.assertGreaterEqual(keithley.calls, 2)
+        self.assertGreaterEqual(anritsu.calls, 2)
+        self.assertEqual(writer.status, "faulted")
 
     def test_moke_hall_action_stores_voltage_and_derived_field_checkpoint(self) -> None:
         voltage_v = -0.099453926

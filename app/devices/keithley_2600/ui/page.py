@@ -19,14 +19,14 @@ from PySide6.QtWidgets import (
     QBoxLayout, QHBoxLayout, QHeaderView, QLabel, QLineEdit, QListWidget,
     QListWidgetItem, QMainWindow, QMenu, QMessageBox, QPlainTextEdit,
     QProgressBar, QPushButton, QSplitter, QSpinBox,
-    QSizePolicy, QStyledItemDelegate, QStyle, QTabWidget, QTableWidget,
+    QSizePolicy, QStyledItemDelegate, QStyle, QTabWidget,
     QTableWidgetItem, QToolButton, QTreeWidget, QTreeWidgetItem,
     QVBoxLayout, QWidget,
 )
 from qfluentwidgets import (
     BodyLabel,
     CaptionLabel, CardWidget, CheckBox, ComboBox, PrimaryPushButton, PushButton,
-    FluentIcon, ScrollArea, SpinBox, StrongBodyLabel, TitleLabel,
+    FluentIcon, ScrollArea, SpinBox, StrongBodyLabel, TableWidget, TitleLabel,
     TransparentToolButton,
 )
 
@@ -690,7 +690,7 @@ class _KeithleyReadbackDialog(StationDialog):
         )
         layout.addWidget(output_status)
 
-        self.table = QTableWidget(self)
+        self.table = TableWidget(self)
         self.table.setObjectName("keithleyReadbackTable")
         self.table.setAccessibleName(
             "Keithley hardware settings read from channels A and B"

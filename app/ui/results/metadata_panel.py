@@ -158,6 +158,13 @@ class MetadataPanel(QWidget):
         lines.extend(
             ("", "Capabilities (snapshot):", _format_json(detail.capabilities))
         )
+        lines.extend(
+            (
+                "",
+                "Execution provenance:",
+                _format_json(detail.simulation_metadata),
+            )
+        )
         if detail.events:
             lines.extend(("", f"Recent events ({len(detail.events)}):"))
             lines.extend(

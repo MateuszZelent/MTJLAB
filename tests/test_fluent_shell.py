@@ -98,6 +98,24 @@ class StationSafetyStripTests(unittest.TestCase):
         )
         self.assertLessEqual(strip.minimumSizeHint().width(), 900)
 
+    def test_save_and_estop_never_overlap_in_responsive_layouts(self) -> None:
+        strip = StationSafetyStrip()
+        strip.estop.setText("E-STOP")
+        strip.estop.setMaximumWidth(96)
+        strip.show()
+        for width, expected_mode in ((240, "narrow"), (700, "compact"), (1000, "wide")):
+            strip.resize(width, 140)
+            self.application.processEvents()
+            self.assertEqual(strip._layout_mode, expected_mode)
+            self.assertFalse(
+                strip.save_settings.geometry().intersects(strip.estop.geometry())
+            )
+            for button in (strip.save_settings, strip.estop):
+                self.assertGreater(button.width(), 0)
+                self.assertGreaterEqual(button.geometry().left(), 0)
+                self.assertLessEqual(button.geometry().right(), strip.width())
+        strip.close()
+
 
 class MainWindowFluentShellTests(unittest.TestCase):
     @classmethod
@@ -338,7 +356,7 @@ class MainWindowFluentShellTests(unittest.TestCase):
                 navigation.geometry().right(),
                 window.fluent_content.geometry().left(),
             )
-            self.assertTrue(window.safety_strip._compact_layout)
+            self.assertIn(window.safety_strip._layout_mode, {"narrow", "compact"})
             self.assertGreater(
                 window.safety_strip.actor.geometry().top(),
                 window.safety_strip.readiness.geometry().top(),
