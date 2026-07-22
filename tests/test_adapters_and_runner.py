@@ -2742,6 +2742,74 @@ root:
         self.assertEqual(writer.status, "completed")
         self.assertFalse(keithley._output_states["B"])
 
+    def test_runner_faults_safe_when_continuity_configuration_does_not_match(self) -> None:
+        from app.devices.simulators import SimulatedVisaFactory
+
+        raw = deepcopy(simulation_settings(approved=True).model_dump(mode="python"))
+        raw["devices"]["keithley"]["safety"]["allow_output_enable"] = True
+        settings = StationSettings.model_validate(raw)
+        rigol = RigolAdapter(settings, session_factory=SimulatedVisaFactory("rigol"))
+        keithley = KeithleyAdapter(
+            settings, session_factory=SimulatedVisaFactory("keithley")
+        )
+        anritsu = AnritsuAdapter(
+            settings, session_factory=SimulatedVisaFactory("anritsu")
+        )
+        for device in (rigol, keithley, anritsu):
+            device.connect()
+        plan = ExecutionPlan(
+            recipe_name="continuity-mismatch",
+            actions=(
+                PlanAction(
+                    "configure",
+                    "configure_keithley",
+                    {
+                        "request": KeithleySourceRequest(
+                            "B", "current", 0.0005, 0.067
+                        )
+                    },
+                    {},
+                ),
+                PlanAction(
+                    "on",
+                    "set_keithley_output",
+                    {"channel": "B", "enabled": True},
+                    {},
+                ),
+                PlanAction(
+                    "continuity",
+                    "assert_output_on",
+                    {
+                        "device": "keithley",
+                        "channel": "B",
+                        "expected_state": {
+                            "mode": "current",
+                            "source_level_si": 0.0006,
+                            "compliance_si": 0.067,
+                        },
+                    },
+                    {},
+                ),
+            ),
+            total_points=0,
+            sha256="continuity-mismatch",
+            recipe_source="schema_version: 1\n",
+            safe_shutdown_actions=("keithley.outputs_off",),
+        )
+        writer = MemoryWriter()
+
+        result = RecipeRunner(
+            rigol=rigol,
+            keithley=keithley,
+            anritsu=anritsu,
+            writer=writer,
+        ).run(plan)  # type: ignore[arg-type]
+
+        self.assertIsNotNone(result.error)
+        self.assertIn("different configuration", str(result.error))
+        self.assertEqual(writer.status, "faulted")
+        self.assertFalse(keithley._output_states["B"])
+
     def test_keithley_whitelisted_sense_and_manual_ranges_are_validated_and_written(self) -> None:
         session = FakeVisaSession(
             responses={

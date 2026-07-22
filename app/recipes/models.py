@@ -62,6 +62,12 @@ ACTION_TYPES: Final[frozenset[str]] = frozenset(
     }
 )
 
+# Authoritative structural contract shared by the parser and visual builder.
+# Every other node type is an atomic action and cannot own executable children.
+CONTAINER_NODE_TYPES: Final[frozenset[str]] = frozenset(
+    {"sequence", "sweep", "repeat", "if"}
+)
+
 
 @dataclass(frozen=True, slots=True)
 class RecipeNode:
@@ -115,12 +121,11 @@ def _parse_node(value: object, where: str) -> RecipeNode:
         _parse_node(item, f"{where}.else[{index}]")
         for index, item in enumerate(else_raw)
     )
-    containers = {"sequence", "sweep", "repeat", "if"}
     if kind in {"sweep", "repeat"} and not children:
         raise ConfigurationError(f"{where}: {kind} requires at least one child.")
     if kind == "if" and not children and not else_children:
         raise ConfigurationError(f"{where}: if requires a children or else branch.")
-    if kind not in containers and children:
+    if kind not in CONTAINER_NODE_TYPES and children:
         raise ConfigurationError(f"{where}: action {kind} cannot have children.")
     if kind != "if" and else_children:
         raise ConfigurationError(f"{where}: only an if node can have an else branch.")

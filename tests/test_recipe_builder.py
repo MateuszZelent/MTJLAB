@@ -26,7 +26,7 @@ from qfluentwidgets import (
     SpinBox, TableWidget,
 )
 
-from app.recipes import RecipeNode, parse_recipe_text
+from app.recipes import RecipeNode, parse_recipe_text, wrap_recipe_nodes_in_repeat
 from app.engine.compiler import RecipeCompiler
 from app.devices.anritsu_ms2830a.ui import (
     AnritsuAdvancedSpectrumPanel,
@@ -1064,6 +1064,140 @@ root:
             )
         finally:
             tree.close()
+
+    def test_device_block_accepts_children_only_after_roi_loop_is_defined(self) -> None:
+        fixed = RecipeNode(
+            "device-fixed",
+            "sequence",
+            {"device_module": "keithley", "parameter_actions": []},
+        )
+        swept = RecipeNode(
+            "device-swept",
+            "sequence",
+            {
+                "device_module": "keithley",
+                "parameter_actions": [
+                    {"parameter": "source.level", "mode": "sweep", "segments": [{}]}
+                ],
+            },
+        )
+
+        self.assertFalse(RecipeTreeWidget.node_accepts_children(fixed))
+        self.assertTrue(RecipeTreeWidget.node_accepts_children(swept))
+
+    def test_drop_on_fixed_device_has_no_inside_destination(self) -> None:
+        tree = RecipeTreeWidget()
+        root = QTreeWidgetItem(["Root"])
+        fixed_item = QTreeWidgetItem(["Fixed device"])
+        root.setData(0, Qt.ItemDataRole.UserRole, RecipeNode("root", "sequence"))
+        fixed_item.setData(
+            0,
+            Qt.ItemDataRole.UserRole,
+            RecipeNode(
+                "fixed",
+                "sequence",
+                {"device_module": "keithley", "parameter_actions": []},
+            ),
+        )
+        root.addChild(fixed_item)
+        tree.addTopLevelItem(root)
+        with patch.object(
+            tree,
+            "dropIndicatorPosition",
+            return_value=QAbstractItemView.DropIndicatorPosition.OnItem,
+        ):
+            destination = tree._drop_destination(fixed_item)
+
+        self.assertEqual(destination, ("root", "children", 1))
+        self.assertNotEqual(destination.parent_id, "fixed")
+        tree.close()
+
+    def test_library_click_adds_after_selected_container_not_inside_it(self) -> None:
+        page = RecipePage(simulation_settings())
+        try:
+            page.new_recipe(confirm=False)
+            with patch("app.ui.recipes.page.QMessageBox.warning") as warning:
+                page._library_add_basic("sequence")
+            recipe = parse_recipe_text(page.editor.toPlainText())
+            group = recipe.root.children[-1]
+            page.tree.setCurrentItem(page._find_tree_item(group.id))
+
+            with patch("app.ui.recipes.page.QMessageBox.warning") as second_warning:
+                page._library_add_basic("wait")
+
+            warning.assert_not_called()
+            second_warning.assert_not_called()
+            updated = parse_recipe_text(page.editor.toPlainText())
+            self.assertEqual(updated.root.children[-2].id, group.id)
+            self.assertEqual(updated.root.children[-1].type, "wait")
+            self.assertEqual(len(updated.root.children[-2].children), 1)
+        finally:
+            page._close_discard_confirmed = True
+            page.close()
+
+    def test_explicit_library_inside_action_adds_to_selected_container(self) -> None:
+        page = RecipePage(simulation_settings())
+        try:
+            page.new_recipe(confirm=False)
+            page._library_add_basic("sequence")
+            group = parse_recipe_text(page.editor.toPlainText()).root.children[-1]
+            page.tree.setCurrentItem(page._find_tree_item(group.id))
+            page._library_force_inside = True
+            try:
+                page._library_add_basic("wait")
+            finally:
+                page._library_force_inside = False
+
+            updated_group = parse_recipe_text(page.editor.toPlainText()).root.children[-1]
+            self.assertEqual(updated_group.id, group.id)
+            self.assertEqual(updated_group.children[-1].type, "wait")
+        finally:
+            page._close_discard_confirmed = True
+            page.close()
+
+    def test_repeat_children_render_under_explicit_execution_branch(self) -> None:
+        page = RecipePage(simulation_settings())
+        try:
+            page.new_recipe(confirm=False)
+            with patch("app.ui.recipes.page.QMessageBox.warning") as warning:
+                page._library_add_basic("wait")
+            warning.assert_not_called()
+            wait = parse_recipe_text(page.editor.toPlainText()).root.children[-1]
+            page.tree.setCurrentItem(page._find_tree_item(wait.id))
+            source = wrap_recipe_nodes_in_repeat(
+                page.editor.toPlainText(),
+                node_ids=(wait.id,),
+                repeat_id="repeat-visual-contract",
+                count=3,
+            )
+            page._apply_builder_source(source, "Rendered repeat contract")
+            repeat_item = page._find_tree_item("repeat-visual-contract")
+            self.assertIsNotNone(repeat_item)
+            execution = next(
+                repeat_item.child(index)
+                for index in range(repeat_item.childCount())
+                if RecipeTreeWidget.structural_kind(repeat_item.child(index))
+                == RecipeTreeWidget.execution_container
+            )
+            self.assertEqual(execution.text(0), "Repeated steps × 3")
+            self.assertEqual(execution.child(0).data(0, Qt.ItemDataRole.UserRole).id, wait.id)
+        finally:
+            page._close_discard_confirmed = True
+            page.close()
+
+    def test_drag_instruction_is_visible_after_show_at_normal_and_narrow_width(self) -> None:
+        page = RecipePage(simulation_settings())
+        try:
+            for width in (1500, 860):
+                page.resize(width, 760)
+                page.show()
+                self.application.processEvents()
+                self.assertTrue(page.drag_feedback.isVisible())
+                self.assertFalse(page.drag_feedback.geometry().isEmpty())
+                self.assertIn("line inserts", page.drag_feedback.text().lower())
+        finally:
+            page._close_discard_confirmed = True
+            page.close()
 
     def test_logical_drop_index_ignores_projected_parameter_rows(self) -> None:
         parent = QTreeWidgetItem(["Device"])

@@ -592,8 +592,8 @@ class RecipePage(QWidget):
         self.tree.setAlternatingRowColors(True)
         self.tree.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
         self.tree.setToolTip(
-            "Drag a non-root node to reorder it or place it inside Sequence, Sweep, Repeat or If. "
-            "The YAML is re-parsed immediately; nodes cannot cross the finally boundary."
+            "Drop on a horizontal gap to reorder. Drop on a highlighted flow "
+            "container to add inside it. Actions and ROI rows never accept children."
         )
         self.builder_container = CardWidget()
         builder_layout = QVBoxLayout(self.builder_container)
@@ -604,7 +604,7 @@ class RecipePage(QWidget):
         self.workflow_tabs.addItem("yaml", "YAML source")
         builder_layout.addWidget(self.workflow_tabs)
         self.drag_feedback = CaptionLabel(
-            "Drag blocks between highlighted gaps; invalid targets are explained here.",
+            "A line inserts between steps; a highlighted container inserts inside it.",
             self.builder_container,
         )
         self.drag_feedback.setObjectName("muted")
@@ -826,6 +826,7 @@ class RecipePage(QWidget):
         self.library_search.setClearButtonEnabled(True)
         layout.addWidget(self.library_search)
         self._library_action_buttons: list[QWidget] = []
+        self._library_force_inside = False
 
         def group(title: str, badge: str) -> QVBoxLayout:
             group_frame = CardWidget(panel)
@@ -877,6 +878,13 @@ class RecipePage(QWidget):
                     self._invoke_library_action(label, command)
                 )
             )
+            if drag_kind is not None and not drag_kind.startswith("safety:"):
+                button.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
+                button.customContextMenuRequested.connect(
+                    lambda position, widget=button, command=callback, label=text: (
+                        self._show_library_action_menu(widget, position, label, command)
+                    )
+                )
             target_layout.addWidget(button)
             self._library_action_buttons.append(button)
 
@@ -902,7 +910,7 @@ class RecipePage(QWidget):
         action(
             devices,
             "Anritsu signal generator",
-            "Configure RF frequency or power; RF remains OFF until an explicit OUTPUT ON step",
+            "Configure RF frequency, power, and a plan-owned output lifecycle; safe default is RF OFF",
             "anritsu",
             QStyle.StandardPixmap.SP_ComputerIcon,
             lambda: self._library_add_device("anritsu_sg"),
@@ -1081,7 +1089,8 @@ class RecipePage(QWidget):
         )
         layout.addStretch(1)
         hint = BodyLabel(
-            "Drag a device or flow block into the measurement tree. "
+            "Click to add after the selected step, or drag to an exact gap. "
+            "Drop inside only when a flow container is highlighted. "
             "Every device block must be configured before validation; incomplete "
             "blocks are rejected without executing their children."
         )
@@ -1092,6 +1101,39 @@ class RecipePage(QWidget):
         self.library_search.textChanged.connect(self._filter_library_actions)
         scroll.setWidget(panel)
         return scroll
+
+    def _show_library_action_menu(
+        self, button: QWidget, position: object, label: str, callback: object
+    ) -> None:
+        menu = RoundMenu(parent=self)
+        add_after = QAction("Add after selected step", menu)
+        add_inside = QAction("Add inside selected flow container", menu)
+        current = self.tree.currentItem()
+        current_node = (
+            current.data(0, Qt.ItemDataRole.UserRole)
+            if current is not None
+            else None
+        )
+        add_inside.setEnabled(
+            isinstance(current_node, RecipeNode)
+            and RecipeTreeWidget.node_accepts_children(current_node)
+        )
+        add_after.triggered.connect(
+            lambda: self._invoke_library_action(label, callback)
+        )
+        add_inside.triggered.connect(
+            lambda: self._invoke_library_action_inside(label, callback)
+        )
+        menu.addAction(add_after)
+        menu.addAction(add_inside)
+        menu.exec(button.mapToGlobal(position))  # type: ignore[arg-type]
+
+    def _invoke_library_action_inside(self, label: str, callback: object) -> None:
+        self._library_force_inside = True
+        try:
+            self._invoke_library_action(label, callback)
+        finally:
+            self._library_force_inside = False
 
     def _invoke_library_action(self, label: str, callback: object) -> None:
         """Keep every library click inside a controlled UI error boundary."""
@@ -1123,7 +1165,7 @@ class RecipePage(QWidget):
             text = (
                 "Apply the YAML draft before moving blocks."
                 if self._yaml_draft_pending()
-                else "Drag blocks between highlighted gaps; invalid targets are explained here."
+                else "A line inserts between steps; a highlighted container inserts inside it."
             )
         self.drag_feedback.setText(text)
         self.drag_feedback.setProperty(
@@ -1171,6 +1213,8 @@ class RecipePage(QWidget):
         branch: str | None = None,
         index: int | None = None,
     ) -> None:
+        if parent_id is None or branch is None:
+            parent_id, branch, index = self._library_default_destination()
         self._add_basic_node(
             kind,
             parent_id=parent_id,
@@ -1269,7 +1313,7 @@ class RecipePage(QWidget):
     ) -> None:
         try:
             if parent_id is None or branch is None:
-                parent_id, branch = self._builder_parent()
+                parent_id, branch, index = self._library_default_destination()
             if parent_id == "__finally__":
                 raise ConfigurationError("OUTPUT ON cannot be added to Finally.")
             if device == "keithley":
@@ -1360,7 +1404,7 @@ class RecipePage(QWidget):
         if device not in labels:
             raise ConfigurationError(f"Unknown device module {device!r}.")
         if parent_id is None or branch is None:
-            parent_id, branch = self._builder_parent()
+            parent_id, branch, index = self._library_default_destination()
         if parent_id == "__finally__":
             QMessageBox.warning(
                 self,
@@ -2393,8 +2437,35 @@ class RecipePage(QWidget):
                 parent.addChild(item)
             self._add_operator_control_rows(node, item)
             self._add_native_sweep_roi_rows(node, item)
+            child_parent = item
+            if node.type in {"sweep", "repeat"} or (
+                node.data.get("device_module")
+                and RecipeTreeWidget.node_accepts_children(node)
+            ):
+                execution_label = (
+                    "For each ROI point"
+                    if node.type == "sweep" or node.data.get("device_module")
+                    else f"Repeated steps × {node.data.get('count', '?')}"
+                )
+                execution = QTreeWidgetItem(
+                    [execution_label, "Executable child steps", "FLOW"]
+                )
+                execution.setData(
+                    0,
+                    RecipeTreeWidget.structural_role,
+                    RecipeTreeWidget.execution_container,
+                )
+                execution.setFlags(
+                    execution.flags() & ~Qt.ItemFlag.ItemIsDragEnabled
+                )
+                execution.setToolTip(
+                    0,
+                    "Only blocks placed in this branch execute for every loop point.",
+                )
+                item.addChild(execution)
+                child_parent = execution
             for child in node.children:
-                add_node(child, item)
+                add_node(child, child_parent)
             if node.type == "if":
                 else_item = QTreeWidgetItem(["Else branch", "Conditional alternative", "●"])
                 else_item.setData(
@@ -2975,7 +3046,29 @@ class RecipePage(QWidget):
         detail = node.type.replace("_", " ")
         icon = QStyle.StandardPixmap.SP_FileIcon
         if node.type == "sequence" and not node.data.get("device_module"):
-            return "Measurement sequence", "Container", QStyle.StandardPixmap.SP_FileDialogDetailedView
+            if node.id == "sequence-main":
+                return (
+                    "Measurement sequence",
+                    "Runs top-level steps in order",
+                    QStyle.StandardPixmap.SP_FileDialogDetailedView,
+                )
+            return (
+                str(node.data.get("text") or "Sequence / group"),
+                "Runs child steps in order",
+                QStyle.StandardPixmap.SP_FileDialogDetailedView,
+            )
+        if node.type == "repeat":
+            return (
+                f"Repeat × {node.data.get('count', '?')}",
+                "Runs the nested branch repeatedly",
+                QStyle.StandardPixmap.SP_BrowserReload,
+            )
+        if node.type == "if":
+            return (
+                "If / Else",
+                "Chooses one conditional branch",
+                QStyle.StandardPixmap.SP_ArrowRight,
+            )
         if node.type == "sweep":
             target = str(node.data.get("target", ""))
             definition = next((item for item in _SWEEPABLE_PARAMETERS if item["target"] == target), None)
@@ -3712,6 +3805,47 @@ class RecipePage(QWidget):
             return node.id, "children"
         raise ConfigurationError("Load a valid recipe before editing its tree.")
 
+    def _library_default_destination(self) -> tuple[str, str, int]:
+        """Insert after the selection; never silently turn it into a child."""
+
+        self._builder_source()
+        current = self.tree.currentItem()
+        node = (
+            current.data(0, Qt.ItemDataRole.UserRole)
+            if current is not None
+            else None
+        )
+        root = self.tree.topLevelItem(0)
+        root_node = (
+            root.data(0, Qt.ItemDataRole.UserRole) if root is not None else None
+        )
+        if not isinstance(root_node, RecipeNode):
+            raise ConfigurationError("Load a valid recipe before editing its tree.")
+        if (
+            current is not None
+            and RecipeTreeWidget.structural_kind(current)
+            == RecipeTreeWidget.finally_container
+        ):
+            return "__finally__", "children", RecipeTreeWidget._logical_child_count(current)
+        if self._library_force_inside:
+            if not isinstance(node, RecipeNode) or not RecipeTreeWidget.node_accepts_children(node):
+                raise ConfigurationError(
+                    "Select Sequence, Repeat, Sweep, If, or an ROI loop before adding inside."
+                )
+            return node.id, "children", len(node.children)
+        if not isinstance(node, RecipeNode) or current is root:
+            return root_node.id, "children", RecipeTreeWidget._logical_child_count(root)
+        parent = current.parent()
+        destination = self._tree_parent_destination(parent)
+        if destination is None:
+            return root_node.id, "children", RecipeTreeWidget._logical_child_count(root)
+        parent_id, branch = destination
+        return (
+            parent_id,
+            branch,
+            RecipeTreeWidget._logical_index(parent, current, below=True),
+        )
+
     @staticmethod
     def _tree_parent_destination(
         parent: QTreeWidgetItem | None,
@@ -3730,6 +3864,14 @@ class RecipePage(QWidget):
             )
             if isinstance(owner, RecipeNode) and owner.type == "if":
                 return owner.id, "else"
+            return None
+        if (
+            structural == RecipeTreeWidget.execution_container
+            and parent.parent() is not None
+        ):
+            owner = parent.parent().data(0, Qt.ItemDataRole.UserRole)
+            if isinstance(owner, RecipeNode):
+                return owner.id, "children"
             return None
         owner = parent.data(0, Qt.ItemDataRole.UserRole)
         if isinstance(owner, RecipeNode):

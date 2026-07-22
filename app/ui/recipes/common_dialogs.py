@@ -4,9 +4,10 @@ from __future__ import annotations
 
 import json
 from dataclasses import dataclass
+from enum import Enum
 from typing import Any
 
-from PySide6.QtCore import QMimeData, Qt, Signal
+from PySide6.QtCore import QMimeData, QTimer, Qt, Signal
 from PySide6.QtGui import QDrag
 from PySide6.QtWidgets import (
     QAbstractItemView, QApplication, QFormLayout, QHBoxLayout,
@@ -27,7 +28,7 @@ from app.domain.quantities import (
     DIMENSION_VOLTAGE,
     parse_quantity,
 )
-from app.recipes import RecipeNode, generate_sweep_points
+from app.recipes import CONTAINER_NODE_TYPES, RecipeNode, generate_sweep_points
 from app.recipes.parameter_registry import SWEEPABLE_PARAMETERS as _SWEEPABLE_PARAMETERS
 from app.recipes.parameter_registry import sweep_default as _sweep_default
 from app.settings.models import StationSettings
@@ -44,6 +45,8 @@ __all__ = [
     "KeithleySweepBuilderDialog",
     "RepeatCountDialog",
     "RecipeTreeMoveRequest",
+    "RecipeDropDestination",
+    "RecipeDropPlacement",
     "RecipeTreeWidget",
     "SweepLibraryButton",
 ]
@@ -824,6 +827,50 @@ class SweepLibraryButton(PushButton):
             self._drag_start = None
 
 
+class RecipeDropPlacement(str, Enum):
+    BEFORE = "before"
+    AFTER = "after"
+    INSIDE = "inside"
+    ELSE = "else"
+    FINALLY = "finally"
+    ROOT_END = "root_end"
+
+
+@dataclass(slots=True, eq=False)
+class RecipeDropDestination:
+    """One explicit and operator-visible destination for a recipe edit."""
+
+    parent_id: str
+    branch: str
+    index: int
+    placement: RecipeDropPlacement
+    target_label: str = ""
+
+    def __iter__(self):
+        yield self.parent_id
+        yield self.branch
+        yield self.index
+
+    def __eq__(self, other: object) -> bool:
+        if isinstance(other, tuple):
+            return tuple(self) == other
+        if not isinstance(other, RecipeDropDestination):
+            return False
+        return (
+            self.parent_id,
+            self.branch,
+            self.index,
+            self.placement,
+            self.target_label,
+        ) == (
+            other.parent_id,
+            other.branch,
+            other.index,
+            other.placement,
+            other.target_label,
+        )
+
+
 @dataclass(slots=True)
 class RecipeTreeMoveRequest:
     """One synchronous, model-owned request to relocate a recipe node.
@@ -837,6 +884,7 @@ class RecipeTreeMoveRequest:
     destination_parent_id: str
     destination_branch: str
     destination_index: int
+    placement: RecipeDropPlacement | None = None
     accepted: bool = False
 
 
@@ -851,6 +899,7 @@ class RecipeTreeWidget(TreeWidget):
     structural_role = int(Qt.ItemDataRole.UserRole) + 41
     else_container = "else"
     finally_container = "finally"
+    execution_container = "execution"
 
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
@@ -863,6 +912,7 @@ class RecipeTreeWidget(TreeWidget):
         # indicator for external drags even when our handler accepts them.
         self.setDragDropMode(QAbstractItemView.DragDropMode.DragDrop)
         self.setDefaultDropAction(Qt.DropAction.MoveAction)
+        self._highlighted_drop_item: QTreeWidgetItem | None = None
 
     def startDrag(self, supported_actions: Any) -> None:
         """Pin the logical source before hover changes tree selection."""
@@ -922,18 +972,22 @@ class RecipeTreeWidget(TreeWidget):
             return
         destination = self._drop_destination_at(event.position().toPoint())
         if destination is None:
+            self._clear_drop_target()
             self.drag_status_changed.emit(
                 "Drop on a container or between real recipe blocks.", False
             )
             event.ignore()
             return
+        destination = self._coerce_destination(destination)
         destination_error = (
             self._internal_destination_error(destination) if internal_drag else None
         )
         if destination_error is not None:
+            self._clear_drop_target()
             self.drag_status_changed.emit(destination_error, False)
             event.ignore()
             return
+        self._show_drop_target(destination)
         destination_label = self._destination_label(destination)
         if internal_drag:
             source = self._find_node_item(self._dragged_node_id or "")
@@ -950,6 +1004,7 @@ class RecipeTreeWidget(TreeWidget):
 
     def dropEvent(self, event: Any) -> None:
         destination = self._drop_destination_at(event.position().toPoint())
+        self._clear_drop_target()
         if event.mimeData().hasFormat(self.library_mime_type):
             if destination is None:
                 self.drop_rejected.emit(
@@ -958,6 +1013,7 @@ class RecipeTreeWidget(TreeWidget):
                 self.drag_status_changed.emit("", True)
                 event.ignore()
                 return
+            destination = self._coerce_destination(destination)
             parent_id, branch, index = destination
             try:
                 kind = bytes(event.mimeData().data(self.library_mime_type)).decode(
@@ -991,12 +1047,14 @@ class RecipeTreeWidget(TreeWidget):
             self.drag_status_changed.emit("", True)
             event.ignore()
             return
+        destination = self._coerce_destination(destination)
         parent_id, branch, index = destination
         request = RecipeTreeMoveRequest(
             node_id=self._dragged_node_id,
             destination_parent_id=parent_id,
             destination_branch=branch,
             destination_index=index,
+            placement=destination.placement,
         )
         self.move_requested.emit(request)
         if not request.accepted:
@@ -1010,14 +1068,16 @@ class RecipeTreeWidget(TreeWidget):
             event.ignore()
             return
         self.drag_status_changed.emit("", True)
+        self._clear_drop_target()
         event.setDropAction(Qt.DropAction.MoveAction)
         event.accept()
 
     def dragLeaveEvent(self, event: Any) -> None:
         super().dragLeaveEvent(event)
+        self._clear_drop_target()
         self.drag_status_changed.emit("", True)
 
-    def _drop_destination_at(self, position: Any) -> tuple[str, str, int] | None:
+    def _drop_destination_at(self, position: Any) -> RecipeDropDestination | None:
         target = self.itemAt(position)
         if target is not None:
             return self._drop_destination(target)
@@ -1027,7 +1087,13 @@ class RecipeTreeWidget(TreeWidget):
             root.data(0, Qt.ItemDataRole.UserRole) if root is not None else None
         )
         if isinstance(root_node, RecipeNode):
-            return root_node.id, "children", self._logical_child_count(root)
+            return RecipeDropDestination(
+                root_node.id,
+                "children",
+                self._logical_child_count(root),
+                RecipeDropPlacement.ROOT_END,
+                root.text(0),
+            )
         return None
 
     @classmethod
@@ -1035,7 +1101,33 @@ class RecipeTreeWidget(TreeWidget):
         if item is None:
             return None
         value = item.data(0, cls.structural_role)
-        return str(value) if value in {cls.else_container, cls.finally_container} else None
+        return (
+            str(value)
+            if value in {
+                cls.else_container,
+                cls.finally_container,
+                cls.execution_container,
+            }
+            else None
+        )
+
+    @staticmethod
+    def node_accepts_children(node: RecipeNode) -> bool:
+        """Return whether the operator may intentionally nest execution here."""
+
+        if node.type not in CONTAINER_NODE_TYPES:
+            return False
+        if not node.data.get("device_module"):
+            return True
+        actions = node.data.get("parameter_actions", [])
+        return isinstance(actions, list) and any(
+            isinstance(action, dict)
+            and (
+                action.get("mode") == "sweep"
+                or bool(action.get("segments"))
+            )
+            for action in actions
+        )
 
     @classmethod
     def item_is_in_finally(cls, item: QTreeWidgetItem | None) -> bool:
@@ -1064,12 +1156,12 @@ class RecipeTreeWidget(TreeWidget):
         return None
 
     def _internal_destination_allowed(
-        self, destination: tuple[str, str, int]
+        self, destination: RecipeDropDestination | tuple[str, str, int]
     ) -> bool:
         return self._internal_destination_error(destination) is None
 
     def _internal_destination_error(
-        self, destination: tuple[str, str, int]
+        self, destination: RecipeDropDestination | tuple[str, str, int]
     ) -> str | None:
         if self._dragged_node_id is None:
             return "The dragged recipe block is no longer available."
@@ -1093,25 +1185,60 @@ class RecipeTreeWidget(TreeWidget):
             current = current.parent()
         return None
 
-    def _destination_label(self, destination: tuple[str, str, int]) -> str:
+    def _destination_label(
+        self, destination: RecipeDropDestination | tuple[str, str, int]
+    ) -> str:
+        destination = self._coerce_destination(destination)
         parent_id, branch, index = destination
         if parent_id == "__finally__":
             parent_label = "Finally"
         else:
             parent = self._find_node_item(parent_id)
             parent_label = parent.text(0) if parent is not None else parent_id
-        branch_label = "Else" if branch == "else" else parent_label
-        return f"{branch_label}, position {index + 1}"
+        if destination.placement == RecipeDropPlacement.INSIDE:
+            return f"inside {parent_label}, as step {index + 1}"
+        if destination.placement == RecipeDropPlacement.ELSE:
+            return f"inside Else, as step {index + 1}"
+        if destination.placement == RecipeDropPlacement.FINALLY:
+            return f"inside Finally, as step {index + 1}"
+        if destination.placement == RecipeDropPlacement.ROOT_END:
+            return f"at the end of {parent_label}"
+        relation = (
+            "before"
+            if destination.placement == RecipeDropPlacement.BEFORE
+            else "after"
+        )
+        return f"{relation} {destination.target_label or parent_label}"
 
-    def _drop_destination(self, target: QTreeWidgetItem) -> tuple[str, str, int] | None:
+    def _drop_destination(self, target: QTreeWidgetItem) -> RecipeDropDestination | None:
         indicator = self.dropIndicatorPosition()
         target_node = target.data(0, Qt.ItemDataRole.UserRole)
         if (
             indicator == QAbstractItemView.DropIndicatorPosition.OnItem
             and isinstance(target_node, RecipeNode)
-            and target_node.type in {"sequence", "sweep", "repeat", "if"}
+            and self.node_accepts_children(target_node)
         ):
-            return target_node.id, "children", self._logical_child_count(target)
+            return RecipeDropDestination(
+                target_node.id,
+                "children",
+                self._logical_child_count(target),
+                RecipeDropPlacement.INSIDE,
+                target.text(0),
+            )
+        if (
+            indicator == QAbstractItemView.DropIndicatorPosition.OnItem
+            and self.structural_kind(target) == self.execution_container
+            and target.parent() is not None
+        ):
+            parent_node = target.parent().data(0, Qt.ItemDataRole.UserRole)
+            if isinstance(parent_node, RecipeNode) and self.node_accepts_children(parent_node):
+                return RecipeDropDestination(
+                    parent_node.id,
+                    "children",
+                    self._logical_child_count(target),
+                    RecipeDropPlacement.INSIDE,
+                    target.text(0),
+                )
         if (
             indicator == QAbstractItemView.DropIndicatorPosition.OnItem
             and self.structural_kind(target) == self.else_container
@@ -1119,12 +1246,24 @@ class RecipeTreeWidget(TreeWidget):
         ):
             parent_node = target.parent().data(0, Qt.ItemDataRole.UserRole)
             if isinstance(parent_node, RecipeNode) and parent_node.type == "if":
-                return parent_node.id, "else", self._logical_child_count(target)
+                return RecipeDropDestination(
+                    parent_node.id,
+                    "else",
+                    self._logical_child_count(target),
+                    RecipeDropPlacement.ELSE,
+                    target.text(0),
+                )
         if (
             indicator == QAbstractItemView.DropIndicatorPosition.OnItem
             and self.structural_kind(target) == self.finally_container
         ):
-            return "__finally__", "children", self._logical_child_count(target)
+            return RecipeDropDestination(
+                "__finally__",
+                "children",
+                self._logical_child_count(target),
+                RecipeDropPlacement.FINALLY,
+                target.text(0),
+            )
 
         # Parameter/ROI rows are projections of a node, not recipe nodes.
         # Accepting a drop relative to them produces an index that has no YAML
@@ -1145,15 +1284,115 @@ class RecipeTreeWidget(TreeWidget):
             },
         )
         if self.structural_kind(parent) == self.finally_container:
-            return "__finally__", "children", index
+            return RecipeDropDestination(
+                "__finally__",
+                "children",
+                index,
+                self._relative_placement(indicator),
+                target.text(0),
+            )
         if (
             self.structural_kind(parent) == self.else_container
             and parent.parent() is not None
         ):
             owner = parent.parent().data(0, Qt.ItemDataRole.UserRole)
-            return (owner.id, "else", index) if isinstance(owner, RecipeNode) else None
+            return (
+                RecipeDropDestination(
+                    owner.id,
+                    "else",
+                    index,
+                    self._relative_placement(indicator),
+                    target.text(0),
+                )
+                if isinstance(owner, RecipeNode)
+                else None
+            )
+        if (
+            self.structural_kind(parent) == self.execution_container
+            and parent.parent() is not None
+        ):
+            owner = parent.parent().data(0, Qt.ItemDataRole.UserRole)
+            return (
+                RecipeDropDestination(
+                    owner.id,
+                    "children",
+                    index,
+                    self._relative_placement(indicator),
+                    target.text(0),
+                )
+                if isinstance(owner, RecipeNode)
+                else None
+            )
         owner = parent.data(0, Qt.ItemDataRole.UserRole)
-        return (owner.id, "children", index) if isinstance(owner, RecipeNode) else None
+        return (
+            RecipeDropDestination(
+                owner.id,
+                "children",
+                index,
+                self._relative_placement(indicator),
+                target.text(0),
+            )
+            if isinstance(owner, RecipeNode)
+            else None
+        )
+
+    @staticmethod
+    def _relative_placement(indicator: Any) -> RecipeDropPlacement:
+        return (
+            RecipeDropPlacement.BEFORE
+            if indicator == QAbstractItemView.DropIndicatorPosition.AboveItem
+            else RecipeDropPlacement.AFTER
+        )
+
+    @staticmethod
+    def _coerce_destination(
+        destination: RecipeDropDestination | tuple[str, str, int],
+    ) -> RecipeDropDestination:
+        if isinstance(destination, RecipeDropDestination):
+            return destination
+        parent_id, branch, index = destination
+        placement = (
+            RecipeDropPlacement.FINALLY
+            if parent_id == "__finally__"
+            else RecipeDropPlacement.ELSE
+            if branch == "else"
+            else RecipeDropPlacement.INSIDE
+        )
+        return RecipeDropDestination(parent_id, branch, index, placement)
+
+    def _show_drop_target(self, destination: RecipeDropDestination) -> None:
+        self._clear_drop_target()
+        if destination.placement not in {
+            RecipeDropPlacement.INSIDE,
+            RecipeDropPlacement.ELSE,
+            RecipeDropPlacement.FINALLY,
+        }:
+            return
+        item = (
+            self.topLevelItem(self.topLevelItemCount() - 1)
+            if destination.parent_id == "__finally__"
+            else self._find_node_item(destination.parent_id)
+        )
+        if item is None:
+            return
+        self._highlighted_drop_item = item
+        color = self.palette().highlight().color().lighter(165)
+        for column in range(self.columnCount()):
+            item.setBackground(column, color)
+        if not item.isExpanded():
+            QTimer.singleShot(450, lambda candidate=item: self._expand_hovered(candidate))
+
+    def _expand_hovered(self, candidate: QTreeWidgetItem) -> None:
+        if candidate is self._highlighted_drop_item:
+            candidate.setExpanded(True)
+
+    def _clear_drop_target(self) -> None:
+        item = self._highlighted_drop_item
+        if item is None:
+            return
+        for column in range(self.columnCount()):
+            item.setData(column, Qt.ItemDataRole.BackgroundRole, None)
+        self._highlighted_drop_item = None
 
     @staticmethod
     def _logical_child_count(parent: QTreeWidgetItem) -> int:

@@ -1277,8 +1277,10 @@ class RecipeCompiler:
     ) -> None:
         """Compile a complete Anritsu SG snapshot and one optional local axis.
 
-        ``configure_anritsu_sg`` always leaves RF disabled. Energisation remains
-        an explicit OUTPUT ON child action and is revalidated for every point.
+        Full configuration always happens with RF disabled. The node's output
+        policy may then enable RF for the block, keep plan-confirmed RF enabled,
+        or continue an already confirmed live sweep without adopting external
+        instrument state.
         """
 
         if is_finally:
