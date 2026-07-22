@@ -162,7 +162,7 @@ class StationMessageBox:
         buttons: QtMessageBox.StandardButton = StandardButton.Ok,
         defaultButton: QtMessageBox.StandardButton = StandardButton.NoButton,
     ) -> QtMessageBox.StandardButton:
-        return cls._show(parent, title, text, buttons, defaultButton)
+        return cls._show(parent, title, text, buttons, defaultButton, offer_settings=True)
 
     @classmethod
     def warning(
@@ -173,7 +173,7 @@ class StationMessageBox:
         buttons: QtMessageBox.StandardButton = StandardButton.Ok,
         defaultButton: QtMessageBox.StandardButton = StandardButton.NoButton,
     ) -> QtMessageBox.StandardButton:
-        return cls._show(parent, title, text, buttons, defaultButton)
+        return cls._show(parent, title, text, buttons, defaultButton, offer_settings=True)
 
     @classmethod
     def critical(
@@ -184,7 +184,7 @@ class StationMessageBox:
         buttons: QtMessageBox.StandardButton = StandardButton.Ok,
         defaultButton: QtMessageBox.StandardButton = StandardButton.NoButton,
     ) -> QtMessageBox.StandardButton:
-        return cls._show(parent, title, text, buttons, defaultButton)
+        return cls._show(parent, title, text, buttons, defaultButton, offer_settings=True)
 
     @classmethod
     def question(
@@ -207,7 +207,23 @@ class StationMessageBox:
         text: str,
         buttons: QtMessageBox.StandardButton,
         default_button: QtMessageBox.StandardButton,
+        *,
+        offer_settings: bool = False,
     ) -> QtMessageBox.StandardButton:
+        if offer_settings:
+            from app.ui.settings_guidance import settings_issue_for_error
+
+            issue = settings_issue_for_error(text)
+            owner = parent
+            while owner is not None and not callable(
+                getattr(owner, "_open_settings_issue", None)
+            ):
+                owner = owner.parentWidget()
+            if issue is not None and owner is not None:
+                dialog = StationSettingsGuidanceDialog(parent, title, text)
+                if dialog.exec() == QDialog.DialogCode.Accepted:
+                    owner._open_settings_issue(issue)  # type: ignore[attr-defined]
+                return cls.StandardButton.Ok
         available = tuple(
             button
             for button in (

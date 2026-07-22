@@ -106,7 +106,9 @@ def settings_issue_for_error(error: Exception | str) -> SettingsIssue | None:
             field
             for marker, field in (
                 ("source current", "source_current"),
+                ("current level", "source_current"),
                 ("source voltage", "source_voltage"),
+                ("voltage level", "source_voltage"),
                 ("voltage compliance", "voltage_compliance"),
                 ("current compliance", "current_compliance"),
                 ("measured current", "measured_current_trip"),
@@ -153,7 +155,9 @@ def settings_issue_for_error(error: Exception | str) -> SettingsIssue | None:
         ),
         None,
     )
-    if rigol_field is not None and "configured" in normalized:
+    if rigol_field is not None and any(
+        marker in normalized for marker in ("configured", "station range")
+    ):
         channel_match = re.search(r"(?:ch|channel\s*)([12])", normalized)
         channels = (channel_match.group(1),) if channel_match else ("1", "2")
         return SettingsIssue(

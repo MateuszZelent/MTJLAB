@@ -1725,13 +1725,17 @@ class SettingsPage(QWidget):
         ]
         marked_editor: QWidget | None = None
         if candidates:
-            matched = max(candidates, key=len)
-            editor = self._form_editors[matched]
-            self._set_validation_state(editor, "error")
-            label = self._field_errors[matched]
-            label.setText(message)
-            label.show()
-            marked_editor = editor
+            longest = max(len(candidate) for candidate in candidates)
+            for matched in (
+                candidate for candidate in candidates if len(candidate) == longest
+            ):
+                editor = self._form_editors[matched]
+                self._set_validation_state(editor, "error")
+                label = self._field_errors[matched]
+                label.setText(message)
+                label.show()
+                if marked_editor is None:
+                    marked_editor = editor
         for limit_path, item in self._limit_items_by_path.items():
             if (
                 tuple(path[: len(limit_path)]) == limit_path

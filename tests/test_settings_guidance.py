@@ -1,12 +1,14 @@
 from __future__ import annotations
 
 import os
+from unittest.mock import patch
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
-from PySide6.QtWidgets import QApplication
+from PySide6.QtWidgets import QApplication, QDialog
 
 from app.ui.shell import MainWindow
+from app.ui.dialogs import StationMessageBox
 from app.ui.settings_guidance import recipe_dut_issue_for_error, settings_issue_for_error
 
 
@@ -44,6 +46,61 @@ def test_missing_keithley_dut_limits_route_to_recipe_channel() -> None:
     assert issue is not None
     assert issue.device == "keithley"
     assert issue.channel == "B"
+
+
+def test_keithley_station_limit_identifies_exact_channel_and_range() -> None:
+    issue = settings_issue_for_error(
+        "node-1: Keithley B current level 0.02 SI is outside the station range [-0.01, 0.01]."
+    )
+
+    assert issue is not None
+    assert issue.paths == (
+        (
+            "devices",
+            "keithley",
+            "safety",
+            "channels",
+            "B",
+            "lab_limits",
+            "source_current",
+        ),
+    )
+
+
+def test_shared_message_box_routes_limit_failure_to_settings() -> None:
+    application = QApplication.instance() or QApplication([])
+    window = MainWindow(".config/settings.yml", simulation=True)
+    try:
+        window.resize(1440, 900)
+        window.show()
+        application.processEvents()
+        with patch(
+            "app.ui.dialogs.StationSettingsGuidanceDialog"
+        ) as guidance_dialog:
+            guidance_dialog.return_value.exec.return_value = QDialog.DialogCode.Accepted
+            StationMessageBox.warning(
+                window.keithley_page,
+                "Keithley",
+                "node-1: Keithley B current level 0.02 SI is outside the station "
+                "range [-0.01, 0.01].",
+            )
+        application.processEvents()
+
+        path = (
+            "devices",
+            "keithley",
+            "safety",
+            "channels",
+            "B",
+            "lab_limits",
+            "source_current",
+            "min",
+        )
+        assert window._current_route() == "settings"
+        assert window.settings_page._form_editors[path].property("validationState") == "error"
+    finally:
+        window.close()
+        application.processEvents()
 
 
 def test_settings_link_opens_anritsu_and_renders_highlighted_fields() -> None:
