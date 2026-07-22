@@ -899,6 +899,37 @@ class MainWindowTests(unittest.TestCase):
             window.close()
             self.application.processEvents()
 
+    def test_hardware_run_asks_before_connecting_required_sweep_devices(self) -> None:
+        window = MainWindow(".config/settings.yml", simulation=True)
+        try:
+            window._simulation = False
+            plan = ExecutionPlan(
+                recipe_name="connection-consent",
+                actions=(),
+                total_points=0,
+                sha256="connection-consent",
+                recipe_source="schema_version: 1\nname: connection-consent\n",
+                required_devices=frozenset({"anritsu", "keithley"}),
+            )
+            with patch(
+                "app.ui.shell.main_window.QMessageBox.action_guidance",
+                return_value=False,
+            ) as guidance:
+                accepted = window._confirm_run_engine_connections(plan)
+
+            self.assertFalse(accepted)
+            guidance.assert_called_once()
+            title = guidance.call_args.args[1]
+            message = guidance.call_args.args[2]
+            self.assertEqual(title, "Connect devices for Sweep")
+            self.assertIn("Anritsu MS2830A", message)
+            self.assertIn("Keithley 2600", message)
+            self.assertIn("does not enable any output", message)
+            self.assertEqual(guidance.call_args.args[3], "Connect and run")
+        finally:
+            window.close()
+            self.application.processEvents()
+
     def test_each_device_and_spectrum_analysis_have_distinct_background_threads(self) -> None:
         window = MainWindow(".config/settings.yml", simulation=True)
         device_threads = [controller._thread for controller in window._controllers.values()]

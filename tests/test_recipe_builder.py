@@ -1766,6 +1766,7 @@ root:
             page._node_selected(item, None)
             self.assertTrue(page.open_editor_button.isEnabled())
         finally:
+            page._close_discard_confirmed = True
             page.close()
 
     def test_acquire_once_is_a_separate_draggable_library_block(self) -> None:

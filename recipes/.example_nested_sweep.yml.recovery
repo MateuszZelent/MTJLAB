@@ -55,7 +55,7 @@ root:
         type: acquire_spectrum
         trace: TRAC1
 
-  - id: anritsu-spectrum-0038ab34
+  - id: anritsu-spectrum-6770d940
     type: sequence
     text: Anritsu Spectrum · 0 parameter(s) · settings only
     device_module: anritsu

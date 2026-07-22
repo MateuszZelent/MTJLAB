@@ -1174,6 +1174,37 @@ class MainWindow(FluentWindow):
                 "The durable audit log is unavailable. A measurement run cannot start."
             )
 
+    def _confirm_run_engine_connections(self, plan: object) -> bool:
+        """Obtain consent before the run worker opens its hardware sessions."""
+
+        if self._simulation:
+            return True
+        required = sorted(set(getattr(plan, "required_devices", ()) or ()))
+        if not required:
+            return True
+        display_names = {
+            "rigol": "Rigol DG1032Z",
+            "keithley": "Keithley 2600",
+            "anritsu": "Anritsu MS2830A",
+            "moke_box": "MOKE Box",
+            "lakeshore_gaussmeter": "Lake Shore 475",
+        }
+        devices = "\n".join(
+            f"• {display_names.get(device, device)}" for device in required
+        )
+        return QMessageBox.action_guidance(
+            self,
+            "Connect devices for Sweep",
+            "The Sweep requires the following instruments:\n\n"
+            f"{devices}\n\n"
+            "Run Engine will open and verify its own connections. Manual-control "
+            "sessions remain disconnected. It may also verify configured source "
+            "devices so station-wide safe shutdown can be confirmed. Connecting "
+            "does not enable any output; output actions still require the normal "
+            "safety checks.",
+            "Connect and run",
+        )
+
     def _start_run(
         self,
         plan: object,
@@ -1201,6 +1232,9 @@ class MainWindow(FluentWindow):
                 "Disconnect manual control",
                 "Run Engine opens its own VISA sessions. Disconnect first: " + ", ".join(connected) + ".",
             )
+            return
+        if not self._confirm_run_engine_connections(plan):
+            self._log("Run cancelled before connecting required devices")
             return
         try:
             estimate = PlanEstimator(self._settings).estimate(plan)  # type: ignore[arg-type]
