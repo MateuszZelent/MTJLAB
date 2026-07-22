@@ -2867,6 +2867,42 @@ class MainWindowTests(unittest.TestCase):
             window.close()
             self.application.processEvents()
 
+    def test_anritsu_read_once_requests_a_fresh_sweep_after_each_result(self) -> None:
+        window = MainWindow(".config/settings.yml", simulation=True)
+        try:
+            anritsu = window.anritsu_page
+            anritsu._controller.call = Mock()
+            first = SpectrumTrace(
+                (1e6, 2e6), (-50.0, -40.0), datetime.now(timezone.utc), "TRAC1"
+            )
+            second = SpectrumTrace(
+                (3e6, 4e6), (-30.0, -20.0), datetime.now(timezone.utc), "TRAC1"
+            )
+
+            anritsu.read_once()
+
+            anritsu._controller.call.assert_called_once_with("single_sweep", "TRAC1")
+            self.assertTrue(anritsu._fetch_pending)
+            anritsu._result("single_sweep", first)
+            self.assertIs(anritsu._latest_trace, first)
+            self.assertFalse(anritsu._fetch_pending)
+
+            anritsu._controller.call.reset_mock()
+            anritsu.read_once()
+
+            anritsu._controller.call.assert_called_once_with("single_sweep", "TRAC1")
+            anritsu._result("single_sweep", second)
+            self.assertIs(anritsu._latest_trace, second)
+            self.assertEqual(
+                anritsu.spectrum_plot._traces["Raw"][0].tolist(), [3e6, 4e6]
+            )
+            self.assertEqual(
+                anritsu.spectrum_plot._traces["Raw"][1].tolist(), [-30.0, -20.0]
+            )
+        finally:
+            window.close()
+            self.application.processEvents()
+
     def test_keithley_apply_settings_rejects_invalid_units_before_dispatch(self) -> None:
         window = MainWindow(".config/settings.yml", simulation=True)
         try:
@@ -3946,6 +3982,58 @@ class MainWindowTests(unittest.TestCase):
         finally:
             window.close()
             self.application.processEvents()
+
+    def test_global_save_uses_one_yaml_transaction_and_no_adapter_rebuild(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            path = Path(temporary) / "settings.yml"
+            write_engineer_settings(path)
+            window = MainWindow(
+                path, simulation=False, authenticated_username=TEST_ENGINEER
+            )
+            try:
+                for controller in window._controllers.values():
+                    controller.call = Mock()
+                    controller.reconfigure = Mock()
+
+                window.rigol_page.frequency.setText("2 kHz")
+                window.anritsu_page.average_count.setValue(123)
+                window.keithley_page.channel.setCurrentText("B")
+                window.keithley_page.nplc.setText("2")
+                window.settings_page._raw["devices"]["keithley"]["safety"][
+                    "channels"
+                ]["B"]["lab_limits"]["source_current"]["max"] = "9 mA"
+                window.settings_page._dirty = True
+
+                with patch.object(
+                    window._repository,
+                    "save_raw",
+                    wraps=window._repository.save_raw,
+                ) as save_raw:
+                    window._save_all_settings()
+
+                self.assertEqual(save_raw.call_count, 1)
+                self.assertFalse(window._keithley_defaults_in_flight)
+                for controller in window._controllers.values():
+                    controller.reconfigure.assert_not_called()
+                window._controllers["keithley"].call.assert_called_with(
+                    "apply_limit_settings", window._settings
+                )
+                persisted = SettingsRepository(path).load().settings
+                self.assertEqual(
+                    persisted.rigol.safety.channels["1"].defaults["frequency"],
+                    "2 kHz",
+                )
+                self.assertEqual(
+                    persisted.anritsu.acquisition.application_average_count,
+                    123,
+                )
+                self.assertEqual(
+                    persisted.keithley.safety.channels["B"].defaults["nplc"],
+                    2.0,
+                )
+            finally:
+                window.close()
+                self.application.processEvents()
 
     def test_limit_edit_button_opens_popup_and_stages_the_range(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:

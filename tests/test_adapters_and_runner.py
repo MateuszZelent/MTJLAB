@@ -1617,7 +1617,7 @@ class AdapterAndRunnerTests(unittest.TestCase):
         cases = (
             ("current", "0.02\t0.01", "measured current"),
             ("voltage", "0.001\t0.2", "measured voltage"),
-            ("power", "0.002\t0.06", "DUT power"),
+            ("power", "0.002\t0.06", "Measured power"),
         )
         for label, response, message in cases:
             with self.subTest(boundary=label):

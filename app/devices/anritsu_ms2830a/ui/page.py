@@ -915,7 +915,7 @@ class AnritsuPage(QWidget):
         self.read_configuration = PushButton("Read from instrument")
         self.read_and_save_configuration = PushButton("Read all & save defaults")
         self.configure_button = PrimaryPushButton("Apply configuration")
-        self.single = PushButton("Read current spectrum")
+        self.single = PushButton("Acquire fresh spectrum")
         self.live = PrimaryPushButton("Start Live")
         self.abort_button = PushButton("Abort acquisition")
         self.abort_button.setObjectName("warningButton")
@@ -1219,7 +1219,7 @@ class AnritsuPage(QWidget):
         help_items = {
             self.read_configuration: "Read Start, Stop, Reference level, and Points from the connected analyser. This sends query commands only and never changes the instrument or configured safety limits.",
             self.read_and_save_configuration: "Read the current basic and advanced Spectrum settings using query commands, preview them, then save them as settings.yml defaults. No instrument setting or safety limit is changed.",
-            self.single: "Read the currently displayed TRAC1 spectrum using SCPI queries only. This does not configure or trigger the analyser.",
+            self.single: "Trigger one qualified analyser sweep, wait for completion, then read a fresh TRAC1 spectrum directly from the instrument.",
             self.average_count: "Number of complete spectra to average. 200 is common in the Thatec workflow. Averaging is performed in linear mW, not directly in dBm.",
             self.acquire_average: "Passively read N traces at the Live refresh interval and average power in linear mW. No analyser setting or trigger mode is changed.",
             self.cancel_average: "Stop temporal averaging. Already collected temporary frames are discarded; completed raw/reference data are unchanged.",
@@ -2025,7 +2025,22 @@ class AnritsuPage(QWidget):
     def read_once(self) -> None:
         if self._page_state not in {AnritsuPageState.IDLE, AnritsuPageState.ERROR}:
             return
-        self._request_trace()
+        if not self._single_sweep_configured:
+            QMessageBox.warning(
+                self,
+                "Fresh spectrum",
+                "A fresh spectrum requires the qualified single-sweep protocol. "
+                "Enable the qualified protocol in the Anritsu acquisition profile "
+                "or use Live acquisition.",
+            )
+            return
+        if self._fetch_pending:
+            return
+        self._fetch_pending = True
+        self._fetch_started_monotonic = time.monotonic()
+        self.info.setText("Acquiring one fresh spectrum from the instrument...")
+        self.status.emit("Anritsu fresh single-sweep acquisition started")
+        self._controller.call("single_sweep", "TRAC1")
 
     def _request_trace(self) -> bool:
         if self._fetch_pending:

@@ -1542,19 +1542,38 @@ class MainWindow(FluentWindow):
 
     def _settings_saved(self, settings: StationSettings) -> None:
         previous_settings = self._settings
-        self._apply_settings_to_ui(settings)
+        updated_settings = (
+            simulated_station_settings(settings) if self._simulation else settings
+        )
+        changes_by_device = {
+            name: self._setting_changes(
+                getattr(previous_settings.devices, name).model_dump(mode="python"),
+                getattr(updated_settings.devices, name).model_dump(mode="python"),
+            )
+            for name in self._controllers
+        }
+        changed_devices = {
+            name for name, changes in changes_by_device.items() if changes
+        }
+        self._apply_settings_to_ui(settings, changed_devices=changed_devices)
 
         for name, controller in self._controllers.items():
-            previous_device = getattr(previous_settings.devices, name)
-            updated_device = getattr(self._settings.devices, name)
-            changes = self._setting_changes(
-                previous_device.model_dump(mode="python"),
-                updated_device.model_dump(mode="python"),
-            )
+            changes = changes_by_device[name]
             if not changes:
                 controller.call("refresh_station_context", self._settings)
                 continue
-            if all(path and path[-1] in {"min", "max", "max_abs"} for path in changes):
+            operational_changes = {
+                path
+                for path in changes
+                if not self._is_non_operational_device_preference(name, path)
+            }
+            if not operational_changes:
+                controller.call("refresh_station_context", self._settings)
+                continue
+            if all(
+                path and path[-1] in {"min", "max", "max_abs"}
+                for path in operational_changes
+            ):
                 self._pending_limit_rollbacks.setdefault(name, previous_settings)
                 controller.call("apply_limit_settings", self._settings)
                 self._log(
@@ -1578,18 +1597,56 @@ class MainWindow(FluentWindow):
             "only connection, identity, driver or other operational changes replaced adapters."
         )
 
-    def _apply_settings_to_ui(self, settings: StationSettings) -> None:
+    @staticmethod
+    def _is_non_operational_device_preference(
+        device: str, path: tuple[str, ...]
+    ) -> bool:
+        if device in {"rigol", "keithley"} and "defaults" in path:
+            return True
+        if device == "anritsu":
+            if path[:2] == ("safety", "defaults"):
+                return True
+            if path in {
+                ("signal_generator", "default_frequency"),
+                ("signal_generator", "default_power"),
+                ("acquisition", "application_average_count"),
+                ("acquisition", "live_refresh_interval"),
+            }:
+                return True
+        return (
+            device == "moke_box"
+            and path
+            and path[0]
+            in {"live_interval", "plot_refresh_interval", "history_window"}
+        ) or (
+            device == "lakeshore_gaussmeter"
+            and path == ("live_interval",)
+        )
+
+    def _apply_settings_to_ui(
+        self,
+        settings: StationSettings,
+        *,
+        changed_devices: set[str] | None = None,
+    ) -> None:
         """Update every visible settings consumer without dispatching device work."""
 
         self._settings = simulated_station_settings(settings) if self._simulation else settings
         self.quick_control_coordinator.set_settings(self._settings)
         self.dashboard.update_settings(self._settings)
-        self.rigol_page.set_settings(self._settings)
-        self.keithley_page.set_settings(self._settings)
-        self.anritsu_page.set_settings(self._settings)
-        self.moke_box_page.set_settings(self._settings)
-        self.lakeshore_gaussmeter_page.set_settings(self._settings)
+        pages = {
+            "rigol": self.rigol_page,
+            "keithley": self.keithley_page,
+            "anritsu": self.anritsu_page,
+            "moke_box": self.moke_box_page,
+            "lakeshore_gaussmeter": self.lakeshore_gaussmeter_page,
+        }
+        for name, page in pages.items():
+            if changed_devices is None or name in changed_devices:
+                page.set_settings(self._settings)
         for name, panel in self.connection_panels.items():
+            if changed_devices is not None and name not in changed_devices:
+                continue
             resource, backend = self._device_connection_details(self._settings, name)
             panel.update_resource(resource, backend)
         self.recipe_page.set_settings(self._settings)
@@ -2024,7 +2081,7 @@ class MainWindow(FluentWindow):
         return True
 
     def _save_all_settings(self) -> None:
-        """Persist the Settings draft and staged device defaults on demand."""
+        """Persist Settings and every device form in one atomic transaction."""
 
         if self._keithley_defaults_in_flight:
             self._log("SAVE SETTINGS ignored: a settings write is already running")
@@ -2057,36 +2114,74 @@ class MainWindow(FluentWindow):
             QMessageBox.critical(self, "Settings not saved", str(exc))
             self._log(f"SAVE SETTINGS CAPTURE FAILED: {type(exc).__name__}: {exc}")
             return
-        if not self.settings_page.save_draft():
-            return
-        if not self._save_rigol_form_defaults(rigol_defaults):
-            return
-        if not self._save_anritsu_form_defaults(anritsu_defaults):
-            return
-        if not self._save_lakeshore_form_defaults(lakeshore_interval_ms):
-            return
-        if not self._save_moke_form_defaults(moke_defaults):
-            return
-        if not self._stage_current_keithley_forms_if_changed(keithley_snapshots):
-            return
-        pending = self._pending_keithley_defaults
-        if pending is None:
-            self._log("SAVE SETTINGS: settings.yml is current")
-            self.safety_strip.save_settings.setText("SAVED")
-            QTimer.singleShot(
-                1_500,
-                lambda: self.safety_strip.save_settings.setText("SAVE SETTINGS"),
-            )
-            return
-        _generation, payload = pending
+
         try:
-            validate_keithley_default_snapshots(self._settings, payload)
+            keithley_payload = self._keithley_snapshot_payload(keithley_snapshots)
         except (ConfigurationError, SafetyViolation, KeyError, TypeError, ValueError) as exc:
             QMessageBox.critical(self, "Keithley settings not saved", str(exc))
             self.keithley_page.banner.show_message(f"Keithley settings not saved: {exc}")
             self._log(f"SAVE SETTINGS REJECTED: {type(exc).__name__}: {exc}")
             return
-        self._start_keithley_defaults_save()
+
+        def merge_device_forms(raw: dict[str, Any]) -> None:
+            for channel, payload in rigol_defaults.items():
+                defaults = raw["devices"]["rigol"]["safety"]["channels"][
+                    str(channel)
+                ]["defaults"]
+                defaults.clear()
+                defaults.update(deepcopy(payload))
+
+            snapshot, advanced, signal_generator, average_count, refresh_ms = (
+                anritsu_defaults
+            )
+            self._update_anritsu_defaults(raw, snapshot, advanced)
+            generator = raw["devices"]["anritsu"]["signal_generator"]
+            generator["default_frequency"] = format_quantity_auto(
+                signal_generator.frequency_hz, DIMENSION_FREQUENCY
+            )
+            generator["default_power"] = f"{signal_generator.power_dbm:.9g} dBm"
+            acquisition = raw["devices"]["anritsu"]["acquisition"]
+            acquisition["application_average_count"] = average_count
+            acquisition["live_refresh_interval"] = format_quantity_auto(
+                refresh_ms / 1000, DIMENSION_TIME
+            )
+
+            raw["devices"]["lakeshore_gaussmeter"]["live_interval"] = (
+                format_quantity_auto(lakeshore_interval_ms / 1000, DIMENSION_TIME)
+            )
+            live_ms, refresh_plot_ms, history_seconds = moke_defaults
+            raw["devices"]["moke_box"].update(
+                {
+                    "live_interval": format_quantity_auto(
+                        live_ms / 1000, DIMENSION_TIME
+                    ),
+                    "plot_refresh_interval": format_quantity_auto(
+                        refresh_plot_ms / 1000, DIMENSION_TIME
+                    ),
+                    "history_window": format_quantity_auto(
+                        history_seconds, DIMENSION_TIME
+                    ),
+                }
+            )
+
+            candidate = StationSettings.model_validate(raw)
+            updates = validate_keithley_default_snapshots(
+                candidate, keithley_payload
+            )
+            channels = raw["devices"]["keithley"]["safety"]["channels"]
+            for channel, values in updates.items():
+                channels[channel]["defaults"].update(values)
+
+        if not self.settings_page.save_draft(extra_transform=merge_device_forms):
+            return
+        self._pending_keithley_defaults = None
+        self._active_keithley_defaults = None
+        self._log("SAVE SETTINGS: one atomic settings.yml transaction completed")
+        self.safety_strip.save_settings.setText("SAVED")
+        QTimer.singleShot(
+            1_500,
+            lambda: self.safety_strip.save_settings.setText("SAVE SETTINGS"),
+        )
 
     def _start_keithley_defaults_save(self) -> None:
         if self._keithley_defaults_in_flight:

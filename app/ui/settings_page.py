@@ -5,7 +5,7 @@ from __future__ import annotations
 from copy import deepcopy
 import json
 from types import UnionType
-from typing import Any, Literal, Union, get_args, get_origin
+from typing import Any, Callable, Literal, Union, get_args, get_origin
 
 from pydantic import BaseModel, ValidationError
 
@@ -1866,8 +1866,20 @@ class SettingsPage(QWidget):
         self.status.emit("Configuration validation passed")
         return settings
 
-    def save_draft(self, *, silent: bool = False) -> bool:
-        if not self._dirty:
+    def save_draft(
+        self,
+        *,
+        silent: bool = False,
+        extra_transform: Callable[[dict[str, Any]], None] | None = None,
+    ) -> bool:
+        """Persist the settings draft and optional device-form updates once.
+
+        ``extra_transform`` runs under the repository transaction after local
+        Settings-page leaves are merged. It lets the shell include all device
+        forms in the same validation, atomic YAML replacement and UI refresh.
+        """
+
+        if not self._dirty and extra_transform is None:
             return True
         try:
             local_draft = self._apply_tree_values()
@@ -1910,6 +1922,8 @@ class SettingsPage(QWidget):
                         path,
                         deepcopy(self._get_path(local_draft, path)),
                     )
+                if extra_transform is not None:
+                    extra_transform(draft)
                 repair_result[0] = self._repository.repair_known_issues(draft)
                 return draft
 
