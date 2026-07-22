@@ -34,7 +34,7 @@ from app.devices.anritsu_ms2830a import (
 )
 from app.domain.errors import ConfigurationError
 from app.domain.quantities import (
-    DIMENSION_CURRENT, DIMENSION_DBM, DIMENSION_FREQUENCY, DIMENSION_TIME,
+    DIMENSION_CURRENT, DIMENSION_DB, DIMENSION_DBM, DIMENSION_FREQUENCY, DIMENSION_TIME,
     DIMENSION_VOLTAGE, format_quantity_auto, parse_quantity,
 )
 from app.recipes.parameter_registry import SWEEPABLE_PARAMETERS, sweep_default
@@ -409,6 +409,53 @@ class AnritsuAdvancedSpectrumPanel(CardWidget):
             format_quantity_auto(snapshot.sweep_time_s, DIMENSION_TIME)
         )
         self.sync_editors()
+
+    def settings_snapshot(self) -> AdvancedSpectrumSnapshot:
+        """Capture all visible defaults, including values behind AUTO modes."""
+
+        return AdvancedSpectrumSnapshot(
+            rbw_auto=self.rbw_mode.currentData() == "auto",
+            rbw_hz=parse_quantity(self.rbw.text(), DIMENSION_FREQUENCY).si_value,
+            vbw_mode=str(self.vbw_mode.currentData()),
+            vbw_hz=parse_quantity(self.vbw.text(), DIMENSION_FREQUENCY).si_value,
+            detector=str(self.detector.currentData()),
+            attenuation_auto=self.attenuation_mode.currentData() == "auto",
+            attenuation_db=float(self.attenuation.value()),
+            preamplifier_enabled=self.preamplifier.isChecked(),
+            sweep_time_auto=self.sweep_time_mode.currentData() == "auto",
+            sweep_time_s=parse_quantity(
+                self.sweep_time.text(), DIMENSION_TIME
+            ).si_value,
+            instrument_mode="PLAN_EDIT",
+        )
+
+    def load_settings_defaults(self, settings: StationSettings) -> None:
+        defaults = settings.anritsu.safety.defaults
+        rbw_hz = parse_quantity(defaults["rbw"], DIMENSION_FREQUENCY).si_value
+        vbw_value = defaults.get("vbw") or defaults["rbw"]
+        vbw_hz = parse_quantity(vbw_value, DIMENSION_FREQUENCY).si_value
+        sweep_time_s = parse_quantity(
+            defaults["sweep_time"], DIMENSION_TIME
+        ).si_value
+        self.load_snapshot(
+            AdvancedSpectrumSnapshot(
+                rbw_auto=bool(defaults.get("rbw_auto", True)),
+                rbw_hz=rbw_hz,
+                vbw_mode=str(defaults.get("vbw_mode", "auto")),
+                vbw_hz=vbw_hz,
+                detector=str(defaults.get("detector", "NORM")),
+                attenuation_auto=bool(defaults.get("attenuation_auto", True)),
+                attenuation_db=parse_quantity(
+                    defaults.get("attenuation", "0 dB"), DIMENSION_DB
+                ).si_value,
+                preamplifier_enabled=bool(
+                    defaults.get("preamplifier_enabled", False)
+                ),
+                sweep_time_auto=bool(defaults.get("sweep_time_auto", True)),
+                sweep_time_s=sweep_time_s,
+                instrument_mode="PLAN_EDIT",
+            )
+        )
 
 
 class _SpectrogramBuffer:
@@ -1226,8 +1273,8 @@ class AnritsuPage(QWidget):
         self.sg_status.setProperty("outputState", "neutral")
         grid.addWidget(self.sg_status, 0, 0, 1, 4)
         generator = self._station_settings.anritsu.signal_generator
-        default_frequency = generator.frequency.min or "1 GHz"
-        default_power = generator.power.min or "-30 dBm"
+        default_frequency = generator.default_frequency
+        default_power = generator.default_power
         self.sg_frequency = LineEdit(self)
         self.sg_frequency.setText(str(default_frequency))
         self.sg_power = LineEdit(self)
@@ -1289,6 +1336,9 @@ class AnritsuPage(QWidget):
         layout.addWidget(self.advanced_protocol_status)
 
         self.advanced_configuration_panel = AnritsuAdvancedSpectrumPanel(dialog)
+        self.advanced_configuration_panel.load_settings_defaults(
+            self._station_settings
+        )
         self.advanced_rbw_mode = self.advanced_configuration_panel.rbw_mode
         self.advanced_rbw = self.advanced_configuration_panel.rbw
         self.advanced_vbw_mode = self.advanced_configuration_panel.vbw_mode

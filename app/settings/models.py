@@ -412,10 +412,15 @@ class AnritsuSignalGeneratorSettings(StrictModel):
     power: OptionalRangeSettings = Field(
         default_factory=lambda: OptionalRangeSettings(min=None, max=None)
     )
+    default_frequency: str = "1 GHz"
+    default_power: str = "-30 dBm"
+
     @model_validator(mode="after")
     def validate_contract(self) -> "AnritsuSignalGeneratorSettings":
         self.frequency.checked_if_complete(DIMENSION_FREQUENCY)
         self.power.checked_if_complete(DIMENSION_DBM)
+        parse_quantity(self.default_frequency, DIMENSION_FREQUENCY)
+        parse_quantity(self.default_power, DIMENSION_DBM)
         return self
 
 

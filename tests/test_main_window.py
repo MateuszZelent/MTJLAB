@@ -3639,6 +3639,27 @@ class MainWindowTests(unittest.TestCase):
                 panel.stop.setText("5 GHz")
                 panel.reference.setText("-12.5 dBm")
                 panel.points.setCurrentIndex(panel.points.findData(2001))
+                advanced = window.anritsu_page.advanced_configuration_panel
+                advanced.rbw_mode.setCurrentIndex(
+                    advanced.rbw_mode.findData("manual")
+                )
+                advanced.rbw.setText("2 MHz")
+                advanced.vbw_mode.setCurrentIndex(
+                    advanced.vbw_mode.findData("off")
+                )
+                advanced.detector.setCurrentIndex(
+                    advanced.detector.findData("POS")
+                )
+                advanced.attenuation_mode.setCurrentIndex(
+                    advanced.attenuation_mode.findData("manual")
+                )
+                advanced.attenuation.setValue(12)
+                advanced.sweep_time_mode.setCurrentIndex(
+                    advanced.sweep_time_mode.findData("manual")
+                )
+                advanced.sweep_time.setText("20 ms")
+                window.anritsu_page.sg_frequency.setText("2 GHz")
+                window.anritsu_page.sg_power.setText("-20 dBm")
 
                 window._save_all_settings()
 
@@ -3649,6 +3670,16 @@ class MainWindowTests(unittest.TestCase):
                 self.assertEqual(defaults["stop_frequency"], "5 GHz")
                 self.assertEqual(defaults["reference_level"], "-12.5 dBm")
                 self.assertEqual(defaults["sweep_points"], 2001)
+                self.assertEqual(defaults["rbw"], "2 MHz")
+                self.assertFalse(defaults["rbw_auto"])
+                self.assertEqual(defaults["detector"], "POS")
+                self.assertEqual(defaults["attenuation"], "12 dB")
+                self.assertEqual(defaults["sweep_time"], "20 ms")
+                generator = SettingsRepository(path).load().raw["devices"][
+                    "anritsu"
+                ]["signal_generator"]
+                self.assertEqual(generator["default_frequency"], "2 GHz")
+                self.assertEqual(generator["default_power"], "-20 dBm")
             finally:
                 window.close()
                 self.application.processEvents()
@@ -3662,6 +3693,15 @@ class MainWindowTests(unittest.TestCase):
                 self.assertEqual(panel.stop.text(), "5 GHz")
                 self.assertEqual(panel.reference.text(), "-12.5 dBm")
                 self.assertEqual(panel.points.currentData(), 2001)
+                advanced = restarted.anritsu_page.advanced_configuration_panel
+                self.assertEqual(advanced.rbw_mode.currentData(), "manual")
+                self.assertEqual(advanced.rbw.text(), "2 MHz")
+                self.assertEqual(advanced.vbw_mode.currentData(), "off")
+                self.assertEqual(advanced.detector.currentData(), "POS")
+                self.assertEqual(advanced.attenuation.value(), 12)
+                self.assertEqual(advanced.sweep_time.text(), "20 ms")
+                self.assertEqual(restarted.anritsu_page.sg_frequency.text(), "2 GHz")
+                self.assertEqual(restarted.anritsu_page.sg_power.text(), "-20 dBm")
             finally:
                 restarted.close()
                 self.application.processEvents()

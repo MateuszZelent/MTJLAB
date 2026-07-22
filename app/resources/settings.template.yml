@@ -391,6 +391,8 @@ devices:
       power:
         min:
         max:
+      default_frequency: "1 GHz"
+      default_power: "-30 dBm"
     advanced_spectrum:
       # Read-only queries can be used for diagnostics. Writes remain locked
       # until this exact SCPI family passes HIL on a listed firmware version.

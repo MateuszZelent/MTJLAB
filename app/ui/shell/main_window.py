@@ -1708,6 +1708,10 @@ class MainWindow(FluentWindow):
 
         try:
             snapshot = self.anritsu_page.configuration_panel.configuration_snapshot()
+            advanced = (
+                self.anritsu_page.advanced_configuration_panel.settings_snapshot()
+            )
+            signal_generator = self.anritsu_page.signal_generator_snapshot()
             self._access.require(
                 Permission.EDIT_SETTINGS,
                 action="saving Anritsu form defaults to settings.yml",
@@ -1715,9 +1719,19 @@ class MainWindow(FluentWindow):
             loaded = self._repository.load()
             raw = loaded.raw
             before = deepcopy(raw["devices"]["anritsu"]["safety"]["defaults"])
-            self._update_anritsu_defaults(raw, snapshot)
+            before_generator = deepcopy(
+                raw["devices"]["anritsu"]["signal_generator"]
+            )
+            self._update_anritsu_defaults(raw, snapshot, advanced)
+            generator = raw["devices"]["anritsu"]["signal_generator"]
+            generator["default_frequency"] = format_quantity_auto(
+                signal_generator.frequency_hz, DIMENSION_FREQUENCY
+            )
+            generator["default_power"] = (
+                f"{signal_generator.power_dbm:.9g} dBm"
+            )
             after = raw["devices"]["anritsu"]["safety"]["defaults"]
-            if before == after:
+            if before == after and before_generator == generator:
                 return True
             persisted = self._repository.save_raw(raw)
         except (AuthorizationError, ConfigurationError, KeyError, ValueError) as exc:
