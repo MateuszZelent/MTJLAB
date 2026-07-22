@@ -3626,6 +3626,94 @@ class MainWindowTests(unittest.TestCase):
                 window.close()
                 self.application.processEvents()
 
+    def test_anritsu_form_defaults_survive_save_and_application_restart(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "settings.yml"
+            write_engineer_settings(path)
+            window = MainWindow(
+                path, simulation=False, authenticated_username=TEST_ENGINEER
+            )
+            try:
+                panel = window.anritsu_page.configuration_panel
+                panel.start.setText("400 MHz")
+                panel.stop.setText("5 GHz")
+                panel.reference.setText("-12.5 dBm")
+                panel.points.setCurrentIndex(panel.points.findData(2001))
+
+                window._save_all_settings()
+
+                defaults = SettingsRepository(path).load().raw["devices"][
+                    "anritsu"
+                ]["safety"]["defaults"]
+                self.assertEqual(defaults["start_frequency"], "400 MHz")
+                self.assertEqual(defaults["stop_frequency"], "5 GHz")
+                self.assertEqual(defaults["reference_level"], "-12.5 dBm")
+                self.assertEqual(defaults["sweep_points"], 2001)
+            finally:
+                window.close()
+                self.application.processEvents()
+
+            restarted = MainWindow(
+                path, simulation=False, authenticated_username=TEST_ENGINEER
+            )
+            try:
+                panel = restarted.anritsu_page.configuration_panel
+                self.assertEqual(panel.start.text(), "400 MHz")
+                self.assertEqual(panel.stop.text(), "5 GHz")
+                self.assertEqual(panel.reference.text(), "-12.5 dBm")
+                self.assertEqual(panel.points.currentData(), 2001)
+            finally:
+                restarted.close()
+                self.application.processEvents()
+
+    def test_rigol_channel_forms_survive_save_and_application_restart(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "settings.yml"
+            write_engineer_settings(path)
+            window = MainWindow(
+                path, simulation=False, authenticated_username=TEST_ENGINEER
+            )
+            try:
+                rigol = window.rigol_page
+                rigol.channel.setCurrentText("1")
+                rigol.level_mode.setCurrentText(rigol.LEVEL_MODE_HIGH_LOW)
+                rigol.frequency.setText("2 kHz")
+                rigol.high_level.setText("3 mV")
+                rigol.low_level.setText("-2 mV")
+                rigol.phase.setText("15")
+                rigol.channel.setCurrentText("2")
+                rigol.waveform.setCurrentText("SQU")
+                rigol.level_mode.setCurrentText(rigol.LEVEL_MODE_HIGH_LOW)
+                rigol.frequency.setText("4 kHz")
+                rigol.high_level.setText("5 mV")
+                rigol.low_level.setText("-4 mV")
+                rigol.duty.setText("40")
+
+                window._save_all_settings()
+            finally:
+                window.close()
+                self.application.processEvents()
+
+            restarted = MainWindow(
+                path, simulation=False, authenticated_username=TEST_ENGINEER
+            )
+            try:
+                rigol = restarted.rigol_page
+                rigol.channel.setCurrentText("1")
+                self.assertEqual(rigol.frequency.text(), "2 kHz")
+                self.assertEqual(rigol.high_level.text(), "3 mV")
+                self.assertEqual(rigol.low_level.text(), "-2 mV")
+                self.assertEqual(rigol.phase.text(), "15")
+                rigol.channel.setCurrentText("2")
+                self.assertEqual(rigol.waveform.currentText(), "SQU")
+                self.assertEqual(rigol.frequency.text(), "4 kHz")
+                self.assertEqual(rigol.high_level.text(), "5 mV")
+                self.assertEqual(rigol.low_level.text(), "-4 mV")
+                self.assertEqual(rigol.duty.text(), "40")
+            finally:
+                restarted.close()
+                self.application.processEvents()
+
     def test_limit_only_changes_hot_apply_without_reconnecting_any_device(self) -> None:
         window = MainWindow(".config/settings.yml", simulation=False)
         try:

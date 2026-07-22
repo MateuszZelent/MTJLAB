@@ -135,6 +135,7 @@ class AnritsuSpectrumConfigurationPanel(CardWidget):
             self._change_frequency_representation
         )
         self.set_settings(settings)
+        self.load_settings_defaults()
 
     def _limit_values(self, key: str) -> tuple[object, object]:
         if key == "reference_level":
@@ -166,6 +167,20 @@ class AnritsuSpectrumConfigurationPanel(CardWidget):
         for field in self.limit_fields.values():
             key = str(field.property("limitKey"))
             field.set_limits(*self._limit_values(key))
+
+    def load_settings_defaults(self) -> None:
+        """Restore the persisted acquisition snapshot into the visible form."""
+
+        defaults = self._settings.anritsu.safety.defaults
+        self.frequency_representation.setCurrentIndex(
+            self.frequency_representation.findData("start_stop")
+        )
+        self.start.setText(str(defaults["start_frequency"]))
+        self.stop.setText(str(defaults["stop_frequency"]))
+        self.reference.setText(str(defaults["reference_level"]))
+        point_index = self.points.findData(int(defaults["sweep_points"]))
+        if point_index >= 0:
+            self.points.setCurrentIndex(point_index)
 
     def frequency_bounds(self) -> tuple[float, float]:
         first = parse_quantity(self.start.text(), DIMENSION_FREQUENCY).si_value

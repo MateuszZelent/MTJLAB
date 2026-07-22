@@ -376,6 +376,7 @@ class RigolPage(QWidget):
         self.channel.currentTextChanged.connect(self._refresh_rigol_limits)
         for field in (self.frequency, self.period, self.high_level, self.low_level, self.vpp, self.offset, self.duty, self.ramp_symmetry, self.pulse_width):
             field.textChanged.connect(self._update_preview)
+        self.load_settings_defaults()
         self._sync_vpp_offset_from_levels()
         self._sync_period_from_frequency()
         self._update_dynamic_controls()
@@ -756,6 +757,67 @@ class RigolPage(QWidget):
                 self._confirmed_advanced_states[channel][mode] = None
         self._refresh_rigol_limits()
         self._refresh_confirmed_advanced_controls()
+
+    @staticmethod
+    def _snapshot_from_defaults(
+        channel: int, defaults: Mapping[str, object]
+    ) -> RigolConfigurationSnapshot:
+        fallback = RigolConfigurationSnapshot(channel=channel)
+        return RigolConfigurationSnapshot(
+            channel=channel,
+            waveform=str(defaults.get("waveform", fallback.waveform)),
+            time_mode=str(defaults.get("time_mode", fallback.time_mode)),
+            frequency=str(defaults.get("frequency", fallback.frequency)),
+            level_mode=str(defaults.get("level_mode", fallback.level_mode)),
+            high_level=str(defaults.get("high_level", fallback.high_level)),
+            low_level=str(defaults.get("low_level", fallback.low_level)),
+            output_load=str(
+                defaults.get(
+                    "output_load", defaults.get("output_load_setting", fallback.output_load)
+                )
+            ),
+            phase_deg=str(defaults.get("phase_deg", fallback.phase_deg)),
+            square_duty_percent=str(
+                defaults.get("square_duty_percent", fallback.square_duty_percent)
+            ),
+            ramp_symmetry_percent=str(
+                defaults.get("ramp_symmetry_percent", fallback.ramp_symmetry_percent)
+            ),
+            pulse_width=str(defaults.get("pulse_width", fallback.pulse_width)),
+            pulse_leading=str(defaults.get("pulse_leading", fallback.pulse_leading)),
+            pulse_trailing=str(defaults.get("pulse_trailing", fallback.pulse_trailing)),
+            output_polarity=str(
+                defaults.get("output_polarity", fallback.output_polarity)
+            ),
+            output_mode=str(defaults.get("output_mode", fallback.output_mode)),
+            gate_polarity=str(defaults.get("gate_polarity", fallback.gate_polarity)),
+            sync_enabled=bool(defaults.get("sync_enabled", fallback.sync_enabled)),
+            sync_polarity=str(defaults.get("sync_polarity", fallback.sync_polarity)),
+            sync_delay=str(defaults.get("sync_delay", fallback.sync_delay)),
+        )
+
+    def load_settings_defaults(self) -> None:
+        """Restore both persisted channel forms without issuing device commands."""
+
+        self._channel_form_snapshots = {
+            channel: self._snapshot_from_defaults(
+                channel,
+                self._station_settings.rigol.safety.channels[str(channel)].defaults,
+            )
+            for channel in (1, 2)
+        }
+        self._visible_form_channel = int(self.channel.currentText())
+        self._load_basic_snapshot(
+            self._channel_form_snapshots[self._visible_form_channel]
+        )
+
+    def configuration_snapshots(self) -> dict[int, RigolConfigurationSnapshot]:
+        """Return complete visible/cached forms for explicit persistence."""
+
+        snapshots = dict(self._channel_form_snapshots)
+        channel = int(self.channel.currentText())
+        snapshots[channel] = replace(self.configuration_snapshot(), channel=channel)
+        return snapshots
 
     def configuration_snapshot(self) -> RigolConfigurationSnapshot:
         """Return the visible carrier state without communicating with hardware."""

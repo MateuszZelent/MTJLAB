@@ -1627,52 +1627,7 @@ class MainWindow(FluentWindow):
             )
             loaded = self._repository.load()
             raw = loaded.raw
-            defaults = raw["devices"]["anritsu"]["safety"]["defaults"]
-            defaults.update(
-                {
-                    "application": basic.instrument_mode or "SPECT",
-                    "start_frequency": format_quantity_auto(
-                        basic.start_hz, DIMENSION_FREQUENCY
-                    ),
-                    "stop_frequency": format_quantity_auto(
-                        basic.stop_hz, DIMENSION_FREQUENCY
-                    ),
-                    "center_frequency": format_quantity_auto(
-                        (basic.start_hz + basic.stop_hz) / 2,
-                        DIMENSION_FREQUENCY,
-                    ),
-                    "span": format_quantity_auto(
-                        basic.stop_hz - basic.start_hz, DIMENSION_FREQUENCY
-                    ),
-                    "reference_level": f"{basic.reference_level_dbm:.9g} dBm",
-                    "sweep_points": basic.points,
-                }
-            )
-            if isinstance(advanced, AdvancedSpectrumSnapshot):
-                defaults.update(
-                    {
-                        "rbw": format_quantity_auto(
-                            advanced.rbw_hz, DIMENSION_FREQUENCY
-                        ),
-                        "rbw_auto": advanced.rbw_auto,
-                        "vbw": (
-                            None
-                            if advanced.vbw_hz is None
-                            else format_quantity_auto(
-                                advanced.vbw_hz, DIMENSION_FREQUENCY
-                            )
-                        ),
-                        "vbw_mode": advanced.vbw_mode,
-                        "detector": advanced.detector,
-                        "attenuation": f"{advanced.attenuation_db:.9g} dB",
-                        "attenuation_auto": advanced.attenuation_auto,
-                        "preamplifier_enabled": advanced.preamplifier_enabled,
-                        "sweep_time": format_quantity_auto(
-                            advanced.sweep_time_s, DIMENSION_TIME
-                        ),
-                        "sweep_time_auto": advanced.sweep_time_auto,
-                    }
-                )
+            self._update_anritsu_defaults(raw, basic, advanced)
             persisted = self._repository.save_raw(raw)
         except (AuthorizationError, ConfigurationError, KeyError, ValueError) as exc:
             QMessageBox.critical(self, "Anritsu settings not saved", str(exc))
@@ -1690,6 +1645,153 @@ class MainWindow(FluentWindow):
             severity="success",
         )
         self._log("ANRITSU SETTINGS IMPORT SAVED: query-only readback persisted; adapter unchanged")
+
+    @staticmethod
+    def _update_anritsu_defaults(
+        raw: dict[str, Any],
+        basic: AnritsuConfigurationSnapshot,
+        advanced: object = None,
+    ) -> None:
+        if basic.start_hz <= 0 or basic.stop_hz <= basic.start_hz:
+            raise ConfigurationError(
+                "Anritsu defaults require a frequency range satisfying 0 < start < stop."
+            )
+        defaults = raw["devices"]["anritsu"]["safety"]["defaults"]
+        defaults.update(
+            {
+                "application": basic.instrument_mode or "SPECT",
+                "start_frequency": format_quantity_auto(
+                    basic.start_hz, DIMENSION_FREQUENCY
+                ),
+                "stop_frequency": format_quantity_auto(
+                    basic.stop_hz, DIMENSION_FREQUENCY
+                ),
+                "center_frequency": format_quantity_auto(
+                    (basic.start_hz + basic.stop_hz) / 2,
+                    DIMENSION_FREQUENCY,
+                ),
+                "span": format_quantity_auto(
+                    basic.stop_hz - basic.start_hz, DIMENSION_FREQUENCY
+                ),
+                "reference_level": f"{basic.reference_level_dbm:.9g} dBm",
+                "sweep_points": basic.points,
+            }
+        )
+        if isinstance(advanced, AdvancedSpectrumSnapshot):
+            defaults.update(
+                {
+                    "rbw": format_quantity_auto(
+                        advanced.rbw_hz, DIMENSION_FREQUENCY
+                    ),
+                    "rbw_auto": advanced.rbw_auto,
+                    "vbw": (
+                        None
+                        if advanced.vbw_hz is None
+                        else format_quantity_auto(
+                            advanced.vbw_hz, DIMENSION_FREQUENCY
+                        )
+                    ),
+                    "vbw_mode": advanced.vbw_mode,
+                    "detector": advanced.detector,
+                    "attenuation": f"{advanced.attenuation_db:.9g} dB",
+                    "attenuation_auto": advanced.attenuation_auto,
+                    "preamplifier_enabled": advanced.preamplifier_enabled,
+                    "sweep_time": format_quantity_auto(
+                        advanced.sweep_time_s, DIMENSION_TIME
+                    ),
+                    "sweep_time_auto": advanced.sweep_time_auto,
+                }
+            )
+
+    def _save_anritsu_form_defaults(self) -> bool:
+        """Persist the visible basic Spectrum form without touching hardware."""
+
+        try:
+            snapshot = self.anritsu_page.configuration_panel.configuration_snapshot()
+            self._access.require(
+                Permission.EDIT_SETTINGS,
+                action="saving Anritsu form defaults to settings.yml",
+            )
+            loaded = self._repository.load()
+            raw = loaded.raw
+            before = deepcopy(raw["devices"]["anritsu"]["safety"]["defaults"])
+            self._update_anritsu_defaults(raw, snapshot)
+            after = raw["devices"]["anritsu"]["safety"]["defaults"]
+            if before == after:
+                return True
+            persisted = self._repository.save_raw(raw)
+        except (AuthorizationError, ConfigurationError, KeyError, ValueError) as exc:
+            QMessageBox.critical(self, "Anritsu settings not saved", str(exc))
+            self.anritsu_page.banner.show_message(
+                f"Anritsu defaults were not saved: {exc}", severity="error"
+            )
+            self._log(f"ANRITSU FORM SAVE FAILED: {type(exc).__name__}: {exc}")
+            return False
+
+        self._settings = (
+            simulated_station_settings(persisted) if self._simulation else persisted
+        )
+        self.settings_page.reload()
+        self.anritsu_page.set_settings(self._settings)
+        self.recipe_page.set_settings(self._settings)
+        self._refresh_safety_strip()
+        self.anritsu_page.banner.show_message(
+            "Current Spectrum form saved to settings.yml as acquisition defaults. "
+            "No command was sent to the analyser.",
+            severity="success",
+        )
+        self._log("ANRITSU FORM DEFAULTS SAVED: settings.yml updated; hardware unchanged")
+        return True
+
+    def _save_rigol_form_defaults(self) -> bool:
+        """Persist both visible/cached Rigol channel forms without hardware I/O."""
+
+        try:
+            snapshots = self.rigol_page.configuration_snapshots()
+            self._access.require(
+                Permission.EDIT_SETTINGS,
+                action="saving Rigol form defaults to settings.yml",
+            )
+            loaded = self._repository.load()
+            raw = loaded.raw
+            changed = False
+            for channel, snapshot in snapshots.items():
+                defaults = raw["devices"]["rigol"]["safety"]["channels"][
+                    str(channel)
+                ]["defaults"]
+                payload = asdict(snapshot)
+                payload.pop("channel", None)
+                payload["output_load_setting"] = payload.pop("output_load")
+                payload["output_enabled"] = False
+                if defaults != payload:
+                    defaults.clear()
+                    defaults.update(payload)
+                    changed = True
+            if not changed:
+                return True
+            persisted = self._repository.save_raw(raw)
+        except (AuthorizationError, ConfigurationError, KeyError, ValueError) as exc:
+            QMessageBox.critical(self, "Rigol settings not saved", str(exc))
+            self.rigol_page.banner.show_message(
+                f"Rigol defaults were not saved: {exc}", severity="error"
+            )
+            self._log(f"RIGOL FORM SAVE FAILED: {type(exc).__name__}: {exc}")
+            return False
+
+        self._settings = (
+            simulated_station_settings(persisted) if self._simulation else persisted
+        )
+        self.settings_page.reload()
+        self.rigol_page.set_settings(self._settings)
+        self.recipe_page.set_settings(self._settings)
+        self._refresh_safety_strip()
+        self.rigol_page.banner.show_message(
+            "Both Rigol channel forms were saved to settings.yml as defaults. "
+            "Outputs remain OFF and no command was sent to the generator.",
+            severity="success",
+        )
+        self._log("RIGOL FORM DEFAULTS SAVED: settings.yml updated; hardware unchanged")
+        return True
 
     @staticmethod
     def _keithley_snapshot_payload(
@@ -1763,6 +1865,10 @@ class MainWindow(FluentWindow):
             self._log("SAVE SETTINGS ignored: a settings write is already running")
             return
         if not self.settings_page.save_draft():
+            return
+        if not self._save_rigol_form_defaults():
+            return
+        if not self._save_anritsu_form_defaults():
             return
         pending = self._pending_keithley_defaults
         if pending is None:
