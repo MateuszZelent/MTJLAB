@@ -10,13 +10,14 @@ from app.devices.lakeshore_475 import (
     MeasurementMode,
 )
 from app.devices.lakeshore_475.simulator import simulated_475_session
+from app.devices.anritsu_ms2830a.module import MODULE as ANRITSU_MODULE
 from app.devices.moke_box import MokeBoxAdapter, MokeBoxConfig
 from app.devices.moke_box.module import MODULE as MOKE_MODULE
 from app.devices.registry import built_in_device_registry
 from app.devices.visa import FakeVisaSessionFactory
 from app.domain.errors import ConfigurationError, DeviceError
 from app.settings.models import StationSettings
-from tests.helpers import loaded_settings
+from tests.helpers import loaded_settings, simulation_settings
 
 
 class _MokeTransport:
@@ -45,6 +46,19 @@ class _OfficialModel425Bridge:
 
 
 class DeviceModuleTests(unittest.TestCase):
+    def test_anritsu_module_dispatches_current_trace_acquisition(self) -> None:
+        adapter = ANRITSU_MODULE.create_adapter(
+            simulation_settings(), simulation=True
+        )
+        adapter.connect()
+
+        trace = ANRITSU_MODULE.dispatch(
+            adapter, "acquire_current_trace", "TRAC1"
+        )
+
+        self.assertEqual(trace.trace_name, "TRAC1")
+        self.assertGreater(len(trace.powers_dbm), 1)
+
     def test_registry_exposes_unique_concrete_implementation_keys(self) -> None:
         modules = built_in_device_registry().all_modules()
         self.assertEqual(
