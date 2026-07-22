@@ -105,7 +105,13 @@ class StationAlertDialog(StationDialog):
 class StationSettingsGuidanceDialog(StationDialog):
     """An alert with a direct, non-destructive route to a configuration fix."""
 
-    def __init__(self, parent: QWidget | None, title: str, text: str) -> None:
+    def __init__(
+        self,
+        parent: QWidget | None,
+        title: str,
+        text: str,
+        action_label: str = "Go to settings",
+    ) -> None:
         super().__init__(parent)
         self.setWindowTitle(title)
         self.setModal(True)
@@ -128,7 +134,7 @@ class StationSettingsGuidanceDialog(StationDialog):
         buttons = QHBoxLayout()
         buttons.addStretch(1)
         close = PushButton("Close", self)
-        self.go_to_settings_button = PrimaryPushButton("Go to settings", self)
+        self.go_to_settings_button = PrimaryPushButton(action_label, self)
         close.clicked.connect(self.reject)
         self.go_to_settings_button.clicked.connect(self.accept)
         buttons.addWidget(close)
@@ -251,6 +257,19 @@ class StationMessageBox:
         """Show an actionable safety/configuration alert and return its choice."""
 
         dialog = StationSettingsGuidanceDialog(parent, title, text)
+        return dialog.exec() == QDialog.DialogCode.Accepted
+
+    @classmethod
+    def action_guidance(
+        cls,
+        parent: QWidget | None,
+        title: str,
+        text: str,
+        action_label: str,
+    ) -> bool:
+        dialog = StationSettingsGuidanceDialog(
+            parent, title, text, action_label=action_label
+        )
         return dialog.exec() == QDialog.DialogCode.Accepted
 
 

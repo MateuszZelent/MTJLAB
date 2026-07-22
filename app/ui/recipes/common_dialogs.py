@@ -24,6 +24,8 @@ from app.domain.quantities import (
     DIMENSION_CURRENT,
     DIMENSION_DBM,
     DIMENSION_FREQUENCY,
+    DIMENSION_POWER,
+    DIMENSION_RESISTANCE,
     DIMENSION_TIME,
     DIMENSION_VOLTAGE,
     parse_quantity,
@@ -43,6 +45,7 @@ __all__ = [
     "CommentEditorDialog",
     "FixedValueDialog",
     "KeithleySweepBuilderDialog",
+    "DutLimitsDialog",
     "OutputPolicyDialog",
     "RepeatCountDialog",
     "RecipeTreeMoveRequest",
@@ -51,6 +54,197 @@ __all__ = [
     "RecipeTreeWidget",
     "SweepLibraryButton",
 ]
+
+
+class DutLimitsDialog(FluentRecipeDialog):
+    """Edit the DUT envelope owned by the complete recipe."""
+
+    def __init__(
+        self,
+        limits: dict[str, Any],
+        parent: QWidget | None = None,
+        *,
+        focus_device: str | None = None,
+        focus_channel: str | int | None = None,
+    ) -> None:
+        super().__init__(parent)
+        self.setWindowTitle("Recipe DUT limits")
+        self.resize(1080, 560)
+        self._fields: dict[tuple[str, ...], LineEdit] = {}
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(24, 20, 24, 20)
+        layout.setSpacing(12)
+        title = StrongBodyLabel("Device-under-test limits", self)
+        description = BodyLabel(
+            "These limits describe what this specific DUT can safely tolerate. "
+            "They are stored in the recipe and intersect with the station limits; "
+            "they never replace or weaken the laboratory profile.",
+            self,
+        )
+        description.setWordWrap(True)
+        layout.addWidget(title)
+        layout.addWidget(description)
+        cards = QHBoxLayout()
+        cards.setSpacing(12)
+
+        def value_at(path: tuple[str, ...]) -> str:
+            value: object = limits
+            for key in path:
+                if not isinstance(value, dict):
+                    return ""
+                for part in key.split("."):
+                    if not isinstance(value, dict):
+                        return ""
+                    value = value.get(part, "")
+            return str(value) if value is not None else ""
+
+        def add_card(title_text: str, rows: tuple[tuple[str, tuple[str, ...]], ...]) -> None:
+            card = CardWidget(self)
+            card_layout = QVBoxLayout(card)
+            card_layout.setContentsMargins(14, 14, 14, 14)
+            card_layout.setSpacing(8)
+            card_layout.addWidget(StrongBodyLabel(title_text, card))
+            form = QFormLayout()
+            form.setFieldGrowthPolicy(QFormLayout.FieldGrowthPolicy.ExpandingFieldsGrow)
+            for label, path in rows:
+                editor = LineEdit(card)
+                editor.setText(value_at(path))
+                editor.setPlaceholderText("value with unit")
+                self._fields[path] = editor
+                form.addRow(label, editor)
+            card_layout.addLayout(form)
+            card_layout.addStretch(1)
+            cards.addWidget(card, 1)
+
+        add_card(
+            "Keithley 2600",
+            tuple(
+                (label, ("keithley", channel, key))
+                for channel in ("A", "B")
+                for label, key in (
+                    (f"{channel} current minimum", "current.min"),
+                    (f"{channel} current maximum", "current.max"),
+                    (f"{channel} voltage minimum", "voltage.min"),
+                    (f"{channel} voltage maximum", "voltage.max"),
+                    (f"{channel} maximum power", "max_abs_power"),
+                )
+            ),
+        )
+        add_card(
+            "Rigol DG1000Z",
+            tuple(
+                (label, ("rigol", channel, key))
+                for channel in ("1", "2")
+                for label, key in (
+                    (f"CH{channel} minimum impedance", "minimum_impedance"),
+                    (f"CH{channel} maximum current", "max_abs_current"),
+                    (f"CH{channel} maximum power", "max_abs_power"),
+                )
+            ),
+        )
+        add_card(
+            "Anritsu",
+            (
+                ("Maximum expected RF input", ("anritsu", "max_expected_input")),
+                ("Maximum SG output", ("anritsu", "max_signal_generator_output")),
+            ),
+        )
+        layout.addLayout(cards, 1)
+        note = BodyLabel(
+            "Examples: -10 mA, 10 mA, -670 mV, 670 mV, 1 mW, 50 ohm, -20 dBm.",
+            self,
+        )
+        note.setObjectName("muted")
+        layout.addWidget(note)
+        footer = QHBoxLayout()
+        footer.addStretch(1)
+        cancel = PushButton("Cancel", self)
+        save = PrimaryPushButton("Apply DUT limits", self)
+        cancel.clicked.connect(self.reject)
+        save.clicked.connect(self.accept)
+        footer.addWidget(cancel)
+        footer.addWidget(save)
+        layout.addLayout(footer)
+        self._focus_required(focus_device, focus_channel)
+
+    @staticmethod
+    def _nested_value(limits: dict[str, Any], path: tuple[str, ...]) -> object:
+        value: object = limits
+        for key in path:
+            if not isinstance(value, dict):
+                return ""
+            if "." in key:
+                for part in key.split("."):
+                    if not isinstance(value, dict):
+                        return ""
+                    value = value.get(part, "")
+            else:
+                value = value.get(key, "")
+        return value
+
+    def _focus_required(self, device: str | None, channel: str | int | None) -> None:
+        prefix = (str(device), str(channel)) if channel is not None else (str(device),)
+        matches = [editor for path, editor in self._fields.items() if path[: len(prefix)] == prefix]
+        for editor in matches:
+            editor.setProperty("validationState", "error")
+        if matches:
+            QTimer.singleShot(0, matches[0].setFocus)
+
+    def limits_mapping(self) -> dict[str, Any]:
+        result: dict[str, Any] = {}
+
+        def text(path: tuple[str, ...]) -> str:
+            return self._fields[path].text().strip()
+
+        dimensions = {
+            "current.min": DIMENSION_CURRENT,
+            "current.max": DIMENSION_CURRENT,
+            "voltage.min": DIMENSION_VOLTAGE,
+            "voltage.max": DIMENSION_VOLTAGE,
+            "max_abs_power": DIMENSION_POWER,
+            "minimum_impedance": DIMENSION_RESISTANCE,
+            "max_abs_current": DIMENSION_CURRENT,
+            "max_expected_input": DIMENSION_DBM,
+            "max_signal_generator_output": DIMENSION_DBM,
+        }
+        for device, channels, keys in (
+            ("keithley", ("A", "B"), ("current.min", "current.max", "voltage.min", "voltage.max", "max_abs_power")),
+            ("rigol", ("1", "2"), ("minimum_impedance", "max_abs_current", "max_abs_power")),
+        ):
+            for channel in channels:
+                values = {key: text((device, channel, key)) for key in keys}
+                if not any(values.values()):
+                    continue
+                if not all(values.values()):
+                    raise ConfigurationError(
+                        f"Complete every {device} channel {channel} DUT-limit field or clear all of them."
+                    )
+                for key, value in values.items():
+                    parse_quantity(value, dimensions[key])
+                target = result.setdefault(device, {}).setdefault(channel, {})
+                if device == "keithley":
+                    target["current"] = {"min": values["current.min"], "max": values["current.max"]}
+                    target["voltage"] = {"min": values["voltage.min"], "max": values["voltage.max"]}
+                    target["max_abs_power"] = values["max_abs_power"]
+                else:
+                    target.update(values)
+        anritsu: dict[str, str] = {}
+        for key in ("max_expected_input", "max_signal_generator_output"):
+            value = text(("anritsu", key))
+            if value:
+                parse_quantity(value, dimensions[key])
+                anritsu[key] = value
+        if anritsu:
+            result["anritsu"] = anritsu
+        return result
+
+    def accept(self) -> None:
+        try:
+            self.limits_mapping()
+        except (ConfigurationError, ValueError) as exc:
+            QMessageBox.warning(self, "DUT limits", str(exc))
+            return
+        super().accept()
 
 
 class OutputPolicyDialog(FluentRecipeDialog):

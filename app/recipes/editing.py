@@ -74,6 +74,27 @@ def replace_recipe_node(source: str, *, node_id: str, node: dict[str, Any]) -> s
     return _dump_validated(raw, "tree-builder edit")
 
 
+def recipe_dut_limits_mapping(source: str) -> dict[str, Any]:
+    """Return an editable copy of the recipe-level DUT envelope."""
+
+    raw = _load(source)
+    limits = raw.get("dut_limits", {})
+    if not isinstance(limits, dict):
+        raise ConfigurationError("recipe.dut_limits must be a mapping.")
+    return deepcopy(limits)
+
+
+def replace_recipe_dut_limits(source: str, limits: dict[str, Any]) -> str:
+    """Atomically replace the recipe-level DUT envelope and validate it."""
+
+    raw = _load(source)
+    if limits:
+        raw["dut_limits"] = deepcopy(limits)
+    else:
+        raw.pop("dut_limits", None)
+    return _dump_validated(raw, "DUT limits editor")
+
+
 def wrap_recipe_nodes_in_repeat(
     source: str,
     *,
