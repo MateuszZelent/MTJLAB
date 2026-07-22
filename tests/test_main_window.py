@@ -2777,6 +2777,9 @@ class MainWindowTests(unittest.TestCase):
             anritsu = window.anritsu_page
             anritsu._controller.call = Mock()
             self.assertEqual(anritsu.refresh.minimum(), 10)
+            anritsu.start.setText("1 MHz")
+            anritsu.stop.setText("2 MHz")
+            anritsu.points.setCurrentIndex(anritsu.points.findData(101))
             trace = SpectrumTrace(
                 (1e6, 2e6), (-50.0, -40.0), datetime.now(timezone.utc), "TRAC1"
             )
@@ -2784,17 +2787,27 @@ class MainWindowTests(unittest.TestCase):
 
             anritsu.toggle_live()
 
-            anritsu._controller.call.assert_called_once_with("start_live", True)
+            operation, config = anritsu._controller.call.call_args.args
+            self.assertEqual(operation, "configure")
+            self.assertEqual(config.start_hz, 1e6)
+            self.assertEqual(config.stop_hz, 2e6)
+            self.assertEqual(config.points, 101)
             self.assertTrue(anritsu._live_transition_pending)
             self.assertEqual(anritsu.live_indicator.property("liveState"), "starting")
+            self.assertFalse(anritsu.configuration_panel.isEnabled())
             anritsu.toggle_live()
-            anritsu._controller.call.assert_called_once_with("start_live", True)
+            self.assertEqual(anritsu._controller.call.call_count, 1)
             snapshot = AnritsuConfigurationSnapshot(1e6, 2e6, 0.0, 101, "SPECT")
+            anritsu._result("configure", snapshot)
+            self.assertEqual(
+                anritsu._controller.call.call_args.args, ("start_live", True)
+            )
             anritsu._result("start_live", snapshot)
             self.assertEqual(anritsu._spectrogram_buffer.row_count, 0)
             self.assertFalse(anritsu._live_transition_pending)
             self.assertFalse(anritsu.single.isEnabled())
             self.assertEqual(anritsu.live_indicator.property("liveState"), "on")
+            self.assertFalse(anritsu.configuration_panel.isEnabled())
             anritsu._result("single_sweep", trace)
             self.assertEqual(
                 anritsu.spectrum_plot._traces["Raw"][1].tolist(),
@@ -2816,6 +2829,29 @@ class MainWindowTests(unittest.TestCase):
             self.assertTrue(anritsu.single.isEnabled())
             self.assertEqual(anritsu.live.text(), "Start Live")
             self.assertEqual(anritsu.live_indicator.property("liveState"), "off")
+            self.assertTrue(anritsu.configuration_panel.isEnabled())
+        finally:
+            window.close()
+            self.application.processEvents()
+
+    def test_anritsu_live_does_not_start_when_configuration_fails(self) -> None:
+        window = MainWindow(".config/settings.yml", simulation=True)
+        try:
+            anritsu = window.anritsu_page
+            anritsu._controller.call = Mock()
+            anritsu.start.setText("300 MHz")
+            anritsu.stop.setText("2 GHz")
+
+            anritsu.toggle_live()
+
+            self.assertEqual(anritsu._controller.call.call_args.args[0], "configure")
+            anritsu._error("configure", "injected readback mismatch")
+            self.assertEqual(anritsu._controller.call.call_count, 1)
+            self.assertFalse(anritsu._timer.isActive())
+            self.assertFalse(anritsu._live_transition_pending)
+            self.assertIsNone(anritsu._pending_after_spectrum_configuration)
+            self.assertEqual(anritsu._page_state, AnritsuPageState.ERROR)
+            self.assertTrue(anritsu.configuration_panel.isEnabled())
         finally:
             window.close()
             self.application.processEvents()
@@ -2872,6 +2908,9 @@ class MainWindowTests(unittest.TestCase):
         try:
             anritsu = window.anritsu_page
             anritsu._controller.call = Mock()
+            anritsu.start.setText("1 MHz")
+            anritsu.stop.setText("2 MHz")
+            anritsu.points.setCurrentIndex(anritsu.points.findData(101))
             first = SpectrumTrace(
                 (1e6, 2e6), (-50.0, -40.0), datetime.now(timezone.utc), "TRAC1"
             )
@@ -2879,18 +2918,43 @@ class MainWindowTests(unittest.TestCase):
                 (3e6, 4e6), (-30.0, -20.0), datetime.now(timezone.utc), "TRAC1"
             )
 
-            anritsu.read_once()
+            anritsu.single.click()
 
-            anritsu._controller.call.assert_called_once_with("single_sweep", "TRAC1")
+            operation, config = anritsu._controller.call.call_args.args
+            self.assertEqual(operation, "configure")
+            self.assertEqual(config.start_hz, 1e6)
+            self.assertEqual(config.stop_hz, 2e6)
+            self.assertEqual(config.points, 101)
             self.assertTrue(anritsu._fetch_pending)
+            anritsu._result(
+                "configure",
+                AnritsuConfigurationSnapshot(1e6, 2e6, -10.0, 101, "SPECT"),
+            )
+            self.assertEqual(
+                anritsu._controller.call.call_args.args, ("single_sweep", "TRAC1")
+            )
             anritsu._result("single_sweep", first)
             self.assertIs(anritsu._latest_trace, first)
             self.assertFalse(anritsu._fetch_pending)
 
             anritsu._controller.call.reset_mock()
-            anritsu.read_once()
+            anritsu.start.setText("3 MHz")
+            anritsu.stop.setText("4 MHz")
+            anritsu.points.setCurrentIndex(anritsu.points.findData(501))
+            anritsu.single.click()
 
-            anritsu._controller.call.assert_called_once_with("single_sweep", "TRAC1")
+            operation, config = anritsu._controller.call.call_args.args
+            self.assertEqual(operation, "configure")
+            self.assertEqual(config.start_hz, 3e6)
+            self.assertEqual(config.stop_hz, 4e6)
+            self.assertEqual(config.points, 501)
+            anritsu._result(
+                "configure",
+                AnritsuConfigurationSnapshot(3e6, 4e6, -10.0, 501, "SPECT"),
+            )
+            self.assertEqual(
+                anritsu._controller.call.call_args.args, ("single_sweep", "TRAC1")
+            )
             anritsu._result("single_sweep", second)
             self.assertIs(anritsu._latest_trace, second)
             self.assertEqual(
@@ -3956,6 +4020,7 @@ class MainWindowTests(unittest.TestCase):
             )
             for changed_device, path, value in cases:
                 with self.subTest(device=changed_device):
+                    window._device_states[changed_device] = "verified"
                     raw = window._settings.model_dump(mode="python")
                     target = raw
                     for key in path[:-1]:
@@ -3999,25 +4064,23 @@ class MainWindowTests(unittest.TestCase):
                 window.anritsu_page.average_count.setValue(123)
                 window.keithley_page.channel.setCurrentText("B")
                 window.keithley_page.nplc.setText("2")
-                window.settings_page._raw["devices"]["keithley"]["safety"][
-                    "channels"
-                ]["B"]["lab_limits"]["source_current"]["max"] = "9 mA"
-                window.settings_page._dirty = True
-
                 with patch.object(
                     window._repository,
                     "save_raw",
                     wraps=window._repository.save_raw,
                 ) as save_raw:
+                    started = time.perf_counter()
                     window._save_all_settings()
+                    elapsed = time.perf_counter() - started
 
                 self.assertEqual(save_raw.call_count, 1)
+                self.assertLess(elapsed, 1.0)
                 self.assertFalse(window._keithley_defaults_in_flight)
                 for controller in window._controllers.values():
                     controller.reconfigure.assert_not_called()
-                window._controllers["keithley"].call.assert_called_with(
-                    "apply_limit_settings", window._settings
-                )
+                    controller.call.assert_called_with(
+                        "refresh_station_context", window._settings
+                    )
                 persisted = SettingsRepository(path).load().settings
                 self.assertEqual(
                     persisted.rigol.safety.channels["1"].defaults["frequency"],
@@ -4105,6 +4168,7 @@ class MainWindowTests(unittest.TestCase):
                 for controller in window._controllers.values():
                     controller.call = Mock()
 
+                window._device_states["keithley"] = "verified"
                 window._settings_saved(updated)
                 self.assertEqual(
                     window.keithley_page._limit_fields["level"].maximum.text(),

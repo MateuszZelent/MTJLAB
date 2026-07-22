@@ -1574,6 +1574,18 @@ class MainWindow(FluentWindow):
                 path and path[-1] in {"min", "max", "max_abs"}
                 for path in operational_changes
             ):
+                if self._device_states.get(name) in {
+                    None,
+                    "disconnected",
+                    "unknown",
+                    "fault",
+                }:
+                    controller.call("refresh_station_context", self._settings)
+                    self._log(
+                        f"DEVICE LIMITS SAVED [{name}]: device is disconnected; "
+                        "the new limits will govern the next connection."
+                    )
+                    continue
                 self._pending_limit_rollbacks.setdefault(name, previous_settings)
                 controller.call("apply_limit_settings", self._settings)
                 self._log(

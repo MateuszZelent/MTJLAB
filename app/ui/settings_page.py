@@ -1946,7 +1946,10 @@ class SettingsPage(QWidget):
         self._settings = settings
         self._dirty = False
         self._clear_validation_errors()
-        if not silent:
+        # Editors already show the committed values. Rebuilding the complete
+        # settings tree here is expensive and only necessary when automatic
+        # repair changed data that the user did not enter.
+        if not silent and repaired:
             self._populate()
         self._update_subtitle()
         self._refresh_diagnostics()
