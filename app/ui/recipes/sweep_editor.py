@@ -31,7 +31,7 @@ from app.settings.models import StationSettings
 
 
 class SeamlessRoiCellDelegate(QStyledItemDelegate):
-    """Make ROI values edit like a spreadsheet cell, not a nested text box."""
+    """Keep an ROI cell compact while making its editing state unambiguous."""
 
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
@@ -39,16 +39,22 @@ class SeamlessRoiCellDelegate(QStyledItemDelegate):
 
     def createEditor(self, parent: QWidget, _option: Any, _index: Any) -> LineEdit:
         editor = LineEdit(parent)
-        editor.setFrame(False)
+        editor.setObjectName("roiCellEditor")
+        editor.setFrame(True)
         editor.setContentsMargins(0, 0, 0, 0)
         editor.setStyleSheet(
-            "LineEdit { border: none; border-radius: 0; "
-            "background: transparent; padding: 0 7px; }"
+            "LineEdit#roiCellEditor { "
+            "border: 1px solid palette(highlight); border-radius: 4px; "
+            "background: palette(base); color: palette(text); "
+            "selection-background-color: palette(highlight); "
+            "selection-color: palette(highlighted-text); padding: 0 7px; }"
         )
         return editor
 
     def updateEditorGeometry(self, editor: QWidget, option: Any, _index: Any) -> None:
-        editor.setGeometry(option.rect)
+        # Keep the focused border inside the selected row instead of letting
+        # the table's blue selection paint bleed through the text editor.
+        editor.setGeometry(option.rect.adjusted(2, 2, -2, -2))
 
 
 class SweepGeneratorDialog(FluentRecipeDialog):

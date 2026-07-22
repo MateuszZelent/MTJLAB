@@ -2699,7 +2699,7 @@ root:
         finally:
             dialog.close()
 
-    def test_roi_text_editor_is_borderless_and_fills_the_cell(self) -> None:
+    def test_roi_text_editor_has_a_clear_focused_surface_inside_the_cell(self) -> None:
         dialog = SweepGeneratorDialog(
             {
                 "device": "Keithley",
@@ -2711,9 +2711,22 @@ root:
         try:
             delegate = dialog.segments.itemDelegateForColumn(0)
             self.assertEqual(delegate.objectName(), "seamlessRoiCellDelegate")
-            editor = delegate.createEditor(dialog.segments, None, None)
-            self.assertFalse(editor.hasFrame())
-            self.assertIn("border: none", editor.styleSheet())
+            dialog.show()
+            self.application.processEvents()
+            item = dialog.segments.item(0, 0)
+            dialog.segments.editItem(item)
+            self.application.processEvents()
+            editor = dialog.segments.findChild(LineEdit, "roiCellEditor")
+            self.assertIsNotNone(editor)
+            assert editor is not None
+            self.assertTrue(editor.hasFrame())
+            self.assertIn("background: palette(base)", editor.styleSheet())
+            self.assertIn("border: 1px solid palette(highlight)", editor.styleSheet())
+            cell = dialog.segments.visualItemRect(item)
+            self.assertGreater(editor.width(), 0)
+            self.assertGreater(editor.height(), 0)
+            self.assertGreaterEqual(editor.x(), cell.x() + 2)
+            self.assertLess(editor.width(), cell.width())
         finally:
             dialog.close()
 
