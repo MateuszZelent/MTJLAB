@@ -834,6 +834,11 @@ class AnritsuAdapter(DeviceAdapter):
         session.write(f"FREQ:STOP {config.stop_hz:.12g}HZ")
         session.write(f"DISP:WIND:TRAC:Y:RLEV {config.reference_level_dbm:.12g}")
         session.write(f"SWE:POIN {config.points}")
+        # TRAC? TRAC1 reads Trace A.  In VIEW mode that buffer is documented
+        # to remain unchanged even while the analyser continues measuring.
+        # An explicit Apply action therefore restores Trace A to WRITE so the
+        # next passive current-buffer read can actually contain a new frame.
+        session.write("TRAC1:TYPE WRIT")
         # A range/point-count change invalidates the current TRAC1 buffer.  If
         # an earlier recipe or front-panel action left the analyser in Single,
         # passive reads would then return -999 forever.  Restore the normal
@@ -873,6 +878,10 @@ class AnritsuAdapter(DeviceAdapter):
             )
         if ensure_continuous:
             session = self._require_session()
+            # Live owns the expectation that every poll can observe the Trace
+            # A measurement being refreshed. This changes the trace display
+            # mode once at Live startup; individual timer ticks remain reads.
+            session.write("TRAC1:TYPE WRIT")
             # Do not probe TRAC:TYPE? here. Although documented for Spectrum
             # Analyzer mode, MS2830A firmware can leave the query unanswered
             # in measurement applications where trace-type control is not

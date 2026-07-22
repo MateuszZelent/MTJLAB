@@ -2510,17 +2510,29 @@ class MainWindowTests(unittest.TestCase):
             self.assertNotEqual(anritsu._averaged_trace.powers_dbm[0], -5.0)
             anritsu.capture_current_reference()
             self.assertIs(anritsu._reference_trace, trace_2)
+            trace_3 = SpectrumTrace(
+                (1e6, 2e6), (-3.0, -17.0), datetime.now(timezone.utc), "TRAC1"
+            )
+            anritsu._show_trace(trace_3)
+            anritsu.spectrum_plot.plot.setYRange(-100.0, -50.0, padding=0.0)
             anritsu.reference_operation.setCurrentIndex(1)
-            anritsu.show_processed.setChecked(True)
             anritsu._refresh_spectrum_display()
+            self.assertTrue(anritsu.show_processed.isChecked())
             self.assertGreater(anritsu.spectrum_plot.trace_point_count("Processed"), 0)
+            self.assertEqual(
+                anritsu.spectrum_plot._traces["Processed"][1].tolist(),
+                [-3.0, 3.0],
+            )
+            processed_y_range = anritsu.spectrum_plot.plot.viewRange()[1]
+            self.assertLessEqual(processed_y_range[0], -3.0)
+            self.assertGreaterEqual(processed_y_range[1], 3.0)
             anritsu.show_processed.setChecked(False)
             anritsu._refresh_spectrum_display()
             self.assertFalse(anritsu.show_processed.isChecked())
             self.assertEqual(anritsu.spectrum_plot.trace_point_count("Processed"), 0)
             anritsu.remove_reference()
             self.assertIsNone(anritsu._reference_trace)
-            self.assertIs(anritsu._latest_trace, trace_2)
+            self.assertIs(anritsu._latest_trace, trace_3)
         finally:
             window.close()
             self.application.processEvents()
@@ -2931,6 +2943,10 @@ class MainWindowTests(unittest.TestCase):
                 (3e6, 4e6), (-30.0, -20.0), datetime.now(timezone.utc), "TRAC1"
             )
 
+            anritsu.hardware_info_button.click()
+            diagnostics = anritsu._trace_diagnostics_dialog
+            self.assertIsNotNone(diagnostics)
+            anritsu._controller.call.assert_not_called()
             anritsu.single.click()
 
             anritsu._controller.call.assert_called_once_with(
@@ -2940,6 +2956,10 @@ class MainWindowTests(unittest.TestCase):
             anritsu._result("fetch_current_trace", first)
             self.assertIs(anritsu._latest_trace, first)
             self.assertFalse(anritsu._fetch_pending)
+            first_preview = diagnostics.raw_text.toPlainText()
+            self.assertIn("received_frame: 1", first_preview)
+            self.assertIn("0\t1000000\t-50", first_preview)
+            self.assertIn("processing: none", first_preview)
 
             anritsu._controller.call.reset_mock()
             anritsu.single.click()
@@ -2955,7 +2975,153 @@ class MainWindowTests(unittest.TestCase):
             self.assertEqual(
                 anritsu.spectrum_plot._traces["Raw"][1].tolist(), [-30.0, -20.0]
             )
+            second_preview = diagnostics.raw_text.toPlainText()
+            self.assertIn("received_frame: 2", second_preview)
+            self.assertIn("0\t3000000\t-30", second_preview)
+            self.assertNotEqual(first_preview, second_preview)
         finally:
+            window.close()
+            self.application.processEvents()
+
+    def test_anritsu_trace_diagnostics_is_visible_and_updates_during_live(self) -> None:
+        window = MainWindow(".config/settings.yml", simulation=True)
+        try:
+            window.resize(1600, 900)
+            window.show()
+            window._navigate_to("anritsu")
+            self.application.processEvents()
+            anritsu = window.anritsu_page
+            anritsu._controller.call = Mock()
+            anritsu.refresh.setValue(5000)
+
+            anritsu.hardware_info_button.click()
+            self.application.processEvents()
+            diagnostics = anritsu._trace_diagnostics_dialog
+            self.assertIsNotNone(diagnostics)
+            self.assertTrue(diagnostics.isVisible())
+            self.assertGreaterEqual(diagnostics.width(), 540)
+            self.assertGreaterEqual(diagnostics.height(), 400)
+            self.assertTrue(diagnostics.raw_text.isVisible())
+            self.assertGreater(diagnostics.raw_text.width(), 300)
+            self.assertGreater(diagnostics.raw_text.height(), 180)
+            self.assertTrue(diagnostics.raw_text.isReadOnly())
+            anritsu._controller.call.assert_not_called()
+
+            anritsu.toggle_live()
+            frequencies = tuple(1e6 + index * 10e3 for index in range(101))
+            anritsu._result(
+                "start_live",
+                AnritsuConfigurationSnapshot(1e6, 2e6, 0.0, 101, "SPECT"),
+            )
+            first = SpectrumTrace(
+                frequencies,
+                tuple(-51.25 + index / 100 for index in range(101)),
+                datetime.now(timezone.utc),
+                "TRAC1",
+            )
+            second = SpectrumTrace(
+                frequencies,
+                tuple(-31.75 + index / 100 for index in range(101)),
+                datetime.now(timezone.utc),
+                "TRAC1",
+            )
+            anritsu._result("fetch_current_trace", first)
+            first_preview = diagnostics.raw_text.toPlainText()
+            anritsu._result("fetch_current_trace", second)
+            second_preview = diagnostics.raw_text.toPlainText()
+
+            self.assertIn("received_frame: 1", first_preview)
+            self.assertIn("0\t1000000\t-51.25", first_preview)
+            self.assertIn("received_frame: 2", second_preview)
+            self.assertIn("0\t1000000\t-31.75", second_preview)
+            self.assertNotEqual(first_preview, second_preview)
+            self.assertIn("Received frame 2", diagnostics.raw_status.text())
+            self.assertEqual(
+                [call.args[0] for call in anritsu._controller.call.call_args_list],
+                ["start_live"],
+            )
+
+            diagnostics.resize(560, 420)
+            self.application.processEvents()
+            self.assertGreater(diagnostics.raw_text.width(), 300)
+            self.assertGreater(diagnostics.raw_text.height(), 150)
+            anritsu._timer.stop()
+        finally:
+            dialog = window.anritsu_page._trace_diagnostics_dialog
+            if dialog is not None:
+                dialog.close()
+                self.application.processEvents()
+            window.close()
+            self.application.processEvents()
+
+    def test_anritsu_controller_delivers_new_manual_and_live_frames_end_to_end(self) -> None:
+        """Prove VISA -> worker thread -> page -> plot/diagnostics freshness."""
+
+        window = MainWindow(".config/settings.yml", simulation=True)
+        try:
+            anritsu = window.anritsu_page
+            connection = window.connection_panels["anritsu"]
+            connection.connect_button.click()
+            self.assertTrue(
+                wait_for_ui(
+                    lambda: connection.state.property("deviceState") == "verified"
+                )
+            )
+
+            point_index = anritsu.points.findData(101)
+            self.assertGreaterEqual(point_index, 0)
+            anritsu.points.setCurrentIndex(point_index)
+            anritsu.refresh.setValue(20)
+            anritsu.configure_button.click()
+            self.assertTrue(
+                wait_for_ui(
+                    lambda: anritsu._last_configuration is not None
+                    and anritsu._last_configuration.points == 101
+                    and anritsu._page_state == AnritsuPageState.IDLE
+                )
+            )
+
+            anritsu.hardware_info_button.click()
+            self.application.processEvents()
+            diagnostics = anritsu._trace_diagnostics_dialog
+            self.assertIsNotNone(diagnostics)
+
+            anritsu.single.click()
+            self.assertTrue(wait_for_ui(lambda: anritsu._received_trace_count == 1))
+            first_values = anritsu.spectrum_plot._traces["Raw"][1].copy()
+            first_preview = diagnostics.raw_text.toPlainText()
+
+            anritsu.single.click()
+            self.assertTrue(wait_for_ui(lambda: anritsu._received_trace_count == 2))
+            second_values = anritsu.spectrum_plot._traces["Raw"][1].copy()
+            second_preview = diagnostics.raw_text.toPlainText()
+            self.assertNotEqual(first_values.tolist(), second_values.tolist())
+            self.assertNotEqual(first_preview, second_preview)
+            self.assertIn("received_frame: 2", second_preview)
+
+            anritsu.live.click()
+            self.assertTrue(wait_for_ui(lambda: anritsu._timer.isActive()))
+            self.assertTrue(wait_for_ui(lambda: anritsu._received_trace_count >= 4))
+            live_values = anritsu.spectrum_plot._traces["Raw"][1].copy()
+            live_preview = diagnostics.raw_text.toPlainText()
+            self.assertNotEqual(second_values.tolist(), live_values.tolist())
+            self.assertNotEqual(second_preview, live_preview)
+            self.assertIn(
+                f"received_frame: {anritsu._received_trace_count}", live_preview
+            )
+
+            anritsu.live.click()
+            self.assertTrue(
+                wait_for_ui(
+                    lambda: not anritsu._timer.isActive()
+                    and anritsu._page_state == AnritsuPageState.IDLE
+                )
+            )
+        finally:
+            dialog = window.anritsu_page._trace_diagnostics_dialog
+            if dialog is not None:
+                dialog.close()
+                self.application.processEvents()
             window.close()
             self.application.processEvents()
 

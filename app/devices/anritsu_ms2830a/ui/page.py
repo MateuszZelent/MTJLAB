@@ -3,6 +3,7 @@
 # ruff: noqa: F401
 from __future__ import annotations
 
+import hashlib
 import math
 import time
 from collections import deque
@@ -25,6 +26,7 @@ from PySide6.QtWidgets import (
 from qfluentwidgets import (
     BodyLabel,
     CaptionLabel, CardWidget, CheckBox, ComboBox, LineEdit, PrimaryPushButton, ProgressBar, PushButton, ScrollArea, SpinBox, StrongBodyLabel, TitleLabel, isDarkTheme,
+    PlainTextEdit,
 )
 
 from app.devices.anritsu_ms2830a import (
@@ -720,6 +722,128 @@ class _AnritsuSpectrumWindow(StationDialog):
         self.closed.emit()
 
 
+class _AnritsuTraceDiagnosticsDialog(StationDialog):
+    """Read-only view of the exact completed trace delivered to the page."""
+
+    closed = Signal()
+    preview_points = 64
+
+    def __init__(self, parent: QWidget) -> None:
+        super().__init__(parent)
+        self.setWindowTitle("Anritsu MS2830A — trace diagnostics")
+        self.setObjectName("anritsuTraceDiagnosticsDialog")
+        self.setModal(False)
+        self.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose, True)
+        self.resize(780, 560)
+        self.setMinimumSize(540, 400)
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(16, 14, 16, 14)
+        layout.setSpacing(10)
+
+        title = StrongBodyLabel("Anritsu read-only diagnostics", self)
+        title.setObjectName("sectionTitle")
+        layout.addWidget(title)
+        description = BodyLabel(
+            "This window mirrors completed TRAC1 data already returned by the "
+            "instrument. Opening it never starts or configures a measurement.",
+            self,
+        )
+        description.setWordWrap(True)
+        description.setObjectName("muted")
+        layout.addWidget(description)
+
+        self.tabs = FluentTabView(self)
+        raw_page = QWidget(self.tabs)
+        raw_layout = QVBoxLayout(raw_page)
+        raw_layout.setContentsMargins(0, 0, 0, 0)
+        raw_layout.setSpacing(8)
+        self.raw_status = CaptionLabel(
+            "Waiting for the first completed current spectrum.", raw_page
+        )
+        self.raw_status.setObjectName("muted")
+        self.raw_status.setWordWrap(True)
+        raw_layout.addWidget(self.raw_status)
+        self.raw_text = PlainTextEdit(raw_page)
+        self.raw_text.setObjectName("anritsuRawTracePreview")
+        self.raw_text.setReadOnly(True)
+        self.raw_text.setLineWrapMode(PlainTextEdit.LineWrapMode.NoWrap)
+        self.raw_text.setAccessibleName("Raw Anritsu TRAC1 point preview")
+        self.raw_text.setAccessibleDescription(
+            "The first parsed frequency and dBm values from the most recently "
+            "completed unprocessed TRAC1 frame."
+        )
+        self.raw_text.setPlainText(
+            "No completed TRAC1 frame has been received in this application session."
+        )
+        raw_layout.addWidget(self.raw_text, 1)
+        self.tabs.addTab(raw_page, "Raw TRAC1")
+
+        hardware_page = QWidget(self.tabs)
+        hardware_layout = QVBoxLayout(hardware_page)
+        hardware_layout.setContentsMargins(0, 0, 0, 0)
+        self.hardware_text = PlainTextEdit(hardware_page)
+        self.hardware_text.setObjectName("anritsuHardwareDiagnostics")
+        self.hardware_text.setReadOnly(True)
+        self.hardware_text.setLineWrapMode(PlainTextEdit.LineWrapMode.WidgetWidth)
+        self.hardware_text.setAccessibleName("Detected Anritsu hardware information")
+        hardware_layout.addWidget(self.hardware_text)
+        self.tabs.addTab(hardware_page, "Hardware")
+        layout.addWidget(self.tabs, 1)
+
+        actions = QHBoxLayout()
+        actions.addStretch(1)
+        close_button = PushButton("Close", self)
+        close_button.clicked.connect(self.close)
+        actions.addWidget(close_button)
+        layout.addLayout(actions)
+
+    def set_hardware_details(self, details: str) -> None:
+        self.hardware_text.setPlainText(
+            details or "Hardware information is not available yet."
+        )
+
+    def set_trace(self, trace: SpectrumTrace, *, received_frame: int) -> None:
+        point_count = len(trace.powers_dbm)
+        shown = min(self.preview_points, point_count)
+        fingerprint = hashlib.sha256(
+            np.asarray(trace.powers_dbm, dtype=np.float64).tobytes()
+        ).hexdigest()
+        start_hz = trace.frequencies_hz[0]
+        stop_hz = trace.frequencies_hz[-1]
+        lines = [
+            f"received_frame: {received_frame}",
+            f"acquired_at_utc: {trace.acquired_at_utc.isoformat()}",
+            f"trace_name: {trace.trace_name}",
+            f"point_count: {point_count}",
+            f"start_frequency_hz: {start_hz:.12g}",
+            f"stop_frequency_hz: {stop_hz:.12g}",
+            f"power_values_sha256: {fingerprint}",
+            "processing: none (before cleanup, reference subtraction, and averaging)",
+            "",
+            f"first {shown} parsed TRAC1 points:",
+            "index\tfrequency_hz\tpower_dbm",
+        ]
+        lines.extend(
+            f"{index}\t{frequency_hz:.12g}\t{power_dbm:.12g}"
+            for index, (frequency_hz, power_dbm) in enumerate(
+                zip(
+                    trace.frequencies_hz[:shown],
+                    trace.powers_dbm[:shown],
+                    strict=True,
+                )
+            )
+        )
+        self.raw_text.setPlainText("\n".join(lines))
+        self.raw_status.setText(
+            f"Received frame {received_frame} · {point_count} points · "
+            f"SHA-256 {fingerprint[:16]}…"
+        )
+
+    def closeEvent(self, event: QCloseEvent) -> None:
+        super().closeEvent(event)
+        self.closed.emit()
+
+
 class AnritsuPage(QWidget):
     status = Signal(str)
     settings_readback_requested = Signal(object, object)
@@ -751,6 +875,9 @@ class AnritsuPage(QWidget):
         self._spectrogram_buffer = _SpectrogramBuffer()
         self._spectrogram_window: _AnritsuSpectrogramWindow | None = None
         self._spectrum_window: _AnritsuSpectrumWindow | None = None
+        self._trace_diagnostics_dialog: _AnritsuTraceDiagnosticsDialog | None = None
+        self._received_trace_count = 0
+        self._active_spectrum_unit = "dBm"
         self._cleanup_result: SpectrumCleanupResult | None = None
         self._detected_peaks: tuple[SpectrumPeak, ...] = ()
         self._last_peak_analysis_monotonic: float | None = None
@@ -867,8 +994,10 @@ class AnritsuPage(QWidget):
         self.hardware_info_button.setObjectName("infoButton")
         self.hardware_info_button.setFixedSize(28, 28)
         self.hardware_info_button.setToolTip(
-            "Show detected Anritsu hardware options and documented operating limits."
+            "Show the latest raw TRAC1 values, frame fingerprint, hardware options "
+            "and documented operating limits."
         )
+        self.hardware_info_button.setAccessibleName("Open Anritsu trace diagnostics")
         self.hardware_info_button.clicked.connect(self._show_anritsu_hardware_info)
         setup_header.addWidget(self.hardware_info_button)
         self._advanced_dialog = self._build_advanced_spectrum_dialog()
@@ -1189,7 +1318,9 @@ class AnritsuPage(QWidget):
         self.clear_reference.clicked.connect(self.remove_reference)
         self.load_reference.clicked.connect(self.load_reference_file)
         self.save_reference.clicked.connect(self.save_reference_file)
-        self.reference_operation.currentIndexChanged.connect(self._refresh_spectrum_display)
+        self.reference_operation.currentIndexChanged.connect(
+            self._reference_operation_changed
+        )
         for checkbox in (self.show_raw, self.show_average, self.show_reference, self.show_processed):
             checkbox.toggled.connect(self._refresh_spectrum_display)
         self.spectrogram_source.currentIndexChanged.connect(
@@ -1957,13 +2088,29 @@ class AnritsuPage(QWidget):
             "Documented instrument limits\n"
             f"{self.hardware_range_info.text()}"
         )
+        if self._trace_diagnostics_dialog is not None:
+            self._trace_diagnostics_dialog.set_hardware_details(
+                self._hardware_details_text
+            )
 
     def _show_anritsu_hardware_info(self) -> None:
-        QMessageBox.information(
-            self,
-            "Anritsu hardware information",
-            self._hardware_details_text or "Hardware information is not available yet.",
-        )
+        dialog = self._trace_diagnostics_dialog
+        if dialog is None:
+            dialog = _AnritsuTraceDiagnosticsDialog(self)
+            dialog.closed.connect(self._trace_diagnostics_closed)
+            self._trace_diagnostics_dialog = dialog
+        dialog.set_hardware_details(self._hardware_details_text)
+        if self._latest_trace is not None:
+            dialog.set_trace(
+                self._latest_trace,
+                received_frame=self._received_trace_count,
+            )
+        dialog.show()
+        dialog.raise_()
+        dialog.activateWindow()
+
+    def _trace_diagnostics_closed(self) -> None:
+        self._trace_diagnostics_dialog = None
 
     def _spectrum_config_from_form(self) -> SpectrumConfig:
         start_hz, stop_hz = self._spectrum_frequency_bounds()
@@ -2607,6 +2754,12 @@ class AnritsuPage(QWidget):
         self, trace: SpectrumTrace, *, update_controls: bool = True
     ) -> None:
         self._latest_trace = trace
+        self._received_trace_count += 1
+        if self._trace_diagnostics_dialog is not None:
+            self._trace_diagnostics_dialog.set_trace(
+                trace,
+                received_frame=self._received_trace_count,
+            )
         self._spectrogram_buffer.append(trace)
         # Raw Live must repaint immediately.  CPU cleanup/peak analysis is
         # deliberately asynchronous and may coalesce frames; making repaint
@@ -3048,6 +3201,18 @@ class AnritsuPage(QWidget):
             )
             self._spectrogram_window.status.setText(message)
 
+    def _reference_operation_changed(self, *_args: object) -> None:
+        operation = str(self.reference_operation.currentData() or "none")
+        should_show = operation != "none"
+        previous = self.show_processed.blockSignals(True)
+        self.show_processed.setChecked(should_show)
+        self.show_processed.blockSignals(previous)
+        if should_show and self._reference_trace is None:
+            self.analysis_status.setText(
+                "Capture or load a reference before displaying Raw − reference."
+            )
+        self._refresh_spectrum_display()
+
     def _refresh_spectrum_display(self, *_args: object) -> None:
         traces: list[tuple[str, SpectrumTrace, tuple[float, ...], str, str]] = []
         if self._latest_trace is not None and self.show_raw.isChecked():
@@ -3074,13 +3239,10 @@ class AnritsuPage(QWidget):
         operation = str(self.reference_operation.currentData() or "none")
         processed: tuple[float, ...] | None = None
         processed_unit = "dBm"
-        signal = self._averaged_trace or self._latest_trace
-        if operation != "none" and signal is not None and self._reference_trace is not None:
-            if signal is self._reference_trace:
-                self.analysis_status.setText(
-                    "Reference captured — acquire the next spectrum before displaying Signal − reference."
-                )
-                operation = "none"
+        # Reference processing is explicitly Raw − reference. A previously
+        # calculated application average must not silently replace the newest
+        # current TRAC1 frame selected by the operator.
+        signal = self._latest_trace
         if operation != "none" and signal is not None and self._reference_trace is not None:
             try:
                 if not frequency_grids_match(signal.frequencies_hz, self._reference_trace.frequencies_hz):
@@ -3108,11 +3270,18 @@ class AnritsuPage(QWidget):
                     self._validate_reference_acquisition_compatibility(
                         self._reference_spectrum
                     )
+                if signal is self._reference_trace:
+                    raise ValueError(
+                        "Reference captured — acquire the next spectrum before "
+                        "displaying Signal − reference."
+                    )
                 processed, processed_unit = apply_reference_operation(
                     signal.powers_dbm, self._reference_trace.powers_dbm, operation
                 )
             except ValueError as exc:
-                self.info.setText(f"Reference processing unavailable: {exc}")
+                message = f"Reference processing unavailable: {exc}"
+                self.info.setText(message)
+                self.analysis_status.setText(message)
             else:
                 if self.show_processed.isChecked():
                     traces.append(("Processed", signal, processed, processed_unit, "#ab47bc"))
@@ -3153,10 +3322,14 @@ class AnritsuPage(QWidget):
                 floating.status.setText("No finite spectrum points are available.")
             return
         active_unit = traces[-1][3]
+        unit_changed = active_unit != self._active_spectrum_unit
         for plot in plots:
             plot.set_labels(
                 x="Frequency", x_unit="Hz", y="Amplitude", y_unit=active_unit
             )
+            if unit_changed:
+                plot.auto_range()
+        self._active_spectrum_unit = active_unit
         if floating is not None:
             floating.spectrum.set_title("Current spectrum")
             floating.status.setText(

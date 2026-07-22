@@ -1991,6 +1991,7 @@ class AdapterAndRunnerTests(unittest.TestCase):
         adapter.stop_live()
 
         self.assertNotIn("TRAC:TYPE?", session.writes)
+        self.assertIn("TRAC1:TYPE WRIT", session.writes)
         self.assertIn("INIT:MODE:CONT", session.writes)
         self.assertNotIn("INIT:CONT OFF", session.writes)
 
@@ -2013,8 +2014,13 @@ class AdapterAndRunnerTests(unittest.TestCase):
         adapter.configure_spectrum(SpectrumConfig(1e6, 2e6, 0, 101))
 
         self.assertIn("INIT:MODE:CONT", session.writes)
+        self.assertIn("TRAC1:TYPE WRIT", session.writes)
         self.assertLess(
             session.writes.index("SWE:POIN 101"),
+            session.writes.index("TRAC1:TYPE WRIT"),
+        )
+        self.assertLess(
+            session.writes.index("TRAC1:TYPE WRIT"),
             session.writes.index("INIT:MODE:CONT"),
         )
 
@@ -2041,6 +2047,7 @@ class AdapterAndRunnerTests(unittest.TestCase):
 
         self.assertTrue(adapter.live)
         self.assertNotIn("TRAC:TYPE?", session.writes)
+        self.assertIn("TRAC1:TYPE WRIT", session.writes)
         self.assertNotIn("INIT:MODE:CONT", session.writes)
 
     def test_anritsu_signal_generator_requires_qualified_limits_and_readback(self) -> None:
