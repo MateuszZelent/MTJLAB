@@ -2771,15 +2771,12 @@ class MainWindowTests(unittest.TestCase):
             window.close()
             self.application.processEvents()
 
-    def test_anritsu_live_enables_continuous_sweep_and_accepts_stable_frames(self) -> None:
+    def test_anritsu_live_passively_polls_current_trace_and_accepts_stable_frames(self) -> None:
         window = MainWindow(".config/settings.yml", simulation=True)
         try:
             anritsu = window.anritsu_page
             anritsu._controller.call = Mock()
             self.assertEqual(anritsu.refresh.minimum(), 10)
-            anritsu.start.setText("1 MHz")
-            anritsu.stop.setText("2 MHz")
-            anritsu.points.setCurrentIndex(anritsu.points.findData(101))
             trace = SpectrumTrace(
                 (1e6, 2e6), (-50.0, -40.0), datetime.now(timezone.utc), "TRAC1"
             )
@@ -2787,28 +2784,20 @@ class MainWindowTests(unittest.TestCase):
 
             anritsu.toggle_live()
 
-            operation, config = anritsu._controller.call.call_args.args
-            self.assertEqual(operation, "configure")
-            self.assertEqual(config.start_hz, 1e6)
-            self.assertEqual(config.stop_hz, 2e6)
-            self.assertEqual(config.points, 101)
+            anritsu._controller.call.assert_called_once_with("start_live", False)
             self.assertTrue(anritsu._live_transition_pending)
             self.assertEqual(anritsu.live_indicator.property("liveState"), "starting")
             self.assertFalse(anritsu.configuration_panel.isEnabled())
             anritsu.toggle_live()
             self.assertEqual(anritsu._controller.call.call_count, 1)
             snapshot = AnritsuConfigurationSnapshot(1e6, 2e6, 0.0, 101, "SPECT")
-            anritsu._result("configure", snapshot)
-            self.assertEqual(
-                anritsu._controller.call.call_args.args, ("start_live", True)
-            )
             anritsu._result("start_live", snapshot)
             self.assertEqual(anritsu._spectrogram_buffer.row_count, 0)
             self.assertFalse(anritsu._live_transition_pending)
             self.assertFalse(anritsu.single.isEnabled())
             self.assertEqual(anritsu.live_indicator.property("liveState"), "on")
             self.assertFalse(anritsu.configuration_panel.isEnabled())
-            anritsu._result("single_sweep", trace)
+            anritsu._result("fetch_current_trace", trace)
             self.assertEqual(
                 anritsu.spectrum_plot._traces["Raw"][1].tolist(),
                 [-50.0, -40.0],
@@ -2834,24 +2823,17 @@ class MainWindowTests(unittest.TestCase):
             window.close()
             self.application.processEvents()
 
-    def test_anritsu_live_does_not_start_when_configuration_fails(self) -> None:
+    def test_anritsu_live_does_not_apply_form_configuration(self) -> None:
         window = MainWindow(".config/settings.yml", simulation=True)
         try:
             anritsu = window.anritsu_page
             anritsu._controller.call = Mock()
-            anritsu.start.setText("300 MHz")
-            anritsu.stop.setText("2 GHz")
-
             anritsu.toggle_live()
 
-            self.assertEqual(anritsu._controller.call.call_args.args[0], "configure")
-            anritsu._error("configure", "injected readback mismatch")
-            self.assertEqual(anritsu._controller.call.call_count, 1)
-            self.assertFalse(anritsu._timer.isActive())
-            self.assertFalse(anritsu._live_transition_pending)
+            anritsu._controller.call.assert_called_once_with("start_live", False)
+            self.assertTrue(anritsu._live_transition_pending)
             self.assertIsNone(anritsu._pending_after_spectrum_configuration)
-            self.assertEqual(anritsu._page_state, AnritsuPageState.ERROR)
-            self.assertTrue(anritsu.configuration_panel.isEnabled())
+            self.assertEqual(anritsu._page_state, AnritsuPageState.STARTING_LIVE)
         finally:
             window.close()
             self.application.processEvents()
@@ -2903,14 +2885,11 @@ class MainWindowTests(unittest.TestCase):
             window.close()
             self.application.processEvents()
 
-    def test_anritsu_read_once_queries_current_trace_after_each_configuration(self) -> None:
+    def test_anritsu_read_once_passively_queries_current_trace(self) -> None:
         window = MainWindow(".config/settings.yml", simulation=True)
         try:
             anritsu = window.anritsu_page
             anritsu._controller.call = Mock()
-            anritsu.start.setText("1 MHz")
-            anritsu.stop.setText("2 MHz")
-            anritsu.points.setCurrentIndex(anritsu.points.findData(101))
             first = SpectrumTrace(
                 (1e6, 2e6), (-50.0, -40.0), datetime.now(timezone.utc), "TRAC1"
             )
@@ -2920,42 +2899,21 @@ class MainWindowTests(unittest.TestCase):
 
             anritsu.single.click()
 
-            operation, config = anritsu._controller.call.call_args.args
-            self.assertEqual(operation, "configure")
-            self.assertEqual(config.start_hz, 1e6)
-            self.assertEqual(config.stop_hz, 2e6)
-            self.assertEqual(config.points, 101)
+            anritsu._controller.call.assert_called_once_with(
+                "fetch_current_trace", "TRAC1"
+            )
             self.assertTrue(anritsu._fetch_pending)
-            anritsu._result(
-                "configure",
-                AnritsuConfigurationSnapshot(1e6, 2e6, -10.0, 101, "SPECT"),
-            )
-            self.assertEqual(
-                anritsu._controller.call.call_args.args, ("acquire_current_trace", "TRAC1")
-            )
-            anritsu._result("acquire_current_trace", first)
+            anritsu._result("fetch_current_trace", first)
             self.assertIs(anritsu._latest_trace, first)
             self.assertFalse(anritsu._fetch_pending)
 
             anritsu._controller.call.reset_mock()
-            anritsu.start.setText("3 MHz")
-            anritsu.stop.setText("4 MHz")
-            anritsu.points.setCurrentIndex(anritsu.points.findData(501))
             anritsu.single.click()
 
-            operation, config = anritsu._controller.call.call_args.args
-            self.assertEqual(operation, "configure")
-            self.assertEqual(config.start_hz, 3e6)
-            self.assertEqual(config.stop_hz, 4e6)
-            self.assertEqual(config.points, 501)
-            anritsu._result(
-                "configure",
-                AnritsuConfigurationSnapshot(3e6, 4e6, -10.0, 501, "SPECT"),
+            anritsu._controller.call.assert_called_once_with(
+                "fetch_current_trace", "TRAC1"
             )
-            self.assertEqual(
-                anritsu._controller.call.call_args.args, ("acquire_current_trace", "TRAC1")
-            )
-            anritsu._result("acquire_current_trace", second)
+            anritsu._result("fetch_current_trace", second)
             self.assertIs(anritsu._latest_trace, second)
             self.assertEqual(
                 anritsu.spectrum_plot._traces["Raw"][0].tolist(), [3e6, 4e6]

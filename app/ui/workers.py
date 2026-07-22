@@ -228,8 +228,6 @@ class InstrumentWorker(QObject):
                 return self._adapter.fetch_trace(str(payload or "TRAC1"))
             if operation == "fetch_current_trace":
                 return self._adapter.fetch_current_trace(str(payload or "TRAC1"))
-            if operation == "acquire_current_trace":
-                return self._adapter.acquire_current_trace(str(payload or "TRAC1"))
             if operation == "single_sweep":
                 return self._adapter.acquire_single_sweep(str(payload or "TRAC1"))
             if operation == "read_signal_generator":

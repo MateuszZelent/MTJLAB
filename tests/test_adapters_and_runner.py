@@ -1902,36 +1902,6 @@ class AdapterAndRunnerTests(unittest.TestCase):
         with self.assertRaisesRegex(DeviceError, "unmeasured/error sentinel"):
             adapter.fetch_trace()
 
-    def test_anritsu_current_snapshot_retries_minus_999_without_starting_sweep(self) -> None:
-        reads = 0
-
-        def trace_after_first_unmeasured(_command: str) -> str:
-            nonlocal reads
-            reads += 1
-            if reads == 1:
-                return ",".join("-999" for _ in range(101))
-            return ",".join(str(-60 + index / 100) for index in range(101))
-
-        session = FakeVisaSession(
-            responses={
-                "*IDN?": "ANRITSU,MS2830A,123456,1.0",
-                "FREQ:STAR?": "1000000",
-                "FREQ:STOP?": "2000000",
-                "SWE:POIN?": "101",
-                "TRAC? TRAC1": trace_after_first_unmeasured,
-            }
-        )
-        adapter = AnritsuAdapter(self.settings, session_factory=FakeVisaSessionFactory(session))
-        adapter.connect()
-
-        trace = adapter.acquire_current_trace()
-
-        self.assertEqual(len(trace.powers_dbm), 101)
-        self.assertEqual(session.writes.count("TRAC? TRAC1"), 2)
-        self.assertIn("FORM ASC", session.writes)
-        self.assertFalse(any(command.startswith("INIT") for command in session.writes))
-        self.assertNotIn("*WAI", session.writes)
-
     def test_anritsu_reads_current_configuration_without_writes_or_acquisition_unlock(self) -> None:
         session = FakeVisaSession(
             responses={

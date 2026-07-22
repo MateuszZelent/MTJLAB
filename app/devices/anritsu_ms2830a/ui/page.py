@@ -916,7 +916,7 @@ class AnritsuPage(QWidget):
         self.read_configuration = PushButton("Read from instrument")
         self.read_and_save_configuration = PushButton("Read all & save defaults")
         self.configure_button = PrimaryPushButton("Apply configuration")
-        self.single = PushButton("Acquire fresh spectrum")
+        self.single = PushButton("Read current spectrum")
         self.live = PrimaryPushButton("Start Live")
         self.abort_button = PushButton("Abort acquisition")
         self.abort_button.setObjectName("warningButton")
@@ -1220,7 +1220,7 @@ class AnritsuPage(QWidget):
         help_items = {
             self.read_configuration: "Read Start, Stop, Reference level, and Points from the connected analyser. This sends query commands only and never changes the instrument or configured safety limits.",
             self.read_and_save_configuration: "Read the current basic and advanced Spectrum settings using query commands, preview them, then save them as settings.yml defaults. No instrument setting or safety limit is changed.",
-            self.single: "Trigger one qualified analyser sweep, wait for completion, then read a fresh TRAC1 spectrum directly from the instrument.",
+            self.single: "Read the currently displayed TRAC1 spectrum using SCPI queries only. This does not configure or trigger the analyser.",
             self.average_count: "Number of complete spectra to average. 200 is common in the Thatec workflow. Averaging is performed in linear mW, not directly in dBm.",
             self.acquire_average: "Passively read N traces at the Live refresh interval and average power in linear mW. No analyser setting or trigger mode is changed.",
             self.cancel_average: "Stop temporal averaging. Already collected temporary frames are discarded; completed raw/reference data are unchanged.",
@@ -2039,17 +2039,7 @@ class AnritsuPage(QWidget):
     def read_once(self) -> None:
         if self._page_state not in {AnritsuPageState.IDLE, AnritsuPageState.ERROR}:
             return
-        if self._fetch_pending:
-            return
-        self._fetch_pending = True
-        self._fetch_started_monotonic = time.monotonic()
-        self.info.setText("Applying and verifying spectrum settings...")
-        self.status.emit("Anritsu spectrum configuration requested before acquisition")
-        self._set_page_state(AnritsuPageState.CONFIGURING)
-        if not self._configure_from_form(then="current_trace"):
-            self._fetch_pending = False
-            self._fetch_started_monotonic = None
-            self._set_page_state(AnritsuPageState.ERROR)
+        self._request_trace()
 
     def _request_trace(self) -> bool:
         if self._fetch_pending:
@@ -2074,16 +2064,11 @@ class AnritsuPage(QWidget):
         self._live_transition_pending = True
         self.live.setText("Starting…")
         self._set_live_indicator("starting")
-        self._set_page_state(AnritsuPageState.CONFIGURING)
+        self._set_page_state(AnritsuPageState.STARTING_LIVE)
         self._timer.setInterval(self.refresh.value())
-        # Live owns continuous acquisition for its lifetime.  The adapter
-        # remembers the previous INIT:CONT state and restores it on Stop.
-        # Without this, polling can repeatedly read a frozen TRAC1 buffer.
-        if not self._configure_from_form(then="start_live"):
-            self._live_transition_pending = False
-            self.live.setText("Start Live")
-            self._set_live_indicator("off")
-            self._set_page_state(AnritsuPageState.ERROR)
+        # Passive polling: leave the analyser in its current front-panel mode
+        # and only read the displayed TRAC1 buffer.
+        self._controller.call("start_live", False)
 
     def _set_live_indicator(self, state: str, frame: int | None = None) -> None:
         labels = {
@@ -2495,7 +2480,6 @@ class AnritsuPage(QWidget):
                 + ("ON" if self._sg_output_enabled else "OFF")
             )
         elif operation == "configure" and isinstance(result, AnritsuConfigurationSnapshot):
-            pending = self._pending_after_spectrum_configuration
             self._pending_after_spectrum_configuration = None
             self._result("read_configuration", result)
             self.banner.show_message(
@@ -2503,18 +2487,7 @@ class AnritsuPage(QWidget):
                 severity="success",
             )
             self.status.emit("Anritsu configured and verified by SCPI readback")
-            if pending == "current_trace":
-                self.info.setText("Reading the current spectrum from the instrument...")
-                self.status.emit("Anritsu current-spectrum read started")
-                self._controller.call("acquire_current_trace", "TRAC1")
-            elif pending == "start_live":
-                self.live.setText("Starting...")
-                self._set_page_state(AnritsuPageState.STARTING_LIVE)
-                # Live owns continuous acquisition for its lifetime. The adapter
-                # restores the previous INIT:CONT state when Live stops.
-                self._controller.call("start_live", True)
-            else:
-                self._set_page_state(AnritsuPageState.IDLE)
+            self._set_page_state(AnritsuPageState.IDLE)
         elif operation == "start_live" and isinstance(result, AnritsuConfigurationSnapshot):
             self._live_transition_pending = False
             self._result("read_configuration", result)
@@ -2532,7 +2505,7 @@ class AnritsuPage(QWidget):
             self.live.setText("Stop Live")
             self._set_live_indicator("on", 0)
             self._set_page_state(AnritsuPageState.LIVE)
-            mode = "continuous sweep with completed-trace polling"
+            mode = "passive current-trace polling"
             self.info.setText(f"Live started; {mode}. Waiting for first frame...")
             self.status.emit(f"Anritsu Live started: {mode}")
         elif operation == "stop_live":
@@ -2542,7 +2515,7 @@ class AnritsuPage(QWidget):
             self._set_page_state(AnritsuPageState.IDLE)
             self.info.setText("Live stopped.")
             self.status.emit("Anritsu Live stopped")
-        elif operation in {"fetch_trace", "fetch_current_trace", "acquire_current_trace", "single_sweep"} and isinstance(result, SpectrumTrace):
+        elif operation in {"fetch_trace", "fetch_current_trace", "single_sweep"} and isinstance(result, SpectrumTrace):
             self._fetch_pending = False
             finished = time.monotonic()
             if self._fetch_started_monotonic is not None:
@@ -3234,13 +3207,13 @@ class AnritsuPage(QWidget):
             )
             self.status.emit(f"Anritsu {operation} failed: {error}")
             return
-        if operation in {"fetch_trace", "fetch_current_trace", "acquire_current_trace", "single_sweep"}:
+        if operation in {"fetch_trace", "fetch_current_trace", "single_sweep"}:
             self._fetch_pending = False
             if self._averaging_active:
                 self._finish_temporal_averaging(resume_live=False)
                 self.info.setText(f"Averaging stopped: {error}")
         if operation in {
-            "read_configuration", "configure", "start_live", "fetch_trace", "fetch_current_trace", "acquire_current_trace",
+            "read_configuration", "configure", "start_live", "fetch_trace", "fetch_current_trace",
             "single_sweep", "emergency_off",
         }:
             self._live_transition_pending = False

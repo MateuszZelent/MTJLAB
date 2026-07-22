@@ -4,17 +4,18 @@ from dataclasses import replace
 import unittest
 
 from app.contracts import DeviceModuleRegistry
+from app.devices.anritsu_ms2830a import AnritsuAdapter
+from app.devices.anritsu_ms2830a.module import MODULE as ANRITSU_MODULE
 from app.devices.lakeshore_475 import (
     GaussmeterConfig,
     LakeShore475Adapter,
     MeasurementMode,
 )
 from app.devices.lakeshore_475.simulator import simulated_475_session
-from app.devices.anritsu_ms2830a.module import MODULE as ANRITSU_MODULE
 from app.devices.moke_box import MokeBoxAdapter, MokeBoxConfig
 from app.devices.moke_box.module import MODULE as MOKE_MODULE
 from app.devices.registry import built_in_device_registry
-from app.devices.visa import FakeVisaSessionFactory
+from app.devices.visa import FakeVisaSession, FakeVisaSessionFactory
 from app.domain.errors import ConfigurationError, DeviceError
 from app.settings.models import StationSettings
 from tests.helpers import loaded_settings, simulation_settings
@@ -46,18 +47,42 @@ class _OfficialModel425Bridge:
 
 
 class DeviceModuleTests(unittest.TestCase):
-    def test_anritsu_module_dispatches_current_trace_acquisition(self) -> None:
-        adapter = ANRITSU_MODULE.create_adapter(
-            simulation_settings(), simulation=True
+    def test_anritsu_production_dispatch_passively_reads_single_and_live_frames(self) -> None:
+        frame = 0
+
+        def next_trace(_command: str) -> str:
+            nonlocal frame
+            frame += 1
+            return ",".join(
+                str(-70.0 + frame + index / 100.0) for index in range(101)
+            )
+
+        session = FakeVisaSession(
+            responses={
+                "*IDN?": "ANRITSU,MS2830A,123456,7.03.00",
+                "INST?": "SPECT",
+                "FORM?": "ASC,0",
+                "FREQ:STAR?": "1000000",
+                "FREQ:STOP?": "2000000",
+                "DISP:WIND:TRAC:Y:RLEV?": "-10",
+                "SWE:POIN?": "101",
+                "TRAC? TRAC1": next_trace,
+            }
+        )
+        adapter = AnritsuAdapter(
+            simulation_settings(),
+            session_factory=FakeVisaSessionFactory(session),
         )
         adapter.connect()
 
-        trace = ANRITSU_MODULE.dispatch(
-            adapter, "acquire_current_trace", "TRAC1"
-        )
+        single = ANRITSU_MODULE.dispatch(adapter, "fetch_current_trace", "TRAC1")
+        ANRITSU_MODULE.dispatch(adapter, "start_live", False)
+        live = ANRITSU_MODULE.dispatch(adapter, "fetch_current_trace", "TRAC1")
 
-        self.assertEqual(trace.trace_name, "TRAC1")
-        self.assertGreater(len(trace.powers_dbm), 1)
+        self.assertEqual(session.writes.count("TRAC? TRAC1"), 2)
+        self.assertNotEqual(single.powers_dbm, live.powers_dbm)
+        self.assertFalse(any(command.startswith("INIT") for command in session.writes))
+        self.assertFalse(any("FORM ASC" == command for command in session.writes))
 
     def test_registry_exposes_unique_concrete_implementation_keys(self) -> None:
         modules = built_in_device_registry().all_modules()

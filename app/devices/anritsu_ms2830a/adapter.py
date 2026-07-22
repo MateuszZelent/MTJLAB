@@ -982,38 +982,6 @@ class AnritsuAdapter(DeviceAdapter):
         self.wait_complete()
         return self.fetch_trace(trace)
 
-    def acquire_current_trace(self, trace: str = "TRAC1") -> SpectrumTrace:
-        """Return the analyser's current trace without initiating a sweep.
-
-        This deliberately mirrors the proven external MS2830A module: select
-        ASCII transfer and query TRAC1. After a range change the instrument can
-        temporarily return its -999 unmeasured marker, so retry the actual
-        device query until a valid current trace or the configured deadline.
-        """
-
-        trace = validate_anritsu_trace_name(trace)
-        self._assert_acquisition_allowed()
-        session = self._require_session()
-        session.write("FORM ASC")
-        timeout = parse_quantity(
-            self._settings.acquisition.operation_complete_timeout,
-            DIMENSION_TIME,
-        ).si_value
-        deadline = time.monotonic() + timeout
-        while True:
-            try:
-                return self._read_ascii_trace(session, trace)
-            except DeviceError as exc:
-                if "-999.0 unmeasured/error sentinel" not in str(exc):
-                    raise
-                if time.monotonic() >= deadline:
-                    raise DeviceError(
-                        "Anritsu did not provide a valid current spectrum before "
-                        "the acquisition deadline; every TRAC1 read contained the "
-                        "documented -999.0 unmeasured/error sentinel."
-                    ) from exc
-                time.sleep(min(0.1, max(0.0, deadline - time.monotonic())))
-
     def fetch_trace(self, trace: str = "TRAC1") -> SpectrumTrace:
         """Read one trace for a validated recipe/single-sweep workflow."""
 

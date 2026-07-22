@@ -27,7 +27,6 @@ def _dispatch(adapter: DeviceAdapter, operation: str, payload: object) -> object
         "stop_live": adapter.stop_live,
         "fetch_trace": lambda: adapter.fetch_trace(str(payload or "TRAC1")),
         "fetch_current_trace": lambda: adapter.fetch_current_trace(str(payload or "TRAC1")),
-        "acquire_current_trace": lambda: adapter.acquire_current_trace(str(payload or "TRAC1")),
         "single_sweep": lambda: adapter.acquire_single_sweep(str(payload or "TRAC1")),
         "read_signal_generator": adapter.read_signal_generator_configuration,
         "configure_signal_generator": lambda: adapter.configure_signal_generator(payload),
