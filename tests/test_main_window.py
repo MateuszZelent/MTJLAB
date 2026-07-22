@@ -2784,7 +2784,7 @@ class MainWindowTests(unittest.TestCase):
 
             anritsu.toggle_live()
 
-            anritsu._controller.call.assert_called_once_with("start_live", False)
+            anritsu._controller.call.assert_called_once_with("start_live", True)
             self.assertTrue(anritsu._live_transition_pending)
             self.assertEqual(anritsu.live_indicator.property("liveState"), "starting")
             self.assertFalse(anritsu.configuration_panel.isEnabled())
@@ -2823,6 +2823,40 @@ class MainWindowTests(unittest.TestCase):
             window.close()
             self.application.processEvents()
 
+    def test_anritsu_manual_read_retries_unmeasured_trace_without_new_sweep(self) -> None:
+        window = MainWindow(".config/settings.yml", simulation=True)
+        try:
+            anritsu = window.anritsu_page
+            anritsu._controller.call = Mock()
+            with (
+                patch(
+                    "app.devices.anritsu_ms2830a.ui.page.time.monotonic",
+                    return_value=100.0,
+                ),
+                patch(
+                    "app.devices.anritsu_ms2830a.ui.page.QTimer.singleShot"
+                ) as single_shot,
+            ):
+                anritsu.read_once()
+                anritsu._error(
+                    "fetch_current_trace",
+                    "Anritsu returned the documented -999.0 "
+                    "unmeasured/error sentinel for 10001 of 10001 trace points",
+                )
+
+            anritsu._controller.call.assert_called_once_with(
+                "fetch_current_trace", "TRAC1"
+            )
+            single_shot.assert_called_once()
+            self.assertFalse(anritsu._fetch_pending)
+            self.assertEqual(anritsu._page_state, AnritsuPageState.IDLE)
+            self.assertTrue(anritsu.banner.isHidden())
+            self.assertIn("still being measured", anritsu.info.text())
+            self.assertNotIn("INIT", str(anritsu._controller.call.call_args_list))
+        finally:
+            window.close()
+            self.application.processEvents()
+
     def test_anritsu_live_does_not_apply_form_configuration(self) -> None:
         window = MainWindow(".config/settings.yml", simulation=True)
         try:
@@ -2830,7 +2864,7 @@ class MainWindowTests(unittest.TestCase):
             anritsu._controller.call = Mock()
             anritsu.toggle_live()
 
-            anritsu._controller.call.assert_called_once_with("start_live", False)
+            anritsu._controller.call.assert_called_once_with("start_live", True)
             self.assertTrue(anritsu._live_transition_pending)
             self.assertIsNone(anritsu._pending_after_spectrum_configuration)
             self.assertEqual(anritsu._page_state, AnritsuPageState.STARTING_LIVE)
@@ -4283,6 +4317,41 @@ class MainWindowTests(unittest.TestCase):
         finally:
             window.close()
             self.application.processEvents()
+
+    def test_anritsu_frequency_limit_edit_updates_both_range_badges(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            path = Path(temporary) / "settings.yml"
+            write_engineer_settings(path)
+            window = MainWindow(
+                path, simulation=False, authenticated_username=TEST_ENGINEER
+            )
+            try:
+                first = window.anritsu_page._limit_fields["frequency0"]
+                second = window.anritsu_page._limit_fields["frequency1"]
+
+                def complete_dialog() -> None:
+                    dialog = QApplication.activeModalWidget()
+                    self.assertIsInstance(dialog, LimitEditDialog)
+                    dialog.minimum.setText("100 MHz")
+                    dialog.maximum.setText("20 GHz")
+                    dialog.accept()
+
+                QTimer.singleShot(0, complete_dialog)
+                with patch.object(
+                    window.anritsu_page.banner, "show_message"
+                ) as show_message:
+                    first.edit_button.click()
+
+                self.assertEqual(first.minimum.text(), "MIN  100 MHz")
+                self.assertEqual(second.minimum.text(), "MIN  100 MHz")
+                self.assertIn("SAVE SETTINGS", show_message.call_args.args[0])
+                persisted = SettingsRepository(path).load().settings
+                self.assertNotEqual(
+                    persisted.anritsu.safety.frequency.min, "100 MHz"
+                )
+            finally:
+                window.close()
+                self.application.processEvents()
 
     def test_keithley_ranges_are_direct_manual_fields_not_trip_limit_editors(self) -> None:
         window = MainWindow(".config/settings.yml", simulation=True)

@@ -199,7 +199,6 @@ class AnritsuAdapter(DeviceAdapter):
         self._factory = session_factory or PyVisaSessionFactory()
         self._session: InstrumentSession | None = None
         self._live = False
-        self._restore_continuous_after_live = False
         self._last_sg_config: SignalGeneratorConfig | None = None
         self._sg_output_enabled = False
 
@@ -310,7 +309,6 @@ class AnritsuAdapter(DeviceAdapter):
                 )
         session, self._session = self._session, None
         self._live = False
-        self._restore_continuous_after_live = False
         self._last_sg_config = None
         self._sg_output_enabled = False
         if session is not None:
@@ -836,6 +834,12 @@ class AnritsuAdapter(DeviceAdapter):
         session.write(f"FREQ:STOP {config.stop_hz:.12g}HZ")
         session.write(f"DISP:WIND:TRAC:Y:RLEV {config.reference_level_dbm:.12g}")
         session.write(f"SWE:POIN {config.points}")
+        # A range/point-count change invalidates the current TRAC1 buffer.  If
+        # an earlier recipe or front-panel action left the analyser in Single,
+        # passive reads would then return -999 forever.  Restore the normal
+        # free-running Spectrum mode once per explicit Apply action.  Manual
+        # Read and each Live timer tick remain pure current-buffer reads.
+        session.write("INIT:MODE:CONT")
         actual = self.read_current_configuration()
         mismatches: list[str] = []
         if not math.isclose(actual.start_hz, config.start_hz, rel_tol=0.0, abs_tol=1.0):
@@ -859,7 +863,7 @@ class AnritsuAdapter(DeviceAdapter):
         return actual
 
     def start_live(self, ensure_continuous: bool = False) -> AnritsuConfigurationSnapshot:
-        """Start Live polling, optionally enabling continuous sweep temporarily."""
+        """Start Live polling, optionally ensuring free-running measurement."""
 
         snapshot = self.read_current_configuration()
         if "SPECT" not in snapshot.instrument_mode.upper():
@@ -884,7 +888,6 @@ class AnritsuAdapter(DeviceAdapter):
                 raise DeviceError(
                     f"Anritsu returned invalid INIT:CONT? response {continuous_response!r}."
                 )
-            self._restore_continuous_after_live = not continuous
             if not continuous:
                 # The MS2830A command explicitly selects Continuous mode and
                 # starts continuous measurement.
@@ -893,9 +896,9 @@ class AnritsuAdapter(DeviceAdapter):
         return snapshot
 
     def stop_live(self) -> None:
-        if self._restore_continuous_after_live and self._session is not None:
-            self._session.write("INIT:CONT OFF")
-        self._restore_continuous_after_live = False
+        # Stop only application polling.  Turning INIT:CONT OFF here would
+        # freeze the front-panel trace and make the next current-trace read
+        # return stale data (or -999 after a range change).
         self._live = False
 
     @property

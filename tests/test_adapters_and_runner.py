@@ -1968,7 +1968,7 @@ class AdapterAndRunnerTests(unittest.TestCase):
         mutations = [command for command in session.writes if "?" not in command]
         self.assertEqual(mutations, ["FORM ASC"])
 
-    def test_anritsu_live_temporarily_enables_and_restores_continuous_sweep(self) -> None:
+    def test_anritsu_live_enables_continuous_measurement_without_stopping_front_panel(self) -> None:
         session = FakeVisaSession(
             responses={
                 "*IDN?": "ANRITSU,MS2830A,123456,1.0",
@@ -1992,7 +1992,31 @@ class AdapterAndRunnerTests(unittest.TestCase):
 
         self.assertNotIn("TRAC:TYPE?", session.writes)
         self.assertIn("INIT:MODE:CONT", session.writes)
-        self.assertIn("INIT:CONT OFF", session.writes)
+        self.assertNotIn("INIT:CONT OFF", session.writes)
+
+    def test_anritsu_configuration_restarts_free_running_measurement(self) -> None:
+        session = FakeVisaSession(
+            responses={
+                "*IDN?": "ANRITSU,MS2830A,123456,1.0",
+                "INST?": "SPECT",
+                "FREQ:STAR?": "1000000",
+                "FREQ:STOP?": "2000000",
+                "DISP:WIND:TRAC:Y:RLEV?": "0",
+                "SWE:POIN?": "101",
+            }
+        )
+        adapter = AnritsuAdapter(
+            self.settings, session_factory=FakeVisaSessionFactory(session)
+        )
+        adapter.connect()
+
+        adapter.configure_spectrum(SpectrumConfig(1e6, 2e6, 0, 101))
+
+        self.assertIn("INIT:MODE:CONT", session.writes)
+        self.assertLess(
+            session.writes.index("SWE:POIN 101"),
+            session.writes.index("INIT:MODE:CONT"),
+        )
 
     def test_anritsu_live_does_not_depend_on_trace_type_query(self) -> None:
         session = FakeVisaSession(

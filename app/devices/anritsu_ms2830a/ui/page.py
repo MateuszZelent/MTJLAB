@@ -741,6 +741,7 @@ class AnritsuPage(QWidget):
         self._single_sweep_configured = single_sweep_available
         self._trace_supported = True
         self._fetch_pending = False
+        self._manual_trace_deadline_monotonic: float | None = None
         self._live_transition_pending = False
         self._pending_after_spectrum_configuration: str | None = None
         self._latest_trace: SpectrumTrace | None = None
@@ -2039,6 +2040,16 @@ class AnritsuPage(QWidget):
     def read_once(self) -> None:
         if self._page_state not in {AnritsuPageState.IDLE, AnritsuPageState.ERROR}:
             return
+        timeout_s = parse_quantity(
+            self._station_settings.anritsu.acquisition.operation_complete_timeout,
+            DIMENSION_TIME,
+        ).si_value
+        self._manual_trace_deadline_monotonic = time.monotonic() + timeout_s
+        self._request_trace()
+
+    def _retry_manual_current_trace(self) -> None:
+        if self._manual_trace_deadline_monotonic is None or self._timer.isActive():
+            return
         self._request_trace()
 
     def _request_trace(self) -> bool:
@@ -2062,13 +2073,15 @@ class AnritsuPage(QWidget):
             self._controller.call("stop_live")
             return
         self._live_transition_pending = True
+        self._manual_trace_deadline_monotonic = None
         self.live.setText("Starting…")
         self._set_live_indicator("starting")
         self._set_page_state(AnritsuPageState.STARTING_LIVE)
         self._timer.setInterval(self.refresh.value())
-        # Passive polling: leave the analyser in its current front-panel mode
-        # and only read the displayed TRAC1 buffer.
-        self._controller.call("start_live", False)
+        # Live does not start one application-owned sweep per frame.  It only
+        # ensures that the analyser itself is free-running, then periodically
+        # reads the displayed TRAC1 buffer.
+        self._controller.call("start_live", True)
 
     def _set_live_indicator(self, state: str, frame: int | None = None) -> None:
         labels = {
@@ -2505,7 +2518,7 @@ class AnritsuPage(QWidget):
             self.live.setText("Stop Live")
             self._set_live_indicator("on", 0)
             self._set_page_state(AnritsuPageState.LIVE)
-            mode = "passive current-trace polling"
+            mode = "current-trace polling from the analyser's continuous measurement"
             self.info.setText(f"Live started; {mode}. Waiting for first frame...")
             self.status.emit(f"Anritsu Live started: {mode}")
         elif operation == "stop_live":
@@ -2517,6 +2530,7 @@ class AnritsuPage(QWidget):
             self.status.emit("Anritsu Live stopped")
         elif operation in {"fetch_trace", "fetch_current_trace", "single_sweep"} and isinstance(result, SpectrumTrace):
             self._fetch_pending = False
+            self._manual_trace_deadline_monotonic = None
             finished = time.monotonic()
             if self._fetch_started_monotonic is not None:
                 self._transfer_durations_s.append(finished - self._fetch_started_monotonic)
@@ -3152,21 +3166,36 @@ class AnritsuPage(QWidget):
     def _error(self, operation: str, error: str) -> None:
         if (
             operation == "fetch_current_trace"
-            and self._timer.isActive()
             and "-999.0 unmeasured/error sentinel" in error
         ):
-            # A Continuous sweep can briefly expose Anritsu's documented
-            # "not measured yet" marker after reconfiguration. Keep polling;
-            # never repaint the last frame as though it were newly acquired.
+            # A Continuous measurement can briefly expose Anritsu's
+            # documented "not measured yet" marker after reconfiguration.
+            # Retry only the passive TRAC1 read; never repaint the previous
+            # frame as though it were newly acquired.
             self._fetch_pending = False
             self._fetch_started_monotonic = None
             self._stale_frame_count += 1
-            self.info.setText(
-                "Anritsu has not completed a valid current spectrum yet; "
-                "Live will retry on the next interval."
-            )
-            self.status.emit("Anritsu Live skipped an unmeasured -999 trace")
-            return
+            if self._timer.isActive():
+                self.info.setText(
+                    "Anritsu has not completed a valid current spectrum yet; "
+                    "Live will retry on the next interval."
+                )
+                self.status.emit("Anritsu Live skipped an unmeasured -999 trace")
+                return
+            deadline = self._manual_trace_deadline_monotonic
+            if deadline is not None and time.monotonic() < deadline:
+                self.info.setText(
+                    "The new Anritsu spectrum is still being measured; "
+                    "waiting for a complete current trace..."
+                )
+                self.status.emit(
+                    "Anritsu current trace is not measured yet; retry queued"
+                )
+                QTimer.singleShot(
+                    self.refresh.value(), self._retry_manual_current_trace
+                )
+                return
+            self._manual_trace_deadline_monotonic = None
         if operation == "configure":
             self._pending_after_spectrum_configuration = None
             self._fetch_pending = False
@@ -3209,6 +3238,7 @@ class AnritsuPage(QWidget):
             return
         if operation in {"fetch_trace", "fetch_current_trace", "single_sweep"}:
             self._fetch_pending = False
+            self._manual_trace_deadline_monotonic = None
             if self._averaging_active:
                 self._finish_temporal_averaging(resume_live=False)
                 self.info.setText(f"Averaging stopped: {error}")

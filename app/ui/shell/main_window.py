@@ -861,7 +861,27 @@ class MainWindow(FluentWindow):
         if scalar_limit:
             field.editor.setText(str(replacement))
         else:
-            field.set_limits(replacement["min"], replacement.get("max", "N/A"))
+            fields = (field,)
+            if device == "anritsu":
+                # Start and Stop are two editors governed by the same
+                # frequency safety range. Never show two different limits
+                # while the shared change is staged for SAVE SETTINGS.
+                fields = tuple(
+                    candidate
+                    for candidate in self.anritsu_page.findChildren(LimitField)
+                    if candidate.property("limitKey") == field.property("limitKey")
+                )
+            for candidate in fields:
+                candidate.set_limits(
+                    replacement["min"], replacement.get("max", "N/A")
+                )
+        if device == "anritsu":
+            self.anritsu_page.banner.show_message(
+                "Anritsu safety limits are staged. Press SAVE SETTINGS before "
+                "applying a spectrum outside the previously saved range.",
+                severity="warning",
+                timeout_ms=0,
+            )
         self._log(f"Safety limits staged: {title}; press SAVE SETTINGS")
 
     def _set_theme_mode(self, mode: str, *, persist: bool = True) -> None:
