@@ -152,11 +152,14 @@ class RigolNodeEditorDialog(FluentRecipeDialog):
         content.addWidget(carrier_scroll)
         actions_frame = CardWidget(self)
         actions_layout = QFormLayout(actions_frame)
+        self.actions_form = actions_layout
         self.parameter_selectors: dict[str, ComboBox] = {}
         for parameter_id, label in (
             ("carrier.frequency", "Frequency"),
             ("carrier.high_level", "HighL"),
             ("carrier.low_level", "LowL"),
+            ("carrier.amplitude", "Amplitude (Vpp)"),
+            ("carrier.offset", "Offset"),
         ):
             selector = ComboBox(self)
             selector.addItem("Set fixed", userData="set")
@@ -291,6 +294,21 @@ class RigolNodeEditorDialog(FluentRecipeDialog):
             selector.setEnabled(not is_dc)
             if is_dc:
                 selector.setCurrentIndex(selector.findData("set"))
+        self.actions_form.setRowVisible(
+            self.parameter_selectors["carrier.frequency"], has_time
+        )
+        self.actions_form.setRowVisible(
+            self.parameter_selectors["carrier.high_level"], not is_dc and high_low_mode
+        )
+        self.actions_form.setRowVisible(
+            self.parameter_selectors["carrier.low_level"], not is_dc and high_low_mode
+        )
+        self.actions_form.setRowVisible(
+            self.parameter_selectors["carrier.amplitude"], not is_dc and not high_low_mode
+        )
+        self.actions_form.setRowVisible(
+            self.parameter_selectors["carrier.offset"], not is_dc and not high_low_mode
+        )
 
     def selected_channel(self) -> int:
         return int(self.channel.currentData())
@@ -345,9 +363,13 @@ class RigolNodeEditorDialog(FluentRecipeDialog):
                 if self.waveform.currentText() == "DC"
                 else self.low_level.text().strip()
             ),
+            "carrier.amplitude": self.vpp.text().strip(),
+            "carrier.offset": self.offset.text().strip(),
         }
         result: list[dict[str, object]] = []
         for parameter_id, selector in self.parameter_selectors.items():
+            if self.actions_form.isRowVisible(selector) is False:
+                continue
             action: dict[str, object] = {
                 "parameter_id": parameter_id,
                 "mode": str(selector.currentData()),
@@ -404,6 +426,8 @@ class RigolNodeEditorDialog(FluentRecipeDialog):
             "carrier.frequency": "Carrier frequency",
             "carrier.high_level": "High level",
             "carrier.low_level": "Low level",
+            "carrier.amplitude": "Amplitude (Vpp)",
+            "carrier.offset": "Offset",
         }
         dialog = SweepGeneratorDialog(
             {
