@@ -78,8 +78,8 @@ class FluentRecipeAndExecutionPageTests(unittest.TestCase):
             self.assertEqual(page.execution_mode.currentData(), "measurement")
             page.execution_mode.setCurrentIndex(1)
             self.application.processEvents()
-            self.assertEqual(page.execution_mode.currentData(), "demo_outputs_off")
-            self.assertEqual(page.run_button.text(), "Run demo")
+            self.assertEqual(page.execution_mode.currentData(), "dry_run")
+            self.assertEqual(page.run_button.text(), "Run dry run")
             self.assertIn("RAW/processed", page.execution_mode_hint.text())
             page.set_settings(
                 simulation_settings()
@@ -353,9 +353,9 @@ finally:
             page.run_started(
                 1,
                 1.0,
-                execution_mode="demo_outputs_off",
+                execution_mode="dry_run",
             )
-            self.assertEqual(page.state.text(), "DEMO — OUTPUTS OFF")
+            self.assertEqual(page.state.text(), "DRY RUN — OUTPUTS OFF")
             self.assertIn("forced OFF", page.state.toolTip())
 
             sample = page.hero_card.mapTo(window, QPoint(40, 40))

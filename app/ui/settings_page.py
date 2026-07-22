@@ -292,7 +292,7 @@ class SettingsPage(QWidget):
         limits_description = BodyLabel(
             "Laboratory software boundaries. Enter values with units, for example "
             "10 mA, 67 mV or 1 MHz. Disabling a limit does not disable immutable "
-            "instrument limits or DUT limits from a recipe."
+            "immutable instrument limits."
         )
         limits_description.setObjectName("muted")
         limits_description.setWordWrap(True)
@@ -1130,7 +1130,7 @@ class SettingsPage(QWidget):
             disable_limit.setChecked(not enabled)
             disable_limit.setEnabled(not self._read_only)
             disable_limit.setToolTip(
-                "Ignore this station-profile limit. Hardware and recipe DUT limits remain active."
+                "Ignore this station-profile limit. Immutable hardware limits remain active."
             )
             disable_limit.toggled.connect(
                 lambda disabled, p=enabled_path, row=row_widget, editors=(
@@ -1466,7 +1466,6 @@ class SettingsPage(QWidget):
             "external_attenuation": DIMENSION_DB,
             "minimum_internal_attenuation": DIMENSION_DB,
             "minimum_impedance": DIMENSION_RESISTANCE,
-            "dut_min_impedance": DIMENSION_RESISTANCE,
             "max_abs_power": DIMENSION_POWER,
             "estimated_load_power": DIMENSION_POWER,
             "source_current": DIMENSION_CURRENT,

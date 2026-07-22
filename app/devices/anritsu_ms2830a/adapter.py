@@ -22,7 +22,6 @@ from app.safety.anritsu import (
     ANRITSU_SWEEP_POINT_COUNTS,
     assert_anritsu_acquisition_allowed,
     validate_anritsu_advanced_spectrum,
-    validate_anritsu_dut_input,
     validate_anritsu_spectrum,
     validate_anritsu_signal_generator,
     validate_anritsu_trace_name,
@@ -37,7 +36,6 @@ class SpectrumConfig:
     reference_level_dbm: float
     points: int
     trace: str = "TRAC1"
-    dut_max_expected_input_dbm: float | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -825,7 +823,6 @@ class AnritsuAdapter(DeviceAdapter):
             stop_hz=config.stop_hz,
             reference_level_dbm=config.reference_level_dbm,
             points=config.points,
-            dut_max_expected_input_dbm=config.dut_max_expected_input_dbm,
         )
         session = self._require_session()
         self._enter_spectrum_mode_with_rf_off()
@@ -903,7 +900,7 @@ class AnritsuAdapter(DeviceAdapter):
     def live(self) -> bool:
         return self._live
 
-    def start_single_sweep(self, dut_max_expected_input_dbm: float | None = None) -> None:
+    def start_single_sweep(self) -> None:
         """Start one qualified SCPI sweep for a recipe checkpoint.
 
         This command family is intentionally unavailable until the current
@@ -912,9 +909,6 @@ class AnritsuAdapter(DeviceAdapter):
         """
 
         self._assert_acquisition_allowed()
-        validate_anritsu_dut_input(
-            self._settings.safety, dut_max_expected_input_dbm
-        )
         if not self._single_sweep_supported:
             raise SafetyViolation(
                 "The recipe requires qualified Anritsu standard_scpi_opc mode; "
@@ -963,12 +957,11 @@ class AnritsuAdapter(DeviceAdapter):
     def acquire_single_sweep(
         self,
         trace: str = "TRAC1",
-        dut_max_expected_input_dbm: float | None = None,
     ) -> SpectrumTrace:
         """Synchronise, then fetch one trace that belongs to this checkpoint."""
 
         trace = validate_anritsu_trace_name(trace)
-        self.start_single_sweep(dut_max_expected_input_dbm)
+        self.start_single_sweep()
         self.wait_complete()
         return self.fetch_trace(trace)
 

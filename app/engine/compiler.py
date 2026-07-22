@@ -16,14 +16,12 @@ from app.devices.anritsu_ms2830a.adapter import (
     SpectrumConfig,
 )
 from app.devices.rigol_dg1000z.adapter import RigolChannelConfig, RigolOutputConfig
-from app.domain.dut import ExperimentDutLimits
 from app.domain.errors import ConfigurationError, SafetyViolation
 from app.domain.quantities import (
     DIMENSION_CURRENT,
     DIMENSION_DB,
     DIMENSION_DBM,
     DIMENSION_FREQUENCY,
-    DIMENSION_RESISTANCE,
     DIMENSION_TIME,
     DIMENSION_VOLTAGE,
     Quantity,
@@ -32,18 +30,14 @@ from app.domain.quantities import (
 from app.recipes.models import Recipe, RecipeNode
 from app.recipes.parameter_registry import SWEEP_DIMENSIONS
 from app.recipes.sweep_points import generate_sweep_points
-from app.safety.keithley import (
-    KeithleySafetyEnvelope,
-    KeithleySourceRequest,
-    validate_keithley_source,
-)
+from app.safety.keithley import KeithleySourceRequest, validate_keithley_source
 from app.safety.anritsu import (
     validate_anritsu_advanced_spectrum,
     validate_anritsu_signal_generator,
     validate_anritsu_spectrum,
     validate_anritsu_trace_name,
 )
-from app.safety.rigol_current import RigolSafetyEnvelope, validate_rigol_waveform
+from app.safety.rigol_current import validate_rigol_waveform
 from app.settings.models import StationSettings
 
 
@@ -104,7 +98,6 @@ class RecipeCompiler:
     ) -> None:
         self._settings = settings
         self._max_actions = int(settings.execution.get("max_expanded_points", 100_000)) * 10
-        self._dut_limits = ExperimentDutLimits()
         self._cancellation_requested = cancellation_requested
         self._outputs_forced_off = bool(outputs_forced_off)
 
@@ -116,7 +109,6 @@ class RecipeCompiler:
             raise ConfigurationError("Recipe compilation cancelled.")
 
     def compile(self, recipe: Recipe) -> ExecutionPlan:
-        self._dut_limits = recipe.dut_limits
         actions: list[PlanAction] = []
         self._visit(recipe.root, {}, actions)
         for node in recipe.finally_nodes:
@@ -802,9 +794,6 @@ class RecipeCompiler:
             "low_level": configuration.get("low_level"),
             "output_load": configuration.get("output_load", "HIGHZ"),
             "phase_deg": configuration.get("phase_deg", 0),
-            "dut_min_impedance": configuration.get(
-                "dut_min_impedance", "50 ohm"
-            ),
         }
         if waveform == "SQU":
             config_data["square_duty_percent"] = configuration.get(
@@ -1693,14 +1682,8 @@ class RecipeCompiler:
                 raise SafetyViolation(
                     f"{node.type} requires the qualified Anritsu standard_scpi_opc protocol."
                 )
-            dut_input = (
-                self._dut_limits.anritsu.max_expected_input_dbm
-                if self._dut_limits.anritsu is not None
-                else None
-            )
             payload = {
                 "trace": validate_anritsu_trace_name(str(data.get("trace", "TRAC1"))),
-                "dut_max_expected_input_dbm": dut_input,
             }
             try:
                 average_count = int(data.get("average_count", 1))
@@ -1762,8 +1745,6 @@ class RecipeCompiler:
                 raise ConfigurationError("set_rigol_output requires channel 1 or 2.")
             enabled = self._require_boolean(data, "enabled", node.id)
             self._assert_output_action_allowed("rigol", enabled)
-            if enabled and not self._outputs_forced_off:
-                self._require_complete_dut_limits("rigol", channel)
             payload = {"channel": channel, "enabled": enabled}
         elif node.type == "set_keithley_output":
             channel = str(data.get("channel", ""))
@@ -1771,8 +1752,6 @@ class RecipeCompiler:
                 raise ConfigurationError("set_keithley_output requires channel A or B.")
             enabled = self._require_boolean(data, "enabled", node.id)
             self._assert_output_action_allowed("keithley", enabled)
-            if enabled and not self._outputs_forced_off:
-                self._require_complete_dut_limits("keithley", channel)
             payload = {"channel": channel, "enabled": enabled}
         elif node.type == "ramp_keithley_to_zero":
             channel = str(data.get("channel", ""))
@@ -1785,8 +1764,6 @@ class RecipeCompiler:
         elif node.type == "set_anritsu_sg_output":
             enabled = self._require_boolean(data, "enabled", node.id)
             self._assert_output_action_allowed("anritsu_sg", enabled)
-            if enabled and not self._outputs_forced_off:
-                self._require_complete_dut_limits("anritsu_sg", "RF")
             payload = {"enabled": enabled}
         else:
             raise ConfigurationError(f"{node.id}: unsupported action type {node.type!r}.")
@@ -1843,37 +1820,6 @@ class RecipeCompiler:
                 f"The recipe cannot enable {device}: its output permission is disabled."
             )
 
-    def _require_complete_dut_limits(self, device: str, channel: str | int) -> None:
-        if device == "anritsu_sg":
-            limits = self._dut_limits.anritsu
-            complete = bool(
-                limits is not None
-                and limits.max_signal_generator_output_dbm is not None
-            )
-        elif device == "keithley":
-            limits = self._dut_limits.keithley.get(str(channel))
-            complete = bool(
-                limits is not None
-                and limits.current is not None
-                and limits.voltage is not None
-                and limits.max_abs_power_w is not None
-            )
-        elif device == "rigol":
-            limits = self._dut_limits.rigol.get(int(channel))
-            complete = bool(
-                limits is not None
-                and limits.minimum_impedance_ohm is not None
-                and limits.max_abs_current_a is not None
-                and limits.max_abs_power_w is not None
-            )
-        else:
-            raise ConfigurationError(f"Unknown DUT limit device {device!r}.")
-        if not complete:
-            raise SafetyViolation(
-                f"OUTPUT for {device} channel {channel} requires complete recipe.dut_limits "
-                "for current, voltage/power or impedance/current/power."
-            )
-
     def _compile_anritsu_signal_generator(self, data: dict[str, Any]) -> dict[str, Any]:
         config = SignalGeneratorConfig(
             frequency_hz=self._resolve_quantity(
@@ -1886,16 +1832,6 @@ class RecipeCompiler:
             frequency_hz=config.frequency_hz,
             power_dbm=config.power_dbm,
         )
-        dut = self._dut_limits.anritsu
-        if (
-            dut is not None
-            and dut.max_signal_generator_output_dbm is not None
-            and config.power_dbm > dut.max_signal_generator_output_dbm
-        ):
-            raise SafetyViolation(
-                f"Anritsu SG power {config.power_dbm:g} dBm exceeds recipe DUT limit "
-                f"{dut.max_signal_generator_output_dbm:g} dBm."
-            )
         return {"config": config}
 
     def _compile_keithley_level_update(
@@ -1924,17 +1860,6 @@ class RecipeCompiler:
                     f"{node_id}: Keithley {channel} {mode} level {level:g} SI is outside "
                     f"the station range [{minimum:g}, {maximum:g}]."
                 )
-        dut = self._dut_limits.keithley.get(channel)
-        dut_range = (
-            dut.current if dut is not None and mode == "current"
-            else dut.voltage if dut is not None
-            else None
-        )
-        if dut_range is not None and not dut_range.minimum_si <= level <= dut_range.maximum_si:
-            raise SafetyViolation(
-                f"{node_id}: Keithley {channel} {mode} level {level:g} SI exceeds "
-                "the recipe DUT limit."
-            )
         return {"channel": channel, "mode": mode, "level_si": level}
 
     def _compile_rigol_frequency_update(
@@ -2032,16 +1957,6 @@ class RecipeCompiler:
             settings = self._settings.rigol.safety.channels[str(channel)]
         except (KeyError, ValueError) as exc:
             raise ConfigurationError("configure_rigol requires valid channel 1 or 2.") from exc
-        dut = self._dut_limits.rigol.get(channel)
-        envelope = (
-            RigolSafetyEnvelope(
-                minimum_impedance_ohm=dut.minimum_impedance_ohm,
-                max_abs_current_a=dut.max_abs_current_a,
-                max_abs_power_w=dut.max_abs_power_w,
-            )
-            if dut is not None
-            else None
-        )
         config = RigolChannelConfig(
             channel=channel,
             waveform=str(data["waveform"]).upper(),
@@ -2055,8 +1970,6 @@ class RecipeCompiler:
             pulse_width_s=self._resolve_quantity(data["pulse_width"], DIMENSION_TIME, {}) .si_value if "pulse_width" in data else None,
             pulse_leading_s=self._resolve_quantity(data["pulse_leading"], DIMENSION_TIME, {}).si_value if "pulse_leading" in data else None,
             pulse_trailing_s=self._resolve_quantity(data["pulse_trailing"], DIMENSION_TIME, {}).si_value if "pulse_trailing" in data else None,
-            dut_min_impedance_ohm=self._resolve_quantity(data["dut_min_impedance"], DIMENSION_RESISTANCE, {}).si_value if "dut_min_impedance" in data else None,
-            dut_envelope=envelope,
         )
         validate_rigol_waveform(
             channel=settings,
@@ -2066,8 +1979,6 @@ class RecipeCompiler:
             high_level=config.high_level_v,
             low_level=config.low_level_v,
             output_load=config.output_load,
-            dut_min_impedance=config.dut_min_impedance_ohm,
-            dut_envelope=config.dut_envelope,
         )
         return {"config": config}
 
@@ -2080,18 +1991,6 @@ class RecipeCompiler:
         level = 0.0 if mode == "measure_only" else self._resolve_quantity(data.get("level"), dimension, {}).si_value
         compliance_dimension = DIMENSION_VOLTAGE if mode == "current" else DIMENSION_CURRENT
         compliance = 0.0 if mode == "measure_only" else self._resolve_quantity(data.get("compliance"), compliance_dimension, {}).si_value
-        dut = self._dut_limits.keithley.get(channel)
-        envelope = (
-            KeithleySafetyEnvelope(
-                current_min_a=dut.current.minimum_si if dut.current is not None else None,
-                current_max_a=dut.current.maximum_si if dut.current is not None else None,
-                voltage_min_v=dut.voltage.minimum_si if dut.voltage is not None else None,
-                voltage_max_v=dut.voltage.maximum_si if dut.voltage is not None else None,
-                max_abs_power_w=dut.max_abs_power_w,
-            )
-            if dut is not None
-            else None
-        )
         request = KeithleySourceRequest(
             channel=channel,  # type: ignore[arg-type]
             mode=mode,  # type: ignore[arg-type]
@@ -2106,25 +2005,18 @@ class RecipeCompiler:
             measure_voltage_range_si=self._optional_quantity(data, "measure_voltage_range", DIMENSION_VOLTAGE),
             measure_current_autorange=self._optional_boolean(data, "measure_current_autorange", True, node_id),
             measure_current_range_si=self._optional_quantity(data, "measure_current_range", DIMENSION_CURRENT),
-            dut_envelope=envelope,
         )
         validate_keithley_source(self._settings.keithley.safety.channels[channel], request)
         return {"request": request}
 
     def _compile_anritsu(self, data: dict[str, Any]) -> dict[str, Any]:
         safety = self._settings.anritsu.safety
-        dut_input = (
-            self._dut_limits.anritsu.max_expected_input_dbm
-            if self._dut_limits.anritsu is not None
-            else None
-        )
         config = SpectrumConfig(
             start_hz=self._resolve_quantity(data["start_frequency"], DIMENSION_FREQUENCY, {}).si_value,
             stop_hz=self._resolve_quantity(data["stop_frequency"], DIMENSION_FREQUENCY, {}).si_value,
             reference_level_dbm=self._resolve_quantity(data["reference_level"], DIMENSION_DBM, {}).si_value,
             points=int(data["points"]),
             trace=validate_anritsu_trace_name(str(data.get("trace", "TRAC1"))),
-            dut_max_expected_input_dbm=dut_input,
         )
         validate_anritsu_spectrum(
             safety,
@@ -2132,7 +2024,6 @@ class RecipeCompiler:
             stop_hz=config.stop_hz,
             reference_level_dbm=config.reference_level_dbm,
             points=config.points,
-            dut_max_expected_input_dbm=config.dut_max_expected_input_dbm,
         )
         return {"config": config}
 

@@ -55,44 +55,20 @@ root:
         type: acquire_spectrum
         trace: TRAC1
 
-  - id: keithley-38dbad05
+  - id: keithley-3a085748
     type: sequence
-    text: Keithley B · 2 selected action(s)
+    text: Keithley 2600 — configuration required
     device_module: keithley
     label: Keithley 2600
-    configuration_required: false
-    channel: B
-    source_mode: current
-    operation: configure_selected_parameters
-    parameter_actions:
-    - parameter_id: source.level
-      mode: sweep
-      value: 1 mA
-      segments:
-      - value: 250 mA
-    - parameter_id: source.compliance
-      mode: set
-      value: 67 mV
-    output_policy: on
-    roi_required: false
-    configuration:
-      channel: B
-      source_mode: current
-      source_level: 1 mA
-      compliance: 67 mV
-      nplc: '1'
-      settling_time: 100 ms
-      sense_mode: 2wire
-      source_autorange: true
-      source_range: AUTO
-      measure_voltage_autorange: true
-      measure_voltage_range: AUTO
-      measure_current_autorange: true
-      measure_current_range: AUTO
+    configuration_required: true
     children:
-    - id: comment-4e288101
+    - id: comment-d7d67749
       type: comment
       text: Drop nested devices or flow actions here
+    - id: acquire_spectrum-71ed4a95
+      type: acquire_spectrum
+      trace: TRAC1
+      average_count: 1
 finally:
 - id: rigol-ch1-off-finally
   type: set_rigol_output

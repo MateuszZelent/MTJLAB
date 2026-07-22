@@ -107,7 +107,6 @@ class RigolNodeEditorDialog(FluentRecipeDialog):
         self.pulse_width = _line(snapshot.pulse_width)
         self.pulse_leading = _line(snapshot.pulse_leading)
         self.pulse_trailing = _line(snapshot.pulse_trailing)
-        self.dut_impedance = _line(snapshot.dut_min_impedance)
         self.output_polarity = ComboBox(self)
         self.output_polarity.addItems(("NORM", "INV"))
         self.output_polarity.setCurrentText(snapshot.output_polarity)
@@ -140,7 +139,6 @@ class RigolNodeEditorDialog(FluentRecipeDialog):
             ("Pulse width", self.pulse_width),
             ("Pulse leading edge", self.pulse_leading),
             ("Pulse trailing edge", self.pulse_trailing),
-            ("Minimum DUT impedance", self.dut_impedance),
             ("Output polarity", self.output_polarity),
             ("Output mode", self.output_mode),
             ("Gate polarity", self.gate_polarity),
@@ -252,7 +250,6 @@ class RigolNodeEditorDialog(FluentRecipeDialog):
         self.pulse_width.setText(snapshot.pulse_width)
         self.pulse_leading.setText(snapshot.pulse_leading)
         self.pulse_trailing.setText(snapshot.pulse_trailing)
-        self.dut_impedance.setText(snapshot.dut_min_impedance)
         self.output_polarity.setCurrentText(snapshot.output_polarity)
         self.output_mode.setCurrentText(snapshot.output_mode)
         self.gate_polarity.setCurrentText(snapshot.gate_polarity)
@@ -399,7 +396,6 @@ class RigolNodeEditorDialog(FluentRecipeDialog):
             pulse_width=self.pulse_width.text().strip(),
             pulse_leading=self.pulse_leading.text().strip(),
             pulse_trailing=self.pulse_trailing.text().strip(),
-            dut_min_impedance=self.dut_impedance.text().strip(),
             output_polarity=self.output_polarity.currentText(),
             output_mode=self.output_mode.currentText(),
             gate_polarity=self.gate_polarity.currentText(),
@@ -551,9 +547,6 @@ class RigolNodeEditorDialog(FluentRecipeDialog):
                     pulse_trailing_s=parse_quantity(
                         snapshot.pulse_trailing, DIMENSION_TIME
                     ).si_value,
-                    dut_min_impedance_ohm=parse_quantity(
-                        snapshot.dut_min_impedance, DIMENSION_RESISTANCE
-                    ).si_value,
                 )
                 validate_rigol_waveform(
                     channel=self._settings.rigol.safety.channels[
@@ -565,7 +558,6 @@ class RigolNodeEditorDialog(FluentRecipeDialog):
                     high_level=config.high_level_v,
                     low_level=config.low_level_v,
                     output_load=config.output_load,
-                    dut_min_impedance=config.dut_min_impedance_ohm,
                 )
                 sync_delay_s = parse_quantity(
                     snapshot.sync_delay, DIMENSION_TIME

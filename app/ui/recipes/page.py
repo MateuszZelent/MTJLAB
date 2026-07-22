@@ -46,9 +46,7 @@ from app.recipes import (
     generate_sweep_stage_points,
     move_recipe_node,
     parse_recipe_text,
-    recipe_dut_limits_mapping,
     replace_recipe_node,
-    replace_recipe_dut_limits,
     wrap_recipe_nodes_in_repeat,
 )
 from app.recipes.parameter_registry import SWEEP_DIMENSIONS
@@ -60,12 +58,7 @@ from app.storage import Hdf5RunReader, ThatecDevice, ThatecRow, ThatecRun, Thate
 from app.ui.common import human_bytes as _human_bytes
 from app.ui.dialogs import StationFileDialog as QFileDialog
 from app.ui.dialogs import StationMessageBox as QMessageBox
-from app.ui.settings_guidance import (
-    RecipeDutIssue,
-    SettingsIssue,
-    recipe_dut_issue_for_error,
-    settings_issue_for_error,
-)
+from app.ui.settings_guidance import SettingsIssue, settings_issue_for_error
 from app.ui.common import human_duration as _human_duration
 from app.ui.common import line_edit as _line
 from app.ui.design_system import ThemeTokens, effective_theme, tokens_for
@@ -73,7 +66,7 @@ from app.ui.recipes.device_parameters import DeviceParameterDialog
 from app.ui.recipes.common_dialogs import (
     ActionNodeEditorDialog, AnritsuAcquisitionEditorDialog, CommentEditorDialog, FixedValueDialog,
     KeithleySweepBuilderDialog, RecipeTreeMoveRequest, RecipeTreeWidget,
-    DutLimitsDialog, OutputPolicyDialog, RepeatCountDialog, SweepLibraryButton,
+    OutputPolicyDialog, RepeatCountDialog, SweepLibraryButton,
 )
 from app.devices.anritsu_ms2830a.ui.recipe_extension import (
     AnritsuAdvancedSpectrumPanel,
@@ -330,7 +323,7 @@ class RecipePage(QWidget):
         self.recipe_profile_badge.setObjectName("recipeProfileBadge")
         self.recipe_profile_badge.setProperty("safetyState", "verified")
         self.recipe_profile_badge.setToolTip(
-            "Device permissions, laboratory and DUT limits, explicit OUTPUT "
+            "Device permissions, configured station limits, explicit OUTPUT "
             "actions and hardware readback govern output operations."
         )
         hero_layout.addWidget(self.recipe_profile_badge, 0, Qt.AlignmentFlag.AlignVCenter)
@@ -363,8 +356,8 @@ class RecipePage(QWidget):
             userData="measurement",
         )
         self.execution_mode.addItem(
-            "Demo — outputs forced OFF",
-            userData="demo_outputs_off",
+            "Dry run — outputs forced OFF",
+            userData="dry_run",
         )
         self.execution_mode.addItem(
             "Manual stages — operator advances each step",
@@ -372,7 +365,7 @@ class RecipePage(QWidget):
         )
         self.execution_mode.setMinimumWidth(260)
         self.execution_mode.setToolTip(
-            "Demo sends configurations and every sweep setpoint to real devices, "
+            "Dry run sends configurations and every sweep setpoint to real devices, "
             "acquires and stores Anritsu spectra, but replaces every OUTPUT ON with "
             "confirmed OUTPUT OFF."
         )
@@ -448,11 +441,6 @@ class RecipePage(QWidget):
             QStyle.StandardPixmap.SP_DialogApplyButton,
             self.compile_recipe_async,
             shortcut=QKeySequence("Ctrl+Return"),
-        )
-        self.dut_limits_action = command_action(
-            "DUT limits",
-            QStyle.StandardPixmap.SP_FileDialogDetailedView,
-            self._edit_recipe_dut_limits,
         )
         self.recipe_command_bar.addSeparator()
         self.library_visibility_action = QAction("Library", self)
@@ -1617,7 +1605,7 @@ class RecipePage(QWidget):
         self.recipe_profile_badge.setText("LIMITS + READBACK ACTIVE")
         self.recipe_profile_badge.setProperty("safetyState", "verified")
         self.recipe_profile_badge.setToolTip(
-            "Device permissions, laboratory and DUT limits, explicit OUTPUT "
+            "Device permissions, configured station limits, explicit OUTPUT "
             "actions and hardware readback govern output operations."
         )
         self.recipe_profile_badge.style().unpolish(self.recipe_profile_badge)
@@ -2201,7 +2189,7 @@ class RecipePage(QWidget):
         try:
             recipe = parse_recipe_text(self._tree_source, origin=self.path.text())
             outputs_forced_off = (
-                self.execution_mode.currentData() == "demo_outputs_off"
+                self.execution_mode.currentData() == "dry_run"
             )
             plan = RecipeCompiler(
                 self._settings, outputs_forced_off=outputs_forced_off
@@ -2237,7 +2225,7 @@ class RecipePage(QWidget):
         self.run_button.setEnabled(False)
         self.plan_preflight_changed.emit(None)
         self._preflight_source = source
-        outputs_forced_off = self.execution_mode.currentData() == "demo_outputs_off"
+        outputs_forced_off = self.execution_mode.currentData() == "dry_run"
         self._preflight_outputs_forced_off = outputs_forced_off
         self.compile_recipe_action.setText("Cancel validation")
         self.summary.setText(
@@ -2268,7 +2256,7 @@ class RecipePage(QWidget):
         self, recipe: object, plan: object, estimate: object
     ) -> None:
         current_outputs_forced_off = (
-            self.execution_mode.currentData() == "demo_outputs_off"
+            self.execution_mode.currentData() == "dry_run"
         )
         if (
             self._preflight_source != self.editor.toPlainText()
@@ -2305,47 +2293,12 @@ class RecipePage(QWidget):
     def _show_recipe_error(self, title: str, error: str) -> None:
         """Offer the one editor that can actually resolve a validation error."""
 
-        dut_issue = recipe_dut_issue_for_error(error)
-        if dut_issue is not None:
-            if QMessageBox.action_guidance(
-                self, title, error, "Edit DUT limits…"
-            ):
-                self._edit_recipe_dut_limits(dut_issue)
-            return
         settings_issue = settings_issue_for_error(error)
         if settings_issue is not None:
             if QMessageBox.settings_guidance(self, title, error):
                 self.settings_issue_requested.emit(settings_issue)
             return
         QMessageBox.warning(self, title, error)
-
-    def _edit_recipe_dut_limits(
-        self, issue: RecipeDutIssue | None = None
-    ) -> None:
-        """Edit the recipe-owned DUT envelope without touching station Settings."""
-
-        try:
-            limits = recipe_dut_limits_mapping(self._builder_source())
-        except Exception as exc:
-            QMessageBox.warning(self, "DUT limits", str(exc))
-            return
-        while True:
-            dialog = DutLimitsDialog(
-                limits,
-                self,
-                focus_device=issue.device if issue is not None else None,
-                focus_channel=issue.channel if issue is not None else None,
-            )
-            if dialog.exec() != QDialog.DialogCode.Accepted:
-                return
-            try:
-                limits = dialog.limits_mapping()
-                source = replace_recipe_dut_limits(self._builder_source(), limits)
-                self._apply_builder_source(source, "Updated recipe DUT limits")
-            except Exception as exc:
-                QMessageBox.warning(self, "DUT limits", str(exc))
-                continue
-            return
 
     def _preflight_cancelled(self) -> None:
         self.summary.setText("Recipe validation cancelled; Run remains disabled.")
@@ -2432,7 +2385,7 @@ class RecipePage(QWidget):
                 if estimate.warnings
                 else "Warnings: none from static preflight\n"
             )
-            + "Compilation sends no instrument commands. Execution uses Run Engine and revalidates device and DUT limits."
+            + "Compilation sends no instrument commands. Execution uses Run Engine and revalidates station and hardware limits."
         )
         self.status.emit("Recipe compiled")
         self.plan_preflight_changed.emit((plan, estimate))
@@ -5146,9 +5099,6 @@ class RecipePage(QWidget):
             pulse_width=str(node.data.get("pulse_width", "100 us")),
             pulse_leading=str(node.data.get("pulse_leading", "10 ns")),
             pulse_trailing=str(node.data.get("pulse_trailing", "10 ns")),
-            dut_min_impedance=str(
-                node.data.get("dut_min_impedance", "50 ohm")
-            ),
         )
         dialog = RigolNodeEditorDialog(
             self,
@@ -5174,7 +5124,6 @@ class RecipePage(QWidget):
                     "low_level": updated.low_level,
                     "output_load": updated.output_load,
                     "phase_deg": float(updated.phase_deg.replace(",", ".")),
-                    "dut_min_impedance": updated.dut_min_impedance,
                 }
             )
             for key, value, waveform in (
@@ -6519,23 +6468,23 @@ class RecipePage(QWidget):
         if self._plan is not None:
             self.run_requested.emit(
                 self._plan,
-                self.execution_mode.currentData() == "demo_outputs_off",
+                self.execution_mode.currentData() == "dry_run",
                 str(self.execution_mode.currentData()),
             )
 
     def _execution_mode_changed(self, _index: int = -1) -> None:
         mode = str(self.execution_mode.currentData())
-        demo = mode == "demo_outputs_off"
+        dry_run = mode == "dry_run"
         manual = mode == "manual_step"
         self.run_button.setText(
-            "Run demo" if demo else "Start manual stages" if manual else "Run plan"
+            "Run dry run" if dry_run else "Start manual stages" if manual else "Run plan"
         )
         self.execution_mode_hint.setText(
             (
-                "DEMO: configurations, setpoints and Anritsu RAW/processed spectra "
+                "DRY RUN: configurations, setpoints and Anritsu RAW/processed spectra "
                 "run normally; every source OUTPUT remains confirmed OFF."
             )
-            if demo
+            if dry_run
             else (
                 "MANUAL STAGES: every normal recipe action waits for Next. "
                 "Finally and emergency shutdown always execute automatically."

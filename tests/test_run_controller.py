@@ -180,7 +180,7 @@ finally:
                 self.assertFalse(failures)
                 self.assertEqual(len(finished), 1)
                 self.assertTrue(
-                    any(name == "demo_output_action_suppressed" for name, _ in events)
+                    any(name == "dry_run_output_action_suppressed" for name, _ in events)
                 )
                 files = list((root / "measurements").glob("*.h5"))
                 self.assertEqual(len(files), 1)
@@ -189,7 +189,7 @@ finally:
                 self.assertTrue(detail.simulation_metadata["outputs_forced_off"])
                 self.assertEqual(
                     detail.simulation_metadata["execution_mode"],
-                    "demo_outputs_off",
+                    "dry_run",
                 )
                 self.assertEqual(detail.summary.spectrum_count, 1)
             finally:

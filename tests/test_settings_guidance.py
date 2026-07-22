@@ -9,7 +9,7 @@ from PySide6.QtWidgets import QApplication, QDialog
 
 from app.ui.shell import MainWindow
 from app.ui.dialogs import StationMessageBox
-from app.ui.settings_guidance import recipe_dut_issue_for_error, settings_issue_for_error
+from app.ui.settings_guidance import settings_issue_for_error
 
 
 def test_anritsu_acquisition_lock_points_to_each_required_setting() -> None:
@@ -35,17 +35,6 @@ def test_anritsu_acquisition_lock_points_to_each_required_setting() -> None:
 
 def test_runtime_or_unknown_errors_are_not_offered_a_settings_fix() -> None:
     assert settings_issue_for_error("VISA transport lost while acquiring") is None
-
-
-def test_missing_keithley_dut_limits_route_to_recipe_channel() -> None:
-    issue = recipe_dut_issue_for_error(
-        "OUTPUT for keithley channel B requires complete recipe.dut_limits for "
-        "current, voltage/power or impedance/current/power."
-    )
-
-    assert issue is not None
-    assert issue.device == "keithley"
-    assert issue.channel == "B"
 
 
 def test_keithley_station_limit_identifies_exact_channel_and_range() -> None:
@@ -86,18 +75,13 @@ def test_shared_message_box_routes_limit_failure_to_settings() -> None:
             )
         application.processEvents()
 
-        path = (
-            "devices",
-            "keithley",
-            "safety",
-            "channels",
-            "B",
-            "lab_limits",
-            "source_current",
-            "min",
-        )
         assert window._current_route() == "settings"
-        assert window.settings_page._form_editors[path].property("validationState") == "error"
+        highlighted = [
+            editor
+            for path, editor in window.settings_page._safety_limit_editors.items()
+            if "source_current" in path and editor.property("validationState") == "error"
+        ]
+        assert highlighted
     finally:
         window.close()
         application.processEvents()

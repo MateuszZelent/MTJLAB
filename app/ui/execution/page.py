@@ -329,7 +329,7 @@ class RunMonitorPage(QWidget):
         self._paused_total_s = 0.0
         self._model_duration_s = 0.0
         self._planned_actions = 0
-        self._demo_outputs_off = False
+        self._dry_run = False
         self._manual_stage_mode = False
         self._manual_dialog = ManualStageDialog(self)
         self._manual_dialog.next_requested.connect(self.manual_next_requested)
@@ -381,9 +381,9 @@ class RunMonitorPage(QWidget):
         self.completion_summary.clear()
         self.completion_path.clear()
         self.open_result_folder_button.setEnabled(False)
-        demo = execution_mode == "demo_outputs_off"
+        dry_run = execution_mode == "dry_run"
         manual = execution_mode == "manual_step"
-        self._demo_outputs_off = demo
+        self._dry_run = dry_run
         self._manual_stage_mode = manual
         if manual:
             self.state.setText("MANUAL — PREPARING")
@@ -391,13 +391,13 @@ class RunMonitorPage(QWidget):
                 "The runner pauses before every normal recipe action until the "
                 "operator explicitly confirms the next stage."
             )
-        self.state.setText("DEMO — OUTPUTS OFF" if demo else "RUNNING")
+        self.state.setText("DRY RUN — OUTPUTS OFF" if dry_run else "RUNNING")
         self.state.setToolTip(
             (
                 "Configurations, setpoints and acquisitions are executing while "
                 "every source output is forced OFF."
             )
-            if demo
+            if dry_run
             else "Normal measurement execution; recipe OUTPUT actions are active."
         )
         self._planned_actions = max(0, actions)
@@ -469,7 +469,7 @@ class RunMonitorPage(QWidget):
         if not self.resume_button.isEnabled():
             return
         self.state.setText(
-            "DEMO — OUTPUTS OFF" if self._demo_outputs_off else "RUNNING"
+            "DRY RUN — OUTPUTS OFF" if self._dry_run else "RUNNING"
         )
         self.pause_button.setEnabled(True)
         self.resume_button.setEnabled(False)
@@ -987,8 +987,8 @@ class RunMonitorPage(QWidget):
             if self._manual_stage_mode:
                 self.state.setText("MANUAL — EXECUTING")
             self.state.setText(
-                "DEMO — OUTPUTS OFF"
-                if self._demo_outputs_off
+                "DRY RUN — OUTPUTS OFF"
+                if self._dry_run
                 else "RUNNING"
             )
             self.pause_button.setEnabled(not self._manual_stage_mode)

@@ -21,15 +21,6 @@ KEITHLEY_2602A_MAX_CURRENT_RANGE_A = 3.0
 
 
 @dataclass(frozen=True, slots=True)
-class KeithleySafetyEnvelope:
-    current_min_a: float | None = None
-    current_max_a: float | None = None
-    voltage_min_v: float | None = None
-    voltage_max_v: float | None = None
-    max_abs_power_w: float | None = None
-
-
-@dataclass(frozen=True, slots=True)
 class KeithleySourceRequest:
     channel: Literal["A", "B"]
     mode: SourceMode
@@ -44,7 +35,6 @@ class KeithleySourceRequest:
     measure_voltage_range_si: float | None = None
     measure_current_autorange: bool = True
     measure_current_range_si: float | None = None
-    dut_envelope: KeithleySafetyEnvelope | None = None
 
 
 def _range_check(name: str, value: float, lower: str, upper: str, dimension: str) -> None:
@@ -113,18 +103,11 @@ def validate_keithley_source(channel: KeithleyChannelSettings, request: Keithley
             if limits.max_abs_power_enabled
             else math.inf
         )
-        power_limit_source = "station profile max_abs_power"
-        if request.dut_envelope is not None:
-            _validate_source_against_dut(request, request.dut_envelope)
-            if request.dut_envelope.max_abs_power_w is not None:
-                if request.dut_envelope.max_abs_power_w < max_power:
-                    power_limit_source = "DUT limit"
-                max_power = min(max_power, request.dut_envelope.max_abs_power_w)
         tolerance = max(max_power, 1.0) * 1e-12
         if math.isfinite(max_power) and worst_case_power > max_power + tolerance:
             raise SafetyViolation(
                 "Worst-case source × compliance power "
-                f"{worst_case_power:.9g} W exceeds the {power_limit_source} "
+                f"{worst_case_power:.9g} W exceeds the station profile "
                 f"{max_power:.9g} W."
             )
     source_required = abs(request.level_si)
@@ -183,77 +166,10 @@ def _require_finite(name: str, value: float) -> None:
         raise SafetyViolation(f"{name} must be finite.")
 
 
-def _validate_optional_si_range(
-    name: str, value: float, minimum: float | None, maximum: float | None
-) -> None:
-    if minimum is not None and value < minimum and not math.isclose(
-        value, minimum, rel_tol=1e-12, abs_tol=1e-15
-    ):
-        raise SafetyViolation(f"{name}={value:.9g} SI is below the DUT limit {minimum:.9g}.")
-    if maximum is not None and value > maximum and not math.isclose(
-        value, maximum, rel_tol=1e-12, abs_tol=1e-15
-    ):
-        raise SafetyViolation(f"{name}={value:.9g} SI exceeds the DUT limit {maximum:.9g}.")
-
-
-def _validate_source_against_dut(
-    request: KeithleySourceRequest, envelope: KeithleySafetyEnvelope
-) -> None:
-    for name, value in (
-        ("DUT current minimum", envelope.current_min_a),
-        ("DUT current maximum", envelope.current_max_a),
-        ("DUT voltage minimum", envelope.voltage_min_v),
-        ("DUT voltage maximum", envelope.voltage_max_v),
-        ("DUT maximum power", envelope.max_abs_power_w),
-    ):
-        if value is not None:
-            _require_finite(name, value)
-    compliance = abs(request.compliance_si)
-    if request.mode == "current":
-        _validate_optional_si_range(
-            "source current",
-            request.level_si,
-            envelope.current_min_a,
-            envelope.current_max_a,
-        )
-        _validate_optional_si_range(
-            "negative voltage compliance",
-            -compliance,
-            envelope.voltage_min_v,
-            envelope.voltage_max_v,
-        )
-        _validate_optional_si_range(
-            "positive voltage compliance",
-            compliance,
-            envelope.voltage_min_v,
-            envelope.voltage_max_v,
-        )
-    elif request.mode == "voltage":
-        _validate_optional_si_range(
-            "source voltage",
-            request.level_si,
-            envelope.voltage_min_v,
-            envelope.voltage_max_v,
-        )
-        _validate_optional_si_range(
-            "negative current compliance",
-            -compliance,
-            envelope.current_min_a,
-            envelope.current_max_a,
-        )
-        _validate_optional_si_range(
-            "positive current compliance",
-            compliance,
-            envelope.current_min_a,
-            envelope.current_max_a,
-        )
-
-
 def validate_keithley_measurement(
     channel: KeithleyChannelSettings,
     voltage_v: float,
     current_a: float,
-    dut_envelope: KeithleySafetyEnvelope | None = None,
 ) -> None:
     limits = channel.lab_limits
     if limits.measured_current_trip.enabled:
@@ -265,25 +181,10 @@ def validate_keithley_measurement(
         if limits.max_abs_power_enabled
         else math.inf
     )
-    if dut_envelope is not None:
-        _validate_optional_si_range(
-            "measured current",
-            current_a,
-            dut_envelope.current_min_a,
-            dut_envelope.current_max_a,
-        )
-        _validate_optional_si_range(
-            "measured voltage",
-            voltage_v,
-            dut_envelope.voltage_min_v,
-            dut_envelope.voltage_max_v,
-        )
-        if dut_envelope.max_abs_power_w is not None:
-            max_power = min(max_power, dut_envelope.max_abs_power_w)
     measured_power = abs(voltage_v * current_a)
     if math.isfinite(max_power) and measured_power > max_power and not math.isclose(
         measured_power, max_power, rel_tol=1e-12, abs_tol=1e-15
     ):
         raise SafetyViolation(
-            f"DUT power {measured_power:.9g} W exceeds the {max_power:.9g} W limit."
+            f"Measured power {measured_power:.9g} W exceeds the {max_power:.9g} W station limit."
         )

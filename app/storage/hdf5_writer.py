@@ -75,13 +75,6 @@ class Hdf5RunWriter:
             run.attrs["application_version"] = "0.1.0+source"
         run.create_dataset("recipe_yaml", data=recipe_source, dtype=h5py.string_dtype("utf-8"))
         run.create_dataset("settings_yaml", data=settings_source, dtype=h5py.string_dtype("utf-8"))
-        dut_limits = self._extract_dut_limits(recipe_source)
-        dut_limits_json = json.dumps(dut_limits, sort_keys=True)
-        run.create_dataset(
-            "dut_limits_json",
-            data=dut_limits_json,
-            dtype=h5py.string_dtype("utf-8"),
-        )
         run.create_dataset("device_idn_json", data=json.dumps(device_idn, sort_keys=True), dtype=h5py.string_dtype("utf-8"))
         capabilities = device_capabilities or {}
         run.create_dataset(
@@ -105,7 +98,6 @@ class Hdf5RunWriter:
             plan_hash=plan_hash,
             expected_points=expected_points,
             recipe_source=recipe_source,
-            dut_limits_json=dut_limits_json,
             settings_source=settings_source,
         )
         self._point_count = 0
@@ -342,26 +334,6 @@ class Hdf5RunWriter:
         if isinstance(value, (list, tuple, set, frozenset)):
             return [Hdf5RunWriter._serializable(item) for item in value]
         return value
-
-    @staticmethod
-    def _extract_dut_limits(recipe_source: str) -> object:
-        """Return the declared DUT envelope for explicit result provenance.
-
-        Recipe compilation remains the authority for validation.  Metadata
-        extraction is deliberately best-effort so that writer diagnostics can
-        still be created for legacy or partially recovered recipe sources.
-        """
-
-        try:
-            from ruamel.yaml import YAML
-
-            source = YAML(typ="safe").load(recipe_source)
-        except Exception:
-            return {}
-        if not isinstance(source, dict):
-            return {}
-        limits = source.get("dut_limits", {})
-        return Hdf5RunWriter._serializable(limits) if isinstance(limits, dict) else {}
 
     def store_reference(
         self,

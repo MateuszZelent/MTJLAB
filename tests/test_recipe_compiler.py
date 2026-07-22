@@ -1312,7 +1312,7 @@ root:
         with self.assertRaisesRegex(SafetyViolation, "TRAC1"):
             RecipeCompiler(simulation_settings()).compile(parse_recipe_text(source))
 
-    def test_recipe_dut_limits_are_parsed_and_embedded_in_keithley_request(self) -> None:
+    def test_legacy_recipe_dut_limits_are_ignored(self) -> None:
         source = """\
 schema_version: 1
 name: dut-envelope
@@ -1331,13 +1331,10 @@ root:
   compliance: "67 mV"
 """
         plan = RecipeCompiler(simulation_settings()).compile(parse_recipe_text(source))
-        envelope = plan.actions[0].payload["request"].dut_envelope
-        self.assertIsNotNone(envelope)
-        self.assertEqual(envelope.current_max_a, 0.002)
-        self.assertEqual(envelope.voltage_min_v, -0.07)
-        self.assertAlmostEqual(envelope.max_abs_power_w, 100e-6)
+        request = plan.actions[0].payload["request"]
+        self.assertFalse(hasattr(request, "dut_envelope"))
 
-    def test_recipe_dut_current_limit_intersects_station_profile(self) -> None:
+    def test_legacy_recipe_dut_current_limit_does_not_override_station_profile(self) -> None:
         source = """\
 schema_version: 1
 name: unsafe-dut-current
@@ -1354,10 +1351,10 @@ root:
   level: "1 mA"
   compliance: "67 mV"
 """
-        with self.assertRaisesRegex(SafetyViolation, "DUT limit"):
-            RecipeCompiler(simulation_settings()).compile(parse_recipe_text(source))
+        plan = RecipeCompiler(simulation_settings()).compile(parse_recipe_text(source))
+        self.assertEqual(plan.actions[0].payload["request"].level_si, 0.001)
 
-    def test_recipe_dut_rigol_current_limit_is_applied_to_every_expanded_value(self) -> None:
+    def test_legacy_recipe_dut_rigol_limit_is_ignored(self) -> None:
         source = """\
 schema_version: 1
 name: unsafe-rigol-dut
@@ -1378,10 +1375,10 @@ root:
   output_load: HIGHZ
   dut_min_impedance: "50 ohm"
 """
-        with self.assertRaisesRegex(SafetyViolation, "5e-06 A"):
-            RecipeCompiler(simulation_settings()).compile(parse_recipe_text(source))
+        plan = RecipeCompiler(simulation_settings()).compile(parse_recipe_text(source))
+        self.assertEqual(plan.actions[0].kind, "configure_rigol")
 
-    def test_recipe_dut_anritsu_input_must_not_exceed_station_limit(self) -> None:
+    def test_legacy_recipe_dut_anritsu_input_is_ignored(self) -> None:
         source = """\
 schema_version: 1
 name: unsafe-rf-input
@@ -1396,10 +1393,10 @@ root:
   reference_level: "0 dBm"
   points: 101
 """
-        with self.assertRaisesRegex(SafetyViolation, "exceeds the station limit"):
-            RecipeCompiler(simulation_settings()).compile(parse_recipe_text(source))
+        plan = RecipeCompiler(simulation_settings()).compile(parse_recipe_text(source))
+        self.assertEqual(plan.actions[0].kind, "configure_anritsu")
 
-    def test_keithley_output_on_requires_permission_and_dut_limits_but_demo_does_not(self) -> None:
+    def test_keithley_output_on_requires_permission_but_demo_does_not(self) -> None:
         source = """\
 schema_version: 1
 name: missing-dut-envelope
@@ -1425,8 +1422,8 @@ root:
         raw = settings.model_dump(mode="python")
         raw["devices"]["keithley"]["safety"]["allow_output_enable"] = True
         permitted = StationSettings.model_validate(raw)
-        with self.assertRaisesRegex(SafetyViolation, "complete recipe.dut_limits"):
-            RecipeCompiler(permitted).compile(parse_recipe_text(source))
+        permitted_plan = RecipeCompiler(permitted).compile(parse_recipe_text(source))
+        self.assertEqual(permitted_plan.actions[-1].kind, "set_keithley_output")
 
         demo = RecipeCompiler(settings, outputs_forced_off=True).compile(
             parse_recipe_text(source)

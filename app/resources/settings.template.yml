@@ -105,7 +105,6 @@ devices:
       allow_output_enable: false
       outputs_off_on_connect: true
       outputs_off_on_disconnect: true
-      require_declared_dut_impedance: true
       require_external_current_sensor_for_runtime_trip: true
       fixed_source_resistance: "50 ohm"
       channels:
@@ -144,9 +143,6 @@ devices:
               min: "0 W"
               max: "5 mW"
               max_abs: "5 mW"
-            declared_dut_impedance:
-              min: "50 ohm"
-              nominal:
             settle_time:
               min: "10 ms"
               max: "10 s"
@@ -207,9 +203,6 @@ devices:
               min: "0 W"
               max: "5 mW"
               max_abs: "5 mW"
-            declared_dut_impedance:
-              min: "50 ohm"
-              nominal:
             settle_time:
               min: "10 ms"
               max: "10 s"

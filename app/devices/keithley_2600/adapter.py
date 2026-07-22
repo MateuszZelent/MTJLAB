@@ -956,7 +956,6 @@ class KeithleyAdapter(DeviceAdapter):
                 self._channel_settings(channel),
                 voltage,
                 current,
-                request.dut_envelope if request is not None else None,
             )
         except SafetyViolation as exc:
             # A manual read must be as fail-safe as a recipe checkpoint: trip

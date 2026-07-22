@@ -125,7 +125,7 @@ class SimulatorTests(unittest.TestCase):
         self.assertIn("2602A", keithley.connect().idn)
         self.assertIn("MS2830A", anritsu.connect().idn)
         rigol.configure_channel(
-            RigolChannelConfig(1, "SQU", 1000, 0.001, -0.001, dut_min_impedance_ohm=50)
+            RigolChannelConfig(1, "SQU", 1000, 0.001, -0.001)
         )
         rigol.configure_output(
             RigolOutputConfig(1, output_load="HIGHZ", polarity="INV", sync_enabled=True, sync_delay_s=0.001)
@@ -188,7 +188,7 @@ class SimulatorTests(unittest.TestCase):
         rigol = RigolAdapter(settings, session_factory=SimulatedVisaFactory("rigol"))
         rigol.connect()
         estimate = rigol.configure_channel(
-            RigolChannelConfig(1, "DC", 1.0, 0.001, 0.001, dut_min_impedance_ohm=50)
+            RigolChannelConfig(1, "DC", 1.0, 0.001, 0.001)
         )
         self.assertGreater(estimate.peak_absolute_current_a, 0)
         rigol.disconnect()
@@ -289,7 +289,6 @@ class SimulatorTests(unittest.TestCase):
                     0.001,
                     -0.001,
                     phase_deg=float("nan"),
-                    dut_min_impedance_ohm=50,
                 )
             )
 
@@ -321,7 +320,7 @@ class SimulatorTests(unittest.TestCase):
                 PlanAction(
                     "rigol-config",
                     "configure_rigol",
-                    {"config": RigolChannelConfig(1, "SQU", 1000, 0.001, -0.001, dut_min_impedance_ohm=50)},
+                    {"config": RigolChannelConfig(1, "SQU", 1000, 0.001, -0.001)},
                     {},
                 ),
                 PlanAction("keithley-on", "set_keithley_output", {"channel": "B", "enabled": True}, {}),

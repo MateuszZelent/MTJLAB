@@ -71,6 +71,7 @@ from app.devices.simulators import simulated_station_settings
 from app.engine.compiler import RecipeCompiler
 from app.engine.estimation import PlanEstimator
 from app.engine.recovery import RunRecoveryManager
+from app.engine.runner import ExecutionMode
 from app.recipes import (
     parse_recipe_text,
 )
@@ -761,7 +762,7 @@ class MainWindow(FluentWindow):
         if device == "rigol":
             channel = self.rigol_page.channel.currentText()
             path = ("devices", "rigol", "safety", "channels", channel, "lab_limits", key)
-            return f"Rigol CH{channel} — {key.replace('_', ' ')}", path, key != "declared_dut_impedance"
+            return f"Rigol CH{channel} — {key.replace('_', ' ')}", path, True
         if device == "anritsu":
             path = ("devices", "anritsu", "safety", key)
             return f"Anritsu — {key.replace('_', ' ')}", path, True
@@ -1179,6 +1180,10 @@ class MainWindow(FluentWindow):
         outputs_forced_off: bool = False,
         execution_mode: str = "measurement",
     ) -> None:
+        selected_execution_mode = ExecutionMode.coerce(execution_mode)
+        if outputs_forced_off:
+            selected_execution_mode = ExecutionMode.DRY_RUN
+        outputs_forced_off = selected_execution_mode is ExecutionMode.DRY_RUN
         try:
             self._require_permission(
                 Permission.RUN_RECIPE,
@@ -1215,7 +1220,7 @@ class MainWindow(FluentWindow):
                 simulation=self._simulation,
                 operator_context=self._access.identity.as_context(),
                 outputs_forced_off=outputs_forced_off,
-                execution_mode=execution_mode,
+                execution_mode=selected_execution_mode.value,
             )
         except Exception as exc:
             issue = settings_issue_for_error(exc)
@@ -1232,14 +1237,12 @@ class MainWindow(FluentWindow):
             plan_actions=plan.actions,  # type: ignore[union-attr]
             recipe_source=plan.recipe_source,  # type: ignore[union-attr]
             recipe_tree_items=recipe_tree_items,
-            execution_mode=(
-                execution_mode
-            ),
+            execution_mode=selected_execution_mode.value,
         )
         self._set_run_ui_locked(True)
         self._navigate_to("execution")
         self._log(
-            "Run Engine started in DEMO mode; all source outputs are forced OFF"
+            "Run Engine started in DRY RUN mode; all source outputs are forced OFF"
             if outputs_forced_off
             else "Run Engine started"
         )
@@ -1289,6 +1292,12 @@ class MainWindow(FluentWindow):
             outputs_forced_off = bool(
                 detail.simulation_metadata.get("outputs_forced_off", False)
             )
+            stored_execution_mode = ExecutionMode.coerce(
+                str(detail.simulation_metadata.get("execution_mode", "measurement"))
+            )
+            if outputs_forced_off:
+                stored_execution_mode = ExecutionMode.DRY_RUN
+            outputs_forced_off = stored_execution_mode is ExecutionMode.DRY_RUN
             current_settings_source = serialize_settings_snapshot(
                 self._settings,
                 self._repository.path,
@@ -1342,6 +1351,7 @@ class MainWindow(FluentWindow):
                 recovery=checkpoint,
                 operator_context=self._access.identity.as_context(),
                 outputs_forced_off=outputs_forced_off,
+                execution_mode=stored_execution_mode.value,
             )
         except Exception as exc:
             QMessageBox.critical(self, "Resume not started", str(exc))
@@ -1358,7 +1368,7 @@ class MainWindow(FluentWindow):
             recipe_source=plan.recipe_source,
             recipe_tree_items=recipe_tree_items,
             execution_mode=(
-                "demo_outputs_off" if outputs_forced_off else "measurement"
+                stored_execution_mode.value
             ),
         )
         self._set_run_ui_locked(True)
@@ -1367,7 +1377,7 @@ class MainWindow(FluentWindow):
             f"Run recovery started at safe checkpoint {checkpoint.stored_points}; "
             f"discarding {discarded} unsafe tail point(s); "
             + (
-                "DEMO outputs remain forced OFF"
+                "DRY RUN outputs remain forced OFF"
                 if outputs_forced_off
                 else "measurement output policy restored"
             )

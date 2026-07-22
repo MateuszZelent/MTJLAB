@@ -18,8 +18,15 @@ from app.devices.moke_box.simulator import SimulatedMokeBoxTransport
 from app.devices.registry import built_in_device_registry
 from app.devices.rigol_dg1000z import RigolAdapter
 from app.devices.rigol_dg1000z.adapter import RigolChannelConfig
-from app.devices.simulators import SimulatedVisaFactory, simulated_station_settings
+from app.devices.simulators import (
+    AnritsuSimulator,
+    KeithleySimulator,
+    RigolSimulator,
+    SimulatedVisaFactory,
+    simulated_station_settings,
+)
 from app.devices.simulation import SimulationContext
+from app.devices.visa import FakeVisaSessionFactory
 from app.engine import ExecutionMode, RecipeCompiler, RecipeRunner
 from app.engine.compiler import ExecutionPlan, PlanAction
 from app.recipes import load_recipe, parse_recipe_text
@@ -32,7 +39,129 @@ from tests.helpers import loaded_settings
 
 
 class SimulatedRunTests(unittest.TestCase):
-    def test_demo_recipe_keeps_outputs_off_and_stores_anritsu_raw_processed(self) -> None:
+    def test_dry_run_programs_rigol_and_keithley_sweeps_and_stores_spectra(self) -> None:
+        """Dry run changes real device settings but never sends OUTPUT ON."""
+
+        recipe = parse_recipe_text(
+            """\
+schema_version: 1
+name: dry-run-device-programming
+root:
+  id: sequence
+  type: sequence
+  children:
+    - id: analyzer
+      type: configure_anritsu
+      start_frequency: "1 MHz"
+      stop_frequency: "2 MHz"
+      reference_level: "0 dBm"
+      points: 101
+      trace: TRAC1
+    - id: rigol
+      type: configure_rigol
+      channel: 1
+      waveform: SIN
+      frequency: "1 kHz"
+      high_level: "1 mV"
+      low_level: "-1 mV"
+      output_load: HIGHZ
+      dut_min_impedance: "50 ohm"
+    - id: keithley
+      type: configure_keithley
+      channel: A
+      mode: current
+      level: "200 uA"
+      compliance: "100 mV"
+    - id: rigol-on-in-tree
+      type: set_rigol_output
+      channel: 1
+      enabled: true
+    - id: keithley-on-in-tree
+      type: set_keithley_output
+      channel: A
+      enabled: true
+    - id: rigol-frequency-sweep
+      type: sweep
+      target: rigol.1.frequency
+      start: "1 kHz"
+      stop: "2 kHz"
+      points: 2
+      spacing: linear
+      children:
+        - id: update-rigol-frequency
+          type: update_rigol_frequency
+          channel: 1
+          frequency: "${rigol.1.frequency}"
+        - id: store-spectrum
+          type: acquire_spectrum
+          trace: TRAC1
+"""
+        )
+        raw = deepcopy(
+            simulated_station_settings(loaded_settings()).model_dump(mode="python")
+        )
+        raw["devices"]["keithley"]["safety"]["channels"]["A"]["enabled"] = True
+        settings = StationSettings.model_validate(raw)
+        plan = RecipeCompiler(settings, outputs_forced_off=True).compile(recipe)
+        rigol_session = RigolSimulator()
+        keithley_session = KeithleySimulator()
+        anritsu_session = AnritsuSimulator()
+        rigol = RigolAdapter(
+            settings, session_factory=FakeVisaSessionFactory(rigol_session)
+        )
+        keithley = KeithleyAdapter(
+            settings, session_factory=FakeVisaSessionFactory(keithley_session)
+        )
+        anritsu = AnritsuAdapter(
+            settings, session_factory=FakeVisaSessionFactory(anritsu_session)
+        )
+        for device in (rigol, keithley, anritsu):
+            device.connect()
+        events: list[tuple[str, dict[str, object]]] = []
+
+        with tempfile.TemporaryDirectory() as temporary:
+            target = Path(temporary) / "dry-run-programming.h5"
+            writer = Hdf5RunWriter(
+                target,
+                recipe_source=recipe.source_text,
+                settings_source="simulation: true\n",
+                plan_hash=plan.sha256,
+                device_idn={},
+                expected_points=plan.total_points,
+                simulation_metadata={
+                    "enabled": True,
+                    "execution_mode": ExecutionMode.DRY_RUN.value,
+                    "outputs_forced_off": True,
+                },
+            )
+            result = RecipeRunner(
+                rigol=rigol,
+                keithley=keithley,
+                anritsu=anritsu,
+                writer=writer,
+                on_event=lambda name, data: events.append((name, data)),
+                execution_mode=ExecutionMode.DRY_RUN,
+            ).run(plan)
+
+            self.assertEqual(result.state.value, "safe")
+            self.assertEqual(result.stored_points, 2)
+            self.assertEqual(rigol_session.frequency[1], 2_000.0)
+            self.assertEqual(keithley_session.level["smua"], 200e-6)
+            self.assertTrue(any(command.startswith(":SOUR1:FREQ") for command in rigol_session.commands))
+            self.assertTrue(any("smua.source.leveli" in command for command in keithley_session.commands))
+            self.assertFalse(any(command.upper() == ":OUTP1 ON" for command in rigol_session.commands))
+            self.assertFalse(any("OUTPUT_ON" in command for command in keithley_session.commands))
+            self.assertFalse(rigol_session.output[1])
+            self.assertFalse(keithley_session.output["smua"])
+            self.assertEqual(len(Hdf5RunReader.points(target)), 2)
+            with h5py.File(target, "r") as file:
+                self.assertEqual(len(file["spectra"]), 2)
+            self.assertEqual(
+                sum(name == "dry_run_output_action_suppressed" for name, _ in events),
+                2,
+            )
+
+    def test_dry_run_keeps_outputs_off_and_stores_anritsu_raw_processed(self) -> None:
         recipe_path = (
             Path(__file__).resolve().parents[1]
             / "recipes"
@@ -73,7 +202,7 @@ class SimulatedRunTests(unittest.TestCase):
         events: list[tuple[str, dict[str, object]]] = []
 
         with tempfile.TemporaryDirectory() as temporary:
-            target = Path(temporary) / "demo-keithley-a-100ua.h5"
+            target = Path(temporary) / "dry-run-keithley-a-100ua.h5"
             writer = Hdf5RunWriter(
                 target,
                 recipe_source=recipe.source_text,
@@ -83,7 +212,7 @@ class SimulatedRunTests(unittest.TestCase):
                 expected_points=plan.total_points,
                 simulation_metadata={
                     **context.metadata(("rigol", "keithley", "anritsu")),
-                    "execution_mode": ExecutionMode.DEMO_OUTPUTS_OFF.value,
+                    "execution_mode": ExecutionMode.DRY_RUN.value,
                     "outputs_forced_off": True,
                 },
             )
@@ -93,7 +222,7 @@ class SimulatedRunTests(unittest.TestCase):
                 anritsu=anritsu,
                 writer=writer,
                 on_event=lambda name, data: events.append((name, data)),
-                execution_mode=ExecutionMode.DEMO_OUTPUTS_OFF,
+                execution_mode=ExecutionMode.DRY_RUN,
             ).run(plan)
 
             self.assertIsNone(result.error)
@@ -110,13 +239,13 @@ class SimulatedRunTests(unittest.TestCase):
                 10,
             )
             self.assertTrue(
-                any(name == "demo_output_action_suppressed" for name, _ in events)
+                any(name == "dry_run_output_action_suppressed" for name, _ in events)
             )
             detail = Hdf5RunReader.detail(target)
             self.assertTrue(detail.simulation_metadata["outputs_forced_off"])
             self.assertEqual(
                 detail.simulation_metadata["execution_mode"],
-                ExecutionMode.DEMO_OUTPUTS_OFF.value,
+                ExecutionMode.DRY_RUN.value,
             )
             points = Hdf5RunReader.points(target)
             self.assertEqual(len(points), 10)
@@ -346,7 +475,7 @@ root:
         plan = ExecutionPlan(
             recipe_name="four-device-simulation",
             actions=(
-                PlanAction("rigol", "configure_rigol", {"config": RigolChannelConfig(1, "SIN", 1_000.0, 0.001, -0.001, dut_min_impedance_ohm=50)}, {}),
+                PlanAction("rigol", "configure_rigol", {"config": RigolChannelConfig(1, "SIN", 1_000.0, 0.001, -0.001)}, {}),
                 PlanAction("keithley", "configure_keithley", {"request": KeithleySourceRequest("B", "current", 0.001, 0.067)}, {}),
                 PlanAction("anritsu", "configure_anritsu", {"config": SpectrumConfig(1e6, 2e6, 0.0, 101)}, {}),
                 PlanAction("moke", "measure_moke_hall", {"checkpoint": False}, {}),

@@ -24,7 +24,7 @@ from app.devices.rigol_dg1000z import (
     RigolModulationConfig, RigolOutputConfig,
 )
 from app.domain.quantities import (
-    DIMENSION_FREQUENCY, DIMENSION_RESISTANCE, DIMENSION_TIME, DIMENSION_VOLTAGE,
+    DIMENSION_FREQUENCY, DIMENSION_TIME, DIMENSION_VOLTAGE,
     format_quantity_auto, parse_quantity,
 )
 from app.safety.rigol_current import validate_rigol_frequency_sweep, validate_rigol_waveform
@@ -54,7 +54,6 @@ class RigolConfigurationSnapshot:
     pulse_width: str = "100 us"
     pulse_leading: str = "10 ns"
     pulse_trailing: str = "10 ns"
-    dut_min_impedance: str = "50 ohm"
     output_polarity: str = "NORM"
     output_mode: str = "NORM"
     gate_polarity: str = "NORM"
@@ -187,7 +186,6 @@ class RigolPage(QWidget):
         self.sync_polarity = ComboBox()
         self.sync_polarity.addItems(["NORM", "INV"])
         self.sync_delay = _line("0 s")
-        self.dut_impedance = _line("50 ohm")
         self.phase = _line("0")
         self.duty = _line("50")
         self.ramp_symmetry = _line("50")
@@ -224,7 +222,6 @@ class RigolPage(QWidget):
                 ("Low Level", self._bounded(self.low_level, "low_level")),
                 ("Amplitude (Vpp)", self._bounded(self.vpp, "amplitude_vpp")),
                 ("Offset / DC level", self._bounded(self.offset, "offset")),
-                ("Minimum DUT impedance", self._bounded(self.dut_impedance, "declared_dut_impedance")),
                 ("Phase [deg]", self.phase),
             ),
             (),
@@ -609,7 +606,6 @@ class RigolPage(QWidget):
             self.low_level: ("LowL", "Lowest programmed waveform voltage. Vpp = HighL − LowL."),
             self.vpp: ("Amplitude (Vpp)", "Peak-to-peak voltage: the difference between maximum and minimum level. A 2 mVpp sine at 0 V offset spans −1 mV to +1 mV."),
             self.offset: ("Offset / DC level", "Moves the waveform vertically around zero. In DC mode this is the constant programmed output voltage."),
-            self.dut_impedance: ("Minimum DUT impedance", "Safety declaration used to estimate worst-case current. The Rigol does not measure DUT impedance; enter the lowest credible load impedance."),
             self.phase: ("Phase", "Starting angular position of the waveform in degrees. The safe default is 0°. It matters mainly when comparing or synchronizing channels."),
             self.duty: ("Square duty cycle", "Percentage of each period for which a square wave remains at HighL. 50% gives equal high and low durations."),
             self.ramp_symmetry: ("Ramp symmetry", "Percentage of the period spent on the rising part of a ramp. 50% produces a symmetric triangle."),
@@ -729,8 +725,6 @@ class RigolPage(QWidget):
             ]
             return bound.minimum_text, bound.maximum_text
         value = getattr(limits, key)
-        if key == "declared_dut_impedance":
-            return value.min, "no profile maximum"
         if not value.enabled:
             return "HARDWARE", "HARDWARE"
         return value.min, value.max
@@ -786,7 +780,6 @@ class RigolPage(QWidget):
             pulse_width=self.pulse_width.text().strip(),
             pulse_leading=self.pulse_leading.text().strip(),
             pulse_trailing=self.pulse_trailing.text().strip(),
-            dut_min_impedance=self.dut_impedance.text().strip(),
             output_polarity=self.output_polarity.currentText(),
             output_mode=self.output_mode.currentText(),
             gate_polarity=self.gate_polarity.currentText(),
@@ -838,11 +831,6 @@ class RigolPage(QWidget):
                 format_quantity_auto(carrier.pulse_trailing_s, DIMENSION_TIME)
                 if carrier.pulse_trailing_s is not None
                 else "10 ns"
-            ),
-            dut_min_impedance=(
-                f"{carrier.dut_min_impedance_ohm:.12g} ohm"
-                if carrier.dut_min_impedance_ohm is not None
-                else "50 ohm"
             ),
             # Output settings are not confirmed/cached independently by the page.
             # Preserve the visible form values rather than inventing another
@@ -1227,7 +1215,6 @@ class RigolPage(QWidget):
         self.pulse_width.setText(snapshot.pulse_width)
         self.pulse_leading.setText(snapshot.pulse_leading)
         self.pulse_trailing.setText(snapshot.pulse_trailing)
-        self.dut_impedance.setText(snapshot.dut_min_impedance)
         self.output_polarity.setCurrentText(snapshot.output_polarity)
         self.output_mode.setCurrentText(snapshot.output_mode)
         self.gate_polarity.setCurrentText(snapshot.gate_polarity)
@@ -1752,7 +1739,6 @@ class RigolPage(QWidget):
             pulse_width_s=parse_quantity(self.pulse_width.text(), DIMENSION_TIME).si_value if self.waveform.currentText() == "PULS" else None,
             pulse_leading_s=parse_quantity(self.pulse_leading.text(), DIMENSION_TIME).si_value if self.waveform.currentText() == "PULS" else None,
             pulse_trailing_s=parse_quantity(self.pulse_trailing.text(), DIMENSION_TIME).si_value if self.waveform.currentText() == "PULS" else None,
-            dut_min_impedance_ohm=parse_quantity(self.dut_impedance.text(), DIMENSION_RESISTANCE).si_value,
         )
         validate_rigol_waveform(
             channel=self._station_settings.rigol.safety.channels[str(config.channel)],
@@ -1762,7 +1748,6 @@ class RigolPage(QWidget):
             high_level=config.high_level_v,
             low_level=config.low_level_v,
             output_load=config.output_load,
-            dut_min_impedance=config.dut_min_impedance_ohm,
         )
         return config
 

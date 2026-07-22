@@ -8,22 +8,7 @@ from typing import Any, Final
 
 from ruamel.yaml import YAML
 
-from app.domain.dut import (
-    AnritsuDutLimits,
-    DutRange,
-    ExperimentDutLimits,
-    KeithleyDutLimits,
-    RigolDutLimits,
-)
 from app.domain.errors import ConfigurationError
-from app.domain.quantities import (
-    DIMENSION_CURRENT,
-    DIMENSION_DBM,
-    DIMENSION_POWER,
-    DIMENSION_RESISTANCE,
-    DIMENSION_VOLTAGE,
-    parse_quantity,
-)
 
 
 ACTION_TYPES: Final[frozenset[str]] = frozenset(
@@ -86,7 +71,6 @@ class Recipe:
     name: str
     root: RecipeNode
     finally_nodes: tuple[RecipeNode, ...]
-    dut_limits: ExperimentDutLimits
     source_text: str
 
 
@@ -200,137 +184,6 @@ def _parse_node(value: object, where: str) -> RecipeNode:
     )
 
 
-def _reject_unknown(raw: dict[str, Any], allowed: set[str], where: str) -> None:
-    unknown = set(raw) - allowed
-    if unknown:
-        raise ConfigurationError(f"{where}: unknown fields: {', '.join(sorted(unknown))}.")
-
-
-def _parse_dut_range(value: object, dimension: str, where: str) -> DutRange:
-    raw = _require_mapping(value, where)
-    _reject_unknown(raw, {"min", "max"}, where)
-    if set(raw) != {"min", "max"}:
-        raise ConfigurationError(f"{where} requires both min and max.")
-    try:
-        return DutRange(
-            parse_quantity(raw["min"], dimension).si_value,
-            parse_quantity(raw["max"], dimension).si_value,
-        )
-    except (TypeError, ValueError) as exc:
-        raise ConfigurationError(f"Invalid {where}: {exc}") from exc
-
-
-def _parse_dut_limits(value: object) -> ExperimentDutLimits:
-    if value is None:
-        return ExperimentDutLimits()
-    raw = _require_mapping(value, "recipe.dut_limits")
-    _reject_unknown(raw, {"keithley", "rigol", "anritsu"}, "recipe.dut_limits")
-
-    keithley: dict[str, KeithleyDutLimits] = {}
-    for channel, channel_value in _require_mapping(
-        raw.get("keithley", {}), "recipe.dut_limits.keithley"
-    ).items():
-        if channel not in {"A", "B"}:
-            raise ConfigurationError("Keithley DUT limit channel must be A or B.")
-        limits = _require_mapping(channel_value, f"recipe.dut_limits.keithley.{channel}")
-        _reject_unknown(
-            limits,
-            {"current", "voltage", "max_abs_power"},
-            f"recipe.dut_limits.keithley.{channel}",
-        )
-        try:
-            keithley[channel] = KeithleyDutLimits(
-                current=(
-                    _parse_dut_range(
-                        limits["current"],
-                        DIMENSION_CURRENT,
-                        f"recipe.dut_limits.keithley.{channel}.current",
-                    )
-                    if "current" in limits
-                    else None
-                ),
-                voltage=(
-                    _parse_dut_range(
-                        limits["voltage"],
-                        DIMENSION_VOLTAGE,
-                        f"recipe.dut_limits.keithley.{channel}.voltage",
-                    )
-                    if "voltage" in limits
-                    else None
-                ),
-                max_abs_power_w=(
-                    parse_quantity(limits["max_abs_power"], DIMENSION_POWER).si_value
-                    if "max_abs_power" in limits
-                    else None
-                ),
-            )
-        except (TypeError, ValueError) as exc:
-            raise ConfigurationError(f"Invalid Keithley DUT limits for channel {channel}: {exc}") from exc
-
-    rigol: dict[int, RigolDutLimits] = {}
-    for channel_text, channel_value in _require_mapping(
-        raw.get("rigol", {}), "recipe.dut_limits.rigol"
-    ).items():
-        try:
-            channel = int(channel_text)
-        except (TypeError, ValueError) as exc:
-            raise ConfigurationError("Rigol DUT limit channel must be 1 or 2.") from exc
-        if channel not in {1, 2}:
-            raise ConfigurationError("Rigol DUT limit channel must be 1 or 2.")
-        limits = _require_mapping(channel_value, f"recipe.dut_limits.rigol.{channel}")
-        _reject_unknown(
-            limits,
-            {"minimum_impedance", "max_abs_current", "max_abs_power"},
-            f"recipe.dut_limits.rigol.{channel}",
-        )
-        try:
-            rigol[channel] = RigolDutLimits(
-                minimum_impedance_ohm=(
-                    parse_quantity(limits["minimum_impedance"], DIMENSION_RESISTANCE).si_value
-                    if "minimum_impedance" in limits
-                    else None
-                ),
-                max_abs_current_a=(
-                    parse_quantity(limits["max_abs_current"], DIMENSION_CURRENT).si_value
-                    if "max_abs_current" in limits
-                    else None
-                ),
-                max_abs_power_w=(
-                    parse_quantity(limits["max_abs_power"], DIMENSION_POWER).si_value
-                    if "max_abs_power" in limits
-                    else None
-                ),
-            )
-        except (TypeError, ValueError) as exc:
-            raise ConfigurationError(f"Invalid Rigol DUT limits for channel {channel}: {exc}") from exc
-
-    anritsu: AnritsuDutLimits | None = None
-    if "anritsu" in raw:
-        limits = _require_mapping(raw["anritsu"], "recipe.dut_limits.anritsu")
-        _reject_unknown(
-            limits,
-            {"max_expected_input", "max_signal_generator_output"},
-            "recipe.dut_limits.anritsu",
-        )
-        if not limits:
-            raise ConfigurationError("Anritsu DUT limits cannot be empty.")
-        anritsu = AnritsuDutLimits(
-            max_expected_input_dbm=(
-                parse_quantity(limits["max_expected_input"], DIMENSION_DBM).si_value
-                if "max_expected_input" in limits
-                else None
-            ),
-            max_signal_generator_output_dbm=(
-                parse_quantity(
-                    limits["max_signal_generator_output"], DIMENSION_DBM
-                ).si_value
-                if "max_signal_generator_output" in limits
-                else None
-            ),
-        )
-    return ExperimentDutLimits(keithley=keithley, rigol=rigol, anritsu=anritsu)
-
-
 def parse_recipe_text(source: str, *, origin: str = "<memory>") -> Recipe:
     """Parse operator-edited YAML without granting it executable privileges."""
 
@@ -339,6 +192,8 @@ def parse_recipe_text(source: str, *, origin: str = "<memory>") -> Recipe:
     except Exception as exc:
         raise ConfigurationError(f"Cannot read recipe {origin}: {exc}") from exc
     root_raw = _require_mapping(raw, "recipe")
+    # Accept the removed field only so saved recipes from older releases still
+    # open. It has no model representation and no effect on compilation.
     allowed_top = {"schema_version", "name", "root", "finally", "dut_limits"}
     unknown = set(root_raw) - allowed_top
     if unknown:
@@ -352,9 +207,8 @@ def parse_recipe_text(source: str, *, origin: str = "<memory>") -> Recipe:
     if not isinstance(finally_raw, list):
         raise ConfigurationError("recipe.finally must be a list.")
     finally_nodes = tuple(_parse_node(item, f"recipe.finally[{index}]") for index, item in enumerate(finally_raw))
-    dut_limits = _parse_dut_limits(root_raw.get("dut_limits"))
     _assert_unique_node_ids((root, *finally_nodes))
-    return Recipe(1, name, root, finally_nodes, dut_limits, source)
+    return Recipe(1, name, root, finally_nodes, source)
 
 
 def _assert_unique_node_ids(nodes: tuple[RecipeNode, ...]) -> None:

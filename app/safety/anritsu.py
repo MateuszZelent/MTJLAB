@@ -51,27 +51,6 @@ def assert_anritsu_acquisition_allowed(safety: AnritsuSafety) -> None:
         raise SafetyViolation("Define the permitted Anritsu frequency range before acquisition.")
 
 
-def validate_anritsu_dut_input(
-    safety: AnritsuSafety, max_expected_input_dbm: float | None
-) -> None:
-    """Intersect the experiment RF declaration with the configured station input limit."""
-
-    assert_anritsu_acquisition_allowed(safety)
-    if max_expected_input_dbm is None:
-        return
-    if not math.isfinite(max_expected_input_dbm):
-        raise SafetyViolation("The DUT maximum expected Anritsu input must be finite.")
-    profile_value = safety.rf_input.max_expected_power_at_connector
-    if profile_value is None:
-        raise SafetyViolation("The station configuration has no Anritsu RF input limit.")
-    profile_max_dbm = parse_quantity(profile_value, DIMENSION_DBM).si_value
-    if max_expected_input_dbm > profile_max_dbm:
-        raise SafetyViolation(
-            f"DUT expected input {max_expected_input_dbm:.9g} dBm exceeds the station limit "
-            f"{profile_max_dbm:.9g} dBm."
-        )
-
-
 def validate_anritsu_spectrum(
     safety: AnritsuSafety,
     *,
@@ -79,12 +58,10 @@ def validate_anritsu_spectrum(
     stop_hz: float,
     reference_level_dbm: float,
     points: int,
-    dut_max_expected_input_dbm: float | None = None,
 ) -> None:
     """Validate the effective range before any Anritsu SCPI is issued."""
 
     assert_anritsu_acquisition_allowed(safety)
-    validate_anritsu_dut_input(safety, dut_max_expected_input_dbm)
     if not all(math.isfinite(value) for value in (start_hz, stop_hz, reference_level_dbm)):
         raise SafetyViolation("Anritsu spectrum parameters must be finite numbers.")
     if start_hz <= 0 or stop_hz <= start_hz:

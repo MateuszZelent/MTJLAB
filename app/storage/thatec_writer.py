@@ -30,7 +30,6 @@ class ThatecHdf5Writer:
         plan_hash: str,
         expected_points: int | None = None,
         recipe_source: str = "",
-        dut_limits_json: str = "{}",
         settings_source: str = "",
     ) -> None:
         import h5py
@@ -103,7 +102,6 @@ class ThatecHdf5Writer:
                     ("plan sha256", plan_hash),
                     ("schema mapper mode", self._schema.mode),
                     ("schema mapper detail", self._schema.detail),
-                    ("DUT limits", dut_limits_json),
                 )
             ),
             dtype=self._text,

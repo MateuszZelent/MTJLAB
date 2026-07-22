@@ -123,20 +123,6 @@ class IntegerRangeSettings(StrictModel):
         return self
 
 
-class ImpedanceSettings(StrictModel):
-    min: str
-    nominal: str | None = None
-    enabled: bool = True
-
-    @model_validator(mode="after")
-    def validate_impedance(self) -> "ImpedanceSettings":
-        if parse_quantity(self.min, DIMENSION_RESISTANCE).si_value <= 0:
-            raise ValueError("minimum DUT impedance must be positive")
-        if self.nominal is not None and parse_quantity(self.nominal, DIMENSION_RESISTANCE).si_value <= 0:
-            raise ValueError("nominal DUT impedance must be positive")
-        return self
-
-
 class RigolChannelLimits(StrictModel):
     frequency: RangeSettings
     high_level: RangeSettings
@@ -145,7 +131,6 @@ class RigolChannelLimits(StrictModel):
     offset: RangeSettings
     estimated_load_current: CurrentEstimateSettings
     estimated_load_power: RangeSettings
-    declared_dut_impedance: ImpedanceSettings
     settle_time: RangeSettings
     modulation_rate: RangeSettings
     sweep_duration: RangeSettings
@@ -180,7 +165,6 @@ class RigolSafety(StrictModel):
     allow_output_enable: bool = False
     outputs_off_on_connect: bool = True
     outputs_off_on_disconnect: bool = True
-    require_declared_dut_impedance: bool = True
     require_external_current_sensor_for_runtime_trip: bool = True
     fixed_source_resistance: str
     channels: dict[str, RigolChannelSettings]

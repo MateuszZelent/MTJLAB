@@ -72,8 +72,10 @@ class RunWorker(QObject):
         self._recovery = recovery
         self._operator_context = dict(operator_context or {})
         self._simulation_seed = simulation_seed
-        self._outputs_forced_off = bool(outputs_forced_off)
-        self._execution_mode = ExecutionMode(execution_mode)
+        self._execution_mode = ExecutionMode.coerce(execution_mode)
+        if outputs_forced_off:
+            self._execution_mode = ExecutionMode.DRY_RUN
+        self._outputs_forced_off = self._execution_mode is ExecutionMode.DRY_RUN
         self._runner: RecipeRunner | None = None
 
     @Slot()
@@ -409,7 +411,13 @@ class RunController(QObject):
             raise RuntimeError("A measurement is already running.")
         self._run_settings = settings
         self._run_simulation = simulation
-        self._run_outputs_forced_off = bool(outputs_forced_off)
+        # A caller that only supplies the former boolean policy must still get
+        # the fail-closed dry-run runner, rather than the default measurement
+        # enum.  The enum is the single authoritative runtime policy.
+        selected_mode = ExecutionMode.coerce(execution_mode)
+        if outputs_forced_off:
+            selected_mode = ExecutionMode.DRY_RUN
+        self._run_outputs_forced_off = selected_mode is ExecutionMode.DRY_RUN
         self._watchdog_estop_started = False
         self._thread = QThread(self)
         self._worker = RunWorker(
@@ -419,8 +427,8 @@ class RunController(QObject):
             simulation,
             recovery,
             operator_context=operator_context,
-            outputs_forced_off=outputs_forced_off,
-            execution_mode=execution_mode,
+            outputs_forced_off=self._run_outputs_forced_off,
+            execution_mode=selected_mode.value,
         )
         self._worker.moveToThread(self._thread)
         self._thread.started.connect(self._worker.run)

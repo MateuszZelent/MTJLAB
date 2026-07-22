@@ -37,8 +37,22 @@ class ExecutionMode(str, Enum):
     """Hardware execution policy selected for one immutable run."""
 
     MEASUREMENT = "measurement"
-    DEMO_OUTPUTS_OFF = "demo_outputs_off"
+    DRY_RUN = "dry_run"
     MANUAL_STEP = "manual_step"
+
+    @classmethod
+    def coerce(cls, value: "ExecutionMode | str") -> "ExecutionMode":
+        """Read the current mode and the retired demo provenance value.
+
+        ``demo_outputs_off`` may be present in immutable run files written by
+        earlier releases.  It has exactly the same safety semantics as a dry
+        run, so historical recovery must fail closed rather than fall back to
+        a normal measurement.
+        """
+
+        if value == "demo_outputs_off":
+            return cls.DRY_RUN
+        return cls(value)
 
 
 @dataclass(frozen=True, slots=True)
@@ -85,7 +99,7 @@ class RecipeRunner:
         self._on_event = on_event or (lambda _name, _data: None)
         self._on_telemetry = on_telemetry or (lambda _name, _data: None)
         self._policy = policy or ExecutionPolicy()
-        self._execution_mode = ExecutionMode(execution_mode)
+        self._execution_mode = ExecutionMode.coerce(execution_mode)
         self._stop_requested = threading.Event()
         self._pause_requested = threading.Event()
         self._resume_requested = threading.Event()
@@ -186,7 +200,7 @@ class RecipeRunner:
                 },
             )
             if self.outputs_forced_off:
-                self._confirm_demo_outputs_off()
+                self._confirm_dry_run_outputs_off()
             for action in recovery_prelude:
                 if action.kind not in {
                     "configure_rigol",
@@ -772,19 +786,7 @@ class RecipeRunner:
             self._rigol.configure_channel(config)
             self._rigol_output_active[config.channel] = False
             self._confirm_output_state(f"rigol.{config.channel}", False)
-            envelope = config.dut_envelope
             self._active_safety_context[f"rigol.{config.channel}"] = {
-                "minimum_impedance_ohm": (
-                    envelope.minimum_impedance_ohm
-                    if envelope is not None
-                    else config.dut_min_impedance_ohm
-                ),
-                "max_abs_current_a": (
-                    envelope.max_abs_current_a if envelope is not None else None
-                ),
-                "max_abs_power_w": (
-                    envelope.max_abs_power_w if envelope is not None else None
-                ),
                 "frequency_hz": config.frequency_hz,
                 "high_level_v": config.high_level_v,
                 "low_level_v": config.low_level_v,
@@ -827,7 +829,6 @@ class RecipeRunner:
             self._keithley_output_active[request.channel] = False
             self._confirm_output_state(f"keithley.{request.channel}", False)
             self._keithley_zeroed[request.channel] = abs(request.level_si) <= 1e-15
-            envelope = request.dut_envelope
             self._active_safety_context[f"keithley.{request.channel}"] = {
                 "mode": request.mode,
                 "source_level_si": request.level_si,
@@ -841,11 +842,6 @@ class RecipeRunner:
                 "measure_voltage_range_si": request.measure_voltage_range_si,
                 "measure_current_autorange": request.measure_current_autorange,
                 "measure_current_range_si": request.measure_current_range_si,
-                "current_min_a": envelope.current_min_a if envelope is not None else None,
-                "current_max_a": envelope.current_max_a if envelope is not None else None,
-                "voltage_min_v": envelope.voltage_min_v if envelope is not None else None,
-                "voltage_max_v": envelope.voltage_max_v if envelope is not None else None,
-                "max_abs_power_w": envelope.max_abs_power_w if envelope is not None else None,
             }
             self._record_device_state(
                 "keithley", f"channel_{request.channel}", requested=request,
@@ -882,7 +878,6 @@ class RecipeRunner:
                 "reference_level_dbm": actual.reference_level_dbm,
                 "points": actual.points,
                 "instrument_mode": actual.instrument_mode,
-                "max_expected_input_dbm": config.dut_max_expected_input_dbm,
             }
             self._record_device_state(
                 "anritsu", "spectrum", requested=config,
@@ -979,7 +974,7 @@ class RecipeRunner:
             context["output_enabled"] = actual_enabled
             self._active_safety_context[f"rigol.{payload['channel']}"] = context
             self._record_device_state("rigol", f"channel_{payload['channel']}", requested=payload, actual=context)
-            self._emit_demo_suppression(action, requested_enabled, actual_enabled)
+            self._emit_dry_run_suppression(action, requested_enabled, actual_enabled)
         elif action.kind == "set_keithley_output":
             requested_enabled = bool(payload["enabled"])
             effective_enabled = requested_enabled and not self.outputs_forced_off
@@ -994,7 +989,7 @@ class RecipeRunner:
             context["output_enabled"] = actual_enabled
             self._active_safety_context[f"keithley.{payload['channel']}"] = context
             self._record_device_state("keithley", f"channel_{payload['channel']}", requested=payload, actual=context)
-            self._emit_demo_suppression(action, requested_enabled, actual_enabled)
+            self._emit_dry_run_suppression(action, requested_enabled, actual_enabled)
         elif action.kind == "set_anritsu_sg_output":
             requested_enabled = bool(payload["enabled"])
             effective_enabled = requested_enabled and not self.outputs_forced_off
@@ -1011,7 +1006,7 @@ class RecipeRunner:
             context["output_enabled"] = actual_enabled
             self._active_safety_context["anritsu.sg"] = context
             self._record_device_state("anritsu", "signal_generator", requested=payload, actual=context)
-            self._emit_demo_suppression(
+            self._emit_dry_run_suppression(
                 action, requested_enabled, actual_enabled
             )
         elif action.kind == "ramp_keithley_to_zero":
@@ -1099,7 +1094,6 @@ class RecipeRunner:
             average_count = int(payload.get("average_count", 1))
             reference = self._acquire_averaged_spectrum(
                 payload["trace"],
-                payload.get("dut_max_expected_input_dbm"),
                 average_count,
             )
             stored_reference_index = self._writer.store_reference(
@@ -1132,7 +1126,6 @@ class RecipeRunner:
             average_count = int(payload.get("average_count", 1))
             trace = self._acquire_averaged_spectrum(
                 payload["trace"],
-                payload.get("dut_max_expected_input_dbm"),
                 average_count,
             )
             operation = str(payload.get("reference_operation", "none"))
@@ -1197,7 +1190,6 @@ class RecipeRunner:
     def _acquire_averaged_spectrum(
         self,
         trace_name: str,
-        dut_max_expected_input_dbm: float | None,
         average_count: int,
     ) -> SpectrumTrace:
         """Acquire complete, grid-matched traces and average in linear power."""
@@ -1207,9 +1199,7 @@ class RecipeRunner:
         latest: SpectrumTrace | None = None
         for _index in range(average_count):
             self._raise_if_stop_requested()
-            latest = self._anritsu.acquire_single_sweep(
-                trace_name, dut_max_expected_input_dbm
-            )
+            latest = self._anritsu.acquire_single_sweep(trace_name)
             if first is None:
                 first = latest
             elif not frequency_grids_match(
@@ -1474,10 +1464,10 @@ class RecipeRunner:
 
     @property
     def outputs_forced_off(self) -> bool:
-        return self._execution_mode is ExecutionMode.DEMO_OUTPUTS_OFF
+        return self._execution_mode is ExecutionMode.DRY_RUN
 
-    def _confirm_demo_outputs_off(self) -> None:
-        """Establish and confirm the demo invariant before any recipe action."""
+    def _confirm_dry_run_outputs_off(self) -> None:
+        """Establish and confirm the dry-run invariant before recipe actions."""
 
         errors: list[str] = []
         for name, device in (
@@ -1485,7 +1475,7 @@ class RecipeRunner:
             ("rigol", self._rigol),
             ("anritsu", self._anritsu),
         ):
-            self._emit("demo_output_guard_started", {"device": name})
+            self._emit("dry_run_output_guard_started", {"device": name})
             try:
                 device.emergency_off()
                 if device.state is DeviceState.UNKNOWN:
@@ -1495,11 +1485,11 @@ class RecipeRunner:
             except Exception as exc:
                 errors.append(f"{name}: {exc}")
                 self._emit_after_fault(
-                    "demo_output_guard_error",
+                    "dry_run_output_guard_error",
                     {"device": name, "error": str(exc)},
                 )
             else:
-                self._emit("demo_output_guard_confirmed", {"device": name})
+                self._emit("dry_run_output_guard_confirmed", {"device": name})
         self._rigol_output_active = {1: False, 2: False}
         self._keithley_output_active = {"A": False, "B": False}
         self._anritsu_sg_output_active = False
@@ -1507,26 +1497,26 @@ class RecipeRunner:
             self._confirm_device_outputs_off(device)
         if errors:
             raise ExecutionError(
-                "Demo mode could not confirm all outputs OFF: " + "; ".join(errors)
+                "Dry run could not confirm all outputs OFF: " + "; ".join(errors)
             )
 
-    def _emit_demo_suppression(
+    def _emit_dry_run_suppression(
         self, action: PlanAction, requested_enabled: bool, actual_enabled: bool
     ) -> None:
         if not (self.outputs_forced_off and requested_enabled):
             return
         if actual_enabled:
             raise ExecutionError(
-                f"Demo mode output guard failed for {action.node_id!r}: OUTPUT is ON."
+                f"Dry run output guard failed for {action.node_id!r}: OUTPUT is ON."
             )
         self._emit(
-            "demo_output_action_suppressed",
+            "dry_run_output_action_suppressed",
             {
                 "node_id": action.node_id,
                 "kind": action.kind,
                 "requested_enabled": True,
                 "actual_enabled": False,
-                "reason": "Demo mode replaced OUTPUT ON with confirmed OUTPUT OFF.",
+                "reason": "Dry run replaced OUTPUT ON with confirmed OUTPUT OFF.",
             },
         )
 
@@ -1569,7 +1559,7 @@ class RecipeRunner:
             "error"
             if name in {
                 "action_failed",
-                "demo_output_guard_error",
+                "dry_run_output_guard_error",
                 "run_fault",
                 "shutdown_error",
             }

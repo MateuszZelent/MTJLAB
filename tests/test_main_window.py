@@ -866,22 +866,22 @@ class MainWindowTests(unittest.TestCase):
             window.close()
             self.application.processEvents()
 
-    def test_demo_run_selection_reaches_controller_and_execution_monitor(self) -> None:
+    def test_dry_run_selection_reaches_controller_and_execution_monitor(self) -> None:
         window = MainWindow(".config/settings.yml", simulation=True)
         try:
             plan = ExecutionPlan(
-                recipe_name="demo-ui-contract",
+                recipe_name="dry-run-ui-contract",
                 actions=(
                     PlanAction(
-                        node_id="demo-wait",
+                        node_id="dry-run-wait",
                         kind="wait",
                         payload={"duration_s": 0.1},
                         setpoints_si={},
                     ),
                 ),
                 total_points=0,
-                sha256="demo-ui-contract",
-                recipe_source="schema_version: 1\nname: demo-ui-contract\n",
+                sha256="dry-run-ui-contract",
+                recipe_source="schema_version: 1\nname: dry-run-ui-contract\n",
             )
             window._run_controller.start = Mock()
 
@@ -893,7 +893,7 @@ class MainWindowTests(unittest.TestCase):
                     "outputs_forced_off"
                 ]
             )
-            self.assertEqual(window.run_monitor.state.text(), "DEMO — OUTPUTS OFF")
+            self.assertEqual(window.run_monitor.state.text(), "DRY RUN — OUTPUTS OFF")
             self.assertIn("forced OFF", window.run_monitor.state.toolTip())
         finally:
             window.close()

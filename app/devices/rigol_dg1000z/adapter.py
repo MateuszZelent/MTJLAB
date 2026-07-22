@@ -20,7 +20,6 @@ from app.domain.models import DeviceCapabilities, DeviceIdentity, DeviceState
 from app.domain.quantities import DIMENSION_TIME, parse_quantity
 from app.safety.rigol_current import (
     RigolCurrentEstimate,
-    RigolSafetyEnvelope,
     validate_rigol_waveform,
 )
 from app.settings.models import RigolSettings, StationSettings
@@ -40,8 +39,6 @@ class RigolChannelConfig:
     pulse_width_s: float | None = None
     pulse_leading_s: float | None = None
     pulse_trailing_s: float | None = None
-    dut_min_impedance_ohm: float | None = None
-    dut_envelope: RigolSafetyEnvelope | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -981,8 +978,6 @@ class RigolAdapter(DeviceAdapter):
             high_level=config.high_level_v,
             low_level=config.low_level_v,
             output_load=config.output_load,
-            dut_min_impedance=config.dut_min_impedance_ohm,
-            dut_envelope=config.dut_envelope,
         )
 
     def _verify_applied_configuration(

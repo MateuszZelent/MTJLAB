@@ -35,7 +35,7 @@ from app.devices.lakeshore_475.models import (
     FieldUnit, GaussmeterReading, GaussmeterSnapshot, MeasurementMode,
 )
 from app.devices.visa import FakeVisaSession, FakeVisaSessionFactory
-from app.domain.errors import DeviceError, SafetyViolation
+from app.domain.errors import ConfigurationError, DeviceError, SafetyViolation
 from app.domain.quick_controls import QuickControlCommand
 from app.domain.models import DeviceState
 from app.domain.models import ApplicationState
@@ -47,7 +47,6 @@ from app.domain.quantities import (
 from app.engine.compiler import ExecutionPlan, PlanAction, RecipeCompiler
 from app.engine.runner import ExecutionMode, RecipeRunner
 from app.recipes import parse_recipe_text
-from app.safety.keithley import KeithleySafetyEnvelope
 from app.settings.models import StationSettings
 from tests.helpers import loaded_settings, simulation_settings
 
@@ -107,7 +106,7 @@ class RigolShutdownFaultSession(FakeVisaSession):
 
 
 @dataclass
-class DemoOutputProbe(ShutdownProbe):
+class DryRunOutputProbe(ShutdownProbe):
     output_requests: list[tuple[object, bool]] = field(default_factory=list)
 
     def io_timeout(self, _timeout_s: float):
@@ -161,7 +160,6 @@ class AdapterAndRunnerTests(unittest.TestCase):
                 1_000.0,
                 0.001,
                 -0.001,
-                dut_min_impedance_ohm=50.0,
             )
         )
         session.command_errors[":SOUR1:FREQ"] = "-200,Injected update failure"
@@ -186,7 +184,6 @@ class AdapterAndRunnerTests(unittest.TestCase):
                 1_000.0,
                 0.001,
                 -0.001,
-                dut_min_impedance_ohm=50.0,
             )
         )
 
@@ -195,10 +192,10 @@ class AdapterAndRunnerTests(unittest.TestCase):
         self.assertLess(mode_write, frequency_write)
         self.assertIn(":SOUR1:FUNC:ARB:MODE?", session.commands)
 
-    def test_demo_mode_suppresses_every_output_on_action(self) -> None:
-        rigol = DemoOutputProbe()
-        keithley = DemoOutputProbe()
-        anritsu = DemoOutputProbe()
+    def test_dry_run_suppresses_every_output_on_action(self) -> None:
+        rigol = DryRunOutputProbe()
+        keithley = DryRunOutputProbe()
+        anritsu = DryRunOutputProbe()
         writer = MemoryWriter()
         actions = (
             PlanAction(
@@ -215,10 +212,10 @@ class AdapterAndRunnerTests(unittest.TestCase):
             ),
         )
         plan = ExecutionPlan(
-            "demo-output-guard",
+            "dry-run-output-guard",
             actions,
             0,
-            "demo-output-guard",
+            "dry-run-output-guard",
             "schema_version: 1\n",
             required_devices=frozenset({"rigol", "keithley", "anritsu"}),
         )
@@ -228,7 +225,7 @@ class AdapterAndRunnerTests(unittest.TestCase):
             keithley=keithley,  # type: ignore[arg-type]
             anritsu=anritsu,  # type: ignore[arg-type]
             writer=writer,  # type: ignore[arg-type]
-            execution_mode=ExecutionMode.DEMO_OUTPUTS_OFF,
+            execution_mode=ExecutionMode.DRY_RUN,
         ).run(plan)
 
         self.assertEqual(result.state, ApplicationState.SAFE)
@@ -246,20 +243,20 @@ class AdapterAndRunnerTests(unittest.TestCase):
         suppressed = [
             data
             for name, data, _severity in writer.events
-            if name == "demo_output_action_suppressed"
+            if name == "dry_run_output_action_suppressed"
         ]
         self.assertEqual(len(suppressed), 3)
 
-    def test_demo_mode_faults_if_initial_output_off_cannot_be_confirmed(self) -> None:
-        rigol = DemoOutputProbe(fail=True)
-        keithley = DemoOutputProbe()
-        anritsu = DemoOutputProbe()
+    def test_dry_run_faults_if_initial_output_off_cannot_be_confirmed(self) -> None:
+        rigol = DryRunOutputProbe(fail=True)
+        keithley = DryRunOutputProbe()
+        anritsu = DryRunOutputProbe()
         writer = MemoryWriter()
         plan = ExecutionPlan(
-            "demo-output-guard-failure",
+            "dry-run-output-guard-failure",
             (),
             0,
-            "demo-output-guard-failure",
+            "dry-run-output-guard-failure",
             "schema_version: 1\n",
         )
 
@@ -268,7 +265,7 @@ class AdapterAndRunnerTests(unittest.TestCase):
             keithley=keithley,  # type: ignore[arg-type]
             anritsu=anritsu,  # type: ignore[arg-type]
             writer=writer,  # type: ignore[arg-type]
-            execution_mode=ExecutionMode.DEMO_OUTPUTS_OFF,
+            execution_mode=ExecutionMode.DRY_RUN,
         ).run(plan)
 
         self.assertEqual(result.state, ApplicationState.FAULT)
@@ -354,7 +351,7 @@ class AdapterAndRunnerTests(unittest.TestCase):
         )
         adapter = RigolAdapter(self.settings, session_factory=FakeVisaSessionFactory(session))
         adapter.connect()
-        adapter.configure_channel(RigolChannelConfig(1, "SQU", 1000, 0.001, -0.001, dut_min_impedance_ohm=50))
+        adapter.configure_channel(RigolChannelConfig(1, "SQU", 1000, 0.001, -0.001))
         with self.assertRaises(SafetyViolation):
             adapter.set_output(1, True)
 
@@ -534,7 +531,6 @@ class AdapterAndRunnerTests(unittest.TestCase):
                     pulse_width_s=100e-6,
                     pulse_leading_s=1e-9,
                     pulse_trailing_s=20e-9,
-                    dut_min_impedance_ohm=50,
                 )
             )
 
@@ -728,7 +724,7 @@ class AdapterAndRunnerTests(unittest.TestCase):
         )
         rigol = RigolAdapter(settings, session_factory=FakeVisaSessionFactory(rigol_session))
         rigol.connect()
-        rigol.configure_channel(RigolChannelConfig(1, "SQU", 1000, 0.001, -0.001, dut_min_impedance_ohm=50))
+        rigol.configure_channel(RigolChannelConfig(1, "SQU", 1000, 0.001, -0.001))
         rigol.set_output(1, True)
         rigol.set_output(2, False)
         self.assertEqual(rigol.state, DeviceState.OUTPUT_ON)
@@ -780,7 +776,7 @@ class AdapterAndRunnerTests(unittest.TestCase):
         adapter.connect()
         adapter.configure_channel(
             RigolChannelConfig(
-                1, "SQU", 1000, 0.001, -0.001, dut_min_impedance_ohm=50
+                1, "SQU", 1000, 0.001, -0.001
             )
         )
         adapter.set_output(1, True)
@@ -828,7 +824,7 @@ class AdapterAndRunnerTests(unittest.TestCase):
         adapter = RigolAdapter(settings, session_factory=FakeVisaSessionFactory(session))
         adapter.connect()
         adapter.configure_channel(
-            RigolChannelConfig(1, "SQU", 1000, 0.001, -0.001, dut_min_impedance_ohm=50)
+            RigolChannelConfig(1, "SQU", 1000, 0.001, -0.001)
         )
         adapter.set_output(1, True)
 
@@ -869,7 +865,7 @@ class AdapterAndRunnerTests(unittest.TestCase):
         rigol.connect()
         rigol.configure_channel(
             RigolChannelConfig(
-                1, "SIN", 1000, 0.001, -0.001, dut_min_impedance_ohm=50
+                1, "SIN", 1000, 0.001, -0.001
             )
         )
         rigol_limit = parse_quantity(
@@ -2242,7 +2238,7 @@ finally:
         self.assertEqual(anritsu.state, DeviceState.VERIFIED)
         self.assertIn("anritsu.rf_off_and_abort", plan.safe_shutdown_actions)
 
-    def test_anritsu_signal_generator_recipe_requires_dut_output_limit(self) -> None:
+    def test_anritsu_signal_generator_output_requires_prior_configuration(self) -> None:
         raw = simulation_settings(approved=True).model_dump(mode="python")
         raw["devices"]["anritsu"]["signal_generator"] = {
             "control_protocol": "basic_scpi",
@@ -2262,7 +2258,7 @@ root:
     - {id: on, type: set_anritsu_sg_output, enabled: true}
 """
         )
-        with self.assertRaisesRegex(SafetyViolation, "complete recipe.dut_limits"):
+        with self.assertRaisesRegex(ConfigurationError, "requires an earlier configuration"):
             RecipeCompiler(settings).compile(recipe)
 
     def test_anritsu_rejects_frequency_outside_configured_limits(self) -> None:
@@ -2347,7 +2343,7 @@ root:
         adapter.connect()
         adapter.configure_channel(
             RigolChannelConfig(
-                1, "SIN", 1000, 0.001, -0.001, dut_min_impedance_ohm=50
+                1, "SIN", 1000, 0.001, -0.001
             )
         )
         adapter.configure_modulation(RigolModulationConfig(1, True, "AM", rate_hz=1000, parameter=50))
@@ -2400,7 +2396,7 @@ root:
         adapter.connect()
         adapter.configure_channel(
             RigolChannelConfig(
-                1, "SIN", 1000, 0.001, -0.001, dut_min_impedance_ohm=50
+                1, "SIN", 1000, 0.001, -0.001
             )
         )
 
@@ -2487,7 +2483,6 @@ root:
                             1000,
                             0.001,
                             -0.001,
-                            dut_min_impedance_ohm=50,
                         )
                     )
 
@@ -2534,7 +2529,7 @@ root:
         session.responses[":SYST:ERR?"] = "0,No error"
         adapter.configure_channel(
             RigolChannelConfig(
-                1, "SIN", 1000, 0.001, -0.001, dut_min_impedance_ohm=50
+                1, "SIN", 1000, 0.001, -0.001
             )
         )
         session.responses[":SYST:ERR?"] = "-100,Injected output failure"
@@ -2584,7 +2579,7 @@ root:
         adapter.connect()
         adapter.configure_channel(
             RigolChannelConfig(
-                1, "SIN", 1000, 0.001, -0.001, dut_min_impedance_ohm=50
+                1, "SIN", 1000, 0.001, -0.001
             )
         )
         adapter.set_output(1, True)
@@ -2624,7 +2619,7 @@ root:
         adapter.connect()
         adapter.configure_channel(
             RigolChannelConfig(
-                1, "SIN", 1000, 0.001, -0.001, dut_min_impedance_ohm=50
+                1, "SIN", 1000, 0.001, -0.001
             )
         )
 
@@ -2888,42 +2883,6 @@ root:
                 KeithleySourceRequest("B", "measure_only", 0, 0, source_autorange=False, source_range_si=0.01)
             )
 
-    def test_keithley_runtime_dut_trip_forces_outputs_off(self) -> None:
-        session = FakeVisaSession(
-            responses={
-                "*IDN?": "KEITHLEY INSTRUMENTS,2602A,123456,1.0",
-                "print(errorqueue.count)": "0",
-                "print(smub.measure.iv())": "0.001\t0.01",
-                "print(smua.source.output)": "0",
-                "print(smub.source.output)": "0",
-            }
-        )
-        adapter = KeithleyAdapter(
-            self.settings, session_factory=FakeVisaSessionFactory(session)
-        )
-        adapter.connect()
-        adapter.configure_source(
-            KeithleySourceRequest(
-                "B",
-                "current",
-                0.0004,
-                0.067,
-                dut_envelope=KeithleySafetyEnvelope(
-                    current_min_a=0.0,
-                    current_max_a=0.0005,
-                    voltage_min_v=-0.067,
-                    voltage_max_v=0.067,
-                    max_abs_power_w=50e-6,
-                ),
-            )
-        )
-
-        with self.assertRaisesRegex(SafetyViolation, "DUT limit"):
-            adapter.measure("B")
-        self.assertIn("smua.source.output = smua.OUTPUT_OFF", session.writes)
-        self.assertIn("smub.source.output = smub.OUTPUT_OFF", session.writes)
-        self.assertEqual(adapter.state, DeviceState.FAULT)
-
     def test_rigol_enables_output_after_configuration_and_readback(self) -> None:
         raw = deepcopy(simulation_settings(approved=True).model_dump(mode="python"))
         raw["devices"]["rigol"]["safety"]["allow_output_enable"] = True
@@ -2941,7 +2900,7 @@ root:
         session.responses[":OUTP1?"] = lambda _command: "ON" if ":OUTP1 ON" in session.writes else "OFF"
         adapter = RigolAdapter(settings, session_factory=FakeVisaSessionFactory(session))
         adapter.connect()
-        adapter.configure_channel(RigolChannelConfig(1, "SQU", 1000, .001, -.001, dut_min_impedance_ohm=50))
+        adapter.configure_channel(RigolChannelConfig(1, "SQU", 1000, .001, -.001))
         self.assertTrue(adapter.set_output(1, True))
         output_on_index = session.writes.index(":OUTP1 ON")
         for command in (
@@ -2996,7 +2955,7 @@ root:
             actions=(
                 PlanAction("anritsu", "configure_anritsu", {"config": SpectrumConfig(1e6, 2e6, 0, 101)}, {}),
                 PlanAction("keithley", "configure_keithley", {"request": KeithleySourceRequest("B", "current", .001, .067)}, {"keithley.B.current": .001}),
-                PlanAction("rigol", "configure_rigol", {"config": RigolChannelConfig(1, "SQU", 1000, .001, -.001, dut_min_impedance_ohm=50)}, {"rigol.1.high_level": .001}),
+                PlanAction("rigol", "configure_rigol", {"config": RigolChannelConfig(1, "SQU", 1000, .001, -.001)}, {"rigol.1.high_level": .001}),
                 PlanAction("measure", "measure_keithley", {"channel": "B"}, {}),
                 PlanAction(
                     "trace",
