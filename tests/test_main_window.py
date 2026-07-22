@@ -106,6 +106,35 @@ class MainWindowTests(unittest.TestCase):
     def setUpClass(cls) -> None:
         cls.application = QApplication.instance() or QApplication([])
 
+    def test_rigol_basic_form_keeps_complete_values_per_channel(self) -> None:
+        window = MainWindow(".config/settings.yml", simulation=True)
+        try:
+            rigol = window.rigol_page
+            rigol.level_mode.setCurrentText(rigol.LEVEL_MODE_HIGH_LOW)
+            rigol.frequency.setText("3 kHz")
+            rigol.high_level.setText("7 mV")
+            rigol.low_level.setText("1 mV")
+            rigol.output_polarity.setCurrentText("INV")
+            rigol.channel.setCurrentText("2")
+            self.application.processEvents()
+            self.assertEqual(rigol.frequency.text(), "1 kHz")
+            rigol.frequency.setText("8 kHz")
+            rigol.waveform.setCurrentText("SQU")
+            rigol.duty.setText("25")
+            rigol.channel.setCurrentText("1")
+            self.application.processEvents()
+            self.assertEqual(rigol.frequency.text(), "3 kHz")
+            self.assertEqual(rigol.high_level.text(), "7 mV")
+            self.assertEqual(rigol.low_level.text(), "1 mV")
+            self.assertEqual(rigol.output_polarity.currentText(), "INV")
+            channel_two = rigol.configuration_snapshot_for(2)
+            self.assertEqual(channel_two.frequency, "8 kHz")
+            self.assertEqual(channel_two.waveform, "SQU")
+            self.assertEqual(channel_two.square_duty_percent, "25")
+        finally:
+            window.close()
+            self.application.processEvents()
+
     def test_rigol_exposes_all_supported_advanced_controls_only_after_capability_probe(self) -> None:
         window = MainWindow(".config/settings.yml", simulation=True)
         try:

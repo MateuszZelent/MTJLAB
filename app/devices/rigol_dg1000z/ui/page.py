@@ -42,7 +42,9 @@ class RigolConfigurationSnapshot:
 
     channel: int = 1
     waveform: str = "SIN"
+    time_mode: str = "Frequency"
     frequency: str = "1 kHz"
+    level_mode: str = "Amplitude / Offset"
     high_level: str = "1 mV"
     low_level: str = "-1 mV"
     output_load: str = "HIGHZ"
@@ -194,6 +196,11 @@ class RigolPage(QWidget):
         self.pulse_trailing = _line("10 ns")
         self._level_syncing = False
         self._time_syncing = False
+        self._visible_form_channel = 1
+        self._channel_form_snapshots: dict[int, RigolConfigurationSnapshot] = {
+            1: RigolConfigurationSnapshot(channel=1),
+            2: RigolConfigurationSnapshot(channel=2),
+        }
 
         splitter = QSplitter(Qt.Orientation.Horizontal)
         splitter.setChildrenCollapsible(False)
@@ -763,7 +770,13 @@ class RigolPage(QWidget):
         return RigolConfigurationSnapshot(
             channel=int(self.channel.currentText()),
             waveform=self.waveform.currentText(),
+            time_mode=self.time_mode.currentText(),
             frequency=self.frequency.text().strip(),
+            level_mode=(
+                "High Level / Low Level"
+                if self.level_mode.currentText() == self.LEVEL_MODE_HIGH_LOW
+                else "Amplitude / Offset"
+            ),
             high_level=self._format_voltage(high),
             low_level=self._format_voltage(low),
             output_load=self.load.text().strip(),
@@ -790,6 +803,9 @@ class RigolPage(QWidget):
         channel = channel or int(self.channel.currentText())
         if channel == int(self.channel.currentText()):
             return self.configuration_snapshot()
+        cached = self._channel_form_snapshots.get(channel)
+        if cached is not None:
+            return cached
         carrier = self._confirmed_carrier_configs.get(channel)
         if carrier is None:
             return replace(self.configuration_snapshot(), channel=channel)
@@ -797,9 +813,11 @@ class RigolPage(QWidget):
         return RigolConfigurationSnapshot(
             channel=channel,
             waveform=carrier.waveform,
+            time_mode=visible.time_mode,
             frequency=format_quantity_auto(
                 carrier.frequency_hz, DIMENSION_FREQUENCY
             ),
+            level_mode=visible.level_mode,
             high_level=self._format_voltage(carrier.high_level_v),
             low_level=self._format_voltage(carrier.low_level_v),
             output_load=str(carrier.output_load),
@@ -1175,11 +1193,50 @@ class RigolPage(QWidget):
         self._refresh_rigol_output_controls()
 
     def _selected_output_channel_changed(self, value: str) -> None:
+        previous_channel = self._visible_form_channel
+        next_channel = int(value)
+        if previous_channel != next_channel:
+            self._channel_form_snapshots[previous_channel] = replace(
+                self.configuration_snapshot(), channel=previous_channel
+            )
+            self._visible_form_channel = next_channel
+            self._load_basic_snapshot(self._channel_form_snapshots[next_channel])
         self.output_action_context.setText(f"Physical output · CH{value}")
         self._refresh_confirmed_advanced_controls()
         self._refresh_rigol_output_controls()
         if self.execution_badge.isVisible():
             self._render_execution_channel(int(value))
+
+    def _load_basic_snapshot(self, snapshot: RigolConfigurationSnapshot) -> None:
+        """Display one channel's cached form state without issuing device commands."""
+
+        self.waveform.setCurrentText(snapshot.waveform)
+        self.time_mode.setCurrentText(snapshot.time_mode)
+        self.frequency.setText(snapshot.frequency)
+        self.level_mode.setCurrentText(
+            self.LEVEL_MODE_HIGH_LOW
+            if snapshot.level_mode == "High Level / Low Level"
+            else self.LEVEL_MODE_AMPLITUDE_OFFSET
+        )
+        self.high_level.setText(snapshot.high_level)
+        self.low_level.setText(snapshot.low_level)
+        self.load.setText(snapshot.output_load)
+        self.phase.setText(snapshot.phase_deg)
+        self.duty.setText(snapshot.square_duty_percent)
+        self.ramp_symmetry.setText(snapshot.ramp_symmetry_percent)
+        self.pulse_width.setText(snapshot.pulse_width)
+        self.pulse_leading.setText(snapshot.pulse_leading)
+        self.pulse_trailing.setText(snapshot.pulse_trailing)
+        self.dut_impedance.setText(snapshot.dut_min_impedance)
+        self.output_polarity.setCurrentText(snapshot.output_polarity)
+        self.output_mode.setCurrentText(snapshot.output_mode)
+        self.gate_polarity.setCurrentText(snapshot.gate_polarity)
+        self.sync_enabled.setChecked(snapshot.sync_enabled)
+        self.sync_polarity.setCurrentText(snapshot.sync_polarity)
+        self.sync_delay.setText(snapshot.sync_delay)
+        self._sync_period_from_frequency()
+        self._sync_vpp_offset_from_levels()
+        self._update_dynamic_controls()
 
     def _set_rigol_channel_output(self, channel: int, enabled: bool) -> None:
         self._output_states[channel] = enabled

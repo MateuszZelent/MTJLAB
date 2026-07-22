@@ -41,6 +41,7 @@ from app.devices.keithley_2600.ui import (
     KeithleyPage,
 )
 from app.devices.rigol_dg1000z.ui import RigolNodeEditorDialog
+from app.devices.rigol_dg1000z.ui.page import RigolConfigurationSnapshot
 from app.ui.recipes import (
     ActionNodeEditorDialog,
     DeviceParameterDialog,

@@ -78,6 +78,7 @@ class RigolNodeEditorDialog(FluentRecipeDialog):
         self.waveform.setCurrentText(snapshot.waveform)
         self.time_mode = ComboBox(self)
         self.time_mode.addItems(("Frequency", "Period"))
+        self.time_mode.setCurrentText(snapshot.time_mode)
         self.frequency = _line(snapshot.frequency)
         try:
             frequency_hz = parse_quantity(snapshot.frequency, DIMENSION_FREQUENCY).si_value
@@ -87,6 +88,7 @@ class RigolNodeEditorDialog(FluentRecipeDialog):
         self.period = _line(period_text)
         self.level_mode = ComboBox(self)
         self.level_mode.addItems(("High Level / Low Level", "Amplitude / Offset"))
+        self.level_mode.setCurrentText(snapshot.level_mode)
         self.high_level = _line(snapshot.high_level)
         self.low_level = _line(snapshot.low_level)
         try:
@@ -226,7 +228,9 @@ class RigolNodeEditorDialog(FluentRecipeDialog):
         """Reload fields from the selected device channel without touching hardware."""
 
         self.waveform.setCurrentText(snapshot.waveform)
+        self.time_mode.setCurrentText(snapshot.time_mode)
         self.frequency.setText(snapshot.frequency)
+        self.level_mode.setCurrentText(snapshot.level_mode)
         self.high_level.setText(snapshot.high_level)
         self.low_level.setText(snapshot.low_level)
         self.output_load.setText(snapshot.output_load)
@@ -371,7 +375,9 @@ class RigolNodeEditorDialog(FluentRecipeDialog):
         return RigolConfigurationSnapshot(
             channel=self.selected_channel(),
             waveform=self.waveform.currentText(),
+            time_mode=self.time_mode.currentText(),
             frequency=self.frequency.text().strip(),
+            level_mode=self.level_mode.currentText(),
             high_level=high_level,
             low_level=low_level,
             output_load=self.output_load.text().strip(),
