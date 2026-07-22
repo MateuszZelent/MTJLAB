@@ -256,6 +256,27 @@ class SettingsRepository:
             changed = True
 
         devices = raw.get("devices")
+        rigol = devices.get("rigol") if isinstance(devices, dict) else None
+        rigol_safety = rigol.get("safety") if isinstance(rigol, dict) else None
+        if isinstance(rigol_safety, dict):
+            # Recipe/DUT impedance declarations were removed.  The remaining
+            # Rigol safety checks use only configured output limits and fixed
+            # hardware characteristics, so legacy values must not prevent an
+            # existing station profile from loading.
+            if "require_declared_dut_impedance" in rigol_safety:
+                del rigol_safety["require_declared_dut_impedance"]
+                changed = True
+            channels = rigol_safety.get("channels")
+            if isinstance(channels, dict):
+                for channel in channels.values():
+                    limits = (
+                        channel.get("lab_limits")
+                        if isinstance(channel, dict)
+                        else None
+                    )
+                    if isinstance(limits, dict) and "declared_dut_impedance" in limits:
+                        del limits["declared_dut_impedance"]
+                        changed = True
         anritsu = devices.get("anritsu") if isinstance(devices, dict) else None
         generator = (
             anritsu.get("signal_generator") if isinstance(anritsu, dict) else None

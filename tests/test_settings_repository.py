@@ -16,6 +16,13 @@ class SettingsRepositoryTests(unittest.TestCase):
         raw = deepcopy(SettingsRepository(SETTINGS_TEMPLATE).load().raw)
         raw["profile"]["state"] = "approved"
         raw["devices"]["anritsu"]["signal_generator"]["arm_ttl"] = "30 s"
+        rigol_safety = raw["devices"]["rigol"]["safety"]
+        rigol_safety["require_declared_dut_impedance"] = True
+        for channel in rigol_safety["channels"].values():
+            channel["lab_limits"]["declared_dut_impedance"] = {
+                "min": "50 ohm",
+                "nominal": None,
+            }
         raw["devices"]["keithley"]["safety"]["allow_output_enable"] = True
         channels = raw["devices"]["keithley"]["safety"]["channels"]
         channels["A"]["lab_limits"]["source_current"] = {
@@ -70,6 +77,12 @@ class SettingsRepositoryTests(unittest.TestCase):
                 "arm_ttl",
                 loaded["devices"]["anritsu"]["signal_generator"],
             )
+            self.assertNotIn(
+                "require_declared_dut_impedance",
+                loaded["devices"]["rigol"]["safety"],
+            )
+            for channel in loaded["devices"]["rigol"]["safety"]["channels"].values():
+                self.assertNotIn("declared_dut_impedance", channel["lab_limits"])
 
             backup_before = report.backup.read_bytes()
             repeated = repair_settings_file(path)
