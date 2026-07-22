@@ -738,6 +738,16 @@ class RecipeCompiler:
                 DIMENSION_VOLTAGE,
                 f"rigol.{channel}.low_level",
             ),
+            "carrier.amplitude": (
+                "amplitude",
+                DIMENSION_VOLTAGE,
+                f"rigol.{channel}.amplitude",
+            ),
+            "carrier.offset": (
+                "offset",
+                DIMENSION_VOLTAGE,
+                f"rigol.{channel}.offset",
+            ),
         }
         for action in parameter_actions:
             parameter_id = str(action.get("parameter_id", ""))
@@ -770,7 +780,22 @@ class RecipeCompiler:
                     f"{node.id}: {sweep_parameter} requires a non-empty ROI."
                 )
             sweep_values = generate_sweep_points(segments, dimension)
-            config_data[config_key] = sweep_values[0]
+            if sweep_parameter in {"carrier.amplitude", "carrier.offset"}:
+                base_high = self._resolve_quantity(
+                    config_data["high_level"], DIMENSION_VOLTAGE, context
+                ).si_value
+                base_low = self._resolve_quantity(
+                    config_data["low_level"], DIMENSION_VOLTAGE, context
+                ).si_value
+                base_amplitude = base_high - base_low
+                base_offset = (base_high + base_low) / 2.0
+                initial = sweep_values[0].si_value
+                amplitude = initial if sweep_parameter == "carrier.amplitude" else base_amplitude
+                offset = initial if sweep_parameter == "carrier.offset" else base_offset
+                config_data["high_level"] = offset + amplitude / 2.0
+                config_data["low_level"] = offset - amplitude / 2.0
+            else:
+                config_data[config_key] = sweep_values[0]
 
         configure_context = dict(context)
         if sweep_values and axis_target is not None:
@@ -858,8 +883,22 @@ class RecipeCompiler:
                     point_config = dict(config_data)
                     if sweep_parameter == "carrier.high_level":
                         point_config["high_level"] = value
-                    else:
+                    elif sweep_parameter == "carrier.low_level":
                         point_config["low_level"] = value
+                    elif sweep_parameter == "carrier.amplitude":
+                        current_offset = (
+                            float(configure_action.payload["config"].high_level_v)
+                            + float(configure_action.payload["config"].low_level_v)
+                        ) / 2.0
+                        point_config["high_level"] = current_offset + value.si_value / 2.0
+                        point_config["low_level"] = current_offset - value.si_value / 2.0
+                    elif sweep_parameter == "carrier.offset":
+                        current_amplitude = (
+                            float(configure_action.payload["config"].high_level_v)
+                            - float(configure_action.payload["config"].low_level_v)
+                        )
+                        point_config["high_level"] = value.si_value + current_amplitude / 2.0
+                        point_config["low_level"] = value.si_value - current_amplitude / 2.0
                     update_node = RecipeNode(
                         f"{node.id}.update-levels",
                         "update_rigol_levels",

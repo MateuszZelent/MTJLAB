@@ -4633,6 +4633,8 @@ class RecipePage(QWidget):
             "carrier.frequency": "frequency",
             "carrier.high_level": "high_level",
             "carrier.low_level": "low_level",
+            "carrier.amplitude": "amplitude",
+            "carrier.offset": "offset",
         }.get(parameter_id)
         if suffix is None:
             return
@@ -4932,6 +4934,8 @@ class RecipePage(QWidget):
             "carrier.frequency",
             "carrier.high_level",
             "carrier.low_level",
+            "carrier.amplitude",
+            "carrier.offset",
         }
         if any(action.get("parameter_id") not in allowed for action in actions):
             raise ConfigurationError("Rigol node contains an unsupported parameter action.")
