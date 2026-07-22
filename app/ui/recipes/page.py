@@ -58,6 +58,7 @@ from app.storage import Hdf5RunReader, ThatecDevice, ThatecRow, ThatecRun, Thate
 from app.ui.common import human_bytes as _human_bytes
 from app.ui.dialogs import StationFileDialog as QFileDialog
 from app.ui.dialogs import StationMessageBox as QMessageBox
+from app.ui.settings_guidance import SettingsIssue, settings_issue_for_error
 from app.ui.common import human_duration as _human_duration
 from app.ui.common import line_edit as _line
 from app.ui.design_system import ThemeTokens, effective_theme, tokens_for
@@ -232,6 +233,7 @@ class RecipePage(QWidget):
     status = Signal(str)
     run_requested = Signal(object, bool, str)
     plan_preflight_changed = Signal(object)
+    settings_issue_requested = Signal(object)
     operator_row_role = int(Qt.ItemDataRole.UserRole) + 17
     _FINALLY_ACTION_TYPES = {
         "ramp_keithley_to_zero",
@@ -2200,7 +2202,13 @@ class RecipePage(QWidget):
                 error_type=type(exc).__name__,
                 error=str(exc),
             )
-            QMessageBox.warning(self, "Recipe", str(exc))
+            issue = settings_issue_for_error(exc)
+            if issue is not None and QMessageBox.settings_guidance(
+                self, "Recipe", str(exc)
+            ):
+                self.settings_issue_requested.emit(issue)
+            elif issue is None:
+                QMessageBox.warning(self, "Recipe", str(exc))
             return
         self._accept_preflight(recipe, plan, estimate)
 
@@ -2416,6 +2424,9 @@ class RecipePage(QWidget):
             count = occurrences.get(node.id, 0)
             detail = node.type + (f" • {count} action(s)" if plan is not None else "")
             label, detail, icon = self._tree_presentation(node, count, plan is not None)
+            if parent is None and node.type == "sequence":
+                label = "Measurement sequence"
+                detail = "Runs top-level steps in order"
             if node.data.get("disabled") is True:
                 label = f"Disabled — {label}"
                 detail = "Skipped with all children"

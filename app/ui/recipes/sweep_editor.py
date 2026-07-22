@@ -8,7 +8,7 @@ from typing import Any
 
 import pyqtgraph as pg
 from PySide6.QtCore import QEvent, QTimer, Qt
-from PySide6.QtGui import QColor, QPalette
+from PySide6.QtGui import QBrush, QColor, QPalette
 from PySide6.QtWidgets import (
     QAbstractItemView, QApplication, QDialog, QFormLayout, QHBoxLayout,
     QHeaderView, QLineEdit, QSplitter, QStyledItemDelegate,
@@ -20,6 +20,7 @@ from qfluentwidgets import (
 
 from app.recipes.parameter_registry import sweep_default as _sweep_default
 from app.domain.errors import ConfigurationError
+from app.domain.quantities import format_quantity_auto
 from app.recipes import estimate_sweep_point_count, generate_sweep_points, generate_sweep_stage_points
 from app.ui.common import line_edit as _line
 from app.ui.dialogs import StationMessageBox as QMessageBox
@@ -246,8 +247,6 @@ class SweepGeneratorDialog(FluentRecipeDialog):
 
     def _set_plot_theme(self, theme: str) -> None:
         resolved = effective_theme(theme)
-        if resolved == self.plot_theme:
-            return
         self.plot_theme = resolved
         self._apply_table_theme()
         self._apply_plot_theme()
@@ -286,11 +285,36 @@ class SweepGeneratorDialog(FluentRecipeDialog):
             widget.setPalette(palette)
             widget.setAutoFillBackground(True)
             widget.update()
+        self._apply_table_item_colors()
+
+    def _apply_table_item_colors(self) -> None:
+        """Keep editable values legible after QFluent reapplies its table style."""
+
+        tokens = tokens_for(self.plot_theme)
+        primary = QBrush(QColor(tokens.text_primary))
+        muted = QBrush(QColor(tokens.text_muted))
+        for row in range(self.segments.rowCount()):
+            for column in (0, 1, 3):
+                item = self.segments.item(row, column)
+                if item is None:
+                    continue
+                item.setForeground(
+                    primary
+                    if item.flags() & Qt.ItemFlag.ItemIsEditable
+                    else muted
+                )
 
     def _set_plot_labels(self) -> None:
         foreground = tokens_for(self.plot_theme).plot_axes
         self.plot.setLabel("bottom", "Generated point index", color=foreground)
-        self.plot.setLabel("left", self.definition["label"], color=foreground)
+        unit = format_quantity_auto(
+            0.0, self.definition["dimension"]
+        ).partition(" ")[2]
+        self.plot.setLabel(
+            "left",
+            f"{self.definition['label']} ({unit})",
+            color=foreground,
+        )
 
     def _style_plot_legend(self) -> None:
         tokens = tokens_for(self.plot_theme)
@@ -390,6 +414,7 @@ class SweepGeneratorDialog(FluentRecipeDialog):
             (3, point_value),
         ):
             self.segments.setItem(row, column, QTableWidgetItem(value))
+        self._apply_table_item_colors()
         method = ComboBox(self.segments)
         method.setObjectName("roiCellCombo")
         method.addItems(("Points", "Step", "Single value"))
@@ -439,7 +464,6 @@ class SweepGeneratorDialog(FluentRecipeDialog):
                 item.setText("—")
                 item.setFlags(item.flags() & ~Qt.ItemFlag.ItemIsEditable)
                 item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
-                item.setData(Qt.ItemDataRole.ForegroundRole, None)
                 item.setToolTip("Not used by a Single value stage")
             else:
                 stored = item.data(Qt.ItemDataRole.UserRole)
@@ -449,7 +473,6 @@ class SweepGeneratorDialog(FluentRecipeDialog):
                 item.setTextAlignment(
                     Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter
                 )
-                item.setData(Qt.ItemDataRole.ForegroundRole, None)
                 item.setToolTip(
                     "Inclusive stop value"
                     if column == 1
@@ -458,6 +481,7 @@ class SweepGeneratorDialog(FluentRecipeDialog):
         spacing = self.segments.cellWidget(row, 4)
         if isinstance(spacing, ComboBox):
             spacing.setEnabled(not single)
+        self._apply_table_item_colors()
         self._refresh_preview()
 
     def remove_interval(self) -> None:
@@ -560,8 +584,9 @@ class SweepGeneratorDialog(FluentRecipeDialog):
             previous_point = stage[-1].si_value
         self._style_plot_legend()
         self.preview.setText(
-            f"Generated {len(points):,} unique points • first {points[0].si_value:.12g} SI • "
-            f"last {points[-1].si_value:.12g} SI"
+            f"Generated {len(points):,} unique points • "
+            f"first {format_quantity_auto(points[0].si_value, self.definition['dimension'])} • "
+            f"last {format_quantity_auto(points[-1].si_value, self.definition['dimension'])}"
         )
         self.create_button.setEnabled(True)
 

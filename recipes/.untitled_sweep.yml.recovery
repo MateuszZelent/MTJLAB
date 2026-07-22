@@ -3,12 +3,5 @@ name: Untitled sweep
 root:
   id: sequence-main
   type: sequence
-  children:
-  - id: repeat-visual-contract
-    type: repeat
-    count: 3
-    children:
-    - id: wait-dfeeefb2
-      type: wait
-      duration: 100 ms
+  children: []
 finally: []

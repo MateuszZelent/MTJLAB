@@ -102,6 +102,41 @@ class StationAlertDialog(StationDialog):
             self.reject()
 
 
+class StationSettingsGuidanceDialog(StationDialog):
+    """An alert with a direct, non-destructive route to a configuration fix."""
+
+    def __init__(self, parent: QWidget | None, title: str, text: str) -> None:
+        super().__init__(parent)
+        self.setWindowTitle(title)
+        self.setModal(True)
+        self.setProperty("stationSurface", "raised")
+        self.setMinimumWidth(max(360, min(640, (parent.width() if parent else 720) - 48)))
+
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(24, 22, 24, 20)
+        layout.setSpacing(12)
+        heading = SubtitleLabel(title, self)
+        body = BodyLabel(text, self)
+        body.setWordWrap(True)
+        body.setTextInteractionFlags(
+            Qt.TextInteractionFlag.TextSelectableByMouse
+            | Qt.TextInteractionFlag.TextSelectableByKeyboard
+        )
+        layout.addWidget(heading)
+        layout.addWidget(body)
+        layout.addSpacing(8)
+        buttons = QHBoxLayout()
+        buttons.addStretch(1)
+        close = PushButton("Close", self)
+        self.go_to_settings_button = PrimaryPushButton("Go to settings", self)
+        close.clicked.connect(self.reject)
+        self.go_to_settings_button.clicked.connect(self.accept)
+        buttons.addWidget(close)
+        buttons.addWidget(self.go_to_settings_button)
+        layout.addLayout(buttons)
+        self.go_to_settings_button.setFocus()
+
+
 class StationMessageBox:
     """Fluent modal prompts with the return contract of ``QMessageBox``.
 
@@ -210,6 +245,13 @@ class StationMessageBox:
             cls.StandardButton.Save: "Save",
             cls.StandardButton.Cancel: "Cancel",
         }.get(button, "OK")
+
+    @classmethod
+    def settings_guidance(cls, parent: QWidget | None, title: str, text: str) -> bool:
+        """Show an actionable safety/configuration alert and return its choice."""
+
+        dialog = StationSettingsGuidanceDialog(parent, title, text)
+        return dialog.exec() == QDialog.DialogCode.Accepted
 
 
 class StationFileDialog(QFileDialog):

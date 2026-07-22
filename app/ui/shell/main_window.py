@@ -80,6 +80,7 @@ from app.settings.validation import format_settings_validation_error
 from app.security import AccessPolicy, Permission
 from app.storage import Hdf5RunReader
 from app.ui.settings_page import SettingsPage
+from app.ui.settings_guidance import SettingsIssue, settings_issue_for_error
 from app.ui.dialogs import StationMessageBox as QMessageBox
 from app.ui.settings_workers import KeithleyDefaultsSaveWorker
 from app.ui.run_worker import RunController, serialize_settings_snapshot
@@ -547,6 +548,7 @@ class MainWindow(FluentWindow):
             self._stage_keithley_defaults
         )
         self.recipe_page.run_requested.connect(self._start_run)
+        self.recipe_page.settings_issue_requested.connect(self._open_settings_issue)
         self.recipe_page.plan_preflight_changed.connect(self.dashboard.update_plan_preflight)
         self.results_page.resume_requested.connect(self._resume_run)
         self.results_page.open_sweep_requested.connect(self._open_historical_thatec_sweep)
@@ -629,6 +631,12 @@ class MainWindow(FluentWindow):
 
     def _navigate_to(self, route: str) -> None:
         self.switchTo(self.navigation_routes[route])
+
+    def _open_settings_issue(self, issue: SettingsIssue) -> None:
+        """Navigate only; correcting a safety profile never changes live outputs."""
+
+        self._navigate_to("settings")
+        self.settings_page.reveal_settings_issues(issue.paths, issue.message)
 
     def _current_route(self) -> str:
         current = self.stackedWidget.currentWidget()
@@ -1210,7 +1218,13 @@ class MainWindow(FluentWindow):
                 execution_mode=execution_mode,
             )
         except Exception as exc:
-            QMessageBox.critical(self, "Run not started", str(exc))
+            issue = settings_issue_for_error(exc)
+            if issue is not None and QMessageBox.settings_guidance(
+                self, "Run not started", str(exc)
+            ):
+                self._open_settings_issue(issue)
+            elif issue is None:
+                QMessageBox.critical(self, "Run not started", str(exc))
             return
         self.run_monitor.run_started(
             len(plan.actions),  # type: ignore[union-attr]

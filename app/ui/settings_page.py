@@ -80,6 +80,7 @@ from app.settings.diagnostics import (
 from app.settings.models import StationSettings
 from app.settings.validation import format_settings_validation_error
 from app.ui.widgets import show_toast
+from app.ui.settings_guidance import SettingsPath
 
 
 _LIMIT_VALIDATION_MESSAGE_ROLE = int(Qt.ItemDataRole.UserRole) + 101
@@ -1738,6 +1739,30 @@ class SettingsPage(QWidget):
             ):
                 self._set_limit_validation(item, message)
         return marked_editor
+
+    def reveal_settings_issues(self, paths: tuple[SettingsPath, ...], message: str) -> None:
+        """Open and visibly mark fields implicated by a rejected safety action."""
+
+        if not paths:
+            return
+        first_path = paths[0]
+        device = str(first_path[1]) if len(first_path) > 1 and first_path[0] == "devices" else "general"
+        form = self.forms.get(device)
+        if form is not None:
+            self.tabs.setCurrentWidget(form)
+        first_editor: QWidget | None = None
+        for path in paths:
+            editor = self._mark_invalid_path(path, message)
+            if first_editor is None and editor is not None:
+                first_editor = editor
+        if first_editor is not None:
+            def focus_issue() -> None:
+                if form is not None:
+                    form.ensureWidgetVisible(first_editor, 36, 72)
+                first_editor.setFocus()
+
+            QTimer.singleShot(0, focus_issue)
+        self.status.emit("Settings fields requiring correction were highlighted")
 
     @staticmethod
     def _missing_range_boundaries(

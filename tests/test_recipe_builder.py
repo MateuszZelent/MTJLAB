@@ -1583,6 +1583,17 @@ root:
             self.application.processEvents()
             light = dialog.plot.backgroundBrush().color().name()
             self.assertEqual(dialog.plot_theme, "light")
+            self.assertEqual(
+                dialog.segments.palette().color(QPalette.ColorRole.Base).name(),
+                tokens_for("light").surface,
+            )
+            self.assertEqual(
+                dialog.segments.item(0, 0).foreground().color().name(),
+                tokens_for("light").text_primary,
+            )
+            self.assertIn("first 0 A", dialog.preview.text())
+            self.assertIn("last 1 mA", dialog.preview.text())
+            self.assertNotIn(" SI", dialog.preview.text())
             apply_application_theme(self.application, "dark")
             self.application.processEvents()
             self.application.processEvents()
@@ -1592,6 +1603,10 @@ root:
             self.assertEqual(
                 dialog.segments.palette().color(QPalette.ColorRole.Base).name(),
                 tokens_for("dark").surface,
+            )
+            self.assertEqual(
+                dialog.segments.item(0, 0).foreground().color().name(),
+                tokens_for("dark").text_primary,
             )
             editor = dialog._roi_cell_delegate.createEditor(
                 dialog.segments.viewport(), None, None
