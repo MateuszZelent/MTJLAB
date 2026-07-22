@@ -940,6 +940,35 @@ class MainWindowTests(unittest.TestCase):
             window.close()
             self.application.processEvents()
 
+    def test_device_pages_remain_visible_but_read_only_while_run_owns_instruments(self) -> None:
+        window = MainWindow(".config/settings.yml", simulation=True)
+        try:
+            window.resize(1280, 800)
+            window.show()
+            window._navigate_to("rigol")
+            self.application.processEvents()
+            rigol = window.rigol_page
+            original_frequency_enabled = rigol.frequency.isEnabled()
+            original_button_enabled = rigol.quick_controls_button.isEnabled()
+
+            window._set_run_ui_locked(True)
+
+            self.assertTrue(window.navigation_routes["rigol"].isEnabled())
+            self.assertTrue(rigol.isVisibleTo(window))
+            self.assertFalse(rigol.frequency.isEnabled())
+            self.assertFalse(rigol.quick_controls_button.isEnabled())
+            self.assertTrue(rigol.isEnabled())
+
+            window._set_run_ui_locked(False)
+
+            self.assertEqual(rigol.frequency.isEnabled(), original_frequency_enabled)
+            self.assertEqual(
+                rigol.quick_controls_button.isEnabled(), original_button_enabled
+            )
+        finally:
+            window.close()
+            self.application.processEvents()
+
     def test_find_visa_scan_states_are_explicit(self) -> None:
         window = MainWindow(".config/settings.yml", simulation=True)
         try:

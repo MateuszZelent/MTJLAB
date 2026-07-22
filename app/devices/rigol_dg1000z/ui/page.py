@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import math
 from collections import defaultdict, deque
+from collections.abc import Mapping
 from dataclasses import dataclass
 
 from PySide6.QtCore import Qt, Signal
@@ -106,6 +107,7 @@ class RigolPage(QWidget):
         self._device_state_value = "disconnected"
         self._output_states = {1: False, 2: False}
         self._output_state_known = {1: False, 2: False}
+        self._execution_readbacks: dict[int, dict[str, object]] = {}
         layout = QVBoxLayout(self)
         layout.setContentsMargins(18, 18, 18, 18)
         layout.setSpacing(14)
@@ -122,6 +124,11 @@ class RigolPage(QWidget):
         heading.addWidget(title)
         heading.addWidget(subtitle)
         header_layout.addLayout(heading, 1)
+        self.execution_badge = CaptionLabel("SWEEP CONTROLLED", self.hero_card)
+        self.execution_badge.setObjectName("executionControlBadge")
+        self.execution_badge.setProperty("deviceState", "verified")
+        self.execution_badge.hide()
+        header_layout.addWidget(self.execution_badge)
         self.quick_controls_button = PushButton("Quick controls...", self.hero_card)
         self.quick_controls_button.clicked.connect(self.quick_controls_requested)
         header_layout.addWidget(self.quick_controls_button)
@@ -456,6 +463,103 @@ class RigolPage(QWidget):
         else:
             self._sync_levels_from_vpp_offset()
         self._record_visible_quick_readback(int(parts[1]))
+
+    def apply_execution_readback(
+        self,
+        channel: int,
+        *,
+        frequency_hz: float | None = None,
+        high_level_v: float | None = None,
+        low_level_v: float | None = None,
+        output_state: str | None = None,
+    ) -> None:
+        """Render runner-confirmed values without issuing a manual command.
+
+        Recipe execution owns a separate VISA session, so this method is a
+        one-way display projection.  It intentionally does not call a page
+        controller, mutate station settings or re-enable any manual control.
+        """
+
+        if channel not in {1, 2}:
+            return
+        if output_state == "on":
+            self._set_rigol_channel_output(channel, True)
+        elif output_state == "off":
+            self._set_rigol_channel_output(channel, False)
+        elif output_state == "unknown":
+            self._output_state_known[channel] = False
+            self._refresh_rigol_output_controls()
+        if channel != int(self.channel.currentText()):
+            return
+        if frequency_hz is not None:
+            self.frequency.setText(
+                format_quantity_auto(frequency_hz, DIMENSION_FREQUENCY)
+            )
+            self._sync_period_from_frequency()
+        if high_level_v is not None:
+            self.high_level.setText(
+                format_quantity_auto(high_level_v, DIMENSION_VOLTAGE)
+            )
+        if low_level_v is not None:
+            self.low_level.setText(
+                format_quantity_auto(low_level_v, DIMENSION_VOLTAGE)
+            )
+        if high_level_v is not None or low_level_v is not None:
+            self._sync_vpp_offset_from_levels()
+        self._record_visible_quick_readback(channel)
+
+    def apply_execution_event(
+        self,
+        event_name: str,
+        event: Mapping[str, object],
+        device_state: Mapping[str, object],
+        output_status: Mapping[str, str],
+    ) -> None:
+        """Project all confirmed Rigol channels from one runner snapshot."""
+        for channel in (1, 2):
+            record = device_state.get(f"channel_{channel}")
+            actual = record.get("actual") if isinstance(record, Mapping) else None
+            if isinstance(actual, Mapping):
+                self._execution_readbacks[channel] = dict(actual)
+            state = output_status.get(f"rigol.{channel}")
+            if state == "on":
+                self._set_rigol_channel_output(channel, True)
+            elif state == "off":
+                self._set_rigol_channel_output(channel, False)
+            elif state == "unknown":
+                self._output_state_known[channel] = False
+
+        if event_name in {"action_started", "manual_stage_waiting"}:
+            channel_hint = event.get("channel")
+            if channel_hint in {1, 2, "1", "2"}:
+                self.channel.setCurrentText(str(channel_hint))
+            setpoints = event.get("setpoints_si")
+            if isinstance(setpoints, Mapping):
+                for target in setpoints:
+                    parts = str(target).split(".")
+                    if len(parts) >= 3 and parts[0] == "rigol" and parts[1] in {"1", "2"}:
+                        self.channel.setCurrentText(parts[1])
+                        break
+        self._render_execution_channel(int(self.channel.currentText()))
+
+    def _render_execution_channel(self, channel: int) -> None:
+        actual = self._execution_readbacks.get(channel, {})
+        self.apply_execution_readback(
+            channel,
+            frequency_hz=self._execution_number(actual.get("frequency_hz")),
+            high_level_v=self._execution_number(actual.get("high_level_v")),
+            low_level_v=self._execution_number(actual.get("low_level_v")),
+        )
+
+    @staticmethod
+    def _execution_number(value: object) -> float | None:
+        if isinstance(value, bool) or not isinstance(value, (int, float)):
+            return None
+        number = float(value)
+        return number if math.isfinite(number) else None
+
+    def set_execution_controlled(self, controlled: bool) -> None:
+        self.execution_badge.setVisible(controlled)
 
     def _record_visible_quick_readback(self, channel: int) -> None:
         try:
@@ -1015,6 +1119,8 @@ class RigolPage(QWidget):
         self.output_action_context.setText(f"Physical output · CH{value}")
         self._refresh_confirmed_advanced_controls()
         self._refresh_rigol_output_controls()
+        if self.execution_badge.isVisible():
+            self._render_execution_channel(int(value))
 
     def _set_rigol_channel_output(self, channel: int, enabled: bool) -> None:
         self._output_states[channel] = enabled

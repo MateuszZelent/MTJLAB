@@ -9,7 +9,7 @@ from __future__ import annotations
 
 from collections.abc import Callable, Iterable
 from dataclasses import dataclass, field
-from typing import Mapping, Protocol
+from typing import Mapping, Protocol, runtime_checkable
 
 from app.devices.base import DeviceAdapter
 from app.settings.models import StationSettings
@@ -19,6 +19,21 @@ class OperationDispatcher(Protocol):
     """Execute a device-specific high-level operation on its worker thread."""
 
     def __call__(self, adapter: DeviceAdapter, operation: str, payload: object) -> object: ...
+
+
+@runtime_checkable
+class ExecutionTelemetryView(Protocol):
+    """Optional page contract for confirmed Run Engine state projection."""
+
+    def apply_execution_event(
+        self,
+        event_name: str,
+        event: Mapping[str, object],
+        device_state: Mapping[str, object],
+        output_status: Mapping[str, str],
+    ) -> None: ...
+
+    def set_execution_controlled(self, controlled: bool) -> None: ...
 
 
 AdapterFactory = Callable[[StationSettings, bool], DeviceAdapter]
@@ -53,10 +68,16 @@ class DeviceModule:
     settings_key: str | None
     adapter_factory: AdapterFactory
     dispatch: OperationDispatcher
+    execution_state_key: str | None = None
     capabilities: frozenset[str] = field(default_factory=frozenset)
     enabled_by_default: bool = True
     recipe_extension: RecipeExtension | None = None
     page_factory: DevicePageFactory | None = None
+
+    @property
+    def runner_state_key(self) -> str:
+        """Key used by Run Engine snapshots for this module."""
+        return self.execution_state_key or self.key
 
     def create_adapter(self, settings: StationSettings, *, simulation: bool) -> DeviceAdapter:
         return self.adapter_factory(settings, simulation)

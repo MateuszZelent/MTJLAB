@@ -6,7 +6,9 @@ from __future__ import annotations
 import math
 import time
 from collections import deque
+from collections.abc import Mapping
 from dataclasses import replace
+from datetime import datetime, timezone
 from enum import StrEnum
 from pathlib import Path
 
@@ -738,6 +740,11 @@ class AnritsuPage(QWidget):
         title.setObjectName("pageTitle")
         title_row.addWidget(title)
         title_row.addStretch(1)
+        self.execution_badge = CaptionLabel("SWEEP CONTROLLED", self.hero_card)
+        self.execution_badge.setObjectName("executionControlBadge")
+        self.execution_badge.setProperty("deviceState", "verified")
+        self.execution_badge.hide()
+        title_row.addWidget(self.execution_badge)
         self.quick_controls_button = PushButton("Quick controls...", self.hero_card)
         self.quick_controls_button.setToolTip(
             "Open always-on-top Rigol and Keithley setpoint controls beside Live Spectrum."
@@ -1675,6 +1682,157 @@ class AnritsuPage(QWidget):
             instrument_mode="PLAN_EDIT",
         )
 
+    def apply_execution_event(
+        self,
+        event_name: str,
+        event: Mapping[str, object],
+        device_state: Mapping[str, object],
+        output_status: Mapping[str, str],
+    ) -> None:
+        """Project confirmed analyser/SG state and committed spectrum previews."""
+        spectrum = self._execution_actual(device_state, "spectrum")
+        if spectrum:
+            start = self._execution_number(spectrum.get("start_hz"))
+            stop = self._execution_number(spectrum.get("stop_hz"))
+            reference = self._execution_number(spectrum.get("reference_level_dbm"))
+            points = spectrum.get("points")
+            if (
+                start is not None
+                and stop is not None
+                and reference is not None
+                and isinstance(points, int)
+            ):
+                snapshot = AnritsuConfigurationSnapshot(
+                    start_hz=start,
+                    stop_hz=stop,
+                    reference_level_dbm=reference,
+                    points=points,
+                    instrument_mode=str(spectrum.get("instrument_mode", "RUN ENGINE")),
+                )
+                self._last_configuration = snapshot
+                self.configuration_panel.load_snapshot(snapshot)
+
+        advanced = self._execution_actual(device_state, "advanced_spectrum")
+        advanced_snapshot = self._execution_advanced_snapshot(advanced)
+        if advanced_snapshot is not None:
+            self._show_advanced_snapshot(advanced_snapshot)
+
+        generator = self._execution_actual(device_state, "signal_generator")
+        frequency = self._execution_number(generator.get("frequency_hz"))
+        power = self._execution_number(generator.get("power_dbm"))
+        sg_state = output_status.get("anritsu.sg")
+        output_enabled = sg_state == "on" if sg_state in {"on", "off"} else None
+        if frequency is not None and power is not None:
+            self.sg_frequency.setText(
+                format_quantity_auto(frequency, DIMENSION_FREQUENCY)
+            )
+            self.sg_power.setText(f"{power:.9g} dBm")
+        self._set_sg_output_state(output_enabled)
+
+        kind = str(event.get("kind", ""))
+        if event_name == "action_started" and kind in {
+            "acquire_spectrum",
+            "acquire_reference",
+        }:
+            label = "REFERENCE" if kind == "acquire_reference" else "SPECTRUM"
+            self.live_indicator.setText(f"●  SWEEP ACQUIRING {label}")
+            self.live_indicator.setProperty("liveState", "starting")
+            self.info.setText(
+                "Run Engine started a synchronized single sweep and is waiting "
+                "for instrument completion readback."
+            )
+            self._repolish_execution_indicator()
+        elif event_name in {"spectrum_preview", "reference_preview"}:
+            self._show_execution_trace(event)
+
+    @staticmethod
+    def _execution_actual(
+        device_state: Mapping[str, object], section: str
+    ) -> Mapping[str, object]:
+        record = device_state.get(section)
+        actual = record.get("actual") if isinstance(record, Mapping) else None
+        return actual if isinstance(actual, Mapping) else {}
+
+    @staticmethod
+    def _execution_number(value: object) -> float | None:
+        if isinstance(value, bool) or not isinstance(value, (int, float)):
+            return None
+        number = float(value)
+        return number if math.isfinite(number) else None
+
+    @classmethod
+    def _execution_advanced_snapshot(
+        cls, actual: Mapping[str, object]
+    ) -> AdvancedSpectrumSnapshot | None:
+        rbw = cls._execution_number(actual.get("rbw_hz"))
+        attenuation = cls._execution_number(actual.get("attenuation_db"))
+        sweep_time = cls._execution_number(actual.get("sweep_time_s"))
+        if rbw is None or attenuation is None or sweep_time is None:
+            return None
+        vbw = cls._execution_number(actual.get("vbw_hz"))
+        return AdvancedSpectrumSnapshot(
+            rbw_auto=bool(actual.get("rbw_auto", False)),
+            rbw_hz=rbw,
+            vbw_mode=str(actual.get("vbw_mode", "auto")),
+            vbw_hz=vbw,
+            detector=str(actual.get("detector", "NORM")),
+            attenuation_auto=bool(actual.get("attenuation_auto", False)),
+            attenuation_db=attenuation,
+            preamplifier_enabled=bool(
+                actual.get("preamplifier_enabled", False)
+            ),
+            sweep_time_auto=bool(actual.get("sweep_time_auto", False)),
+            sweep_time_s=sweep_time,
+            instrument_mode=str(actual.get("instrument_mode", "RUN ENGINE")),
+        )
+
+    def _show_execution_trace(self, event: Mapping[str, object]) -> None:
+        frequencies = event.get("frequency_hz")
+        powers = event.get("power_dbm")
+        if not isinstance(frequencies, (tuple, list)) or not isinstance(
+            powers, (tuple, list)
+        ):
+            return
+        frequency_values = tuple(float(value) for value in frequencies)
+        power_values = tuple(float(value) for value in powers)
+        if (
+            len(frequency_values) != len(power_values)
+            or len(frequency_values) < 2
+            or not all(math.isfinite(value) for value in (*frequency_values, *power_values))
+        ):
+            return
+        timestamp_text = str(event.get("timestamp_utc", ""))
+        try:
+            acquired_at = datetime.fromisoformat(timestamp_text)
+        except ValueError:
+            acquired_at = datetime.now(timezone.utc)
+        trace = SpectrumTrace(
+            frequencies_hz=frequency_values,
+            powers_dbm=power_values,
+            acquired_at_utc=acquired_at,
+            trace_name=str(event.get("trace_name", "TRAC1")),
+        )
+        self._show_trace(trace, update_controls=False)
+        source_points = int(event.get("source_points", len(power_values)))
+        kind = str(event.get("preview_kind", "measurement"))
+        label = "REFERENCE STORED" if kind == "reference" else "SPECTRUM STORED"
+        self.live_indicator.setText(f"●  {label}")
+        self.live_indicator.setProperty("liveState", "on")
+        self.info.setText(
+            f"Run Engine confirmed {label.lower()} • displaying "
+            f"{len(power_values)} of {source_points} points • {acquired_at.isoformat()}"
+        )
+        self._repolish_execution_indicator()
+
+    def _repolish_execution_indicator(self) -> None:
+        self.live_indicator.style().unpolish(self.live_indicator)
+        self.live_indicator.style().polish(self.live_indicator)
+
+    def set_execution_controlled(self, controlled: bool) -> None:
+        self.execution_badge.setVisible(controlled)
+        if not controlled and not self._timer.isActive():
+            self._set_live_indicator("off")
+
     def _update_anritsu_hardware_limits(self, options: tuple[str, ...]) -> None:
         frequency_option = frequency_option_for(options)
         if options:
@@ -2315,10 +2473,13 @@ class AnritsuPage(QWidget):
             else:
                 self._show_trace(result)
 
-    def _show_trace(self, trace: SpectrumTrace) -> None:
+    def _show_trace(
+        self, trace: SpectrumTrace, *, update_controls: bool = True
+    ) -> None:
         self._latest_trace = trace
         self._spectrogram_buffer.append(trace)
-        self._apply_page_state()
+        if update_controls:
+            self._apply_page_state()
         self._update_signal_analysis(trace)
         self._refresh_spectrogram_display()
         live_detail = ""

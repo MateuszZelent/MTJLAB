@@ -95,7 +95,7 @@ from app.ui.workers import RecipePreflightWorker
 
 class RecipePage(QWidget):
     status = Signal(str)
-    run_requested = Signal(object, bool)
+    run_requested = Signal(object, bool, str)
     plan_preflight_changed = Signal(object)
     operator_row_role = int(Qt.ItemDataRole.UserRole) + 17
     _FINALLY_ACTION_TYPES = {
@@ -221,6 +221,10 @@ class RecipePage(QWidget):
         self.execution_mode.addItem(
             "Demo — outputs forced OFF",
             userData="demo_outputs_off",
+        )
+        self.execution_mode.addItem(
+            "Manual stages — operator advances each step",
+            userData="manual_step",
         )
         self.execution_mode.setMinimumWidth(260)
         self.execution_mode.setToolTip(
@@ -2258,6 +2262,34 @@ class RecipePage(QWidget):
         elif self.tree.topLevelItemCount():
             self.tree.setCurrentItem(self.tree.topLevelItem(0))
         self.tree.verticalScrollBar().setValue(previous_scroll)
+
+    def execution_tree_snapshot(
+        self,
+        recipe_source: str,
+        plan: object | None,
+    ) -> tuple[QTreeWidgetItem, ...]:
+        """Return a detached, read-only projection made by the Builder renderer.
+
+        Execute must never maintain a second interpretation of a recipe.  The
+        snapshot is rendered by :meth:`_populate_recipe_tree` into a temporary
+        tree and then cloned, so labels, ROI rows, structural branches, icons
+        and static status cells are byte-for-byte the same projection seen in
+        Sweep Builder.  The visible Builder tree is never changed.
+        """
+
+        recipe = parse_recipe_text(recipe_source, origin="execution plan")
+        original_tree = self.tree
+        staging_tree = RecipeTreeWidget(self)
+        try:
+            self.tree = staging_tree
+            self._populate_recipe_tree(recipe.root, recipe.finally_nodes, plan)
+            return tuple(
+                staging_tree.topLevelItem(index).clone()
+                for index in range(staging_tree.topLevelItemCount())
+            )
+        finally:
+            self.tree = original_tree
+            staging_tree.deleteLater()
 
     @staticmethod
     def _keithley_parameter_label(node: RecipeNode, parameter_id: str) -> str:
@@ -5705,18 +5737,28 @@ class RecipePage(QWidget):
             self.run_requested.emit(
                 self._plan,
                 self.execution_mode.currentData() == "demo_outputs_off",
+                str(self.execution_mode.currentData()),
             )
 
     def _execution_mode_changed(self, _index: int = -1) -> None:
-        demo = self.execution_mode.currentData() == "demo_outputs_off"
-        self.run_button.setText("Run demo" if demo else "Run plan")
+        mode = str(self.execution_mode.currentData())
+        demo = mode == "demo_outputs_off"
+        manual = mode == "manual_step"
+        self.run_button.setText(
+            "Run demo" if demo else "Start manual stages" if manual else "Run plan"
+        )
         self.execution_mode_hint.setText(
             (
                 "DEMO: configurations, setpoints and Anritsu RAW/processed spectra "
                 "run normally; every source OUTPUT remains confirmed OFF."
             )
             if demo
-            else "Normal measurement: OUTPUT actions in the recipe are executed."
+            else (
+                "MANUAL STAGES: every normal recipe action waits for Next. "
+                "Finally and emergency shutdown always execute automatically."
+                if manual
+                else "Normal measurement: OUTPUT actions in the recipe are executed."
+            )
         )
         if self._preflight_thread is not None and self._preflight_thread.isRunning():
             self._preflight_thread.requestInterruption()

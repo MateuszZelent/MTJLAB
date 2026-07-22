@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from contextlib import contextmanager
+import threading
 import time
 import unittest
 from uuid import UUID
@@ -68,6 +69,13 @@ class _FailingKeithley(_PassiveAdapter):
         del channel, enabled
         self.output_calls += 1
         raise DeviceError("ambiguous OUTPUT ON failure")
+
+
+class _ConfirmingRigol(_PassiveAdapter):
+    def set_output(self, channel, enabled) -> bool:
+        del channel
+        self.state = DeviceState.OUTPUT_ON if enabled else DeviceState.OUTPUT_OFF
+        return bool(enabled)
 
 
 def _plan(action: PlanAction, required: str) -> ExecutionPlan:
@@ -152,6 +160,78 @@ class ExecutionPolicyTests(unittest.TestCase):
             if name == "run_started"
         )
         self.assertNotEqual(second_id, correlation_id)
+
+    def test_output_status_is_unknown_until_adapter_confirms_then_records_actual_state(self) -> None:
+        writer = _MemoryWriter()
+        rigol = _ConfirmingRigol()
+        passive = _PassiveAdapter()
+        action = PlanAction(
+            "rigol-on",
+            "set_rigol_output",
+            {"channel": 1, "enabled": True},
+            {},
+        )
+        result = RecipeRunner(
+            rigol=rigol,
+            keithley=passive,
+            anritsu=passive,
+            writer=writer,
+        ).run(_plan(action, "rigol"))
+
+        self.assertIsNone(result.error)
+        started = next(payload for name, payload, _ in writer.events if name == "action_started")
+        self.assertEqual(started["state_snapshot"]["output_status"]["rigol.1"], "unknown")
+        finished = next(payload for name, payload, _ in writer.events if name == "action_finished")
+        self.assertEqual(finished["state_snapshot"]["output_status"]["rigol.1"], "on")
+        completed = next(payload for name, payload, _ in writer.events if name == "run_completed")
+        self.assertEqual(completed["state_snapshot"]["output_status"]["rigol.1"], "off")
+
+    def test_manual_step_waits_for_operator_then_runs_finally_without_a_second_click(self) -> None:
+        writer = _MemoryWriter()
+        passive = _PassiveAdapter()
+        events: list[tuple[str, dict[str, object]]] = []
+        normal = PlanAction("checkpoint", "checkpoint", {"label": "manual"}, {})
+        finally_action = PlanAction(
+            "cleanup", "checkpoint", {"label": "automatic cleanup marker"}, {}, is_finally=True
+        )
+        plan = ExecutionPlan(
+            recipe_name="manual-step",
+            actions=(normal, finally_action),
+            total_points=1,
+            sha256="manual-step",
+            recipe_source="schema_version: 1\n",
+            required_devices=frozenset({"rigol"}),
+        )
+        runner = RecipeRunner(
+            rigol=passive,
+            keithley=passive,
+            anritsu=passive,
+            writer=writer,
+            on_event=lambda name, data: events.append((name, data)),
+            execution_mode="manual_step",
+        )
+        result: list[object] = []
+        thread = threading.Thread(target=lambda: result.append(runner.run(plan)))
+        thread.start()
+        deadline = time.monotonic() + 1.0
+        while not any(name == "manual_stage_waiting" for name, _ in events):
+            self.assertLess(time.monotonic(), deadline)
+            time.sleep(0.01)
+        self.assertTrue(thread.is_alive())
+        runner.advance_manual_step()
+        thread.join(1.0)
+
+        self.assertFalse(thread.is_alive())
+        self.assertIsNone(result[0].error)
+        self.assertEqual(
+            [name for name, _ in events].count("manual_stage_waiting"), 1
+        )
+        started_nodes = [
+            payload.get("node_id")
+            for name, payload in events
+            if name == "action_started"
+        ]
+        self.assertEqual(started_nodes, ["checkpoint", "cleanup"])
 
     def test_output_on_is_never_retried_after_an_ambiguous_failure(self) -> None:
         writer = _MemoryWriter()

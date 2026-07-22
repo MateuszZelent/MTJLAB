@@ -61,6 +61,7 @@ class RunWorker(QObject):
         operator_context: dict[str, object] | None = None,
         simulation_seed: int | None = None,
         outputs_forced_off: bool = False,
+        execution_mode: str = ExecutionMode.MEASUREMENT.value,
         parent: QObject | None = None,
     ) -> None:
         super().__init__(parent)
@@ -72,6 +73,7 @@ class RunWorker(QObject):
         self._operator_context = dict(operator_context or {})
         self._simulation_seed = simulation_seed
         self._outputs_forced_off = bool(outputs_forced_off)
+        self._execution_mode = ExecutionMode(execution_mode)
         self._runner: RecipeRunner | None = None
 
     @Slot()
@@ -204,11 +206,7 @@ class RunWorker(QObject):
                 on_event=lambda name, data: self.event.emit(name, data),
                 on_telemetry=lambda name, data: self.event.emit(name, data),
                 policy=ExecutionPolicy.from_settings(self._settings),
-                execution_mode=(
-                    ExecutionMode.DEMO_OUTPUTS_OFF
-                    if self._outputs_forced_off
-                    else ExecutionMode.MEASUREMENT
-                ),
+                execution_mode=self._execution_mode,
             )
             result = self._runner.run(
                 self._plan,
@@ -299,11 +297,7 @@ class RunWorker(QObject):
         )
         return {
             **metadata,
-            "execution_mode": (
-                ExecutionMode.DEMO_OUTPUTS_OFF.value
-                if self._outputs_forced_off
-                else ExecutionMode.MEASUREMENT.value
-            ),
+            "execution_mode": self._execution_mode.value,
             "outputs_forced_off": self._outputs_forced_off,
         }
 
@@ -321,6 +315,10 @@ class RunWorker(QObject):
     def request_resume(self) -> None:
         if self._runner is not None:
             self._runner.resume()
+
+    def advance_manual_step(self) -> None:
+        if self._runner is not None:
+            self._runner.advance_manual_step()
 
 
 class EmergencyStopWorker(QObject):
@@ -405,6 +403,7 @@ class RunController(QObject):
         recovery: RecoveryCheckpoint | None = None,
         operator_context: dict[str, object] | None = None,
         outputs_forced_off: bool = False,
+        execution_mode: str = ExecutionMode.MEASUREMENT.value,
     ) -> None:
         if self.running:
             raise RuntimeError("A measurement is already running.")
@@ -421,6 +420,7 @@ class RunController(QObject):
             recovery,
             operator_context=operator_context,
             outputs_forced_off=outputs_forced_off,
+            execution_mode=execution_mode,
         )
         self._worker.moveToThread(self._thread)
         self._thread.started.connect(self._worker.run)
@@ -455,6 +455,10 @@ class RunController(QObject):
     def request_resume(self) -> None:
         if self._worker is not None:
             self._worker.request_resume()
+
+    def advance_manual_step(self) -> None:
+        if self._worker is not None:
+            self._worker.advance_manual_step()
 
     def request_emergency_stop(self, settings: StationSettings, *, simulation: bool = False) -> None:
         """Request cooperative stop and concurrently issue a best-effort OFF."""

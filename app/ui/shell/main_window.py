@@ -20,7 +20,10 @@ from PySide6.QtGui import (
     QShowEvent,
 )
 from PySide6.QtWidgets import (
+    QAbstractButton,
+    QAbstractSpinBox,
     QApplication,
+    QComboBox,
     QDialog,
     QHBoxLayout,
     QLineEdit,
@@ -44,6 +47,7 @@ from qfluentwidgets.common.style_sheet import styleSheetManager
 
 from app.audit import AuditLogger
 from app.bootstrap import StationComposition
+from app.contracts import ExecutionTelemetryView
 from app.domain.errors import AuthorizationError, ConfigurationError, SafetyViolation
 from app.domain.quantities import (
     DIMENSION_CURRENT,
@@ -252,6 +256,7 @@ class MainWindow(FluentWindow):
         self.anritsu_page = self._device_pages["anritsu"]
         self.moke_box_page = self._device_pages["moke_box"]
         self.lakeshore_gaussmeter_page = self._device_pages["lakeshore_gaussmeter"]
+        self._run_read_only_controls: dict[QWidget, bool] = {}
         self.quick_control_coordinator = QuickControlCoordinator(
             self._controllers, self, settings=self._settings
         )
@@ -548,6 +553,9 @@ class MainWindow(FluentWindow):
         self.run_monitor.stop_requested.connect(self._run_controller.request_stop)
         self.run_monitor.pause_requested.connect(self._run_controller.request_pause)
         self.run_monitor.resume_requested.connect(self._run_controller.request_resume)
+        self.run_monitor.manual_next_requested.connect(
+            self._run_controller.advance_manual_step
+        )
         self._run_controller.event.connect(self._run_event)
         self._run_controller.finished.connect(self._run_finished)
         self._run_controller.failed.connect(self._run_failed)
@@ -1157,7 +1165,12 @@ class MainWindow(FluentWindow):
                 "The durable audit log is unavailable. A measurement run cannot start."
             )
 
-    def _start_run(self, plan: object, outputs_forced_off: bool = False) -> None:
+    def _start_run(
+        self,
+        plan: object,
+        outputs_forced_off: bool = False,
+        execution_mode: str = "measurement",
+    ) -> None:
         try:
             self._require_permission(
                 Permission.RUN_RECIPE,
@@ -1184,6 +1197,9 @@ class MainWindow(FluentWindow):
                     f"• {item.label}: {item.detail}" for item in readiness.blocking_items
                 )
                 raise ConfigurationError("Station preflight is blocked:\n" + details)
+            recipe_tree_items = self.recipe_page.execution_tree_snapshot(
+                plan.recipe_source, plan  # type: ignore[union-attr]
+            )
             self._run_controller.start(
                 self._settings,
                 self._repository.path,
@@ -1191,6 +1207,7 @@ class MainWindow(FluentWindow):
                 simulation=self._simulation,
                 operator_context=self._access.identity.as_context(),
                 outputs_forced_off=outputs_forced_off,
+                execution_mode=execution_mode,
             )
         except Exception as exc:
             QMessageBox.critical(self, "Run not started", str(exc))
@@ -1199,8 +1216,10 @@ class MainWindow(FluentWindow):
             len(plan.actions),  # type: ignore[union-attr]
             estimate.nominal_duration_s,
             plan_actions=plan.actions,  # type: ignore[union-attr]
+            recipe_source=plan.recipe_source,  # type: ignore[union-attr]
+            recipe_tree_items=recipe_tree_items,
             execution_mode=(
-                "demo_outputs_off" if outputs_forced_off else "measurement"
+                execution_mode
             ),
         )
         self._set_run_ui_locked(True)
@@ -1298,6 +1317,9 @@ class MainWindow(FluentWindow):
             return
         try:
             estimate = PlanEstimator(self._settings).estimate(plan)  # type: ignore[arg-type]
+            recipe_tree_items = self.recipe_page.execution_tree_snapshot(
+                plan.recipe_source, plan
+            )
             self._run_controller.start(
                 self._settings,
                 self._repository.path,
@@ -1319,6 +1341,8 @@ class MainWindow(FluentWindow):
                 *checkpoint.prelude_actions,
                 *plan.actions[checkpoint.next_action_index :],
             ),
+            recipe_source=plan.recipe_source,
+            recipe_tree_items=recipe_tree_items,
             execution_mode=(
                 "demo_outputs_off" if outputs_forced_off else "measurement"
             ),
@@ -1337,6 +1361,7 @@ class MainWindow(FluentWindow):
 
     def _run_event(self, name: str, data: object) -> None:
         payload = data if isinstance(data, dict) else {"data": data}
+        self._apply_runner_device_readback(name, payload)
         if name == "run_started":
             value = payload.get("correlation_id") or payload.get("hash")
             self._run_correlation_id = str(value) if value else None
@@ -1361,12 +1386,49 @@ class MainWindow(FluentWindow):
             )
         if name == "runner_heartbeat":
             self.run_monitor.update_heartbeat(payload)
-        elif name == "spectrum_preview":
+        elif name in {"spectrum_preview", "reference_preview"}:
             self.run_monitor.update_spectrum_preview(payload)
         else:
             self.run_monitor.append_event(name, payload)
         if name in {"run_completed", "run_aborted", "run_fault"}:
             self._run_correlation_id = None
+
+    def _apply_runner_device_readback(
+        self, event_name: str, payload: dict[str, object]
+    ) -> None:
+        """Dispatch one confirmed runner event through every device module.
+
+        Pages receive immutable event/snapshot mappings and may only render
+        them.  Instrument I/O remains exclusively owned by the Run Engine.
+        """
+        snapshot = payload.get("state_snapshot")
+        snapshot = snapshot if isinstance(snapshot, dict) else {}
+        raw_device_states = snapshot.get("device_states")
+        device_states = raw_device_states if isinstance(raw_device_states, dict) else {}
+        raw_statuses = snapshot.get("output_status")
+        output_status = raw_statuses if isinstance(raw_statuses, dict) else {}
+        safe_statuses = {
+            str(endpoint): state
+            for endpoint, state in output_status.items()
+            if isinstance(state, str) and state in {"on", "off", "unknown"}
+        }
+        for module_key, page in self._device_pages.items():
+            if not isinstance(page, ExecutionTelemetryView):
+                continue
+            module = self._composition.registry.get(module_key)
+            raw_state = device_states.get(module.runner_state_key)
+            device_state = raw_state if isinstance(raw_state, dict) else {}
+            page.apply_execution_event(
+                event_name,
+                payload,
+                device_state,
+                safe_statuses,
+            )
+        # Rendering helpers may normally refresh manual action availability.
+        # A runner-owned session must remain inspect-only after every event.
+        for control in self._run_read_only_controls:
+            if control is not None:
+                control.setEnabled(False)
 
     def _run_finished(self, result: object) -> None:
         self._set_run_ui_locked(False)
@@ -1905,16 +1967,48 @@ class MainWindow(FluentWindow):
             self.lakeshore_gaussmeter_page.stop_live(
                 "Live field readout paused while a recipe run owns the Lake Shore 475."
             )
-        for route in (
-            "rigol",
-            "keithley",
-            "anritsu",
-            "moke_box",
-            "lakeshore_gaussmeter",
-            "sweeps",
-            "settings",
-        ):
+        self._set_device_pages_execution_read_only(locked)
+        # Device routes remain available during a run so the operator can
+        # inspect their last verified values, output state and plots. Recipe
+        # editing and station-profile changes remain unavailable.
+        for route in ("sweeps", "settings"):
             self._set_route_enabled(route, not locked)
+
+    def _set_device_pages_execution_read_only(self, locked: bool) -> None:
+        """Keep device pages inspectable while the Run Engine owns I/O.
+
+        The execution worker uses independent sessions. Manual page actions
+        must therefore be unavailable during the run, but disabling the entire
+        route also hid output/compliance/plot evidence from the operator.
+        Preserve each control's pre-run enabled state and disable only widgets
+        that can initiate an edit or command.
+        """
+
+        if locked:
+            if self._run_read_only_controls:
+                return
+            for page in self._device_pages.values():
+                if isinstance(page, ExecutionTelemetryView):
+                    page.set_execution_controlled(True)
+                controls: set[QWidget] = set()
+                for widget_type in (
+                    QAbstractButton,
+                    QAbstractSpinBox,
+                    QComboBox,
+                    QLineEdit,
+                ):
+                    controls.update(page.findChildren(widget_type))
+                for control in controls:
+                    self._run_read_only_controls[control] = control.isEnabled()
+                    control.setEnabled(False)
+            return
+        for control, enabled in self._run_read_only_controls.items():
+            if control is not None:
+                control.setEnabled(enabled)
+        self._run_read_only_controls.clear()
+        for page in self._device_pages.values():
+            if isinstance(page, ExecutionTelemetryView):
+                page.set_execution_controlled(False)
 
     def _require_permission(
         self,

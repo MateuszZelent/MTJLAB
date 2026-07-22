@@ -37,6 +37,7 @@ class ExecutionMode(str, Enum):
 
     MEASUREMENT = "measurement"
     DEMO_OUTPUTS_OFF = "demo_outputs_off"
+    MANUAL_STEP = "manual_step"
 
 
 @dataclass(frozen=True, slots=True)
@@ -88,6 +89,7 @@ class RecipeRunner:
         self._pause_requested = threading.Event()
         self._resume_requested = threading.Event()
         self._resume_requested.set()
+        self._manual_step_permit = threading.Event()
         self._state = ApplicationState.SAFE
         self._required_devices: frozenset[str] = frozenset()
         self._safe_shutdown_actions: tuple[str, ...] = ()
@@ -95,6 +97,7 @@ class RecipeRunner:
         self._device_states: dict[str, dict[str, object]] = {}
         self._rigol_output_active = {1: False, 2: False}
         self._keithley_output_active = {"A": False, "B": False}
+        self._output_status = self._unknown_output_status()
         self._keithley_zeroed = {"A": True, "B": True}
         self._anritsu_sg_output_active = False
         self._last_safe_boundary_points = 0
@@ -115,6 +118,7 @@ class RecipeRunner:
 
     def request_stop(self) -> None:
         self._stop_requested.set()
+        self._manual_step_permit.set()
 
     def pause_after_point(self) -> None:
         self._pause_requested.set()
@@ -122,6 +126,12 @@ class RecipeRunner:
     def resume(self) -> None:
         self._pause_requested.clear()
         self._resume_requested.set()
+
+    def advance_manual_step(self) -> None:
+        """Permit exactly the stage currently presented to the operator."""
+
+        if self._execution_mode is ExecutionMode.MANUAL_STEP:
+            self._manual_step_permit.set()
 
     def run(
         self,
@@ -148,12 +158,14 @@ class RecipeRunner:
         self._device_states = {}
         self._rigol_output_active = {1: False, 2: False}
         self._keithley_output_active = {"A": False, "B": False}
+        self._output_status = self._unknown_output_status()
         self._keithley_zeroed = {"A": True, "B": True}
         self._anritsu_sg_output_active = False
         self._last_safe_boundary_points = stored_points
         self._watchdog_timed_out.clear()
         self._reference_trace = None
         self._reference_index = None
+        self._manual_step_permit.clear()
         self._correlation_id = str(uuid4())
         self._start_watchdog()
         self._state = ApplicationState.RUNNING
@@ -200,11 +212,17 @@ class RecipeRunner:
                 current_action = action
                 if action.is_finally:
                     attempted_finally.add(action.node_id)
+                if (
+                    self._execution_mode is ExecutionMode.MANUAL_STEP
+                    and not action.is_finally
+                ):
+                    self._wait_for_manual_step(action, action_index, len(plan.actions))
                 self._emit(
                     "action_started",
                     {
                         "node_id": action.node_id,
                         "kind": action.kind,
+                        **self._action_display_context(action),
                         "action_index": action_index,
                         "setpoints_si": dict(action.setpoints_si),
                         "deadline_s": self._policy.deadline_for(action),
@@ -305,7 +323,14 @@ class RecipeRunner:
                         self._emit_spectrum_preview(trace, point.index)
                     point_measurements.clear()
                     self._pause_at_point_if_requested()
-                self._emit("action_finished", {"node_id": action.node_id, "kind": action.kind})
+                self._emit(
+                    "action_finished",
+                    {
+                        "node_id": action.node_id,
+                        "kind": action.kind,
+                        **self._action_display_context(action),
+                    },
+                )
                 current_action = None
                 self._record_safe_boundary_if_advanced(
                     stored_points=stored,
@@ -329,6 +354,9 @@ class RecipeRunner:
                     attempted_finally=attempted_finally,
                 )
             self._state = ApplicationState.FAULT
+            # A failed action leaves output state indeterminate until the
+            # emergency-off sequence itself confirms a safe state.
+            self._mark_output_unknown()
             if current_action is not None:
                 self._emit_after_fault(
                     "action_failed",
@@ -438,6 +466,33 @@ class RecipeRunner:
         }:
             return self._anritsu
         return None
+
+    @staticmethod
+    def _action_display_context(action: PlanAction) -> dict[str, object]:
+        """Expose only routing metadata needed by the read-only device views."""
+        kind = action.kind
+        device = (
+            "rigol"
+            if "rigol" in kind
+            else "keithley"
+            if "keithley" in kind
+            else "anritsu"
+            if "anritsu" in kind or kind in {"acquire_reference", "acquire_spectrum"}
+            else "moke_box"
+            if "moke" in kind
+            else "lakeshore"
+            if "lakeshore" in kind
+            else ""
+        )
+        context: dict[str, object] = {"device": device} if device else {}
+        channel = action.payload.get("channel")
+        if channel is None:
+            config = action.payload.get("config")
+            request = action.payload.get("request")
+            channel = getattr(config, "channel", getattr(request, "channel", None))
+        if channel is not None:
+            context["channel"] = channel
+        return context
 
     def _start_watchdog(self) -> None:
         self._watchdog_stop.clear()
@@ -560,16 +615,23 @@ class RecipeRunner:
             },
         )
 
-    def _emit_spectrum_preview(self, trace: SpectrumTrace, point_index: int) -> None:
+    def _emit_spectrum_preview(
+        self,
+        trace: SpectrumTrace,
+        point_index: int,
+        *,
+        preview_kind: str = "measurement",
+    ) -> None:
         maximum_preview_points = 1_000
         step = max(
             1,
             (len(trace.powers_dbm) + maximum_preview_points - 1) // maximum_preview_points,
         )
         self._emit_telemetry(
-            "spectrum_preview",
+            "reference_preview" if preview_kind == "reference" else "spectrum_preview",
             {
                 "point_index": point_index,
+                "preview_kind": preview_kind,
                 "trace_name": trace.trace_name,
                 "frequency_hz": trace.frequencies_hz[::step],
                 "power_dbm": trace.powers_dbm[::step],
@@ -651,6 +713,7 @@ class RecipeRunner:
             config = payload["config"]
             self._rigol.configure_channel(config)
             self._rigol_output_active[config.channel] = False
+            self._confirm_output_state(f"rigol.{config.channel}", False)
             envelope = config.dut_envelope
             self._active_safety_context[f"rigol.{config.channel}"] = {
                 "minimum_impedance_ohm": (
@@ -664,6 +727,7 @@ class RecipeRunner:
                 "max_abs_power_w": (
                     envelope.max_abs_power_w if envelope is not None else None
                 ),
+                "frequency_hz": config.frequency_hz,
                 "high_level_v": config.high_level_v,
                 "low_level_v": config.low_level_v,
                 "output_load": config.output_load,
@@ -676,6 +740,7 @@ class RecipeRunner:
             config = payload["config"]
             self._rigol.configure_output(config)
             self._rigol_output_active[config.channel] = False
+            self._confirm_output_state(f"rigol.{config.channel}", False)
             context = self._active_safety_context.get(
                 f"rigol.{config.channel}", {}
             )
@@ -695,6 +760,7 @@ class RecipeRunner:
             request = payload["request"]
             self._keithley.configure_source(request)
             self._keithley_output_active[request.channel] = False
+            self._confirm_output_state(f"keithley.{request.channel}", False)
             self._keithley_zeroed[request.channel] = abs(request.level_si) <= 1e-15
             envelope = request.dut_envelope
             self._active_safety_context[f"keithley.{request.channel}"] = {
@@ -735,12 +801,13 @@ class RecipeRunner:
             self._record_device_state("keithley", f"channel_{payload['channel']}", requested=payload, actual=context)
         elif action.kind == "configure_anritsu":
             config = payload["config"]
-            self._anritsu.configure_spectrum(config)
+            actual = self._anritsu.configure_spectrum(config)
             self._active_safety_context["anritsu"] = {
-                "start_hz": config.start_hz,
-                "stop_hz": config.stop_hz,
-                "reference_level_dbm": config.reference_level_dbm,
-                "points": config.points,
+                "start_hz": actual.start_hz,
+                "stop_hz": actual.stop_hz,
+                "reference_level_dbm": actual.reference_level_dbm,
+                "points": actual.points,
+                "instrument_mode": actual.instrument_mode,
                 "max_expected_input_dbm": config.dut_max_expected_input_dbm,
             }
             self._record_device_state(
@@ -768,11 +835,14 @@ class RecipeRunner:
             )
         elif action.kind == "configure_anritsu_sg":
             config = payload["config"]
-            self._anritsu.configure_signal_generator(config)
-            self._anritsu_sg_output_active = False
+            actual = self._anritsu.configure_signal_generator(config)
+            self._anritsu_sg_output_active = actual.output_enabled
+            self._confirm_output_state("anritsu.sg", actual.output_enabled)
             self._active_safety_context["anritsu.sg"] = {
-                "frequency_hz": config.frequency_hz,
-                "power_dbm": config.power_dbm,
+                "frequency_hz": actual.frequency_hz,
+                "power_dbm": actual.power_dbm,
+                "output_enabled": actual.output_enabled,
+                "instrument_mode": actual.instrument_mode,
             }
             self._record_device_state(
                 "anritsu", "signal_generator", requested=config,
@@ -806,6 +876,9 @@ class RecipeRunner:
                 payload["channel"], effective_enabled
             )
             self._rigol_output_active[payload["channel"]] = actual_enabled
+            self._confirm_output_state(
+                f"rigol.{payload['channel']}", actual_enabled
+            )
             context = self._active_safety_context.get(f"rigol.{payload['channel']}", {})
             context["output_enabled"] = actual_enabled
             self._active_safety_context[f"rigol.{payload['channel']}"] = context
@@ -818,6 +891,9 @@ class RecipeRunner:
                 payload["channel"], effective_enabled
             )
             self._keithley_output_active[payload["channel"]] = actual_enabled
+            self._confirm_output_state(
+                f"keithley.{payload['channel']}", actual_enabled
+            )
             context = self._active_safety_context.get(f"keithley.{payload['channel']}", {})
             context["output_enabled"] = actual_enabled
             self._active_safety_context[f"keithley.{payload['channel']}"] = context
@@ -826,14 +902,21 @@ class RecipeRunner:
         elif action.kind == "set_anritsu_sg_output":
             requested_enabled = bool(payload["enabled"])
             effective_enabled = requested_enabled and not self.outputs_forced_off
-            self._anritsu.set_signal_generator_output(effective_enabled)
-            self._anritsu_sg_output_active = effective_enabled
+            actual_enabled = self._anritsu.set_signal_generator_output(
+                effective_enabled
+            )
+            if not isinstance(actual_enabled, bool):
+                raise ExecutionError(
+                    "Anritsu SG output transition did not return a confirmed boolean readback."
+                )
+            self._anritsu_sg_output_active = actual_enabled
+            self._confirm_output_state("anritsu.sg", actual_enabled)
             context = self._active_safety_context.get("anritsu.sg", {})
-            context["output_enabled"] = effective_enabled
+            context["output_enabled"] = actual_enabled
             self._active_safety_context["anritsu.sg"] = context
             self._record_device_state("anritsu", "signal_generator", requested=payload, actual=context)
             self._emit_demo_suppression(
-                action, requested_enabled, effective_enabled
+                action, requested_enabled, actual_enabled
             )
         elif action.kind == "ramp_keithley_to_zero":
             self._keithley.ramp_to_zero(payload["channel"], deadline_s=payload["deadline_s"])
@@ -850,6 +933,14 @@ class RecipeRunner:
             )
             measurements[f"{prefix}.compliance_detected"] = float(result.compliance_detected)
             measurements[f"{prefix}.compliance_stop_required"] = float(result.compliance_stop_required)
+            self._keithley_output_active[result.channel] = result.output_enabled
+            self._confirm_output_state(prefix, result.output_enabled)
+            self._record_device_state(
+                "keithley",
+                f"measurement_{result.channel}",
+                requested={"channel": result.channel},
+                actual=result,
+            )
         elif action.kind == "measure_moke_hall":
             if self._moke_box is None:
                 raise ExecutionError("MOKE Hall measurement was requested but MOKE Box is unavailable.")
@@ -866,7 +957,9 @@ class RecipeRunner:
                     "voltage_v": result.voltage_v,
                     "field_t": measurements["moke_box.hall1_field_t"],
                     "stddev_v": result.stddev_v,
+                    "samples": result.samples,
                     "raw_ad7734": result.raw_codes[0],
+                    "timestamp_utc": result.timestamp_utc.isoformat(),
                 },
             )
         elif action.kind == "measure_lakeshore_field":
@@ -887,6 +980,25 @@ class RecipeRunner:
             measurements["lakeshore.range_code"] = float(snapshot.range_code)
             measurements["lakeshore.autorange_enabled"] = float(snapshot.autorange_enabled)
             measurements["lakeshore.probe_type_code"] = float(snapshot.probe_type_code)
+            self._record_device_state(
+                "lakeshore",
+                "measurement",
+                requested={"mode": snapshot.mode.value},
+                actual={
+                    "mode": result.mode.value,
+                    "unit": result.unit.value,
+                    "mode_code": snapshot.mode_code,
+                    "unit_code": snapshot.unit_code,
+                    "range_code": snapshot.range_code,
+                    "autorange_enabled": snapshot.autorange_enabled,
+                    "probe_type_code": snapshot.probe_type_code,
+                    "field_t": result.field_t,
+                    "frequency_hz": result.frequency_hz,
+                    "negative_peak_t": result.negative_peak_t,
+                    "positive_peak_t": result.positive_peak_t,
+                    "timestamp_utc": result.timestamp_utc.isoformat(),
+                },
+            )
         elif action.kind == "acquire_reference":
             average_count = int(payload.get("average_count", 1))
             reference = self._acquire_averaged_spectrum(
@@ -914,6 +1026,11 @@ class RecipeRunner:
                     "reference_index": self._reference_index,
                     "acquired_at_utc": reference.acquired_at_utc.isoformat(),
                 },
+            )
+            self._emit_spectrum_preview(
+                reference,
+                self._reference_index if self._reference_index is not None else -1,
+                preview_kind="reference",
             )
         elif action.kind == "acquire_spectrum":
             average_count = int(payload.get("average_count", 1))
@@ -1039,6 +1156,44 @@ class RecipeRunner:
                 self._state = ApplicationState.RUNNING
                 return
 
+    def _wait_for_manual_step(
+        self, action: PlanAction, action_index: int, total_actions: int
+    ) -> None:
+        """Wait cooperatively before one visible recipe stage.
+
+        This is a UI pacing gate only.  It does not replace adapter completion,
+        deadlines, readback or the normal safe-finally path.  Cleanup actions
+        deliberately bypass the gate so Stop/E-STOP cannot wait for a click.
+        """
+
+        self._manual_step_permit.clear()
+        self._state = ApplicationState.PAUSED
+        self._emit(
+            "manual_stage_waiting",
+            {
+                "node_id": action.node_id,
+                "kind": action.kind,
+                "action_index": action_index,
+                "total_actions": total_actions,
+                "setpoints_si": dict(action.setpoints_si),
+                "deadline_s": self._policy.deadline_for(action),
+            },
+        )
+        while not self._manual_step_permit.wait(0.05):
+            self._raise_if_stop_requested()
+        self._raise_if_stop_requested()
+        self._manual_step_permit.clear()
+        self._state = ApplicationState.RUNNING
+        self._emit(
+            "manual_stage_confirmed",
+            {
+                "node_id": action.node_id,
+                "kind": action.kind,
+                "action_index": action_index,
+                "total_actions": total_actions,
+            },
+        )
+
     def _pause_at_point_if_requested(self) -> None:
         if self._pause_requested.is_set():
             self._emit("pause_pending", {})
@@ -1086,6 +1241,8 @@ class RecipeRunner:
                     {"action": action, "error": str(exc)},
                 )
             else:
+                if action != "storage.flush_checkpoint":
+                    self._confirm_device_outputs_off(name)
                 self._emit_after_fault("shutdown_action_finished", {"action": action})
         # A malformed manually-created plan must not be able to omit OFF for a
         # required device. Compiled plans already contain this fallback.
@@ -1103,6 +1260,8 @@ class RecipeRunner:
                     "shutdown_error",
                     {"action": action, "error": str(exc), "fallback": True},
                 )
+            else:
+                self._confirm_device_outputs_off(name)
         return confirmed
 
     @staticmethod
@@ -1185,7 +1344,37 @@ class RecipeRunner:
             "rigol_outputs": dict(self._rigol_output_active),
             "keithley_outputs": dict(self._keithley_output_active),
             "anritsu_sg_output": self._anritsu_sg_output_active,
+            "output_status": dict(self._output_status),
+            "device_states": self._device_state_snapshot(),
         }
+
+    @staticmethod
+    def _unknown_output_status() -> dict[str, str]:
+        return {
+            "rigol.1": "unknown",
+            "rigol.2": "unknown",
+            "keithley.A": "unknown",
+            "keithley.B": "unknown",
+            "anritsu.sg": "unknown",
+        }
+
+    def _confirm_output_state(self, endpoint: str, enabled: bool) -> None:
+        """Record only an adapter-confirmed output state for the UI/event log."""
+
+        self._output_status[endpoint] = "on" if enabled else "off"
+
+    def _mark_output_unknown(self, endpoint: str | None = None) -> None:
+        if endpoint is not None:
+            self._output_status[endpoint] = "unknown"
+            return
+        for key in self._output_status:
+            self._output_status[key] = "unknown"
+
+    def _confirm_device_outputs_off(self, device: str) -> None:
+        prefix = f"{device}."
+        for endpoint in self._output_status:
+            if endpoint.startswith(prefix):
+                self._confirm_output_state(endpoint, False)
 
     @property
     def outputs_forced_off(self) -> bool:
@@ -1218,6 +1407,8 @@ class RecipeRunner:
         self._rigol_output_active = {1: False, 2: False}
         self._keithley_output_active = {"A": False, "B": False}
         self._anritsu_sg_output_active = False
+        for device in ("keithley", "rigol", "anritsu"):
+            self._confirm_device_outputs_off(device)
         if errors:
             raise ExecutionError(
                 "Demo mode could not confirm all outputs OFF: " + "; ".join(errors)

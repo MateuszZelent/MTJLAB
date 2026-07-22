@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import math
 from collections import deque
+from collections.abc import Mapping
 from datetime import datetime, timedelta, timezone
 from typing import TYPE_CHECKING
 
@@ -12,7 +14,12 @@ from PySide6.QtGui import QResizeEvent, QShowEvent
 from PySide6.QtWidgets import QButtonGroup, QFormLayout, QGridLayout, QHBoxLayout, QSizePolicy, QVBoxLayout, QWidget
 from qfluentwidgets import BodyLabel, CaptionLabel, CardWidget, CheckBox, ComboBox, FluentIcon, IconWidget, PrimaryPushButton, PushButton, StrongBodyLabel, SubtitleLabel, TransparentPushButton, isDarkTheme
 
-from app.devices.lakeshore_475.models import GaussmeterReading
+from app.devices.lakeshore_475.models import (
+    FieldUnit,
+    GaussmeterReading,
+    GaussmeterSnapshot,
+    MeasurementMode,
+)
 from app.domain.quantities import DIMENSION_TIME, parse_quantity
 from app.settings.models import StationSettings
 from app.ui.design_system import plot_theme, tokens_for
@@ -270,9 +277,14 @@ class LakeShore475Page(QWidget):
         self.resource.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred)
         copy.addWidget(self.resource)
         hero_layout.addLayout(copy, 1)
-        badge = CaptionLabel("READ-ONLY", self.hero_card)
-        badge.setProperty("deviceState", "compliance")
-        hero_layout.addWidget(badge)
+        self.execution_badge = CaptionLabel("SWEEP CONTROLLED", self.hero_card)
+        self.execution_badge.setObjectName("executionControlBadge")
+        self.execution_badge.setProperty("deviceState", "verified")
+        self.execution_badge.hide()
+        hero_layout.addWidget(self.execution_badge)
+        self.read_only_badge = CaptionLabel("READ-ONLY", self.hero_card)
+        self.read_only_badge.setProperty("deviceState", "compliance")
+        hero_layout.addWidget(self.read_only_badge)
         self.values_card = CardWidget(self)
         self.values_card.setObjectName("lakeshoreValuesCard")
         self.values_card.setMinimumWidth(0)
@@ -590,6 +602,10 @@ class LakeShore475Page(QWidget):
             return
         self._in_flight = False
         self.read_now.setEnabled(True)
+        self._show_reading(result)
+
+    def _show_reading(self, result: GaussmeterReading) -> None:
+        """Render one confirmed reading without changing command availability."""
         self.field.setText("— T" if result.field_t is None else f"{result.field_t:+.8g} T")
         self.frequency.setText("— Hz" if result.frequency_hz is None else f"{result.frequency_hz:.8g} Hz")
         self.peaks.setText("— / — T" if result.negative_peak_t is None else f"{result.negative_peak_t:+.8g} / {result.positive_peak_t:+.8g} T")
@@ -604,6 +620,72 @@ class LakeShore475Page(QWidget):
         if not self.live.isChecked():
             self._refresh_plot_if_needed()
         self.banner.setText(f"Updated {result.timestamp_utc.astimezone().strftime('%H:%M:%S')}")
+
+    def apply_execution_event(
+        self,
+        event_name: str,
+        event: Mapping[str, object],
+        device_state: Mapping[str, object],
+        _output_status: Mapping[str, str],
+    ) -> None:
+        """Render each runner-owned gaussmeter measurement and history point."""
+        if event_name == "action_started" and event.get("kind") == "measure_lakeshore_field":
+            self.live_state.setText("SWEEP MEASURING")
+            self.banner.setText(
+                "Run Engine is waiting for a complete Lake Shore measurement."
+            )
+            return
+        if event_name != "action_finished" or event.get("kind") != "measure_lakeshore_field":
+            return
+        record = device_state.get("measurement")
+        actual = record.get("actual") if isinstance(record, Mapping) else None
+        if not isinstance(actual, Mapping):
+            return
+        try:
+            mode = MeasurementMode(str(actual.get("mode", "")))
+            unit = FieldUnit(str(actual.get("unit", "")))
+            timestamp = datetime.fromisoformat(str(actual.get("timestamp_utc", "")))
+            snapshot = GaussmeterSnapshot(
+                mode_code=str(actual.get("mode_code", "")),
+                mode=mode,
+                unit_code=str(actual.get("unit_code", "")),
+                unit=unit,
+                range_code=str(actual.get("range_code", "")),
+                autorange_enabled=bool(actual.get("autorange_enabled", False)),
+                probe_type_code=str(actual.get("probe_type_code", "")),
+                timestamp_utc=timestamp,
+            )
+            reading = GaussmeterReading(
+                mode=mode,
+                unit=unit,
+                snapshot=snapshot,
+                timestamp_utc=timestamp,
+                field_t=self._execution_number(actual.get("field_t")),
+                frequency_hz=self._execution_number(actual.get("frequency_hz")),
+                negative_peak_t=self._execution_number(actual.get("negative_peak_t")),
+                positive_peak_t=self._execution_number(actual.get("positive_peak_t")),
+            )
+        except (TypeError, ValueError):
+            return
+        self._show_reading(reading)
+        self.live_state.setText("SWEEP UPDATED")
+        self.banner.setText(
+            "Run Engine confirmed the Lake Shore measurement and exposed it to the UI."
+        )
+
+    @staticmethod
+    def _execution_number(value: object) -> float | None:
+        if value is None:
+            return None
+        if isinstance(value, bool) or not isinstance(value, (int, float)):
+            return None
+        number = float(value)
+        return number if math.isfinite(number) else None
+
+    def set_execution_controlled(self, controlled: bool) -> None:
+        self.execution_badge.setVisible(controlled)
+        if not controlled and not self._timer.isActive():
+            self.live_state.setText("STOPPED")
 
     def _prune_history(self, now: datetime) -> None:
         cutoff = now - timedelta(seconds=self._selected_value(self.history_window))

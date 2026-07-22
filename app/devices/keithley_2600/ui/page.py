@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import math
 import time
+from collections.abc import Mapping
 from copy import deepcopy
 from dataclasses import dataclass, replace
 from typing import Any
@@ -34,6 +35,7 @@ from app.devices.keithley_2600 import (
     KeithleyChannelConfigurationReadback, KeithleyConfigurationReadback,
     KeithleyRampRequest, KeithleySourceRequest, build_keithley_ramp_levels,
 )
+from app.devices.keithley_2600.adapter import KeithleyMeasurement
 from app.domain.errors import ConfigurationError
 from app.domain.quantities import (
     DIMENSION_CURRENT, DIMENSION_RESISTANCE, DIMENSION_TIME, DIMENSION_VOLTAGE,
@@ -974,6 +976,7 @@ class KeithleyPage(QWidget):
         self._limit_fields: dict[str, LimitField] = {}
         self._output_states = {"A": False, "B": False}
         self._output_state_known = {"A": False, "B": False}
+        self._execution_readbacks: dict[str, dict[str, object]] = {}
         self._pending_channels: dict[str, str] = {}
         self._pending_output_enabled: dict[str, bool] = {}
         self._pending_config_modes: dict[str, str] = {}
@@ -1014,6 +1017,11 @@ class KeithleyPage(QWidget):
         title.setObjectName("keithleyPageTitle")
         hero_layout.addWidget(title)
         hero_layout.addStretch(1)
+        self.execution_badge = CaptionLabel("SWEEP CONTROLLED", hero)
+        self.execution_badge.setObjectName("executionControlBadge")
+        self.execution_badge.setProperty("deviceState", "verified")
+        self.execution_badge.hide()
+        hero_layout.addWidget(self.execution_badge)
         self.quick_controls_button = PushButton("Quick controls...", self.hero_card)
         self.quick_controls_button.clicked.connect(self.quick_controls_requested)
         hero_layout.addWidget(self.quick_controls_button)
@@ -1322,6 +1330,166 @@ class KeithleyPage(QWidget):
         dimension = DIMENSION_CURRENT if mode == "current" else DIMENSION_VOLTAGE
         self.level.setText(format_quantity_auto(value_si, dimension))
         self._persist_form_defaults()
+
+    def apply_execution_readback(
+        self,
+        channel: str,
+        *,
+        mode: str | None = None,
+        source_level_si: float | None = None,
+        compliance_si: float | None = None,
+        output_state: str | None = None,
+        compliance_detected: bool | None = None,
+    ) -> None:
+        """Render Run Engine-confirmed state without sending a page command.
+
+        The execution worker owns a separate instrument session.  This method
+        is deliberately display-only: it never persists defaults, changes the
+        manual page connection state, or emits a controller request.
+        """
+        if channel not in {"A", "B"}:
+            return
+        if output_state == "on":
+            self._set_channel_output(channel, True)
+        elif output_state == "off":
+            self._set_channel_output(channel, False)
+        elif output_state == "unknown":
+            self._output_state_known[channel] = False
+            self._update_output_readiness()
+            self._update_live_controls()
+
+        if compliance_detected is not None:
+            compliance_label = self.channel_cards[channel]["compliance"]
+            compliance_label.setText(
+                "COMPLIANCE: ACTIVE" if compliance_detected else "COMPLIANCE: clear"
+            )
+            compliance_label.setObjectName(
+                "keithleyComplianceActive"
+                if compliance_detected
+                else "keithleyComplianceClear"
+            )
+            compliance_label.style().unpolish(compliance_label)
+            compliance_label.style().polish(compliance_label)
+
+        # Do not move the operator to another channel while they inspect the
+        # run.  The currently visible form is nevertheless a live reflection
+        # when it corresponds to this runner-controlled channel.
+        if channel != self.channel.currentText():
+            return
+        active_mode = mode if mode in {"current", "voltage", "measure_only"} else self.mode.currentText()
+        if active_mode != self.mode.currentText():
+            self.mode.blockSignals(True)
+            self.mode.setCurrentText(active_mode)
+            self.mode.blockSignals(False)
+            self._active_mode = active_mode
+            self._update_source_mode_ui()
+        if active_mode == "measure_only":
+            return
+        level_dimension = (
+            DIMENSION_CURRENT if active_mode == "current" else DIMENSION_VOLTAGE
+        )
+        compliance_dimension = (
+            DIMENSION_VOLTAGE if active_mode == "current" else DIMENSION_CURRENT
+        )
+        if source_level_si is not None:
+            self.level.setText(format_quantity_auto(source_level_si, level_dimension))
+        if compliance_si is not None:
+            self.compliance.setText(
+                format_quantity_auto(compliance_si, compliance_dimension)
+            )
+
+    def apply_execution_event(
+        self,
+        event_name: str,
+        event: Mapping[str, object],
+        device_state: Mapping[str, object],
+        output_status: Mapping[str, str],
+    ) -> None:
+        """Project confirmed source, output and measurement state for both SMUs."""
+        for channel in ("A", "B"):
+            record = device_state.get(f"channel_{channel}")
+            actual = record.get("actual") if isinstance(record, Mapping) else None
+            if isinstance(actual, Mapping):
+                self._execution_readbacks[channel] = dict(actual)
+            state = output_status.get(f"keithley.{channel}")
+            if state == "on":
+                self._set_channel_output(channel, True)
+            elif state == "off":
+                self._set_channel_output(channel, False)
+            elif state == "unknown":
+                self._output_state_known[channel] = False
+
+        if event_name in {"action_started", "manual_stage_waiting"}:
+            channel_hint = event.get("channel")
+            if channel_hint in {"A", "B"}:
+                self.channel.setCurrentText(str(channel_hint))
+            setpoints = event.get("setpoints_si")
+            if isinstance(setpoints, Mapping):
+                for target in setpoints:
+                    parts = str(target).split(".")
+                    if len(parts) >= 3 and parts[0] == "keithley" and parts[1] in {"A", "B"}:
+                        self.channel.setCurrentText(parts[1])
+                        break
+        self._render_execution_channel(self.channel.currentText())
+
+        if event_name == "action_finished" and event.get("kind") == "measure_keithley":
+            for channel in ("A", "B"):
+                record = device_state.get(f"measurement_{channel}")
+                actual = record.get("actual") if isinstance(record, Mapping) else None
+                if not isinstance(actual, Mapping):
+                    continue
+                measurement = self._execution_measurement(channel, actual)
+                if measurement is not None:
+                    self._update_channel_measurement(measurement)
+
+    def _render_execution_channel(self, channel: str) -> None:
+        actual = self._execution_readbacks.get(channel, {})
+        mode = actual.get("mode")
+        self.apply_execution_readback(
+            channel,
+            mode=(
+                mode
+                if isinstance(mode, str)
+                and mode in {"current", "voltage", "measure_only"}
+                else None
+            ),
+            source_level_si=self._execution_number(actual.get("source_level_si")),
+            compliance_si=self._execution_number(actual.get("compliance_si")),
+        )
+
+    @staticmethod
+    def _execution_number(value: object) -> float | None:
+        if isinstance(value, bool) or not isinstance(value, (int, float)):
+            return None
+        number = float(value)
+        return number if math.isfinite(number) else None
+
+    @classmethod
+    def _execution_measurement(
+        cls, channel: str, actual: Mapping[str, object]
+    ) -> KeithleyMeasurement | None:
+        voltage = cls._execution_number(actual.get("voltage_v"))
+        current = cls._execution_number(actual.get("current_a"))
+        power = cls._execution_number(actual.get("power_w"))
+        if voltage is None or current is None or power is None:
+            return None
+        return KeithleyMeasurement(
+            channel=channel,  # type: ignore[arg-type]
+            voltage_v=voltage,
+            current_a=current,
+            power_w=power,
+            output_enabled=bool(actual.get("output_enabled", False)),
+            measurement_path_connected=bool(
+                actual.get("measurement_path_connected", True)
+            ),
+            compliance_detected=bool(actual.get("compliance_detected", False)),
+            compliance_stop_required=bool(
+                actual.get("compliance_stop_required", False)
+            ),
+        )
+
+    def set_execution_controlled(self, controlled: bool) -> None:
+        self.execution_badge.setVisible(controlled)
 
     @staticmethod
     def _scroll_widget(content: QWidget) -> ScrollArea:
@@ -1700,6 +1868,8 @@ class KeithleyPage(QWidget):
         self.output_toggle.blockSignals(False)
         self._style_output_toggle(self._output_states[selected])
         self._update_output_readiness()
+        if self.execution_badge.isVisible():
+            self._render_execution_channel(selected)
 
     def _device_is_output_ready(self) -> bool:
         return self._device_state_value in {"VERIFIED", "OUTPUT OFF", "OUTPUT ON"}

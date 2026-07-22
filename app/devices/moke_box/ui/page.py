@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import math
 from collections import deque
+from collections.abc import Mapping
 from datetime import datetime, timedelta, timezone
 
 import pyqtgraph as pg
@@ -164,6 +166,11 @@ class MokeBoxPage(QWidget):
         heading.addWidget(subtitle)
         heading.addWidget(self.endpoint)
         hero_layout.addLayout(heading, 1)
+        self.execution_badge = CaptionLabel("SWEEP CONTROLLED", self.hero_card)
+        self.execution_badge.setObjectName("executionControlBadge")
+        self.execution_badge.setProperty("deviceState", "verified")
+        self.execution_badge.hide()
+        hero_layout.addWidget(self.execution_badge)
         self.protocol_badge = BodyLabel("READ-ONLY")
         self.protocol_badge.setObjectName("mokeProtocolBadge")
         hero_layout.addWidget(self.protocol_badge)
@@ -546,6 +553,61 @@ class MokeBoxPage(QWidget):
             self._refresh_plot_if_needed()
         if self._hall_live_window is not None:
             self._hall_live_window.set_reading(result)
+
+    def apply_execution_event(
+        self,
+        event_name: str,
+        event: Mapping[str, object],
+        device_state: Mapping[str, object],
+        _output_status: Mapping[str, str],
+    ) -> None:
+        """Render runner-confirmed Hall readings in the normal page and plot."""
+        if event_name == "action_started" and event.get("kind") == "measure_moke_hall":
+            self.field_status.setText(
+                "Run Engine is reading the Hall channel; waiting for a validated response."
+            )
+            return
+        if event_name != "action_finished" or event.get("kind") != "measure_moke_hall":
+            return
+        record = device_state.get("hall_readback")
+        actual = record.get("actual") if isinstance(record, Mapping) else None
+        if not isinstance(actual, Mapping):
+            return
+        voltage = self._execution_number(actual.get("voltage_v"))
+        stddev = self._execution_number(actual.get("stddev_v"))
+        raw = actual.get("raw_ad7734")
+        samples = actual.get("samples", 1)
+        if voltage is None or stddev is None or not isinstance(raw, int):
+            return
+        timestamp = self._execution_timestamp(actual.get("timestamp_utc"))
+        reading = MokeHallVoltageReading(
+            voltage_v=voltage,
+            stddev_v=stddev,
+            samples=int(samples) if isinstance(samples, int) and samples > 0 else 1,
+            raw_codes=(raw,),
+            timestamp_utc=timestamp,
+        )
+        self._show_hall_reading(reading)
+        self.field_status.setText(
+            "Run Engine confirmed the Hall measurement and exposed it to the UI."
+        )
+
+    @staticmethod
+    def _execution_number(value: object) -> float | None:
+        if isinstance(value, bool) or not isinstance(value, (int, float)):
+            return None
+        number = float(value)
+        return number if math.isfinite(number) else None
+
+    @staticmethod
+    def _execution_timestamp(value: object) -> datetime:
+        try:
+            return datetime.fromisoformat(str(value))
+        except ValueError:
+            return datetime.now(timezone.utc)
+
+    def set_execution_controlled(self, controlled: bool) -> None:
+        self.execution_badge.setVisible(controlled)
 
     def _prune_history(self, now: datetime) -> None:
         cutoff = now - timedelta(seconds=self._selected_value(self.history_window))

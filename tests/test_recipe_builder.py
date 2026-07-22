@@ -69,11 +69,11 @@ class RecipeBuilderTests(unittest.TestCase):
 
     def test_run_request_carries_explicit_demo_outputs_off_policy(self) -> None:
         page = RecipePage(simulation_settings())
-        requests: list[tuple[object, bool]] = []
+        requests: list[tuple[object, bool, str]] = []
         plan = object()
         try:
             page.run_requested.connect(
-                lambda selected, demo: requests.append((selected, demo))
+                lambda selected, demo, mode: requests.append((selected, demo, mode))
             )
 
             page.execution_mode.setCurrentIndex(1)
@@ -83,7 +83,10 @@ class RecipeBuilderTests(unittest.TestCase):
             page._plan = plan
             page.request_run()
 
-            self.assertEqual(requests, [(plan, True), (plan, False)])
+            self.assertEqual(
+                requests,
+                [(plan, True, "demo_outputs_off"), (plan, False, "measurement")],
+            )
         finally:
             page.close()
 

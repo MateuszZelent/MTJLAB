@@ -118,9 +118,10 @@ class DemoOutputProbe(ShutdownProbe):
         self.state = DeviceState.OUTPUT_ON if enabled else DeviceState.OUTPUT_OFF
         return enabled
 
-    def set_signal_generator_output(self, enabled: bool) -> None:
+    def set_signal_generator_output(self, enabled: bool) -> bool:
         self.output_requests.append(("SG", enabled))
         self.state = DeviceState.OUTPUT_ON if enabled else DeviceState.OUTPUT_OFF
+        return enabled
 
 
 @dataclass

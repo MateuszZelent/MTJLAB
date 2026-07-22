@@ -59,6 +59,7 @@ MODULE = DeviceModule(
     implementation_key="lakeshore_475",
     display_name="Lake Shore 475",
     settings_key="lakeshore_gaussmeter",
+    execution_state_key="lakeshore",
     adapter_factory=_adapter,
     dispatch=_dispatch,
     capabilities=frozenset({"field_reading", "dc", "rms", "peak", "read_only"}),
