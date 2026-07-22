@@ -358,10 +358,14 @@ class RecipeCompiler:
         if len(actions) > self._max_actions:
             raise SafetyViolation("The expanded-action limit was exceeded.")
         if node.type == "sequence":
-            if node.data.get("configuration_required"):
+            device_module = node.data.get("device_module")
+            if (
+                device_module in {"keithley", "rigol", "anritsu", "anritsu_sg"}
+                and node.data.get("operation") != "configure_selected_parameters"
+            ):
                 raise ConfigurationError(
                     f"{node.id}: device configuration is incomplete. "
-                    "Complete every required parameter and ROI before compilation."
+                    "The node contains no configuration snapshot."
                 )
             if node.data.get("operation") == "configure_selected_parameters":
                 if node.data.get("device_module") == "keithley":

@@ -64,7 +64,10 @@ from app.ui.recipes.page import (
 from app.ui.workers import DeviceController
 from app.ui.design_system import apply_application_theme, tokens_for
 from app.devices.keithley_2600 import KeithleyAdapter
-from app.devices.anritsu_ms2830a import SignalGeneratorSnapshot
+from app.devices.anritsu_ms2830a import (
+    AnritsuConfigurationSnapshot,
+    SignalGeneratorSnapshot,
+)
 from app.devices.simulators import SimulatedVisaFactory
 from app.storage import Hdf5RunWriter
 from tests.helpers import simulation_settings
@@ -1332,6 +1335,54 @@ root:
         finally:
             dialog.close()
 
+    def test_anritsu_required_configuration_is_visibly_highlighted(self) -> None:
+        dialog = AnritsuNodeEditorDialog(simulation_settings())
+        try:
+            sweep_selector = dialog.parameter_selectors[
+                "spectrum.start_frequency"
+            ]
+            sweep_selector.setCurrentIndex(sweep_selector.findData("sweep"))
+            dialog.highlight_required_configuration()
+            dialog.show()
+            self.application.processEvents()
+
+            for editor in (
+                dialog.configuration_panel.start,
+                dialog.configuration_panel.stop,
+                dialog.configuration_panel.reference,
+                dialog.configuration_panel.points,
+                sweep_selector,
+            ):
+                self.assertEqual(editor.property("validationState"), "error")
+                self.assertGreater(editor.geometry().width(), 0)
+            self.assertTrue(dialog.configuration_panel.start.hasFocus())
+        finally:
+            dialog.close()
+
+    def test_incomplete_node_error_offers_its_configuration_editor(self) -> None:
+        page = RecipePage(simulation_settings())
+        try:
+            with (
+                patch(
+                    "app.ui.recipes.page.QMessageBox.action_guidance",
+                    return_value=True,
+                ) as guidance,
+                patch.object(page, "_open_incomplete_node_configuration") as open_node,
+            ):
+                page._show_recipe_error(
+                    "Recipe",
+                    "anritsu-spectrum-e2abb58f: device configuration is incomplete. "
+                    "Complete every required parameter and ROI before compilation.",
+                )
+
+            guidance.assert_called_once()
+            self.assertEqual(
+                guidance.call_args.args[3], "Go to configuration..."
+            )
+            open_node.assert_called_once_with("anritsu-spectrum-e2abb58f")
+        finally:
+            page.close()
+
     def test_anritsu_configuration_accepts_settings_only_without_parameter_rows(self) -> None:
         dialog = AnritsuNodeEditorDialog(simulation_settings())
         try:
@@ -1686,11 +1737,30 @@ root:
     def test_anritsu_library_device_is_configuration_without_implicit_acquisition(self) -> None:
         page = RecipePage(simulation_settings())
         try:
+            page.set_anritsu_snapshot_provider(
+                lambda: AnritsuConfigurationSnapshot(
+                    start_hz=1.25e9,
+                    stop_hz=1.75e9,
+                    reference_level_dbm=-17.0,
+                    points=5001,
+                    instrument_mode="SPECT",
+                )
+            )
             page._library_add_device("anritsu")
             node = parse_recipe_text(page.editor.toPlainText()).root.children[-1]
             self.assertEqual(node.type, "sequence")
             self.assertEqual(node.data["device_module"], "anritsu")
             self.assertFalse(node.data["acquire_single"])
+            self.assertFalse(node.data["configuration_required"])
+            self.assertEqual(
+                node.data["configuration"],
+                {
+                    "start_frequency": "1250000000 Hz",
+                    "stop_frequency": "1750000000 Hz",
+                    "reference_level": "-17 dBm",
+                    "points": 5001,
+                },
+            )
             self.assertEqual(node.children, ())
             item = page._find_tree_item(node.id)
             page._node_selected(item, None)

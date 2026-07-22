@@ -5,7 +5,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from PySide6.QtCore import Qt
+from PySide6.QtCore import QTimer, Qt
 from PySide6.QtWidgets import (
     QCheckBox, QComboBox, QDialog, QDialogButtonBox, QFormLayout, QFrame,
     QGridLayout, QHBoxLayout, QLabel, QLineEdit, QPushButton,
@@ -199,6 +199,28 @@ class AnritsuNodeEditorDialog(FluentRecipeDialog):
         self.node_role.currentIndexChanged.connect(self._role_changed)
         layout.addLayout(footer)
         self._role_changed()
+
+    @staticmethod
+    def _set_validation_error(widget: QWidget) -> None:
+        widget.setProperty("validationState", "error")
+        widget.style().unpolish(widget)
+        widget.style().polish(widget)
+        widget.update()
+
+    def highlight_required_configuration(self) -> None:
+        """Expose the fields that must be committed before compilation."""
+
+        panel = self.configuration_panel
+        required = (panel.start, panel.stop, panel.reference, panel.points)
+        for widget in required:
+            self._set_validation_error(widget)
+        for parameter_id, selector in self.parameter_selectors.items():
+            if (
+                selector.currentData() == "sweep"
+                and not self._working_segments.get(parameter_id)
+            ):
+                self._set_validation_error(selector)
+        QTimer.singleShot(0, panel.start.setFocus)
 
     def _role_changed(self) -> None:
         role = self.selected_node_role()

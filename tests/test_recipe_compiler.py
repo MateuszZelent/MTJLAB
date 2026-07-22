@@ -911,7 +911,7 @@ root:
             ],
         )
 
-    def test_incomplete_device_placeholder_blocks_children_before_compilation(self) -> None:
+    def test_device_without_configuration_snapshot_blocks_children(self) -> None:
         source = """\
 schema_version: 1
 name: incomplete-placeholder
@@ -922,7 +922,6 @@ root:
     - id: keithley-placeholder
       type: sequence
       device_module: keithley
-      configuration_required: true
       children:
         - id: spectrum-must-not-run
           type: acquire_spectrum
@@ -976,7 +975,7 @@ root:
         self.assertEqual(plan.actions[-1].kind, "set_rigol_output")
         self.assertTrue(plan.actions[-1].payload["enabled"])
 
-    def test_anritsu_settings_only_provider_compiles_complete_snapshot(self) -> None:
+    def test_anritsu_complete_snapshot_ignores_stale_required_marker(self) -> None:
         source = """\
 schema_version: 1
 name: anritsu-settings-only
@@ -985,7 +984,7 @@ root:
   type: sequence
   device_module: anritsu
   operation: configure_selected_parameters
-  configuration_required: false
+  configuration_required: true
   parameter_actions: []
   post_configuration_operation: configure
   configuration:

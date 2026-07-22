@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import json
+import re
 from copy import deepcopy
 from dataclasses import replace
 from pathlib import Path
@@ -1427,19 +1428,18 @@ class RecipePage(QWidget):
                 "children": [],
             }
         elif device == "anritsu":
-            node = {
-                "id": self._new_node_id("anritsu-spectrum"),
-                "type": "sequence",
-                "text": "Anritsu MS2830A · spectrum settings required",
-                "trace": "TRAC1",
-                "device_module": "anritsu",
-                "label": labels[device],
-                "operation": "configure_selected_parameters",
-                "configuration_required": True,
-                "acquire_single": False,
-                "parameter_actions": [],
-                "children": [],
-            }
+            node_id = self._new_node_id("anritsu-spectrum")
+            node = self._configured_anritsu_node(
+                RecipeNode(
+                    id=node_id,
+                    type="sequence",
+                    data={"device_module": "anritsu"},
+                ),
+                snapshot=self._current_anritsu_snapshot(),
+                parameter_actions=[],
+                acquire_single=False,
+                trace="TRAC1",
+            )
         else:
             node = {
                 "id": self._new_node_id(device),
@@ -1480,9 +1480,9 @@ class RecipePage(QWidget):
                 selected_node_id=str(node["id"]),
             )
             self.summary.setText(
-                "Anritsu configuration added. Double-click it to apply Spectrum "
-                "settings only, or append a clearly separated spectrum/reference "
-                "acquisition step."
+                "Anritsu configuration added from the current Spectrum settings. "
+                "Double-click it to change the snapshot or append a clearly "
+                "separated spectrum/reference acquisition step."
             )
         else:
             self._apply_builder_source(
@@ -2293,12 +2293,49 @@ class RecipePage(QWidget):
     def _show_recipe_error(self, title: str, error: str) -> None:
         """Offer the one editor that can actually resolve a validation error."""
 
+        incomplete_node = re.match(
+            r"^(?P<node_id>[^:]+): (?:device configuration is incomplete\.|"
+            r"Anritsu provider requires a complete configuration snapshot\.|"
+            r"incomplete Anritsu spectrum snapshot\.)",
+            error,
+        )
+        if incomplete_node is not None:
+            if QMessageBox.action_guidance(
+                self, title, error, "Go to configuration..."
+            ):
+                self._open_incomplete_node_configuration(
+                    incomplete_node.group("node_id")
+                )
+            return
         settings_issue = settings_issue_for_error(error)
         if settings_issue is not None:
             if QMessageBox.settings_guidance(self, title, error):
                 self.settings_issue_requested.emit(settings_issue)
             return
         QMessageBox.warning(self, title, error)
+
+    def _open_incomplete_node_configuration(self, node_id: str) -> None:
+        """Select the rejected recipe node and open its resolving editor."""
+
+        item = self._find_tree_item(node_id)
+        if item is None:
+            QMessageBox.warning(
+                self,
+                "Recipe",
+                f"The incomplete recipe node {node_id!r} is no longer present.",
+            )
+            return
+        self.tree.setCurrentItem(item)
+        self.tree.scrollToItem(
+            item, QAbstractItemView.ScrollHint.PositionAtCenter
+        )
+        node = item.data(0, Qt.ItemDataRole.UserRole)
+        if not isinstance(node, RecipeNode):
+            return
+        if node.data.get("device_module") == "anritsu":
+            self._edit_anritsu_module_node(node, highlight_required=True)
+            return
+        self._edit_selected_node()
 
     def _preflight_cancelled(self) -> None:
         self.summary.setText("Recipe validation cancelled; Run remains disabled.")
@@ -4738,7 +4775,9 @@ class RecipePage(QWidget):
         except Exception as exc:
             QMessageBox.warning(self, "Keithley node", str(exc))
 
-    def _edit_anritsu_module_node(self, node: RecipeNode) -> None:
+    def _edit_anritsu_module_node(
+        self, node: RecipeNode, *, highlight_required: bool = False
+    ) -> None:
         snapshot = self._current_anritsu_snapshot()
         configuration = node.data.get("configuration")
         raw_actions = node.data.get("parameter_actions")
@@ -4806,6 +4845,8 @@ class RecipePage(QWidget):
         reference_index = dialog.reference_operation.findData(reference_operation)
         if reference_index >= 0:
             dialog.reference_operation.setCurrentIndex(reference_index)
+        if highlight_required:
+            dialog.highlight_required_configuration()
         if dialog.exec() != QDialog.DialogCode.Accepted:
             return
         try:
