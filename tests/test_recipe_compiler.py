@@ -796,7 +796,7 @@ root:
                 parse_recipe_text(source)
             )
 
-    def test_anritsu_sg_device_provider_expands_axis_with_rf_off_configuration(self) -> None:
+    def test_anritsu_sg_device_provider_configures_off_then_uses_live_updates(self) -> None:
         source = """\
 schema_version: 1
 name: anritsu-sg-provider
@@ -832,14 +832,14 @@ root:
 
         self.assertEqual(
             [action.kind for action in plan.actions],
-            [
-                "configure_anritsu_sg",
-                "acquire_spectrum",
-                "configure_anritsu_sg",
-                "acquire_spectrum",
-                "configure_anritsu_sg",
-                "acquire_spectrum",
-            ],
+                [
+                    "configure_anritsu_sg",
+                    "acquire_spectrum",
+                    "update_anritsu_sg",
+                    "acquire_spectrum",
+                    "update_anritsu_sg",
+                    "acquire_spectrum",
+                ],
         )
         acquisitions = [
             action for action in plan.actions if action.kind == "acquire_spectrum"
@@ -858,7 +858,7 @@ root:
             )
         )
 
-    def test_anritsu_sg_axis_uses_direct_rf_on_at_every_point(self) -> None:
+    def test_anritsu_sg_axis_preserves_explicit_per_point_rf_transitions(self) -> None:
         source = """\
 schema_version: 1
 name: anritsu-sg-energized-provider
@@ -901,11 +901,11 @@ root:
             [action.kind for action in plan.actions],
             [
                 "configure_anritsu_sg",
-                "set_anritsu_sg_output",
-                "acquire_spectrum",
-                "set_anritsu_sg_output",
-                "configure_anritsu_sg",
-                "set_anritsu_sg_output",
+                    "set_anritsu_sg_output",
+                    "acquire_spectrum",
+                    "set_anritsu_sg_output",
+                    "update_anritsu_sg",
+                    "set_anritsu_sg_output",
                 "acquire_spectrum",
                 "set_anritsu_sg_output",
             ],
@@ -975,6 +975,65 @@ root:
         )
         self.assertEqual(plan.actions[-1].kind, "set_rigol_output")
         self.assertTrue(plan.actions[-1].payload["enabled"])
+
+    def test_anritsu_settings_only_provider_compiles_complete_snapshot(self) -> None:
+        source = """\
+schema_version: 1
+name: anritsu-settings-only
+root:
+  id: anritsu-settings
+  type: sequence
+  device_module: anritsu
+  operation: configure_selected_parameters
+  configuration_required: false
+  parameter_actions: []
+  post_configuration_operation: configure
+  configuration:
+    start_frequency: 200 MHz
+    stop_frequency: 6 GHz
+    reference_level: -10 dBm
+    points: 10001
+  children: []
+"""
+        plan = RecipeCompiler(simulation_settings()).compile(
+            parse_recipe_text(source)
+        )
+        self.assertEqual(
+            [action.kind for action in plan.actions],
+            ["configure_anritsu"],
+        )
+
+    def test_anritsu_sg_settings_only_provider_compiles_with_rf_off(self) -> None:
+        source = """\
+schema_version: 1
+name: anritsu-sg-settings-only
+root:
+  id: anritsu-sg-settings
+  type: sequence
+  device_module: anritsu_sg
+  operation: configure_selected_parameters
+  configuration_required: false
+  parameter_actions: []
+  configuration:
+    frequency: 1 GHz
+    power: -30 dBm
+  children: []
+"""
+        raw = deepcopy(simulation_settings(approved=True).model_dump(mode="python"))
+        raw["devices"]["anritsu"]["signal_generator"].update(
+            {
+                "control_protocol": "basic_scpi",
+                "frequency": {"min": "100 MHz", "max": "6 GHz"},
+                "power": {"min": "-100 dBm", "max": "0 dBm"},
+            }
+        )
+        plan = RecipeCompiler(StationSettings.model_validate(raw)).compile(
+            parse_recipe_text(source)
+        )
+        self.assertEqual(
+            [action.kind for action in plan.actions],
+            ["configure_anritsu_sg"],
+        )
 
     def test_output_on_authoring_action_expands_to_direct_rigol_output(self) -> None:
         raw = deepcopy(simulation_settings(approved=True).model_dump(mode="python"))
@@ -1414,6 +1473,96 @@ root:
         self.assertEqual(config.attenuation_db, 20)
         self.assertTrue(config.preamplifier_enabled)
         self.assertEqual(config.sweep_time_s, 0.2)
+
+    def test_keithley_keep_on_then_continue_sweep_never_reconfigures_or_turns_off(self) -> None:
+        raw = deepcopy(simulation_settings(approved=True).model_dump(mode="python"))
+        raw["devices"]["keithley"]["safety"]["allow_output_enable"] = True
+        raw["devices"]["keithley"]["safety"]["channels"]["A"]["enabled"] = True
+        source = """\
+schema_version: 1
+name: continuous-keithley
+dut_limits:
+  keithley:
+    A:
+      current: {min: 0 A, max: 3 mA}
+      voltage: {min: -1 V, max: 1 V}
+      max_abs_power: 3 mW
+root:
+  id: root
+  type: sequence
+  children:
+    - id: establish
+      type: sequence
+      device_module: keithley
+      operation: configure_selected_parameters
+      output_policy: on_keep
+      configuration:
+            {channel: A, source_mode: current, source_level: 500 uA,
+         compliance: 100 mV, nplc: 1, settling_time: 0 s, sense_mode: 2wire,
+         source_autorange: true, source_range: AUTO,
+         measure_voltage_autorange: true, measure_voltage_range: AUTO,
+         measure_current_autorange: true, measure_current_range: AUTO}
+      parameter_actions:
+            - {parameter_id: source.level, mode: set, value: 500 uA}
+    - id: live-sweep
+      type: sequence
+      device_module: keithley
+      operation: configure_selected_parameters
+      output_policy: continue
+      configuration:
+            {channel: A, source_mode: current, source_level: 500 uA,
+         compliance: 100 mV, nplc: 1, settling_time: 0 s, sense_mode: 2wire,
+         source_autorange: true, source_range: AUTO,
+         measure_voltage_autorange: true, measure_voltage_range: AUTO,
+         measure_current_autorange: true, measure_current_range: AUTO}
+      parameter_actions:
+        - parameter_id: source.level
+          mode: sweep
+          value: 500 uA
+          segments:
+                - {start: 500 uA, stop: 1 mA, points: 2}
+"""
+        plan = RecipeCompiler(StationSettings.model_validate(raw)).compile(
+            parse_recipe_text(source)
+        )
+        kinds = [action.kind for action in plan.actions]
+        self.assertEqual(kinds.count("configure_keithley"), 1)
+        self.assertEqual(kinds.count("set_keithley_output"), 1)
+        self.assertTrue(plan.actions[kinds.index("set_keithley_output")].payload["enabled"])
+        self.assertEqual(kinds.count("assert_output_on"), 3)
+        self.assertEqual(kinds.count("update_keithley_level"), 2)
+
+    def test_continuous_output_without_plan_owned_on_transition_is_rejected(self) -> None:
+        source = """\
+schema_version: 1
+name: invalid-continuity
+root:
+  id: live
+  type: sequence
+  device_module: keithley
+  operation: configure_selected_parameters
+  output_policy: continue
+  configuration:
+    {channel: A, source_mode: current, source_level: 500 uA,
+     compliance: 100 mV, nplc: 1, settling_time: 0 s, sense_mode: 2wire,
+     source_autorange: true, source_range: AUTO,
+     measure_voltage_autorange: true, measure_voltage_range: AUTO,
+     measure_current_autorange: true, measure_current_range: AUTO}
+  parameter_actions:
+    - parameter_id: source.level
+      mode: sweep
+      value: 500 uA
+      segments:
+        - {start: 500 uA, stop: 1 mA, points: 2}
+"""
+        raw = deepcopy(simulation_settings().model_dump(mode="python"))
+        raw["devices"]["keithley"]["safety"]["channels"]["A"]["enabled"] = True
+        with self.assertRaisesRegex(
+            Exception, "continuous OUTPUT requires an earlier configuration"
+        ):
+            RecipeCompiler(StationSettings.model_validate(raw)).compile(
+                parse_recipe_text(source)
+            )
 
 
 if __name__ == "__main__":

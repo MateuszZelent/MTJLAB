@@ -461,11 +461,11 @@ finally: []
                     "Rigol DG1032Z",
                     "Anritsu configuration",
                     "Anritsu signal generator",
-                    "Keithley A OUTPUT ON",
-                    "Keithley B OUTPUT ON",
-                    "Rigol CH1 OUTPUT ON",
-                    "Rigol CH2 OUTPUT ON",
-                    "Anritsu SG RF OUTPUT ON",
+                    "Advanced · Keithley A OUTPUT ON",
+                    "Advanced · Keithley B OUTPUT ON",
+                    "Advanced · Rigol CH1 OUTPUT ON",
+                    "Advanced · Rigol CH2 OUTPUT ON",
+                    "Advanced · Anritsu SG RF OUTPUT ON",
                     "MOKE Hall (V + field)",
                     "Measure Lake Shore field",
                     "Acquire reference",
@@ -479,7 +479,7 @@ finally: []
                     "Anritsu SG OFF",
                     "Wait",
                     "Sequence / group",
-                    "Repeat",
+                    "Wrap in Repeat...",
                     "Comment",
                 ],
             )
@@ -1182,8 +1182,8 @@ root:
                     "advanced.sweep_time",
                 },
             )
-            self.assertFalse(dialog.acquire_single.isChecked())
-            self.assertFalse(dialog.acquire_single.isVisible())
+            self.assertEqual(dialog.node_role.currentData(), "configure")
+            self.assertTrue(dialog.average_count.isHidden())
             selector = dialog.parameter_selectors["spectrum.start_frequency"]
             selector.setCurrentIndex(selector.findData("sweep"))
             actions = dialog.planned_parameter_actions()
@@ -1193,6 +1193,128 @@ root:
             self.assertTrue(dialog.open_roi_button.isEnabled())
         finally:
             dialog.close()
+
+    def test_anritsu_configuration_accepts_settings_only_without_parameter_rows(self) -> None:
+        dialog = AnritsuNodeEditorDialog(simulation_settings())
+        try:
+            dialog.accept()
+            self.assertEqual(dialog.result(), QDialog.DialogCode.Accepted)
+            self.assertEqual(dialog.selected_node_role(), "configure")
+            self.assertEqual(dialog.planned_parameter_actions(), [])
+        finally:
+            dialog.close()
+
+    def test_anritsu_configuration_role_reveals_matching_acquisition_fields(self) -> None:
+        dialog = AnritsuNodeEditorDialog(simulation_settings())
+        try:
+            dialog.show()
+            self.application.processEvents()
+            self.assertTrue(dialog.node_role.isVisible())
+            self.assertEqual(dialog.apply_button.text(), "Apply spectrum settings")
+            self.assertFalse(dialog.average_count.isVisible())
+            dialog.node_role.setCurrentIndex(
+                dialog.node_role.findData("acquire_reference")
+            )
+            self.application.processEvents()
+            self.assertTrue(dialog.average_count.isVisible())
+            self.assertTrue(dialog.trace.isVisible())
+            self.assertFalse(dialog.reference_operation.isVisible())
+            self.assertEqual(
+                dialog.apply_button.text(), "Apply settings + add reference"
+            )
+            self.assertGreater(dialog.node_role.geometry().width(), 0)
+        finally:
+            dialog.close()
+
+    def test_anritsu_sg_accepts_complete_snapshot_without_explicit_parameter_rows(self) -> None:
+        dialog = AnritsuSignalGeneratorNodeEditorDialog()
+        try:
+            dialog.accept()
+            self.assertEqual(dialog.result(), QDialog.DialogCode.Accepted)
+            self.assertEqual(dialog.planned_parameter_actions(), [])
+            self.assertEqual(
+                dialog.apply_button.text(),
+                "Apply signal generator settings · RF OFF",
+            )
+        finally:
+            dialog.close()
+
+    def test_anritsu_configuration_role_creates_explicit_reference_child(self) -> None:
+        recipe = parse_recipe_text(
+            """schema_version: 1\nname: role\nroot:\n  id: anritsu\n  type: sequence\n  device_module: anritsu\n  children: []\n"""
+        )
+        replacement = RecipePage._configured_anritsu_node(
+            recipe.root,
+            parameter_actions=[],
+            acquire_single=False,
+            trace="TRAC1",
+            post_configuration_operation="acquire_reference",
+            acquisition_average_count=7,
+        )
+        self.assertEqual(
+            replacement["post_configuration_operation"], "acquire_reference"
+        )
+        self.assertEqual(len(replacement["children"]), 1)
+        acquisition = replacement["children"][0]
+        self.assertEqual(acquisition["type"], "acquire_reference")
+        self.assertEqual(acquisition["average_count"], 7)
+        self.assertEqual(acquisition["trace"], "TRAC1")
+
+    def test_anritsu_configuration_role_updates_and_removes_only_managed_acquisition(self) -> None:
+        recipe = parse_recipe_text(
+            """\
+schema_version: 1
+name: managed-role
+root:
+  id: anritsu
+  type: sequence
+  device_module: anritsu
+  managed_acquisition_id: managed
+  post_configuration_operation: acquire_spectrum
+  children:
+    - {id: managed, type: acquire_spectrum, trace: TRAC1, average_count: 2}
+    - {id: independent, type: acquire_reference, trace: TRAC1, average_count: 9}
+"""
+        )
+        changed = RecipePage._configured_anritsu_node(
+            recipe.root,
+            parameter_actions=[],
+            acquire_single=False,
+            trace="TRAC1",
+            post_configuration_operation="acquire_reference",
+            acquisition_average_count=5,
+        )
+        self.assertEqual(
+            [(child["id"], child["type"]) for child in changed["children"]],
+            [("independent", "acquire_reference"), ("managed", "acquire_reference")],
+        )
+        settings_only = RecipePage._configured_anritsu_node(
+            recipe.root,
+            parameter_actions=[],
+            acquire_single=False,
+            trace="TRAC1",
+            post_configuration_operation="configure",
+        )
+        self.assertEqual(
+            [child["id"] for child in settings_only["children"]], ["independent"]
+        )
+
+    def test_every_anritsu_node_type_has_one_explicit_editor_role(self) -> None:
+        cases = {
+            "spectrum_configuration": "type: sequence\n  device_module: anritsu",
+            "signal_generator_configuration": "type: sequence\n  device_module: anritsu_sg",
+            "spectrum_acquisition": "type: acquire_spectrum",
+            "reference_acquisition": "type: acquire_reference",
+            "signal_generator_output": "type: set_anritsu_sg_output\n  enabled: false",
+            "legacy_spectrum_configuration": "type: configure_anritsu",
+            "legacy_advanced_configuration": "type: configure_anritsu_advanced",
+            "legacy_signal_generator_configuration": "type: configure_anritsu_sg",
+        }
+        for expected, fields in cases.items():
+            node = parse_recipe_text(
+                "schema_version: 1\nname: role\nroot:\n  id: node\n  " + fields + "\n"
+            ).root
+            self.assertEqual(RecipePage._anritsu_node_role(node), expected)
 
     def test_anritsu_acquisition_dialog_exposes_reference_and_storage_policy(self) -> None:
         node = parse_recipe_text(
@@ -1210,6 +1332,7 @@ root:
         ).root
         dialog = AnritsuAcquisitionEditorDialog(node)
         try:
+            self.assertEqual(dialog.apply_button.text(), "Apply spectrum acquisition")
             self.assertEqual(
                 dialog.reference_operation.currentData(), "difference_db"
             )
@@ -1239,6 +1362,7 @@ root:
         ).root
         dialog = AnritsuAcquisitionEditorDialog(node)
         try:
+            self.assertEqual(dialog.apply_button.text(), "Apply reference acquisition")
             dialog.show()
             QApplication.processEvents()
             self.assertFalse(dialog.reference_operation.isVisible())
@@ -1757,9 +1881,10 @@ root:
 
     def test_device_recipe_dialogs_use_english_actions_and_render_at_two_sizes(self) -> None:
         keithley = KeithleyNodeEditorDialog(simulation_settings())
+        rigol = RigolNodeEditorDialog(settings=simulation_settings())
         anritsu = AnritsuNodeEditorDialog(simulation_settings())
         anritsu_sg = AnritsuSignalGeneratorNodeEditorDialog()
-        dialogs = (keithley, anritsu, anritsu_sg)
+        dialogs = (keithley, rigol, anritsu, anritsu_sg)
         try:
             for dialog in dialogs:
                 dialog.resize(1180, 760)
@@ -1781,7 +1906,19 @@ root:
                 keithley.parameter_selectors["source.level"].itemText(2),
                 "Sweep — ROI required",
             )
-            self.assertEqual(keithley.output_policy.itemText(1), "OUTPUT ON at start")
+            for output_policy in (
+                keithley.output_policy,
+                rigol.output_policy,
+                anritsu_sg.output_policy,
+            ):
+                self.assertGreaterEqual(output_policy.findData("on"), 0)
+                self.assertGreaterEqual(output_policy.findData("on_keep"), 0)
+                self.assertGreaterEqual(output_policy.findData("continue"), 0)
+                self.assertGreaterEqual(output_policy.findData("off"), 0)
+                self.assertIn(
+                    "safe default",
+                    output_policy.itemText(output_policy.findData("unchanged")),
+                )
             self.assertEqual(keithley.open_roi_button.text(), "Go to ROI…")
             self.assertEqual(
                 anritsu.parameter_selectors["spectrum.start_frequency"].itemText(0),
@@ -2297,6 +2434,7 @@ root:
                 self.assertEqual(replacement["device_module"], "anritsu_sg")
                 self.assertFalse(replacement["configuration_required"])
                 self.assertIn("RF OFF", replacement["text"])
+                self.assertEqual(replacement["output_policy"], "unchanged")
                 self.assertEqual(
                     replacement["configuration"]["power"], "-40 dBm"
                 )

@@ -909,11 +909,11 @@ class RecipePage(QWidget):
             drag_kind="device:anritsu_sg",
         )
 
-        outputs = group("Output control", "5")
+        outputs = group("Advanced output transitions", "5")
         action(
             outputs,
-            "Keithley A OUTPUT ON",
-            "Enable channel A after an earlier validated Keithley configuration",
+            "Advanced · Keithley A OUTPUT ON",
+            "Expert transition only: enable channel A after an earlier plan-owned, validated configuration",
             "keithley",
             QStyle.StandardPixmap.SP_MediaPlay,
             lambda: self._library_add_output_on("keithley", "A"),
@@ -921,8 +921,8 @@ class RecipePage(QWidget):
         )
         action(
             outputs,
-            "Keithley B OUTPUT ON",
-            "Enable channel B after an earlier validated Keithley configuration",
+            "Advanced · Keithley B OUTPUT ON",
+            "Expert transition only: enable channel B after an earlier plan-owned, validated configuration",
             "keithley",
             QStyle.StandardPixmap.SP_MediaPlay,
             lambda: self._library_add_output_on("keithley", "B"),
@@ -930,8 +930,8 @@ class RecipePage(QWidget):
         )
         action(
             outputs,
-            "Rigol CH1 OUTPUT ON",
-            "Enable channel 1 with the required internal one-shot interlock",
+            "Advanced · Rigol CH1 OUTPUT ON",
+            "Expert transition only: enable channel 1 after an earlier plan-owned configuration",
             "rigol",
             QStyle.StandardPixmap.SP_MediaPlay,
             lambda: self._library_add_output_on("rigol", 1),
@@ -939,8 +939,8 @@ class RecipePage(QWidget):
         )
         action(
             outputs,
-            "Rigol CH2 OUTPUT ON",
-            "Enable channel 2 with the required internal one-shot interlock",
+            "Advanced · Rigol CH2 OUTPUT ON",
+            "Expert transition only: enable channel 2 after an earlier plan-owned configuration",
             "rigol",
             QStyle.StandardPixmap.SP_MediaPlay,
             lambda: self._library_add_output_on("rigol", 2),
@@ -948,8 +948,8 @@ class RecipePage(QWidget):
         )
         action(
             outputs,
-            "Anritsu SG RF OUTPUT ON",
-            "Enable RF with the required internal one-shot interlock",
+            "Advanced · Anritsu SG RF OUTPUT ON",
+            "Expert transition only: enable RF after an earlier plan-owned SG configuration",
             "anritsu",
             QStyle.StandardPixmap.SP_MediaPlay,
             lambda: self._library_add_output_on("anritsu_sg", None),
@@ -1384,7 +1384,7 @@ class RecipePage(QWidget):
             node = {
                 "id": self._new_node_id("anritsu-spectrum"),
                 "type": "sequence",
-                "text": "Anritsu MS2830A · acquire single spectrum",
+                "text": "Anritsu MS2830A · spectrum settings required",
                 "trace": "TRAC1",
                 "device_module": "anritsu",
                 "label": labels[device],
@@ -1424,8 +1424,8 @@ class RecipePage(QWidget):
                 selected_node_id=str(node["id"]),
             )
             self.summary.setText(
-                "Anritsu SG added. Double-click it to configure frequency/power; "
-                "RF remains OFF until an explicit OUTPUT ON action."
+                "Anritsu SG added. Double-click it to configure frequency, power, "
+                "and the RF output lifecycle. The safe default keeps RF OFF."
             )
         elif device == "anritsu":
             self._apply_builder_source(
@@ -1434,8 +1434,9 @@ class RecipePage(QWidget):
                 selected_node_id=str(node["id"]),
             )
             self.summary.setText(
-                "Anritsu configuration added. Double-click it to select Spectrum "
-                "settings. Add Acquire spectrum once separately inside a loop."
+                "Anritsu configuration added. Double-click it to apply Spectrum "
+                "settings only, or append a clearly separated spectrum/reference "
+                "acquisition step."
             )
         else:
             self._apply_builder_source(
@@ -2809,16 +2810,22 @@ class RecipePage(QWidget):
             )
 
         output_policy = str(node.data.get("output_policy", "unchanged"))
-        if output_policy in {"on", "off"}:
-            is_on = output_policy == "on"
+        if output_policy in {"on", "off", "on_keep", "continue"}:
+            is_on = output_policy in {"on", "on_keep", "continue"}
+            description, status, badge = {
+                "on": ("Enable safely for this node; switch OFF on exit", "ON → OFF", "ON"),
+                "on_keep": ("Enable safely and keep confirmed ON after this node", "KEEP ON", "ON"),
+                "continue": ("Inherit confirmed ON; apply live updates only", "CONTINUE", "↻"),
+                "off": ("Force and confirm OUTPUT OFF for this node", "OFF", "OFF"),
+            }[output_policy]
             informational_row(
                 [
                     "Output",
-                    f"Switch {output_policy.upper()} when entering this node",
-                    output_policy.upper(),
+                    description,
+                    status,
                 ],
                 color=tokens.success if is_on else tokens.neutral,
-                badge="ON" if is_on else "OFF",
+                badge=badge,
             )
 
     @staticmethod
@@ -3005,8 +3012,9 @@ class RecipePage(QWidget):
             return "Anritsu spectrum configuration", "Analyzer setting", QStyle.StandardPixmap.SP_ComputerIcon
         if node.type == "acquire_reference":
             return (
-                f"Acquire reference spectrum - {node.data.get('trace', 'TRAC1')}",
-                "Anritsu reference",
+                f"Acquire reference spectrum · {node.data.get('trace', 'TRAC1')} · "
+                f"average {int(node.data.get('average_count', 1))}",
+                "Anritsu reference acquisition",
                 QStyle.StandardPixmap.SP_DialogSaveButton,
             )
         if node.type == "acquire_spectrum":
@@ -3019,8 +3027,9 @@ class RecipePage(QWidget):
                     QStyle.StandardPixmap.SP_MediaPlay,
                 )
             return (
-                f"Acquire single spectrum · {node.data.get('trace', 'TRAC1')}",
-                "Anritsu acquisition",
+                f"Acquire spectrum · {node.data.get('trace', 'TRAC1')} · "
+                f"average {int(node.data.get('average_count', 1))}",
+                "Anritsu spectrum acquisition",
                 QStyle.StandardPixmap.SP_MediaPlay,
             )
         if node.type == "update_keithley_level":
@@ -3119,8 +3128,16 @@ class RecipePage(QWidget):
                 (action for action in actions if action.get("mode") == "sweep"),
                 None,
             )
+            output = str(node.data.get("output_policy", "unchanged"))
+            output_label = {
+                "on": "RF ON for block",
+                "on_keep": "RF KEEP ON",
+                "continue": "RF CONTINUE ON",
+                "off": "RF OFF",
+                "unchanged": "RF OFF",
+            }.get(output, "RF invalid")
             return (
-                f"Anritsu SG · {len(actions)} parameter(s) · RF OFF",
+                f"Anritsu SG · {len(actions)} parameter(s) · {output_label}",
                 "Sweep axis" if sweep is not None else "Fixed configuration",
                 QStyle.StandardPixmap.SP_ComputerIcon,
             )
@@ -3135,20 +3152,34 @@ class RecipePage(QWidget):
                 (action for action in actions if action.get("mode") == "sweep"),
                 None,
             )
-            acquisition = " · acquire once" if node.data.get("acquire_single") else ""
+            role = str(
+                node.data.get(
+                    "post_configuration_operation",
+                    "acquire_spectrum"
+                    if node.data.get("acquire_single")
+                    else "configure",
+                )
+            )
+            role_label = {
+                "configure": "settings only",
+                "acquire_spectrum": "then acquire spectrum",
+                "acquire_reference": "then acquire reference",
+            }.get(role, "invalid role")
             return (
-                f"Anritsu Spectrum · {len(actions)} parameter(s){acquisition}",
+                f"Anritsu Spectrum · {role_label} · {len(actions)} explicit row(s)",
                 "Sweep axis" if sweep is not None else "Fixed configuration",
                 QStyle.StandardPixmap.SP_ComputerIcon,
             )
         if node.data.get("device_module") == "rigol":
             channel = int(node.data.get("channel", 1))
             output = str(node.data.get("output_policy", "unchanged"))
-            output_label = (
-                f"OUTPUT {output.upper()}"
-                if output in {"on", "off"}
-                else "OUTPUT unchanged"
-            )
+            output_label = {
+                "on": "OUTPUT ON for block",
+                "on_keep": "OUTPUT KEEP ON",
+                "continue": "OUTPUT CONTINUE ON",
+                "off": "OUTPUT OFF",
+                "unchanged": "OUTPUT OFF",
+            }.get(output, "OUTPUT invalid")
             return (
                 f"Rigol CH{channel} · {output_label}",
                 "Fixed configuration",
@@ -3165,11 +3196,11 @@ class RecipePage(QWidget):
             if (
                 node.data.get("device_module") == "keithley"
                 and not actions
-                and output_only in {"on", "off"}
+                and output_only in {"on", "off", "on_keep", "continue"}
             ):
                 return (
                     f"Keithley {node.data.get('channel', '?')} · "
-                    f"OUTPUT {output_only.upper()}",
+                    f"OUTPUT {output_only.replace('_', ' ').upper()}",
                     "Fixed configuration",
                     QStyle.StandardPixmap.SP_BrowserStop,
                 )
@@ -3193,9 +3224,12 @@ class RecipePage(QWidget):
 
                 output = str(node.data.get("output_policy", "unchanged"))
                 output_suffix = (
-                    " · OUTPUT ON"
-                    if output == "on"
-                    else " · OUTPUT OFF" if output == "off" else ""
+                    {
+                        "on": " · OUTPUT ON for block",
+                        "on_keep": " · OUTPUT KEEP ON",
+                        "continue": " · OUTPUT CONTINUE ON",
+                        "off": " · OUTPUT OFF",
+                    }.get(output, "")
                 )
                 sweep_action = next(
                     (action for action in actions if action.get("mode") == "sweep"),
@@ -4099,13 +4133,13 @@ class RecipePage(QWidget):
             self._edit_selected_roi()
             return
         node = item.data(0, Qt.ItemDataRole.UserRole) if item is not None else None
+        anritsu_role = (
+            self._anritsu_node_role(node) if isinstance(node, RecipeNode) else None
+        )
         if isinstance(node, RecipeNode) and node.type == "comment":
             self._edit_comment_node(node)
             return
-        if isinstance(node, RecipeNode) and node.type in {
-            "acquire_reference",
-            "acquire_spectrum",
-        }:
+        if anritsu_role in {"spectrum_acquisition", "reference_acquisition"}:
             self._edit_anritsu_acquisition_node(node)
             return
         if isinstance(node, RecipeNode) and node.type in {
@@ -4125,6 +4159,29 @@ class RecipePage(QWidget):
             return
         if isinstance(node, RecipeNode):
             self._edit_action_node(node)
+
+    @staticmethod
+    def _anritsu_node_role(node: RecipeNode) -> str | None:
+        """Return the one editor role represented by an Anritsu tree node."""
+
+        module = node.data.get("device_module")
+        if module == "anritsu":
+            return "spectrum_configuration"
+        if module == "anritsu_sg":
+            return "signal_generator_configuration"
+        if node.type == "acquire_spectrum":
+            return "spectrum_acquisition"
+        if node.type == "acquire_reference":
+            return "reference_acquisition"
+        if node.type in {"set_anritsu_sg_output", "enable_anritsu_sg_output"}:
+            return "signal_generator_output"
+        if node.type == "configure_anritsu":
+            return "legacy_spectrum_configuration"
+        if node.type == "configure_anritsu_advanced":
+            return "legacy_advanced_configuration"
+        if node.type == "configure_anritsu_sg":
+            return "legacy_signal_generator_configuration"
+        return None
 
     def _edit_action_node(self, node: RecipeNode) -> None:
         item = self.tree.currentItem()
@@ -4505,6 +4562,42 @@ class RecipePage(QWidget):
             acquire_single=bool(node.data.get("acquire_single", False)),
             trace=str(node.data.get("trace", "TRAC1")),
         )
+        stored_role = str(node.data.get("post_configuration_operation", ""))
+        managed_id = str(node.data.get("managed_acquisition_id", ""))
+        managed_acquisition = next(
+            (child for child in node.children if child.id == managed_id),
+            None,
+        )
+        if managed_acquisition is not None and managed_acquisition.type in {
+            "acquire_spectrum",
+            "acquire_reference",
+        }:
+            stored_role = managed_acquisition.type
+        if stored_role in {"configure", "acquire_spectrum", "acquire_reference"}:
+            dialog.node_role.setCurrentIndex(dialog.node_role.findData(stored_role))
+        acquisition_data = (
+            managed_acquisition.data if managed_acquisition is not None else node.data
+        )
+        trace_index = dialog.trace.findText(str(acquisition_data.get("trace", "TRAC1")))
+        if trace_index >= 0:
+            dialog.trace.setCurrentIndex(trace_index)
+        dialog.average_count.setValue(
+            int(
+                acquisition_data.get(
+                    "average_count",
+                    node.data.get("acquisition_average_count", 1),
+                )
+            )
+        )
+        reference_operation = str(
+            acquisition_data.get(
+                "reference_operation",
+                node.data.get("acquisition_reference_operation", "none"),
+            )
+        )
+        reference_index = dialog.reference_operation.findData(reference_operation)
+        if reference_index >= 0:
+            dialog.reference_operation.setCurrentIndex(reference_index)
         if dialog.exec() != QDialog.DialogCode.Accepted:
             return
         try:
@@ -4513,8 +4606,13 @@ class RecipePage(QWidget):
                 node,
                 snapshot=snapshot,
                 parameter_actions=dialog.planned_parameter_actions(),
-                acquire_single=dialog.acquire_single.isChecked(),
+                acquire_single=False,
                 trace=dialog.trace.currentText(),
+                post_configuration_operation=dialog.selected_node_role(),
+                acquisition_average_count=dialog.average_count.value(),
+                acquisition_reference_operation=str(
+                    dialog.reference_operation.currentData() or "none"
+                ),
             )
             source = replace_recipe_node(
                 self._builder_source(), node_id=node.id, node=replacement
@@ -4543,6 +4641,7 @@ class RecipePage(QWidget):
             frequency=frequency,
             power=power,
             parameter_actions=actions,
+            output_policy=str(node.data.get("output_policy", "unchanged")),
         )
         if dialog.exec() != QDialog.DialogCode.Accepted:
             return
@@ -4552,6 +4651,7 @@ class RecipePage(QWidget):
                 frequency=dialog.frequency.text().strip(),
                 power=dialog.power.text().strip(),
                 parameter_actions=dialog.planned_parameter_actions(),
+                output_policy=dialog.selected_output_policy(),
             )
             source = replace_recipe_node(
                 self._builder_source(), node_id=node.id, node=replacement
@@ -4924,9 +5024,16 @@ class RecipePage(QWidget):
         channel = snapshot.channel
         if channel not in {1, 2}:
             raise ConfigurationError("Rigol output channel must be 1 or 2.")
-        if output_policy not in {"unchanged", "on", "off"}:
+        if output_policy not in {
+            "unchanged",
+            "on",
+            "off",
+            "on_keep",
+            "continue",
+        }:
             raise ConfigurationError(
-                "Rigol output policy must be unchanged, on or off."
+                "Rigol output policy must be off, on for the block, kept on, "
+                "or continuous."
             )
         actions = parameter_actions or [
             {
@@ -5154,6 +5261,7 @@ class RecipePage(QWidget):
         frequency: str,
         power: str,
         parameter_actions: list[dict[str, object]],
+        output_policy: str = "unchanged",
     ) -> dict[str, object]:
         allowed = {"sg.frequency", "sg.power"}
         if any(
@@ -5169,16 +5277,32 @@ class RecipePage(QWidget):
         ]
         if len(sweeps) > 1:
             raise ConfigurationError("One Anritsu SG node supports one sweep axis.")
+        if output_policy not in {
+            "unchanged",
+            "on",
+            "off",
+            "on_keep",
+            "continue",
+        }:
+            raise ConfigurationError("Invalid Anritsu SG output policy.")
         roi_required = any(
             not isinstance(action.get("segments"), list)
             or not action.get("segments")
             for action in sweeps
         )
+        output_label = {
+            "unchanged": "OFF",
+            "off": "OFF",
+            "on": "ON FOR BLOCK",
+            "on_keep": "KEEP ON",
+            "continue": "CONTINUE ON",
+        }[output_policy]
         return {
             "id": node.id,
             "type": "sequence",
             "text": (
-                f"Anritsu SG · {len(parameter_actions)} parameter(s) · RF OFF"
+                f"Anritsu SG · {len(parameter_actions)} parameter(s) · "
+                f"RF {output_label}"
             ),
             "device_module": "anritsu_sg",
             "label": "Anritsu MS2830A Signal Generator",
@@ -5186,6 +5310,7 @@ class RecipePage(QWidget):
             "configuration_required": roi_required,
             "roi_required": roi_required,
             "parameter_actions": parameter_actions,
+            "output_policy": output_policy,
             "configuration": {
                 "frequency": frequency,
                 "power": power,
@@ -5203,6 +5328,9 @@ class RecipePage(QWidget):
         parameter_actions: list[dict[str, object]],
         acquire_single: bool,
         trace: str,
+        post_configuration_operation: str = "configure",
+        acquisition_average_count: int = 1,
+        acquisition_reference_operation: str = "none",
     ) -> dict[str, object]:
         allowed = {
             "spectrum.start_frequency",
@@ -5229,22 +5357,58 @@ class RecipePage(QWidget):
             not isinstance(action.get("segments"), list) or not action.get("segments")
             for action in sweeps
         )
+        role = post_configuration_operation
+        if acquire_single and role == "configure":
+            role = "acquire_spectrum"
+        if role not in {"configure", "acquire_spectrum", "acquire_reference"}:
+            raise ConfigurationError(f"Unsupported Anritsu node role {role!r}.")
+        if not 1 <= acquisition_average_count <= 9999:
+            raise ConfigurationError(
+                "Anritsu acquisition average count must be between 1 and 9999."
+            )
+        allowed_reference_operations = {
+            "none",
+            "difference_db",
+            "ratio_linear",
+            "add_power",
+            "subtract_power",
+            "multiply_linear",
+        }
+        if acquisition_reference_operation not in allowed_reference_operations:
+            raise ConfigurationError(
+                "Anritsu acquisition contains an unsupported reference operation."
+            )
+        managed_id = str(node.data.get("managed_acquisition_id", ""))
+        if not managed_id and acquire_single:
+            legacy = next(
+                (child for child in node.children if child.type == "acquire_spectrum"),
+                None,
+            )
+            managed_id = legacy.id if legacy is not None else ""
         children = [
             RecipePage._node_to_mapping(child)
             for child in node.children
+            if not managed_id or child.id != managed_id
         ]
-        existing = next(
-            (child for child in node.children if child.type == "acquire_spectrum"),
-            None,
-        )
-        if acquire_single and existing is None:
-            children.append(
-                {
-                    "id": f"anritsu-acquire-{uuid4().hex[:8]}",
-                    "type": "acquire_spectrum",
-                    "trace": trace,
-                }
-            )
+        if role != "configure":
+            managed_id = managed_id or f"anritsu-acquire-{uuid4().hex[:8]}"
+            acquisition: dict[str, object] = {
+                "id": managed_id,
+                "type": role,
+                "trace": trace,
+                "average_count": acquisition_average_count,
+            }
+            if role == "acquire_spectrum":
+                acquisition.update(
+                    {
+                        "reference_operation": acquisition_reference_operation,
+                        "store_raw": True,
+                        "store_processed": acquisition_reference_operation != "none",
+                    }
+                )
+            children.append(acquisition)
+        else:
+            managed_id = ""
         snapshot = snapshot or AnritsuConfigurationSnapshot(
             start_hz=1e6,
             stop_hz=10e6,
@@ -5257,7 +5421,13 @@ class RecipePage(QWidget):
             "type": "sequence",
             "text": (
                 f"Anritsu Spectrum · {len(parameter_actions)} parameter(s)"
-                + (" · acquire once" if acquire_single else "")
+                + (
+                    " · acquire spectrum"
+                    if role == "acquire_spectrum"
+                    else " · acquire reference"
+                    if role == "acquire_reference"
+                    else " · settings only"
+                )
             ),
             "device_module": "anritsu",
             "label": "Anritsu MS2830A",
@@ -5265,7 +5435,11 @@ class RecipePage(QWidget):
             "configuration_required": roi_required,
             "roi_required": roi_required,
             "parameter_actions": parameter_actions,
-            "acquire_single": acquire_single,
+            "acquire_single": False,
+            "post_configuration_operation": role,
+            "managed_acquisition_id": managed_id,
+            "acquisition_average_count": acquisition_average_count,
+            "acquisition_reference_operation": acquisition_reference_operation,
             "trace": trace,
             "configuration": {
                 "start_frequency": f"{snapshot.start_hz:.12g} Hz",
@@ -5333,6 +5507,15 @@ class RecipePage(QWidget):
                 parameter_actions=actions,
                 acquire_single=bool(node.data.get("acquire_single", False)),
                 trace=str(node.data.get("trace", "TRAC1")),
+                post_configuration_operation=str(
+                    node.data.get("post_configuration_operation", "configure")
+                ),
+                acquisition_average_count=int(
+                    node.data.get("acquisition_average_count", 1)
+                ),
+                acquisition_reference_operation=str(
+                    node.data.get("acquisition_reference_operation", "none")
+                ),
             )
             source = replace_recipe_node(
                 self._builder_source(), node_id=node.id, node=replacement
@@ -5412,8 +5595,17 @@ class RecipePage(QWidget):
         }
         if any(action.get("parameter_id") not in allowed_parameters for action in actions):
             raise ConfigurationError("Keithley node contains an unsupported parameter action.")
-        if output_policy not in {"unchanged", "on", "off"}:
-            raise ConfigurationError("Keithley output policy must be unchanged, on or off.")
+        if output_policy not in {
+            "unchanged",
+            "on",
+            "off",
+            "on_keep",
+            "continue",
+        }:
+            raise ConfigurationError(
+                "Keithley output policy must be off, on for the block, kept on, "
+                "or continuous."
+            )
         sweep_actions = [action for action in actions if action.get("mode") == "sweep"]
         if len(sweep_actions) > 1:
             raise ConfigurationError(

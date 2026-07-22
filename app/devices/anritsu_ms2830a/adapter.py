@@ -473,6 +473,59 @@ class AnritsuAdapter(DeviceAdapter):
         self._state = DeviceState.OUTPUT_OFF
         return actual
 
+    def update_signal_generator(
+        self, config: SignalGeneratorConfig
+    ) -> SignalGeneratorSnapshot:
+        """Update validated SG setpoints without changing confirmed RF state."""
+
+        self._assert_signal_generator_supported()
+        if self._last_sg_config is None:
+            raise SafetyViolation(
+                "Configure and verify the Anritsu SG before a live setpoint update."
+            )
+        validate_anritsu_signal_generator(
+            self._settings,
+            frequency_hz=config.frequency_hz,
+            power_dbm=config.power_dbm,
+        )
+        session = self._require_session()
+        before = self.read_signal_generator_configuration()
+        try:
+            session.write(f"FREQ {config.frequency_hz:.12g}HZ")
+            session.write(f"POW {config.power_dbm:.12g}")
+            actual = self.read_signal_generator_configuration()
+        except Exception:
+            self.emergency_off()
+            raise
+        if actual.output_enabled != before.output_enabled:
+            self.emergency_off()
+            raise DeviceError(
+                "Anritsu SG RF OUTPUT state changed during a live setpoint update."
+            )
+        mismatches: list[str] = []
+        if not math.isclose(
+            actual.frequency_hz, config.frequency_hz, rel_tol=1e-9, abs_tol=1.0
+        ):
+            mismatches.append("frequency")
+        if not math.isclose(
+            actual.power_dbm, config.power_dbm, rel_tol=0.0, abs_tol=0.01
+        ):
+            mismatches.append("power")
+        if mismatches:
+            self.emergency_off()
+            raise DeviceError(
+                "Anritsu SG live-update readback mismatch: "
+                + ", ".join(mismatches)
+            )
+        self._last_sg_config = config
+        self._sg_output_enabled = actual.output_enabled
+        self._state = (
+            DeviceState.OUTPUT_ON
+            if actual.output_enabled
+            else DeviceState.OUTPUT_OFF
+        )
+        return actual
+
     def set_signal_generator_output(self, enabled: bool) -> bool:
         """Apply one explicit RF transition; OFF is always available."""
 

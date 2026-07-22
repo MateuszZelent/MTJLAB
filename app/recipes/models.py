@@ -54,6 +54,7 @@ ACTION_TYPES: Final[frozenset[str]] = frozenset(
         "update_keithley_compliance",
         "update_rigol_frequency",
         "update_rigol_levels",
+        "update_anritsu_sg",
         "acquire_reference",
         "acquire_spectrum",
         "wait",

@@ -177,9 +177,19 @@ class RigolNodeEditorDialog(FluentRecipeDialog):
         self.open_roi_button.clicked.connect(self._open_roi)
         actions_layout.addRow(self.open_roi_button)
         self.output_policy = ComboBox(self)
-        self.output_policy.addItem("Leave OUTPUT unchanged", userData="unchanged")
-        self.output_policy.addItem("Switch OUTPUT ON", userData="on")
-        self.output_policy.addItem("Switch OUTPUT OFF", userData="off")
+        self.output_policy.addItem(
+            "Keep OUTPUT OFF (safe default)", userData="unchanged"
+        )
+        self.output_policy.addItem(
+            "OUTPUT ON for this block · OFF on exit", userData="on"
+        )
+        self.output_policy.addItem(
+            "OUTPUT ON and keep confirmed ON", userData="on_keep"
+        )
+        self.output_policy.addItem(
+            "Continue confirmed OUTPUT ON · live sweep", userData="continue"
+        )
+        self.output_policy.addItem("Force OUTPUT OFF", userData="off")
         output_index = self.output_policy.findData(output_policy)
         self.output_policy.setCurrentIndex(output_index if output_index >= 0 else 0)
         actions_layout.addRow("Output", self.output_policy)
@@ -189,7 +199,9 @@ class RigolNodeEditorDialog(FluentRecipeDialog):
         layout.addWidget(content, 1)
         note = BodyLabel(
             "Plan editing is offline. Hardware sweep/modulation/burst stay manual-only; "
-            "recipe axes use validated point updates with readback."
+            "recipe axes use validated point updates with readback. Continuous mode never "
+            "adopts an external device state: the same recipe must have configured and "
+            "confirmed this channel OUTPUT ON first."
         )
         note.setWordWrap(True)
         note.setObjectName("recipeHint")

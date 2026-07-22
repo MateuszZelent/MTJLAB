@@ -12,8 +12,9 @@ from PySide6.QtWidgets import (
     QSplitter, QStackedWidget, QVBoxLayout, QWidget,
 )
 from qfluentwidgets import (
-    BodyLabel,
-    CardWidget, CheckBox, ComboBox, LineEdit, PrimaryPushButton, PushButton, SegmentedWidget,
+    BodyLabel, CaptionLabel,
+    CardWidget, CheckBox, ComboBox, LineEdit, PrimaryPushButton, PushButton,
+    ScrollArea, SegmentedWidget, SpinBox,
 )
 from app.ui.dialogs import StationMessageBox as QMessageBox
 
@@ -106,12 +107,48 @@ class AnritsuNodeEditorDialog(FluentRecipeDialog):
         right = CardWidget(self)
         right.setObjectName("recipeEditorParameters")
         right_layout = QGridLayout(right)
-        title = BodyLabel("Select what this node controls")
+        title = BodyLabel("Node role and controlled parameters")
         title.setObjectName("sectionTitle")
         right_layout.addWidget(title, 0, 0, 1, 2)
+        self.node_role = ComboBox(self)
+        self.node_role.addItem("Apply spectrum settings only", userData="configure")
+        self.node_role.addItem(
+            "Apply settings, then acquire spectrum", userData="acquire_spectrum"
+        )
+        self.node_role.addItem(
+            "Apply settings, then acquire reference", userData="acquire_reference"
+        )
+        right_layout.addWidget(BodyLabel("Node role"), 1, 0)
+        right_layout.addWidget(self.node_role, 1, 1)
+        self.acquisition_hint = CaptionLabel(
+            "Acquisition is stored as a separate child step so its role remains visible in the tree.",
+            self,
+        )
+        self.acquisition_hint.setWordWrap(True)
+        self.acquisition_hint.setObjectName("muted")
+        right_layout.addWidget(self.acquisition_hint, 2, 0, 1, 2)
+        self.average_count = SpinBox(self)
+        self.average_count.setRange(1, 9999)
+        self.average_count.setValue(1)
+        self.average_count_label = BodyLabel("Average complete spectra")
+        right_layout.addWidget(self.average_count_label, 3, 0)
+        right_layout.addWidget(self.average_count, 3, 1)
+        self.reference_operation = ComboBox(self)
+        for label, value in (
+            ("None — raw spectrum", "none"),
+            ("Difference in dB", "difference_db"),
+            ("Linear ratio", "ratio_linear"),
+            ("Add power", "add_power"),
+            ("Subtract power", "subtract_power"),
+            ("Multiply linear", "multiply_linear"),
+        ):
+            self.reference_operation.addItem(label, userData=value)
+        self.reference_operation_label = BodyLabel("Reference processing")
+        right_layout.addWidget(self.reference_operation_label, 4, 0)
+        right_layout.addWidget(self.reference_operation, 4, 1)
         self.parameter_selectors: dict[str, ComboBox] = {}
         for row, (parameter_id, label, sweepable) in enumerate(
-            self.parameter_specs, start=1
+            self.parameter_specs, start=5
         ):
             right_layout.addWidget(BodyLabel(label), row, 0)
             selector = ComboBox(self)
@@ -122,16 +159,10 @@ class AnritsuNodeEditorDialog(FluentRecipeDialog):
             selector.currentIndexChanged.connect(self._selection_changed)
             self.parameter_selectors[parameter_id] = selector
             right_layout.addWidget(selector, row, 1)
-        operation_row = len(self.parameter_specs) + 1
-        self.acquire_single = CheckBox("Acquire single spectrum at this tree position", self)
-        self.acquire_single.setChecked(False)
-        self.acquire_single.setVisible(False)
-        right_layout.addWidget(self.acquire_single, operation_row, 0, 1, 2)
+        operation_row = len(self.parameter_specs) + 5
         self.trace = ComboBox(self)
         self.trace.addItems(("TRAC1",))
         self.trace_label = BodyLabel("Trace")
-        self.trace_label.setVisible(False)
-        self.trace.setVisible(False)
         right_layout.addWidget(self.trace_label, operation_row + 1, 0)
         right_layout.addWidget(self.trace, operation_row + 1, 1)
         self.open_roi_button = PrimaryPushButton("Go to ROI…", self)
@@ -150,7 +181,11 @@ class AnritsuNodeEditorDialog(FluentRecipeDialog):
         note.setWordWrap(True)
         right_layout.addWidget(note, operation_row + 3, 0, 1, 2)
         right_layout.setRowStretch(operation_row + 4, 1)
-        self.content_splitter.addWidget(right)
+        right_scroll = ScrollArea(self)
+        right_scroll.setWidgetResizable(True)
+        right_scroll.setFrameShape(QFrame.Shape.NoFrame)
+        right_scroll.setWidget(right)
+        self.content_splitter.addWidget(right_scroll)
         self.content_splitter.setSizes([570, 390])
         layout.addWidget(self.content_splitter, 1)
         footer = QHBoxLayout()
@@ -161,7 +196,41 @@ class AnritsuNodeEditorDialog(FluentRecipeDialog):
         footer.addWidget(self.apply_button)
         self.apply_button.clicked.connect(self.accept)
         self.cancel_button.clicked.connect(self.reject)
+        self.node_role.currentIndexChanged.connect(self._role_changed)
         layout.addLayout(footer)
+        self._role_changed()
+
+    def _role_changed(self) -> None:
+        role = self.selected_node_role()
+        acquisition = role != "configure"
+        spectrum = role == "acquire_spectrum"
+        for widget in (
+            self.acquisition_hint,
+            self.average_count_label,
+            self.average_count,
+            self.trace_label,
+            self.trace,
+        ):
+            widget.setVisible(acquisition)
+        self.reference_operation_label.setVisible(spectrum)
+        self.reference_operation.setVisible(spectrum)
+        self.apply_button.setText(
+            {
+                "configure": "Apply spectrum settings",
+                "acquire_spectrum": "Apply settings + add spectrum",
+                "acquire_reference": "Apply settings + add reference",
+            }[role]
+        )
+        self.setWindowTitle(
+            {
+                "configure": "Anritsu MS2830A — Spectrum settings",
+                "acquire_spectrum": "Anritsu MS2830A — settings and spectrum acquisition",
+                "acquire_reference": "Anritsu MS2830A — settings and reference acquisition",
+            }[role]
+        )
+
+    def selected_node_role(self) -> str:
+        return str(self.node_role.currentData() or "configure")
 
     def resizeEvent(self, event: object) -> None:
         super().resizeEvent(event)  # type: ignore[arg-type]
@@ -296,7 +365,9 @@ class AnritsuNodeEditorDialog(FluentRecipeDialog):
                     for segment in segments
                     if isinstance(segment, dict)
                 ]
-        self.acquire_single.setChecked(acquire_single)
+        self.node_role.setCurrentIndex(
+            self.node_role.findData("acquire_spectrum" if acquire_single else "configure")
+        )
         trace_index = self.trace.findText(trace)
         if trace_index >= 0:
             self.trace.setCurrentIndex(trace_index)
@@ -401,11 +472,6 @@ class AnritsuNodeEditorDialog(FluentRecipeDialog):
                 self, "Anritsu node", "Define ROI for the selected sweep parameter."
             )
             return
-        if not actions and not self.acquire_single.isChecked():
-            QMessageBox.information(
-                self, "Anritsu node", "Select a parameter or acquisition operation."
-            )
-            return
         super().accept()
 
 
@@ -424,6 +490,7 @@ class AnritsuSignalGeneratorNodeEditorDialog(FluentRecipeDialog):
         frequency: str = "1 GHz",
         power: str = "-30 dBm",
         parameter_actions: list[dict[str, object]] | None = None,
+        output_policy: str = "unchanged",
     ) -> None:
         super().__init__(parent)
         self.setProperty("stationSurface", "page")
@@ -454,6 +521,24 @@ class AnritsuSignalGeneratorNodeEditorDialog(FluentRecipeDialog):
             form.addWidget(BodyLabel(label), row, 0)
             form.addWidget(field, row, 1)
             form.addWidget(selector, row, 2)
+        self.output_policy = ComboBox(self)
+        self.output_policy.addItem(
+            "Keep RF OUTPUT OFF (safe default)", userData="unchanged"
+        )
+        self.output_policy.addItem(
+            "RF OUTPUT ON for this block · OFF on exit", userData="on"
+        )
+        self.output_policy.addItem(
+            "RF OUTPUT ON and keep confirmed ON", userData="on_keep"
+        )
+        self.output_policy.addItem(
+            "Continue confirmed RF OUTPUT ON · live sweep", userData="continue"
+        )
+        self.output_policy.addItem("Force RF OUTPUT OFF", userData="off")
+        output_index = self.output_policy.findData(output_policy)
+        self.output_policy.setCurrentIndex(output_index if output_index >= 0 else 0)
+        form.addWidget(BodyLabel("RF output"), 2, 0)
+        form.addWidget(self.output_policy, 2, 1, 1, 2)
         layout.addLayout(form)
         self.open_roi_button = PrimaryPushButton("Edit ROI…", self)
         self.open_roi_button.setEnabled(False)
@@ -462,8 +547,9 @@ class AnritsuSignalGeneratorNodeEditorDialog(FluentRecipeDialog):
         note = BodyLabel(
             "The complete visible SG snapshot is stored and applied with RF OFF; "
             "Unchanged still uses the visible value, Set exposes an explicit row, and "
-            "Sweep defines the ROI axis. Enabling RF requires a separate, explicit "
-            "OUTPUT ON step and must pass the complete safety preflight."
+            "Sweep defines the ROI axis. Safe ON configures and verifies with RF OFF "
+            "before energizing. Continuous mode is accepted only after this recipe has "
+            "already configured and confirmed RF OUTPUT ON."
         )
         note.setObjectName("recipeHint")
         note.setWordWrap(True)
@@ -472,7 +558,9 @@ class AnritsuSignalGeneratorNodeEditorDialog(FluentRecipeDialog):
         footer = QHBoxLayout()
         footer.addStretch(1)
         self.cancel_button = PushButton("Cancel", self)
-        self.apply_button = PrimaryPushButton("Apply Anritsu SG node", self)
+        self.apply_button = PrimaryPushButton(
+            "Apply signal generator settings · RF OFF", self
+        )
         footer.addWidget(self.cancel_button)
         footer.addWidget(self.apply_button)
         self.apply_button.clicked.connect(self.accept)
@@ -487,6 +575,9 @@ class AnritsuSignalGeneratorNodeEditorDialog(FluentRecipeDialog):
             if selector.currentData() == "sweep"
         ]
         return selected[0] if len(selected) == 1 else None
+
+    def selected_output_policy(self) -> str:
+        return str(self.output_policy.currentData() or "unchanged")
 
     def _selection_changed(self) -> None:
         self.open_roi_button.setEnabled(
@@ -577,11 +668,6 @@ class AnritsuSignalGeneratorNodeEditorDialog(FluentRecipeDialog):
         if any("segments" not in action for action in sweeps):
             QMessageBox.warning(
                 self, "Anritsu SG node", "Define ROI for the selected sweep parameter."
-            )
-            return
-        if not actions:
-            QMessageBox.information(
-                self, "Anritsu SG node", "Select at least one parameter."
             )
             return
         super().accept()

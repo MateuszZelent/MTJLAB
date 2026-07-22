@@ -55,15 +55,16 @@ root:
         type: acquire_spectrum
         trace: TRAC1
 
-  - id: anritsu-sg-a04fbbfb
+  - id: rigol-51308bc5
     type: sequence
-    text: Anritsu SG — configuration required · RF OFF
-    device_module: anritsu_sg
-    label: Anritsu MS2830A Signal Generator
-    operation: configure_selected_parameters
+    text: Rigol DG1032Z — configuration required
+    device_module: rigol
+    label: Rigol DG1032Z
     configuration_required: true
-    parameter_actions: []
-    children: []
+    children:
+    - id: comment-9d2d9e90
+      type: comment
+      text: Drop nested devices or flow actions here
 finally:
 - id: rigol-ch1-off-finally
   type: set_rigol_output

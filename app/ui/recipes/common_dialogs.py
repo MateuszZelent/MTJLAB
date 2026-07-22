@@ -649,7 +649,12 @@ class AnritsuAcquisitionEditorDialog(FluentRecipeDialog):
         footer = QHBoxLayout()
         footer.addStretch(1)
         self.cancel_button = PushButton("Cancel", self)
-        self.apply_button = PrimaryPushButton("Apply acquisition settings", self)
+        self.apply_button = PrimaryPushButton(
+            "Apply reference acquisition"
+            if self._reference_only
+            else "Apply spectrum acquisition",
+            self,
+        )
         footer.addWidget(self.cancel_button)
         footer.addWidget(self.apply_button)
         self.apply_button.clicked.connect(self.accept)

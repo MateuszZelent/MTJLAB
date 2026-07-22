@@ -1963,6 +1963,13 @@ class AdapterAndRunnerTests(unittest.TestCase):
         self.assertFalse(snapshot.output_enabled)
         self.assertTrue(adapter.set_signal_generator_output(True))
         self.assertEqual(adapter.state, DeviceState.OUTPUT_ON)
+        updated = adapter.update_signal_generator(
+            SignalGeneratorConfig(1.1e9, -15.0)
+        )
+        self.assertEqual(updated.frequency_hz, 1.1e9)
+        self.assertEqual(updated.power_dbm, -15.0)
+        self.assertTrue(updated.output_enabled)
+        self.assertEqual(adapter.state, DeviceState.OUTPUT_ON)
         self.assertFalse(adapter.set_signal_generator_output(False))
         self.assertEqual(adapter.state, DeviceState.OUTPUT_OFF)
 
@@ -2659,6 +2666,81 @@ root:
         self.assertEqual(point.status, "compliance")
         self.assertIsNone(trace)
         self.assertIn("smub.source.output = smub.OUTPUT_OFF", session.writes)
+
+    def test_runner_enforces_plan_owned_output_continuity_during_live_update(self) -> None:
+        from app.devices.simulators import SimulatedVisaFactory
+
+        raw = deepcopy(simulation_settings(approved=True).model_dump(mode="python"))
+        raw["devices"]["keithley"]["safety"]["allow_output_enable"] = True
+        settings = StationSettings.model_validate(raw)
+        rigol = RigolAdapter(
+            settings, session_factory=SimulatedVisaFactory("rigol")
+        )
+        keithley = KeithleyAdapter(
+            settings, session_factory=SimulatedVisaFactory("keithley")
+        )
+        anritsu = AnritsuAdapter(
+            settings, session_factory=SimulatedVisaFactory("anritsu")
+        )
+        for device in (rigol, keithley, anritsu):
+            device.connect()
+        plan = ExecutionPlan(
+            recipe_name="continuous-output",
+            actions=(
+                PlanAction(
+                    "configure",
+                    "configure_keithley",
+                    {
+                        "request": KeithleySourceRequest(
+                            "B", "current", 0.0005, 0.067
+                        )
+                    },
+                    {},
+                ),
+                PlanAction(
+                    "on",
+                    "set_keithley_output",
+                    {"channel": "B", "enabled": True},
+                    {},
+                ),
+                PlanAction(
+                    "continuity",
+                    "assert_output_on",
+                    {
+                        "device": "keithley",
+                        "channel": "B",
+                        "expected_state": {
+                            "mode": "current",
+                            "source_level_si": 0.0005,
+                            "compliance_si": 0.067,
+                        },
+                    },
+                    {},
+                ),
+                PlanAction(
+                    "live-update",
+                    "update_keithley_level",
+                    {"channel": "B", "mode": "current", "level_si": 0.00075},
+                    {},
+                ),
+            ),
+            total_points=0,
+            sha256="continuous-output",
+            recipe_source="schema_version: 1\n",
+            safe_shutdown_actions=("keithley.outputs_off",),
+        )
+        writer = MemoryWriter()
+
+        result = RecipeRunner(
+            rigol=rigol,
+            keithley=keithley,
+            anritsu=anritsu,
+            writer=writer,
+        ).run(plan)  # type: ignore[arg-type]
+
+        self.assertIsNone(result.error)
+        self.assertEqual(writer.status, "completed")
+        self.assertFalse(keithley._output_states["B"])
 
     def test_keithley_whitelisted_sense_and_manual_ranges_are_validated_and_written(self) -> None:
         session = FakeVisaSession(

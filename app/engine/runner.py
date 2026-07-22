@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from dataclasses import asdict, dataclass, is_dataclass
 from datetime import datetime, timezone
+import math
 import threading
 import time
 from typing import Callable
@@ -709,7 +710,64 @@ class RecipeRunner:
         self, action: PlanAction, measurements: dict[str, float]
     ) -> _AcquiredSpectrum | None:
         payload = action.payload
-        if action.kind == "configure_rigol":
+        if action.kind == "assert_output_on":
+            device = str(payload.get("device", ""))
+            channel = str(payload.get("channel", ""))
+            if device == "keithley":
+                confirmed = self._keithley_output_active.get(channel, False)
+            elif device == "rigol":
+                try:
+                    confirmed = self._rigol_output_active.get(int(channel), False)
+                except ValueError:
+                    confirmed = False
+            elif device == "anritsu_sg":
+                confirmed = self._anritsu_sg_output_active
+            else:
+                raise ExecutionError(
+                    f"Unknown continuous-output endpoint {device}.{channel}."
+                )
+            if not confirmed:
+                raise ExecutionError(
+                    f"Continuous OUTPUT for {device}.{channel} was not confirmed ON "
+                    "by an earlier action in this run."
+                )
+            context_key = (
+                f"{device}.{channel}"
+                if device != "anritsu_sg"
+                else "anritsu.sg"
+            )
+            actual_state = self._active_safety_context.get(context_key, {})
+            expected_state = payload.get("expected_state", {})
+            if not isinstance(expected_state, dict):
+                raise ExecutionError("Continuous-output expected state is malformed.")
+            mismatches: list[str] = []
+            for name, expected in expected_state.items():
+                actual = actual_state.get(name)
+                if isinstance(expected, (int, float)) and isinstance(
+                    actual, (int, float)
+                ):
+                    abs_tol = (
+                        1.0
+                        if name.endswith("frequency_hz")
+                        else 0.01
+                        if name.endswith("power_dbm")
+                        else 1e-12
+                    )
+                    matches = math.isclose(
+                        float(actual), float(expected), rel_tol=1e-9, abs_tol=abs_tol
+                    )
+                else:
+                    matches = actual == expected
+                if not matches:
+                    mismatches.append(name)
+            if mismatches:
+                raise ExecutionError(
+                    f"Continuous OUTPUT for {device}.{channel} cannot inherit a "
+                    "different configuration; mismatched fields: "
+                    + ", ".join(mismatches)
+                    + "."
+                )
+        elif action.kind == "configure_rigol":
             config = payload["config"]
             self._rigol.configure_channel(config)
             self._rigol_output_active[config.channel] = False
@@ -731,6 +789,13 @@ class RecipeRunner:
                 "high_level_v": config.high_level_v,
                 "low_level_v": config.low_level_v,
                 "output_load": config.output_load,
+                "waveform": config.waveform,
+                "phase_deg": config.phase_deg,
+                "square_duty_percent": config.square_duty_percent,
+                "ramp_symmetry_percent": config.ramp_symmetry_percent,
+                "pulse_width_s": config.pulse_width_s,
+                "pulse_leading_s": config.pulse_leading_s,
+                "pulse_trailing_s": config.pulse_trailing_s,
             }
             self._record_device_state(
                 "rigol", f"channel_{config.channel}", requested=config,
@@ -767,6 +832,15 @@ class RecipeRunner:
                 "mode": request.mode,
                 "source_level_si": request.level_si,
                 "compliance_si": request.compliance_si,
+                "nplc": request.nplc,
+                "settle_time_s": request.settle_time_s,
+                "sense_mode": request.sense_mode,
+                "source_autorange": request.source_autorange,
+                "source_range_si": request.source_range_si,
+                "measure_voltage_autorange": request.measure_voltage_autorange,
+                "measure_voltage_range_si": request.measure_voltage_range_si,
+                "measure_current_autorange": request.measure_current_autorange,
+                "measure_current_range_si": request.measure_current_range_si,
                 "current_min_a": envelope.current_min_a if envelope is not None else None,
                 "current_max_a": envelope.current_max_a if envelope is not None else None,
                 "voltage_min_v": envelope.voltage_min_v if envelope is not None else None,
@@ -846,6 +920,28 @@ class RecipeRunner:
             }
             self._record_device_state(
                 "anritsu", "signal_generator", requested=config,
+                actual=self._active_safety_context["anritsu.sg"],
+            )
+        elif action.kind == "update_anritsu_sg":
+            config = payload["config"]
+            expected_output = self._anritsu_sg_output_active
+            actual = self._anritsu.update_signal_generator(config)
+            if actual.output_enabled != expected_output:
+                raise ExecutionError(
+                    "Anritsu SG RF OUTPUT continuity was lost during a live update."
+                )
+            self._anritsu_sg_output_active = actual.output_enabled
+            self._confirm_output_state("anritsu.sg", actual.output_enabled)
+            self._active_safety_context["anritsu.sg"] = {
+                "frequency_hz": actual.frequency_hz,
+                "power_dbm": actual.power_dbm,
+                "output_enabled": actual.output_enabled,
+                "instrument_mode": actual.instrument_mode,
+            }
+            self._record_device_state(
+                "anritsu",
+                "signal_generator",
+                requested=config,
                 actual=self._active_safety_context["anritsu.sg"],
             )
         elif action.kind == "update_rigol_frequency":

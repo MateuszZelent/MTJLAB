@@ -1978,10 +1978,10 @@ class AnritsuPage(QWidget):
         self._set_live_indicator("starting")
         self._set_page_state(AnritsuPageState.STARTING_LIVE)
         self._timer.setInterval(self.refresh.value())
-        # Live is intentionally passive: do not alter sweep or trace modes.
-        # This is compatible with the same current-trace path used by the
-        # working one-shot read and avoids unsupported mode probes.
-        self._controller.call("start_live", False)
+        # Live owns continuous acquisition for its lifetime.  The adapter
+        # remembers the previous INIT:CONT state and restores it on Stop.
+        # Without this, polling can repeatedly read a frozen TRAC1 buffer.
+        self._controller.call("start_live", True)
 
     def _set_live_indicator(self, state: str, frame: int | None = None) -> None:
         labels = {
@@ -2391,7 +2391,7 @@ class AnritsuPage(QWidget):
             self.live.setText("Stop Live")
             self._set_live_indicator("on", 0)
             self._set_page_state(AnritsuPageState.LIVE)
-            mode = "passive current-trace polling"
+            mode = "continuous sweep with completed-trace polling"
             self.info.setText(f"Live started; {mode}. Waiting for first frame...")
             self.status.emit(f"Anritsu Live started: {mode}")
         elif operation == "stop_live":
@@ -2478,6 +2478,12 @@ class AnritsuPage(QWidget):
     ) -> None:
         self._latest_trace = trace
         self._spectrogram_buffer.append(trace)
+        # Raw Live must repaint immediately.  CPU cleanup/peak analysis is
+        # deliberately asynchronous and may coalesce frames; making repaint
+        # wait for that worker can leave the visible trace frozen indefinitely
+        # while newer analysis requests keep superseding older generations.
+        self._cleanup_result = None
+        self._refresh_spectrum_display()
         if update_controls:
             self._apply_page_state()
         self._update_signal_analysis(trace)
@@ -2495,13 +2501,10 @@ class AnritsuPage(QWidget):
                 self._identical_live_frames += 1
                 self._stale_frame_count += 1
                 live_detail = f" • unchanged ×{self._identical_live_frames}"
-                if self._identical_live_frames == 3:
-                    self.banner.show_message(
-                        "Live received three identical traces. Verify that Trace A is in Write "
-                        "mode, Continuous Sweep is active, and the analyser sweep time is not "
-                        "longer than the observation interval.",
-                        timeout_ms=15_000,
-                    )
+                # Identical numeric frames are valid for a stable input and do
+                # not prove stale acquisition.  Continuous sweep is enforced
+                # at Live startup, so do not raise a false warning from data
+                # equality alone.
             else:
                 self._identical_live_frames = 0
                 self._stale_frame_count = 0

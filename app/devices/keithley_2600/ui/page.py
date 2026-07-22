@@ -407,9 +407,19 @@ class KeithleyNodeEditorDialog(FluentRecipeDialog):
         output_row = 3 + len(definitions)
         parameter_layout.addWidget(BodyLabel("Output state"), output_row, 0)
         self.output_policy = ComboBox(self)
-        self.output_policy.addItem("Unchanged", userData="unchanged")
-        self.output_policy.addItem("OUTPUT ON at start", userData="on")
-        self.output_policy.addItem("OUTPUT OFF", userData="off")
+        self.output_policy.addItem(
+            "Keep OUTPUT OFF (safe default)", userData="unchanged"
+        )
+        self.output_policy.addItem(
+            "OUTPUT ON for this block · OFF on exit", userData="on"
+        )
+        self.output_policy.addItem(
+            "OUTPUT ON and keep confirmed ON", userData="on_keep"
+        )
+        self.output_policy.addItem(
+            "Continue confirmed OUTPUT ON · live sweep", userData="continue"
+        )
+        self.output_policy.addItem("Force OUTPUT OFF", userData="off")
         parameter_layout.addWidget(self.output_policy, output_row, 1)
         self.open_roi_button = PrimaryPushButton("Go to ROI…", self)
         self.open_roi_button.setEnabled(False)
@@ -426,8 +436,10 @@ class KeithleyNodeEditorDialog(FluentRecipeDialog):
         parameter_note = BodyLabel(
             "The complete visible Keithley snapshot is stored and applied with OUTPUT OFF. "
             "Set marks a value as an explicit plan row; Sweep turns one value into the ROI "
-            "axis. Unchanged still uses the visible snapshot value. OUTPUT is only a plan "
-            "declaration; this window never energizes the instrument."
+            "axis. The safe default configures with OUTPUT OFF. Continuous mode is accepted "
+            "only after this recipe has already configured and confirmed the same channel ON, "
+            "and it permits live sweep updates without a full reconfiguration. This window "
+            "never energizes the instrument."
         )
         parameter_note.setObjectName("muted")
         parameter_note.setWordWrap(True)

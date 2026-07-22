@@ -86,6 +86,9 @@ def required_devices_for_actions(actions: Iterable[PlanAction]) -> frozenset[str
             required.add("lakeshore_gaussmeter")
         if action.kind == "verify_connection":
             required.add(str(action.payload["device"]))
+        if action.kind == "assert_output_on":
+            device = str(action.payload.get("device", ""))
+            required.add("anritsu" if device == "anritsu_sg" else device)
     return frozenset(required)
 
 
@@ -188,6 +191,7 @@ class RecipeCompiler:
         """Reject update/energisation sequences that cannot be valid at runtime."""
 
         configured: set[tuple[str, str]] = set()
+        output_enabled: dict[tuple[str, str], bool] = {}
         for action in actions:
             if action.is_finally:
                 continue
@@ -202,6 +206,27 @@ class RecipeCompiler:
                 key = ("anritsu_sg", "RF")
             if key is not None:
                 configured.add(key)
+                # Every full device configuration is specified to force and
+                # confirm OUTPUT OFF before applying setpoints.
+                output_enabled[key] = False
+                continue
+
+            if kind == "assert_output_on":
+                assertion_key = (
+                    str(payload.get("device", "")),
+                    str(payload.get("channel", "")),
+                )
+                if assertion_key not in configured:
+                    raise ConfigurationError(
+                        f"{action.node_id}: continuous OUTPUT requires an earlier "
+                        f"configuration for {assertion_key[0]} channel "
+                        f"{assertion_key[1]}."
+                    )
+                if not output_enabled.get(assertion_key, False):
+                    raise ConfigurationError(
+                        f"{action.node_id}: continuous OUTPUT requires a previously "
+                        "confirmed OUTPUT ON transition in this recipe."
+                    )
                 continue
 
             update_device: str | None = None
@@ -212,6 +237,9 @@ class RecipeCompiler:
             elif kind in {"update_rigol_frequency", "update_rigol_levels"}:
                 update_device = "rigol"
                 update_channel = str(payload["channel"])
+            elif kind == "update_anritsu_sg":
+                update_device = "anritsu_sg"
+                update_channel = "RF"
             if update_device is not None and update_channel is not None:
                 update_key = (update_device, update_channel)
                 if update_key not in configured:
@@ -239,6 +267,32 @@ class RecipeCompiler:
                         f"{action.node_id}: {kind} requires an earlier configuration "
                         f"for {output_device} channel {output_channel}."
                     )
+            output_enabled[output_key] = enabled
+
+    @staticmethod
+    def _append_output_continuity_assertion(
+        actions: list[PlanAction],
+        *,
+        node_id: str,
+        device: str,
+        channel: str,
+        context: dict[str, Quantity],
+        expected_state: dict[str, Any] | None = None,
+    ) -> None:
+        """Make plan-owned OUTPUT continuity explicit and preflight-verifiable."""
+
+        actions.append(
+            PlanAction(
+                f"{node_id}.assert-output-on",
+                "assert_output_on",
+                {
+                    "device": device,
+                    "channel": channel,
+                    "expected_state": dict(expected_state or {}),
+                },
+                {name: quantity.si_value for name, quantity in context.items()},
+            )
+        )
 
     def _safe_shutdown_actions(self, required_devices: frozenset[str]) -> tuple[str, ...]:
         allowed = {
@@ -547,6 +601,34 @@ class RecipeCompiler:
             sweep_values = generate_sweep_points(segments, dimension)
             configure_data[configure_key] = sweep_values[0]
 
+        output_policy = str(node.data.get("output_policy", "unchanged"))
+        if output_policy not in {
+            "unchanged",
+            "on",
+            "off",
+            "on_keep",
+            "continue",
+        }:
+            raise ConfigurationError(f"{node.id}: invalid Keithley output policy.")
+        if output_policy == "continue":
+            unsupported_live_actions = [
+                str(action.get("parameter_id", ""))
+                for action in parameter_actions
+                if action.get("mode") == "set"
+                or str(action.get("parameter_id", ""))
+                not in {
+                    "source.level",
+                    "source.compliance",
+                    "measurement.settling_time",
+                }
+            ]
+            if unsupported_live_actions:
+                raise ConfigurationError(
+                    f"{node.id}: Continue confirmed OUTPUT ON accepts only a local "
+                    "source-level, compliance, or settling-time sweep; fixed/full "
+                    "configuration rows require OUTPUT OFF."
+                )
+
         configure_node = RecipeNode(
             f"{node.id}.configure", "configure_keithley", configure_data
         )
@@ -556,12 +638,33 @@ class RecipeCompiler:
         configure_action = self._compile_action(
             configure_node, configure_context, is_finally=False
         )
-        actions.append(configure_action)
-        self._remember_literal_configuration(configure_action, context)
-        output_policy = str(node.data.get("output_policy", "unchanged"))
-        if output_policy not in {"unchanged", "on", "off"}:
-            raise ConfigurationError(f"{node.id}: invalid Keithley output policy.")
-        if output_policy == "on":
+        configured_request = configure_action.payload["request"]
+        if output_policy == "continue":
+            self._append_output_continuity_assertion(
+                actions,
+                node_id=node.id,
+                device="keithley",
+                channel=channel,
+                context=context,
+                expected_state={
+                    "mode": configured_request.mode,
+                    "source_level_si": configured_request.level_si,
+                    "compliance_si": configured_request.compliance_si,
+                    "nplc": configured_request.nplc,
+                    "settle_time_s": configured_request.settle_time_s,
+                    "sense_mode": configured_request.sense_mode,
+                    "source_autorange": configured_request.source_autorange,
+                    "source_range_si": configured_request.source_range_si,
+                    "measure_voltage_autorange": configured_request.measure_voltage_autorange,
+                    "measure_voltage_range_si": configured_request.measure_voltage_range_si,
+                    "measure_current_autorange": configured_request.measure_current_autorange,
+                    "measure_current_range_si": configured_request.measure_current_range_si,
+                },
+            )
+        else:
+            actions.append(configure_action)
+            self._remember_literal_configuration(configure_action, context)
+        if output_policy in {"on", "on_keep"}:
             actions.append(
                 self._compile_action(
                     RecipeNode(
@@ -592,6 +695,14 @@ class RecipeCompiler:
             nested = dict(context)
             if value is not None:
                 nested[axis_target] = value
+                if output_policy == "continue":
+                    self._append_output_continuity_assertion(
+                        actions,
+                        node_id=f"{node.id}.point",
+                        device="keithley",
+                        channel=channel,
+                        context=nested,
+                    )
                 if sweep_parameter == "source.level":
                     actions.append(
                         self._compile_action(
@@ -801,6 +912,16 @@ class RecipeCompiler:
             else:
                 config_data[config_key] = sweep_values[0]
 
+        output_policy = str(node.data.get("output_policy", "unchanged"))
+        if output_policy not in {
+            "unchanged",
+            "on",
+            "off",
+            "on_keep",
+            "continue",
+        }:
+            raise ConfigurationError(f"{node.id}: invalid Rigol output policy.")
+
         configure_context = dict(context)
         if sweep_values and axis_target is not None:
             configure_context[axis_target] = sweep_values[0]
@@ -811,43 +932,61 @@ class RecipeCompiler:
             configure_context,
             is_finally=False,
         )
-        actions.append(configure_action)
-        self._remember_literal_configuration(configure_action, context)
-        actions.append(
-            self._compile_action(
-                RecipeNode(
-                    f"{node.id}.configure-output-path",
-                    "configure_rigol_output",
-                    {
-                        "channel": channel,
-                        "output_load": configuration.get(
-                            "output_load", "HIGHZ"
-                        ),
-                        "polarity": configuration.get(
-                            "output_polarity", "NORM"
-                        ),
-                        "mode": configuration.get("output_mode", "NORM"),
-                        "gate_polarity": configuration.get(
-                            "gate_polarity", "NORM"
-                        ),
-                        "sync_enabled": configuration.get(
-                            "sync_enabled", False
-                        ),
-                        "sync_polarity": configuration.get(
-                            "sync_polarity", "NORM"
-                        ),
-                        "sync_delay": configuration.get("sync_delay", "0 s"),
-                    },
-                ),
-                configure_context,
-                is_finally=False,
-            )
+        output_path_action = self._compile_action(
+            RecipeNode(
+                f"{node.id}.configure-output-path",
+                "configure_rigol_output",
+                {
+                    "channel": channel,
+                    "output_load": configuration.get("output_load", "HIGHZ"),
+                    "polarity": configuration.get("output_polarity", "NORM"),
+                    "mode": configuration.get("output_mode", "NORM"),
+                    "gate_polarity": configuration.get("gate_polarity", "NORM"),
+                    "sync_enabled": configuration.get("sync_enabled", False),
+                    "sync_polarity": configuration.get("sync_polarity", "NORM"),
+                    "sync_delay": configuration.get("sync_delay", "0 s"),
+                },
+            ),
+            configure_context,
+            is_finally=False,
         )
+        if output_policy == "continue":
+            config = configure_action.payload["config"]
+            output_config = output_path_action.payload["config"]
+            self._append_output_continuity_assertion(
+                actions,
+                node_id=node.id,
+                device="rigol",
+                channel=str(channel),
+                context=context,
+                expected_state={
+                    "frequency_hz": config.frequency_hz,
+                    "high_level_v": config.high_level_v,
+                    "low_level_v": config.low_level_v,
+                    "output_load": config.output_load,
+                    "waveform": config.waveform,
+                    "phase_deg": config.phase_deg,
+                    "square_duty_percent": config.square_duty_percent,
+                    "ramp_symmetry_percent": config.ramp_symmetry_percent,
+                    "pulse_width_s": config.pulse_width_s,
+                    "pulse_leading_s": config.pulse_leading_s,
+                    "pulse_trailing_s": config.pulse_trailing_s,
+                    "output_path": {
+                        "polarity": output_config.polarity,
+                        "mode": output_config.mode,
+                        "gate_polarity": output_config.gate_polarity,
+                        "sync_enabled": output_config.sync_enabled,
+                        "sync_polarity": output_config.sync_polarity,
+                        "sync_delay_s": output_config.sync_delay_s,
+                    },
+                },
+            )
+        else:
+            actions.append(configure_action)
+            self._remember_literal_configuration(configure_action, context)
+            actions.append(output_path_action)
 
-        output_policy = str(node.data.get("output_policy", "unchanged"))
-        if output_policy not in {"unchanged", "on", "off"}:
-            raise ConfigurationError(f"{node.id}: invalid Rigol output policy.")
-        if output_policy == "on":
+        if output_policy in {"on", "on_keep"}:
             actions.append(
                 self._compile_action(
                     RecipeNode(
@@ -877,6 +1016,14 @@ class RecipeCompiler:
             nested = dict(context)
             if value is not None and axis_target is not None:
                 nested[axis_target] = value
+                if output_policy == "continue":
+                    self._append_output_continuity_assertion(
+                        actions,
+                        node_id=f"{node.id}.point",
+                        device="rigol",
+                        channel=str(channel),
+                        context=nested,
+                    )
                 if sweep_parameter == "carrier.frequency":
                     update_node = RecipeNode(
                         f"{node.id}.update-frequency",
@@ -1197,27 +1344,117 @@ class RecipeCompiler:
             sweep_parameter = parameter_id
             axis_target = target
 
-        for value in sweep_values or (None,):
+        output_policy = str(node.data.get("output_policy", "unchanged"))
+        if output_policy not in {
+            "unchanged",
+            "on",
+            "off",
+            "on_keep",
+            "continue",
+        }:
+            raise ConfigurationError(f"{node.id}: invalid Anritsu SG output policy.")
+
+        first_data = dict(point_data)
+        first_context = dict(context)
+        if sweep_values and sweep_parameter is not None and axis_target:
+            first_key, _dimension, _target = definitions[sweep_parameter]
+            first_data[first_key] = sweep_values[0]
+            first_context[axis_target] = sweep_values[0]
+        first_configure = self._compile_action(
+            RecipeNode(
+                f"{node.id}.configure-sg",
+                "configure_anritsu_sg",
+                first_data,
+            ),
+            first_context,
+            is_finally=False,
+        )
+        first_config = first_configure.payload["config"]
+        runtime_context = dict(context)
+        if output_policy == "continue":
+            self._append_output_continuity_assertion(
+                actions,
+                node_id=node.id,
+                device="anritsu_sg",
+                channel="RF",
+                context=context,
+                expected_state={
+                    "frequency_hz": first_config.frequency_hz,
+                    "power_dbm": first_config.power_dbm,
+                },
+            )
+        else:
+            actions.append(first_configure)
+            self._remember_literal_configuration(first_configure, runtime_context)
+
+        if output_policy in {"on", "on_keep"}:
+            actions.append(
+                self._compile_action(
+                    RecipeNode(
+                        f"{node.id}.output-on",
+                        "set_anritsu_sg_output",
+                        {"enabled": True},
+                    ),
+                    context,
+                    is_finally=False,
+                )
+            )
+        elif output_policy == "off":
+            actions.append(
+                self._compile_action(
+                    RecipeNode(
+                        f"{node.id}.output-off",
+                        "set_anritsu_sg_output",
+                        {"enabled": False},
+                    ),
+                    context,
+                    is_finally=False,
+                )
+            )
+
+        for point_index, value in enumerate(sweep_values or (None,)):
             self._check_cancelled()
-            nested = dict(context)
+            nested = dict(runtime_context)
             current = dict(point_data)
             if value is not None and sweep_parameter is not None and axis_target:
                 key, _dimension, _target = definitions[sweep_parameter]
                 current[key] = value
                 nested[axis_target] = value
-            configure = self._compile_action(
-                RecipeNode(
-                    f"{node.id}.configure-sg",
-                    "configure_anritsu_sg",
-                    current,
-                ),
-                nested,
-                is_finally=False,
-            )
-            actions.append(configure)
-            self._remember_literal_configuration(configure, nested)
+                if output_policy == "continue" and point_index > 0:
+                    self._append_output_continuity_assertion(
+                        actions,
+                        node_id=f"{node.id}.point",
+                        device="anritsu_sg",
+                        channel="RF",
+                        context=nested,
+                    )
+                if point_index > 0:
+                    actions.append(
+                        self._compile_action(
+                            RecipeNode(
+                                f"{node.id}.update-sg",
+                                "update_anritsu_sg",
+                                current,
+                            ),
+                            nested,
+                            is_finally=False,
+                        )
+                    )
             for child in node.children:
                 self._visit(child, nested, actions, is_finally=False)
+
+        if output_policy == "on":
+            actions.append(
+                self._compile_action(
+                    RecipeNode(
+                        f"{node.id}.output-off",
+                        "set_anritsu_sg_output",
+                        {"enabled": False},
+                    ),
+                    context,
+                    is_finally=False,
+                )
+            )
 
     @staticmethod
     def _remember_literal_configuration(
@@ -1405,6 +1642,8 @@ class RecipeCompiler:
         elif node.type == "configure_anritsu_advanced":
             payload = self._compile_anritsu_advanced(data, node.id)
         elif node.type == "configure_anritsu_sg":
+            payload = self._compile_anritsu_signal_generator(data)
+        elif node.type == "update_anritsu_sg":
             payload = self._compile_anritsu_signal_generator(data)
         elif node.type == "update_keithley_level":
             payload = self._compile_keithley_level_update(data, node.id)
