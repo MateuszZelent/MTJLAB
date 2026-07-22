@@ -2480,8 +2480,13 @@ class MainWindowTests(unittest.TestCase):
             anritsu.capture_current_reference()
             self.assertIs(anritsu._reference_trace, trace_2)
             anritsu.reference_operation.setCurrentIndex(1)
+            anritsu.show_processed.setChecked(True)
             anritsu._refresh_spectrum_display()
             self.assertGreater(anritsu.spectrum_plot.trace_point_count("Processed"), 0)
+            anritsu.show_processed.setChecked(False)
+            anritsu._refresh_spectrum_display()
+            self.assertFalse(anritsu.show_processed.isChecked())
+            self.assertEqual(anritsu.spectrum_plot.trace_point_count("Processed"), 0)
             anritsu.remove_reference()
             self.assertIsNone(anritsu._reference_trace)
             self.assertIs(anritsu._latest_trace, trace_2)
@@ -2509,10 +2514,10 @@ class MainWindowTests(unittest.TestCase):
 
             anritsu.acquire_reference_once()
 
-            anritsu._controller.call.assert_called_once_with("fetch_current_trace", "TRAC1")
+            anritsu._controller.call.assert_called_once_with("single_sweep", "TRAC1")
             self.assertEqual(anritsu._page_state, AnritsuPageState.ACQUIRING_REFERENCE)
             self.assertFalse(anritsu.live.isEnabled())
-            anritsu._result("fetch_current_trace", trace)
+            anritsu._result("single_sweep", trace)
 
             reference = anritsu._reference_spectrum
             self.assertIsNotNone(reference)
@@ -2543,6 +2548,10 @@ class MainWindowTests(unittest.TestCase):
             anritsu.capture_current_reference()
             self.assertIs(anritsu._reference_trace, first)
             anritsu._controller.call.assert_not_called()
+            anritsu.reference_operation.setCurrentIndex(1)
+            anritsu._refresh_spectrum_display()
+            self.assertEqual(anritsu.spectrum_plot.trace_point_count("Processed"), 0)
+            self.assertIn("acquire the next spectrum", anritsu.analysis_status.text())
 
             anritsu._latest_trace = second
             with patch(
@@ -2681,7 +2690,7 @@ class MainWindowTests(unittest.TestCase):
             window.close()
             self.application.processEvents()
 
-    def test_anritsu_temporal_average_uses_passive_reads_and_updates_at_target(self) -> None:
+    def test_anritsu_temporal_average_uses_fresh_sweeps_and_updates_at_target(self) -> None:
         window = MainWindow(".config/settings.yml", simulation=True)
         try:
             anritsu = window.anritsu_page
@@ -2696,14 +2705,14 @@ class MainWindowTests(unittest.TestCase):
 
             anritsu.start_averaging()
 
-            anritsu._controller.call.assert_called_once_with("fetch_current_trace", "TRAC1")
+            anritsu._controller.call.assert_called_once_with("single_sweep", "TRAC1")
             self.assertEqual(anritsu.average_progress.format(), "0 / 2")
-            anritsu._result("fetch_current_trace", first)
+            anritsu._result("single_sweep", first)
             self.assertEqual(anritsu.average_progress.value(), 1)
             self.assertEqual(anritsu.average_progress.format(), "1 / 2")
             self.assertIsNone(anritsu._averaged_trace)
 
-            anritsu._result("fetch_current_trace", second)
+            anritsu._result("single_sweep", second)
             self.assertEqual(anritsu.average_progress.value(), 2)
             self.assertEqual(anritsu.average_progress.format(), "2 / 2")
             self.assertIsNotNone(anritsu._averaged_trace)
@@ -2755,7 +2764,7 @@ class MainWindowTests(unittest.TestCase):
             self.assertFalse(anritsu._live_transition_pending)
             self.assertFalse(anritsu.single.isEnabled())
             self.assertEqual(anritsu.live_indicator.property("liveState"), "on")
-            anritsu._result("fetch_current_trace", trace)
+            anritsu._result("single_sweep", trace)
             self.assertEqual(
                 anritsu.spectrum_plot._traces["Raw"][1].tolist(),
                 [-50.0, -40.0],
@@ -3321,9 +3330,9 @@ class MainWindowTests(unittest.TestCase):
             )
 
             anritsu.start_reference_averaging()
-            anritsu._result("fetch_current_trace", first)
+            anritsu._result("single_sweep", first)
             self.assertIsNone(anritsu._reference_trace)
-            anritsu._result("fetch_current_trace", second)
+            anritsu._result("single_sweep", second)
 
             self.assertIsNotNone(anritsu._reference_trace)
             self.assertTrue(anritsu.show_reference.isChecked())

@@ -86,7 +86,7 @@ class SpectrumAnalysisTests(unittest.TestCase):
         )
 
         self.assertEqual(untouched.values_dbm, tuple(current))
-        self.assertEqual(untouched.method, "Raw (unchanged)")
+        self.assertEqual(untouched.method, "Raw (no processing)")
         self.assertIn(50, rejected.stationary_interference_indices)
         self.assertAlmostEqual(rejected.values_dbm[50], -100.0)
         self.assertIn("display only", rejected.method)

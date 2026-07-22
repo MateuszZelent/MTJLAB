@@ -181,7 +181,7 @@ def clean_spectrum_dbm(
     sigma = robust_noise_sigma_db(values)
     mode = mode.lower()
     if mode == "raw":
-        return SpectrumCleanupResult(values, sigma, (), "Raw (unchanged)")
+        return SpectrumCleanupResult(values, sigma, (), "Raw (no processing)")
     interference = detect_stationary_interference(history_dbm)
     if mode == "denoise":
         cleaned = bilateral_denoise_dbm(values)

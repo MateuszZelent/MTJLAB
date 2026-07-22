@@ -2040,11 +2040,9 @@ class AnritsuPage(QWidget):
         label = "reference" if destination == "reference" else "spectrum"
         self.info.setText(f"Averaging {label}: 0 / {target} temporal frames...")
         self.status.emit(
-            f"Anritsu passive temporal averaging started: {label}, 0 / {target}"
+            f"Anritsu temporal averaging started: {label}, 0 / {target}"
         )
-        # Reuse an already pending Live frame instead of queuing a duplicate
-        # VISA query against the same session.
-        self._request_trace()
+        self._request_next_average_frame()
 
     def cancel_averaging(self) -> None:
         self._finish_temporal_averaging(resume_live=True)
@@ -2075,7 +2073,22 @@ class AnritsuPage(QWidget):
     def _request_next_average_frame(self) -> None:
         if not self._averaging_active or self._fetch_pending:
             return
-        self._request_trace()
+        if self._resume_live_after_averaging:
+            # Continuous Live acquisition remains active while the timer is
+            # paused, so this reads the next completed hardware frame.
+            self._request_trace()
+            return
+        if not self._single_sweep_configured:
+            self._finish_temporal_averaging(resume_live=False)
+            QMessageBox.warning(
+                self,
+                "Temporal averaging",
+                "Averaging outside Live requires the qualified single-sweep protocol.",
+            )
+            return
+        self._fetch_pending = True
+        self._fetch_started_monotonic = time.monotonic()
+        self._controller.call("single_sweep", "TRAC1")
 
     def capture_current_reference(self) -> None:
         """Use the latest completed frame locally without issuing a VISA query."""
@@ -2089,19 +2102,27 @@ class AnritsuPage(QWidget):
         self.status.emit("Anritsu current trace stored as a single reference")
 
     def acquire_reference_once(self) -> None:
-        """Passively fetch one fresh trace and commit it only after success."""
+        """Acquire one new, completed sweep before storing a reference."""
 
         if self._page_state not in {AnritsuPageState.IDLE, AnritsuPageState.ERROR}:
             return
         if not self._confirm_reference_replacement("single"):
             return
+        if not self._single_sweep_configured:
+            QMessageBox.warning(
+                self,
+                "Reference spectrum",
+                "A fresh reference requires the qualified single-sweep protocol. "
+                "Use Start Live and acquire a new frame, or use the current trace explicitly.",
+            )
+            return
         self._pending_reference_kind = "single"
         self._set_page_state(AnritsuPageState.ACQUIRING_REFERENCE)
         self.info.setText("Acquiring one fresh reference frame…")
         self.status.emit("Anritsu single-reference acquisition started")
-        if not self._request_trace():
-            self._pending_reference_kind = None
-            self._set_page_state(AnritsuPageState.IDLE)
+        self._fetch_pending = True
+        self._fetch_started_monotonic = time.monotonic()
+        self._controller.call("single_sweep", "TRAC1")
 
     def _confirm_reference_replacement(self, new_kind: str) -> bool:
         current = self._reference_spectrum
@@ -2946,6 +2967,12 @@ class AnritsuPage(QWidget):
         processed_unit = "dBm"
         signal = self._averaged_trace or self._latest_trace
         if operation != "none" and signal is not None and self._reference_trace is not None:
+            if signal is self._reference_trace:
+                self.analysis_status.setText(
+                    "Reference captured — acquire the next spectrum before displaying Signal − reference."
+                )
+                operation = "none"
+        if operation != "none" and signal is not None and self._reference_trace is not None:
             try:
                 if not frequency_grids_match(signal.frequencies_hz, self._reference_trace.frequencies_hz):
                     raise ValueError("Reference frequency grid differs from the current spectrum.")
@@ -2978,7 +3005,6 @@ class AnritsuPage(QWidget):
             except ValueError as exc:
                 self.info.setText(f"Reference processing unavailable: {exc}")
             else:
-                self.show_processed.setChecked(True)
                 if self.show_processed.isChecked():
                     traces.append(("Processed", signal, processed, processed_unit, "#ab47bc"))
 
