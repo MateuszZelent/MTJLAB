@@ -892,7 +892,9 @@ class AnritsuAdapter(DeviceAdapter):
                 )
             self._restore_continuous_after_live = not continuous
             if not continuous:
-                session.write("INIT:CONT ON")
+                # The MS2830A command explicitly selects Continuous mode and
+                # starts continuous measurement.
+                session.write("INIT:MODE:CONT")
         self._live = True
         return snapshot
 
@@ -917,19 +919,24 @@ class AnritsuAdapter(DeviceAdapter):
         self._assert_acquisition_allowed()
         if not self._single_sweep_supported:
             raise SafetyViolation(
-                "The recipe requires qualified Anritsu standard_scpi_opc mode; "
+                "The recipe requires the qualified Anritsu single-sweep protocol; "
                 "the current profile permits Live/Fetch only."
             )
         session = self._require_session()
         self._enter_spectrum_mode_with_rf_off()
-        session.write("INIT:CONT OFF")
-        session.write("INIT:IMM")
+        # MS2830A Spectrum Analyzer Remote Control, section 2.7 documents this
+        # exact pair for a single measurement. INIT:MODE:SING both selects
+        # Single and starts the sweep; *WAI holds the following command until
+        # the sweep is complete. Generic INIT:IMM + *OPC? is deliberately not
+        # used because it did not produce a valid trace on the target firmware.
+        session.write("INIT:MODE:SING")
+        session.write("*WAI")
         # DeviceState represents the connection/output safety state, not the
         # transient acquisition state; the analyser has no energy output here.
         self._state = DeviceState.VERIFIED
 
     def wait_complete(self, *, deadline_s: float | None = None) -> None:
-        """Wait for the single sweep's `*OPC?` result with a hard deadline."""
+        """Confirm completion after the queued ``*WAI`` with a hard deadline."""
 
         if not self._single_sweep_supported:
             raise SafetyViolation("No qualified Anritsu single-sweep protocol is configured.")
@@ -949,10 +956,14 @@ class AnritsuAdapter(DeviceAdapter):
                 # The VISA call itself must not outlive the application-level
                 # deadline. Some backends reject a zero-millisecond timeout.
                 session.timeout = max(1, min(original_timeout_ms, int(remaining * 1000)))
-                response = session.query("*OPC?").strip()
-                if response in {"1", "+1"}:
+                response = session.query("INIT:SWP?").strip()
+                if response in {"0", "+0"}:
                     self._state = DeviceState.VERIFIED
                     return
+                if response not in {"1", "+1"}:
+                    raise DeviceError(
+                        f"Anritsu returned invalid INIT:SWP? response {response!r}."
+                    )
                 time.sleep(min(0.05, max(0.0, deadline - time.monotonic())))
         except Exception:
             self.emergency_off()
@@ -970,6 +981,38 @@ class AnritsuAdapter(DeviceAdapter):
         self.start_single_sweep()
         self.wait_complete()
         return self.fetch_trace(trace)
+
+    def acquire_current_trace(self, trace: str = "TRAC1") -> SpectrumTrace:
+        """Return the analyser's current trace without initiating a sweep.
+
+        This deliberately mirrors the proven external MS2830A module: select
+        ASCII transfer and query TRAC1. After a range change the instrument can
+        temporarily return its -999 unmeasured marker, so retry the actual
+        device query until a valid current trace or the configured deadline.
+        """
+
+        trace = validate_anritsu_trace_name(trace)
+        self._assert_acquisition_allowed()
+        session = self._require_session()
+        session.write("FORM ASC")
+        timeout = parse_quantity(
+            self._settings.acquisition.operation_complete_timeout,
+            DIMENSION_TIME,
+        ).si_value
+        deadline = time.monotonic() + timeout
+        while True:
+            try:
+                return self._read_ascii_trace(session, trace)
+            except DeviceError as exc:
+                if "-999.0 unmeasured/error sentinel" not in str(exc):
+                    raise
+                if time.monotonic() >= deadline:
+                    raise DeviceError(
+                        "Anritsu did not provide a valid current spectrum before "
+                        "the acquisition deadline; every TRAC1 read contained the "
+                        "documented -999.0 unmeasured/error sentinel."
+                    ) from exc
+                time.sleep(min(0.1, max(0.0, deadline - time.monotonic())))
 
     def fetch_trace(self, trace: str = "TRAC1") -> SpectrumTrace:
         """Read one trace for a validated recipe/single-sweep workflow."""
@@ -1011,6 +1054,13 @@ class AnritsuAdapter(DeviceAdapter):
             raise DeviceError("Anritsu returned fewer than two trace points.")
         if not all(math.isfinite(value) for value in (start, stop, *values)):
             raise DeviceError("Anritsu returned NaN or infinity in the trace.")
+        invalid_points = sum(value == -999.0 for value in values)
+        if invalid_points:
+            raise DeviceError(
+                "Anritsu returned the documented -999.0 unmeasured/error sentinel "
+                f"for {invalid_points} of {points} trace points; no valid completed "
+                "spectrum is available."
+            )
         if stop <= start:
             raise DeviceError("Anritsu returned an invalid trace frequency axis.")
         step = (stop - start) / (points - 1)

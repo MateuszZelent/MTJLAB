@@ -374,8 +374,9 @@ devices:
       expected_serial:
       required_options: []
     acquisition:
-      # Enable "standard_scpi_opc" only after qualifying INIT:CONT OFF,
-      # INIT:IMM, *OPC?, and ABORT on the installed firmware.
+      # The legacy setting name "standard_scpi_opc" selects the qualified
+      # MS2830A protocol: INIT:MODE:SING, *WAI, INIT:SWP? confirmation,
+      # and ABORT.
       # Unverified mode permits manual Live/Fetch but blocks recipe checkpoints
       # so that an old trace cannot be stored as a new measurement point.
       single_sweep_mode: "unverified"

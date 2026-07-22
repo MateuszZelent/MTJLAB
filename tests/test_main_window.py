@@ -2903,7 +2903,7 @@ class MainWindowTests(unittest.TestCase):
             window.close()
             self.application.processEvents()
 
-    def test_anritsu_read_once_requests_a_fresh_sweep_after_each_result(self) -> None:
+    def test_anritsu_read_once_queries_current_trace_after_each_configuration(self) -> None:
         window = MainWindow(".config/settings.yml", simulation=True)
         try:
             anritsu = window.anritsu_page
@@ -2931,9 +2931,9 @@ class MainWindowTests(unittest.TestCase):
                 AnritsuConfigurationSnapshot(1e6, 2e6, -10.0, 101, "SPECT"),
             )
             self.assertEqual(
-                anritsu._controller.call.call_args.args, ("single_sweep", "TRAC1")
+                anritsu._controller.call.call_args.args, ("acquire_current_trace", "TRAC1")
             )
-            anritsu._result("single_sweep", first)
+            anritsu._result("acquire_current_trace", first)
             self.assertIs(anritsu._latest_trace, first)
             self.assertFalse(anritsu._fetch_pending)
 
@@ -2953,9 +2953,9 @@ class MainWindowTests(unittest.TestCase):
                 AnritsuConfigurationSnapshot(3e6, 4e6, -10.0, 501, "SPECT"),
             )
             self.assertEqual(
-                anritsu._controller.call.call_args.args, ("single_sweep", "TRAC1")
+                anritsu._controller.call.call_args.args, ("acquire_current_trace", "TRAC1")
             )
-            anritsu._result("single_sweep", second)
+            anritsu._result("acquire_current_trace", second)
             self.assertIs(anritsu._latest_trace, second)
             self.assertEqual(
                 anritsu.spectrum_plot._traces["Raw"][0].tolist(), [3e6, 4e6]

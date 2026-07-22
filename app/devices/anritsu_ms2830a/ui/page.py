@@ -2039,15 +2039,6 @@ class AnritsuPage(QWidget):
     def read_once(self) -> None:
         if self._page_state not in {AnritsuPageState.IDLE, AnritsuPageState.ERROR}:
             return
-        if not self._single_sweep_configured:
-            QMessageBox.warning(
-                self,
-                "Fresh spectrum",
-                "A fresh spectrum requires the qualified single-sweep protocol. "
-                "Enable the qualified protocol in the Anritsu acquisition profile "
-                "or use Live acquisition.",
-            )
-            return
         if self._fetch_pending:
             return
         self._fetch_pending = True
@@ -2055,7 +2046,7 @@ class AnritsuPage(QWidget):
         self.info.setText("Applying and verifying spectrum settings...")
         self.status.emit("Anritsu spectrum configuration requested before acquisition")
         self._set_page_state(AnritsuPageState.CONFIGURING)
-        if not self._configure_from_form(then="single_sweep"):
+        if not self._configure_from_form(then="current_trace"):
             self._fetch_pending = False
             self._fetch_started_monotonic = None
             self._set_page_state(AnritsuPageState.ERROR)
@@ -2512,10 +2503,10 @@ class AnritsuPage(QWidget):
                 severity="success",
             )
             self.status.emit("Anritsu configured and verified by SCPI readback")
-            if pending == "single_sweep":
-                self.info.setText("Acquiring one fresh spectrum from the instrument...")
-                self.status.emit("Anritsu fresh single-sweep acquisition started")
-                self._controller.call("single_sweep", "TRAC1")
+            if pending == "current_trace":
+                self.info.setText("Reading the current spectrum from the instrument...")
+                self.status.emit("Anritsu current-spectrum read started")
+                self._controller.call("acquire_current_trace", "TRAC1")
             elif pending == "start_live":
                 self.live.setText("Starting...")
                 self._set_page_state(AnritsuPageState.STARTING_LIVE)
@@ -2551,7 +2542,7 @@ class AnritsuPage(QWidget):
             self._set_page_state(AnritsuPageState.IDLE)
             self.info.setText("Live stopped.")
             self.status.emit("Anritsu Live stopped")
-        elif operation in {"fetch_trace", "fetch_current_trace", "single_sweep"} and isinstance(result, SpectrumTrace):
+        elif operation in {"fetch_trace", "fetch_current_trace", "acquire_current_trace", "single_sweep"} and isinstance(result, SpectrumTrace):
             self._fetch_pending = False
             finished = time.monotonic()
             if self._fetch_started_monotonic is not None:
@@ -3186,6 +3177,23 @@ class AnritsuPage(QWidget):
             )
 
     def _error(self, operation: str, error: str) -> None:
+        if (
+            operation == "fetch_current_trace"
+            and self._timer.isActive()
+            and "-999.0 unmeasured/error sentinel" in error
+        ):
+            # A Continuous sweep can briefly expose Anritsu's documented
+            # "not measured yet" marker after reconfiguration. Keep polling;
+            # never repaint the last frame as though it were newly acquired.
+            self._fetch_pending = False
+            self._fetch_started_monotonic = None
+            self._stale_frame_count += 1
+            self.info.setText(
+                "Anritsu has not completed a valid current spectrum yet; "
+                "Live will retry on the next interval."
+            )
+            self.status.emit("Anritsu Live skipped an unmeasured -999 trace")
+            return
         if operation == "configure":
             self._pending_after_spectrum_configuration = None
             self._fetch_pending = False
@@ -3226,13 +3234,13 @@ class AnritsuPage(QWidget):
             )
             self.status.emit(f"Anritsu {operation} failed: {error}")
             return
-        if operation in {"fetch_trace", "fetch_current_trace", "single_sweep"}:
+        if operation in {"fetch_trace", "fetch_current_trace", "acquire_current_trace", "single_sweep"}:
             self._fetch_pending = False
             if self._averaging_active:
                 self._finish_temporal_averaging(resume_live=False)
                 self.info.setText(f"Averaging stopped: {error}")
         if operation in {
-            "read_configuration", "configure", "start_live", "fetch_trace", "fetch_current_trace",
+            "read_configuration", "configure", "start_live", "fetch_trace", "fetch_current_trace", "acquire_current_trace",
             "single_sweep", "emergency_off",
         }:
             self._live_transition_pending = False

@@ -744,14 +744,25 @@ class AnritsuSimulator(_BaseSimulator):
         match = re.match(r"^INIT:CONT\s+(ON|OFF|1|0)$", command, re.IGNORECASE)
         if match:
             self.continuous_sweep = match.group(1).upper() in {"ON", "1"}
+            return
+        if command.upper() == "INIT:MODE:SING":
+            self.continuous_sweep = False
+            self.trace_frame += 1
+            return
+        if command.upper() == "INIT:MODE:CONT":
+            self.continuous_sweep = True
+            self.trace_frame += 1
+            return
+        if command.upper() == "*WAI":
+            return
 
     def _query(self, command: str) -> str:
         if command == "*IDN?":
             return "ANRITSU,MS2830A,SIM000001,sim-1.0"
         if command == "*OPT?":
             return "041,008,020"
-        if command == "*OPC?":
-            return "1"
+        if command == "INIT:SWP?":
+            return "0"
         if command == "FORM?":
             return "ASC,0"
         if command == "INST?":

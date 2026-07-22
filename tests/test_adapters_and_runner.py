@@ -1855,6 +1855,83 @@ class AdapterAndRunnerTests(unittest.TestCase):
         self.assertEqual(trace.frequencies_hz[-1], 2e6)
         self.assertEqual(len(trace.powers_dbm), 101)
 
+    def test_anritsu_live_queries_the_instrument_for_every_frame(self) -> None:
+        frame = 0
+
+        def next_trace(_command: str) -> str:
+            nonlocal frame
+            frame += 1
+            return ",".join(str(-70 + frame + index / 100) for index in range(101))
+
+        session = FakeVisaSession(
+            responses={
+                "*IDN?": "ANRITSU,MS2830A,123456,1.0",
+                "INST?": "SPECT",
+                "FORM?": "ASC,0",
+                "INIT:CONT?": "1",
+                "FREQ:STAR?": "1000000",
+                "FREQ:STOP?": "2000000",
+                "DISP:WIND:TRAC:Y:RLEV?": "0",
+                "SWE:POIN?": "101",
+                "TRAC? TRAC1": next_trace,
+            }
+        )
+        adapter = AnritsuAdapter(self.settings, session_factory=FakeVisaSessionFactory(session))
+        adapter.connect()
+        adapter.start_live(ensure_continuous=True)
+
+        first = adapter.fetch_current_trace()
+        second = adapter.fetch_current_trace()
+
+        self.assertEqual(session.writes.count("TRAC? TRAC1"), 2)
+        self.assertNotEqual(first.powers_dbm, second.powers_dbm)
+
+    def test_anritsu_rejects_unmeasured_minus_999_trace(self) -> None:
+        session = FakeVisaSession(
+            responses={
+                "*IDN?": "ANRITSU,MS2830A,123456,1.0",
+                "FREQ:STAR?": "1000000",
+                "FREQ:STOP?": "2000000",
+                "SWE:POIN?": "101",
+                "TRAC? TRAC1": ",".join("-999" for _ in range(101)),
+            }
+        )
+        adapter = AnritsuAdapter(self.settings, session_factory=FakeVisaSessionFactory(session))
+        adapter.connect()
+
+        with self.assertRaisesRegex(DeviceError, "unmeasured/error sentinel"):
+            adapter.fetch_trace()
+
+    def test_anritsu_current_snapshot_retries_minus_999_without_starting_sweep(self) -> None:
+        reads = 0
+
+        def trace_after_first_unmeasured(_command: str) -> str:
+            nonlocal reads
+            reads += 1
+            if reads == 1:
+                return ",".join("-999" for _ in range(101))
+            return ",".join(str(-60 + index / 100) for index in range(101))
+
+        session = FakeVisaSession(
+            responses={
+                "*IDN?": "ANRITSU,MS2830A,123456,1.0",
+                "FREQ:STAR?": "1000000",
+                "FREQ:STOP?": "2000000",
+                "SWE:POIN?": "101",
+                "TRAC? TRAC1": trace_after_first_unmeasured,
+            }
+        )
+        adapter = AnritsuAdapter(self.settings, session_factory=FakeVisaSessionFactory(session))
+        adapter.connect()
+
+        trace = adapter.acquire_current_trace()
+
+        self.assertEqual(len(trace.powers_dbm), 101)
+        self.assertEqual(session.writes.count("TRAC? TRAC1"), 2)
+        self.assertIn("FORM ASC", session.writes)
+        self.assertFalse(any(command.startswith("INIT") for command in session.writes))
+        self.assertNotIn("*WAI", session.writes)
+
     def test_anritsu_reads_current_configuration_without_writes_or_acquisition_unlock(self) -> None:
         session = FakeVisaSession(
             responses={
@@ -1943,7 +2020,7 @@ class AdapterAndRunnerTests(unittest.TestCase):
         adapter.stop_live()
 
         self.assertNotIn("TRAC:TYPE?", session.writes)
-        self.assertIn("INIT:CONT ON", session.writes)
+        self.assertIn("INIT:MODE:CONT", session.writes)
         self.assertIn("INIT:CONT OFF", session.writes)
 
     def test_anritsu_live_does_not_depend_on_trace_type_query(self) -> None:
@@ -1969,7 +2046,7 @@ class AdapterAndRunnerTests(unittest.TestCase):
 
         self.assertTrue(adapter.live)
         self.assertNotIn("TRAC:TYPE?", session.writes)
-        self.assertNotIn("INIT:CONT ON", session.writes)
+        self.assertNotIn("INIT:MODE:CONT", session.writes)
 
     def test_anritsu_signal_generator_requires_qualified_limits_and_readback(self) -> None:
         from app.devices.simulators import SimulatedVisaFactory
@@ -2329,22 +2406,49 @@ root:
 
         self.assertEqual(len(session.writes), writes_before)
 
-    def test_anritsu_opc_query_uses_and_restores_hard_visa_deadline(self) -> None:
+    def test_anritsu_sweep_status_uses_and_restores_hard_visa_deadline(self) -> None:
         session = FakeVisaSession(
             responses={"*IDN?": "ANRITSU,MS2830A,123456,1.0"},
             timeout=10_000,
         )
 
-        def opc(_command: str) -> str:
+        def sweep_status(_command: str) -> str:
             self.assertGreater(session.timeout, 0)
             self.assertLessEqual(session.timeout, 50)
-            return "1"
+            return "0"
 
-        session.responses["*OPC?"] = opc
+        session.responses["INIT:SWP?"] = sweep_status
         adapter = AnritsuAdapter(self.settings, session_factory=FakeVisaSessionFactory(session))
         adapter.connect()
         adapter.wait_complete(deadline_s=0.05)
         self.assertEqual(session.timeout, 10_000)
+
+    def test_anritsu_recipe_single_sweep_uses_documented_command_order(self) -> None:
+        values = ",".join(str(-60 + index / 100) for index in range(101))
+        session = FakeVisaSession(
+            responses={
+                "*IDN?": "ANRITSU,MS2830A,123456,1.0",
+                "INST?": "SPECT",
+                "INIT:SWP?": "0",
+                "FREQ:STAR?": "1000000",
+                "FREQ:STOP?": "2000000",
+                "SWE:POIN?": "101",
+                "TRAC? TRAC1": values,
+            }
+        )
+        adapter = AnritsuAdapter(self.settings, session_factory=FakeVisaSessionFactory(session))
+        adapter.connect()
+
+        adapter.acquire_single_sweep()
+
+        commands = session.writes
+        single = commands.index("INIT:MODE:SING")
+        wait = commands.index("*WAI")
+        status = commands.index("INIT:SWP?")
+        trace = commands.index("TRAC? TRAC1")
+        self.assertLess(single, wait)
+        self.assertLess(wait, status)
+        self.assertLess(status, trace)
 
     def test_rigol_advanced_modes_force_output_off_and_reject_implicit_switching(self) -> None:
         session = FakeVisaSession(
@@ -2976,7 +3080,7 @@ root:
                 "DISP:WIND:TRAC:Y:RLEV?": "0",
                 "SWE:POIN?": "101",
                 "TRAC? TRAC1": values,
-                "*OPC?": "1",
+                "INIT:SWP?": "0",
             }
         )
         rigol = RigolAdapter(self.settings, session_factory=FakeVisaSessionFactory(rigol_session))
@@ -3012,7 +3116,8 @@ root:
         stored_point, _stored_trace = writer.points[0]
         self.assertEqual(stored_point.metadata["spectrum_average_count"], 3)
         self.assertEqual(writer.events[-1][0], "run_completed")
-        self.assertEqual(anritsu_session.writes.count("INIT:IMM"), 3)
+        self.assertEqual(anritsu_session.writes.count("INIT:MODE:SING"), 3)
+        self.assertEqual(anritsu_session.writes.count("*WAI"), 3)
 
     def test_operator_stop_runs_finally_ramp_and_closes_as_aborted(self) -> None:
         from app.devices.simulators import SimulatedVisaFactory, simulated_station_settings
