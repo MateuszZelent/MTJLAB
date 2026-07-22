@@ -225,9 +225,8 @@ class QuantityAndSafetyTests(unittest.TestCase):
             high_level="1 mV",
             low_level="-1 mV",
             output_load="HIGHZ",
-            dut_min_impedance="50 ohm",
         )
-        self.assertAlmostEqual(estimate.peak_absolute_current_a, 10e-6)
+        self.assertAlmostEqual(estimate.peak_absolute_current_a, 20e-6)
         self.assertAlmostEqual(estimate.peak_estimated_dut_power_w, 5e-9)
         raw = deepcopy(SettingsRepository(SETTINGS_TEMPLATE).load().raw)
         limits = raw["devices"]["rigol"]["safety"]["channels"]["1"]["lab_limits"]
@@ -245,7 +244,6 @@ class QuantityAndSafetyTests(unittest.TestCase):
                 high_level="1 V",
                 low_level="-1 V",
                 output_load="HIGHZ",
-                dut_min_impedance="1 ohm",
             )
 
     def test_rigol_estimated_dut_power_limit_is_enforced_independently(self) -> None:
@@ -262,7 +260,6 @@ class QuantityAndSafetyTests(unittest.TestCase):
                 high_level="100 mV",
                 low_level="-100 mV",
                 output_load="HIGHZ",
-                dut_min_impedance="50 ohm",
             )
 
     def test_repository_persists_configuration_change(self) -> None:
@@ -361,7 +358,6 @@ class QuantityAndSafetyTests(unittest.TestCase):
                 high_level="1 mV",
                 low_level="-1 mV",
                 output_load="HIGHZ",
-                dut_min_impedance="50 ohm",
             )
 
     def test_anritsu_reference_level_uses_documented_hardware_range(self) -> None:
@@ -389,10 +385,9 @@ class QuantityAndSafetyTests(unittest.TestCase):
         settings = simulation_settings()
         rigol_channel = settings.rigol.safety.channels["1"]
         for field, values in (
-            ("frequency", (float("nan"), 0.001, -0.001, "50 ohm")),
-            ("high level", (1000.0, float("inf"), -0.001, "50 ohm")),
-            ("low level", (1000.0, 0.001, float("nan"), "50 ohm")),
-            ("DUT impedance", (1000.0, 0.001, -0.001, float("nan"))),
+            ("frequency", (float("nan"), 0.001, -0.001)),
+            ("high level", (1000.0, float("inf"), -0.001)),
+            ("low level", (1000.0, 0.001, float("nan"))),
         ):
             with self.subTest(field=field):
                 with self.assertRaisesRegex(SafetyViolation, "finite"):
@@ -404,7 +399,6 @@ class QuantityAndSafetyTests(unittest.TestCase):
                         high_level=values[1],
                         low_level=values[2],
                         output_load="HIGHZ",
-                        dut_min_impedance=values[3],
                     )
         for load in (float("nan"), "not-a-load"):
             with self.subTest(output_load=load):
@@ -417,7 +411,6 @@ class QuantityAndSafetyTests(unittest.TestCase):
                         high_level=0.001,
                         low_level=-0.001,
                         output_load=load,
-                        dut_min_impedance=50.0,
                     )
 
     def test_keithley_preflight_rejects_source_compliance_power(self) -> None:

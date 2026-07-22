@@ -5,7 +5,7 @@ from __future__ import annotations
 import math
 from collections import defaultdict, deque
 from collections.abc import Mapping
-from dataclasses import dataclass, replace
+from dataclasses import asdict, dataclass, replace
 
 from PySide6.QtCore import Qt, Signal
 from PySide6.QtWidgets import (
@@ -326,7 +326,10 @@ class RigolPage(QWidget):
         self.estimate.setObjectName("muted")
         self.estimate.setWordWrap(True)
         safety_layout.addWidget(self.estimate)
-        warning = BodyLabel("⚠ This estimate is not a measurement. Verify DUT impedance and configured limits before OUTPUT ON.")
+        warning = BodyLabel(
+            "⚠ Conservative hardware bound from the Rigol 50 Ω source model; "
+            "it does not assume or require a fixed MTJ impedance."
+        )
         warning.setObjectName("rigolWarning")
         warning.setWordWrap(True)
         safety_layout.addWidget(warning)
@@ -806,9 +809,18 @@ class RigolPage(QWidget):
             )
             for channel in (1, 2)
         }
+        self._channel_advanced_defaults = {
+            channel: dict(
+                self._station_settings.rigol.safety.channels[str(channel)].defaults
+            )
+            for channel in (1, 2)
+        }
         self._visible_form_channel = int(self.channel.currentText())
         self._load_basic_snapshot(
             self._channel_form_snapshots[self._visible_form_channel]
+        )
+        self._load_advanced_defaults(
+            self._channel_advanced_defaults[self._visible_form_channel]
         )
 
     def configuration_snapshots(self) -> dict[int, RigolConfigurationSnapshot]:
@@ -818,6 +830,105 @@ class RigolPage(QWidget):
         channel = int(self.channel.currentText())
         snapshots[channel] = replace(self.configuration_snapshot(), channel=channel)
         return snapshots
+
+    def settings_defaults(self) -> dict[int, dict[str, object]]:
+        """Return complete per-channel forms suitable for settings.yml persistence."""
+
+        channel = int(self.channel.currentText())
+        self._channel_advanced_defaults[channel] = self._advanced_defaults_snapshot()
+        snapshots = self.configuration_snapshots()
+        result: dict[int, dict[str, object]] = {}
+        for channel, snapshot in snapshots.items():
+            payload = asdict(snapshot)
+            payload.pop("channel", None)
+            payload["output_load_setting"] = payload.pop("output_load")
+            payload["output_enabled"] = False
+            payload.update(self._channel_advanced_defaults[channel])
+            result[channel] = payload
+        return result
+
+    def _advanced_defaults_snapshot(self) -> dict[str, object]:
+        return {
+            "modulation_enabled": self.mod_enabled.isChecked(),
+            "modulation_type": self.mod_type.currentText(),
+            "modulation_source": self.mod_source.currentText(),
+            "modulation_rate": self.mod_rate.text().strip(),
+            "modulation_parameter": self.mod_parameter.text().strip(),
+            "modulation_shape": self.mod_shape.currentText(),
+            "modulation_polarity": self.mod_polarity.currentText(),
+            "sweep_enabled": self.sweep_enabled.isChecked(),
+            "sweep_start": self.sweep_start.text().strip(),
+            "sweep_stop": self.sweep_stop.text().strip(),
+            "sweep_duration": self.sweep_duration.text().strip(),
+            "sweep_start_hold": self.sweep_start_hold.text().strip(),
+            "sweep_stop_hold": self.sweep_stop_hold.text().strip(),
+            "sweep_return_time": self.sweep_return_time.text().strip(),
+            "sweep_spacing": self.sweep_spacing.currentText(),
+            "sweep_steps": self.sweep_steps.value(),
+            "sweep_trigger": self.sweep_trigger.currentText(),
+            "sweep_trigger_slope": self.sweep_trigger_slope.currentText(),
+            "sweep_trigger_out": self.sweep_trigger_out.currentText(),
+            "burst_enabled": self.burst_enabled.isChecked(),
+            "burst_mode": self.burst_mode.currentText(),
+            "burst_cycles": self.burst_cycles.value(),
+            "burst_phase": self.burst_phase.text().strip(),
+            "burst_period": self.burst_period.text().strip(),
+            "burst_delay": self.burst_delay.text().strip(),
+            "burst_trigger": self.burst_trigger.currentText(),
+            "burst_trigger_slope": self.burst_trigger_slope.currentText(),
+            "burst_trigger_out": self.burst_trigger_out.currentText(),
+            "burst_gate_polarity": self.burst_gate_polarity.currentText(),
+            "burst_idle": self.burst_idle.currentText(),
+            "counter_state": self.counter_state.currentText(),
+            "counter_coupling": self.counter_coupling.currentText(),
+            "counter_gate": self.counter_gate.currentText(),
+            "counter_hf_rejection": self.counter_hf_rejection.isChecked(),
+            "counter_level": self.counter_level.text().strip(),
+            "counter_sensitivity": self.counter_sensitivity.text().strip(),
+        }
+
+    def _load_advanced_defaults(self, defaults: Mapping[str, object]) -> None:
+        def text(name: str, fallback: str) -> str:
+            return str(defaults.get(name, fallback))
+
+        self.mod_enabled.setChecked(bool(defaults.get("modulation_enabled", False)))
+        self.mod_type.setCurrentText(text("modulation_type", "AM"))
+        self.mod_source.setCurrentText(text("modulation_source", "INT"))
+        self.mod_rate.setText(text("modulation_rate", "1 kHz"))
+        self.mod_shape.setCurrentText(text("modulation_shape", "SIN"))
+        self.mod_polarity.setCurrentText(text("modulation_polarity", "POS"))
+        self.mod_parameter.setText(text("modulation_parameter", "50"))
+        self.sweep_enabled.setChecked(bool(defaults.get("sweep_enabled", False)))
+        self.sweep_start.setText(text("sweep_start", "100 Hz"))
+        self.sweep_stop.setText(text("sweep_stop", "1 kHz"))
+        self.sweep_duration.setText(text("sweep_duration", "1 s"))
+        self.sweep_start_hold.setText(text("sweep_start_hold", "0 s"))
+        self.sweep_stop_hold.setText(text("sweep_stop_hold", "0 s"))
+        self.sweep_return_time.setText(text("sweep_return_time", "0 s"))
+        self.sweep_spacing.setCurrentText(text("sweep_spacing", "LIN"))
+        self.sweep_steps.setValue(int(defaults.get("sweep_steps", 10)))
+        self.sweep_trigger.setCurrentText(text("sweep_trigger", "INT"))
+        self.sweep_trigger_slope.setCurrentText(text("sweep_trigger_slope", "POS"))
+        self.sweep_trigger_out.setCurrentText(text("sweep_trigger_out", "OFF"))
+        self.burst_enabled.setChecked(bool(defaults.get("burst_enabled", False)))
+        self.burst_mode.setCurrentText(text("burst_mode", "TRIG"))
+        self.burst_cycles.setValue(int(defaults.get("burst_cycles", 1)))
+        self.burst_phase.setText(text("burst_phase", "0"))
+        self.burst_period.setText(text("burst_period", "1 ms"))
+        self.burst_delay.setText(text("burst_delay", "0 s"))
+        self.burst_trigger.setCurrentText(text("burst_trigger", "INT"))
+        self.burst_trigger_slope.setCurrentText(text("burst_trigger_slope", "POS"))
+        self.burst_trigger_out.setCurrentText(text("burst_trigger_out", "OFF"))
+        self.burst_gate_polarity.setCurrentText(text("burst_gate_polarity", "NORM"))
+        self.burst_idle.setCurrentText(text("burst_idle", "FPT"))
+        self.counter_state.setCurrentText(text("counter_state", "OFF"))
+        self.counter_coupling.setCurrentText(text("counter_coupling", "AC"))
+        self.counter_gate.setCurrentText(text("counter_gate", "AUTO"))
+        self.counter_hf_rejection.setChecked(
+            bool(defaults.get("counter_hf_rejection", False))
+        )
+        self.counter_level.setText(text("counter_level", "0 V"))
+        self.counter_sensitivity.setText(text("counter_sensitivity", "25"))
 
     def configuration_snapshot(self) -> RigolConfigurationSnapshot:
         """Return the visible carrier state without communicating with hardware."""
@@ -1069,9 +1180,9 @@ class RigolPage(QWidget):
         for name, checkbox, apply_button in self._advanced_controls():
             confirmed = states[name]
             pending = (channel, name) in self._pending_advanced_requests
-            checkbox.blockSignals(True)
-            checkbox.setChecked(confirmed is True)
-            checkbox.blockSignals(False)
+            # The checkbox is the editable requested configuration. Hardware
+            # confirmation is separate session state and must never overwrite
+            # a saved form value merely because this session has no readback.
             checkbox.setEnabled(not pending)
             apply_button.setEnabled(not pending)
             semantic = "pending" if pending else "unknown" if confirmed is None else "confirmed"
@@ -1249,8 +1360,12 @@ class RigolPage(QWidget):
             self._channel_form_snapshots[previous_channel] = replace(
                 self.configuration_snapshot(), channel=previous_channel
             )
+            self._channel_advanced_defaults[
+                previous_channel
+            ] = self._advanced_defaults_snapshot()
             self._visible_form_channel = next_channel
             self._load_basic_snapshot(self._channel_form_snapshots[next_channel])
+            self._load_advanced_defaults(self._channel_advanced_defaults[next_channel])
         self.output_action_context.setText(f"Physical output · CH{value}")
         self._refresh_confirmed_advanced_controls()
         self._refresh_rigol_output_controls()

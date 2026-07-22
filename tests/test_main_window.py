@@ -702,7 +702,7 @@ class MainWindowTests(unittest.TestCase):
             parameters = (
                 rigol.channel, rigol.waveform, rigol.time_mode, rigol.frequency, rigol.period,
                 rigol.level_mode, rigol.high_level, rigol.low_level, rigol.vpp, rigol.offset,
-                rigol.dut_impedance, rigol.phase, rigol.duty, rigol.ramp_symmetry,
+                rigol.phase, rigol.duty, rigol.ramp_symmetry,
                 rigol.pulse_width, rigol.pulse_leading, rigol.pulse_trailing, rigol.load,
                 rigol.output_polarity, rigol.output_mode, rigol.gate_polarity,
                 rigol.sync_enabled, rigol.sync_polarity, rigol.sync_delay, rigol.mod_enabled,
@@ -3730,6 +3730,12 @@ class MainWindowTests(unittest.TestCase):
                 rigol.high_level.setText("3 mV")
                 rigol.low_level.setText("-2 mV")
                 rigol.phase.setText("15")
+                rigol.mod_enabled.setChecked(True)
+                rigol.mod_type.setCurrentText("FM")
+                rigol.mod_rate.setText("3 kHz")
+                rigol.mod_parameter.setText("250 Hz")
+                rigol.counter_coupling.setCurrentText("DC")
+                rigol.counter_level.setText("20 mV")
                 rigol.channel.setCurrentText("2")
                 rigol.waveform.setCurrentText("SQU")
                 rigol.level_mode.setCurrentText(rigol.LEVEL_MODE_HIGH_LOW)
@@ -3737,8 +3743,18 @@ class MainWindowTests(unittest.TestCase):
                 rigol.high_level.setText("5 mV")
                 rigol.low_level.setText("-4 mV")
                 rigol.duty.setText("40")
+                rigol.sweep_enabled.setChecked(True)
+                rigol.sweep_start.setText("2 kHz")
+                rigol.sweep_stop.setText("8 kHz")
+                rigol.sweep_steps.setValue(23)
+                rigol.burst_cycles.setValue(7)
+                window.settings_page._raw["ui"]["theme"] = "dark"
+                window.settings_page._dirty = True
 
                 window._save_all_settings()
+                saved_channels = SettingsRepository(path).load().settings.rigol.safety.channels
+                self.assertTrue(saved_channels["1"].defaults["modulation_enabled"])
+                self.assertTrue(saved_channels["2"].defaults["sweep_enabled"])
             finally:
                 window.close()
                 self.application.processEvents()
@@ -3753,12 +3769,23 @@ class MainWindowTests(unittest.TestCase):
                 self.assertEqual(rigol.high_level.text(), "3 mV")
                 self.assertEqual(rigol.low_level.text(), "-2 mV")
                 self.assertEqual(rigol.phase.text(), "15")
+                self.assertTrue(rigol.mod_enabled.isChecked())
+                self.assertEqual(rigol.mod_type.currentText(), "FM")
+                self.assertEqual(rigol.mod_rate.text(), "3 kHz")
+                self.assertEqual(rigol.mod_parameter.text(), "250 Hz")
+                self.assertEqual(rigol.counter_coupling.currentText(), "DC")
+                self.assertEqual(rigol.counter_level.text(), "20 mV")
                 rigol.channel.setCurrentText("2")
                 self.assertEqual(rigol.waveform.currentText(), "SQU")
                 self.assertEqual(rigol.frequency.text(), "4 kHz")
                 self.assertEqual(rigol.high_level.text(), "5 mV")
                 self.assertEqual(rigol.low_level.text(), "-4 mV")
                 self.assertEqual(rigol.duty.text(), "40")
+                self.assertTrue(rigol.sweep_enabled.isChecked())
+                self.assertEqual(rigol.sweep_start.text(), "2 kHz")
+                self.assertEqual(rigol.sweep_stop.text(), "8 kHz")
+                self.assertEqual(rigol.sweep_steps.value(), 23)
+                self.assertEqual(rigol.burst_cycles.value(), 7)
             finally:
                 restarted.close()
                 self.application.processEvents()
@@ -3773,6 +3800,8 @@ class MainWindowTests(unittest.TestCase):
             try:
                 combo = window.lakeshore_gaussmeter_page.sample_interval
                 combo.setCurrentIndex(combo.findData(2000))
+                window.settings_page._raw["ui"]["theme"] = "dark"
+                window.settings_page._dirty = True
                 window._save_all_settings()
             finally:
                 window.close()
@@ -3786,6 +3815,81 @@ class MainWindowTests(unittest.TestCase):
                     restarted.lakeshore_gaussmeter_page.sample_interval.currentData(),
                     2000,
                 )
+            finally:
+                restarted.close()
+                self.application.processEvents()
+
+    def test_moke_display_preferences_survive_global_save_and_restart(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "settings.yml"
+            write_engineer_settings(path)
+            window = MainWindow(
+                path, simulation=False, authenticated_username=TEST_ENGINEER
+            )
+            try:
+                page = window.moke_box_page
+                page.sample_interval.setCurrentIndex(
+                    page.sample_interval.findData(2000)
+                )
+                page.refresh_interval.setCurrentIndex(
+                    page.refresh_interval.findData(250)
+                )
+                page.history_window.setCurrentIndex(
+                    page.history_window.findData(600)
+                )
+                window._save_all_settings()
+            finally:
+                window.close()
+                self.application.processEvents()
+
+            restarted = MainWindow(
+                path, simulation=False, authenticated_username=TEST_ENGINEER
+            )
+            try:
+                page = restarted.moke_box_page
+                self.assertEqual(page.sample_interval.currentData(), 2000)
+                self.assertEqual(page.refresh_interval.currentData(), 250)
+                self.assertEqual(page.history_window.currentData(), 600)
+            finally:
+                restarted.close()
+                self.application.processEvents()
+
+    def test_keithley_manual_forms_survive_global_save_and_restart(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "settings.yml"
+            write_engineer_settings(path)
+            window = MainWindow(
+                path, simulation=False, authenticated_username=TEST_ENGINEER
+            )
+            try:
+                keithley = window.keithley_page
+                keithley.channel.setCurrentText("A")
+                keithley.nplc.setText("2")
+                keithley.settle.setText("150 ms")
+                keithley.channel.setCurrentText("B")
+                keithley.nplc.setText("3")
+                keithley.settle.setText("250 ms")
+                window._save_all_settings()
+                for _attempt in range(50):
+                    if not window._keithley_defaults_in_flight:
+                        break
+                    QTest.qWait(100)
+                self.assertFalse(window._keithley_defaults_in_flight)
+            finally:
+                window.close()
+                self.application.processEvents()
+
+            restarted = MainWindow(
+                path, simulation=False, authenticated_username=TEST_ENGINEER
+            )
+            try:
+                keithley = restarted.keithley_page
+                keithley.channel.setCurrentText("A")
+                self.assertEqual(keithley.nplc.text(), "2")
+                self.assertEqual(keithley.settle.text(), "150 ms")
+                keithley.channel.setCurrentText("B")
+                self.assertEqual(keithley.nplc.text(), "3")
+                self.assertEqual(keithley.settle.text(), "250 ms")
             finally:
                 restarted.close()
                 self.application.processEvents()

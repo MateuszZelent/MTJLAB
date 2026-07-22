@@ -434,6 +434,12 @@ class RigolAdapter(DeviceAdapter):
         self._burst_enabled.clear()
         self._last_burst_config.clear()
 
+    def refresh_station_context(self, station: object) -> None:
+        if not isinstance(station, StationSettings):
+            raise TypeError("Rigol context refresh requires StationSettings.")
+        self._station = station
+        self._settings = station.rigol
+
     def _read_output_states(self) -> dict[int, bool]:
         session = self._require_session()
         states: dict[int, bool] = {}

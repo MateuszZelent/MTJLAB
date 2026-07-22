@@ -629,6 +629,41 @@ class AdapterAndRunnerTests(unittest.TestCase):
             "10 mA",
         )
 
+    def test_saved_form_defaults_refresh_adapter_before_later_limit_update(self) -> None:
+        defaults_raw = deepcopy(self.settings.model_dump(mode="python"))
+        defaults_raw["devices"]["rigol"]["safety"]["channels"]["1"][
+            "defaults"
+        ]["frequency"] = "2 kHz"
+        defaults_raw["devices"]["keithley"]["safety"]["channels"]["B"][
+            "defaults"
+        ]["nplc"] = 2.0
+        defaults_raw["devices"]["anritsu"]["safety"]["defaults"][
+            "start_frequency"
+        ] = "2 MHz"
+        with_defaults = StationSettings.model_validate(defaults_raw)
+        adapters = (
+            RigolAdapter(self.settings),
+            KeithleyAdapter(self.settings),
+            AnritsuAdapter(self.settings),
+        )
+        for adapter in adapters:
+            adapter.refresh_station_context(with_defaults)
+
+        limits_raw = deepcopy(with_defaults.model_dump(mode="python"))
+        limits_raw["devices"]["rigol"]["safety"]["channels"]["1"][
+            "lab_limits"
+        ]["frequency"]["max"] = "900 kHz"
+        limits_raw["devices"]["keithley"]["safety"]["channels"]["B"][
+            "lab_limits"
+        ]["source_current"]["max"] = "9 mA"
+        limits_raw["devices"]["anritsu"]["safety"]["frequency"]["max"] = (
+            "19 GHz"
+        )
+        updated = StationSettings.model_validate(limits_raw)
+
+        for adapter in adapters:
+            adapter.apply_limit_settings(updated)
+
     def test_keithley_rejects_unconfirmed_output_state(self) -> None:
         raw = deepcopy(self.settings.model_dump(mode="python"))
         raw["devices"]["keithley"]["safety"]["allow_output_enable"] = True

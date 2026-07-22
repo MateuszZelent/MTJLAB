@@ -13,6 +13,7 @@ from app.domain.quantities import (
     DIMENSION_RESISTANCE,
     DIMENSION_VOLTAGE,
     Quantity,
+    QuantityError,
     parse_quantity,
 )
 from app.settings.models import RigolChannelSettings, RigolSafety
@@ -148,9 +149,12 @@ def validate_rigol_waveform(
     waveform_normalized = waveform.strip().upper()
     if waveform_normalized not in channel.allowed_waveforms:
         raise SafetyViolation(f"Waveform {waveform_normalized} is not allowed for this channel.")
-    freq_hz = parse_quantity(frequency, DIMENSION_FREQUENCY, require_unit=not isinstance(frequency, (int, float))).si_value
-    high_v = parse_quantity(high_level, DIMENSION_VOLTAGE, require_unit=not isinstance(high_level, (int, float))).si_value
-    low_v = parse_quantity(low_level, DIMENSION_VOLTAGE, require_unit=not isinstance(low_level, (int, float))).si_value
+    try:
+        freq_hz = parse_quantity(frequency, DIMENSION_FREQUENCY, require_unit=not isinstance(frequency, (int, float))).si_value
+        high_v = parse_quantity(high_level, DIMENSION_VOLTAGE, require_unit=not isinstance(high_level, (int, float))).si_value
+        low_v = parse_quantity(low_level, DIMENSION_VOLTAGE, require_unit=not isinstance(low_level, (int, float))).si_value
+    except QuantityError as exc:
+        raise SafetyViolation(f"Invalid Rigol waveform quantity: {exc}") from exc
     if not all(math.isfinite(value) for value in (freq_hz, high_v, low_v)):
         raise SafetyViolation("Rigol frequency and voltage levels must be finite.")
     if waveform_normalized not in {"DC", "NOIS"} and freq_hz <= 0:

@@ -20,6 +20,7 @@ from qfluentwidgets import BodyLabel, CaptionLabel, CardWidget, CheckBox, ComboB
 from app.ui.dialogs import StationDialog
 
 from app.devices.moke_box.models import MokeHallVoltageReading, hall_field_from_voltage
+from app.domain.quantities import DIMENSION_TIME, parse_quantity
 from app.settings.models import StationSettings
 from app.ui.design_system import plot_theme, tokens_for
 from app.ui.widgets import FluentTabView
@@ -391,6 +392,19 @@ class MokeBoxPage(QWidget):
     def set_settings(self, settings: StationSettings) -> None:
         self._settings = settings
         profile = settings.moke_box
+        for combo, configured in (
+            (self.sample_interval, profile.live_interval),
+            (self.refresh_interval, profile.plot_refresh_interval),
+            (self.history_window, profile.history_window),
+        ):
+            configured_ms = round(
+                parse_quantity(configured, DIMENSION_TIME).si_value * 1000
+            )
+            closest = min(
+                range(combo.count()),
+                key=lambda index: abs(int(combo.itemData(index)) - configured_ms),
+            )
+            combo.setCurrentIndex(closest)
         self.endpoint.setText(f"Endpoint  {profile.endpoint or 'not configured'}")
         if not profile.enabled or not profile.protocol_qualified or not profile.endpoint:
             self.safety_note.setText(

@@ -446,6 +446,9 @@ devices:
     protocol_qualified: false
     allow_vout_control: false
     allowed_vout_channels: []
+    live_interval: 1 s
+    plot_refresh_interval: 500 ms
+    history_window: 300 s
 
   lakeshore_gaussmeter:
     enabled: false

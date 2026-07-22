@@ -1769,6 +1769,53 @@ root:
             page._close_discard_confirmed = True
             page.close()
 
+    def test_legacy_anritsu_placeholder_is_upgraded_from_current_form(self) -> None:
+        page = RecipePage(simulation_settings())
+        try:
+            source = """\
+schema_version: 1
+name: legacy-anritsu
+root:
+  id: root
+  type: sequence
+  children:
+    - id: anritsu-spectrum-old
+      type: sequence
+      device_module: anritsu
+      operation: configure_selected_parameters
+      configuration_required: true
+      parameter_actions: []
+      children: []
+"""
+            page._apply_builder_source(source, "Loaded legacy Anritsu")
+            page.set_anritsu_snapshot_provider(
+                lambda: AnritsuConfigurationSnapshot(
+                    start_hz=400e6,
+                    stop_hz=6e9,
+                    reference_level_dbm=-10,
+                    points=10001,
+                    instrument_mode="SPECT",
+                )
+            )
+
+            self.assertTrue(page._repair_missing_anritsu_snapshots())
+
+            node = parse_recipe_text(page.editor.toPlainText()).root.children[0]
+            self.assertFalse(node.data["configuration_required"])
+            self.assertEqual(
+                node.data["configuration"],
+                {
+                    "start_frequency": "400000000 Hz",
+                    "stop_frequency": "6000000000 Hz",
+                    "reference_level": "-10 dBm",
+                    "points": 10001,
+                },
+            )
+            self.assertFalse(page._repair_missing_anritsu_snapshots())
+        finally:
+            page._close_discard_confirmed = True
+            page.close()
+
     def test_acquire_once_is_a_separate_draggable_library_block(self) -> None:
         page = RecipePage(simulation_settings())
         try:

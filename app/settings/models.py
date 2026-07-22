@@ -491,11 +491,20 @@ class MokeBoxSettings(StrictModel):
     protocol_qualified: bool = False
     allow_vout_control: bool = False
     allowed_vout_channels: tuple[int, ...] = ()
+    live_interval: str = "1 s"
+    plot_refresh_interval: str = "500 ms"
+    history_window: str = "300 s"
 
     @model_validator(mode="after")
     def validate_timeout(self) -> "MokeBoxSettings":
         if parse_quantity(self.timeout, DIMENSION_TIME).si_value <= 0:
             raise ValueError("MOKE Box timeout must be positive")
+        if parse_quantity(self.live_interval, DIMENSION_TIME).si_value < 0.5:
+            raise ValueError("MOKE Box live_interval must be at least 500 ms")
+        if parse_quantity(self.plot_refresh_interval, DIMENSION_TIME).si_value < 0.1:
+            raise ValueError("MOKE Box plot_refresh_interval must be at least 100 ms")
+        if parse_quantity(self.history_window, DIMENSION_TIME).si_value < 60:
+            raise ValueError("MOKE Box history_window must be at least 1 minute")
         if self.allow_vout_control or self.allowed_vout_channels:
             raise ValueError("MOKE Box is read-only; VOUT control permissions are forbidden")
         if any(channel not in range(8) for channel in self.allowed_vout_channels):

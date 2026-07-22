@@ -291,6 +291,12 @@ class KeithleyAdapter(DeviceAdapter):
         self._settings = station.keithley
         self._last_request.clear()
 
+    def refresh_station_context(self, station: object) -> None:
+        if not isinstance(station, StationSettings):
+            raise TypeError("Keithley context refresh requires StationSettings.")
+        self._station = station
+        self._settings = station.keithley
+
     def _clear_errors(self) -> None:
         self._require_session().write("errorqueue.clear()")
 

@@ -2497,6 +2497,7 @@ class KeithleyPage(QWidget):
             self.level.setText(snapshot.source_level)
             self.compliance.setText(snapshot.compliance)
             self.nplc.setText(snapshot.nplc)
+            self.settle.setText(snapshot.settling_time)
             self.sense_mode.setCurrentText(snapshot.sense_mode)
             self.source_autorange.setChecked(snapshot.source_autorange)
             self.source_range.setText(snapshot.source_range)

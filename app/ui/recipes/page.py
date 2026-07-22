@@ -2187,6 +2187,7 @@ class RecipePage(QWidget):
         if not self.apply_yaml_to_tree():
             return
         try:
+            self._repair_missing_anritsu_snapshots()
             recipe = parse_recipe_text(self._tree_source, origin=self.path.text())
             outputs_forced_off = (
                 self.execution_mode.currentData() == "dry_run"
@@ -2220,6 +2221,11 @@ class RecipePage(QWidget):
             return
         if not self.apply_yaml_to_tree():
             return
+        try:
+            self._repair_missing_anritsu_snapshots()
+        except Exception as exc:
+            self._show_recipe_error("Recipe", str(exc))
+            return
         source = self._tree_source
         self._plan = None
         self.run_button.setEnabled(False)
@@ -2251,6 +2257,60 @@ class RecipePage(QWidget):
         self._preflight_thread = thread
         self._preflight_worker = worker
         thread.start()
+
+    def _repair_missing_anritsu_snapshots(self) -> bool:
+        """Upgrade legacy Anritsu placeholders from the current visible form."""
+
+        recipe = parse_recipe_text(self._tree_source, origin=self.path.text())
+
+        def visit(node: RecipeNode) -> list[RecipeNode]:
+            found = [node]
+            for child in (*node.children, *node.else_children):
+                found.extend(visit(child))
+            return found
+
+        candidates = [
+            node
+            for root in (recipe.root, *recipe.finally_nodes)
+            for node in visit(root)
+            if node.data.get("device_module") == "anritsu"
+            and node.data.get("operation") == "configure_selected_parameters"
+            and not isinstance(node.data.get("configuration"), dict)
+        ]
+        if not candidates:
+            return False
+        snapshot = self._current_anritsu_snapshot()
+        source = self._tree_source
+        for node in candidates:
+            raw_actions = node.data.get("parameter_actions", [])
+            actions = (
+                [dict(action) for action in raw_actions if isinstance(action, dict)]
+                if isinstance(raw_actions, list)
+                else []
+            )
+            replacement = self._configured_anritsu_node(
+                node,
+                snapshot=snapshot,
+                parameter_actions=actions,
+                acquire_single=bool(node.data.get("acquire_single", False)),
+                trace=str(node.data.get("trace", "TRAC1")),
+                post_configuration_operation=str(
+                    node.data.get("post_configuration_operation", "configure")
+                ),
+                acquisition_average_count=int(
+                    node.data.get("acquisition_average_count", 1)
+                ),
+                acquisition_reference_operation=str(
+                    node.data.get("acquisition_reference_operation", "none")
+                ),
+            )
+            source = replace_recipe_node(source, node_id=node.id, node=replacement)
+        self._apply_builder_source(
+            source,
+            "Upgraded legacy Anritsu node(s) from the current Spectrum form",
+            selected_node_id=candidates[0].id,
+        )
+        return True
 
     def _preflight_succeeded(
         self, recipe: object, plan: object, estimate: object

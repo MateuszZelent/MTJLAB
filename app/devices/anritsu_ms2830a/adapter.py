@@ -384,6 +384,12 @@ class AnritsuAdapter(DeviceAdapter):
         self._settings = station.anritsu
         self._last_sg_config = None
 
+    def refresh_station_context(self, station: object) -> None:
+        if not isinstance(station, StationSettings):
+            raise TypeError("Anritsu context refresh requires StationSettings.")
+        self._station = station
+        self._settings = station.anritsu
+
     def _assert_signal_generator_supported(self) -> None:
         if self._capabilities is None or not self._capabilities.supports("signal_generator"):
             raise SafetyViolation(

@@ -1638,6 +1638,9 @@ class MainWindow(FluentWindow):
         self.settings_page.reload()
         self.anritsu_page.set_settings(self._settings)
         self.recipe_page.set_settings(self._settings)
+        self._controllers["anritsu"].call(
+            "refresh_station_context", self._settings
+        )
         self._refresh_safety_strip()
         self.anritsu_page.banner.show_message(
             "Instrument readback saved to settings.yml as acquisition defaults. "
@@ -1703,15 +1706,24 @@ class MainWindow(FluentWindow):
                 }
             )
 
-    def _save_anritsu_form_defaults(self) -> bool:
+    def _save_anritsu_form_defaults(
+        self,
+        captured: tuple[
+            AnritsuConfigurationSnapshot, AdvancedSpectrumSnapshot, object, int, int
+        ]
+        | None = None,
+    ) -> bool:
         """Persist the visible basic Spectrum form without touching hardware."""
 
         try:
-            snapshot = self.anritsu_page.configuration_panel.configuration_snapshot()
-            advanced = (
-                self.anritsu_page.advanced_configuration_panel.settings_snapshot()
-            )
-            signal_generator = self.anritsu_page.signal_generator_snapshot()
+            if captured is None:
+                snapshot = self.anritsu_page.configuration_panel.configuration_snapshot()
+                advanced = self.anritsu_page.advanced_configuration_panel.settings_snapshot()
+                signal_generator = self.anritsu_page.signal_generator_snapshot()
+                average_count = self.anritsu_page.average_count.value()
+                refresh_ms = self.anritsu_page.refresh.value()
+            else:
+                snapshot, advanced, signal_generator, average_count, refresh_ms = captured
             self._access.require(
                 Permission.EDIT_SETTINGS,
                 action="saving Anritsu form defaults to settings.yml",
@@ -1734,11 +1746,9 @@ class MainWindow(FluentWindow):
                 f"{signal_generator.power_dbm:.9g} dBm"
             )
             acquisition = raw["devices"]["anritsu"]["acquisition"]
-            acquisition["application_average_count"] = (
-                self.anritsu_page.average_count.value()
-            )
+            acquisition["application_average_count"] = average_count
             acquisition["live_refresh_interval"] = format_quantity_auto(
-                self.anritsu_page.refresh.value() / 1000,
+                refresh_ms / 1000,
                 DIMENSION_TIME,
             )
             after = raw["devices"]["anritsu"]["safety"]["defaults"]
@@ -1763,6 +1773,9 @@ class MainWindow(FluentWindow):
         self.settings_page.reload()
         self.anritsu_page.set_settings(self._settings)
         self.recipe_page.set_settings(self._settings)
+        self._controllers["anritsu"].call(
+            "refresh_station_context", self._settings
+        )
         self._refresh_safety_strip()
         self.anritsu_page.banner.show_message(
             "Current Spectrum form saved to settings.yml as acquisition defaults. "
@@ -1772,11 +1785,14 @@ class MainWindow(FluentWindow):
         self._log("ANRITSU FORM DEFAULTS SAVED: settings.yml updated; hardware unchanged")
         return True
 
-    def _save_rigol_form_defaults(self) -> bool:
+    def _save_rigol_form_defaults(
+        self, channel_defaults: dict[int, dict[str, object]] | None = None
+    ) -> bool:
         """Persist both visible/cached Rigol channel forms without hardware I/O."""
 
         try:
-            snapshots = self.rigol_page.configuration_snapshots()
+            if channel_defaults is None:
+                channel_defaults = self.rigol_page.settings_defaults()
             self._access.require(
                 Permission.EDIT_SETTINGS,
                 action="saving Rigol form defaults to settings.yml",
@@ -1784,14 +1800,10 @@ class MainWindow(FluentWindow):
             loaded = self._repository.load()
             raw = loaded.raw
             changed = False
-            for channel, snapshot in snapshots.items():
+            for channel, payload in channel_defaults.items():
                 defaults = raw["devices"]["rigol"]["safety"]["channels"][
                     str(channel)
                 ]["defaults"]
-                payload = asdict(snapshot)
-                payload.pop("channel", None)
-                payload["output_load_setting"] = payload.pop("output_load")
-                payload["output_enabled"] = False
                 if defaults != payload:
                     defaults.clear()
                     defaults.update(payload)
@@ -1813,6 +1825,7 @@ class MainWindow(FluentWindow):
         self.settings_page.reload()
         self.rigol_page.set_settings(self._settings)
         self.recipe_page.set_settings(self._settings)
+        self._controllers["rigol"].call("refresh_station_context", self._settings)
         self._refresh_safety_strip()
         self.rigol_page.banner.show_message(
             "Both Rigol channel forms were saved to settings.yml as defaults. "
@@ -1822,11 +1835,14 @@ class MainWindow(FluentWindow):
         self._log("RIGOL FORM DEFAULTS SAVED: settings.yml updated; hardware unchanged")
         return True
 
-    def _save_lakeshore_form_defaults(self) -> bool:
+    def _save_lakeshore_form_defaults(self, interval_ms: int | None = None) -> bool:
         """Persist the read-only gaussmeter polling preference."""
 
         try:
-            interval_ms = int(self.lakeshore_gaussmeter_page.sample_interval.currentData())
+            if interval_ms is None:
+                interval_ms = int(
+                    self.lakeshore_gaussmeter_page.sample_interval.currentData()
+                )
             self._access.require(
                 Permission.EDIT_SETTINGS,
                 action="saving Lake Shore display defaults to settings.yml",
@@ -1851,6 +1867,53 @@ class MainWindow(FluentWindow):
         self.recipe_page.set_settings(self._settings)
         self._refresh_safety_strip()
         self._log("LAKESHORE DISPLAY DEFAULTS SAVED: settings.yml updated")
+        return True
+
+    def _save_moke_form_defaults(
+        self, captured: tuple[int, int, int] | None = None
+    ) -> bool:
+        """Persist MOKE read-only sampling and plot preferences."""
+
+        try:
+            if captured is None:
+                captured = (
+                    int(self.moke_box_page.sample_interval.currentData()),
+                    int(self.moke_box_page.refresh_interval.currentData()),
+                    int(self.moke_box_page.history_window.currentData()),
+                )
+            live_ms, refresh_ms, history_seconds = captured
+            self._access.require(
+                Permission.EDIT_SETTINGS,
+                action="saving MOKE display defaults to settings.yml",
+            )
+            loaded = self._repository.load()
+            raw = loaded.raw
+            profile = raw["devices"]["moke_box"]
+            updates = {
+                "live_interval": format_quantity_auto(live_ms / 1000, DIMENSION_TIME),
+                "plot_refresh_interval": format_quantity_auto(
+                    refresh_ms / 1000, DIMENSION_TIME
+                ),
+                "history_window": format_quantity_auto(
+                    history_seconds, DIMENSION_TIME
+                ),
+            }
+            if all(profile.get(key) == value for key, value in updates.items()):
+                return True
+            profile.update(updates)
+            persisted = self._repository.save_raw(raw)
+        except (AuthorizationError, ConfigurationError, KeyError, ValueError) as exc:
+            QMessageBox.critical(self, "MOKE settings not saved", str(exc))
+            self._log(f"MOKE FORM SAVE FAILED: {type(exc).__name__}: {exc}")
+            return False
+        self._settings = (
+            simulated_station_settings(persisted) if self._simulation else persisted
+        )
+        self.settings_page.reload()
+        self.moke_box_page.set_settings(self._settings)
+        self.recipe_page.set_settings(self._settings)
+        self._refresh_safety_strip()
+        self._log("MOKE DISPLAY DEFAULTS SAVED: settings.yml updated")
         return True
 
     @staticmethod
@@ -1918,19 +1981,93 @@ class MainWindow(FluentWindow):
         )
         self._log(f"KEITHLEY SETTINGS STAGED: generation {generation}; file unchanged")
 
+    def _stage_current_keithley_forms_if_changed(
+        self, snapshots: object = None
+    ) -> bool:
+        """Include ordinary manual A/B edits in the global settings save."""
+
+        try:
+            if snapshots is None:
+                snapshots = {
+                    channel: self.keithley_page.configuration_snapshot_for(channel)
+                    for channel in ("A", "B")
+                }
+            payload = self._keithley_snapshot_payload(snapshots)
+            updates = validate_keithley_default_snapshots(self._settings, payload)
+            changed = any(
+                any(
+                    self._settings.keithley.safety.channels[channel].defaults.get(key)
+                    != value
+                    for key, value in values.items()
+                )
+                for channel, values in updates.items()
+            )
+        except (
+            ConfigurationError,
+            SafetyViolation,
+            KeyError,
+            TypeError,
+            ValueError,
+        ) as exc:
+            QMessageBox.critical(self, "Keithley settings not saved", str(exc))
+            self.keithley_page.banner.show_message(
+                f"Keithley settings were not saved: {exc}"
+            )
+            self._log(f"KEITHLEY FORM SAVE FAILED: {type(exc).__name__}: {exc}")
+            return False
+        if changed:
+            self._keithley_defaults_generation += 1
+            self._pending_keithley_defaults = (
+                self._keithley_defaults_generation,
+                payload,
+            )
+        return True
+
     def _save_all_settings(self) -> None:
         """Persist the Settings draft and staged device defaults on demand."""
 
         if self._keithley_defaults_in_flight:
             self._log("SAVE SETTINGS ignored: a settings write is already running")
             return
+        # Capture every device page before SettingsPage emits settings_saved.
+        # That signal intentionally reloads all pages and would otherwise erase
+        # unsaved form edits before their device-specific persistence runs.
+        try:
+            rigol_defaults = self.rigol_page.settings_defaults()
+            anritsu_defaults = (
+                self.anritsu_page.configuration_panel.configuration_snapshot(),
+                self.anritsu_page.advanced_configuration_panel.settings_snapshot(),
+                self.anritsu_page.signal_generator_snapshot(),
+                self.anritsu_page.average_count.value(),
+                self.anritsu_page.refresh.value(),
+            )
+            keithley_snapshots = {
+                channel: self.keithley_page.configuration_snapshot_for(channel)
+                for channel in ("A", "B")
+            }
+            lakeshore_interval_ms = int(
+                self.lakeshore_gaussmeter_page.sample_interval.currentData()
+            )
+            moke_defaults = (
+                int(self.moke_box_page.sample_interval.currentData()),
+                int(self.moke_box_page.refresh_interval.currentData()),
+                int(self.moke_box_page.history_window.currentData()),
+            )
+        except (ConfigurationError, SafetyViolation, TypeError, ValueError) as exc:
+            QMessageBox.critical(self, "Settings not saved", str(exc))
+            self._log(f"SAVE SETTINGS CAPTURE FAILED: {type(exc).__name__}: {exc}")
+            return
         if not self.settings_page.save_draft():
             return
-        if not self._save_rigol_form_defaults():
+        if not self._save_rigol_form_defaults(rigol_defaults):
             return
-        if not self._save_anritsu_form_defaults():
+        if not self._save_anritsu_form_defaults(anritsu_defaults):
             return
-        if not self._save_lakeshore_form_defaults():
+        if not self._save_lakeshore_form_defaults(lakeshore_interval_ms):
+            return
+        if not self._save_moke_form_defaults(moke_defaults):
+            return
+        if not self._stage_current_keithley_forms_if_changed(keithley_snapshots):
             return
         pending = self._pending_keithley_defaults
         if pending is None:
@@ -1989,6 +2126,9 @@ class MainWindow(FluentWindow):
             self.keithley_page.set_settings(self._settings)
             self.recipe_page.set_settings(self._settings)
             self.quick_control_coordinator.set_settings(self._settings)
+            self._controllers["keithley"].call(
+                "refresh_station_context", self._settings
+            )
             self._refresh_safety_strip()
         self.keithley_page.banner.show_message(
             "Keithley defaults saved after explicit SAVE SETTINGS. The live instrument and "
