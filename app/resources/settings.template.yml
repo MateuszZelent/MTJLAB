@@ -380,6 +380,7 @@ devices:
       # so that an old trace cannot be stored as a new measurement point.
       single_sweep_mode: "unverified"
       operation_complete_timeout: "30 s"
+      live_refresh_interval: "500 ms"
       application_average_count: 200
     signal_generator:
       # The historical driver used INST SG, FREQ, POW and OUTP. Keep this

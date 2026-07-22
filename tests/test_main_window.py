@@ -3660,6 +3660,8 @@ class MainWindowTests(unittest.TestCase):
                 advanced.sweep_time.setText("20 ms")
                 window.anritsu_page.sg_frequency.setText("2 GHz")
                 window.anritsu_page.sg_power.setText("-20 dBm")
+                window.anritsu_page.average_count.setValue(321)
+                window.anritsu_page.refresh.setValue(750)
 
                 window._save_all_settings()
 
@@ -3680,6 +3682,11 @@ class MainWindowTests(unittest.TestCase):
                 ]["signal_generator"]
                 self.assertEqual(generator["default_frequency"], "2 GHz")
                 self.assertEqual(generator["default_power"], "-20 dBm")
+                acquisition = SettingsRepository(path).load().raw["devices"][
+                    "anritsu"
+                ]["acquisition"]
+                self.assertEqual(acquisition["application_average_count"], 321)
+                self.assertEqual(acquisition["live_refresh_interval"], "750 ms")
             finally:
                 window.close()
                 self.application.processEvents()
@@ -3702,6 +3709,8 @@ class MainWindowTests(unittest.TestCase):
                 self.assertEqual(advanced.sweep_time.text(), "20 ms")
                 self.assertEqual(restarted.anritsu_page.sg_frequency.text(), "2 GHz")
                 self.assertEqual(restarted.anritsu_page.sg_power.text(), "-20 dBm")
+                self.assertEqual(restarted.anritsu_page.average_count.value(), 321)
+                self.assertEqual(restarted.anritsu_page.refresh.value(), 750)
             finally:
                 restarted.close()
                 self.application.processEvents()
@@ -3750,6 +3759,33 @@ class MainWindowTests(unittest.TestCase):
                 self.assertEqual(rigol.high_level.text(), "5 mV")
                 self.assertEqual(rigol.low_level.text(), "-4 mV")
                 self.assertEqual(rigol.duty.text(), "40")
+            finally:
+                restarted.close()
+                self.application.processEvents()
+
+    def test_lakeshore_poll_interval_survives_global_settings_save(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "settings.yml"
+            write_engineer_settings(path)
+            window = MainWindow(
+                path, simulation=False, authenticated_username=TEST_ENGINEER
+            )
+            try:
+                combo = window.lakeshore_gaussmeter_page.sample_interval
+                combo.setCurrentIndex(combo.findData(2000))
+                window._save_all_settings()
+            finally:
+                window.close()
+                self.application.processEvents()
+
+            restarted = MainWindow(
+                path, simulation=False, authenticated_username=TEST_ENGINEER
+            )
+            try:
+                self.assertEqual(
+                    restarted.lakeshore_gaussmeter_page.sample_interval.currentData(),
+                    2000,
+                )
             finally:
                 restarted.close()
                 self.application.processEvents()

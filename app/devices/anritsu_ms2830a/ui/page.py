@@ -431,11 +431,12 @@ class AnritsuAdvancedSpectrumPanel(CardWidget):
 
     def load_settings_defaults(self, settings: StationSettings) -> None:
         defaults = settings.anritsu.safety.defaults
-        rbw_hz = parse_quantity(defaults["rbw"], DIMENSION_FREQUENCY).si_value
-        vbw_value = defaults.get("vbw") or defaults["rbw"]
+        rbw_value = defaults.get("rbw", "1 kHz")
+        rbw_hz = parse_quantity(rbw_value, DIMENSION_FREQUENCY).si_value
+        vbw_value = defaults.get("vbw") or rbw_value
         vbw_hz = parse_quantity(vbw_value, DIMENSION_FREQUENCY).si_value
         sweep_time_s = parse_quantity(
-            defaults["sweep_time"], DIMENSION_TIME
+            defaults.get("sweep_time", "100 ms"), DIMENSION_TIME
         ).si_value
         self.load_snapshot(
             AdvancedSpectrumSnapshot(
@@ -886,7 +887,15 @@ class AnritsuPage(QWidget):
         setup_layout.addWidget(self.configuration_panel)
         self.refresh = SpinBox(self)
         self.refresh.setRange(10, 5000)
-        self.refresh.setValue(500)
+        self.refresh.setValue(
+            round(
+                parse_quantity(
+                    self._station_settings.anritsu.acquisition.live_refresh_interval,
+                    DIMENSION_TIME,
+                ).si_value
+                * 1000
+            )
+        )
         self.refresh.setSuffix(" ms")
         self.refresh.setToolTip(
             "Requested Live polling interval: 10 ms to 5 s. The effective frame rate is "

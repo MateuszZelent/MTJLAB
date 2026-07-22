@@ -1722,6 +1722,9 @@ class MainWindow(FluentWindow):
             before_generator = deepcopy(
                 raw["devices"]["anritsu"]["signal_generator"]
             )
+            before_acquisition = deepcopy(
+                raw["devices"]["anritsu"]["acquisition"]
+            )
             self._update_anritsu_defaults(raw, snapshot, advanced)
             generator = raw["devices"]["anritsu"]["signal_generator"]
             generator["default_frequency"] = format_quantity_auto(
@@ -1730,8 +1733,20 @@ class MainWindow(FluentWindow):
             generator["default_power"] = (
                 f"{signal_generator.power_dbm:.9g} dBm"
             )
+            acquisition = raw["devices"]["anritsu"]["acquisition"]
+            acquisition["application_average_count"] = (
+                self.anritsu_page.average_count.value()
+            )
+            acquisition["live_refresh_interval"] = format_quantity_auto(
+                self.anritsu_page.refresh.value() / 1000,
+                DIMENSION_TIME,
+            )
             after = raw["devices"]["anritsu"]["safety"]["defaults"]
-            if before == after and before_generator == generator:
+            if (
+                before == after
+                and before_generator == generator
+                and before_acquisition == acquisition
+            ):
                 return True
             persisted = self._repository.save_raw(raw)
         except (AuthorizationError, ConfigurationError, KeyError, ValueError) as exc:
@@ -1805,6 +1820,37 @@ class MainWindow(FluentWindow):
             severity="success",
         )
         self._log("RIGOL FORM DEFAULTS SAVED: settings.yml updated; hardware unchanged")
+        return True
+
+    def _save_lakeshore_form_defaults(self) -> bool:
+        """Persist the read-only gaussmeter polling preference."""
+
+        try:
+            interval_ms = int(self.lakeshore_gaussmeter_page.sample_interval.currentData())
+            self._access.require(
+                Permission.EDIT_SETTINGS,
+                action="saving Lake Shore display defaults to settings.yml",
+            )
+            loaded = self._repository.load()
+            raw = loaded.raw
+            interval = format_quantity_auto(interval_ms / 1000, DIMENSION_TIME)
+            profile = raw["devices"]["lakeshore_gaussmeter"]
+            if profile.get("live_interval") == interval:
+                return True
+            profile["live_interval"] = interval
+            persisted = self._repository.save_raw(raw)
+        except (AuthorizationError, ConfigurationError, KeyError, ValueError) as exc:
+            QMessageBox.critical(self, "Lake Shore settings not saved", str(exc))
+            self._log(f"LAKESHORE FORM SAVE FAILED: {type(exc).__name__}: {exc}")
+            return False
+        self._settings = (
+            simulated_station_settings(persisted) if self._simulation else persisted
+        )
+        self.settings_page.reload()
+        self.lakeshore_gaussmeter_page.set_settings(self._settings)
+        self.recipe_page.set_settings(self._settings)
+        self._refresh_safety_strip()
+        self._log("LAKESHORE DISPLAY DEFAULTS SAVED: settings.yml updated")
         return True
 
     @staticmethod
@@ -1883,6 +1929,8 @@ class MainWindow(FluentWindow):
         if not self._save_rigol_form_defaults():
             return
         if not self._save_anritsu_form_defaults():
+            return
+        if not self._save_lakeshore_form_defaults():
             return
         pending = self._pending_keithley_defaults
         if pending is None:
