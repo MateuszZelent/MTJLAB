@@ -54,6 +54,7 @@ from app.ui.recipes.page import (
     FixedValueDialog,
     KeithleySweepBuilderDialog,
     RecipePage,
+    set_keithley_shutdown_ramps_in_recipe,
 )
 from app.ui.workers import DeviceController
 from app.ui.design_system import apply_application_theme, tokens_for
@@ -1533,6 +1534,83 @@ root:
             dialog.close()
             page.close()
 
+    def test_rigol_sweep_editor_matches_basic_device_panel_representations(self) -> None:
+        dialog = RigolNodeEditorDialog(settings=simulation_settings())
+        try:
+            dialog.show()
+            self.application.processEvents()
+            self.assertEqual(
+                dialog.waveform.itemText(dialog.waveform.findText("USER")), "USER"
+            )
+            dialog.time_mode.setCurrentText("Period")
+            self.assertTrue(dialog.period.isVisible())
+            self.assertFalse(dialog.frequency.isVisible())
+            dialog.level_mode.setCurrentText("Amplitude / Offset")
+            self.assertTrue(dialog.vpp.isVisible())
+            self.assertTrue(dialog.offset.isVisible())
+            self.assertFalse(dialog.high_level.isVisible())
+            self.assertFalse(dialog.low_level.isVisible())
+            self.assertTrue(
+                dialog.actions_form.isRowVisible(
+                    dialog.parameter_selectors["carrier.amplitude"]
+                )
+            )
+            self.assertFalse(
+                dialog.actions_form.isRowVisible(
+                    dialog.parameter_selectors["carrier.high_level"]
+                )
+            )
+            dialog.vpp.setText("4 mV")
+            dialog.offset.setText("1 mV")
+            snapshot = dialog.configuration_snapshot()
+            self.assertEqual(snapshot.high_level, "3 mV")
+            self.assertEqual(snapshot.low_level, "-1 mV")
+            dialog.waveform.setCurrentText("SQU")
+            self.assertTrue(dialog.duty.isVisible())
+            self.assertFalse(dialog.symmetry.isVisible())
+            dialog.waveform.setCurrentText("PULS")
+            self.assertTrue(dialog.pulse_width.isVisible())
+            self.assertGreater(dialog.geometry().width(), 0)
+            self.assertGreater(dialog.geometry().height(), 0)
+        finally:
+            dialog.close()
+
+    def test_rigol_sweep_editor_reloads_selected_channel_snapshot(self) -> None:
+        snapshots = {
+            1: RigolConfigurationSnapshot(channel=1, frequency="1 kHz"),
+            2: RigolConfigurationSnapshot(
+                channel=2,
+                waveform="SQU",
+                frequency="2 kHz",
+                high_level="4 mV",
+                low_level="0 mV",
+                square_duty_percent="25",
+            ),
+        }
+        requested: list[int] = []
+
+        def resolve(channel: int) -> RigolConfigurationSnapshot:
+            requested.append(channel)
+            return snapshots[channel]
+
+        dialog = RigolNodeEditorDialog(
+            settings=simulation_settings(),
+            snapshot=snapshots[1],
+            snapshot_resolver=resolve,
+        )
+        try:
+            dialog.channel.setCurrentIndex(dialog.channel.findData(2))
+            self.application.processEvents()
+            self.assertEqual(requested, [2])
+            self.assertEqual(dialog.waveform.currentText(), "SQU")
+            self.assertEqual(dialog.frequency.text(), "2 kHz")
+            self.assertEqual(dialog.high_level.text(), "4 mV")
+            self.assertEqual(dialog.low_level.text(), "0 mV")
+            self.assertEqual(dialog.duty.text(), "25")
+            self.assertEqual(dialog.configuration_snapshot().channel, 2)
+        finally:
+            dialog.close()
+
     def test_keithley_plan_dialog_round_trips_offline_configuration(self) -> None:
         dialog = KeithleyNodeEditorDialog(simulation_settings())
         try:
@@ -2600,29 +2678,42 @@ finally: []
             page.close()
 
     def test_keithley_auto_shutdown_does_not_create_ramp_until_user_selects_it(self) -> None:
-        page = RecipePage(simulation_settings())
-        try:
-            page._set_keithley_shutdown_choice({"A"}, "25 s")
-            parsed = parse_recipe_text(page.editor.toPlainText())
-            self.assertEqual(
-                [
-                    (node.id, node.type, node.data.get("channel"), node.data.get("deadline"))
-                    for node in parsed.finally_nodes
-                ],
-                [
-                    (
-                        "optional-keithley-a-ramp-before-auto-off",
-                        "ramp_keithley_to_zero",
-                        "A",
-                        "25 s",
-                    )
-                ],
-            )
-            page._set_keithley_shutdown_choice(set(), "25 s")
-            parsed = parse_recipe_text(page.editor.toPlainText())
-            self.assertEqual(parsed.finally_nodes, ())
-        finally:
-            page.close()
+        source = """\
+schema_version: 1
+name: empty-finally
+root: {id: root, type: sequence, children: []}
+finally: []
+"""
+        source, selected_id = set_keithley_shutdown_ramps_in_recipe(
+            source,
+            ramp_channels={"A"},
+            deadline="25 s",
+        )
+        parsed = parse_recipe_text(source)
+        self.assertEqual(selected_id, "optional-keithley-a-ramp-before-auto-off")
+        self.assertEqual(
+            [
+                (node.id, node.type, node.data.get("channel"), node.data.get("deadline"))
+                for node in parsed.finally_nodes
+            ],
+            [
+                (
+                    "optional-keithley-a-ramp-before-auto-off",
+                    "ramp_keithley_to_zero",
+                    "A",
+                    "25 s",
+                )
+            ],
+        )
+
+        source, selected_id = set_keithley_shutdown_ramps_in_recipe(
+            source,
+            ramp_channels=set(),
+            deadline="25 s",
+        )
+        parsed = parse_recipe_text(source)
+        self.assertIsNone(selected_id)
+        self.assertEqual(parsed.finally_nodes, ())
 
     def test_double_click_on_auto_keithley_shutdown_opens_shutdown_choice(self) -> None:
         page = RecipePage(simulation_settings())
@@ -2640,6 +2731,9 @@ finally: []
             keithley_auto = finally_item.child(0)
             with patch.object(page, "_edit_automatic_shutdown") as edit_shutdown:
                 page._open_node_editor(keithley_auto, 0)
+            edit_shutdown.assert_called_once_with("keithley.outputs_off")
+            with patch.object(page, "_edit_automatic_shutdown") as edit_shutdown:
+                page._open_node_editor(finally_item, 0)
             edit_shutdown.assert_called_once_with("keithley.outputs_off")
         finally:
             page.close()

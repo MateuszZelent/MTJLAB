@@ -3,6 +3,7 @@
 # ruff: noqa: F401
 from __future__ import annotations
 
+from collections.abc import Callable
 from typing import Any
 
 from PySide6.QtCore import Qt
@@ -37,6 +38,7 @@ class RigolNodeEditorDialog(FluentRecipeDialog):
         *,
         settings: StationSettings | None = None,
         snapshot: RigolConfigurationSnapshot | None = None,
+        snapshot_resolver: Callable[[int], RigolConfigurationSnapshot | None] | None = None,
         parameter_actions: list[dict[str, object]] | None = None,
         channel: int = 1,
         output_policy: str = "unchanged",
@@ -45,6 +47,7 @@ class RigolNodeEditorDialog(FluentRecipeDialog):
         self.setProperty("stationSurface", "page")
         snapshot = snapshot or RigolConfigurationSnapshot(channel=channel)
         self._settings = settings
+        self._snapshot_resolver = snapshot_resolver
         self._working_segments: dict[str, list[dict[str, object]]] = {}
         self.plan_mode = True
         self.hardware_actions_enabled = False
@@ -197,6 +200,7 @@ class RigolNodeEditorDialog(FluentRecipeDialog):
         footer.addWidget(self.apply_button)
         self.apply_button.clicked.connect(self.accept)
         self.cancel_button.clicked.connect(self.reject)
+        self.channel.currentIndexChanged.connect(self._channel_changed)
         self.waveform.currentTextChanged.connect(self._waveform_changed)
         self.time_mode.currentTextChanged.connect(self._dynamic_controls_changed)
         self.level_mode.currentTextChanged.connect(self._dynamic_controls_changed)
@@ -210,6 +214,38 @@ class RigolNodeEditorDialog(FluentRecipeDialog):
         self.load_plan_actions(parameter_actions or [])
         self._selection_changed()
         self._waveform_changed(self.waveform.currentText())
+
+    def _channel_changed(self, _index: int) -> None:
+        if self._snapshot_resolver is None:
+            return
+        snapshot = self._snapshot_resolver(self.selected_channel())
+        if isinstance(snapshot, RigolConfigurationSnapshot):
+            self._load_snapshot(snapshot)
+
+    def _load_snapshot(self, snapshot: RigolConfigurationSnapshot) -> None:
+        """Reload fields from the selected device channel without touching hardware."""
+
+        self.waveform.setCurrentText(snapshot.waveform)
+        self.frequency.setText(snapshot.frequency)
+        self.high_level.setText(snapshot.high_level)
+        self.low_level.setText(snapshot.low_level)
+        self.output_load.setText(snapshot.output_load)
+        self.phase.setText(snapshot.phase_deg)
+        self.duty.setText(snapshot.square_duty_percent)
+        self.symmetry.setText(snapshot.ramp_symmetry_percent)
+        self.pulse_width.setText(snapshot.pulse_width)
+        self.pulse_leading.setText(snapshot.pulse_leading)
+        self.pulse_trailing.setText(snapshot.pulse_trailing)
+        self.dut_impedance.setText(snapshot.dut_min_impedance)
+        self.output_polarity.setCurrentText(snapshot.output_polarity)
+        self.output_mode.setCurrentText(snapshot.output_mode)
+        self.gate_polarity.setCurrentText(snapshot.gate_polarity)
+        self.sync_enabled.setChecked(snapshot.sync_enabled)
+        self.sync_polarity.setCurrentText(snapshot.sync_polarity)
+        self.sync_delay.setText(snapshot.sync_delay)
+        self._sync_period_from_frequency()
+        self._sync_vpp_offset_from_levels()
+        self._waveform_changed(snapshot.waveform)
 
     def _sync_dc_level(self) -> None:
         if self.waveform.currentText() == "DC":
@@ -309,6 +345,9 @@ class RigolNodeEditorDialog(FluentRecipeDialog):
         self.actions_form.setRowVisible(
             self.parameter_selectors["carrier.offset"], not is_dc and not high_low_mode
         )
+        for parameter_id, selector in self.parameter_selectors.items():
+            if not self.actions_form.isRowVisible(selector):
+                selector.setCurrentIndex(selector.findData("set"))
 
     def selected_channel(self) -> int:
         return int(self.channel.currentData())
@@ -404,7 +443,8 @@ class RigolNodeEditorDialog(FluentRecipeDialog):
         selected = [
             parameter_id
             for parameter_id, selector in self.parameter_selectors.items()
-            if selector.currentData() == "sweep"
+            if self.actions_form.isRowVisible(selector)
+            and selector.currentData() == "sweep"
         ]
         return selected[0] if len(selected) == 1 else None
 
@@ -478,6 +518,21 @@ class RigolNodeEditorDialog(FluentRecipeDialog):
                     ).si_value,
                     output_load=snapshot.output_load,
                     phase_deg=float(snapshot.phase_deg.replace(",", ".")),
+                    square_duty_percent=float(
+                        snapshot.square_duty_percent.replace(",", ".")
+                    ),
+                    ramp_symmetry_percent=float(
+                        snapshot.ramp_symmetry_percent.replace(",", ".")
+                    ),
+                    pulse_width_s=parse_quantity(
+                        snapshot.pulse_width, DIMENSION_TIME
+                    ).si_value,
+                    pulse_leading_s=parse_quantity(
+                        snapshot.pulse_leading, DIMENSION_TIME
+                    ).si_value,
+                    pulse_trailing_s=parse_quantity(
+                        snapshot.pulse_trailing, DIMENSION_TIME
+                    ).si_value,
                     dut_min_impedance_ohm=parse_quantity(
                         snapshot.dut_min_impedance, DIMENSION_RESISTANCE
                     ).si_value,

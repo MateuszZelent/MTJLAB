@@ -792,8 +792,12 @@ class RecipeCompiler:
                 initial = sweep_values[0].si_value
                 amplitude = initial if sweep_parameter == "carrier.amplitude" else base_amplitude
                 offset = initial if sweep_parameter == "carrier.offset" else base_offset
-                config_data["high_level"] = offset + amplitude / 2.0
-                config_data["low_level"] = offset - amplitude / 2.0
+                config_data["high_level"] = Quantity(
+                    offset + amplitude / 2.0, DIMENSION_VOLTAGE
+                )
+                config_data["low_level"] = Quantity(
+                    offset - amplitude / 2.0, DIMENSION_VOLTAGE
+                )
             else:
                 config_data[config_key] = sweep_values[0]
 
@@ -890,15 +894,27 @@ class RecipeCompiler:
                             float(configure_action.payload["config"].high_level_v)
                             + float(configure_action.payload["config"].low_level_v)
                         ) / 2.0
-                        point_config["high_level"] = current_offset + value.si_value / 2.0
-                        point_config["low_level"] = current_offset - value.si_value / 2.0
+                        point_config["high_level"] = Quantity(
+                            current_offset + value.si_value / 2.0,
+                            DIMENSION_VOLTAGE,
+                        )
+                        point_config["low_level"] = Quantity(
+                            current_offset - value.si_value / 2.0,
+                            DIMENSION_VOLTAGE,
+                        )
                     elif sweep_parameter == "carrier.offset":
                         current_amplitude = (
                             float(configure_action.payload["config"].high_level_v)
                             - float(configure_action.payload["config"].low_level_v)
                         )
-                        point_config["high_level"] = value.si_value + current_amplitude / 2.0
-                        point_config["low_level"] = value.si_value - current_amplitude / 2.0
+                        point_config["high_level"] = Quantity(
+                            value.si_value + current_amplitude / 2.0,
+                            DIMENSION_VOLTAGE,
+                        )
+                        point_config["low_level"] = Quantity(
+                            value.si_value - current_amplitude / 2.0,
+                            DIMENSION_VOLTAGE,
+                        )
                     update_node = RecipeNode(
                         f"{node.id}.update-levels",
                         "update_rigol_levels",

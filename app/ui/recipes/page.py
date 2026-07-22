@@ -179,6 +179,55 @@ class KeithleyShutdownMethodDialog(QDialog):
         self.accept()
 
 
+def set_keithley_shutdown_ramps_in_recipe(
+    source: str,
+    *,
+    ramp_channels: set[str],
+    deadline: str,
+) -> tuple[str, str | None]:
+    invalid = ramp_channels - {"A", "B"}
+    if invalid:
+        raise ConfigurationError(
+            f"Keithley shutdown ramp supports only channels A and B, not {sorted(invalid)!r}."
+        )
+    quantity = parse_quantity(deadline, DIMENSION_TIME)
+    if quantity.si_value <= 0:
+        raise ConfigurationError("Ramp deadline must be greater than 0 s.")
+    recipe = parse_recipe_text(source, origin="tree-builder")
+    managed_ids = set(_KEITHLEY_OPTIONAL_SHUTDOWN_RAMP_IDS.values())
+    next_source = source
+    for node in recipe.finally_nodes:
+        if node.id not in managed_ids:
+            continue
+        channel = str(node.data.get("channel", "")).upper()
+        if (
+            node.type != "ramp_keithley_to_zero"
+            or _KEITHLEY_OPTIONAL_SHUTDOWN_RAMP_IDS.get(channel) != node.id
+        ):
+            raise ConfigurationError(
+                f"{node.id}: reserved shutdown node id is not a managed Keithley ramp."
+            )
+        next_source = delete_recipe_node(next_source, node_id=node.id)
+    selected_id: str | None = None
+    for channel in ("A", "B"):
+        if channel not in ramp_channels:
+            continue
+        node = {
+            "id": _KEITHLEY_OPTIONAL_SHUTDOWN_RAMP_IDS[channel],
+            "type": "ramp_keithley_to_zero",
+            "channel": channel,
+            "deadline": deadline,
+        }
+        next_source = add_recipe_node(
+            next_source,
+            parent_id="__finally__",
+            branch="children",
+            node=node,
+        )
+        selected_id = str(node["id"])
+    return next_source, selected_id
+
+
 class RecipePage(QWidget):
     status = Signal(str)
     run_requested = Signal(object, bool, str)
@@ -1170,46 +1219,11 @@ class RecipePage(QWidget):
         ramp_channels: set[str],
         deadline: str,
     ) -> None:
-        invalid = ramp_channels - {"A", "B"}
-        if invalid:
-            raise ConfigurationError(
-                f"Keithley shutdown ramp supports only channels A and B, not {sorted(invalid)!r}."
-            )
-        quantity = parse_quantity(deadline, DIMENSION_TIME)
-        if quantity.si_value <= 0:
-            raise ConfigurationError("Ramp deadline must be greater than 0 s.")
-        source = self._builder_source()
-        recipe = parse_recipe_text(source, origin="tree-builder")
-        managed_ids = set(_KEITHLEY_OPTIONAL_SHUTDOWN_RAMP_IDS.values())
-        for node in recipe.finally_nodes:
-            if node.id not in managed_ids:
-                continue
-            channel = str(node.data.get("channel", "")).upper()
-            if (
-                node.type != "ramp_keithley_to_zero"
-                or _KEITHLEY_OPTIONAL_SHUTDOWN_RAMP_IDS.get(channel) != node.id
-            ):
-                raise ConfigurationError(
-                    f"{node.id}: reserved shutdown node id is not a managed Keithley ramp."
-                )
-            source = delete_recipe_node(source, node_id=node.id)
-        selected_id: str | None = None
-        for channel in ("A", "B"):
-            if channel not in ramp_channels:
-                continue
-            node = {
-                "id": _KEITHLEY_OPTIONAL_SHUTDOWN_RAMP_IDS[channel],
-                "type": "ramp_keithley_to_zero",
-                "channel": channel,
-                "deadline": deadline,
-            }
-            source = add_recipe_node(
-                source,
-                parent_id="__finally__",
-                branch="children",
-                node=node,
-            )
-            selected_id = str(node["id"])
+        source, selected_id = set_keithley_shutdown_ramps_in_recipe(
+            self._builder_source(),
+            ramp_channels=ramp_channels,
+            deadline=deadline,
+        )
         self._apply_builder_source(
             source,
             "Updated Keithley shutdown method",
@@ -4574,6 +4588,7 @@ class RecipePage(QWidget):
             self,
             settings=self._settings,
             snapshot=snapshot,
+            snapshot_resolver=self._rigol_snapshot_for,
             parameter_actions=actions,
             output_policy=str(node.data.get("output_policy", "unchanged")),
         )
@@ -4987,6 +5002,18 @@ class RecipePage(QWidget):
             if isinstance(snapshot, RigolConfigurationSnapshot):
                 return snapshot
         return RigolConfigurationSnapshot()
+
+    def _rigol_snapshot_for(self, channel: int) -> RigolConfigurationSnapshot | None:
+        provider = self._rigol_snapshot_provider
+        if not callable(provider):
+            return None
+        try:
+            snapshot = provider(channel)
+        except TypeError:
+            snapshot = provider()
+            if isinstance(snapshot, RigolConfigurationSnapshot):
+                return replace(snapshot, channel=channel)
+        return snapshot if isinstance(snapshot, RigolConfigurationSnapshot) else None
 
     @staticmethod
     def _rigol_snapshot_from_mapping(
@@ -5545,6 +5572,9 @@ class RecipePage(QWidget):
             self._edit_selected_roi()
             return
         structural = item.data(0, RecipeTreeWidget.structural_role)
+        if structural == RecipeTreeWidget.finally_container:
+            self._edit_automatic_shutdown("keithley.outputs_off")
+            return
         if isinstance(structural, str) and structural.startswith("automatic_shutdown:"):
             self._edit_automatic_shutdown(structural.split(":", 1)[1])
             return

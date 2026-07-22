@@ -5,7 +5,7 @@ from __future__ import annotations
 import math
 from collections import defaultdict, deque
 from collections.abc import Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 
 from PySide6.QtCore import Qt, Signal
 from PySide6.QtWidgets import (
@@ -780,6 +780,61 @@ class RigolPage(QWidget):
             sync_enabled=self.sync_enabled.isChecked(),
             sync_polarity=self.sync_polarity.currentText(),
             sync_delay=self.sync_delay.text().strip(),
+        )
+
+    def configuration_snapshot_for(
+        self, channel: int | None = None
+    ) -> RigolConfigurationSnapshot:
+        """Return the best confirmed/basic form snapshot for one channel."""
+
+        channel = channel or int(self.channel.currentText())
+        if channel == int(self.channel.currentText()):
+            return self.configuration_snapshot()
+        carrier = self._confirmed_carrier_configs.get(channel)
+        if carrier is None:
+            return replace(self.configuration_snapshot(), channel=channel)
+        visible = self.configuration_snapshot()
+        return RigolConfigurationSnapshot(
+            channel=channel,
+            waveform=carrier.waveform,
+            frequency=format_quantity_auto(
+                carrier.frequency_hz, DIMENSION_FREQUENCY
+            ),
+            high_level=self._format_voltage(carrier.high_level_v),
+            low_level=self._format_voltage(carrier.low_level_v),
+            output_load=str(carrier.output_load),
+            phase_deg=f"{carrier.phase_deg:.12g}",
+            square_duty_percent=f"{carrier.square_duty_percent or 50:.12g}",
+            ramp_symmetry_percent=f"{carrier.ramp_symmetry_percent or 50:.12g}",
+            pulse_width=(
+                format_quantity_auto(carrier.pulse_width_s, DIMENSION_TIME)
+                if carrier.pulse_width_s is not None
+                else "100 us"
+            ),
+            pulse_leading=(
+                format_quantity_auto(carrier.pulse_leading_s, DIMENSION_TIME)
+                if carrier.pulse_leading_s is not None
+                else "10 ns"
+            ),
+            pulse_trailing=(
+                format_quantity_auto(carrier.pulse_trailing_s, DIMENSION_TIME)
+                if carrier.pulse_trailing_s is not None
+                else "10 ns"
+            ),
+            dut_min_impedance=(
+                f"{carrier.dut_min_impedance_ohm:.12g} ohm"
+                if carrier.dut_min_impedance_ohm is not None
+                else "50 ohm"
+            ),
+            # Output settings are not confirmed/cached independently by the page.
+            # Preserve the visible form values rather than inventing another
+            # channel's hardware state.
+            output_polarity=visible.output_polarity,
+            output_mode=visible.output_mode,
+            gate_polarity=visible.gate_polarity,
+            sync_enabled=visible.sync_enabled,
+            sync_polarity=visible.sync_polarity,
+            sync_delay=visible.sync_delay,
         )
 
     @staticmethod

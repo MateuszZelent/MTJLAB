@@ -662,6 +662,51 @@ root:
             )
         )
 
+    def test_rigol_amplitude_axis_preserves_offset_at_every_point(self) -> None:
+        source = """\
+schema_version: 1
+name: rigol-amplitude-provider
+root:
+  id: rigol-axis
+  type: sequence
+  device_module: rigol
+  operation: configure_selected_parameters
+  channel: 1
+  configuration:
+    channel: 1
+    waveform: SIN
+    frequency: 1 kHz
+    high_level: 2 mV
+    low_level: 0 mV
+    output_load: HIGHZ
+    phase_deg: "0"
+    dut_min_impedance: 50 ohm
+  parameter_actions:
+    - parameter_id: carrier.amplitude
+      mode: sweep
+      value: 2 mV
+      segments:
+        - {start: 2 mV, stop: 4 mV, points: 3}
+  children: []
+"""
+        plan = RecipeCompiler(simulation_settings()).compile(
+            parse_recipe_text(source)
+        )
+        updates = [
+            action.payload
+            for action in plan.actions
+            if action.kind == "update_rigol_levels"
+        ]
+        self.assertEqual(len(updates), 3)
+        self.assertEqual(
+            [round(item["high_level_v"] - item["low_level_v"], 9) for item in updates],
+            [0.002, 0.003, 0.004],
+        )
+        self.assertEqual(
+            [round((item["high_level_v"] + item["low_level_v"]) / 2, 9) for item in updates],
+            [0.001, 0.001, 0.001],
+        )
+
     def test_anritsu_device_provider_expands_axis_and_preserves_acquisition_child(self) -> None:
         source = """\
 schema_version: 1

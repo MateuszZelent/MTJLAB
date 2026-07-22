@@ -314,7 +314,7 @@ class MainWindow(FluentWindow):
             self.keithley_page.configuration_snapshot_for
         )
         self.recipe_page.set_rigol_snapshot_provider(
-            self.rigol_page.configuration_snapshot
+            self.rigol_page.configuration_snapshot_for
         )
         self.recipe_page.set_anritsu_snapshot_provider(
             self.anritsu_page.configuration_panel.configuration_snapshot

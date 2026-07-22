@@ -55,6 +55,16 @@ root:
         type: acquire_spectrum
         trace: TRAC1
 
+  - id: rigol-b8b22f5e
+    type: sequence
+    text: Rigol DG1032Z — configuration required
+    device_module: rigol
+    label: Rigol DG1032Z
+    configuration_required: true
+    children:
+    - id: comment-7e1a2d65
+      type: comment
+      text: Drop nested devices or flow actions here
 finally:
 - id: rigol-ch1-off-finally
   type: set_rigol_output
@@ -68,7 +78,3 @@ finally:
   type: set_keithley_output
   channel: B
   enabled: false
-- id: optional-keithley-a-ramp-before-auto-off
-  type: ramp_keithley_to_zero
-  channel: A
-  deadline: 25 s
