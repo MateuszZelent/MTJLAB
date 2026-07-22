@@ -2569,10 +2569,16 @@ class KeithleyPage(QWidget):
         self._persist_form_defaults()
 
     def _persist_form_defaults(self, *_args: object) -> None:
+        """Keep working values in the page draft without staging Settings.
+
+        Manual setpoints, compliance and ranges describe the next operation,
+        not persistent station configuration.  Only explicit readback
+        assignment or a safety-limit editor may request a settings write.
+        """
+
         if self._loading_form_snapshot:
             return
         self._remember_source_values()
-        self.settings_defaults_requested.emit(dict(self._channel_form_snapshots))
 
     def _autorange_changed(
         self, enabled: bool, range_editor: QLineEdit, label: str

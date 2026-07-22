@@ -3806,7 +3806,7 @@ class MainWindowTests(unittest.TestCase):
             )
             self.assertIn("max_abs_power", channels[channel]["lab_limits"])
 
-    def test_keithley_form_values_require_global_save_settings(self) -> None:
+    def test_keithley_working_values_do_not_stage_or_write_settings(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             path = Path(temporary) / "settings.yml"
             write_engineer_settings(path)
@@ -3832,6 +3832,7 @@ class MainWindowTests(unittest.TestCase):
                     "keithley"
                 ]["safety"]["channels"]["B"]["defaults"]
                 self.assertEqual(still_unsaved["source_current"], "1 mA")
+                self.assertIsNone(window._pending_keithley_defaults)
                 window.safety_strip.save_settings.click()
                 for _attempt in range(30):
                     if not window._keithley_defaults_in_flight:
@@ -3840,8 +3841,10 @@ class MainWindowTests(unittest.TestCase):
                 defaults = SettingsRepository(path).load().raw["devices"]["keithley"][
                     "safety"
                 ]["channels"]["B"]["defaults"]
-                self.assertEqual(defaults["source_current"], "2 mA")
-                self.assertEqual(defaults["voltage_compliance"], "60 mV")
+                self.assertEqual(defaults["source_current"], "1 mA")
+                self.assertNotEqual(defaults["voltage_compliance"], "60 mV")
+                self.assertEqual(keithley.level.text(), "2 mA")
+                self.assertEqual(keithley.compliance.text(), "60 mV")
             finally:
                 window.close()
                 self.application.processEvents()
@@ -3879,13 +3882,8 @@ class MainWindowTests(unittest.TestCase):
             self.assertTrue(keithley.measure_voltage_range.isEnabled())
             keithley.measure_voltage_range.setText("1 V")
             keithley.measure_voltage_range.editingFinished.emit()
-            self.assertIsNotNone(window._pending_keithley_defaults)
-            self.assertEqual(
-                window._pending_keithley_defaults[1][keithley.channel.currentText()][
-                    "measure_voltage_range"
-                ],
-                "1 V",
-            )
+            self.assertIsNone(window._pending_keithley_defaults)
+            self.assertEqual(keithley.measure_voltage_range.text(), "1 V")
         finally:
             window.close()
             self.application.processEvents()

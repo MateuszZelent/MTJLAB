@@ -46,7 +46,9 @@ from app.recipes import (
     generate_sweep_stage_points,
     move_recipe_node,
     parse_recipe_text,
+    recipe_dut_limits_mapping,
     replace_recipe_node,
+    replace_recipe_dut_limits,
     wrap_recipe_nodes_in_repeat,
 )
 from app.recipes.parameter_registry import SWEEP_DIMENSIONS
@@ -58,7 +60,12 @@ from app.storage import Hdf5RunReader, ThatecDevice, ThatecRow, ThatecRun, Thate
 from app.ui.common import human_bytes as _human_bytes
 from app.ui.dialogs import StationFileDialog as QFileDialog
 from app.ui.dialogs import StationMessageBox as QMessageBox
-from app.ui.settings_guidance import SettingsIssue, settings_issue_for_error
+from app.ui.settings_guidance import (
+    RecipeDutIssue,
+    SettingsIssue,
+    recipe_dut_issue_for_error,
+    settings_issue_for_error,
+)
 from app.ui.common import human_duration as _human_duration
 from app.ui.common import line_edit as _line
 from app.ui.design_system import ThemeTokens, effective_theme, tokens_for
@@ -66,7 +73,7 @@ from app.ui.recipes.device_parameters import DeviceParameterDialog
 from app.ui.recipes.common_dialogs import (
     ActionNodeEditorDialog, AnritsuAcquisitionEditorDialog, CommentEditorDialog, FixedValueDialog,
     KeithleySweepBuilderDialog, RecipeTreeMoveRequest, RecipeTreeWidget,
-    OutputPolicyDialog, RepeatCountDialog, SweepLibraryButton,
+    DutLimitsDialog, OutputPolicyDialog, RepeatCountDialog, SweepLibraryButton,
 )
 from app.devices.anritsu_ms2830a.ui.recipe_extension import (
     AnritsuAdvancedSpectrumPanel,
@@ -441,6 +448,11 @@ class RecipePage(QWidget):
             QStyle.StandardPixmap.SP_DialogApplyButton,
             self.compile_recipe_async,
             shortcut=QKeySequence("Ctrl+Return"),
+        )
+        self.dut_limits_action = command_action(
+            "DUT limits",
+            QStyle.StandardPixmap.SP_FileDialogDetailedView,
+            self._edit_recipe_dut_limits,
         )
         self.recipe_command_bar.addSeparator()
         self.library_visibility_action = QAction("Library", self)
@@ -2202,13 +2214,7 @@ class RecipePage(QWidget):
                 error_type=type(exc).__name__,
                 error=str(exc),
             )
-            issue = settings_issue_for_error(exc)
-            if issue is not None and QMessageBox.settings_guidance(
-                self, "Recipe", str(exc)
-            ):
-                self.settings_issue_requested.emit(issue)
-            elif issue is None:
-                QMessageBox.warning(self, "Recipe", str(exc))
+            self._show_recipe_error("Recipe", str(exc))
             return
         self._accept_preflight(recipe, plan, estimate)
 
@@ -2294,7 +2300,52 @@ class RecipePage(QWidget):
         )
         self.summary.setText(f"Validation blocked: {error}")
         self._refresh_document_state()
-        QMessageBox.warning(self, "Recipe", error)
+        self._show_recipe_error("Recipe", error)
+
+    def _show_recipe_error(self, title: str, error: str) -> None:
+        """Offer the one editor that can actually resolve a validation error."""
+
+        dut_issue = recipe_dut_issue_for_error(error)
+        if dut_issue is not None:
+            if QMessageBox.action_guidance(
+                self, title, error, "Edit DUT limits…"
+            ):
+                self._edit_recipe_dut_limits(dut_issue)
+            return
+        settings_issue = settings_issue_for_error(error)
+        if settings_issue is not None:
+            if QMessageBox.settings_guidance(self, title, error):
+                self.settings_issue_requested.emit(settings_issue)
+            return
+        QMessageBox.warning(self, title, error)
+
+    def _edit_recipe_dut_limits(
+        self, issue: RecipeDutIssue | None = None
+    ) -> None:
+        """Edit the recipe-owned DUT envelope without touching station Settings."""
+
+        try:
+            limits = recipe_dut_limits_mapping(self._builder_source())
+        except Exception as exc:
+            QMessageBox.warning(self, "DUT limits", str(exc))
+            return
+        while True:
+            dialog = DutLimitsDialog(
+                limits,
+                self,
+                focus_device=issue.device if issue is not None else None,
+                focus_channel=issue.channel if issue is not None else None,
+            )
+            if dialog.exec() != QDialog.DialogCode.Accepted:
+                return
+            try:
+                limits = dialog.limits_mapping()
+                source = replace_recipe_dut_limits(self._builder_source(), limits)
+                self._apply_builder_source(source, "Updated recipe DUT limits")
+            except Exception as exc:
+                QMessageBox.warning(self, "DUT limits", str(exc))
+                continue
+            return
 
     def _preflight_cancelled(self) -> None:
         self.summary.setText("Recipe validation cancelled; Run remains disabled.")
