@@ -867,12 +867,6 @@ class AnritsuAdapter(DeviceAdapter):
                 f"Read-only Live requires Spectrum Analyzer mode; current mode is "
                 f"{snapshot.instrument_mode!r}. Select Spectrum Analyzer on the instrument."
             )
-        data_format = self._require_session().query("FORM?").strip().upper()
-        if not data_format.startswith("ASC"):
-            raise DeviceError(
-                f"Read-only Live requires the current trace format to be ASCII; "
-                f"the instrument reports {data_format!r}."
-            )
         if ensure_continuous:
             session = self._require_session()
             # Do not probe TRAC:TYPE? here. Although documented for Spectrum
@@ -988,30 +982,36 @@ class AnritsuAdapter(DeviceAdapter):
         trace = validate_anritsu_trace_name(trace)
         self._assert_acquisition_allowed()
         session = self._require_session()
-        session.write("FORM ASC")
-        return self._read_ascii_trace(session, trace)
+        return self._read_ascii_trace(session, trace, prepare_ascii=True)
 
     def fetch_current_trace(self, trace: str = "TRAC1") -> SpectrumTrace:
-        """Read the currently displayed trace using query commands only."""
+        """Read the currently displayed trace using the proven library sequence."""
 
         trace = validate_anritsu_trace_name(trace)
         session = self._require_session()
-        data_format = session.query("FORM?").strip().upper()
-        if not data_format.startswith("ASC"):
-            raise DeviceError(
-                f"Cannot read the current trace without changing the instrument: "
-                f"FORM? returned {data_format!r}, not ASCII."
-            )
-        return self._read_ascii_trace(session, trace)
+        return self._read_ascii_trace(session, trace, prepare_ascii=True)
 
     @staticmethod
-    def _read_ascii_trace(session: InstrumentSession, trace: str) -> SpectrumTrace:
+    def _read_ascii_trace(
+        session: InstrumentSession,
+        trace: str,
+        *,
+        prepare_ascii: bool = False,
+    ) -> SpectrumTrace:
         try:
-            start = float(session.query("FREQ:STAR?"))
-            stop = float(session.query("FREQ:STOP?"))
             points = int(float(session.query("SWE:POIN?")))
+            # Match the working external MS2830A library exactly: request the
+            # current point count, select ASCII transfer, then immediately read
+            # TRAC1. FORM ASC changes only the response representation; it does
+            # not trigger, stop, or reconfigure the analyser measurement.
+            if prepare_ascii:
+                session.write("FORM ASC")
             raw = session.query(f"TRAC? {trace}")
             values = tuple(float(item) for item in raw.split(",") if item.strip())
+            # Read the axis only after the trace transfer so no unrelated query
+            # is inserted between FORM ASC and TRAC?.
+            start = float(session.query("FREQ:STAR?"))
+            stop = float(session.query("FREQ:STOP?"))
         except (TypeError, ValueError) as exc:
             raise DeviceError("Anritsu returned an invalid trace response.") from exc
         if len(values) != points:

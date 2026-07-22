@@ -82,7 +82,18 @@ class DeviceModuleTests(unittest.TestCase):
         self.assertEqual(session.writes.count("TRAC? TRAC1"), 2)
         self.assertNotEqual(single.powers_dbm, live.powers_dbm)
         self.assertFalse(any(command.startswith("INIT") for command in session.writes))
-        self.assertFalse(any("FORM ASC" == command for command in session.writes))
+        self.assertEqual(session.writes.count("FORM ASC"), 2)
+        self.assertNotIn("FORM?", session.writes)
+        for trace_index in (
+            index
+            for index, command in enumerate(session.writes)
+            if command == "TRAC? TRAC1"
+        ):
+            self.assertEqual(session.writes[trace_index - 2 : trace_index + 1], [
+                "SWE:POIN?",
+                "FORM ASC",
+                "TRAC? TRAC1",
+            ])
 
     def test_registry_exposes_unique_concrete_implementation_keys(self) -> None:
         modules = built_in_device_registry().all_modules()

@@ -1940,7 +1940,7 @@ class AdapterAndRunnerTests(unittest.TestCase):
         )
         self.assertTrue(all("?" in command for command in session.writes))
 
-    def test_anritsu_passive_live_reads_locked_profile_without_writes(self) -> None:
+    def test_anritsu_passive_live_only_sets_ascii_transfer_format(self) -> None:
         values = ",".join(str(-70 + index / 100) for index in range(101))
         session = FakeVisaSession(
             responses={
@@ -1965,7 +1965,8 @@ class AdapterAndRunnerTests(unittest.TestCase):
 
         self.assertEqual(len(trace.powers_dbm), 101)
         self.assertTrue(adapter.live)
-        self.assertTrue(all("?" in command for command in session.writes))
+        mutations = [command for command in session.writes if "?" not in command]
+        self.assertEqual(mutations, ["FORM ASC"])
 
     def test_anritsu_live_temporarily_enables_and_restores_continuous_sweep(self) -> None:
         session = FakeVisaSession(
