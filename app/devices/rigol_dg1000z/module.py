@@ -56,19 +56,9 @@ def _dispatch(adapter: DeviceAdapter, operation: str, payload: object) -> object
         if field == "offset":
             return adapter.update_offset(channel, float(value_si))
         if field == "high_level":
-            config = adapter.last_channel_config(channel)
-            return adapter.update_levels(
-                channel,
-                high_level_v=float(value_si),
-                low_level_v=config.low_level_v,
-            )[0]
+            return adapter.update_high_level(channel, float(value_si))
         if field == "low_level":
-            config = adapter.last_channel_config(channel)
-            return adapter.update_levels(
-                channel,
-                high_level_v=config.high_level_v,
-                low_level_v=float(value_si),
-            )[1]
+            return adapter.update_low_level(channel, float(value_si))
         raise ValueError(
             f"Unsupported Rigol quick-control target {payload.target!r}."
         )

@@ -287,6 +287,17 @@ class FakeVisaSession:
                 if field.endswith(":WIDT"):
                     return "0.0001"
                 return "1e-08"
+            # A fake Rigol starts with channel coupling, tracking and all
+            # advanced generators disabled, matching the safe simulator
+            # baseline. Tests that exercise faults can still override any of
+            # these exact responses with a value or raising callable.
+            if command == ":COUP?":
+                return "FREQ:OFF,PHASE:OFF,AMPL:OFF"
+            if re.match(
+                r"^:SOUR\d+:(?:TRACK|MOD|SWE:STAT|BURS:STAT|HARM|SUM)\?$",
+                command,
+            ):
+                return "OFF"
             scpi_readback = re.match(r"^(:[A-Za-z0-9:]+)\?$", command)
             if scpi_readback:
                 field = scpi_readback.group(1)

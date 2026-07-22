@@ -12,7 +12,7 @@ from PySide6.QtWidgets import (
 )
 from qfluentwidgets import (
     BodyLabel,
-    CardWidget, CheckBox, ComboBox, PrimaryPushButton, PushButton,
+    CardWidget, CheckBox, ComboBox, PrimaryPushButton, PushButton, ScrollArea,
 )
 from app.ui.dialogs import StationMessageBox as QMessageBox
 
@@ -71,11 +71,30 @@ class RigolNodeEditorDialog(FluentRecipeDialog):
         self.channel.setCurrentIndex(channel_index if channel_index >= 0 else 0)
         form.addRow("Channel", self.channel)
         self.waveform = ComboBox(self)
-        self.waveform.addItems(("SIN", "SQU", "RAMP", "PULS", "NOIS", "DC"))
+        self.waveform.addItems(("SIN", "SQU", "RAMP", "PULS", "NOIS", "USER", "DC"))
         self.waveform.setCurrentText(snapshot.waveform)
+        self.time_mode = ComboBox(self)
+        self.time_mode.addItems(("Frequency", "Period"))
         self.frequency = _line(snapshot.frequency)
+        try:
+            frequency_hz = parse_quantity(snapshot.frequency, DIMENSION_FREQUENCY).si_value
+            period_text = f"{1 / frequency_hz:.12g} s" if frequency_hz > 0 else "1 ms"
+        except Exception:
+            period_text = "1 ms"
+        self.period = _line(period_text)
+        self.level_mode = ComboBox(self)
+        self.level_mode.addItems(("High Level / Low Level", "Amplitude / Offset"))
         self.high_level = _line(snapshot.high_level)
         self.low_level = _line(snapshot.low_level)
+        try:
+            high_v = parse_quantity(snapshot.high_level, DIMENSION_VOLTAGE).si_value
+            low_v = parse_quantity(snapshot.low_level, DIMENSION_VOLTAGE).si_value
+            amplitude_text = self._format_voltage(high_v - low_v)
+            offset_text = self._format_voltage((high_v + low_v) / 2)
+        except Exception:
+            amplitude_text, offset_text = "2 mV", "0 V"
+        self.vpp = _line(amplitude_text)
+        self.offset = _line(offset_text)
         self.output_load = _line(snapshot.output_load)
         self.phase = _line(snapshot.phase_deg)
         self.duty = _line(snapshot.square_duty_percent)
@@ -101,9 +120,14 @@ class RigolNodeEditorDialog(FluentRecipeDialog):
         self.sync_delay = _line(snapshot.sync_delay)
         for label, widget in (
             ("Waveform", self.waveform),
+            ("Time representation", self.time_mode),
             ("Frequency", self.frequency),
+            ("Period", self.period),
+            ("Voltage entry mode", self.level_mode),
             ("HighL", self.high_level),
             ("LowL", self.low_level),
+            ("Amplitude (Vpp)", self.vpp),
+            ("Offset / DC level", self.offset),
             ("Load", self.output_load),
             ("Phase [deg]", self.phase),
             ("Square duty [%]", self.duty),
@@ -121,7 +145,11 @@ class RigolNodeEditorDialog(FluentRecipeDialog):
         ):
             form.addRow(label, widget)
         self.carrier_form = form
-        content.addWidget(carrier)
+        carrier_scroll = ScrollArea(self)
+        carrier_scroll.setWidgetResizable(True)
+        carrier_scroll.setFrameShape(QFrame.Shape.NoFrame)
+        carrier_scroll.setWidget(carrier)
+        content.addWidget(carrier_scroll)
         actions_frame = CardWidget(self)
         actions_layout = QFormLayout(actions_frame)
         self.parameter_selectors: dict[str, ComboBox] = {}
@@ -167,7 +195,14 @@ class RigolNodeEditorDialog(FluentRecipeDialog):
         self.apply_button.clicked.connect(self.accept)
         self.cancel_button.clicked.connect(self.reject)
         self.waveform.currentTextChanged.connect(self._waveform_changed)
-        self.high_level.editingFinished.connect(self._sync_dc_level)
+        self.time_mode.currentTextChanged.connect(self._dynamic_controls_changed)
+        self.level_mode.currentTextChanged.connect(self._dynamic_controls_changed)
+        self.frequency.editingFinished.connect(self._sync_period_from_frequency)
+        self.period.editingFinished.connect(self._sync_frequency_from_period)
+        self.high_level.editingFinished.connect(self._sync_vpp_offset_from_levels)
+        self.low_level.editingFinished.connect(self._sync_vpp_offset_from_levels)
+        self.vpp.editingFinished.connect(self._sync_levels_from_vpp_offset)
+        self.offset.editingFinished.connect(self._sync_levels_from_vpp_offset)
         layout.addLayout(footer)
         self.load_plan_actions(parameter_actions or [])
         self._selection_changed()
@@ -175,13 +210,78 @@ class RigolNodeEditorDialog(FluentRecipeDialog):
 
     def _sync_dc_level(self) -> None:
         if self.waveform.currentText() == "DC":
-            self.low_level.setText(self.high_level.text())
+            self.high_level.setText(self.offset.text())
+            self.low_level.setText(self.offset.text())
+
+    @staticmethod
+    def _format_voltage(value_v: float) -> str:
+        if 0 < abs(value_v) < 1:
+            return f"{value_v * 1e3:.12g} mV"
+        return f"{value_v:.12g} V"
+
+    def _sync_vpp_offset_from_levels(self) -> None:
+        try:
+            high = parse_quantity(self.high_level.text(), DIMENSION_VOLTAGE).si_value
+            low = parse_quantity(self.low_level.text(), DIMENSION_VOLTAGE).si_value
+        except Exception:
+            return
+        self.vpp.setText(self._format_voltage(high - low))
+        self.offset.setText(self._format_voltage((high + low) / 2))
+
+    def _sync_levels_from_vpp_offset(self) -> None:
+        try:
+            offset = parse_quantity(self.offset.text(), DIMENSION_VOLTAGE).si_value
+            amplitude = (
+                0.0
+                if self.waveform.currentText() == "DC"
+                else parse_quantity(self.vpp.text(), DIMENSION_VOLTAGE).si_value
+            )
+        except Exception:
+            return
+        self.high_level.setText(self._format_voltage(offset + amplitude / 2))
+        self.low_level.setText(self._format_voltage(offset - amplitude / 2))
+
+    def _sync_period_from_frequency(self) -> None:
+        try:
+            frequency = parse_quantity(self.frequency.text(), DIMENSION_FREQUENCY).si_value
+            if frequency > 0:
+                self.period.setText(f"{1 / frequency:.12g} s")
+        except Exception:
+            return
+
+    def _sync_frequency_from_period(self) -> None:
+        try:
+            period = parse_quantity(self.period.text(), DIMENSION_TIME).si_value
+            if period > 0:
+                self.frequency.setText(f"{1 / period:.12g} Hz")
+        except Exception:
+            return
+
+    def _dynamic_controls_changed(self, *_args: object) -> None:
+        self._waveform_changed(self.waveform.currentText())
 
     def _waveform_changed(self, waveform: str) -> None:
         is_dc = waveform == "DC"
-        self.carrier_form.setRowVisible(self.frequency, not is_dc)
-        self.carrier_form.setRowVisible(self.low_level, not is_dc)
-        self.carrier_form.setRowVisible(self.phase, not is_dc)
+        has_time = waveform not in {"DC", "NOIS"}
+        high_low_mode = self.level_mode.currentText() == "High Level / Low Level"
+        visibility = {
+            self.time_mode: has_time,
+            self.frequency: has_time and self.time_mode.currentText() == "Frequency",
+            self.period: has_time and self.time_mode.currentText() == "Period",
+            self.level_mode: not is_dc,
+            self.high_level: not is_dc and high_low_mode,
+            self.low_level: not is_dc and high_low_mode,
+            self.vpp: not is_dc and not high_low_mode,
+            self.offset: is_dc or not high_low_mode,
+            self.phase: waveform not in {"DC", "NOIS"},
+            self.duty: waveform == "SQU",
+            self.symmetry: waveform == "RAMP",
+            self.pulse_width: waveform == "PULS",
+            self.pulse_leading: waveform == "PULS",
+            self.pulse_trailing: waveform == "PULS",
+        }
+        for widget, visible in visibility.items():
+            self.carrier_form.setRowVisible(widget, visible)
         high_label = self.carrier_form.labelForField(self.high_level)
         if high_label is not None:
             high_label.setText("DC level" if is_dc else "HighL")
@@ -199,7 +299,13 @@ class RigolNodeEditorDialog(FluentRecipeDialog):
         return str(self.output_policy.currentData())
 
     def configuration_snapshot(self) -> RigolConfigurationSnapshot:
-        high_level = self.high_level.text().strip()
+        if self.waveform.currentText() == "DC":
+            high_level = self.offset.text().strip()
+        elif self.level_mode.currentText() == "Amplitude / Offset":
+            self._sync_levels_from_vpp_offset()
+            high_level = self.high_level.text().strip()
+        else:
+            high_level = self.high_level.text().strip()
         low_level = (
             high_level
             if self.waveform.currentText() == "DC"
@@ -228,6 +334,8 @@ class RigolNodeEditorDialog(FluentRecipeDialog):
         )
 
     def planned_parameter_actions(self) -> list[dict[str, object]]:
+        if self.level_mode.currentText() == "Amplitude / Offset":
+            self._sync_levels_from_vpp_offset()
         high_level = self.high_level.text().strip()
         values = {
             "carrier.frequency": self.frequency.text().strip(),

@@ -715,6 +715,13 @@ class AdapterAndRunnerTests(unittest.TestCase):
                 ":SOUR1:FUNC?": "SQU",
                 ":SOUR1:FREQ?": "1000",
                 ":SOUR1:VOLT:HIGH?": "0.001",
+                ":COUP?": "FREQ:OFF,PHASE:OFF,AMPL:OFF",
+                ":SOUR1:TRACK?": "OFF",
+                ":SOUR1:MOD?": "OFF",
+                ":SOUR1:SWE:STAT?": "OFF",
+                ":SOUR1:BURS:STAT?": "OFF",
+                ":SOUR1:HARM?": "OFF",
+                ":SOUR1:SUM?": "OFF",
                 ":OUTP1?": lambda _command: "ON" if ":OUTP1 ON" in rigol_session.writes else "OFF",
                 ":OUTP2?": "OFF",
             }
@@ -731,18 +738,37 @@ class AdapterAndRunnerTests(unittest.TestCase):
         raw["devices"]["rigol"]["safety"]["allow_output_enable"] = True
         settings = StationSettings.model_validate(raw)
         session = FakeVisaSession()
+        def voltage_state() -> tuple[float, float]:
+            amplitude = next(
+                (float(item.rsplit(" ", 1)[-1]) for item in reversed(session.writes)
+                 if item.startswith(":SOUR1:VOLT ")),
+                0.002,
+            )
+            offset = next(
+                (float(item.rsplit(" ", 1)[-1]) for item in reversed(session.writes)
+                 if item.startswith(":SOUR1:VOLT:OFFS ")),
+                0.0,
+            )
+            high, low = offset + amplitude / 2, offset - amplitude / 2
+            if ":SOUR1:VOLT:HIGH 0.003" in session.writes:
+                high = 0.003
+            return high, low
         session.responses.update(
             {
                 "*IDN?": "Rigol Technologies,DG1032Z,DG1ZA172902039,00.01.08",
                 ":SYST:ERR?": "0,No error",
                 ":SOUR1:FUNC?": "SQU",
                 ":SOUR1:FREQ?": "1000",
-                ":SOUR1:VOLT:HIGH?": lambda _command: (
-                    "0.003"
-                    if ":SOUR1:VOLT:HIGH 0.003" in session.writes
-                    else "0.001"
+                ":SOUR1:VOLT?": lambda _command: str(
+                    voltage_state()[0] - voltage_state()[1]
                 ),
-                ":SOUR1:VOLT:LOW?": "-0.001",
+                ":SOUR1:VOLT:OFFS?": lambda _command: str(
+                    sum(voltage_state()) / 2
+                ),
+                ":SOUR1:VOLT:HIGH?": lambda _command: (
+                    str(voltage_state()[0])
+                ),
+                ":SOUR1:VOLT:LOW?": lambda _command: str(voltage_state()[1]),
                 ":OUTP1?": lambda _command: (
                     "ON" if ":OUTP1 ON" in session.writes else "OFF"
                 ),
@@ -772,28 +798,28 @@ class AdapterAndRunnerTests(unittest.TestCase):
         raw["devices"]["rigol"]["safety"]["allow_output_enable"] = True
         settings = StationSettings.model_validate(raw)
         session = FakeVisaSession()
+        def voltage_state() -> tuple[float, float, float, float]:
+            amplitude = next(
+                (float(item.rsplit(" ", 1)[-1]) for item in reversed(session.writes)
+                 if item.startswith(":SOUR1:VOLT ")),
+                0.002,
+            )
+            offset = next(
+                (float(item.rsplit(" ", 1)[-1]) for item in reversed(session.writes)
+                 if item.startswith(":SOUR1:VOLT:OFFS ")),
+                0.0,
+            )
+            return amplitude, offset, offset + amplitude / 2, offset - amplitude / 2
         session.responses.update(
             {
                 "*IDN?": "Rigol Technologies,DG1032Z,DG1ZA172902039,00.01.08",
                 ":SYST:ERR?": "0,No error",
                 ":SOUR1:FUNC?": "SQU",
                 ":SOUR1:FREQ?": "1000",
-                ":SOUR1:VOLT:HIGH?": lambda _command: next(
-                    (
-                        command.rsplit(" ", 1)[-1]
-                        for command in reversed(session.writes)
-                        if command.startswith(":SOUR1:VOLT:HIGH ")
-                    ),
-                    "0.001",
-                ),
-                ":SOUR1:VOLT:LOW?": lambda _command: next(
-                    (
-                        command.rsplit(" ", 1)[-1]
-                        for command in reversed(session.writes)
-                        if command.startswith(":SOUR1:VOLT:LOW ")
-                    ),
-                    "-0.001",
-                ),
+                ":SOUR1:VOLT?": lambda _command: str(voltage_state()[0]),
+                ":SOUR1:VOLT:OFFS?": lambda _command: str(voltage_state()[1]),
+                ":SOUR1:VOLT:HIGH?": lambda _command: str(voltage_state()[2]),
+                ":SOUR1:VOLT:LOW?": lambda _command: str(voltage_state()[3]),
                 ":OUTP1?": lambda _command: (
                     "ON" if ":OUTP1 ON" in session.writes else "OFF"
                 ),
@@ -809,10 +835,8 @@ class AdapterAndRunnerTests(unittest.TestCase):
         self.assertAlmostEqual(adapter.update_amplitude_vpp(1, 0.004), 0.004)
         self.assertAlmostEqual(adapter.update_offset(1, 0.001), 0.001)
         self.assertEqual(adapter.state, DeviceState.OUTPUT_ON)
-        self.assertIn(":SOUR1:VOLT:HIGH 0.002", session.writes)
-        self.assertIn(":SOUR1:VOLT:LOW -0.002", session.writes)
-        self.assertIn(":SOUR1:VOLT:HIGH 0.003", session.writes)
-        self.assertIn(":SOUR1:VOLT:LOW -0.001", session.writes)
+        self.assertIn(":SOUR1:VOLT 0.004", session.writes)
+        self.assertIn(":SOUR1:VOLT:OFFS 0.001", session.writes)
         writes_before = len(session.writes)
         with self.assertRaises(SafetyViolation):
             adapter.update_amplitude_vpp(1, 1_000.0)

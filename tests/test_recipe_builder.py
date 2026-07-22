@@ -27,6 +27,7 @@ from qfluentwidgets import (
 )
 
 from app.recipes import RecipeNode, parse_recipe_text
+from app.engine.compiler import RecipeCompiler
 from app.devices.anritsu_ms2830a.ui import (
     AnritsuAdvancedSpectrumPanel,
     AnritsuNodeEditorDialog,
@@ -35,6 +36,7 @@ from app.devices.anritsu_ms2830a.ui import (
 )
 from app.devices.keithley_2600.ui import (
     KeithleyConfigurationPanel,
+    KeithleyConfigurationSnapshot,
     KeithleyNodeEditorDialog,
     KeithleyPage,
 )
@@ -1117,6 +1119,37 @@ root:
             manual.close()
             controller.close()
 
+    def test_keithley_sweep_editor_reloads_values_for_selected_channel_and_mode(self) -> None:
+        settings = simulation_settings()
+        snapshots = {
+            ("B", "current"): KeithleyConfigurationSnapshot(
+                channel="B", source_mode="current", source_level="2 mA", compliance="50 mV"
+            ),
+            ("A", "voltage"): KeithleyConfigurationSnapshot(
+                channel="A", source_mode="voltage", source_level="10 mV", compliance="1 mA"
+            ),
+        }
+        dialog = KeithleyNodeEditorDialog(
+            settings,
+            snapshot=snapshots[("B", "current")],
+            snapshot_resolver=lambda channel, mode: snapshots.get((channel, mode)),
+        )
+        try:
+            dialog.channel.setCurrentText("A")
+            dialog.mode.setCurrentText("voltage")
+            self.assertEqual(dialog.level.text(), "10 mV")
+            self.assertEqual(dialog.compliance.text(), "1 mA")
+            self.assertEqual(
+                dialog.parameter_labels["source.level"].text(), "Source voltage"
+            )
+            self.assertEqual(
+                dialog.parameter_labels["source.compliance"].text(),
+                "Current limit (compliance)",
+            )
+            self.assertEqual(dialog.source_mode_action.currentData(), "set")
+        finally:
+            dialog.close()
+
     def test_anritsu_plan_dialog_uses_shared_spectrum_panel_and_selective_actions(self) -> None:
         dialog = AnritsuNodeEditorDialog(simulation_settings())
         try:
@@ -1195,6 +1228,22 @@ root:
                     "store_processed": True,
                 },
             )
+        finally:
+            dialog.close()
+
+    def test_anritsu_reference_dialog_hides_unavailable_processing_controls(self) -> None:
+        node = parse_recipe_text(
+            """schema_version: 1\nname: reference-editor\nroot:\n  id: ref\n  type: acquire_reference\n  trace: TRAC1\n"""
+        ).root
+        dialog = AnritsuAcquisitionEditorDialog(node)
+        try:
+            dialog.show()
+            QApplication.processEvents()
+            self.assertFalse(dialog.reference_operation.isVisible())
+            self.assertFalse(dialog.store_raw.isVisible())
+            self.assertFalse(dialog.store_processed.isVisible())
+            self.assertTrue(dialog.trace.isVisible())
+            self.assertGreater(dialog.trace.geometry().top(), 0)
         finally:
             dialog.close()
 
@@ -2505,7 +2554,7 @@ root:
         finally:
             page.close()
 
-    def test_empty_finally_is_visible_and_library_adds_explicit_safe_outputs(self) -> None:
+    def test_finally_always_projects_automatic_station_shutdown(self) -> None:
         page = RecipePage(simulation_settings())
         try:
             recipe = parse_recipe_text(
@@ -2516,35 +2565,112 @@ root: {id: root, type: sequence, children: []}
 finally: []
 """
             )
-            page.editor.setPlainText(recipe.source_text)
             page._populate_recipe_tree(recipe.root, recipe.finally_nodes, None)
+            page.resize(1600, 900)
+            page.show()
+            self.application.processEvents()
             finally_item = page.tree.topLevelItem(page.tree.topLevelItemCount() - 1)
+            finally_item.setExpanded(True)
+            self.application.processEvents()
             self.assertTrue(finally_item.text(0).startswith("Finally"))
-            self.assertIn("Empty", finally_item.text(1))
+            self.assertIn("Automatic shutdown", finally_item.text(1))
+            self.assertEqual(
+                [
+                    finally_item.child(index).text(0)
+                    for index in range(finally_item.childCount())
+                ],
+                [
+                    "Keithley A + B OUTPUT OFF",
+                    "Rigol CH1 + CH2 OUTPUT OFF",
+                    "Anritsu RF OUTPUT OFF + abort",
+                    "Measurement checkpoint flush",
+                ],
+            )
+            self.assertTrue(
+                all(
+                    finally_item.child(index).text(2) == "AUTO"
+                    for index in range(finally_item.childCount())
+                )
+            )
+            self.assertGreater(page.tree.visualItemRect(finally_item).width(), 0)
+            self.assertGreater(
+                page.tree.visualItemRect(finally_item.child(0)).height(), 0
+            )
+        finally:
+            page.close()
 
-            page._library_add_keithley_shutdown("A")
-            page._library_add_output_off("set_keithley_output", channel="B")
-            page._library_add_output_off("set_rigol_output", channel=2)
-            page._library_add_output_off("set_anritsu_sg_output")
+    def test_keithley_auto_shutdown_does_not_create_ramp_until_user_selects_it(self) -> None:
+        page = RecipePage(simulation_settings())
+        try:
+            page._set_keithley_shutdown_choice({"A"}, "25 s")
             parsed = parse_recipe_text(page.editor.toPlainText())
             self.assertEqual(
                 [
-                    (node.type, node.data.get("channel"), node.data.get("enabled"))
+                    (node.id, node.type, node.data.get("channel"), node.data.get("deadline"))
                     for node in parsed.finally_nodes
                 ],
                 [
-                    ("ramp_keithley_to_zero", "A", None),
-                    ("set_keithley_output", "A", False),
-                    ("set_keithley_output", "B", False),
-                    ("set_rigol_output", 2, False),
-                    ("set_anritsu_sg_output", None, False),
+                    (
+                        "optional-keithley-a-ramp-before-auto-off",
+                        "ramp_keithley_to_zero",
+                        "A",
+                        "25 s",
+                    )
                 ],
             )
-            labels = {button.text() for button in page._library_action_buttons}
-            self.assertIn("Keithley A OUTPUT OFF", labels)
-            self.assertIn("Keithley A RAMP TO ZERO + OFF (optional)", labels)
-            self.assertIn("Rigol CH2 OFF", labels)
-            self.assertIn("Anritsu SG OFF", labels)
+            page._set_keithley_shutdown_choice(set(), "25 s")
+            parsed = parse_recipe_text(page.editor.toPlainText())
+            self.assertEqual(parsed.finally_nodes, ())
+        finally:
+            page.close()
+
+    def test_double_click_on_auto_keithley_shutdown_opens_shutdown_choice(self) -> None:
+        page = RecipePage(simulation_settings())
+        try:
+            recipe = parse_recipe_text(
+                """\
+schema_version: 1
+name: empty-finally
+root: {id: root, type: sequence, children: []}
+finally: []
+"""
+            )
+            page._populate_recipe_tree(recipe.root, recipe.finally_nodes, None)
+            finally_item = page.tree.topLevelItem(page.tree.topLevelItemCount() - 1)
+            keithley_auto = finally_item.child(0)
+            with patch.object(page, "_edit_automatic_shutdown") as edit_shutdown:
+                page._open_node_editor(keithley_auto, 0)
+            edit_shutdown.assert_called_once_with("keithley.outputs_off")
+        finally:
+            page.close()
+
+    def test_compiled_shutdown_manifest_is_rendered_in_builder_and_execute_snapshot(self) -> None:
+        page = RecipePage(simulation_settings())
+        try:
+            recipe = parse_recipe_text(
+                """\
+schema_version: 1
+name: automatic-finally
+root:
+  id: root
+  type: sequence
+  children:
+    - {id: wait, type: wait, duration: 1 ms}
+finally: []
+"""
+            )
+            plan = RecipeCompiler(simulation_settings()).compile(recipe)
+            snapshot = page.execution_tree_snapshot(recipe.source_text, plan)
+            finally_item = snapshot[-1]
+            self.assertEqual(finally_item.text(0), "Finally — safe shutdown")
+            self.assertEqual(finally_item.childCount(), len(plan.safe_shutdown_actions))
+            self.assertEqual(
+                [
+                    finally_item.child(index).text(2)
+                    for index in range(finally_item.childCount())
+                ],
+                ["AUTO"] * len(plan.safe_shutdown_actions),
+            )
         finally:
             page.close()
 

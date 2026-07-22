@@ -93,6 +93,92 @@ from app.ui.recipes.sweep_editor import SweepGeneratorDialog
 from app.ui.widgets import LimitEditDialog, LimitField, SpectrumPlotWidget
 from app.ui.workers import RecipePreflightWorker
 
+
+_KEITHLEY_OPTIONAL_SHUTDOWN_RAMP_IDS = {
+    "A": "optional-keithley-a-ramp-before-auto-off",
+    "B": "optional-keithley-b-ramp-before-auto-off",
+}
+
+
+class KeithleyShutdownMethodDialog(QDialog):
+    """Choose optional operator cleanup before the compiler's final OFF."""
+
+    def __init__(
+        self,
+        *,
+        ramp_channels: set[str],
+        deadline: str,
+        parent: QWidget | None = None,
+    ) -> None:
+        super().__init__(parent)
+        self.setWindowTitle("Keithley shutdown method")
+        self.setMinimumWidth(520)
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(24, 22, 24, 20)
+        layout.setSpacing(12)
+
+        title = StrongBodyLabel("Keithley shutdown before automatic OFF", self)
+        layout.addWidget(title)
+        explanation = BodyLabel(
+            "Automatic final OUTPUT OFF always remains active. Ramp to zero is "
+            "only added when you explicitly select it here.",
+            self,
+        )
+        explanation.setWordWrap(True)
+        explanation.setObjectName("muted")
+        layout.addWidget(explanation)
+
+        form = QFormLayout()
+        self.channel_a = self._method_combo("A" in ramp_channels)
+        self.channel_b = self._method_combo("B" in ramp_channels)
+        self.deadline = LineEdit(self)
+        self.deadline.setText(deadline or "30 s")
+        self.deadline.setPlaceholderText("30 s")
+        self.deadline.setAccessibleName("Ramp deadline")
+        form.addRow("Channel A", self.channel_a)
+        form.addRow("Channel B", self.channel_b)
+        form.addRow("Ramp deadline", self.deadline)
+        layout.addLayout(form)
+
+        footer = QHBoxLayout()
+        footer.addStretch(1)
+        cancel = PushButton("Cancel", self)
+        apply = PrimaryPushButton("Apply shutdown choice", self)
+        footer.addWidget(cancel)
+        footer.addWidget(apply)
+        layout.addLayout(footer)
+        cancel.clicked.connect(self.reject)
+        apply.clicked.connect(self._accept_if_valid)
+
+    def selected_ramp_channels(self) -> set[str]:
+        selected: set[str] = set()
+        if self.channel_a.currentData() == "ramp":
+            selected.add("A")
+        if self.channel_b.currentData() == "ramp":
+            selected.add("B")
+        return selected
+
+    def ramp_deadline(self) -> str:
+        return self.deadline.text().strip() or "30 s"
+
+    def _method_combo(self, ramp_enabled: bool) -> ComboBox:
+        combo = ComboBox(self)
+        combo.addItem("Immediate OUTPUT OFF", userData="off")
+        combo.addItem("Ramp to zero, then OUTPUT OFF", userData="ramp")
+        combo.setCurrentIndex(1 if ramp_enabled else 0)
+        return combo
+
+    def _accept_if_valid(self) -> None:
+        try:
+            quantity = parse_quantity(self.ramp_deadline(), DIMENSION_TIME)
+            if quantity.si_value <= 0:
+                raise ConfigurationError("Ramp deadline must be greater than 0 s.")
+        except Exception as exc:
+            QMessageBox.warning(self, "Keithley shutdown method", str(exc))
+            return
+        self.accept()
+
+
 class RecipePage(QWidget):
     status = Signal(str)
     run_requested = Signal(object, bool, str)
@@ -1060,6 +1146,102 @@ class RecipePage(QWidget):
                 },
             ],
             f"Added Keithley {channel} safe shutdown",
+        )
+
+    def _current_keithley_shutdown_choice(self) -> tuple[set[str], str]:
+        recipe = parse_recipe_text(self._builder_source(), origin="tree-builder")
+        channels: set[str] = set()
+        deadline = "30 s"
+        for node in recipe.finally_nodes:
+            if node.id not in _KEITHLEY_OPTIONAL_SHUTDOWN_RAMP_IDS.values():
+                continue
+            channel = str(node.data.get("channel", "")).upper()
+            expected_id = _KEITHLEY_OPTIONAL_SHUTDOWN_RAMP_IDS.get(channel)
+            if node.type != "ramp_keithley_to_zero" or node.id != expected_id:
+                raise ConfigurationError(
+                    f"{node.id}: reserved shutdown node id is not a managed Keithley ramp."
+                )
+            channels.add(channel)
+            deadline = str(node.data.get("deadline", deadline))
+        return channels, deadline
+
+    def _set_keithley_shutdown_choice(
+        self,
+        ramp_channels: set[str],
+        deadline: str,
+    ) -> None:
+        invalid = ramp_channels - {"A", "B"}
+        if invalid:
+            raise ConfigurationError(
+                f"Keithley shutdown ramp supports only channels A and B, not {sorted(invalid)!r}."
+            )
+        quantity = parse_quantity(deadline, DIMENSION_TIME)
+        if quantity.si_value <= 0:
+            raise ConfigurationError("Ramp deadline must be greater than 0 s.")
+        source = self._builder_source()
+        recipe = parse_recipe_text(source, origin="tree-builder")
+        managed_ids = set(_KEITHLEY_OPTIONAL_SHUTDOWN_RAMP_IDS.values())
+        for node in recipe.finally_nodes:
+            if node.id not in managed_ids:
+                continue
+            channel = str(node.data.get("channel", "")).upper()
+            if (
+                node.type != "ramp_keithley_to_zero"
+                or _KEITHLEY_OPTIONAL_SHUTDOWN_RAMP_IDS.get(channel) != node.id
+            ):
+                raise ConfigurationError(
+                    f"{node.id}: reserved shutdown node id is not a managed Keithley ramp."
+                )
+            source = delete_recipe_node(source, node_id=node.id)
+        selected_id: str | None = None
+        for channel in ("A", "B"):
+            if channel not in ramp_channels:
+                continue
+            node = {
+                "id": _KEITHLEY_OPTIONAL_SHUTDOWN_RAMP_IDS[channel],
+                "type": "ramp_keithley_to_zero",
+                "channel": channel,
+                "deadline": deadline,
+            }
+            source = add_recipe_node(
+                source,
+                parent_id="__finally__",
+                branch="children",
+                node=node,
+            )
+            selected_id = str(node["id"])
+        self._apply_builder_source(
+            source,
+            "Updated Keithley shutdown method",
+            selected_node_id=selected_id,
+        )
+
+    def _edit_automatic_shutdown(self, action: str) -> None:
+        if action == "keithley.outputs_off":
+            try:
+                channels, deadline = self._current_keithley_shutdown_choice()
+            except Exception as exc:
+                QMessageBox.warning(self, "Keithley shutdown method", str(exc))
+                return
+            dialog = KeithleyShutdownMethodDialog(
+                ramp_channels=channels,
+                deadline=deadline,
+                parent=self,
+            )
+            if dialog.exec() != QDialog.DialogCode.Accepted:
+                return
+            try:
+                self._set_keithley_shutdown_choice(
+                    dialog.selected_ramp_channels(),
+                    dialog.ramp_deadline(),
+                )
+            except Exception as exc:
+                QMessageBox.warning(self, "Keithley shutdown method", str(exc))
+            return
+        QMessageBox.information(
+            self,
+            "Automatic shutdown",
+            "This automatic shutdown action is always immediate and cannot be changed here.",
         )
 
     def _library_add_output_on(
@@ -2213,10 +2395,14 @@ class RecipePage(QWidget):
                     add_node(child, else_item)
 
         add_node(root)
+        automatic_shutdown = self._automatic_shutdown_projection(plan, finally_nodes)
         cleanup_detail = (
-            "Guaranteed cleanup"
-            if finally_nodes
-            else "Empty — select an OFF action from Safe shutdown"
+            f"Automatic shutdown • {len(automatic_shutdown)} guaranteed action(s)"
+            + (
+                f" • {len(finally_nodes)} operator cleanup action(s)"
+                if finally_nodes
+                else ""
+            )
         )
         cleanup = QTreeWidgetItem(["Finally — safe shutdown", cleanup_detail, "●"])
         cleanup.setIcon(0, self._tree_badge_icon("Safety", tokens.neutral, "OFF"))
@@ -2229,12 +2415,39 @@ class RecipePage(QWidget):
         cleanup.setFlags(cleanup.flags() & ~Qt.ItemFlag.ItemIsDragEnabled)
         cleanup.setToolTip(
             0,
-            "Select this row, then click a Safe shutdown action in the Node library. "
-            "These actions run after success, stop and fault.",
+            "System-generated OUTPUT OFF actions always run after success, stop "
+            "and fault. Optional operator cleanup, such as a Keithley ramp, runs "
+            "before the independent automatic shutdown.",
         )
         top_level_items.append(cleanup)
         for node in finally_nodes:
             add_node(node, cleanup)
+        for action, label, detail in automatic_shutdown:
+            item = QTreeWidgetItem([label, detail, "AUTO"])
+            item.setIcon(0, self._tree_badge_icon("Safety", tokens.neutral, "OFF"))
+            item.setFlags(
+                item.flags()
+                & ~Qt.ItemFlag.ItemIsDragEnabled
+                & ~Qt.ItemFlag.ItemIsDropEnabled
+                & ~Qt.ItemFlag.ItemIsEditable
+            )
+            item.setData(0, Qt.ItemDataRole.UserRole, None)
+            item.setData(
+                0,
+                RecipeTreeWidget.structural_role,
+                f"automatic_shutdown:{action}",
+            )
+            item.setToolTip(
+                0,
+                "Generated by the compiler and executed by the Run Engine. "
+                "It cannot be removed or disabled from the recipe tree.",
+            )
+            item.setForeground(2, QBrush(QColor(tokens.success)))
+            status_font = item.font(2)
+            status_font.setBold(True)
+            status_font.setPointSize(8)
+            item.setFont(2, status_font)
+            cleanup.addChild(item)
         # Commit only after every row, synthetic control and icon was built.
         # A presentation exception must never erase the operator's current tree.
         self.tree.clear()
@@ -2262,6 +2475,64 @@ class RecipePage(QWidget):
         elif self.tree.topLevelItemCount():
             self.tree.setCurrentItem(self.tree.topLevelItem(0))
         self.tree.verticalScrollBar().setValue(previous_scroll)
+
+    @staticmethod
+    def _automatic_shutdown_projection(
+        plan: object | None,
+        finally_nodes: tuple[RecipeNode, ...] = (),
+    ) -> tuple[tuple[str, str, str], ...]:
+        """Describe the immutable shutdown manifest rendered below Finally."""
+
+        actions = getattr(plan, "safe_shutdown_actions", None)
+        if not isinstance(actions, (tuple, list)) or not actions:
+            actions = (
+                "keithley.outputs_off",
+                "rigol.outputs_off",
+                "anritsu.rf_off_and_abort",
+                "storage.flush_checkpoint",
+            )
+        ramp_channels = tuple(
+            str(node.data.get("channel", "")).upper()
+            for node in finally_nodes
+            if node.type == "ramp_keithley_to_zero"
+            and str(node.data.get("channel", "")).upper() in {"A", "B"}
+        )
+        keithley_detail = "Automatic - both SMU channels - confirmed safe state"
+        if ramp_channels:
+            keithley_detail += (
+                f" - optional ramp first: {', '.join(sorted(set(ramp_channels)))}"
+            )
+        presentation = {
+            "keithley.outputs_off": (
+                "Keithley A + B OUTPUT OFF",
+                "Automatic • both SMU channels • confirmed safe state",
+            ),
+            "rigol.outputs_off": (
+                "Rigol CH1 + CH2 OUTPUT OFF",
+                "Automatic • both generator channels • confirmed safe state",
+            ),
+            "anritsu.abort_acquisition": (
+                "Anritsu • abort acquisition",
+                "Automatic • stop active spectrum acquisition",
+            ),
+            "anritsu.rf_off_and_abort": (
+                "Anritsu RF OUTPUT OFF + abort",
+                "Automatic • RF source OFF and spectrum acquisition stopped",
+            ),
+            "storage.flush_checkpoint": (
+                "Measurement checkpoint flush",
+                "Automatic • persist the latest completed measurement boundary",
+            ),
+        }
+        rows: list[tuple[str, str, str]] = []
+        for raw_action in actions:
+            action = str(raw_action)
+            label, detail = presentation.get(
+                action,
+                (action, "Automatic safe-shutdown operation"),
+            )
+            rows.append((action, label, detail))
+        return tuple(rows)
 
     def execution_tree_snapshot(
         self,
@@ -4139,6 +4410,7 @@ class RecipePage(QWidget):
 
     def _edit_keithley_module_node(self, node: RecipeNode) -> None:
         snapshot = self._current_keithley_snapshot()
+        configuration = node.data.get("configuration")
         raw_actions = node.data.get("parameter_actions")
         actions = (
             [dict(action) for action in raw_actions if isinstance(action, dict)]
@@ -4148,10 +4420,19 @@ class RecipePage(QWidget):
         legacy_override = node.data.get("parameter_override")
         if not actions and isinstance(legacy_override, dict):
             actions = [{"mode": "set", **legacy_override}]
+        if isinstance(configuration, dict):
+            try:
+                snapshot = KeithleyConfigurationSnapshot(**configuration)
+            except (TypeError, ValueError) as exc:
+                QMessageBox.warning(self, "Keithley node", f"Invalid stored snapshot: {exc}")
+                return
         for action in actions:
             snapshot = self._snapshot_with_override(snapshot, action)
         dialog = KeithleyNodeEditorDialog(
-            self._settings, self, snapshot=snapshot
+            self._settings,
+            self,
+            snapshot=snapshot,
+            snapshot_resolver=self._keithley_snapshot_for,
         )
         dialog.load_plan_actions(
             actions, str(node.data.get("output_policy", "unchanged"))
@@ -5210,6 +5491,20 @@ class RecipePage(QWidget):
                 return snapshot
         return KeithleyConfigurationSnapshot()
 
+    def _keithley_snapshot_for(
+        self, channel: str, mode: str
+    ) -> KeithleyConfigurationSnapshot | None:
+        provider = self._keithley_snapshot_provider
+        if not callable(provider):
+            return None
+        try:
+            snapshot = provider(channel, mode)
+        except TypeError:
+            snapshot = provider()
+            if isinstance(snapshot, KeithleyConfigurationSnapshot):
+                return replace(snapshot, channel=channel, source_mode=mode)
+        return snapshot if isinstance(snapshot, KeithleyConfigurationSnapshot) else None
+
     @staticmethod
     def _snapshot_with_override(
         snapshot: KeithleyConfigurationSnapshot,
@@ -5244,6 +5539,10 @@ class RecipePage(QWidget):
         operator_row = item.data(0, self.operator_row_role)
         if isinstance(operator_row, dict):
             self._edit_selected_roi()
+            return
+        structural = item.data(0, RecipeTreeWidget.structural_role)
+        if isinstance(structural, str) and structural.startswith("automatic_shutdown:"):
+            self._edit_automatic_shutdown(structural.split(":", 1)[1])
             return
         node = item.data(0, Qt.ItemDataRole.UserRole)
         if not isinstance(node, RecipeNode):

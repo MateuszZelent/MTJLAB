@@ -220,7 +220,7 @@ class RigolPage(QWidget):
                 ("Minimum DUT impedance", self._bounded(self.dut_impedance, "declared_dut_impedance")),
                 ("Phase [deg]", self.phase),
             ),
-            (configure,),
+            (),
         )
         self.basic_form = self.basic_scroll.widget().findChild(QFormLayout)
         shape_apply = PrimaryPushButton("Apply shape parameters")
@@ -391,7 +391,7 @@ class RigolPage(QWidget):
         return self._output_state_known[channel] and self._output_states[channel]
 
     def _submit_active_frequency(self) -> None:
-        if not self._active_output_selected() or self.waveform.currentText() in {"DC", "NOIS"}:
+        if self.waveform.currentText() in {"DC", "NOIS"}:
             return
         channel = self.channel.currentText()
         try:
@@ -403,14 +403,15 @@ class RigolPage(QWidget):
                 timeout_ms=12_000,
             )
             return
+        if self._confirmed_carrier_configs[int(channel)] is None:
+            self.configure()
+            return
         self.quick_setpoint_requested.emit(
             f"rigol.{channel}.frequency",
             format_quantity_auto(value.si_value, DIMENSION_FREQUENCY),
         )
 
     def _submit_active_voltage(self, field: str, editor: QWidget) -> None:
-        if not self._active_output_selected():
-            return
         channel = self.channel.currentText()
         try:
             value = parse_quantity(editor.text(), DIMENSION_VOLTAGE)  # type: ignore[attr-defined]
@@ -420,6 +421,9 @@ class RigolPage(QWidget):
                 severity="error",
                 timeout_ms=12_000,
             )
+            return
+        if self._confirmed_carrier_configs[int(channel)] is None:
+            self.configure()
             return
         self.quick_setpoint_requested.emit(
             f"rigol.{channel}.{field}",

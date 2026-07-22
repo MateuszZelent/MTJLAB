@@ -637,6 +637,13 @@ class AnritsuAcquisitionEditorDialog(FluentRecipeDialog):
             form.addRow("Reference operation", self.reference_operation)
             form.addRow("", self.store_raw)
             form.addRow("", self.store_processed)
+        else:
+            # These controls still exist so node_fields and shared signal
+            # handling stay simple, but an unlaid-out child defaults to (0,0)
+            # and used to overlap the dialog heading.
+            self.reference_operation.hide()
+            self.store_raw.hide()
+            self.store_processed.hide()
         layout.addLayout(form)
         layout.addStretch(1)
         footer = QHBoxLayout()

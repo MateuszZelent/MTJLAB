@@ -311,7 +311,7 @@ class MainWindow(FluentWindow):
             device_registry=self._composition.registry,
         )
         self.recipe_page.set_keithley_snapshot_provider(
-            self.keithley_page.configuration_panel.snapshot
+            self.keithley_page.configuration_snapshot_for
         )
         self.recipe_page.set_rigol_snapshot_provider(
             self.rigol_page.configuration_snapshot

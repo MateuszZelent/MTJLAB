@@ -283,6 +283,17 @@ class RigolSimulator(_BaseSimulator):
             self.phase[int(match.group(1))] = float(match.group(2))
             return
         match = re.match(
+            rf"^:SOUR([12]):VOLT\s+({_SCPI_NUMBER})$",
+            command,
+            re.IGNORECASE,
+        )
+        if match:
+            channel, amplitude = int(match.group(1)), float(match.group(2))
+            offset = (self.high[channel] + self.low[channel]) / 2.0
+            self.high[channel] = offset + amplitude / 2.0
+            self.low[channel] = offset - amplitude / 2.0
+            return
+        match = re.match(
             rf"^:SOUR([12]):VOLT:(HIGH|LOW)\s+({_SCPI_NUMBER})$",
             command,
             re.IGNORECASE,
@@ -353,6 +364,10 @@ class RigolSimulator(_BaseSimulator):
         if match:
             channel = int(match.group(1))
             return str((self.high[channel] + self.low[channel]) / 2.0)
+        match = re.match(r"^:SOUR([12]):VOLT\?$", command, re.IGNORECASE)
+        if match:
+            channel = int(match.group(1))
+            return f"{self.high[channel] - self.low[channel]:.12g}"
         match = re.match(r"^:OUTP([12])\?$", command, re.IGNORECASE)
         if match:
             return "ON" if self.output[int(match.group(1))] else "OFF"

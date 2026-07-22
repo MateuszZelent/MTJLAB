@@ -296,8 +296,12 @@ class KeithleyConfigurationPanel(CardWidget):
         )
 
     def load_snapshot(self, snapshot: KeithleyConfigurationSnapshot) -> None:
+        self.channel.blockSignals(True)
+        self.mode.blockSignals(True)
         self.channel.setCurrentText(snapshot.channel)
         self.mode.setCurrentText(snapshot.source_mode)
+        self.channel.blockSignals(False)
+        self.mode.blockSignals(False)
         self.level.setText(snapshot.source_level)
         self.compliance.setText(snapshot.compliance)
         self.nplc.setText(snapshot.nplc)
@@ -327,10 +331,15 @@ class KeithleyNodeEditorDialog(FluentRecipeDialog):
         parent: QWidget | None = None,
         *,
         snapshot: KeithleyConfigurationSnapshot | None = None,
+        snapshot_resolver: object | None = None,
     ) -> None:
         super().__init__(parent)
         self.setProperty("stationSurface", "page")
         self._settings = settings
+        self._snapshot_resolver = snapshot_resolver
+        self._selection_snapshots: dict[
+            tuple[str, str], KeithleyConfigurationSnapshot
+        ] = {}
         self._loaded_segments_by_parameter: dict[
             str, list[dict[str, object]]
         ] = {}
@@ -366,8 +375,14 @@ class KeithleyNodeEditorDialog(FluentRecipeDialog):
         parameter_layout.addWidget(BodyLabel("Parameter"), 1, 0)
         parameter_layout.addWidget(BodyLabel("Action"), 1, 1)
         self.parameter_selectors: dict[str, ComboBox] = {}
+        mode_label = BodyLabel("Source mode")
+        parameter_layout.addWidget(mode_label, 2, 0)
+        self.source_mode_action = ComboBox(self)
+        self.source_mode_action.addItem("Set", userData="set")
+        self.source_mode_action.setEnabled(False)
+        parameter_layout.addWidget(self.source_mode_action, 2, 1)
         definitions = (
-            ("Source value", "source.level", True),
+            ("Source current", "source.level", True),
             ("Compliance", "source.compliance", True),
             ("NPLC", "measurement.nplc", False),
             ("Settling time", "measurement.settling_time", True),
@@ -376,8 +391,11 @@ class KeithleyNodeEditorDialog(FluentRecipeDialog):
             ("Voltage measurement range", "measurement.voltage_range", False),
             ("Current measurement range", "measurement.current_range", False),
         )
-        for row, (label, parameter_id, sweepable) in enumerate(definitions, start=2):
-            parameter_layout.addWidget(BodyLabel(label), row, 0)
+        self.parameter_labels: dict[str, BodyLabel] = {}
+        for row, (label, parameter_id, sweepable) in enumerate(definitions, start=3):
+            parameter_label = BodyLabel(label)
+            parameter_layout.addWidget(parameter_label, row, 0)
+            self.parameter_labels[parameter_id] = parameter_label
             selector = ComboBox(self)
             selector.setProperty("parameterId", parameter_id)
             selector.addItem("Unchanged", userData="unchanged")
@@ -386,7 +404,7 @@ class KeithleyNodeEditorDialog(FluentRecipeDialog):
                 selector.addItem("Sweep — ROI required", userData="sweep")
             parameter_layout.addWidget(selector, row, 1)
             self.parameter_selectors[parameter_id] = selector
-        output_row = 2 + len(definitions)
+        output_row = 3 + len(definitions)
         parameter_layout.addWidget(BodyLabel("Output state"), output_row, 0)
         self.output_policy = ComboBox(self)
         self.output_policy.addItem("Unchanged", userData="unchanged")
@@ -435,12 +453,15 @@ class KeithleyNodeEditorDialog(FluentRecipeDialog):
         self.apply_button.clicked.connect(self.accept)
         self.cancel_button.clicked.connect(self.reject)
         self.validate_button.clicked.connect(self._validate)
-        self.mode.currentTextChanged.connect(self._source_mode_changed)
+        self.channel.currentTextChanged.connect(self._selection_changed)
+        self.mode.currentTextChanged.connect(self._selection_changed)
         self.open_roi_button.clicked.connect(self._open_selected_roi)
         for selector in self.parameter_selectors.values():
             selector.currentIndexChanged.connect(self._update_roi_button)
         if snapshot is not None:
             self.configuration_panel.load_snapshot(snapshot)
+            self._selection_snapshots[(snapshot.channel, snapshot.source_mode)] = snapshot
+        self._active_selection = (self.channel.currentText(), self.mode.currentText())
         self._source_mode_changed()
         self._update_roi_button()
 
@@ -565,12 +586,59 @@ class KeithleyNodeEditorDialog(FluentRecipeDialog):
         self._update_roi_button()
 
     def _source_mode_changed(self, *_args: object) -> None:
-        measure_only = self.mode.currentText() == "measure_only"
+        mode = self.mode.currentText()
+        measure_only = mode == "measure_only"
+        self.parameter_labels["source.level"].setText(
+            "Source current" if mode == "current" else "Source voltage"
+        )
+        self.parameter_labels["source.compliance"].setText(
+            "Voltage limit (compliance)"
+            if mode == "current"
+            else "Current limit (compliance)"
+        )
         for parameter_id in ("source.level", "source.compliance", "source.range"):
             selector = self.parameter_selectors[parameter_id]
             selector.setEnabled(not measure_only)
             if measure_only:
                 selector.setCurrentIndex(0)
+
+    def _selection_changed(self, *_args: object) -> None:
+        if not hasattr(self, "_active_selection"):
+            return
+        previous_channel, previous_mode = self._active_selection
+        previous = replace(
+            self.configuration_panel.snapshot(),
+            channel=previous_channel,
+            source_mode=previous_mode,
+        )
+        self._selection_snapshots[self._active_selection] = previous
+        selection = (self.channel.currentText(), self.mode.currentText())
+        snapshot = self._selection_snapshots.get(selection)
+        if snapshot is None and callable(self._snapshot_resolver):
+            candidate = self._snapshot_resolver(*selection)
+            if isinstance(candidate, KeithleyConfigurationSnapshot):
+                snapshot = candidate
+        if snapshot is None:
+            defaults = self._settings.keithley.safety.channels[selection[0]].defaults
+            if selection[1] == "current":
+                level = str(defaults.get("source_current", "0 A"))
+                compliance = str(defaults.get("voltage_compliance", "0 V"))
+            elif selection[1] == "voltage":
+                level = str(defaults.get("source_voltage", "0 V"))
+                compliance = str(defaults.get("current_compliance", "0 A"))
+            else:
+                level, compliance = "0 V", "0 A"
+            snapshot = replace(
+                previous,
+                channel=selection[0],
+                source_mode=selection[1],
+                source_level=level,
+                compliance=compliance,
+                source_range="AUTO",
+            )
+        self._active_selection = selection
+        self.configuration_panel.load_snapshot(snapshot)
+        self._source_mode_changed()
 
     def _validate(self) -> bool:
         snapshot = self.configuration_snapshot()
@@ -2353,6 +2421,29 @@ class KeithleyPage(QWidget):
             measure_voltage_range=self.measure_voltage_range.text().strip(),
             measure_current_autorange=self.measure_current_autorange.isChecked(),
             measure_current_range=self.measure_current_range.text().strip(),
+        )
+
+    def configuration_snapshot_for(
+        self, channel: str | None = None, mode: str | None = None
+    ) -> KeithleyConfigurationSnapshot:
+        """Return the currently edited values for a channel/mode without I/O."""
+
+        self._remember_source_values()
+        channel = channel or self._active_channel
+        mode = mode or self._active_mode
+        if channel == self._active_channel and mode == self._active_mode:
+            return self._capture_form_snapshot(channel=channel, mode=mode)
+        base = self._channel_form_snapshots.get(channel, self._default_form_snapshot(channel))
+        level, compliance, source_range = self._source_value_cache.get(
+            (channel, mode), self._default_source_values(channel, mode)
+        )
+        return replace(
+            base,
+            channel=channel,
+            source_mode=mode,
+            source_level=level,
+            compliance=compliance,
+            source_range=source_range,
         )
 
     def _default_form_snapshot(self, channel: str) -> KeithleyConfigurationSnapshot:
