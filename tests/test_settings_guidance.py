@@ -7,7 +7,7 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 from PySide6.QtWidgets import QApplication
 
 from app.ui.shell import MainWindow
-from app.ui.settings_guidance import settings_issue_for_error
+from app.ui.settings_guidance import recipe_dut_issue_for_error, settings_issue_for_error
 
 
 def test_anritsu_acquisition_lock_points_to_each_required_setting() -> None:
@@ -33,6 +33,17 @@ def test_anritsu_acquisition_lock_points_to_each_required_setting() -> None:
 
 def test_runtime_or_unknown_errors_are_not_offered_a_settings_fix() -> None:
     assert settings_issue_for_error("VISA transport lost while acquiring") is None
+
+
+def test_missing_keithley_dut_limits_route_to_recipe_channel() -> None:
+    issue = recipe_dut_issue_for_error(
+        "OUTPUT for keithley channel B requires complete recipe.dut_limits for "
+        "current, voltage/power or impedance/current/power."
+    )
+
+    assert issue is not None
+    assert issue.device == "keithley"
+    assert issue.channel == "B"
 
 
 def test_settings_link_opens_anritsu_and_renders_highlighted_fields() -> None:

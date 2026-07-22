@@ -45,6 +45,13 @@ def settings_issue_for_error(error: Exception | str) -> SettingsIssue | None:
 
     message = str(error)
     normalized = message.casefold()
+    # Hardware ceilings and recipe-owned DUT envelopes cannot be corrected by
+    # changing the station profile. Never offer a misleading Settings route.
+    if any(
+        marker in normalized
+        for marker in ("recipe dut", "recipe.dut_limits", "hardware limit", "hardware maximum", "documented")
+    ):
+        return None
     if "anritsu acquisition is locked by the safety profile" in normalized:
         return SettingsIssue(_ANRITSU_ACQUISITION_PATHS, message)
     if "maximum expected rf power" in normalized or "anritsu rf input limit" in normalized:
@@ -57,6 +64,102 @@ def settings_issue_for_error(error: Exception | str) -> SettingsIssue | None:
             (
                 _ANRITSU_SAFETY + ("frequency", "min"),
                 _ANRITSU_SAFETY + ("frequency", "max"),
+            ),
+            message,
+        )
+    if "anritsu sg frequency" in normalized and "configured range" in normalized:
+        return SettingsIssue(
+            (
+                ("devices", "anritsu", "signal_generator", "frequency", "min"),
+                ("devices", "anritsu", "signal_generator", "frequency", "max"),
+            ),
+            message,
+        )
+    if "anritsu sg power" in normalized and "configured range" in normalized:
+        return SettingsIssue(
+            (
+                ("devices", "anritsu", "signal_generator", "power", "min"),
+                ("devices", "anritsu", "signal_generator", "power", "max"),
+            ),
+            message,
+        )
+    if "anritsu range" in normalized and "configured range" in normalized:
+        return SettingsIssue(
+            (
+                _ANRITSU_SAFETY + ("frequency", "min"),
+                _ANRITSU_SAFETY + ("frequency", "max"),
+            ),
+            message,
+        )
+    permission_paths = {
+        "keithley": ("devices", "keithley", "safety", "allow_output_enable"),
+        "rigol": ("devices", "rigol", "safety", "allow_output_enable"),
+        "anritsu_sg": _ANRITSU_SAFETY + ("signal_generator_output_allowed",),
+    }
+    if "output permission is disabled" in normalized:
+        for device, path in permission_paths.items():
+            if device in normalized:
+                return SettingsIssue((path,), message)
+
+    keithley_field = next(
+        (
+            field
+            for marker, field in (
+                ("source current", "source_current"),
+                ("source voltage", "source_voltage"),
+                ("voltage compliance", "voltage_compliance"),
+                ("current compliance", "current_compliance"),
+                ("measured current", "measured_current_trip"),
+                ("measured voltage", "measured_voltage_trip"),
+                ("worst-case source", "max_abs_power"),
+                ("station profile max_abs_power", "max_abs_power"),
+            )
+            if marker in normalized
+        ),
+        None,
+    )
+    if keithley_field is not None and any(
+        marker in normalized for marker in ("outside", "exceeds", "station profile")
+    ):
+        channel_match = re.search(r"(?:keithley|channel)\s+([ab])", normalized)
+        channels = (channel_match.group(1).upper(),) if channel_match else ("A", "B")
+        return SettingsIssue(
+            tuple(
+                ("devices", "keithley", "safety", "channels", channel, "lab_limits", keithley_field)
+                for channel in channels
+            ),
+            message,
+        )
+
+    rigol_field = next(
+        (
+            field
+            for marker, field in (
+                ("load current", "estimated_load_current"),
+                ("dut power", "estimated_load_power"),
+                ("sweep step count", "sweep_steps"),
+                ("sweep time", "sweep_duration"),
+                ("sweep duration", "sweep_duration"),
+                ("modulation rate", "modulation_rate"),
+                ("burst period", "burst_period"),
+                ("burst cycle", "burst_cycles"),
+                ("amplitude_vpp", "amplitude_vpp"),
+                ("high_level", "high_level"),
+                ("low_level", "low_level"),
+                ("offset", "offset"),
+                ("frequency", "frequency"),
+            )
+            if marker in normalized
+        ),
+        None,
+    )
+    if rigol_field is not None and "configured" in normalized:
+        channel_match = re.search(r"(?:ch|channel\s*)([12])", normalized)
+        channels = (channel_match.group(1),) if channel_match else ("1", "2")
+        return SettingsIssue(
+            tuple(
+                ("devices", "rigol", "safety", "channels", channel, "lab_limits", rigol_field)
+                for channel in channels
             ),
             message,
         )

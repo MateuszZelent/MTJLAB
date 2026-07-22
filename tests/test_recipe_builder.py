@@ -26,7 +26,12 @@ from qfluentwidgets import (
     SpinBox, TableWidget,
 )
 
-from app.recipes import RecipeNode, parse_recipe_text, wrap_recipe_nodes_in_repeat
+from app.recipes import (
+    RecipeNode,
+    parse_recipe_text,
+    replace_recipe_dut_limits,
+    wrap_recipe_nodes_in_repeat,
+)
 from app.engine.compiler import RecipeCompiler
 from app.devices.anritsu_ms2830a.ui import (
     AnritsuAdvancedSpectrumPanel,
@@ -45,6 +50,7 @@ from app.devices.rigol_dg1000z.ui.page import RigolConfigurationSnapshot
 from app.ui.recipes import (
     ActionNodeEditorDialog,
     DeviceParameterDialog,
+    DutLimitsDialog,
     RecipeTreeMoveRequest,
     RecipeTreeWidget,
     SweepGeneratorDialog,
@@ -70,6 +76,51 @@ class RecipeBuilderTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls) -> None:
         cls.application = QApplication.instance() or QApplication([])
+
+    def test_dut_limits_dialog_builds_and_highlights_keithley_b_envelope(self) -> None:
+        dialog = DutLimitsDialog({}, focus_device="keithley", focus_channel="B")
+        try:
+            values = {
+                "current.min": "-10 mA",
+                "current.max": "10 mA",
+                "voltage.min": "-670 mV",
+                "voltage.max": "670 mV",
+                "max_abs_power": "6.7 mW",
+            }
+            for key, value in values.items():
+                field = dialog._fields[("keithley", "B", key)]
+                self.assertEqual(field.property("validationState"), "error")
+                field.setText(value)
+            mapping = dialog.limits_mapping()
+            self.assertEqual(mapping["keithley"]["B"]["current"]["max"], "10 mA")
+            self.assertEqual(mapping["keithley"]["B"]["max_abs_power"], "6.7 mW")
+        finally:
+            dialog.close()
+
+    def test_recipe_dut_limits_edit_is_validated_structurally(self) -> None:
+        source = """\
+schema_version: 1
+name: dut-edit
+root:
+  id: root
+  type: sequence
+  children: []
+"""
+        updated = replace_recipe_dut_limits(
+            source,
+            {
+                "keithley": {
+                    "B": {
+                        "current": {"min": "-10 mA", "max": "10 mA"},
+                        "voltage": {"min": "-670 mV", "max": "670 mV"},
+                        "max_abs_power": "6.7 mW",
+                    }
+                }
+            },
+        )
+        limits = parse_recipe_text(updated).dut_limits.keithley["B"]
+        self.assertEqual(limits.current.maximum_si, 0.01)
+        self.assertEqual(limits.voltage.minimum_si, -0.67)
 
     def test_run_request_carries_explicit_demo_outputs_off_policy(self) -> None:
         page = RecipePage(simulation_settings())
