@@ -66,7 +66,7 @@ from app.ui.recipes.device_parameters import DeviceParameterDialog
 from app.ui.recipes.common_dialogs import (
     ActionNodeEditorDialog, AnritsuAcquisitionEditorDialog, CommentEditorDialog, FixedValueDialog,
     KeithleySweepBuilderDialog, RecipeTreeMoveRequest, RecipeTreeWidget,
-    RepeatCountDialog, SweepLibraryButton,
+    OutputPolicyDialog, RepeatCountDialog, SweepLibraryButton,
 )
 from app.devices.anritsu_ms2830a.ui.recipe_extension import (
     AnritsuAdvancedSpectrumPanel,
@@ -2715,6 +2715,7 @@ class RecipePage(QWidget):
             color: str,
             badge: str,
             metadata: dict[str, object] | None = None,
+            tooltip: str | None = None,
             owner: QTreeWidgetItem = parent,
         ) -> QTreeWidgetItem:
             row = QTreeWidgetItem(columns)
@@ -2724,7 +2725,7 @@ class RecipePage(QWidget):
                 row.setData(0, self.operator_row_role, metadata)
                 row.setToolTip(
                     0,
-                    "Click to open the ROI editor directly for this sweep axis.",
+                    tooltip or "Click to open the ROI editor directly for this sweep axis.",
                 )
                 link_font = row.font(0)
                 link_font.setUnderline(True)
@@ -2892,9 +2893,10 @@ class RecipePage(QWidget):
             )
 
         output_policy = str(node.data.get("output_policy", "unchanged"))
-        if output_policy in {"on", "off", "on_keep", "continue"}:
+        if output_policy in {"unchanged", "on", "off", "on_keep", "continue"}:
             is_on = output_policy in {"on", "on_keep", "continue"}
             description, status, badge = {
+                "unchanged": ("Keep OUTPUT OFF (safe default)", "OFF", "OFF"),
                 "on": ("Enable safely for this node; switch OFF on exit", "ON → OFF", "ON"),
                 "on_keep": ("Enable safely and keep confirmed ON after this node", "KEEP ON", "ON"),
                 "continue": ("Inherit confirmed ON; apply live updates only", "CONTINUE", "↻"),
@@ -2908,6 +2910,8 @@ class RecipePage(QWidget):
                 ],
                 color=tokens.success if is_on else tokens.neutral,
                 badge=badge,
+                metadata={"kind": "output_policy", "owner_node_id": node.id},
+                tooltip="Click to choose the output mode for this device block.",
             )
 
     @staticmethod
@@ -3569,6 +3573,21 @@ class RecipePage(QWidget):
         self.selection_context.setText(item.text(0).strip() or "Selected tree row")
         operator_row = item.data(0, self.operator_row_role)
         if isinstance(operator_row, dict):
+            if operator_row.get("kind") == "output_policy":
+                owner_id = str(operator_row.get("owner_node_id", ""))
+                self.inspector_summary.setText(
+                    "<b>Output mode</b><br>Click to choose this block's output policy"
+                )
+                self.open_editor_button.setEnabled(editable_now)
+                self.open_editor_button.setText("Edit output mode")
+                self.edit_device_button.setEnabled(False)
+                self.edit_generator_button.setEnabled(False)
+                self.inspector.setPlainText(
+                    f"Device node: {owner_id}\n\n"
+                    "Choose how output behaves for this recipe block. The selection "
+                    "is validated against safety limits again before execution."
+                )
+                return
             stage_index = operator_row.get("stage_index")
             parameter_id = str(operator_row.get("parameter_id", ""))
             owner_id = str(operator_row.get("owner_node_id", ""))
@@ -3710,6 +3729,8 @@ class RecipePage(QWidget):
                 self._edit_native_sweep_roi_from_tree(dict(metadata))
             else:
                 self._edit_device_roi_from_tree(dict(metadata))
+        elif isinstance(metadata, dict) and metadata.get("kind") == "output_policy":
+            self._edit_output_policy_from_tree(dict(metadata))
 
     def _move_recipe_node(
         self,
@@ -4283,7 +4304,10 @@ class RecipePage(QWidget):
             item.data(0, self.operator_row_role) if item is not None else None
         )
         if isinstance(operator_row, dict):
-            self._edit_selected_roi()
+            if operator_row.get("kind") == "output_policy":
+                self._edit_output_policy_from_tree(dict(operator_row))
+            else:
+                self._edit_selected_roi()
             return
         node = item.data(0, Qt.ItemDataRole.UserRole) if item is not None else None
         anritsu_role = (
@@ -4361,13 +4385,40 @@ class RecipePage(QWidget):
         except Exception as exc:
             QMessageBox.warning(self, "Action settings", str(exc))
 
+    def _edit_output_policy_from_tree(self, metadata: dict[str, object]) -> None:
+        """Edit only the output contract represented by the compact child row."""
+
+        owner_id = str(metadata.get("owner_node_id", ""))
+        owner = self._find_tree_item(owner_id)
+        node = owner.data(0, Qt.ItemDataRole.UserRole) if owner is not None else None
+        if not isinstance(node, RecipeNode):
+            return
+        dialog = OutputPolicyDialog(str(node.data.get("output_policy", "unchanged")), self)
+        if dialog.exec() != QDialog.DialogCode.Accepted:
+            return
+        replacement = self._node_to_mapping(node)
+        replacement["output_policy"] = dialog.selected_policy()
+        try:
+            source = replace_recipe_node(
+                self._builder_source(), node_id=node.id, node=replacement
+            )
+            self._apply_builder_source(
+                source,
+                f"Updated output mode for {node.id}",
+                selected_node_id=node.id,
+            )
+        except Exception as exc:
+            QMessageBox.warning(self, "Output mode", str(exc))
+
     def _edit_selected_roi(self) -> None:
         item = self.tree.currentItem()
         operator_row = (
             item.data(0, self.operator_row_role) if item is not None else None
         )
         if isinstance(operator_row, dict):
-            if operator_row.get("kind") == "native_sweep_roi":
+            if operator_row.get("kind") == "output_policy":
+                self._edit_output_policy_from_tree(dict(operator_row))
+            elif operator_row.get("kind") == "native_sweep_roi":
                 self._edit_native_sweep_roi_from_tree(dict(operator_row))
             else:
                 self._edit_device_roi_from_tree(dict(operator_row))
@@ -5914,7 +5965,10 @@ class RecipePage(QWidget):
         self.tree.setCurrentItem(item)
         operator_row = item.data(0, self.operator_row_role)
         if isinstance(operator_row, dict):
-            self._edit_selected_roi()
+            if operator_row.get("kind") == "output_policy":
+                self._edit_output_policy_from_tree(dict(operator_row))
+            else:
+                self._edit_selected_roi()
             return
         structural = item.data(0, RecipeTreeWidget.structural_role)
         if structural == RecipeTreeWidget.finally_container:

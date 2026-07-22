@@ -2192,9 +2192,22 @@ root:
             self.assertEqual(rows["Voltage compliance"].text(1), "Set to 67 mV")
             self.assertEqual(rows["NPLC"].text(2), "SET")
             self.assertIn("Output", rows)
-            self.assertEqual(rows["Output"].text(2), "ON")
+            self.assertEqual(rows["Output"].text(2), "ON → OFF")
+            output_metadata = rows["Output"].data(0, page.operator_row_role)
+            self.assertEqual(output_metadata["kind"], "output_policy")
+            with (
+                patch("app.ui.recipes.page.OutputPolicyDialog") as dialog_type,
+                patch.object(page, "_apply_builder_source") as apply_source,
+            ):
+                output_dialog = dialog_type.return_value
+                output_dialog.exec.return_value = QDialog.DialogCode.Accepted
+                output_dialog.selected_policy.return_value = "off"
+                page._operator_row_clicked(rows["Output"], 0)
+            updated = parse_recipe_text(apply_source.call_args.args[0]).root.children[-1]
+            self.assertEqual(updated.data["output_policy"], "off")
         finally:
             dialog.close()
+            page._close_discard_confirmed = True
             page.close()
 
     def test_clicking_roi_stage_routes_directly_to_roi_editor_metadata(self) -> None:

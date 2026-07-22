@@ -43,6 +43,7 @@ __all__ = [
     "CommentEditorDialog",
     "FixedValueDialog",
     "KeithleySweepBuilderDialog",
+    "OutputPolicyDialog",
     "RepeatCountDialog",
     "RecipeTreeMoveRequest",
     "RecipeDropDestination",
@@ -50,6 +51,58 @@ __all__ = [
     "RecipeTreeWidget",
     "SweepLibraryButton",
 ]
+
+
+class OutputPolicyDialog(FluentRecipeDialog):
+    """Edit the output contract of one device configuration block."""
+
+    _OPTIONS = (
+        ("Keep OUTPUT OFF (safe default)", "unchanged"),
+        ("OUTPUT ON for this block · OFF on exit", "on"),
+        ("OUTPUT ON and keep confirmed ON", "on_keep"),
+        ("Continue confirmed OUTPUT ON · live sweep", "continue"),
+        ("Force and confirm OUTPUT OFF", "off"),
+    )
+
+    def __init__(
+        self, current_policy: str, parent: QWidget | None = None
+    ) -> None:
+        super().__init__(parent)
+        self.setWindowTitle("Output mode")
+        self.setMinimumWidth(440)
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(24, 20, 24, 20)
+        layout.setSpacing(12)
+        heading = StrongBodyLabel("Output mode for this block", self)
+        description = BodyLabel(
+            "Changing this recipe policy does not change a live instrument. "
+            "Safety limits and output confirmation are checked again before execution.",
+            self,
+        )
+        description.setWordWrap(True)
+        self.policy = ComboBox(self)
+        for label, value in self._OPTIONS:
+            self.policy.addItem(label, userData=value)
+        selected = self.policy.findData(current_policy)
+        self.policy.setCurrentIndex(selected if selected >= 0 else 0)
+        layout.addWidget(heading)
+        layout.addWidget(description)
+        form = QFormLayout()
+        form.addRow("Output mode", self.policy)
+        layout.addLayout(form)
+        layout.addStretch(1)
+        footer = QHBoxLayout()
+        footer.addStretch(1)
+        cancel = PushButton("Cancel", self)
+        apply = PrimaryPushButton("Apply output mode", self)
+        cancel.clicked.connect(self.reject)
+        apply.clicked.connect(self.accept)
+        footer.addWidget(cancel)
+        footer.addWidget(apply)
+        layout.addLayout(footer)
+
+    def selected_policy(self) -> str:
+        return str(self.policy.currentData() or "unchanged")
 
 
 class RepeatCountDialog(FluentRecipeDialog):
