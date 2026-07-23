@@ -2494,6 +2494,21 @@ class MainWindowTests(unittest.TestCase):
             window.close()
             self.application.processEvents()
 
+    def test_anritsu_manual_read_dispatches_a_fresh_single_sweep(self) -> None:
+        window = MainWindow(".config/settings.yml", simulation=True)
+        try:
+            anritsu = window.anritsu_page
+            anritsu._controller.call = Mock()
+
+            anritsu.read_once()
+
+            anritsu._controller.call.assert_called_once_with("single_sweep", "TRAC1")
+            self.assertEqual(anritsu._page_state, AnritsuPageState.ACQUIRING_SPECTRUM)
+            self.assertFalse(anritsu.single.isEnabled())
+        finally:
+            window.close()
+            self.application.processEvents()
+
     def test_anritsu_averaging_reference_and_processed_views_preserve_raw_trace(self) -> None:
         window = MainWindow(".config/settings.yml", simulation=True)
         try:
