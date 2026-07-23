@@ -13,3 +13,4 @@ qualification-sim*/
 *.nc
 tmp/
 artifacts/
+recipes/*
