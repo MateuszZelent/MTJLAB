@@ -31,6 +31,9 @@ def _dispatch(adapter: DeviceAdapter, operation: str, payload: object) -> object
     if operation == "set_output":
         channel, enabled = payload  # type: ignore[misc]
         return adapter.set_output(channel, enabled)
+    if operation == "set_dut_output_off_mode":
+        channel, mode = payload  # type: ignore[misc]
+        return adapter.set_dut_output_off_mode(channel, mode)
     if operation == "quick_setpoint":
         if not isinstance(payload, QuickControlCommand):
             raise ValueError("Keithley quick_setpoint requires an explicit-unit command.")

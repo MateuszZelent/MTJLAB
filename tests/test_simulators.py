@@ -154,6 +154,27 @@ class SimulatorTests(unittest.TestCase):
         )
         self.assertTrue(all(channel.source_mode == "current" for channel in readback.channels))
 
+    def test_keithley_simulator_isolates_one_dut_and_measurement_restores_normal(
+        self,
+    ) -> None:
+        settings = simulated_station_settings(loaded_settings())
+        keithley = KeithleyAdapter(
+            settings, session_factory=SimulatedVisaFactory("keithley")
+        )
+        keithley.connect()
+        keithley.set_dut_output_off_mode("A", "normal")
+        keithley.set_dut_output_off_mode("B", "high_impedance")
+
+        isolated = keithley.read_configuration()
+
+        self.assertEqual(isolated.channels[0].output_off_mode, "normal")
+        self.assertEqual(isolated.channels[1].output_off_mode, "high_impedance")
+        measurement = keithley.measure("B")
+        restored = keithley.read_configuration()
+        self.assertTrue(measurement.measurement_path_connected)
+        self.assertEqual(restored.channels[0].output_off_mode, "normal")
+        self.assertEqual(restored.channels[1].output_off_mode, "normal")
+
     def test_anritsu_trace_timeout_is_reported_without_hardware(self) -> None:
         settings = simulated_station_settings(loaded_settings())
         anritsu = AnritsuAdapter(

@@ -304,7 +304,7 @@ class KeithleySafety(StrictModel):
     allow_output_enable: bool = False
     outputs_off_on_connect: bool = True
     outputs_off_on_disconnect: bool = True
-    output_off_mode: Literal["normal", "high_impedance", "zero"]
+    output_off_mode: Literal["normal", "high_impedance", "zero"] = "normal"
     stop_on_compliance: bool = True
     stop_on_overpower: bool = True
     channels: dict[Literal["A", "B"], KeithleyChannelSettings]

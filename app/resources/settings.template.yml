@@ -252,7 +252,7 @@ devices:
       allow_output_enable: false
       outputs_off_on_connect: true
       outputs_off_on_disconnect: true
-      output_off_mode: "high_impedance"
+      output_off_mode: "normal"
       stop_on_compliance: true
       stop_on_overpower: true
       channels:

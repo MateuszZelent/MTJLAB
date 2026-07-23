@@ -3,5 +3,143 @@ name: Untitled sweep
 root:
   id: sequence-main
   type: sequence
-  children: []
-finally: []
+  children:
+  - id: anritsu-spectrum-f6551310
+    type: sequence
+    text: Anritsu Spectrum · 1 parameter(s) · settings only
+    device_module: anritsu
+    label: Anritsu MS2830A
+    operation: configure_selected_parameters
+    configuration_required: false
+    roi_required: false
+    parameter_actions:
+    - parameter_id: spectrum.start_frequency
+      mode: set
+      value: 300 MHz
+    acquire_single: false
+    post_configuration_operation: configure
+    managed_acquisition_id: ''
+    acquisition_average_count: 1
+    acquisition_reference_operation: none
+    trace: TRAC1
+    configuration:
+      start_frequency: 300000000 Hz
+      stop_frequency: 6000000000 Hz
+      reference_level: -10 dBm
+      points: 10001
+    children: []
+  - id: repeat-59ddbbfa
+    type: repeat
+    count: 3
+    children:
+    - id: keithley-e2d220f5
+      type: sequence
+      text: Keithley B · 1 selected action(s)
+      device_module: keithley
+      label: Keithley 2600
+      configuration_required: false
+      channel: B
+      source_mode: current
+      operation: configure_selected_parameters
+      parameter_actions:
+      - parameter_id: source.level
+        mode: sweep
+        value: 10 mA
+        segments:
+        - start: 0 A
+          stop: 10 mA
+          spacing: linear
+          points: 100
+        - start: 10 mA
+          stop: 0 mA
+          spacing: linear
+          points: 100
+      output_policy: on_keep
+      roi_required: false
+      configuration:
+        channel: B
+        source_mode: current
+        source_level: 10 mA
+        compliance: 670 mV
+        nplc: '1'
+        settling_time: 100 ms
+        sense_mode: 2wire
+        source_autorange: false
+        source_range: 1 A
+        measure_voltage_autorange: true
+        measure_voltage_range: AUTO
+        measure_current_autorange: true
+        measure_current_range: AUTO
+      children:
+      - id: comment-a50fe26d
+        type: comment
+        text: Drop nested devices or flow actions here
+      - id: rigol-7fa285e1
+        type: sequence
+        text: Rigol CH1 · OUTPUT ON_KEEP
+        device_module: rigol
+        label: Rigol DG1032Z
+        operation: configure_selected_parameters
+        configuration_required: false
+        channel: 1
+        parameter_actions:
+        - parameter_id: carrier.frequency
+          mode: sweep
+          value: 1 kHz
+          segments:
+          - start: 1 kHz
+            stop: 10 kHz
+            spacing: linear
+            points: 100
+        - parameter_id: carrier.amplitude
+          mode: set
+          value: 2 mV
+        - parameter_id: carrier.offset
+          mode: set
+          value: 0 V
+        output_policy: on_keep
+        roi_required: false
+        configuration:
+          channel: 1
+          waveform: SIN
+          time_mode: Frequency
+          frequency: 1 kHz
+          level_mode: Amplitude / Offset
+          high_level: 1 mV
+          low_level: -1 mV
+          output_load: HIGHZ
+          phase_deg: '0'
+          square_duty_percent: '50'
+          ramp_symmetry_percent: '50'
+          pulse_width: 100 us
+          pulse_leading: 10 ns
+          pulse_trailing: 10 ns
+          output_polarity: NORM
+          output_mode: NORM
+          gate_polarity: NORM
+          sync_enabled: false
+          sync_polarity: NORM
+          sync_delay: 0 s
+        children:
+        - id: acquire_spectrum-d5fb1e41
+          type: acquire_spectrum
+          trace: TRAC1
+          average_count: 1
+          reference_operation: none
+          store_raw: true
+          store_processed: false
+  - id: keithley-3fe1fc74
+    type: sequence
+    text: Keithley 2600 — configuration required
+    device_module: keithley
+    label: Keithley 2600
+    configuration_required: true
+    children:
+    - id: comment-d6d826ef
+      type: comment
+      text: Drop nested devices or flow actions here
+finally:
+- id: keithley-output-off-01b20caf
+  type: set_keithley_output
+  channel: A
+  enabled: false

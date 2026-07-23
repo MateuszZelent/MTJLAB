@@ -31,6 +31,7 @@ from app.devices.anritsu_ms2830a import (
 from app.devices.keithley_2600 import (
     KeithleyChannelConfigurationReadback,
     KeithleyConfigurationReadback,
+    KeithleyOutputOffModeResult,
 )
 from app.devices.keithley_2600.ui.page import KeithleyConfigurationSnapshot
 from app.domain.quantities import DIMENSION_DBM, DIMENSION_FREQUENCY, parse_quantity
@@ -2045,6 +2046,160 @@ class MainWindowTests(unittest.TestCase):
             window.close()
             self.application.processEvents()
 
+    def test_keithley_renders_one_dut_isolation_action_per_channel(self) -> None:
+        window = MainWindow(".config/settings.yml", simulation=True)
+        try:
+            window.resize(1280, 800)
+            window.show()
+            window._navigate_to("keithley")
+            self.application.processEvents()
+
+            for channel in ("A", "B"):
+                card = window.keithley_page.channel_cards[channel]
+                button = card["dut_isolation"]
+                self.assertTrue(button.isVisible())
+                self.assertGreaterEqual(button.geometry().width(), 130)
+                self.assertIn("DUT", button.text())
+                self.assertEqual(button.y(), card["measure"].y())
+                self.assertLessEqual(
+                    button.geometry().right(),
+                    card["card"].contentsRect().right(),
+                )
+        finally:
+            window.close()
+            self.application.processEvents()
+
+    def test_keithley_dut_isolation_dispatches_card_channel_and_restores_normal(
+        self,
+    ) -> None:
+        window = MainWindow(".config/settings.yml", simulation=True)
+        try:
+            keithley = window.keithley_page
+            keithley._controller.call = Mock()
+            keithley._device_state_changed("verified")
+            keithley._set_channel_output("B", False)
+
+            keithley.channel_cards["B"]["dut_isolation"].click()
+
+            keithley._controller.call.assert_called_once_with(
+                "set_dut_output_off_mode",
+                ("B", "high_impedance"),
+            )
+            with patch(
+                "app.devices.keithley_2600.ui.page.QMessageBox.information",
+                return_value=QMessageBox.StandardButton.Ok,
+            ) as information:
+                keithley._result(
+                    "set_dut_output_off_mode",
+                    KeithleyOutputOffModeResult("B", "high_impedance", False),
+                )
+
+            information.assert_called_once()
+            self.assertEqual(
+                keithley._controller.call.call_args.args,
+                ("set_dut_output_off_mode", ("B", "normal")),
+            )
+            keithley._result(
+                "set_dut_output_off_mode",
+                KeithleyOutputOffModeResult("B", "normal", False),
+            )
+            self.assertEqual(keithley._dut_isolation_phase, "idle")
+            self.assertIsNone(keithley._dut_isolation_channel)
+            self.assertTrue(
+                keithley.channel_cards["B"]["dut_isolation"].isEnabled()
+            )
+        finally:
+            window.close()
+            self.application.processEvents()
+
+    def test_keithley_dut_isolation_requires_confirmed_output_off(self) -> None:
+        window = MainWindow(".config/settings.yml", simulation=True)
+        try:
+            keithley = window.keithley_page
+            keithley._device_state_changed("verified")
+            channel_a = keithley.channel_cards["A"]["dut_isolation"]
+
+            keithley._output_state_known["A"] = False
+            keithley._update_output_readiness()
+            self.assertFalse(channel_a.isEnabled())
+            self.assertIn("confirmed OFF", channel_a.toolTip())
+
+            keithley._set_channel_output("A", True)
+            self.assertFalse(channel_a.isEnabled())
+            self.assertIn("OUTPUT OFF", channel_a.toolTip())
+
+            keithley._set_channel_output("A", False)
+            self.assertTrue(channel_a.isEnabled())
+        finally:
+            window.close()
+            self.application.processEvents()
+
+    def test_keithley_dut_isolation_failure_never_opens_operator_modal(self) -> None:
+        window = MainWindow(".config/settings.yml", simulation=True)
+        try:
+            keithley = window.keithley_page
+            keithley._controller.call = Mock()
+            keithley._device_state_changed("verified")
+            keithley.request_dut_isolation("A")
+
+            with (
+                patch(
+                    "app.devices.keithley_2600.ui.page.QMessageBox.information"
+                ) as information,
+                patch(
+                    "app.devices.keithley_2600.ui.page.QMessageBox.critical"
+                ) as critical,
+            ):
+                keithley._error(
+                    "set_dut_output_off_mode",
+                    "HIGH-Z readback was not confirmed",
+                )
+
+            information.assert_not_called()
+            critical.assert_called_once()
+            self.assertEqual(keithley._dut_isolation_phase, "idle")
+            self.assertIsNone(keithley._dut_isolation_channel)
+        finally:
+            window.close()
+            self.application.processEvents()
+
+    def test_keithley_dut_restore_failure_exposes_only_retry_normal(self) -> None:
+        window = MainWindow(".config/settings.yml", simulation=True)
+        try:
+            keithley = window.keithley_page
+            keithley._controller.call = Mock()
+            keithley._device_state_changed("verified")
+            keithley.request_dut_isolation("B")
+            with patch(
+                "app.devices.keithley_2600.ui.page.QMessageBox.information",
+                return_value=QMessageBox.StandardButton.Ok,
+            ):
+                keithley._result(
+                    "set_dut_output_off_mode",
+                    KeithleyOutputOffModeResult("B", "high_impedance", False),
+                )
+
+            with patch(
+                "app.devices.keithley_2600.ui.page.QMessageBox.critical"
+            ) as critical:
+                keithley._error(
+                    "set_dut_output_off_mode",
+                    "NORMAL readback was not confirmed",
+                )
+
+            critical.assert_called_once()
+            self.assertEqual(keithley._dut_isolation_phase, "restore_failed")
+            retry = keithley.channel_cards["B"]["dut_isolation"]
+            self.assertTrue(retry.isEnabled())
+            self.assertEqual(retry.text(), "Retry NORMAL")
+            self.assertFalse(
+                keithley.channel_cards["A"]["dut_isolation"].isEnabled()
+            )
+            self.assertFalse(keithley.channel_cards["B"]["measure"].isEnabled())
+        finally:
+            window.close()
+            self.application.processEvents()
+
     def test_keithley_output_buttons_and_led_follow_confirmed_readback_state(self) -> None:
         window = MainWindow(".config/settings.yml", simulation=True)
         try:
@@ -2329,8 +2484,8 @@ class MainWindowTests(unittest.TestCase):
             self.application.processEvents()
 
             self.assertEqual(keithley.workspace_splitter.count(), 2)
-            self.assertLessEqual(keithley.channel_cards["A"]["card"].maximumHeight(), 160)
-            self.assertLessEqual(keithley.channel_cards["B"]["card"].maximumHeight(), 160)
+            self.assertLessEqual(keithley.channel_cards["A"]["card"].maximumHeight(), 180)
+            self.assertLessEqual(keithley.channel_cards["B"]["card"].maximumHeight(), 180)
             self.assertTrue(keithley.history_widgets["A"]["plot"].isVisible())
             self.assertTrue(keithley.history_widgets["B"]["plot"].isVisible())
             self.assertTrue(keithley.level.isVisible())

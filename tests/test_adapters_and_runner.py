@@ -355,7 +355,7 @@ class AdapterAndRunnerTests(unittest.TestCase):
         with self.assertRaises(SafetyViolation):
             adapter.set_output(1, True)
 
-    def test_connect_forces_outputs_off_before_optional_probe_or_error_cleanup(self) -> None:
+    def test_rigol_connect_forces_outputs_off_before_optional_probe_or_error_cleanup(self) -> None:
         rigol_session = FakeVisaSession(
             responses={
                 "*IDN?": "Rigol Technologies,DG1032Z,DG1ZA172902039,00.01.08",
@@ -370,18 +370,6 @@ class AdapterAndRunnerTests(unittest.TestCase):
         first_probe = rigol_session.writes.index(":SOUR1:MOD?")
         self.assertLess(rigol_session.writes.index(":OUTP1 OFF"), first_probe)
         self.assertLess(rigol_session.writes.index(":OUTP2 OFF"), first_probe)
-
-        keithley_session = FakeVisaSession(
-            responses={
-                "*IDN?": "KEITHLEY INSTRUMENTS,2602A,123456,1.0",
-                "print(errorqueue.count)": "0",
-            }
-        )
-        keithley = KeithleyAdapter(self.settings, session_factory=FakeVisaSessionFactory(keithley_session))
-        keithley.connect()
-        clear_errors = keithley_session.writes.index("errorqueue.clear()")
-        self.assertLess(keithley_session.writes.index("smua.source.output = smua.OUTPUT_OFF"), clear_errors)
-        self.assertLess(keithley_session.writes.index("smub.source.output = smub.OUTPUT_OFF"), clear_errors)
 
     def test_rigol_connect_fails_if_output_off_readback_is_not_confirmed(self) -> None:
         session = FakeVisaSession(
@@ -1034,7 +1022,182 @@ class AdapterAndRunnerTests(unittest.TestCase):
         self.assertIn("smub.source.output = smub.OUTPUT_OFF", session.writes)
         self.assertEqual(adapter.state, DeviceState.FAULT)
 
-    def test_keithley_connect_applies_and_confirms_high_impedance_off_mode(self) -> None:
+    def test_keithley_connect_is_read_only_and_reports_observed_output_state(self) -> None:
+        session = FakeVisaSession(
+            responses={
+                "*IDN?": "KEITHLEY INSTRUMENTS,2602A,123456,1.0",
+                "print(smua.source.output)": "0",
+                "print(smub.source.output)": "1",
+            }
+        )
+        adapter = KeithleyAdapter(
+            self.settings, session_factory=FakeVisaSessionFactory(session)
+        )
+
+        adapter.connect()
+
+        self.assertEqual(
+            session.writes,
+            [
+                "*IDN?",
+                "print(smua.source.output)",
+                "print(smub.source.output)",
+            ],
+        )
+        self.assertEqual(adapter.state, DeviceState.OUTPUT_ON)
+
+    def test_keithley_dut_output_off_mode_is_channel_specific_and_verified(self) -> None:
+        session = FakeVisaSession(
+            responses={"*IDN?": "KEITHLEY INSTRUMENTS,2602A,123456,1.0"}
+        )
+        adapter = KeithleyAdapter(
+            self.settings, session_factory=FakeVisaSessionFactory(session)
+        )
+        adapter.connect()
+        traffic_start = len(session.writes)
+
+        result = adapter.set_dut_output_off_mode("B", "high_impedance")
+
+        traffic = session.writes[traffic_start:]
+        self.assertEqual(
+            traffic,
+            [
+                "print(smub.source.output)",
+                "smub.source.offmode = smub.OUTPUT_HIGH_Z",
+                "print(smub.source.offmode == smub.OUTPUT_HIGH_Z)",
+                "print(smub.source.output)",
+            ],
+        )
+        self.assertEqual(
+            (result.channel, result.mode, result.output_enabled),
+            ("B", "high_impedance", False),
+        )
+        self.assertFalse(any("smua." in command for command in traffic))
+
+    def test_keithley_dut_output_off_mode_restores_normal(self) -> None:
+        session = FakeVisaSession(
+            responses={"*IDN?": "KEITHLEY INSTRUMENTS,2602A,123456,1.0"}
+        )
+        adapter = KeithleyAdapter(
+            self.settings, session_factory=FakeVisaSessionFactory(session)
+        )
+        adapter.connect()
+        adapter.set_dut_output_off_mode("A", "high_impedance")
+        traffic_start = len(session.writes)
+
+        result = adapter.set_dut_output_off_mode("A", "normal")
+
+        self.assertEqual(
+            session.writes[traffic_start:],
+            [
+                "print(smua.source.output)",
+                "smua.source.offmode = smua.OUTPUT_NORMAL",
+                "print(smua.source.offmode == smua.OUTPUT_NORMAL)",
+                "print(smua.source.output)",
+            ],
+        )
+        self.assertEqual(result.mode, "normal")
+
+    def test_keithley_dut_output_off_mode_rejects_output_on_without_mutation(self) -> None:
+        session = FakeVisaSession(
+            responses={
+                "*IDN?": "KEITHLEY INSTRUMENTS,2602A,123456,1.0",
+                "print(smub.source.output)": "1",
+            }
+        )
+        adapter = KeithleyAdapter(
+            self.settings, session_factory=FakeVisaSessionFactory(session)
+        )
+        adapter.connect()
+        traffic_start = len(session.writes)
+
+        with self.assertRaisesRegex(SafetyViolation, "OUTPUT is confirmed OFF"):
+            adapter.set_dut_output_off_mode("B", "high_impedance")
+
+        traffic = session.writes[traffic_start:]
+        self.assertEqual(traffic, ["print(smub.source.output)"])
+        self.assertFalse(any("source.offmode =" in command for command in traffic))
+
+    def test_keithley_dut_output_off_mode_does_not_retry_failed_readback(self) -> None:
+        session = FakeVisaSession(
+            responses={
+                "*IDN?": "KEITHLEY INSTRUMENTS,2602A,123456,1.0",
+                "print(smub.source.offmode == smub.OUTPUT_HIGH_Z)": "0",
+            }
+        )
+        adapter = KeithleyAdapter(
+            self.settings, session_factory=FakeVisaSessionFactory(session)
+        )
+        adapter.connect()
+        traffic_start = len(session.writes)
+
+        with self.assertRaisesRegex(DeviceError, "did not confirm"):
+            adapter.set_dut_output_off_mode("B", "high_impedance")
+
+        traffic = session.writes[traffic_start:]
+        self.assertEqual(
+            traffic.count("smub.source.offmode = smub.OUTPUT_HIGH_Z"),
+            1,
+        )
+
+    def test_keithley_dispatches_only_whitelisted_dut_output_off_modes(self) -> None:
+        session = FakeVisaSession(
+            responses={"*IDN?": "KEITHLEY INSTRUMENTS,2602A,123456,1.0"}
+        )
+        adapter = KeithleyAdapter(
+            self.settings, session_factory=FakeVisaSessionFactory(session)
+        )
+        adapter.connect()
+
+        result = dispatch_keithley(
+            adapter,
+            "set_dut_output_off_mode",
+            ("A", "high_impedance"),
+        )
+
+        self.assertEqual(result.channel, "A")
+        traffic_start = len(session.writes)
+        with self.assertRaisesRegex(SafetyViolation, "mode"):
+            dispatch_keithley(
+                adapter,
+                "set_dut_output_off_mode",
+                ("A", "zero"),
+            )
+        self.assertEqual(session.writes[traffic_start:], [])
+
+    def test_keithley_measurement_restores_normal_output_off_mode(self) -> None:
+        session = FakeVisaSession(
+            responses={
+                "*IDN?": "KEITHLEY INSTRUMENTS,2602A,123456,1.0",
+                "print(smub.measure.iv())": "0.001\t0.01",
+                "print(errorqueue.count)": "0",
+            }
+        )
+        adapter = KeithleyAdapter(
+            self.settings, session_factory=FakeVisaSessionFactory(session)
+        )
+        adapter.connect()
+        adapter.set_dut_output_off_mode("B", "high_impedance")
+        traffic_start = len(session.writes)
+
+        result = adapter.measure("B")
+
+        traffic = session.writes[traffic_start:]
+        self.assertEqual(result.channel, "B")
+        self.assertTrue(result.measurement_path_connected)
+        self.assertLess(
+            traffic.index("smub.source.offmode = smub.OUTPUT_NORMAL"),
+            traffic.index("print(smub.measure.iv())"),
+        )
+        self.assertLess(
+            traffic.index("print(smub.source.offmode == smub.OUTPUT_NORMAL)"),
+            traffic.index("print(smub.measure.iv())"),
+        )
+
+    def test_keithley_output_enable_restores_normal_output_off_mode(self) -> None:
+        raw = deepcopy(self.settings.model_dump(mode="python"))
+        raw["devices"]["keithley"]["safety"]["allow_output_enable"] = True
+        settings = StationSettings.model_validate(raw)
         session = FakeVisaSession(
             responses={
                 "*IDN?": "KEITHLEY INSTRUMENTS,2602A,123456,1.0",
@@ -1042,38 +1205,57 @@ class AdapterAndRunnerTests(unittest.TestCase):
             }
         )
         adapter = KeithleyAdapter(
-            self.settings, session_factory=FakeVisaSessionFactory(session)
+            settings, session_factory=FakeVisaSessionFactory(session)
+        )
+        adapter.connect()
+        adapter.configure_source(
+            KeithleySourceRequest("B", "current", 0.001, 0.067)
+        )
+        adapter.set_dut_output_off_mode("B", "high_impedance")
+        traffic_start = len(session.writes)
+
+        enabled = adapter.set_output("B", True)
+
+        traffic = session.writes[traffic_start:]
+        self.assertTrue(enabled)
+        self.assertLess(
+            traffic.index("smub.source.offmode = smub.OUTPUT_NORMAL"),
+            traffic.index("smub.source.output = smub.OUTPUT_ON"),
+        )
+        self.assertLess(
+            traffic.index("print(smub.source.offmode == smub.OUTPUT_NORMAL)"),
+            traffic.index("smub.source.output = smub.OUTPUT_ON"),
         )
 
-        adapter.connect()
-
-        for smu in ("smua", "smub"):
-            self.assertIn(
-                f"{smu}.source.offmode = {smu}.OUTPUT_HIGH_Z",
-                session.writes,
-            )
-            self.assertIn(
-                f"print({smu}.source.offmode == {smu}.OUTPUT_HIGH_Z)",
-                session.writes,
-            )
-        self.assertEqual(adapter.state, DeviceState.OUTPUT_OFF)
-
-    def test_keithley_connect_accepts_scientific_boolean_high_z_confirmation(self) -> None:
+    def test_keithley_energized_non_normal_mode_fails_closed_without_relay_write(
+        self,
+    ) -> None:
         session = FakeVisaSession(
             responses={
-                "*IDN?": "KEITHLEY INSTRUMENTS,2602A,123456,2.1.6",
-                "print(errorqueue.count)": "0.00000E+00",
-                "print(smua.source.offmode == smua.OUTPUT_HIGH_Z)": "1.00000E+00",
-                "print(smub.source.offmode == smub.OUTPUT_HIGH_Z)": "1.00000E+00",
+                "*IDN?": "KEITHLEY INSTRUMENTS,2602A,123456,1.0",
+                "print(smua.source.output)": "0",
+                "print(smub.source.output)": "1",
             }
         )
-
         adapter = KeithleyAdapter(
             self.settings, session_factory=FakeVisaSessionFactory(session)
         )
-
         adapter.connect()
-        self.assertEqual(adapter.state, DeviceState.OUTPUT_OFF)
+        session.writes.append("smub.source.offmode = smub.OUTPUT_HIGH_Z")
+        traffic_start = len(session.writes)
+
+        with self.assertRaisesRegex(DeviceError, "non-NORMAL"):
+            adapter.measure("B")
+
+        traffic = session.writes[traffic_start:]
+        self.assertFalse(
+            any(
+                command == "smub.source.offmode = smub.OUTPUT_NORMAL"
+                for command in traffic
+            )
+        )
+        self.assertIn("smua.source.output = smua.OUTPUT_OFF", traffic)
+        self.assertIn("smub.source.output = smub.OUTPUT_OFF", traffic)
 
     def test_keithley_passive_measure_never_writes_output_on(self) -> None:
         session = FakeVisaSession(
@@ -1399,6 +1581,17 @@ class AdapterAndRunnerTests(unittest.TestCase):
             configuration_traffic[0],
             "smub.source.output = smub.OUTPUT_OFF",
         )
+        self.assertIn(
+            "smub.source.offmode = smub.OUTPUT_NORMAL",
+            configuration_traffic,
+        )
+        self.assertIn(
+            "print(smub.source.offmode == smub.OUTPUT_NORMAL)",
+            configuration_traffic,
+        )
+        self.assertFalse(
+            any("OUTPUT_HIGH_Z" in command for command in configuration_traffic)
+        )
         self.assertFalse(
             any("OUTPUT_ON" in command for command in configuration_traffic)
         )
@@ -1477,7 +1670,7 @@ class AdapterAndRunnerTests(unittest.TestCase):
         channel_a, channel_b = readback.channels
         self.assertEqual(channel_a.channel, "A")
         self.assertFalse(channel_a.output_enabled)
-        self.assertEqual(channel_a.output_off_mode, "high_impedance")
+        self.assertEqual(channel_a.output_off_mode, "normal")
         self.assertEqual(channel_a.source_mode, "current")
         self.assertEqual(channel_a.source_level_si, 500e-6)
         self.assertEqual(channel_a.compliance_si, 50e-3)
@@ -1486,6 +1679,7 @@ class AdapterAndRunnerTests(unittest.TestCase):
         self.assertEqual(channel_a.nplc, 0.5)
         self.assertEqual(channel_b.channel, "B")
         self.assertTrue(channel_b.output_enabled)
+        self.assertEqual(channel_b.output_off_mode, "normal")
         self.assertEqual(channel_b.source_mode, "voltage")
         self.assertEqual(channel_b.source_level_si, 10e-3)
         self.assertEqual(channel_b.compliance_si, 1e-3)

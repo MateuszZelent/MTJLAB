@@ -33,7 +33,8 @@ from qfluentwidgets import (
 
 from app.devices.keithley_2600 import (
     KeithleyChannelConfigurationReadback, KeithleyConfigurationReadback,
-    KeithleyRampRequest, KeithleySourceRequest, build_keithley_ramp_levels,
+    KeithleyOutputOffModeResult, KeithleyRampRequest, KeithleySourceRequest,
+    build_keithley_ramp_levels,
 )
 from app.devices.keithley_2600.adapter import KeithleyMeasurement
 from app.domain.errors import ConfigurationError
@@ -1078,6 +1079,8 @@ class KeithleyPage(QWidget):
         self._panel_float_buttons: dict[str, TransparentToolButton] = {}
         self._floating_panels: dict[str, _KeithleyFloatingPanelWindow] = {}
         self._readback_dialog: _KeithleyReadbackDialog | None = None
+        self._dut_isolation_channel: str | None = None
+        self._dut_isolation_phase = "idle"
         self._last_assignment_succeeded = False
         self._loading_form_snapshot = False
         self._panel_placeholders: dict[str, CardWidget] = {}
@@ -1789,7 +1792,7 @@ class KeithleyPage(QWidget):
         card = CardWidget()
         card.setObjectName("keithleyChannelCard")
         card.setProperty("selected", False)
-        card.setMaximumHeight(154)
+        card.setMaximumHeight(180)
         card_layout = QVBoxLayout(card)
         card_layout.setContentsMargins(8, 6, 8, 6)
         card_layout.setSpacing(4)
@@ -1838,6 +1841,12 @@ class KeithleyPage(QWidget):
         measure = PushButton(f"Measure CH {channel}")
         measure.setProperty("compact", True)
         measure.clicked.connect(lambda _checked=False, ch=channel: self.request_measurement(ch))
+        dut_isolation = PushButton("Disconnect / connect DUT…")
+        dut_isolation.setProperty("compact", True)
+        dut_isolation.setMinimumWidth(130)
+        dut_isolation.clicked.connect(
+            lambda _checked=False, ch=channel: self.request_dut_isolation(ch)
+        )
         output_on_action = PushButton("OUTPUT ON")
         output_on_action.setCheckable(True)
         output_off_action = PushButton("OUTPUT OFF")
@@ -1853,13 +1862,27 @@ class KeithleyPage(QWidget):
         )
         footer.addWidget(compliance)
         footer.addStretch(1)
-        footer.addWidget(select)
-        footer.addWidget(measure)
-        footer.addWidget(output_on_action)
-        footer.addWidget(output_off_action)
-        for button in (select, measure, output_on_action, output_off_action):
-            button.setFixedHeight(28)
         card_layout.addLayout(footer)
+        channel_actions = QHBoxLayout()
+        channel_actions.setSpacing(4)
+        channel_actions.addWidget(select)
+        channel_actions.addWidget(measure)
+        channel_actions.addWidget(dut_isolation)
+        card_layout.addLayout(channel_actions)
+        output_footer = QHBoxLayout()
+        output_footer.setSpacing(4)
+        output_footer.addStretch(1)
+        output_footer.addWidget(output_on_action)
+        output_footer.addWidget(output_off_action)
+        for button in (
+            select,
+            measure,
+            dut_isolation,
+            output_on_action,
+            output_off_action,
+        ):
+            button.setFixedHeight(28)
+        card_layout.addLayout(output_footer)
         self.channel_cards[channel] = {
             "card": card,
             "led": led,
@@ -1867,6 +1890,7 @@ class KeithleyPage(QWidget):
             "compliance": compliance,
             "select": select,
             "measure": measure,
+            "dut_isolation": dut_isolation,
             "output_on_action": output_on_action,
             "output_off_action": output_off_action,
             **values,
@@ -1930,6 +1954,7 @@ class KeithleyPage(QWidget):
             self._set_help(card["compliance"], "Compliance indicator", "ACTIVE means the measured opposite quantity reached the programmed compliance threshold. The safety policy may immediately disable outputs.")
             self._set_help(card["select"], f"Select channel {channel}", "Makes this channel active in the configuration form without changing its electrical output.")
             self._set_help(card["measure"], f"Measure channel {channel}", "Requests one voltage/current reading for this channel without enabling its output.")
+            self._set_help(card["dut_isolation"], f"Disconnect or connect channel {channel} DUT", "Available only with confirmed OUTPUT OFF. It opens this channel relay in HIGH-Z, waits while you physically disconnect or connect the DUT, then restores and verifies NORMAL mode.")
             self._set_help(card["output_on_action"], f"Channel {channel} OUTPUT ON", "Validates and confirms the visible source settings, configures with OUTPUT OFF, verifies readback and only then energizes this channel.")
             self._set_help(card["output_off_action"], f"Channel {channel} OUTPUT OFF", "Disables this channel immediately and verifies the hardware readback. OUTPUT OFF is never blocked by audit health.")
         self.workspace_splitter.setToolTip(
@@ -2013,13 +2038,16 @@ class KeithleyPage(QWidget):
             )
         )
         configuration_busy = configuration_mutation_pending or self._readback_pending
+        dut_isolation_busy = self._dut_isolation_phase != "idle"
         self.apply_configuration_button.setText(
             "Applying & verifying…"
             if configure_pending
             else "Apply & verify settings · OUTPUT OFF"
         )
         self.apply_configuration_button.setEnabled(
-            self._device_is_output_ready() and not configuration_busy
+            self._device_is_output_ready()
+            and not configuration_busy
+            and not dut_isolation_busy
         )
         self.read_configuration_button.setText(
             "Reading device…"
@@ -2030,6 +2058,7 @@ class KeithleyPage(QWidget):
             self._device_is_output_ready()
             and not configuration_busy
             and not self._measure_pending
+            and not dut_isolation_busy
         )
         for channel, card in self.channel_cards.items():
             pending_enable = (
@@ -2049,7 +2078,9 @@ class KeithleyPage(QWidget):
             # _output_toggled() before dispatch, but it can now explain the
             # exact unmet condition promised by the tooltip/readiness panel.
             card["output_on_action"].setEnabled(
-                self._device_is_output_ready() and not pending_enable
+                self._device_is_output_ready()
+                and not pending_enable
+                and not dut_isolation_busy
             )
             card["output_on_action"].setToolTip(
                 (
@@ -2067,8 +2098,55 @@ class KeithleyPage(QWidget):
             )
             disconnected = self._device_state_value == "DISCONNECTED"
             card["output_off_action"].setEnabled(
-                not pending_enable and not confirmed_off and not disconnected
+                not pending_enable
+                and not confirmed_off
+                and not disconnected
+                and not dut_isolation_busy
             )
+            isolation_pending = (
+                configuration_busy
+                or self._measure_pending
+                or self._ramp_pending
+                or dut_isolation_busy
+            )
+            retry_normal = (
+                self._dut_isolation_phase == "restore_failed"
+                and self._dut_isolation_channel == channel
+            )
+            isolation_ready = (
+                self._device_is_output_ready()
+                and self._station_settings.keithley.safety.channels[channel].enabled
+                and confirmed_off
+                and (not isolation_pending or retry_normal)
+            )
+            card["dut_isolation"].setEnabled(isolation_ready)
+            card["dut_isolation"].setText(
+                "Retry NORMAL"
+                if retry_normal
+                else "Disconnect / connect DUT…"
+            )
+            if not self._device_is_output_ready():
+                isolation_help = "Connect and verify Keithley first."
+            elif not self._output_state_known[channel]:
+                isolation_help = (
+                    f"Channel {channel} OUTPUT must be known and confirmed OFF."
+                )
+            elif self._output_states[channel]:
+                isolation_help = (
+                    f"Turn channel {channel} OUTPUT OFF before handling the DUT."
+                )
+            elif retry_normal:
+                isolation_help = (
+                    f"Retry restoring channel {channel} relay mode to NORMAL."
+                )
+            elif isolation_pending:
+                isolation_help = "Wait for the current Keithley operation to finish."
+            else:
+                isolation_help = (
+                    f"Temporarily isolate channel {channel} in HIGH-Z while you "
+                    "physically disconnect or connect its DUT."
+                )
+            card["dut_isolation"].setToolTip(isolation_help)
 
     def _device_state_changed(self, state: str) -> None:
         normalized = state.upper()
@@ -2226,6 +2304,51 @@ class KeithleyPage(QWidget):
         self._measure_pending = True
         self._controller.call("measure", selected)
 
+    def request_dut_isolation(self, channel: str) -> None:
+        """Open one confirmed-OFF relay for a modal physical DUT operation."""
+
+        if channel not in self.channel_cards:
+            raise ValueError(f"Unknown Keithley channel {channel!r}.")
+        if (
+            not self._device_is_output_ready()
+            or not self._output_state_known[channel]
+            or self._output_states[channel]
+        ):
+            QMessageBox.warning(
+                self,
+                "Keithley DUT connection",
+                f"Channel {channel} OUTPUT must be known and confirmed OFF "
+                "before the DUT relay can be switched.",
+            )
+            return
+        if self._dut_isolation_phase == "restore_failed":
+            if self._dut_isolation_channel != channel:
+                return
+            self._dut_isolation_phase = "restoring_normal"
+            self._update_output_readiness()
+            self._update_live_controls()
+            self._controller.call(
+                "set_dut_output_off_mode",
+                (channel, "normal"),
+            )
+            return
+        if self._dut_isolation_phase != "idle":
+            return
+        self._live_timer.stop()
+        for checkbox in (self.live_channel_a, self.live_channel_b):
+            checkbox.setChecked(False)
+        self._dut_isolation_channel = channel
+        self._dut_isolation_phase = "entering_high_z"
+        self._update_output_readiness()
+        self._update_live_controls()
+        self.status.emit(
+            f"Keithley CH {channel}: verifying OUTPUT OFF and opening HIGH-Z relay"
+        )
+        self._controller.call(
+            "set_dut_output_off_mode",
+            (channel, "high_impedance"),
+        )
+
     def _request_channel_output(self, channel: str, enabled: bool) -> None:
         self.channel.setCurrentText(channel)
         if enabled and self._output_states[channel]:
@@ -2296,6 +2419,7 @@ class KeithleyPage(QWidget):
 
     def _update_live_controls(self) -> None:
         connected = self._device_is_output_ready()
+        dut_isolation_busy = self._dut_isolation_phase != "idle"
         high_impedance_off = (
             self._station_settings.keithley.safety.output_off_mode
             == "high_impedance"
@@ -2310,9 +2434,13 @@ class KeithleyPage(QWidget):
             measurement_path_available = (
                 not high_impedance_off or self._output_states[channel]
             )
-            checkbox.setEnabled(connected and channel_enabled)
+            checkbox.setEnabled(
+                connected and channel_enabled and not dut_isolation_busy
+            )
             measure_button = self.channel_cards[channel]["measure"]
-            measure_button.setEnabled(connected and channel_enabled)
+            measure_button.setEnabled(
+                connected and channel_enabled and not dut_isolation_busy
+            )
             if not channel_enabled and checkbox.isChecked():
                 checkbox.setChecked(False)
             if not connected:
@@ -2346,7 +2474,7 @@ class KeithleyPage(QWidget):
             self.measure_selected_button.setEnabled(
                 self.channel_cards[selected]["measure"].isEnabled()
             )
-        self.live_interval.setEnabled(connected)
+        self.live_interval.setEnabled(connected and not dut_isolation_busy)
         self._update_live_timing()
 
     def _update_live_timing(self) -> None:
@@ -3091,6 +3219,68 @@ class KeithleyPage(QWidget):
                 "Keithley: channel A/B settings read using queries only"
             )
             self._show_configuration_readback(result)
+        elif operation == "set_dut_output_off_mode" and isinstance(
+            result, KeithleyOutputOffModeResult
+        ):
+            channel = result.channel
+            if result.output_enabled:
+                self._dut_isolation_phase = "restore_failed"
+                self._dut_isolation_channel = channel
+                self._update_output_readiness()
+                self._update_live_controls()
+                QMessageBox.critical(
+                    self,
+                    "Keithley DUT connection",
+                    f"Channel {channel} did not remain OUTPUT OFF. Do not handle "
+                    "the DUT; relay state is not confirmed.",
+                )
+                return
+            self._set_channel_output(channel, False)
+            if (
+                result.mode == "high_impedance"
+                and self._dut_isolation_phase == "entering_high_z"
+                and self._dut_isolation_channel == channel
+            ):
+                self._dut_isolation_phase = "operator_modal"
+                self._update_output_readiness()
+                self._update_live_controls()
+                QMessageBox.information(
+                    self,
+                    f"Channel {channel} DUT connection",
+                    f"Channel {channel} is isolated (HIGH-Z).\n\n"
+                    "You may now physically disconnect or connect the DUT.\n\n"
+                    "Click OK when finished. The application will reconnect "
+                    "the measurement path and verify NORMAL mode.",
+                )
+                self._dut_isolation_phase = "restoring_normal"
+                self._update_output_readiness()
+                self._update_live_controls()
+                self.status.emit(
+                    f"Keithley CH {channel}: restoring NORMAL relay mode"
+                )
+                self._controller.call(
+                    "set_dut_output_off_mode",
+                    (channel, "normal"),
+                )
+            elif (
+                result.mode == "normal"
+                and self._dut_isolation_phase
+                in {"restoring_normal", "restore_failed"}
+                and self._dut_isolation_channel == channel
+            ):
+                self._dut_isolation_phase = "idle"
+                self._dut_isolation_channel = None
+                self._update_output_readiness()
+                self._update_live_controls()
+                self.banner.show_message(
+                    f"Keithley CH {channel}: DUT path reconnected and "
+                    "OUTPUT_NORMAL verified. OUTPUT remains OFF.",
+                    severity="success",
+                    timeout_ms=10_000,
+                )
+                self.status.emit(
+                    f"Keithley CH {channel}: NORMAL relay mode verified"
+                )
         elif operation == "measure" and hasattr(result, "current_a"):
             measurement = result
             self._measure_pending = False
@@ -3167,6 +3357,40 @@ class KeithleyPage(QWidget):
             self.status.emit(f"Keithley CH {channel}: manual ramp completed")
 
     def _error(self, operation: str, error: str) -> None:
+        if operation == "set_dut_output_off_mode":
+            channel = self._dut_isolation_channel
+            restoring = self._dut_isolation_phase in {
+                "restoring_normal",
+                "restore_failed",
+            }
+            self._dut_isolation_phase = "restore_failed" if restoring else "idle"
+            if not restoring:
+                self._dut_isolation_channel = None
+            self._update_output_readiness()
+            self._update_live_controls()
+            if restoring and channel is not None:
+                message = (
+                    f"Channel {channel} OUTPUT remains OFF, but NORMAL relay mode "
+                    f"was not confirmed: {error} Use Retry NORMAL before normal work."
+                )
+                self.banner.show_message(
+                    message,
+                    severity="error",
+                    timeout_ms=0,
+                )
+                QMessageBox.critical(
+                    self,
+                    "Keithley DUT connection",
+                    message,
+                )
+            else:
+                QMessageBox.critical(
+                    self,
+                    "Keithley DUT connection",
+                    "HIGH-Z isolation was not confirmed. Do not disconnect or "
+                    f"connect the DUT. {error}",
+                )
+            return
         if operation == "read_configuration":
             self._readback_pending = False
             self._update_output_readiness()

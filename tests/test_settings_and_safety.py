@@ -42,6 +42,10 @@ class QuantityAndSafetyTests(unittest.TestCase):
             self.assertEqual(loaded.settings.profile.id, "default-lab-profile")
             self.assertIsNone(loaded.settings.rigol.connection.resource)
             self.assertIsNone(loaded.settings.rigol.identity.expected_serial)
+            self.assertEqual(
+                loaded.settings.keithley.safety.output_off_mode,
+                "normal",
+            )
             original = path.read_bytes()
             self.assertFalse(repository.ensure_exists())
             self.assertEqual(path.read_bytes(), original)

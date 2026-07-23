@@ -23,6 +23,9 @@ from app.safety.keithley import KeithleySourceRequest, validate_keithley_measure
 from app.settings.models import KeithleyChannelSettings, KeithleySettings, StationSettings
 
 
+KeithleyDutOffMode = Literal["normal", "high_impedance"]
+
+
 @dataclass(frozen=True, slots=True)
 class KeithleyMeasurement:
     channel: Literal["A", "B"]
@@ -63,6 +66,15 @@ class KeithleyConfigurationReadback:
         KeithleyChannelConfigurationReadback,
         KeithleyChannelConfigurationReadback,
     ]
+
+
+@dataclass(frozen=True, slots=True)
+class KeithleyOutputOffModeResult:
+    """Confirmed channel-specific relay mode while OUTPUT remains OFF."""
+
+    channel: Literal["A", "B"]
+    mode: KeithleyDutOffMode
+    output_enabled: bool
 
 
 @dataclass(frozen=True, slots=True)
@@ -186,21 +198,11 @@ class KeithleyAdapter(DeviceAdapter):
                 ),
             )
             self._state = DeviceState.VERIFIED
-            if self._settings.safety.outputs_off_on_connect:
-                self._write_all_outputs_off()
-                states = self._read_output_states()
-                if any(states.values()):
-                    raise DeviceError("Keithley did not confirm OUTPUT OFF after connection.")
-            else:
-                states = self._read_output_states()
-            if any(states.values()):
-                raise DeviceError(
-                    "Keithley output-off mode cannot be applied while an output is ON."
-                )
-            for channel in ("A", "B"):
-                self._configure_output_off_mode(session, self._smu(channel))
+            # Connection establishes identity and observes the existing output
+            # state only. It must not alter a front-panel or another client's
+            # configuration, relay state, source state, or diagnostic queue.
+            self._read_output_states()
             self._update_aggregate_output_state()
-            self._clear_errors()
             return identity
         except Exception:
             try:
@@ -240,23 +242,82 @@ class KeithleyAdapter(DeviceAdapter):
         session.write("smua.source.output = smua.OUTPUT_OFF")
         session.write("smub.source.output = smub.OUTPUT_OFF")
 
-    def _configure_output_off_mode(
-        self, session: InstrumentSession, smu: str
-    ) -> None:
+    def set_dut_output_off_mode(
+        self,
+        channel: Literal["A", "B"],
+        mode: KeithleyDutOffMode,
+    ) -> KeithleyOutputOffModeResult:
+        """Temporarily isolate or reconnect one confirmed-OFF SMU channel."""
+
+        if channel not in {"A", "B"}:
+            raise SafetyViolation("Keithley channel must be A or B.")
         constants = {
             "normal": "OUTPUT_NORMAL",
             "high_impedance": "OUTPUT_HIGH_Z",
-            "zero": "OUTPUT_ZERO",
         }
-        constant = constants[self._settings.safety.output_off_mode]
-        session.write(f"{smu}.source.offmode = {smu}.{constant}")
-        response = session.query(
-            f"print({smu}.source.offmode == {smu}.{constant})"
-        )
-        if not self._parse_boolean_readback(f"{smu}.source.offmode", response):
-            raise DeviceError(
-                f"Keithley did not confirm {smu}.source.offmode = {constant}."
+        if mode not in constants:
+            raise SafetyViolation(
+                "Keithley DUT output-off mode must be normal or high_impedance."
             )
+        smu = self._smu(channel)
+        session = self._require_session()
+        active_before = self._output_is_enabled(channel)
+        self._output_states[channel] = active_before
+        self._update_aggregate_output_state()
+        if active_before:
+            raise SafetyViolation(
+                f"Keithley channel {channel} DUT connection mode can change only "
+                "after OUTPUT is confirmed OFF."
+            )
+
+        constant = constants[mode]
+        mutation_started = False
+        try:
+            session.write(f"{smu}.source.offmode = {smu}.{constant}")
+            mutation_started = True
+            response = session.query(
+                f"print({smu}.source.offmode == {smu}.{constant})"
+            )
+            if not self._parse_boolean_readback(f"{smu}.source.offmode", response):
+                raise DeviceError(
+                    f"Keithley did not confirm {smu}.source.offmode = {constant}."
+                )
+            active_after = self._output_is_enabled(channel)
+        except Exception:
+            if mutation_started:
+                self._state = DeviceState.UNKNOWN
+            raise
+        if active_after:
+            self.emergency_off()
+            if self._state is not DeviceState.UNKNOWN:
+                self._state = DeviceState.FAULT
+            raise DeviceError(
+                f"Keithley channel {channel} OUTPUT changed while switching DUT "
+                "connection mode. Both outputs were commanded OFF."
+            )
+        self._output_states[channel] = False
+        self._update_aggregate_output_state()
+        return KeithleyOutputOffModeResult(channel, mode, False)
+
+    def _ensure_normal_output_off_mode(
+        self,
+        channel: Literal["A", "B"],
+    ) -> None:
+        """Establish NORMAL only while OFF; never close the relay under load."""
+
+        smu = self._smu(channel)
+        active = self._output_is_enabled(channel)
+        normal = self._query_boolean(
+            f"{smu}.source.offmode == {smu}.OUTPUT_NORMAL"
+        )
+        if normal:
+            return
+        if active:
+            self._fail_measurement_output_invariant(
+                f"Keithley channel {channel} is energized with a non-NORMAL "
+                "output-off mode."
+            )
+        self.set_dut_output_off_mode(channel, "normal")
 
     def emergency_off(self) -> None:
         if self._session is None:
@@ -465,7 +526,7 @@ class KeithleyAdapter(DeviceAdapter):
         session = self._require_session()
         session.write(f"{smu}.source.output = {smu}.OUTPUT_OFF")
         self._output_states[request.channel] = False
-        self._configure_output_off_mode(session, smu)
+        self._ensure_normal_output_off_mode(request.channel)
         if request.mode == "measure_only":
             self._configure_measurement_ranges_and_sense(session, smu, request)
             session.write(f"{smu}.measure.nplc = {request.nplc:.12g}")
@@ -888,6 +949,7 @@ class KeithleyAdapter(DeviceAdapter):
             if request is None:
                 raise SafetyViolation("Configure a safe Keithley source before enabling OUTPUT.")
             validate_keithley_source(settings, request)
+            self._ensure_normal_output_off_mode(channel)
             # Re-read the complete programmed source immediately before the
             # single energising transition. This also proves OUTPUT is still
             # OFF and detects front-panel or remote changes after configure.
@@ -922,6 +984,7 @@ class KeithleyAdapter(DeviceAdapter):
                 "Keithley output readback changed outside the configured control path "
                 "before measurement."
             )
+        self._ensure_normal_output_off_mode(channel)
         try:
             # One TSP acquisition keeps I and V from the same measurement
             # instant. Keithley returns current first, then voltage.
@@ -988,8 +1051,7 @@ class KeithleyAdapter(DeviceAdapter):
             current,
             voltage * current,
             self._output_states[channel],
-            self._output_states[channel]
-            or self._settings.safety.output_off_mode != "high_impedance",
+            True,
             compliance_detected,
             stop_required,
         )
