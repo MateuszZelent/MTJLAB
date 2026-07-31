@@ -8,6 +8,7 @@ from typing import Literal
 
 from app.domain.errors import SafetyViolation
 from app.domain.quantities import DIMENSION_CURRENT, DIMENSION_POWER, DIMENSION_VOLTAGE, parse_quantity
+from app.safety.precision import quantize_to_step
 from app.settings.models import KeithleyChannelSettings
 
 
@@ -18,6 +19,83 @@ SourceMode = Literal["current", "voltage", "measure_only"]
 # discrete ranges before writing TSP commands.
 KEITHLEY_2602A_MAX_VOLTAGE_RANGE_V = 40.0
 KEITHLEY_2602A_MAX_CURRENT_RANGE_A = 3.0
+KEITHLEY_2602A_VOLTAGE_RANGES = (0.1, 1.0, 6.0, 40.0)
+KEITHLEY_2602A_VOLTAGE_SOURCE_RESOLUTIONS = (5e-6, 50e-6, 50e-6, 500e-6)
+KEITHLEY_2602A_CURRENT_RANGES = (
+    100e-9,
+    1e-6,
+    10e-6,
+    100e-6,
+    1e-3,
+    10e-3,
+    100e-3,
+    1.0,
+    3.0,
+)
+KEITHLEY_2602A_CURRENT_SOURCE_RESOLUTIONS = (
+    1e-12,
+    10e-12,
+    100e-12,
+    1e-9,
+    10e-9,
+    100e-9,
+    1e-6,
+    10e-6,
+    10e-6,
+)
+
+
+def keithley_programming_resolution(
+    dimension: str,
+    value_si: float,
+    *,
+    requested_range_si: float | None = None,
+) -> float:
+    """Return the 2602A source-programming step for a selected range."""
+
+    if not math.isfinite(value_si):
+        raise SafetyViolation("Keithley value must be finite before quantisation.")
+    if requested_range_si is not None and (
+        not math.isfinite(requested_range_si) or requested_range_si <= 0
+    ):
+        raise SafetyViolation("Keithley manual range must be finite and positive.")
+    if dimension == DIMENSION_VOLTAGE:
+        ranges = KEITHLEY_2602A_VOLTAGE_RANGES
+        resolutions = KEITHLEY_2602A_VOLTAGE_SOURCE_RESOLUTIONS
+    elif dimension == DIMENSION_CURRENT:
+        ranges = KEITHLEY_2602A_CURRENT_RANGES
+        resolutions = KEITHLEY_2602A_CURRENT_SOURCE_RESOLUTIONS
+    else:
+        raise SafetyViolation(f"Unsupported Keithley quantisation dimension {dimension!r}.")
+
+    required = abs(requested_range_si if requested_range_si is not None else value_si)
+    for hardware_range, resolution in zip(ranges, resolutions, strict=True):
+        if required <= hardware_range or math.isclose(
+            required, hardware_range, rel_tol=1e-12, abs_tol=1e-15
+        ):
+            return resolution
+    raise SafetyViolation(
+        f"Keithley {dimension} value {value_si:.12g} exceeds the documented 2602A range."
+    )
+
+
+def quantize_keithley_value(
+    value_si: float,
+    dimension: str,
+    *,
+    requested_range_si: float | None = None,
+) -> float:
+    """Round a source level or compliance value to the 2602A range step."""
+
+    return quantize_to_step(
+        float(value_si),
+        keithley_programming_resolution(
+            dimension,
+            float(value_si),
+            requested_range_si=requested_range_si,
+        ),
+        name=f"Keithley {dimension}",
+    )
 
 
 @dataclass(frozen=True, slots=True)

@@ -1,0 +1,84 @@
+from __future__ import annotations
+
+import unittest
+
+from app.devices.keithley_2600 import KeithleyAdapter, KeithleySourceRequest
+from app.devices.rigol_dg1000z import RigolAdapter, RigolChannelConfig
+from app.devices.simulators import KeithleySimulator, RigolSimulator
+from app.devices.visa import FakeVisaSessionFactory
+from app.domain.quantities import DIMENSION_CURRENT, DIMENSION_VOLTAGE
+from app.safety.keithley import quantize_keithley_value
+from app.safety.rigol_current import quantize_rigol_voltage
+from tests.helpers import simulation_settings
+
+
+class InstrumentPrecisionTests(unittest.TestCase):
+    def test_documented_resolution_rounds_long_sweep_values(self) -> None:
+        long_value = 0.01111111111111111111111111111111
+
+        self.assertAlmostEqual(quantize_rigol_voltage(long_value), 0.0111)
+        self.assertAlmostEqual(
+            quantize_keithley_value(long_value, DIMENSION_VOLTAGE), 0.01111
+        )
+        self.assertAlmostEqual(
+            quantize_keithley_value(long_value, DIMENSION_CURRENT), 0.011111
+        )
+
+    def test_rigol_sweep_level_is_quantized_before_scpi_write(self) -> None:
+        session = RigolSimulator()
+        adapter = RigolAdapter(
+            simulation_settings(),
+            session_factory=FakeVisaSessionFactory(session),
+        )
+        adapter.connect()
+        adapter.configure_channel(
+            RigolChannelConfig(
+                channel=1,
+                waveform="SIN",
+                frequency_hz=1_000.0,
+                high_level_v=0.001,
+                low_level_v=-0.001,
+            )
+        )
+
+        actual = adapter.update_high_level(
+            1, 0.01111111111111111111111111111111
+        )
+
+        self.assertAlmostEqual(actual, 0.0111)
+        self.assertIn(":SOUR1:VOLT:HIGH 0.0111", session.commands)
+        self.assertAlmostEqual(
+            adapter.last_channel_config(1).high_level_v, 0.0111
+        )
+
+    def test_keithley_sweep_level_is_quantized_before_tsp_write(self) -> None:
+        session = KeithleySimulator()
+        adapter = KeithleyAdapter(
+            simulation_settings(),
+            session_factory=FakeVisaSessionFactory(session),
+        )
+        adapter.connect()
+        adapter.configure_source(
+            KeithleySourceRequest(
+                channel="B",
+                mode="voltage",
+                level_si=0.01,
+                compliance_si=0.001,
+            )
+        )
+
+        actual = adapter.update_source_level(
+            "B",
+            mode="voltage",
+            level_si=0.01111111111111111111111111111111,
+        )
+
+        self.assertAlmostEqual(actual, 0.01111)
+        self.assertIn("smub.source.levelv = 0.01111", session.commands)
+        self.assertAlmostEqual(
+            adapter.quick_control_snapshot()["keithley.B.voltage"], 0.01111
+        )
+
+
+if __name__ == "__main__":
+    unittest.main()

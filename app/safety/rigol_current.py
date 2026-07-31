@@ -16,6 +16,7 @@ from app.domain.quantities import (
     QuantityError,
     parse_quantity,
 )
+from app.safety.precision import quantize_to_step
 from app.settings.models import RigolChannelSettings, RigolSafety
 
 
@@ -40,6 +41,44 @@ _DG1032Z_MAX_OPEN_CIRCUIT_VPP_BY_FREQUENCY = (
     (10e6, 20.0),
     (30e6, 10.0),
 )
+
+# DG1000Z programming resolutions used at the SCPI boundary.  Frequency is
+# specified in the manual as 1 uHz.  Voltage amplitude is specified as
+# 0.1 mVpp or four digits, whichever is coarser at the requested magnitude.
+RIGOL_DG1000Z_FREQUENCY_RESOLUTION_HZ = 1e-6
+RIGOL_DG1000Z_MIN_VOLTAGE_RESOLUTION_V = 1e-4
+
+
+def rigol_voltage_resolution_v(value_v: float) -> float:
+    """Return the conservative DG1000Z voltage step at ``value_v``."""
+
+    if not math.isfinite(value_v):
+        raise SafetyViolation("Rigol voltage must be finite before quantisation.")
+    magnitude = abs(value_v)
+    if magnitude == 0:
+        return RIGOL_DG1000Z_MIN_VOLTAGE_RESOLUTION_V
+    four_digit_step = 10.0 ** (math.floor(math.log10(magnitude)) - 3)
+    return max(RIGOL_DG1000Z_MIN_VOLTAGE_RESOLUTION_V, four_digit_step)
+
+
+def quantize_rigol_voltage(value_v: float) -> float:
+    """Round a DG1000Z voltage to the documented four-digit/0.1 mV step."""
+
+    return quantize_to_step(
+        float(value_v),
+        rigol_voltage_resolution_v(float(value_v)),
+        name="Rigol voltage",
+    )
+
+
+def quantize_rigol_frequency(frequency_hz: float) -> float:
+    """Round a DG1000Z frequency to its documented 1 uHz resolution."""
+
+    return quantize_to_step(
+        float(frequency_hz),
+        RIGOL_DG1000Z_FREQUENCY_RESOLUTION_HZ,
+        name="Rigol frequency",
+    )
 
 
 def rigol_hardware_frequency_max_hz(waveform: str | None = None) -> float:

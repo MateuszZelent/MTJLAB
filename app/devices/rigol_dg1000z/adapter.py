@@ -20,6 +20,8 @@ from app.domain.models import DeviceCapabilities, DeviceIdentity, DeviceState
 from app.domain.quantities import DIMENSION_TIME, parse_quantity
 from app.safety.rigol_current import (
     RigolCurrentEstimate,
+    quantize_rigol_frequency,
+    quantize_rigol_voltage,
     validate_rigol_waveform,
 )
 from app.settings.models import RigolSettings, StationSettings
@@ -522,6 +524,13 @@ class RigolAdapter(DeviceAdapter):
         self._assert_finite("phase", config.phase_deg)
         if not 0 <= config.phase_deg <= 360:
             raise SafetyViolation("Rigol carrier phase must be within 0..360 degrees.")
+        self._validate_waveform_config(config)
+        self._validate_shape_parameters(config)
+        # The recipe/compiler may produce a binary-float interpolation with
+        # more digits than the DG1000Z can represent.  Normalize only after
+        # validating the raw request, then validate the exact wire state again
+        # before any session mutation.
+        config = self._quantize_channel_config(config)
         estimate = self._validate_waveform_config(config)
         self._validate_shape_parameters(config)
         # Finish deterministic local validation before querying hardware. A
@@ -558,7 +567,7 @@ class RigolAdapter(DeviceAdapter):
         self._last_burst_config.pop(config.channel, None)
         session.write(f":OUTP{config.channel}:LOAD {self._format_load(config.output_load)}")
         if waveform == "DC":
-            session.write(f"{prefix}:APPL:DC DEF,DEF,{config.high_level_v:.12g}")
+            session.write(f"{prefix}:APPL:DC DEF,DEF,{self._format_wire_number(config.high_level_v)}")
         else:
             session.write(f"{prefix}:FUNC {waveform}")
             if waveform == "USER":
@@ -568,15 +577,15 @@ class RigolAdapter(DeviceAdapter):
                 # frequency_hz.
                 session.write(f"{prefix}:FUNC:ARB:MODE FREQ")
             if waveform != "NOIS":
-                session.write(f"{prefix}:FREQ {config.frequency_hz:.12g}")
+                session.write(f"{prefix}:FREQ {self._format_wire_number(config.frequency_hz)}")
             # HighL and LowL are coupled representations of amplitude and
             # offset on the DG1000Z.  Program the canonical pair while OUTPUT
             # is OFF instead of walking through two conflicting endpoint
             # states that the instrument may clamp.
             amplitude_vpp = config.high_level_v - config.low_level_v
             offset_v = (config.high_level_v + config.low_level_v) / 2.0
-            session.write(f"{prefix}:VOLT {amplitude_vpp:.12g}")
-            session.write(f"{prefix}:VOLT:OFFS {offset_v:.12g}")
+            session.write(f"{prefix}:VOLT {self._format_wire_number(amplitude_vpp)}")
+            session.write(f"{prefix}:VOLT:OFFS {self._format_wire_number(offset_v)}")
             if waveform != "NOIS":
                 session.write(f"{prefix}:PHAS {config.phase_deg:.12g}")
             self._write_shape_parameters(prefix, waveform, config)
@@ -598,11 +607,17 @@ class RigolAdapter(DeviceAdapter):
             raise SafetyViolation(
                 f"Rigol {config.waveform.upper()} does not support carrier-frequency updates."
             )
-        updated = replace(config, frequency_hz=float(frequency_hz))
-        self._validate_waveform_config(updated)
+        raw_updated = replace(config, frequency_hz=float(frequency_hz))
+        self._validate_waveform_config(raw_updated)
         # Pulse timing limits depend on the period.  A frequency-only update
         # can therefore make a previously valid width/edge configuration
         # invalid even though the voltage/frequency envelope still passes.
+        self._validate_shape_parameters(raw_updated)
+        updated = replace(
+            raw_updated,
+            frequency_hz=quantize_rigol_frequency(raw_updated.frequency_hz),
+        )
+        self._validate_waveform_config(updated)
         self._validate_shape_parameters(updated)
         self._assert_independent_channels()
         session = self._require_session()
@@ -622,7 +637,7 @@ class RigolAdapter(DeviceAdapter):
             self._validate_active_quick_update(channel, updated)
         self._last_config.pop(channel, None)
         try:
-            session.write(f"{prefix}:FREQ {updated.frequency_hz:.12g}")
+            session.write(f"{prefix}:FREQ {self._format_wire_number(updated.frequency_hz)}")
             self._check_errors()
             try:
                 actual = float(session.query(f"{prefix}:FREQ?"))
@@ -663,10 +678,16 @@ class RigolAdapter(DeviceAdapter):
             raise SafetyViolation(
                 "DC has one voltage level. Change Offset / DC level instead of HighL/LowL."
             )
-        updated = replace(
+        raw_updated = replace(
             config,
             high_level_v=float(high_level_v),
             low_level_v=float(low_level_v),
+        )
+        self._validate_waveform_config(raw_updated)
+        updated = replace(
+            raw_updated,
+            high_level_v=quantize_rigol_voltage(raw_updated.high_level_v),
+            low_level_v=quantize_rigol_voltage(raw_updated.low_level_v),
         )
         self._validate_waveform_config(updated)
         high_changed = not self._same_number(
@@ -676,21 +697,27 @@ class RigolAdapter(DeviceAdapter):
             updated.low_level_v, config.low_level_v, absolute=1e-12
         )
         if high_changed and not low_changed:
-            actual = self.update_high_level(channel, updated.high_level_v)
-            return actual, config.low_level_v
+            self.update_high_level(channel, updated.high_level_v)
+            applied = self.last_channel_config(channel)
+            return applied.high_level_v, applied.low_level_v
         if low_changed and not high_changed:
-            actual = self.update_low_level(channel, updated.low_level_v)
-            return config.high_level_v, actual
+            self.update_low_level(channel, updated.low_level_v)
+            applied = self.last_channel_config(channel)
+            return applied.high_level_v, applied.low_level_v
+        if not high_changed and not low_changed:
+            return config.high_level_v, config.low_level_v
         old_offset = (config.high_level_v + config.low_level_v) / 2.0
         new_offset = (updated.high_level_v + updated.low_level_v) / 2.0
         old_amplitude = config.high_level_v - config.low_level_v
         new_amplitude = updated.high_level_v - updated.low_level_v
         if self._same_number(old_offset, new_offset, absolute=1e-12):
             self.update_amplitude_vpp(channel, new_amplitude)
-            return updated.high_level_v, updated.low_level_v
+            applied = self.last_channel_config(channel)
+            return applied.high_level_v, applied.low_level_v
         if self._same_number(old_amplitude, new_amplitude, absolute=1e-12):
             self.update_offset(channel, new_offset)
-            return updated.high_level_v, updated.low_level_v
+            applied = self.last_channel_config(channel)
+            return applied.high_level_v, applied.low_level_v
         self._assert_independent_channels()
         session = self._require_session()
         prefix = f":SOUR{channel}"
@@ -714,8 +741,8 @@ class RigolAdapter(DeviceAdapter):
         try:
             amplitude_vpp = updated.high_level_v - updated.low_level_v
             offset_v = (updated.high_level_v + updated.low_level_v) / 2.0
-            session.write(f"{prefix}:VOLT {amplitude_vpp:.12g}")
-            session.write(f"{prefix}:VOLT:OFFS {offset_v:.12g}")
+            session.write(f"{prefix}:VOLT {self._format_wire_number(amplitude_vpp)}")
+            session.write(f"{prefix}:VOLT:OFFS {self._format_wire_number(offset_v)}")
             self._check_errors()
             try:
                 actual_high = float(session.query(f"{prefix}:VOLT:HIGH?"))
@@ -769,10 +796,16 @@ class RigolAdapter(DeviceAdapter):
         if not math.isfinite(offset_v):
             raise SafetyViolation("Rigol offset must be finite.")
         if config.waveform.upper() == "DC":
-            updated = replace(
+            raw_updated = replace(
                 config,
                 high_level_v=float(offset_v),
                 low_level_v=float(offset_v),
+            )
+            self._validate_waveform_config(raw_updated)
+            updated = replace(
+                raw_updated,
+                high_level_v=quantize_rigol_voltage(raw_updated.high_level_v),
+                low_level_v=quantize_rigol_voltage(raw_updated.low_level_v),
             )
             self._validate_waveform_config(updated)
             self._assert_independent_channels()
@@ -790,7 +823,9 @@ class RigolAdapter(DeviceAdapter):
             # Do not re-apply the whole DC function while energised.  The
             # dedicated offset command changes only the active DC level.
             try:
-                session.write(f"{prefix}:VOLT:OFFS {updated.high_level_v:.12g}")
+                session.write(
+                    f"{prefix}:VOLT:OFFS {self._format_wire_number(updated.high_level_v)}"
+                )
                 self._check_errors()
                 try:
                     actual_offset = float(session.query(f"{prefix}:VOLT:OFFS?"))
@@ -801,7 +836,9 @@ class RigolAdapter(DeviceAdapter):
                 )
                 if output_after != output_before:
                     raise DeviceError("Rigol OUTPUT state changed during a DC-level update.")
-                if not self._same_number(actual_offset, offset_v, absolute=1e-6):
+                if not self._same_number(
+                    actual_offset, updated.high_level_v, absolute=1e-6
+                ):
                     raise DeviceError(
                         "Rigol DC-level readback does not match the requested offset."
                     )
@@ -848,6 +885,38 @@ class RigolAdapter(DeviceAdapter):
         config = self.last_channel_config(channel)
         if config.waveform.upper() == "DC":
             raise SafetyViolation("Use Offset / DC level for a DC waveform.")
+        # Validate the interpolated request first.  The normalized command is
+        # then rebuilt from the semantic control being changed so an
+        # amplitude update is not accidentally rounded as two endpoint values.
+        self._validate_waveform_config(updated)
+        normalized_requested = quantize_rigol_voltage(float(requested))
+        if command_suffix == "VOLT":
+            offset = (config.high_level_v + config.low_level_v) / 2.0
+            normalized_updated = replace(
+                config,
+                high_level_v=offset + normalized_requested / 2.0,
+                low_level_v=offset - normalized_requested / 2.0,
+            )
+        elif command_suffix == "VOLT:OFFS":
+            amplitude = config.high_level_v - config.low_level_v
+            normalized_updated = replace(
+                config,
+                high_level_v=normalized_requested + amplitude / 2.0,
+                low_level_v=normalized_requested - amplitude / 2.0,
+            )
+        elif command_suffix == "VOLT:HIGH":
+            normalized_updated = replace(
+                config, high_level_v=normalized_requested
+            )
+        elif command_suffix == "VOLT:LOW":
+            normalized_updated = replace(
+                config, low_level_v=normalized_requested
+            )
+        else:
+            raise SafetyViolation(
+                f"Unsupported Rigol voltage control {command_suffix!r}."
+            )
+        updated = normalized_updated
         self._validate_waveform_config(updated)
         self._assert_independent_channels()
         session = self._require_session()
@@ -863,7 +932,9 @@ class RigolAdapter(DeviceAdapter):
             self._validate_active_quick_update(channel, updated)
         self._last_config.pop(channel, None)
         try:
-            session.write(f"{prefix}:{command_suffix} {float(requested):.12g}")
+            session.write(
+                f"{prefix}:{command_suffix} {self._format_wire_number(normalized_requested)}"
+            )
             self._check_errors()
             actual_amplitude = float(session.query(f"{prefix}:VOLT?"))
             actual_offset = float(session.query(f"{prefix}:VOLT:OFFS?"))
@@ -973,6 +1044,15 @@ class RigolAdapter(DeviceAdapter):
                 config.high_level_v + config.low_level_v
             ) / 2.0
         return snapshot
+
+    @staticmethod
+    def _quantize_channel_config(config: RigolChannelConfig) -> RigolChannelConfig:
+        return replace(
+            config,
+            frequency_hz=quantize_rigol_frequency(config.frequency_hz),
+            high_level_v=quantize_rigol_voltage(config.high_level_v),
+            low_level_v=quantize_rigol_voltage(config.low_level_v),
+        )
 
     def _validate_waveform_config(self, config: RigolChannelConfig) -> RigolCurrentEstimate:
         channel = self._channel_settings(config.channel)
@@ -1132,6 +1212,12 @@ class RigolAdapter(DeviceAdapter):
     @staticmethod
     def _same_number(actual: float, expected: float, *, absolute: float) -> bool:
         return abs(actual - expected) <= max(absolute, abs(expected) * 1e-8)
+
+    @staticmethod
+    def _format_wire_number(value: float) -> str:
+        """Keep documented sub-microvolt/sub-microhertz digits on the wire."""
+
+        return f"{value:.16g}"
 
     @staticmethod
     def _assert_finite(name: str, value: float) -> None:

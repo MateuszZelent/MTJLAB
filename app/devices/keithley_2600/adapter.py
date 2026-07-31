@@ -18,8 +18,22 @@ from app.devices.base import (
 from app.devices.visa import PyVisaSessionFactory
 from app.domain.errors import ConnectionError, DeviceError, SafetyViolation
 from app.domain.models import DeviceCapabilities, DeviceIdentity, DeviceState
-from app.domain.quantities import DIMENSION_TIME, parse_quantity
-from app.safety.keithley import KeithleySourceRequest, validate_keithley_measurement, validate_keithley_source
+from app.domain.quantities import (
+    DIMENSION_CURRENT,
+    DIMENSION_TIME,
+    DIMENSION_VOLTAGE,
+    parse_quantity,
+)
+from app.safety.keithley import (
+    KEITHLEY_2602A_CURRENT_RANGES,
+    KEITHLEY_2602A_MAX_CURRENT_RANGE_A,
+    KEITHLEY_2602A_MAX_VOLTAGE_RANGE_V,
+    KEITHLEY_2602A_VOLTAGE_RANGES,
+    KeithleySourceRequest,
+    quantize_keithley_value,
+    validate_keithley_measurement,
+    validate_keithley_source,
+)
 from app.settings.models import KeithleyChannelSettings, KeithleySettings, StationSettings
 
 
@@ -130,18 +144,8 @@ class KeithleyAdapter(DeviceAdapter):
     # Series 2601A/2602A nominal hardware ranges, Reference Manual Rev. E,
     # section 2 "Available ranges". A range assignment is a requested maximum;
     # reading rangeY returns the selected hardware range, not that request.
-    _MODEL_2602A_VOLTAGE_RANGES = (0.1, 1.0, 6.0, 40.0)
-    _MODEL_2602A_CURRENT_RANGES = (
-        100e-9,
-        1e-6,
-        10e-6,
-        100e-6,
-        1e-3,
-        10e-3,
-        100e-3,
-        1.0,
-        3.0,
-    )
+    _MODEL_2602A_VOLTAGE_RANGES = KEITHLEY_2602A_VOLTAGE_RANGES
+    _MODEL_2602A_CURRENT_RANGES = KEITHLEY_2602A_CURRENT_RANGES
 
     def __init__(self, station: StationSettings, *, session_factory: SessionFactory | None = None) -> None:
         super().__init__()
@@ -522,6 +526,13 @@ class KeithleyAdapter(DeviceAdapter):
         channel = self._channel_settings(request.channel)
         validate_keithley_source(channel, request)
         self._validate_model_hardware_request(request)
+        # Sweep interpolation can produce a decimal that is valid in the
+        # station profile but not representable by the selected 2602A source
+        # range.  Quantize before the first TSP write and validate the exact
+        # request that will be sent and recorded as the applied state.
+        request = self._quantize_source_request(request)
+        validate_keithley_source(channel, request)
+        self._validate_model_hardware_request(request)
         smu = self._smu(request.channel)
         session = self._require_session()
         session.write(f"{smu}.source.output = {smu}.OUTPUT_OFF")
@@ -712,9 +723,9 @@ class KeithleyAdapter(DeviceAdapter):
         if request.mode == "measure_only":
             return
         if request.mode == "current":
-            if abs(request.level_si) > 3.0:
+            if abs(request.level_si) > KEITHLEY_2602A_MAX_CURRENT_RANGE_A:
                 raise SafetyViolation("2602A source current must not exceed ±3 A.")
-            if not 0.01 <= request.compliance_si <= 40.0:
+            if not 0.01 <= request.compliance_si <= KEITHLEY_2602A_MAX_VOLTAGE_RANGE_V:
                 raise SafetyViolation(
                     "2602A voltage compliance must be between 10 mV and 40 V."
                 )
@@ -725,9 +736,9 @@ class KeithleyAdapter(DeviceAdapter):
                 )
             ranges = self._MODEL_2602A_CURRENT_RANGES
         else:
-            if abs(request.level_si) > 40.0:
+            if abs(request.level_si) > KEITHLEY_2602A_MAX_VOLTAGE_RANGE_V:
                 raise SafetyViolation("2602A source voltage must not exceed ±40 V.")
-            if not 10e-9 <= request.compliance_si <= 3.0:
+            if not 10e-9 <= request.compliance_si <= KEITHLEY_2602A_MAX_CURRENT_RANGE_A:
                 raise SafetyViolation(
                     "2602A current compliance must be between 10 nA and 3 A."
                 )
@@ -739,6 +750,32 @@ class KeithleyAdapter(DeviceAdapter):
             ranges = self._MODEL_2602A_VOLTAGE_RANGES
         if request.source_range_si is not None:
             self._selected_hardware_range(request.source_range_si, ranges)
+
+    @staticmethod
+    def _quantize_source_request(request: KeithleySourceRequest) -> KeithleySourceRequest:
+        if request.mode == "measure_only":
+            return request
+        level_dimension = (
+            DIMENSION_CURRENT if request.mode == "current" else DIMENSION_VOLTAGE
+        )
+        compliance_dimension = (
+            DIMENSION_VOLTAGE if request.mode == "current" else DIMENSION_CURRENT
+        )
+        source_range = (
+            request.source_range_si if not request.source_autorange else None
+        )
+        return replace(
+            request,
+            level_si=quantize_keithley_value(
+                request.level_si,
+                level_dimension,
+                requested_range_si=source_range,
+            ),
+            compliance_si=quantize_keithley_value(
+                request.compliance_si,
+                compliance_dimension,
+            ),
+        )
 
     def update_source_level(
         self,
@@ -760,8 +797,13 @@ class KeithleyAdapter(DeviceAdapter):
             raise SafetyViolation(
                 f"Keithley channel {channel} is configured for {current.mode}, not {mode}."
             )
-        updated = replace(current, level_si=float(level_si))
-        validate_keithley_source(self._channel_settings(channel), updated)
+        raw_updated = replace(current, level_si=float(level_si))
+        channel_settings = self._channel_settings(channel)
+        validate_keithley_source(channel_settings, raw_updated)
+        self._validate_model_hardware_request(raw_updated)
+        updated = self._quantize_source_request(raw_updated)
+        validate_keithley_source(channel_settings, updated)
+        self._validate_model_hardware_request(updated)
         smu = self._smu(channel)
         suffix = "i" if mode == "current" else "v"
         session = self._require_session()
@@ -810,8 +852,13 @@ class KeithleyAdapter(DeviceAdapter):
             raise SafetyViolation(
                 f"Keithley channel {channel} is configured for {current.mode}, not {mode}."
             )
-        updated = replace(current, compliance_si=float(compliance_si))
-        validate_keithley_source(self._channel_settings(channel), updated)
+        raw_updated = replace(current, compliance_si=float(compliance_si))
+        channel_settings = self._channel_settings(channel)
+        validate_keithley_source(channel_settings, raw_updated)
+        self._validate_model_hardware_request(raw_updated)
+        updated = self._quantize_source_request(raw_updated)
+        validate_keithley_source(channel_settings, updated)
+        self._validate_model_hardware_request(updated)
         smu = self._smu(channel)
         field = "limitv" if mode == "current" else "limiti"
         session = self._require_session()
