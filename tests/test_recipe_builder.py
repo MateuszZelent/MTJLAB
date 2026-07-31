@@ -80,23 +80,43 @@ class RecipeBuilderTests(unittest.TestCase):
 
     def test_run_request_carries_explicit_dry_run_output_policy(self) -> None:
         page = RecipePage(simulation_settings())
-        requests: list[tuple[object, bool, str]] = []
+        requests: list[tuple[object, bool, str, str, str]] = []
         plan = object()
         try:
             page.run_requested.connect(
-                lambda selected, dry_run, mode: requests.append((selected, dry_run, mode))
+                lambda selected, dry_run, mode, output_dir, file_stem: requests.append(
+                    (selected, dry_run, mode, output_dir, file_stem)
+                )
             )
 
             page.execution_mode.setCurrentIndex(1)
+            page.output_directory.setText("measurements/custom")
+            page.output_file_stem.setText("sample sweep")
             page._plan = plan
             page.request_run()
             page.execution_mode.setCurrentIndex(0)
+            page.output_file_stem.clear()
             page._plan = plan
             page.request_run()
 
             self.assertEqual(
                 requests,
-                [(plan, True, "dry_run"), (plan, False, "measurement")],
+                [
+                    (
+                        plan,
+                        True,
+                        "dry_run",
+                        str(Path("measurements/custom").expanduser()),
+                        "sample sweep",
+                    ),
+                    (
+                        plan,
+                        False,
+                        "measurement",
+                        str(Path("measurements/custom").expanduser()),
+                        "",
+                    ),
+                ],
             )
         finally:
             page.close()

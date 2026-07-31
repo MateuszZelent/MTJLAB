@@ -2297,7 +2297,7 @@ class KeithleyPage(QWidget):
         self._update_live_controls()
 
     def request_measurement(self, channel: str | None = None) -> None:
-        if self._measure_pending:
+        if self._measure_pending or self._dut_isolation_phase != "idle":
             return
         selected = channel or self.channel.currentText()
         self._pending_channels["measure"] = selected

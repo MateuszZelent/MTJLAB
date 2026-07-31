@@ -307,6 +307,11 @@ class KeithleyAdapter(DeviceAdapter):
 
         smu = self._smu(channel)
         active = self._output_is_enabled(channel)
+        if active != self._output_states[channel]:
+            self._fail_measurement_output_invariant(
+                "Keithley output readback changed outside the configured control "
+                "path before NORMAL-mode verification."
+            )
         normal = self._query_boolean(
             f"{smu}.source.offmode == {smu}.OUTPUT_NORMAL"
         )

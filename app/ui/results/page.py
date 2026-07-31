@@ -360,6 +360,11 @@ class ResultsPage(QWidget):
                 "Choose a file from the browser to inspect its immutable contents.",
             )
 
+    def set_output_directory(self, output_dir: str | Path) -> None:
+        """Point Results at the directory used by the latest run."""
+
+        self.file_browser.set_output_directory(output_dir)
+
     def browse_result_file(self) -> None:
         """Open a file dialog to select an HDF5 result file."""
         self.file_browser.browse_file()

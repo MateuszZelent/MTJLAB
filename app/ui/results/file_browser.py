@@ -93,6 +93,16 @@ class FileBrowserPanel(QWidget):
     def output_dir(self) -> Path:
         return self._output_dir
 
+    def set_output_directory(self, output_dir: str | Path) -> None:
+        next_output_dir = Path(output_dir).expanduser()
+        if next_output_dir == self._output_dir:
+            return
+        self._output_dir = next_output_dir
+        self._selected_path = None
+        self.directory_changed.emit(self._output_dir)
+        self.file_selected.emit(None)
+        self.refresh()
+
     def refresh(self) -> None:
         """Reload known results and preserve selection only when it still exists."""
 

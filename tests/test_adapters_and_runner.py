@@ -1257,6 +1257,35 @@ class AdapterAndRunnerTests(unittest.TestCase):
         self.assertIn("smua.source.output = smua.OUTPUT_OFF", traffic)
         self.assertIn("smub.source.output = smub.OUTPUT_OFF", traffic)
 
+    def test_keithley_measurement_rejects_output_change_before_normal_check(
+        self,
+    ) -> None:
+        output_b_reads = iter(("0", "0", "1", "0"))
+
+        def output_b(_command: str) -> str:
+            return next(output_b_reads, "0")
+
+        session = FakeVisaSession(
+            responses={
+                "*IDN?": "KEITHLEY INSTRUMENTS,2602A,123456,1.0",
+                "print(smub.source.output)": output_b,
+            }
+        )
+        adapter = KeithleyAdapter(
+            self.settings, session_factory=FakeVisaSessionFactory(session)
+        )
+        adapter.connect()
+        session.writes.append("smub.source.offmode = smub.OUTPUT_NORMAL")
+        traffic_start = len(session.writes)
+
+        with self.assertRaisesRegex(DeviceError, "changed outside"):
+            adapter.measure("B")
+
+        traffic = session.writes[traffic_start:]
+        self.assertNotIn("print(smub.measure.iv())", traffic)
+        self.assertIn("smua.source.output = smua.OUTPUT_OFF", traffic)
+        self.assertIn("smub.source.output = smub.OUTPUT_OFF", traffic)
+
     def test_keithley_passive_measure_never_writes_output_on(self) -> None:
         session = FakeVisaSession(
             responses={
