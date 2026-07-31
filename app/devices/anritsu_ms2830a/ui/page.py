@@ -7,7 +7,7 @@ import hashlib
 import math
 import time
 from collections import deque
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from dataclasses import replace
 from datetime import datetime, timezone
 from enum import StrEnum
@@ -35,6 +35,7 @@ from app.devices.anritsu_ms2830a import (
     SignalGeneratorSnapshot, SpectrumConfig, SpectrumTrace, frequency_option_for,
 )
 from app.domain.errors import ConfigurationError
+from app.domain.manual_metadata import ManualMetadataValue
 from app.domain.quantities import (
     DIMENSION_CURRENT, DIMENSION_DB, DIMENSION_DBM, DIMENSION_FREQUENCY, DIMENSION_TIME,
     DIMENSION_VOLTAGE, format_quantity_auto, parse_quantity,
@@ -54,7 +55,11 @@ from app.spectrum import (
     detect_spectrum_peaks,
     frequency_grids_match,
 )
-from app.storage import ReferenceHdf5Store
+from app.storage import (
+    ManualSpectrumArchive,
+    ManualSpectrumSaveMode,
+    ReferenceHdf5Store,
+)
 from app.ui.common import line_edit as _line
 from app.ui.design_system import plot_theme, tokens_for
 from app.ui.dialogs import StationFileDialog as QFileDialog
@@ -63,6 +68,7 @@ from app.ui.widgets import FluentTabView, LimitField, NotificationBanner, Spectr
 from app.ui.workers import DeviceController
 
 from .peak_analysis import PeakTableDialog, PeakTrackingWindow
+from .manual_save import ManualSpectrumSaveDialog
 from .analysis_worker import (
     SpectrumAnalysisController,
     SpectrumAnalysisOutcome,
@@ -895,6 +901,7 @@ class AnritsuPage(QWidget):
         self._device_idn = ""
         self._last_configuration: AnritsuConfigurationSnapshot | None = None
         self._last_advanced_configuration: AdvancedSpectrumSnapshot | None = None
+        self._last_signal_generator_snapshot: SignalGeneratorSnapshot | None = None
         self._save_readback_pending = False
         self._page_state = AnritsuPageState.IDLE
         self._capabilities: object | None = None
@@ -916,6 +923,13 @@ class AnritsuPage(QWidget):
         self._sg_output_enabled = False
         self._sg_output_known = False
         self._sg_configured = False
+        self._manual_metadata_provider: Callable[[], tuple[ManualMetadataValue, ...]] | None = None
+        self._manual_device_idn_provider: Callable[[], dict[str, str]] | None = None
+        self._manual_settings_source_provider: Callable[[], str] | None = None
+        self._manual_operator_context_provider: Callable[[], dict[str, object]] | None = None
+        self._manual_archive: ManualSpectrumArchive | None = None
+        self._manual_archive_last_path: Path | None = None
+        self._manual_last_mode: ManualSpectrumSaveMode | None = None
         self._timer = QTimer(self)
         self._timer.setInterval(500)
         self._timer.timeout.connect(self.fetch_live)
@@ -1146,6 +1160,41 @@ class AnritsuPage(QWidget):
         trace_toggles.addStretch(1)
         processing_layout.addLayout(trace_toggles, 10, 0, 1, 2)
         left_layout.addWidget(self.processing_card)
+        self.manual_save_card = CardWidget(left_panel)
+        self.manual_save_card.setObjectName("anritsuManualSaveCard")
+        self.manual_save_card.setProperty("stationSurface", "card")
+        manual_layout = QVBoxLayout(self.manual_save_card)
+        manual_layout.setContentsMargins(20, 16, 20, 16)
+        manual_layout.setSpacing(7)
+        manual_title = StrongBodyLabel("Manual spectrum archive")
+        manual_title.setObjectName("sectionTitle")
+        manual_layout.addWidget(manual_title)
+        manual_hint = CaptionLabel(
+            "Save the completed trace visible above. The archive can collect several "
+            "spectra and selected last-confirmed device values without another hardware query."
+        )
+        manual_hint.setObjectName("muted")
+        manual_hint.setWordWrap(True)
+        manual_layout.addWidget(manual_hint)
+        self.manual_save_status = BodyLabel("No completed spectrum ready to save.")
+        self.manual_save_status.setObjectName("anritsuManualSaveStatus")
+        self.manual_save_status.setWordWrap(True)
+        manual_layout.addWidget(self.manual_save_status)
+        self.manual_save_target = CaptionLabel("No append archive selected.")
+        self.manual_save_target.setObjectName("muted")
+        self.manual_save_target.setWordWrap(True)
+        manual_layout.addWidget(self.manual_save_target)
+        manual_buttons = QVBoxLayout()
+        manual_buttons.setSpacing(6)
+        self.save_manual_spectrum = PrimaryPushButton("Save current spectrum…")
+        self.save_manual_spectrum.setProperty("compact", True)
+        self.close_manual_archive = PushButton("Close append session")
+        self.close_manual_archive.setProperty("compact", True)
+        self.close_manual_archive.setEnabled(False)
+        manual_buttons.addWidget(self.save_manual_spectrum)
+        manual_buttons.addWidget(self.close_manual_archive)
+        manual_layout.addLayout(manual_buttons)
+        left_layout.addWidget(self.manual_save_card)
         left_layout.addStretch(1)
         self.spectrum_plot = SpectrumPlotWidget(legend=True)
         self.spectrum_plot.setProperty("stationSurface", "raised")
@@ -1319,6 +1368,8 @@ class AnritsuPage(QWidget):
         self.clear_reference.clicked.connect(self.remove_reference)
         self.load_reference.clicked.connect(self.load_reference_file)
         self.save_reference.clicked.connect(self.save_reference_file)
+        self.save_manual_spectrum.clicked.connect(self._show_manual_save_dialog)
+        self.close_manual_archive.clicked.connect(self.close_manual_archive_session)
         self.reference_operation.currentIndexChanged.connect(
             self._reference_operation_changed
         )
@@ -1363,6 +1414,8 @@ class AnritsuPage(QWidget):
             self.clear_reference: "Remove the in-memory reference and all derived display results. It does not delete raw measurements from HDF5.",
             self.load_reference: "Load a Lab Control reference HDF5 artefact. The current analyser is not queried or configured.",
             self.save_reference: "Save the complete reference trace and provenance as a thaTEC/PyThat-compatible HDF5 artefact.",
+            self.save_manual_spectrum: "Save the latest completed spectrum to a new or appendable HDF5 archive. Device metadata uses only values already confirmed in the station UI.",
+            self.close_manual_archive: "Close the current append session as a valid resumable HDF5 file. It does not delete data.",
             self.reference_operation: "Choose point-wise reference mathematics. Difference in dB equals a power ratio expressed logarithmically; linear operations first convert dBm to mW.",
             self.show_raw: "Show the latest untouched trace returned by Anritsu.",
             self.show_average: "Show the application-side linear-power average.",
@@ -1695,6 +1748,132 @@ class AnritsuPage(QWidget):
         self._update_advanced_availability()
         self._apply_page_state()
 
+    def set_manual_archive_context(
+        self,
+        *,
+        metadata_provider: Callable[[], tuple[ManualMetadataValue, ...]] | None = None,
+        device_idn_provider: Callable[[], dict[str, str]] | None = None,
+        settings_source_provider: Callable[[], str] | None = None,
+        operator_context_provider: Callable[[], dict[str, object]] | None = None,
+    ) -> None:
+        """Bind station-wide, already-confirmed values to the manual saver."""
+
+        self._manual_metadata_provider = metadata_provider
+        self._manual_device_idn_provider = device_idn_provider
+        self._manual_settings_source_provider = settings_source_provider
+        self._manual_operator_context_provider = operator_context_provider
+
+    def manual_metadata_values(self) -> tuple[ManualMetadataValue, ...]:
+        """Expose confirmed Anritsu settings for the manual metadata picker."""
+
+        values: list[ManualMetadataValue] = []
+
+        def add(
+            key: str,
+            label: str,
+            dimension: str | None,
+            unit: str,
+            value: float | int | None,
+            *,
+            source: str = "Anritsu SCPI readback",
+        ) -> None:
+            if value is not None:
+                values.append(
+                    ManualMetadataValue(
+                        key=key,
+                        device="Anritsu Spectrum Analyzer",
+                        label=label,
+                        dimension=dimension,
+                        unit=unit,
+                        value_si=float(value),
+                        source=source,
+                    )
+                )
+
+        basic = self._last_configuration
+        if basic is not None:
+            add(
+                "anritsu.spectrum.start_frequency_hz",
+                "Anritsu · start frequency",
+                DIMENSION_FREQUENCY,
+                "Hz",
+                basic.start_hz,
+            )
+            add(
+                "anritsu.spectrum.stop_frequency_hz",
+                "Anritsu · stop frequency",
+                DIMENSION_FREQUENCY,
+                "Hz",
+                basic.stop_hz,
+            )
+            add(
+                "anritsu.spectrum.reference_level_dbm",
+                "Anritsu · reference level",
+                DIMENSION_DBM,
+                "dBm",
+                basic.reference_level_dbm,
+            )
+            add(
+                "anritsu.spectrum.points_count",
+                "Anritsu · sweep points",
+                None,
+                "count",
+                basic.points,
+            )
+        advanced = self._last_advanced_configuration
+        if advanced is not None:
+            add(
+                "anritsu.spectrum.rbw_hz",
+                "Anritsu · RBW",
+                DIMENSION_FREQUENCY,
+                "Hz",
+                advanced.rbw_hz if not advanced.rbw_auto else None,
+                source="Anritsu advanced SCPI readback",
+            )
+            add(
+                "anritsu.spectrum.vbw_hz",
+                "Anritsu · VBW",
+                DIMENSION_FREQUENCY,
+                "Hz",
+                advanced.vbw_hz,
+                source="Anritsu advanced SCPI readback",
+            )
+            add(
+                "anritsu.spectrum.attenuation_db",
+                "Anritsu · attenuation",
+                DIMENSION_DB,
+                "dB",
+                advanced.attenuation_db if not advanced.attenuation_auto else None,
+                source="Anritsu advanced SCPI readback",
+            )
+            add(
+                "anritsu.spectrum.sweep_time_s",
+                "Anritsu · sweep time",
+                DIMENSION_TIME,
+                "s",
+                advanced.sweep_time_s if not advanced.sweep_time_auto else None,
+                source="Anritsu advanced SCPI readback",
+            )
+        generator = self._last_signal_generator_snapshot
+        if generator is not None:
+            add(
+                "anritsu.sg.frequency_hz",
+                "Anritsu SG · frequency",
+                DIMENSION_FREQUENCY,
+                "Hz",
+                generator.frequency_hz,
+                source="Anritsu signal-generator readback",
+            )
+            add(
+                "anritsu.sg.power_dbm",
+                "Anritsu SG · power",
+                DIMENSION_DBM,
+                "dBm",
+                generator.power_dbm,
+                source="Anritsu signal-generator readback",
+            )
+        return tuple(values)
+
     def _device_state_changed(self, state: str) -> None:
         if state == "disconnected":
             self._sg_configured = False
@@ -1807,6 +1986,21 @@ class AnritsuPage(QWidget):
         self.sg_on.style().unpolish(self.sg_on)
         self.sg_on.style().polish(self.sg_on)
         self._update_advanced_availability()
+        self._update_manual_save_controls()
+
+    def _update_manual_save_controls(self) -> None:
+        ready = self._latest_trace is not None
+        self.save_manual_spectrum.setEnabled(ready)
+        self.close_manual_archive.setEnabled(
+            self._manual_archive is not None
+            and self._manual_archive.active_path is not None
+        )
+        if ready and self._manual_archive is None:
+            self.manual_save_status.setText(
+                "Completed spectrum ready — choose a file and metadata policy."
+            )
+        elif not ready:
+            self.manual_save_status.setText("No completed spectrum ready to save.")
 
     def _set_sg_output_state(self, enabled: bool | None) -> None:
         self._sg_output_known = enabled is not None
@@ -2590,6 +2784,168 @@ class AnritsuPage(QWidget):
         )
         self.status.emit(f"Anritsu reference loaded: {path}")
 
+    def _manual_trace_choices(self) -> tuple[tuple[str, str], ...]:
+        choices: list[tuple[str, str]] = []
+        if self._latest_trace is not None:
+            choices.append(("raw", "Latest raw trace"))
+        if self._averaged_trace is not None:
+            choices.append(("averaged", "Application averaged trace"))
+        if self._cleanup_result is not None and self._latest_trace is not None:
+            choices.append(
+                (
+                    "processed",
+                    f"Displayed processed trace · {self._cleanup_result.method}",
+                )
+            )
+        return tuple(choices)
+
+    def _manual_trace_payload(
+        self, variant: str
+    ) -> tuple[SpectrumTrace, tuple[float, ...] | None, str | None, str]:
+        if variant == "averaged" and self._averaged_trace is not None:
+            return self._averaged_trace, None, None, "none"
+        if variant == "processed" and self._latest_trace is not None:
+            cleanup = self._cleanup_result
+            if cleanup is None:
+                raise ValueError("The displayed processed spectrum is no longer available.")
+            return (
+                self._latest_trace,
+                tuple(float(value) for value in cleanup.values_dbm),
+                "dBm",
+                f"display_{cleanup.method}",
+            )
+        if self._latest_trace is not None:
+            return self._latest_trace, None, None, "none"
+        raise ValueError("Acquire a completed spectrum before saving it.")
+
+    def _manual_metadata_for_dialog(self) -> tuple[ManualMetadataValue, ...]:
+        provider = self._manual_metadata_provider
+        if provider is None:
+            return self.manual_metadata_values()
+        try:
+            values = tuple(provider())
+        except Exception as exc:
+            self.status.emit(f"Manual metadata provider unavailable: {exc}")
+            return self.manual_metadata_values()
+        unique: dict[str, ManualMetadataValue] = {}
+        for value in values:
+            unique.setdefault(value.key, value)
+        return tuple(unique.values())
+
+    def _manual_default_destination(self) -> Path:
+        if self._manual_last_mode is ManualSpectrumSaveMode.APPEND and self._manual_archive_last_path:
+            return self._manual_archive_last_path
+        directory = Path(
+            str(self._station_settings.storage.get("output_directory", "./measurements"))
+        ).expanduser()
+        return directory / "manual_spectrum.h5"
+
+    def _show_manual_save_dialog(self) -> None:
+        choices = self._manual_trace_choices()
+        if not choices:
+            self.manual_save_status.setText(
+                "Acquire a completed spectrum before opening the manual saver."
+            )
+            return
+        default_mode = self._manual_last_mode or ManualSpectrumSaveMode.APPEND
+        dialog = ManualSpectrumSaveDialog(
+            self,
+            trace_choices=choices,
+            metadata_values=self._manual_metadata_for_dialog(),
+            default_destination=self._manual_default_destination(),
+            default_mode=default_mode,
+        )
+        if dialog.exec() != QDialog.DialogCode.Accepted:
+            return
+        options = dialog.options()
+        try:
+            trace, processed, processed_unit, operation = self._manual_trace_payload(
+                options.trace_variant
+            )
+            if self._manual_archive is None:
+                settings_source = (
+                    self._manual_settings_source_provider()
+                    if self._manual_settings_source_provider is not None
+                    else ""
+                )
+                device_idn = (
+                    self._manual_device_idn_provider()
+                    if self._manual_device_idn_provider is not None
+                    else {}
+                )
+                if self._device_idn:
+                    device_idn = {**device_idn, "anritsu": self._device_idn}
+                operator_context = (
+                    self._manual_operator_context_provider()
+                    if self._manual_operator_context_provider is not None
+                    else {}
+                )
+                self._manual_archive = ManualSpectrumArchive(
+                    settings_source=settings_source,
+                    device_idn=device_idn,
+                    operator_context=operator_context,
+                )
+            result = self._manual_archive.save(
+                trace,
+                destination=options.destination,
+                mode=options.mode,
+                metadata_values=options.metadata_values,
+                metadata_scope=options.metadata_scope,
+                trace_variant=options.trace_variant,
+                processed_values=processed,
+                processed_unit=processed_unit,
+                processing_operation=operation,
+            )
+        except Exception as exc:
+            self.manual_save_status.setText(f"Manual spectrum save failed: {exc}")
+            self.banner.show_message(
+                f"Manual spectrum save failed: {exc}",
+                severity="error",
+                timeout_ms=0,
+            )
+            self.status.emit(f"Anritsu manual spectrum save failed: {exc}")
+            self._update_manual_save_controls()
+            return
+        self._manual_archive_last_path = result.path
+        self._manual_last_mode = result.mode
+        metadata_count = len(options.metadata_values)
+        self.manual_save_status.setText(
+            f"Saved spectrum #{result.point_index + 1} · {result.path.name} · "
+            f"{metadata_count} device value(s)."
+        )
+        if result.mode is ManualSpectrumSaveMode.APPEND:
+            self.manual_save_target.setText(
+                f"Append session: {result.path} · {result.point_count} spectrum(s)"
+            )
+        else:
+            self.manual_save_target.setText(f"Last timestamped file: {result.path}")
+        self.banner.show_message(
+            f"Manual spectrum saved to {result.path.name}.", severity="success"
+        )
+        self.status.emit(f"Anritsu manual spectrum saved: {result.path}")
+        self._update_manual_save_controls()
+
+    def close_manual_archive_session(self) -> None:
+        archive = self._manual_archive
+        if archive is None or archive.active_path is None:
+            return
+        path = archive.active_path
+        try:
+            archive.close()
+        except Exception as exc:
+            self.banner.show_message(
+                f"Manual archive close failed: {exc}",
+                severity="error",
+                timeout_ms=0,
+            )
+            self.status.emit(f"Anritsu manual archive close failed: {exc}")
+            return
+        self.manual_save_target.setText(
+            f"Append session closed: {path.name} · it can be resumed later."
+        )
+        self.close_manual_archive.setEnabled(False)
+        self.status.emit(f"Anritsu manual archive closed: {path}")
+
     def _result(self, operation: str, result: object) -> None:
         if operation == "connect":
             self._device_idn = str(getattr(result, "idn", "") or "")
@@ -2637,6 +2993,7 @@ class AnritsuPage(QWidget):
             "read_signal_generator",
             "configure_signal_generator",
         } and isinstance(result, SignalGeneratorSnapshot):
+            self._last_signal_generator_snapshot = result
             self._show_signal_generator_snapshot(result)
             self._sg_configured = operation == "configure_signal_generator"
             self._apply_page_state()

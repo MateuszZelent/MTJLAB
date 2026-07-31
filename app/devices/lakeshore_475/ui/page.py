@@ -20,7 +20,13 @@ from app.devices.lakeshore_475.models import (
     GaussmeterSnapshot,
     MeasurementMode,
 )
-from app.domain.quantities import DIMENSION_TIME, parse_quantity
+from app.domain.manual_metadata import ManualMetadataValue
+from app.domain.quantities import (
+    DIMENSION_FREQUENCY,
+    DIMENSION_MAGNETIC_FIELD,
+    DIMENSION_TIME,
+    parse_quantity,
+)
 from app.settings.models import StationSettings
 from app.ui.design_system import plot_theme, tokens_for
 from app.ui.dialogs import StationDialog
@@ -620,6 +626,65 @@ class LakeShore475Page(QWidget):
         if not self.live.isChecked():
             self._refresh_plot_if_needed()
         self.banner.setText(f"Updated {result.timestamp_utc.astimezone().strftime('%H:%M:%S')}")
+
+    def manual_metadata_values(self) -> tuple[ManualMetadataValue, ...]:
+        """Return the latest confirmed Lake Shore field reading."""
+
+        if not self._history:
+            return ()
+        reading = self._history[-1]
+        values: list[ManualMetadataValue] = []
+
+        def add(
+            key: str,
+            label: str,
+            dimension: str,
+            unit: str,
+            value: float | None,
+        ) -> None:
+            if value is None or not math.isfinite(float(value)):
+                return
+            values.append(
+                ManualMetadataValue(
+                    key=key,
+                    device="Lake Shore 475",
+                    label=label,
+                    dimension=dimension,
+                    unit=unit,
+                    value_si=float(value),
+                    source="last confirmed Lake Shore readback",
+                )
+            )
+
+        add(
+            "lakeshore_gaussmeter.field_t",
+            "Lake Shore · field",
+            DIMENSION_MAGNETIC_FIELD,
+            "T",
+            reading.field_t,
+        )
+        add(
+            "lakeshore_gaussmeter.frequency_hz",
+            "Lake Shore · RMS frequency",
+            DIMENSION_FREQUENCY,
+            "Hz",
+            reading.frequency_hz,
+        )
+        add(
+            "lakeshore_gaussmeter.negative_peak_t",
+            "Lake Shore · negative peak",
+            DIMENSION_MAGNETIC_FIELD,
+            "T",
+            reading.negative_peak_t,
+        )
+        add(
+            "lakeshore_gaussmeter.positive_peak_t",
+            "Lake Shore · positive peak",
+            DIMENSION_MAGNETIC_FIELD,
+            "T",
+            reading.positive_peak_t,
+        )
+        return tuple(values)
 
     def apply_execution_event(
         self,

@@ -18,7 +18,12 @@ from qfluentwidgets import CardWidget, CheckBox, ComboBox, PlainTextEdit, Primar
 from app.ui.shell import MainWindow
 from app.ui.design_system import tokens_for
 from app.settings import SettingsRepository
+from app.devices.anritsu_ms2830a import SpectrumTrace
+from app.devices.anritsu_ms2830a.ui.manual_save import ManualSpectrumSaveDialog
 from app.devices.discovery import DiscoveredInstrument, identify_device
+from app.domain.manual_metadata import ManualMetadataValue
+from app.domain.quantities import DIMENSION_CURRENT
+from app.storage import ManualSpectrumSaveMode
 from app.devices.lakeshore_475.models import FieldUnit, GaussmeterReading, GaussmeterSnapshot, MeasurementMode
 from app.devices.moke_box.models import MokeHallVoltageReading
 from tests.test_main_window import (
@@ -319,6 +324,64 @@ class FluentAnritsuAndMokePageTests(unittest.TestCase):
         self.assertIsInstance(page.live, PrimaryPushButton)
         self.assertTrue(page.hero_card.isVisibleTo(self.window))
         self.assertGreater(page.hero_card.geometry().width(), 300)
+
+    def test_anritsu_manual_archive_panel_and_modal_are_rendered_and_operable(self) -> None:
+        self.window._navigate_to("anritsu")
+        self.application.processEvents()
+
+        page = self.window.anritsu_page
+        self.assertIsInstance(page.manual_save_card, CardWidget)
+        self.assertTrue(page.manual_save_card.isVisibleTo(self.window))
+        self.assertGreater(page.manual_save_card.height(), 120)
+
+        page._show_trace(
+            SpectrumTrace(
+                frequencies_hz=(1e6, 2e6, 3e6),
+                powers_dbm=(-60.0, -50.0, -55.0),
+                acquired_at_utc=datetime.now(timezone.utc),
+                trace_name="TRAC1",
+            )
+        )
+        self.application.processEvents()
+        self.assertTrue(page.save_manual_spectrum.isEnabled())
+        self.assertIn("Completed spectrum ready", page.manual_save_status.text())
+
+        metadata = ManualMetadataValue(
+            key="keithley.B.current_a",
+            device="Keithley 2600",
+            label="Keithley B · current",
+            dimension=DIMENSION_CURRENT,
+            unit="A",
+            value_si=0.001,
+        )
+        dialog = ManualSpectrumSaveDialog(
+            page,
+            trace_choices=page._manual_trace_choices(),
+            metadata_values=(metadata,),
+            default_destination=Path("measurements/manual_spectrum.h5"),
+            default_mode=ManualSpectrumSaveMode.APPEND,
+        )
+        dialog.show()
+        self.application.processEvents()
+        try:
+            self.assertTrue(dialog.isVisible())
+            self.assertEqual(dialog.mode.currentData(), "append")
+            self.assertEqual(dialog.trace.currentData(), "raw")
+            self.assertEqual(dialog.options().metadata_values, (metadata,))
+
+            dialog.metadata_scope.setCurrentIndex(1)
+            dialog._metadata_scope_changed()
+            self.assertEqual(dialog.options().metadata_values, (metadata,))
+            dialog.metadata_scope.setCurrentIndex(2)
+            dialog._metadata_scope_changed()
+            self.assertEqual(dialog.options().metadata_values, ())
+        finally:
+            dialog.close()
+
+        self.window.resize(820, 560)
+        self.application.processEvents()
+        host = self.window.navigation_routes["anritsu"]
+        self.assertEqual(host.scroll_area.horizontalScrollBar().maximum(), 0)
 
     def test_anritsu_workspace_stacks_without_clipping_at_minimum_window_size(self) -> None:
         self.window.resize(820, 560)

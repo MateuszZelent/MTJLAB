@@ -33,6 +33,7 @@ class Hdf5RunWriter:
         expected_points: int | None = None,
         operator_context: dict[str, object] | None = None,
         simulation_metadata: dict[str, object] | None = None,
+        run_attributes: dict[str, object] | None = None,
     ) -> None:
         try:
             import h5py
@@ -75,6 +76,11 @@ class Hdf5RunWriter:
             run.attrs["application_version"] = "0.1.0+source"
         run.create_dataset("recipe_yaml", data=recipe_source, dtype=h5py.string_dtype("utf-8"))
         run.create_dataset("settings_yaml", data=settings_source, dtype=h5py.string_dtype("utf-8"))
+        run.create_dataset(
+            "dut_limits_json",
+            data=json.dumps(self._recipe_dut_limits(recipe_source), sort_keys=True),
+            dtype=h5py.string_dtype("utf-8"),
+        )
         run.create_dataset("device_idn_json", data=json.dumps(device_idn, sort_keys=True), dtype=h5py.string_dtype("utf-8"))
         capabilities = device_capabilities or {}
         run.create_dataset(
@@ -92,6 +98,13 @@ class Hdf5RunWriter:
             data=json.dumps(self._serializable(simulation_metadata or {"enabled": False}), sort_keys=True),
             dtype=h5py.string_dtype("utf-8"),
         )
+        for attribute, value in (run_attributes or {}).items():
+            if isinstance(value, (str, bytes, int, float, bool)):
+                run.attrs[str(attribute)] = value
+            else:
+                run.attrs[str(attribute)] = json.dumps(
+                    self._serializable(value), sort_keys=True
+                )
         self._thatec = ThatecHdf5Writer(
             self._file,
             device_idn=device_idn,
@@ -105,6 +118,12 @@ class Hdf5RunWriter:
         if self.csv_summary_path is not None:
             self._open_csv_summary()
         self._file.flush()
+
+    @property
+    def point_count(self) -> int:
+        """Number of committed private checkpoints currently in the file."""
+
+        return self._point_count
 
     @classmethod
     def resume(
@@ -248,6 +267,15 @@ class Hdf5RunWriter:
     def _truncate_public_thatec(self, checkpoint_count: int) -> None:
         definition = self._file["scan_definition"]
         measurement = self._file["measurement"]
+        if bool(self._file.attrs.get("lab_control_dynamic_checkpoint_axis", False)):
+            axis = measurement.get("row_00")
+            if axis is not None:
+                target_count = max(1, checkpoint_count)
+                axis["data"].resize((target_count,))
+                axis["timestamp"].resize((target_count,))
+                axis["data"][:] = self._np.arange(target_count, dtype="f8")
+                if checkpoint_count == 0:
+                    axis["timestamp"][:] = self._np.nan
         resumable_rows = 0
         for row_name in sorted(name for name in definition if name.startswith("row_")):
             values = dict(definition[row_name].asstr()[()])
@@ -334,6 +362,18 @@ class Hdf5RunWriter:
         if isinstance(value, (list, tuple, set, frozenset)):
             return [Hdf5RunWriter._serializable(item) for item in value]
         return value
+
+    @staticmethod
+    def _recipe_dut_limits(source: str) -> dict[str, object]:
+        try:
+            from ruamel.yaml import YAML
+
+            decoded = YAML(typ="safe").load(source)
+        except Exception:
+            return {}
+        if not isinstance(decoded, dict) or not isinstance(decoded.get("dut_limits"), dict):
+            return {}
+        return Hdf5RunWriter._serializable(decoded["dut_limits"])
 
     def store_reference(
         self,

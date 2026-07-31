@@ -38,8 +38,10 @@ from app.devices.keithley_2600 import (
 )
 from app.devices.keithley_2600.adapter import KeithleyMeasurement
 from app.domain.errors import ConfigurationError
+from app.domain.manual_metadata import ManualMetadataValue
 from app.domain.quantities import (
-    DIMENSION_CURRENT, DIMENSION_RESISTANCE, DIMENSION_TIME, DIMENSION_VOLTAGE,
+    DIMENSION_CURRENT, DIMENSION_POWER, DIMENSION_RESISTANCE, DIMENSION_TIME,
+    DIMENSION_VOLTAGE,
     format_quantity_auto, parse_quantity,
 )
 from app.recipes import RecipeNode, replace_recipe_node
@@ -1064,6 +1066,8 @@ class KeithleyPage(QWidget):
         self._configured_channels: set[str] = set()
         self._auto_enable_channel: str | None = None
         self._measure_pending = False
+        self._latest_measurements: dict[str, KeithleyMeasurement] = {}
+        self._last_configuration_readback: KeithleyConfigurationReadback | None = None
         self._ramp_pending = False
         self._readback_pending = False
         self._device_state_value = "DISCONNECTED"
@@ -2214,6 +2218,8 @@ class KeithleyPage(QWidget):
 
     def _update_channel_measurement(self, measurement: object) -> None:
         channel = str(getattr(measurement, "channel"))
+        if isinstance(measurement, KeithleyMeasurement):
+            self._latest_measurements[channel] = measurement
         voltage = float(getattr(measurement, "voltage_v"))
         current = float(getattr(measurement, "current_a"))
         power = float(getattr(measurement, "power_w"))
@@ -2585,6 +2591,129 @@ class KeithleyPage(QWidget):
             compliance=compliance,
             source_range=source_range,
         )
+
+    def manual_metadata_values(self) -> tuple[ManualMetadataValue, ...]:
+        """Return only Keithley values confirmed by a measurement/readback."""
+
+        values: list[ManualMetadataValue] = []
+
+        def add(
+            key: str,
+            label: str,
+            dimension: str | None,
+            unit: str,
+            value: float | None,
+            *,
+            source: str,
+        ) -> None:
+            if value is None or not math.isfinite(float(value)):
+                return
+            values.append(
+                ManualMetadataValue(
+                    key=key,
+                    device="Keithley 2600A",
+                    label=label,
+                    dimension=dimension,
+                    unit=unit,
+                    value_si=float(value),
+                    source=source,
+                )
+            )
+
+        for channel, measurement in sorted(self._latest_measurements.items()):
+            add(
+                f"keithley.{channel}.current_a",
+                f"Keithley {channel} · measured current",
+                DIMENSION_CURRENT,
+                "A",
+                measurement.current_a,
+                source="last confirmed Keithley measurement",
+            )
+            add(
+                f"keithley.{channel}.voltage_v",
+                f"Keithley {channel} · measured voltage",
+                DIMENSION_VOLTAGE,
+                "V",
+                measurement.voltage_v,
+                source="last confirmed Keithley measurement",
+            )
+            add(
+                f"keithley.{channel}.power_w",
+                f"Keithley {channel} · measured power",
+                DIMENSION_POWER,
+                "W",
+                measurement.power_w,
+                source="last confirmed Keithley measurement",
+            )
+            if abs(measurement.current_a) > 1e-15:
+                add(
+                    f"keithley.{channel}.resistance_ohm",
+                    f"Keithley {channel} · derived resistance",
+                    DIMENSION_RESISTANCE,
+                    "ohm",
+                    abs(measurement.voltage_v / measurement.current_a),
+                    source="derived from last confirmed Keithley measurement",
+                )
+
+        readback = self._last_configuration_readback
+        if readback is not None:
+            for channel in readback.channels:
+                prefix = f"keithley.{channel.channel}"
+                source_dimension = (
+                    DIMENSION_CURRENT
+                    if channel.source_mode == "current"
+                    else DIMENSION_VOLTAGE
+                )
+                source_unit = "A" if channel.source_mode == "current" else "V"
+                compliance_dimension = (
+                    DIMENSION_VOLTAGE
+                    if channel.source_mode == "current"
+                    else DIMENSION_CURRENT
+                )
+                compliance_unit = "V" if channel.source_mode == "current" else "A"
+                add(
+                    f"{prefix}.source_level_{'a' if source_unit == 'A' else 'v'}",
+                    f"Keithley {channel.channel} · source {channel.source_mode}",
+                    source_dimension,
+                    source_unit,
+                    channel.source_level_si,
+                    source="last confirmed Keithley configuration",
+                )
+                add(
+                    f"{prefix}.compliance_{'v' if compliance_unit == 'V' else 'a'}",
+                    f"Keithley {channel.channel} · compliance",
+                    compliance_dimension,
+                    compliance_unit,
+                    channel.compliance_si,
+                    source="last confirmed Keithley configuration",
+                )
+                add(
+                    f"{prefix}.nplc",
+                    f"Keithley {channel.channel} · NPLC",
+                    None,
+                    "PLC",
+                    channel.nplc,
+                    source="last confirmed Keithley configuration",
+                )
+                if not channel.measure_voltage_autorange:
+                    add(
+                        f"{prefix}.measure_voltage_range_v",
+                        f"Keithley {channel.channel} · voltage range",
+                        DIMENSION_VOLTAGE,
+                        "V",
+                        channel.measure_voltage_range_v,
+                        source="last confirmed Keithley configuration",
+                    )
+                if not channel.measure_current_autorange:
+                    add(
+                        f"{prefix}.measure_current_range_a",
+                        f"Keithley {channel.channel} · current range",
+                        DIMENSION_CURRENT,
+                        "A",
+                        channel.measure_current_range_a,
+                        source="last confirmed Keithley configuration",
+                    )
+        return tuple(values)
 
     def _default_form_snapshot(self, channel: str) -> KeithleyConfigurationSnapshot:
         defaults = self._station_settings.keithley.safety.channels[channel].defaults
@@ -3211,6 +3340,7 @@ class KeithleyPage(QWidget):
         if operation == "read_configuration" and isinstance(
             result, KeithleyConfigurationReadback
         ):
+            self._last_configuration_readback = result
             self._readback_pending = False
             for channel in result.channels:
                 self._set_channel_output(channel.channel, channel.output_enabled)

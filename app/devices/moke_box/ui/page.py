@@ -20,7 +20,13 @@ from qfluentwidgets import BodyLabel, CaptionLabel, CardWidget, CheckBox, ComboB
 from app.ui.dialogs import StationDialog
 
 from app.devices.moke_box.models import MokeHallVoltageReading, hall_field_from_voltage
-from app.domain.quantities import DIMENSION_TIME, parse_quantity
+from app.domain.manual_metadata import ManualMetadataValue
+from app.domain.quantities import (
+    DIMENSION_MAGNETIC_FIELD,
+    DIMENSION_TIME,
+    DIMENSION_VOLTAGE,
+    parse_quantity,
+)
 from app.settings.models import StationSettings
 from app.ui.design_system import plot_theme, tokens_for
 from app.ui.widgets import FluentTabView
@@ -130,6 +136,7 @@ class MokeBoxPage(QWidget):
         self._settings = settings
         self._pending_operation: str | None = None
         self.vout_values: dict[int, QLabel] = {}
+        self._last_vouts: dict[int, float] = {}
         self.field_values: dict[str, QLabel] = {}
         self._live_timer = QTimer(self)
         self._live_timer.setInterval(1_000)
@@ -534,7 +541,9 @@ class MokeBoxPage(QWidget):
         if operation == "read_vouts" and isinstance(result, dict):
             for channel, value in result.items():
                 if channel in self.vout_values:
-                    self.vout_values[channel].setText(f"{float(value):+.6f} V")
+                    numeric = float(value)
+                    self._last_vouts[int(channel)] = numeric
+                    self.vout_values[channel].setText(f"{numeric:+.6f} V")
             self.status.emit("MOKE Box: eight VOUT channels validated")
         elif operation == "read_hall_voltage" and isinstance(result, MokeHallVoltageReading):
             self._show_hall_reading(result)
@@ -567,6 +576,71 @@ class MokeBoxPage(QWidget):
             self._refresh_plot_if_needed()
         if self._hall_live_window is not None:
             self._hall_live_window.set_reading(result)
+
+    def manual_metadata_values(self) -> tuple[ManualMetadataValue, ...]:
+        """Return confirmed read-only MOKE Hall and VOUT values."""
+
+        values: list[ManualMetadataValue] = []
+
+        def add(
+            key: str,
+            label: str,
+            unit: str,
+            value: float,
+            *,
+            source: str,
+            dimension: str | None,
+        ) -> None:
+            if not math.isfinite(float(value)):
+                return
+            values.append(
+                ManualMetadataValue(
+                    key=key,
+                    device="MOKE Box",
+                    label=label,
+                    dimension=dimension,
+                    unit=unit,
+                    value_si=float(value),
+                    source=source,
+                )
+            )
+
+        for channel, value in sorted(self._last_vouts.items()):
+            add(
+                f"moke_box.vout.{channel}_v",
+                f"MOKE VOUT {channel}",
+                "V",
+                value,
+                dimension=DIMENSION_VOLTAGE,
+                source="last confirmed MOKE VOUT readback",
+            )
+        if self._history:
+            reading = self._history[-1]
+            add(
+                "moke_box.hall1.voltage_v",
+                "MOKE Hall 1 · voltage",
+                "V",
+                reading.voltage_v,
+                dimension=DIMENSION_VOLTAGE,
+                source="last confirmed MOKE Hall readback",
+            )
+            add(
+                "moke_box.hall1.stddev_v",
+                "MOKE Hall 1 · standard deviation",
+                "V",
+                reading.stddev_v,
+                dimension=DIMENSION_VOLTAGE,
+                source="last confirmed MOKE Hall readback",
+            )
+            add(
+                "moke_box.hall1.field_t",
+                "MOKE Hall 1 · derived field",
+                "T",
+                hall_field_from_voltage(reading.voltage_v),
+                dimension=DIMENSION_MAGNETIC_FIELD,
+                source="derived from last confirmed MOKE Hall readback",
+            )
+        return tuple(values)
 
     def apply_execution_event(
         self,

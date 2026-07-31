@@ -49,6 +49,7 @@ from app.audit import AuditLogger
 from app.bootstrap import StationComposition
 from app.contracts import ExecutionTelemetryView
 from app.domain.errors import AuthorizationError, ConfigurationError, SafetyViolation
+from app.domain.manual_metadata import ManualMetadataValue
 from app.domain.quantities import (
     DIMENSION_CURRENT,
     DIMENSION_FREQUENCY,
@@ -177,6 +178,7 @@ class MainWindow(FluentWindow):
         self._device_states = {
             key: "disconnected" for key in ("rigol", "keithley", "anritsu", "moke_box", "lakeshore_gaussmeter")
         }
+        self._manual_device_idn: dict[str, str] = {}
         self._run_controller = RunController(self)
         self._build()
         self._apply_accessibility()
@@ -258,6 +260,16 @@ class MainWindow(FluentWindow):
         self.anritsu_page = self._device_pages["anritsu"]
         self.moke_box_page = self._device_pages["moke_box"]
         self.lakeshore_gaussmeter_page = self._device_pages["lakeshore_gaussmeter"]
+        self.anritsu_page.set_manual_archive_context(
+            metadata_provider=self._manual_spectrum_metadata_values,
+            device_idn_provider=self._manual_spectrum_device_idn,
+            settings_source_provider=lambda: serialize_settings_snapshot(
+                self._settings,
+                self._repository.path,
+                simulation=self._simulation,
+            ),
+            operator_context_provider=lambda: self._access.identity.as_context(),
+        )
         self._run_read_only_controls: dict[QWidget, bool] = {}
         self.quick_control_coordinator = QuickControlCoordinator(
             self._controllers, self, settings=self._settings
@@ -1031,8 +1043,37 @@ class MainWindow(FluentWindow):
             return
         self._log(f"Rejected Quick controls output request for {device!r}")
 
+    def _manual_spectrum_metadata_values(self) -> tuple[ManualMetadataValue, ...]:
+        """Collect last-confirmed numeric values from the visible device pages."""
+
+        values: list[ManualMetadataValue] = []
+        for page in (
+            self.anritsu_page,
+            self.rigol_page,
+            self.keithley_page,
+            self.moke_box_page,
+            self.lakeshore_gaussmeter_page,
+        ):
+            provider = getattr(page, "manual_metadata_values", None)
+            if callable(provider):
+                values.extend(provider())
+        unique: dict[str, ManualMetadataValue] = {}
+        for value in values:
+            key = value.key
+            if key:
+                unique.setdefault(key, value)
+        return tuple(unique.values())
+
+    def _manual_spectrum_device_idn(self) -> dict[str, str]:
+        """Return identities already verified by manual station sessions."""
+
+        return dict(self._manual_device_idn)
+
     def _device_result(self, device: str, card: DeviceConnectionPanel, operation: str, result: object) -> None:
         if operation == "connect":
+            identity = str(getattr(result, "idn", "") or "")
+            if identity:
+                self._manual_device_idn[device] = identity
             card.set_connecting(False)
             card.update_identity(result)
             self.dashboard.cards[device].update_identity(result)
@@ -2756,6 +2797,10 @@ class MainWindow(FluentWindow):
         self.quick_controls_window.close()
         self.quick_control_coordinator.cancel_all("Application closing")
         self.anritsu_page._timer.stop()
+        try:
+            self.anritsu_page.close_manual_archive_session()
+        except Exception as exc:
+            self._log(f"Manual spectrum archive close warning: {exc}")
         self.anritsu_page._analysis_controller.close()
         for controller in self._controllers.values():
             controller.close()

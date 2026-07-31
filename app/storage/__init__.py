@@ -2,6 +2,13 @@
 
 from app.storage.hdf5_reader import Hdf5RunReader, RunDetail, RunSummary, StoredEvent, StoredPoint, StoredReference, StoredSpectrum
 from app.storage.hdf5_writer import Hdf5RunWriter
+from app.storage.manual_spectrum_writer import (
+    MANUAL_SPECTRUM_SCHEMA,
+    ManualSpectrumArchive,
+    ManualSpectrumSaveMode,
+    ManualSpectrumSaveResult,
+    timestamped_path,
+)
 from app.storage.thatec_reader import (
     ThatecDevice,
     ThatecRecord,
@@ -29,6 +36,11 @@ from app.storage.thatec_validator import (
 __all__ = [
     "Hdf5RunReader",
     "Hdf5RunWriter",
+    "MANUAL_SPECTRUM_SCHEMA",
+    "ManualSpectrumArchive",
+    "ManualSpectrumSaveMode",
+    "ManualSpectrumSaveResult",
+    "timestamped_path",
     "ThatecDevice",
     "ThatecRecord",
     "ThatecRow",

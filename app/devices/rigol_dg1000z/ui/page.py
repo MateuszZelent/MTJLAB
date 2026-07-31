@@ -23,6 +23,7 @@ from app.devices.rigol_dg1000z import (
     RigolBurstConfig, RigolChannelConfig, RigolCounterConfig, RigolCounterReading, RigolFrequencySweepConfig,
     RigolModulationConfig, RigolOutputConfig,
 )
+from app.domain.manual_metadata import ManualMetadataValue
 from app.domain.quantities import (
     DIMENSION_FREQUENCY, DIMENSION_TIME, DIMENSION_VOLTAGE,
     format_quantity_auto, parse_quantity,
@@ -108,6 +109,7 @@ class RigolPage(QWidget):
         self._device_state_value = "disconnected"
         self._output_states = {1: False, 2: False}
         self._output_state_known = {1: False, 2: False}
+        self._last_counter_reading: RigolCounterReading | None = None
         self._execution_readbacks: dict[int, dict[str, object]] = {}
         layout = QVBoxLayout(self)
         layout.setContentsMargins(18, 18, 18, 18)
@@ -1015,6 +1017,114 @@ class RigolPage(QWidget):
             sync_polarity=visible.sync_polarity,
             sync_delay=visible.sync_delay,
         )
+
+    def manual_metadata_values(self) -> tuple[ManualMetadataValue, ...]:
+        """Return confirmed Rigol carrier and counter values without I/O."""
+
+        values: list[ManualMetadataValue] = []
+
+        def add(
+            key: str,
+            label: str,
+            dimension: str | None,
+            unit: str,
+            value: float,
+            *,
+            source: str,
+        ) -> None:
+            if not math.isfinite(float(value)):
+                return
+            values.append(
+                ManualMetadataValue(
+                    key=key,
+                    device="Rigol DG1032Z",
+                    label=label,
+                    dimension=dimension,
+                    unit=unit,
+                    value_si=float(value),
+                    source=source,
+                )
+            )
+
+        for channel, config in sorted(self._confirmed_carrier_configs.items()):
+            if config is None:
+                continue
+            prefix = f"rigol.{channel}"
+            add(
+                f"{prefix}.frequency_hz",
+                f"Rigol CH{channel} · frequency",
+                DIMENSION_FREQUENCY,
+                "Hz",
+                config.frequency_hz,
+                source="last confirmed Rigol carrier configuration",
+            )
+            add(
+                f"{prefix}.high_level_v",
+                f"Rigol CH{channel} · high level",
+                DIMENSION_VOLTAGE,
+                "V",
+                config.high_level_v,
+                source="last confirmed Rigol carrier configuration",
+            )
+            add(
+                f"{prefix}.low_level_v",
+                f"Rigol CH{channel} · low level",
+                DIMENSION_VOLTAGE,
+                "V",
+                config.low_level_v,
+                source="last confirmed Rigol carrier configuration",
+            )
+            add(
+                f"{prefix}.phase_deg",
+                f"Rigol CH{channel} · phase",
+                None,
+                "deg",
+                config.phase_deg,
+                source="last confirmed Rigol carrier configuration",
+            )
+        counter = self._last_counter_reading
+        if counter is not None:
+            add(
+                "rigol.counter.frequency_hz",
+                "Rigol counter · frequency",
+                DIMENSION_FREQUENCY,
+                "Hz",
+                counter.frequency_hz,
+                source="last confirmed Rigol counter reading",
+            )
+            add(
+                "rigol.counter.period_s",
+                "Rigol counter · period",
+                DIMENSION_TIME,
+                "s",
+                counter.period_s,
+                source="last confirmed Rigol counter reading",
+            )
+            add(
+                "rigol.counter.duty_percent",
+                "Rigol counter · duty",
+                None,
+                "%",
+                counter.duty_percent,
+                source="last confirmed Rigol counter reading",
+            )
+            add(
+                "rigol.counter.positive_width_s",
+                "Rigol counter · positive width",
+                DIMENSION_TIME,
+                "s",
+                counter.positive_width_s,
+                source="last confirmed Rigol counter reading",
+            )
+            add(
+                "rigol.counter.negative_width_s",
+                "Rigol counter · negative width",
+                DIMENSION_TIME,
+                "s",
+                counter.negative_width_s,
+                source="last confirmed Rigol counter reading",
+            )
+        return tuple(values)
 
     @staticmethod
     def _format_voltage(value_v: float) -> str:
@@ -2231,6 +2341,7 @@ class RigolPage(QWidget):
         elif operation == "configure_counter":
             self.status.emit("Rigol frequency counter settings verified")
         elif operation == "read_counter" and isinstance(result, RigolCounterReading):
+            self._last_counter_reading = result
             self.counter_readout.setText(
                 f"Frequency {format_quantity_auto(result.frequency_hz, DIMENSION_FREQUENCY)} · "
                 f"Period {format_quantity_auto(result.period_s, DIMENSION_TIME)} · "

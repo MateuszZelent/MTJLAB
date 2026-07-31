@@ -42,6 +42,9 @@ class ThatecHdf5Writer:
             recipe_source, expected_points=expected_points
         )
         self._expected_points = self._schema.point_count
+        self._dynamic_checkpoint_axis = (
+            expected_points is None and self._schema.mode == "checkpoint_fallback"
+        )
         self._checkpoint_count = 0
         self._next_row = len(self._schema.axes)
         self._indicator_indent = len(self._schema.axes)
@@ -55,9 +58,13 @@ class ThatecHdf5Writer:
         self._last_spectrum_appended = False
         self._last_processed_spectrum_appended = False
         self._last_checkpoint_incremented = False
+        self._last_checkpoint_axis_appended = False
         self._last_created: list[tuple[str, tuple[str, str] | None]] = []
 
         file.attrs["measurement running"] = np.uint8(1)
+        file.attrs["lab_control_dynamic_checkpoint_axis"] = np.uint8(
+            self._dynamic_checkpoint_axis
+        )
         file.attrs["thaTEC:OS version"] = "PyThat-compatible Lab Control schema 2"
         file.attrs["version information"] = "Lab Control 0.1"
 
@@ -100,6 +107,10 @@ class ThatecHdf5Writer:
                     ("date", datetime.now(timezone.utc).isoformat()),
                     ("application", "Lab Control"),
                     ("plan sha256", plan_hash),
+                    (
+                        "DUT limits",
+                        json.dumps(self._recipe_dut_limits(recipe_source), sort_keys=True),
+                    ),
                     ("schema mapper mode", self._schema.mode),
                     ("schema mapper detail", self._schema.detail),
                 )
@@ -143,6 +154,9 @@ class ThatecHdf5Writer:
             recipe_source, expected_points=expected_points
         )
         self._expected_points = self._schema.point_count
+        self._dynamic_checkpoint_axis = (
+            expected_points is None and self._schema.mode == "checkpoint_fallback"
+        )
         self._checkpoint_count = checkpoint_count
         self._indicator_indent = len(self._schema.axes)
         self._definition = file["scan_definition"]
@@ -185,8 +199,12 @@ class ThatecHdf5Writer:
         self._last_spectrum_appended = False
         self._last_processed_spectrum_appended = False
         self._last_checkpoint_incremented = False
+        self._last_checkpoint_axis_appended = False
         self._last_created = []
         file.attrs["measurement running"] = np.uint8(1)
+        file.attrs["lab_control_dynamic_checkpoint_axis"] = np.uint8(
+            self._dynamic_checkpoint_axis
+        )
         self._append_log(f"Process resumed from checkpoint {checkpoint_count}.")
         return self
 
@@ -205,7 +223,9 @@ class ThatecHdf5Writer:
         self._last_spectrum_appended = False
         self._last_processed_spectrum_appended = False
         self._last_checkpoint_incremented = False
+        self._last_checkpoint_axis_appended = False
         self._last_created = []
+        self._append_checkpoint_axis(point)
         values = {
             **{
                 ("setpoint", key): value
@@ -275,6 +295,15 @@ class ThatecHdf5Writer:
         if self._last_checkpoint_incremented:
             self._checkpoint_count = max(0, self._checkpoint_count - 1)
 
+        if self._dynamic_checkpoint_axis and self._last_checkpoint_axis_appended:
+            row = self._file["measurement/row_00"]
+            target_count = max(1, self._checkpoint_count)
+            row["data"].resize((target_count,))
+            row["timestamp"].resize((target_count,))
+            row["data"][0] = 0.0
+            if target_count == 1 and self._checkpoint_count == 0:
+                row["timestamp"][0] = self._np.nan
+
         for row_name, role_key in reversed(self._last_created):
             if row_name in self._file["measurement"]:
                 del self._file["measurement"][row_name]
@@ -295,6 +324,7 @@ class ThatecHdf5Writer:
         self._last_spectrum_appended = False
         self._last_processed_spectrum_appended = False
         self._last_checkpoint_incremented = False
+        self._last_checkpoint_axis_appended = False
         self._last_created = []
 
     def close(self, status: str) -> None:
@@ -580,6 +610,17 @@ class ThatecHdf5Writer:
         return devices if isinstance(devices, dict) else {}
 
     @staticmethod
+    def _recipe_dut_limits(source: str) -> dict[str, Any]:
+        try:
+            from ruamel.yaml import YAML
+
+            decoded = YAML(typ="safe").load(source)
+        except Exception:
+            return {}
+        limits = decoded.get("dut_limits", {}) if isinstance(decoded, dict) else {}
+        return limits if isinstance(limits, dict) else {}
+
+    @staticmethod
     def _flatten(value: Any, prefix: str = "") -> tuple[tuple[str, str], ...]:
         if isinstance(value, dict):
             rows: list[tuple[str, str]] = []
@@ -614,12 +655,30 @@ class ThatecHdf5Writer:
             dtype=self._text,
         )
         row = self._file["measurement"].create_group(row_name)
-        data = row.create_dataset("data", data=self._np.asarray(axis.values_si, dtype="f8"))
+        data = row.create_dataset(
+            "data",
+            data=self._np.asarray(axis.values_si, dtype="f8"),
+            maxshape=(None,) if self._dynamic_checkpoint_axis else None,
+        )
         data.attrs["data type"] = self._np.int32(11)
         data.attrs["dim of data"] = self._np.int32(0)
         row.create_dataset(
-            "timestamp", data=self._np.full(axis.points, self._np.nan, dtype="f8")
+            "timestamp",
+            data=self._np.full(axis.points, self._np.nan, dtype="f8"),
+            maxshape=(None,) if self._dynamic_checkpoint_axis else None,
         )
+
+    def _append_checkpoint_axis(self, point: MeasurementPoint) -> None:
+        if not self._dynamic_checkpoint_axis:
+            return
+        row = self._file["measurement/row_00"]
+        index = self._checkpoint_count
+        if row["data"].shape[0] <= index:
+            row["data"].resize((index + 1,))
+            row["timestamp"].resize((index + 1,))
+        row["data"][index] = float(index)
+        row["timestamp"][index] = point.timestamp_utc.timestamp()
+        self._last_checkpoint_axis_appended = True
 
     def _allocate_row(self) -> str:
         row_name = f"row_{self._next_row:02d}"
@@ -641,6 +700,8 @@ class ThatecHdf5Writer:
             "keithley": "Keithley 2602A",
             "anritsu": "Anritsu Spectrum Analyzer",
             "lakeshore": "Lake Shore 475",
+            "lakeshore_gaussmeter": "Lake Shore 475",
+            "moke_box": "MOKE Box",
         }.get(device_key, "Lab Control")
         leaf = parts[-1].lower()
         unit = ""
@@ -652,7 +713,10 @@ class ThatecHdf5Writer:
             (("resistance", "impedance", "_ohm"), "Ω"),
             (("duration", "settling", "_s"), "s"),
             (("dbm", "reference_level"), "dBm"),
-            (("field", "peak"), "T"),
+            (("field", "peak", "_t"), "T"),
+            (("period", "width", "_s"), "s"),
+            (("duty", "percent"), "%"),
+            (("nplc",), "PLC"),
         )
         for tokens, candidate in unit_tokens:
             if any(token in leaf for token in tokens):
