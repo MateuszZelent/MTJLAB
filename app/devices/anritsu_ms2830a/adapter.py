@@ -438,6 +438,46 @@ class AnritsuAdapter(DeviceAdapter):
         self._state = DeviceState.OUTPUT_ON if output_enabled else DeviceState.OUTPUT_OFF
         return SignalGeneratorSnapshot(frequency_hz, power_dbm, output_enabled, mode)
 
+    def assert_signal_generator_output_state(self, *, expected_enabled: bool) -> bool:
+        """Confirm RF state and the last validated frequency/power snapshot."""
+
+        cached_output = self._sg_output_enabled
+        snapshot = self.read_signal_generator_configuration()
+        if snapshot.output_enabled != cached_output:
+            self.emergency_off()
+            raise DeviceError(
+                "Anritsu SG RF OUTPUT changed outside the configured control path."
+            )
+        if self._last_sg_config is not None:
+            if not (
+                math.isclose(
+                    snapshot.frequency_hz,
+                    self._last_sg_config.frequency_hz,
+                    rel_tol=1e-9,
+                    abs_tol=1.0,
+                )
+                and math.isclose(
+                    snapshot.power_dbm,
+                    self._last_sg_config.power_dbm,
+                    rel_tol=0.0,
+                    abs_tol=0.01,
+                )
+            ):
+                if snapshot.output_enabled:
+                    self.emergency_off()
+                raise DeviceError(
+                    "Anritsu SG readback no longer matches the validated frequency/power."
+                )
+        if snapshot.output_enabled != expected_enabled:
+            if snapshot.output_enabled:
+                self.emergency_off()
+            raise DeviceError(
+                "Anritsu SG RF OUTPUT is "
+                f"{'ON' if snapshot.output_enabled else 'OFF'}; expected "
+                f"{'ON' if expected_enabled else 'OFF'}."
+            )
+        return snapshot.output_enabled
+
     def configure_signal_generator(self, config: SignalGeneratorConfig) -> SignalGeneratorSnapshot:
         """Explicitly enter SG mode, force RF OFF, configure and verify readback."""
 

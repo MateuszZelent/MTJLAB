@@ -79,6 +79,64 @@ class InstrumentPrecisionTests(unittest.TestCase):
             adapter.quick_control_snapshot()["keithley.B.voltage"], 0.01111
         )
 
+    def test_rigol_quantized_duplicate_frequency_skips_second_scpi_write(self) -> None:
+        session = RigolSimulator()
+        adapter = RigolAdapter(
+            simulation_settings(),
+            session_factory=FakeVisaSessionFactory(session),
+        )
+        adapter.connect()
+        adapter.configure_channel(
+            RigolChannelConfig(
+                channel=1,
+                waveform="SIN",
+                frequency_hz=1_000.0,
+                high_level_v=0.001,
+                low_level_v=-0.001,
+            )
+        )
+        initial_writes = session.commands.count(":SOUR1:FREQ 1000")
+
+        actual = adapter.update_frequency(
+            1, 1_000.0000000000001
+        )
+
+        self.assertAlmostEqual(actual, 1_000.0)
+        self.assertEqual(session.commands.count(":SOUR1:FREQ 1000"), initial_writes)
+
+        changed = adapter.update_frequency(1, 1_000.0005)
+
+        self.assertAlmostEqual(changed, 1_000.0005)
+        self.assertIn(":SOUR1:FREQ 1000.0005", session.commands)
+
+    def test_keithley_quantized_duplicate_level_skips_second_tsp_write(self) -> None:
+        session = KeithleySimulator()
+        adapter = KeithleyAdapter(
+            simulation_settings(),
+            session_factory=FakeVisaSessionFactory(session),
+        )
+        adapter.connect()
+        adapter.configure_source(
+            KeithleySourceRequest(
+                channel="B",
+                mode="voltage",
+                level_si=0.01,
+                compliance_si=0.001,
+            )
+        )
+        initial_writes = session.commands.count("smub.source.levelv = 0.01")
+
+        actual = adapter.update_source_level(
+            "B",
+            mode="voltage",
+            level_si=0.01000000000000000000000000000001,
+        )
+
+        self.assertAlmostEqual(actual, 0.01)
+        self.assertEqual(
+            session.commands.count("smub.source.levelv = 0.01"), initial_writes
+        )
+
 
 if __name__ == "__main__":
     unittest.main()

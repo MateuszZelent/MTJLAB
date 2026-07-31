@@ -436,7 +436,6 @@ root:
             [action.kind for action in plan.actions],
             [
                 "configure_keithley",
-                "update_keithley_level",
                 "wait",
                 "acquire_spectrum",
                 "update_keithley_level",
@@ -524,7 +523,7 @@ root:
                 action.kind == "update_keithley_compliance"
                 for action in plan.actions
             ),
-            3,
+            2,
         )
         self.assertFalse(
             any(
@@ -596,10 +595,9 @@ root:
 
         self.assertEqual(
             [action.kind for action in plan.actions],
-                [
-                    "configure_rigol",
-                    "configure_rigol_output",
-                    "update_rigol_frequency",
+            [
+                "configure_rigol",
+                "configure_rigol_output",
                 "acquire_spectrum",
                 "update_rigol_frequency",
                 "acquire_spectrum",
@@ -653,7 +651,7 @@ root:
 
         self.assertEqual(
             sum(action.kind == "update_rigol_levels" for action in plan.actions),
-            3,
+            2,
         )
         self.assertFalse(
             any(
@@ -697,14 +695,14 @@ root:
             for action in plan.actions
             if action.kind == "update_rigol_levels"
         ]
-        self.assertEqual(len(updates), 3)
+        self.assertEqual(len(updates), 2)
         self.assertEqual(
             [round(item["high_level_v"] - item["low_level_v"], 9) for item in updates],
-            [0.002, 0.003, 0.004],
+            [0.003, 0.004],
         )
         self.assertEqual(
             [round((item["high_level_v"] + item["low_level_v"]) / 2, 9) for item in updates],
-            [0.001, 0.001, 0.001],
+            [0.001, 0.001],
         )
 
     def test_anritsu_device_provider_expands_axis_and_preserves_acquisition_child(self) -> None:
@@ -1525,8 +1523,8 @@ root:
         self.assertEqual(kinds.count("configure_keithley"), 1)
         self.assertEqual(kinds.count("set_keithley_output"), 1)
         self.assertTrue(plan.actions[kinds.index("set_keithley_output")].payload["enabled"])
-        self.assertEqual(kinds.count("assert_output_on"), 3)
-        self.assertEqual(kinds.count("update_keithley_level"), 2)
+        self.assertEqual(kinds.count("assert_output_on"), 2)
+        self.assertEqual(kinds.count("update_keithley_level"), 1)
 
     def test_continuous_output_without_plan_owned_on_transition_is_rejected(self) -> None:
         source = """\

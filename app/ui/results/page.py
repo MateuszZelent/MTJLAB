@@ -177,8 +177,8 @@ class ResultsPage(QWidget):
         title.setObjectName("pageTitle")
         layout.addWidget(title)
         subtitle = BodyLabel(
-            "Review recorded runs, reconstruct their executed Sweep, and resume only at "
-            "confirmed safe checkpoints.",
+            "Open HDF5 results, inspect the complete measurement tree, filter checkpoint "
+            "parameter sets, and browse raw or processed spectra.",
             self,
         )
         subtitle.setWordWrap(True)
@@ -274,6 +274,14 @@ class ResultsPage(QWidget):
             self.spectrum_tab.show_thatec_spectrum
         )
         self.sweep_tree.spectrum_requested.connect(self._switch_to_spectrum)
+        self.sweep_tree.stored_spectrum_requested.connect(
+            self.spectrum_tab.show_stored_spectrum
+        )
+        self.sweep_tree.stored_spectrum_requested.connect(self._switch_to_spectrum)
+        self.sweep_tree.reference_spectrum_requested.connect(
+            self.spectrum_tab.show_reference
+        )
+        self.sweep_tree.reference_spectrum_requested.connect(self._switch_to_spectrum)
 
         # Point selection → device state panel
         self.spectrum_tab.device_state_changed.connect(
@@ -434,8 +442,6 @@ class ResultsPage(QWidget):
             tree = ()
             self._thatec_tree_available = False
 
-        # Sweep tree panel
-        self.sweep_tree.load(path, self._thatec_run, tree)
         self.open_sweep_button.setEnabled(self._thatec_tree_available)
 
         # --- Load private HDF5 detail (if available) ---
@@ -445,6 +451,21 @@ class ResultsPage(QWidget):
         except Exception:
             detail = None
             points = ()
+        try:
+            references = Hdf5RunReader.references(path)
+        except Exception:
+            references = ()
+
+        # The tree is intentionally enriched with the private checkpoint and
+        # reference layers when present.  Public-only THATEC files still get
+        # their complete /measurement tree from ``run.rows``.
+        self.sweep_tree.load(
+            path,
+            self._thatec_run,
+            tree,
+            points=points,
+            references=references,
+        )
 
         # PyThat enriches metadata when available, but it must not suppress
         # the core HDF5 browser when an optional bridge cannot open a file.

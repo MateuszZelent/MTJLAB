@@ -19,6 +19,14 @@ from app.devices.lakeshore_475.adapter import LakeShore475Adapter
 from app.devices.rigol_dg1000z.adapter import RigolAdapter
 from app.domain.errors import DeviceError, ExecutionError
 from app.domain.models import ApplicationState, DeviceState, MeasurementPoint
+from app.domain.quantities import (
+    DIMENSION_CURRENT,
+    DIMENSION_DBM,
+    DIMENSION_POWER,
+    DIMENSION_RESISTANCE,
+    DIMENSION_VOLTAGE,
+    parse_quantity,
+)
 from app.engine.compiler import ExecutionPlan, PlanAction, required_devices_for_actions
 from app.engine.policy import ExecutionPolicy
 from app.spectrum import (
@@ -109,6 +117,7 @@ class RecipeRunner:
         self._required_devices: frozenset[str] = frozenset()
         self._safe_shutdown_actions: tuple[str, ...] = ()
         self._active_safety_context: dict[str, dict[str, object]] = {}
+        self._recipe_dut_limits: dict[str, object] = {}
         self._device_states: dict[str, dict[str, object]] = {}
         self._rigol_output_active = {1: False, 2: False}
         self._keithley_output_active = {"A": False, "B": False}
@@ -170,6 +179,7 @@ class RecipeRunner:
         )
         self._safe_shutdown_actions = plan.safe_shutdown_actions
         self._active_safety_context = {}
+        self._recipe_dut_limits = dict(plan.recipe_dut_limits)
         self._device_states = {}
         self._rigol_output_active = {1: False, 2: False}
         self._keithley_output_active = {"A": False, "B": False}
@@ -197,6 +207,7 @@ class RecipeRunner:
                     "stored_points": stored_points,
                     "execution_mode": self._execution_mode.value,
                     "outputs_forced_off": self.outputs_forced_off,
+                    "output_guard_devices": self._output_guard_devices(),
                 },
             )
             if self.outputs_forced_off:
@@ -246,6 +257,7 @@ class RecipeRunner:
                 )
                 acquisition = self._execute_with_policy(action, point_measurements)
                 point_setpoints.update(action.setpoints_si)
+                self._apply_actual_setpoints(point_setpoints)
                 completed = action_index + 1
                 compliance_channels = self._compliance_channels(point_measurements)
                 if compliance_channels:
@@ -261,6 +273,7 @@ class RecipeRunner:
                             "safety_context": self._safety_context_snapshot(),
                             "execution_mode": self._execution_mode.value,
                             "outputs_forced_off": self.outputs_forced_off,
+                            "output_guard_devices": self._output_guard_devices(),
                         },
                     )
                     write_started = time.monotonic()
@@ -308,6 +321,7 @@ class RecipeRunner:
                             ),
                             "execution_mode": self._execution_mode.value,
                             "outputs_forced_off": self.outputs_forced_off,
+                            "output_guard_devices": self._output_guard_devices(),
                         },
                     )
                     write_started = time.monotonic()
@@ -727,23 +741,26 @@ class RecipeRunner:
         if action.kind == "assert_output_on":
             device = str(payload.get("device", ""))
             channel = str(payload.get("channel", ""))
-            if device == "keithley":
-                confirmed = self._keithley_output_active.get(channel, False)
-            elif device == "rigol":
-                try:
-                    confirmed = self._rigol_output_active.get(int(channel), False)
-                except ValueError:
-                    confirmed = False
-            elif device == "anritsu_sg":
-                confirmed = self._anritsu_sg_output_active
-            else:
-                raise ExecutionError(
-                    f"Unknown continuous-output endpoint {device}.{channel}."
-                )
-            if not confirmed:
+            expected_output = not self.outputs_forced_off
+            confirmed = self._assert_physical_output_state(
+                device, channel, expected_enabled=expected_output
+            )
+            if not self.outputs_forced_off and not confirmed:
                 raise ExecutionError(
                     f"Continuous OUTPUT for {device}.{channel} was not confirmed ON "
                     "by an earlier action in this run."
+                )
+            if self.outputs_forced_off:
+                self._emit(
+                    "dry_run_output_continuity_suppressed",
+                    {
+                        "node_id": action.node_id,
+                        "device": device,
+                        "channel": channel,
+                        "requested_enabled": True,
+                        "actual_enabled": False,
+                        "reason": "Dry run keeps continuous-output assertions logically scoped while OUTPUT remains OFF.",
+                    },
                 )
             context_key = (
                 f"{device}.{channel}"
@@ -784,21 +801,27 @@ class RecipeRunner:
         elif action.kind == "configure_rigol":
             config = payload["config"]
             self._rigol.configure_channel(config)
-            self._rigol_output_active[config.channel] = False
-            self._confirm_output_state(f"rigol.{config.channel}", False)
-            self._active_safety_context[f"rigol.{config.channel}"] = {
-                "frequency_hz": config.frequency_hz,
-                "high_level_v": config.high_level_v,
-                "low_level_v": config.low_level_v,
-                "output_load": config.output_load,
-                "waveform": config.waveform,
-                "phase_deg": config.phase_deg,
-                "square_duty_percent": config.square_duty_percent,
-                "ramp_symmetry_percent": config.ramp_symmetry_percent,
-                "pulse_width_s": config.pulse_width_s,
-                "pulse_leading_s": config.pulse_leading_s,
-                "pulse_trailing_s": config.pulse_trailing_s,
+            applied = self._rigol.last_channel_config(config.channel)
+            self._rigol_output_active[applied.channel] = False
+            self._confirm_output_state(f"rigol.{applied.channel}", False)
+            self._active_safety_context[f"rigol.{applied.channel}"] = {
+                "frequency_hz": applied.frequency_hz,
+                "high_level_v": applied.high_level_v,
+                "low_level_v": applied.low_level_v,
+                "output_load": applied.output_load,
+                "waveform": applied.waveform,
+                "phase_deg": applied.phase_deg,
+                "square_duty_percent": applied.square_duty_percent,
+                "ramp_symmetry_percent": applied.ramp_symmetry_percent,
+                "pulse_width_s": applied.pulse_width_s,
+                "pulse_leading_s": applied.pulse_leading_s,
+                "pulse_trailing_s": applied.pulse_trailing_s,
             }
+            self._attach_recipe_dut_limits(
+                self._active_safety_context[f"rigol.{applied.channel}"],
+                "rigol",
+                applied.channel,
+            )
             self._record_device_state(
                 "rigol", f"channel_{config.channel}", requested=config,
                 actual=self._active_safety_context[f"rigol.{config.channel}"],
@@ -826,23 +849,29 @@ class RecipeRunner:
         elif action.kind == "configure_keithley":
             request = payload["request"]
             self._keithley.configure_source(request)
-            self._keithley_output_active[request.channel] = False
-            self._confirm_output_state(f"keithley.{request.channel}", False)
-            self._keithley_zeroed[request.channel] = abs(request.level_si) <= 1e-15
-            self._active_safety_context[f"keithley.{request.channel}"] = {
-                "mode": request.mode,
-                "source_level_si": request.level_si,
-                "compliance_si": request.compliance_si,
-                "nplc": request.nplc,
-                "settle_time_s": request.settle_time_s,
-                "sense_mode": request.sense_mode,
-                "source_autorange": request.source_autorange,
-                "source_range_si": request.source_range_si,
-                "measure_voltage_autorange": request.measure_voltage_autorange,
-                "measure_voltage_range_si": request.measure_voltage_range_si,
-                "measure_current_autorange": request.measure_current_autorange,
-                "measure_current_range_si": request.measure_current_range_si,
+            applied = self._keithley.last_source_request(request.channel)
+            self._keithley_output_active[applied.channel] = False
+            self._confirm_output_state(f"keithley.{applied.channel}", False)
+            self._keithley_zeroed[applied.channel] = abs(applied.level_si) <= 1e-15
+            self._active_safety_context[f"keithley.{applied.channel}"] = {
+                "mode": applied.mode,
+                "source_level_si": applied.level_si,
+                "compliance_si": applied.compliance_si,
+                "nplc": applied.nplc,
+                "settle_time_s": applied.settle_time_s,
+                "sense_mode": applied.sense_mode,
+                "source_autorange": applied.source_autorange,
+                "source_range_si": applied.source_range_si,
+                "measure_voltage_autorange": applied.measure_voltage_autorange,
+                "measure_voltage_range_si": applied.measure_voltage_range_si,
+                "measure_current_autorange": applied.measure_current_autorange,
+                "measure_current_range_si": applied.measure_current_range_si,
             }
+            self._attach_recipe_dut_limits(
+                self._active_safety_context[f"keithley.{applied.channel}"],
+                "keithley",
+                applied.channel,
+            )
             self._record_device_state(
                 "keithley", f"channel_{request.channel}", requested=request,
                 actual=self._active_safety_context[f"keithley.{request.channel}"],
@@ -872,13 +901,23 @@ class RecipeRunner:
         elif action.kind == "configure_anritsu":
             config = payload["config"]
             actual = self._anritsu.configure_spectrum(config)
+            if actual is None:
+                # Qualified AnritsuAdapter implementations return a verified
+                # snapshot. Keep passive test/dry-run doubles compatible while
+                # never weakening the production adapter contract.
+                actual = config
             self._active_safety_context["anritsu"] = {
-                "start_hz": actual.start_hz,
-                "stop_hz": actual.stop_hz,
-                "reference_level_dbm": actual.reference_level_dbm,
-                "points": actual.points,
-                "instrument_mode": actual.instrument_mode,
+                "start_hz": getattr(actual, "start_hz", config.start_hz),
+                "stop_hz": getattr(actual, "stop_hz", config.stop_hz),
+                "reference_level_dbm": getattr(
+                    actual, "reference_level_dbm", config.reference_level_dbm
+                ),
+                "points": getattr(actual, "points", config.points),
+                "instrument_mode": getattr(actual, "instrument_mode", ""),
             }
+            self._attach_recipe_dut_limits(
+                self._active_safety_context["anritsu"], "anritsu"
+            )
             self._record_device_state(
                 "anritsu", "spectrum", requested=config,
                 actual=self._active_safety_context["anritsu"],
@@ -1280,6 +1319,50 @@ class RecipeRunner:
             },
         )
 
+    def _assert_physical_output_state(
+        self, device: str, channel: str, *, expected_enabled: bool
+    ) -> bool:
+        """Read back the output and configuration at every continuity boundary."""
+
+        if device == "keithley":
+            if channel not in {"A", "B"}:
+                raise ExecutionError(
+                    f"Unknown continuous-output endpoint {device}.{channel}."
+                )
+            actual = self._keithley.assert_output_state(
+                channel, expected_enabled=expected_enabled
+            )
+            self._keithley_output_active[channel] = actual
+            self._confirm_output_state(f"keithley.{channel}", actual)
+            return actual
+        if device == "rigol":
+            try:
+                channel_number = int(channel)
+            except ValueError as exc:
+                raise ExecutionError(
+                    f"Unknown continuous-output endpoint {device}.{channel}."
+                ) from exc
+            if channel_number not in {1, 2}:
+                raise ExecutionError(
+                    f"Unknown continuous-output endpoint {device}.{channel}."
+                )
+            actual = self._rigol.assert_output_state(
+                channel_number, expected_enabled=expected_enabled
+            )
+            self._rigol_output_active[channel_number] = actual
+            self._confirm_output_state(f"rigol.{channel_number}", actual)
+            return actual
+        if device == "anritsu_sg" and channel == "RF":
+            actual = self._anritsu.assert_signal_generator_output_state(
+                expected_enabled=expected_enabled
+            )
+            self._anritsu_sg_output_active = actual
+            self._confirm_output_state("anritsu.sg", actual)
+            return actual
+        raise ExecutionError(
+            f"Unknown continuous-output endpoint {device}.{channel}."
+        )
+
     def _pause_at_point_if_requested(self) -> None:
         if self._pause_requested.is_set():
             self._emit("pause_pending", {})
@@ -1300,8 +1383,11 @@ class RecipeRunner:
             "rigol": "rigol.outputs_off",
             "anritsu": "anritsu.rf_off_and_abort",
         }
+        shutdown_scope = set(self._output_guard_devices())
         actions = self._safe_shutdown_actions or tuple(
-            default_actions[name] for name in ("keithley", "rigol", "anritsu")
+            default_actions[name]
+            for name in ("keithley", "rigol", "anritsu")
+            if name in shutdown_scope
         ) + ("storage.flush_checkpoint",)
         attempted_devices: set[str] = set()
         for action in actions:
@@ -1332,7 +1418,10 @@ class RecipeRunner:
                 self._emit_after_fault("shutdown_action_finished", {"action": action})
         # A malformed manually-created plan must not be able to omit OFF for a
         # required device. Compiled plans already contain this fallback.
-        for name in sorted(set(devices) - attempted_devices):
+        fallback_scope = (
+            set(devices) if not self.outputs_forced_off else shutdown_scope
+        )
+        for name in sorted(fallback_scope - attempted_devices):
             action = default_actions[name]
             try:
                 devices[name].emergency_off()
@@ -1382,6 +1471,125 @@ class RecipeRunner:
             "requested": self._jsonable(requested),
             "actual": self._jsonable(actual),
         }
+
+    def _attach_recipe_dut_limits(
+        self,
+        context: dict[str, object],
+        device: str,
+        channel: str | int | None = None,
+    ) -> None:
+        """Add explicit recipe DUT envelopes to the checkpoint safety context."""
+
+        raw_device = self._recipe_dut_limits.get(device)
+        if not isinstance(raw_device, dict):
+            return
+        raw_limits: object = raw_device
+        if channel is not None:
+            raw_limits = raw_device.get(str(channel), raw_device.get(channel, {}))
+        if not isinstance(raw_limits, dict):
+            return
+
+        def quantity(raw: object, dimension: str, name: str) -> float:
+            try:
+                return parse_quantity(raw, dimension).si_value
+            except Exception as exc:
+                raise ExecutionError(
+                    f"Recipe DUT limit {name!r} is invalid: {raw!r}."
+                ) from exc
+
+        if device == "rigol":
+            mapping = {
+                "minimum_impedance": ("minimum_impedance_ohm", DIMENSION_RESISTANCE),
+                "max_abs_current": ("max_abs_current_a", DIMENSION_CURRENT),
+                "max_abs_power": ("max_abs_power_w", DIMENSION_POWER),
+            }
+            for source, (target, dimension) in mapping.items():
+                if source in raw_limits:
+                    context[target] = quantity(raw_limits[source], dimension, source)
+        elif device == "keithley":
+            for source, suffix, dimension in (
+                ("current", "a", DIMENSION_CURRENT),
+                ("voltage", "v", DIMENSION_VOLTAGE),
+            ):
+                envelope = raw_limits.get(source)
+                if not isinstance(envelope, dict):
+                    continue
+                for bound in ("min", "max"):
+                    if bound in envelope:
+                        context[f"{source}_{bound}_{suffix}"] = quantity(
+                            envelope[bound], dimension, f"{source}.{bound}"
+                        )
+            if "max_abs_power" in raw_limits:
+                context["max_abs_power_w"] = quantity(
+                    raw_limits["max_abs_power"], DIMENSION_POWER, "max_abs_power"
+                )
+        elif device == "anritsu" and "max_expected_input" in raw_limits:
+            context["max_expected_input_dbm"] = quantity(
+                raw_limits["max_expected_input"], DIMENSION_DBM, "max_expected_input"
+            )
+
+    def _apply_actual_setpoints(self, setpoints: dict[str, float]) -> None:
+        """Replace requested sweep floats with the last readback-confirmed values."""
+
+        for name in tuple(setpoints):
+            actual = self._actual_setpoint_value(name)
+            if actual is not None and math.isfinite(actual):
+                setpoints[name] = actual
+
+    def _actual_setpoint_value(self, name: str) -> float | None:
+        parts = name.split(".")
+        context: dict[str, object] | None = None
+        field: str | None = None
+        if len(parts) == 3 and parts[0] == "keithley":
+            channel, axis = parts[1], parts[2]
+            context = self._active_safety_context.get(f"keithley.{channel}")
+            mode = context.get("mode") if context is not None else None
+            if axis in {"current", "voltage", "level"} and (
+                axis == "level" or mode == axis
+            ):
+                field = "source_level_si"
+            elif axis == "compliance_voltage" and mode == "current":
+                field = "compliance_si"
+            elif axis == "compliance_current" and mode == "voltage":
+                field = "compliance_si"
+            elif axis == "settling_time":
+                field = "settle_time_s"
+        elif len(parts) == 3 and parts[0] == "rigol":
+            context = self._active_safety_context.get(f"rigol.{parts[1]}")
+            field = {
+                "frequency": "frequency_hz",
+                "high_level": "high_level_v",
+                "low_level": "low_level_v",
+            }.get(parts[2])
+            if parts[2] == "amplitude" and context is not None:
+                high = context.get("high_level_v")
+                low = context.get("low_level_v")
+                if isinstance(high, (int, float)) and isinstance(low, (int, float)):
+                    return float(high) - float(low)
+            if parts[2] == "offset" and context is not None:
+                high = context.get("high_level_v")
+                low = context.get("low_level_v")
+                if isinstance(high, (int, float)) and isinstance(low, (int, float)):
+                    return (float(high) + float(low)) / 2.0
+        elif parts == ["anritsu", "spectrum", "start_frequency"]:
+            context = self._active_safety_context.get("anritsu")
+            field = "start_hz"
+        elif parts == ["anritsu", "spectrum", "stop_frequency"]:
+            context = self._active_safety_context.get("anritsu")
+            field = "stop_hz"
+        elif parts == ["anritsu", "spectrum", "reference_level"]:
+            context = self._active_safety_context.get("anritsu")
+            field = "reference_level_dbm"
+        elif parts == ["anritsu", "sg", "frequency"]:
+            context = self._active_safety_context.get("anritsu.sg")
+            field = "frequency_hz"
+        elif parts == ["anritsu", "sg", "power"]:
+            context = self._active_safety_context.get("anritsu.sg")
+            field = "power_dbm"
+        if context is None or field is None:
+            return None
+        value = context.get(field)
+        return float(value) if isinstance(value, (int, float)) else None
 
     def _device_state_snapshot(self) -> dict[str, dict[str, object]]:
         return self._jsonable(self._device_states)  # type: ignore[return-value]
@@ -1466,15 +1674,29 @@ class RecipeRunner:
     def outputs_forced_off(self) -> bool:
         return self._execution_mode is ExecutionMode.DRY_RUN
 
+    def _output_guard_devices(self) -> tuple[str, ...]:
+        """Return the core devices whose outputs belong to this run's scope."""
+
+        core = ("keithley", "rigol", "anritsu")
+        if not self.outputs_forced_off:
+            return core
+        if not self._required_devices:
+            # A hand-built plan without a dependency manifest is not trusted
+            # to describe its scope; fail closed with the station-wide guard.
+            return core
+        return tuple(name for name in core if name in self._required_devices)
+
     def _confirm_dry_run_outputs_off(self) -> None:
         """Establish and confirm the dry-run invariant before recipe actions."""
 
         errors: list[str] = []
-        for name, device in (
-            ("keithley", self._keithley),
-            ("rigol", self._rigol),
-            ("anritsu", self._anritsu),
-        ):
+        devices = {
+            "keithley": self._keithley,
+            "rigol": self._rigol,
+            "anritsu": self._anritsu,
+        }
+        for name in self._output_guard_devices():
+            device = devices[name]
             self._emit("dry_run_output_guard_started", {"device": name})
             try:
                 device.emergency_off()
@@ -1493,7 +1715,7 @@ class RecipeRunner:
         self._rigol_output_active = {1: False, 2: False}
         self._keithley_output_active = {"A": False, "B": False}
         self._anritsu_sg_output_active = False
-        for device in ("keithley", "rigol", "anritsu"):
+        for device in self._output_guard_devices():
             self._confirm_device_outputs_off(device)
         if errors:
             raise ExecutionError(

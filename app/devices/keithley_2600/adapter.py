@@ -523,7 +523,7 @@ class KeithleyAdapter(DeviceAdapter):
         self._update_aggregate_output_state()
         return KeithleyConfigurationReadback((snapshots[0], snapshots[1]))
 
-    def configure_source(self, request: KeithleySourceRequest) -> None:
+    def configure_source(self, request: KeithleySourceRequest) -> KeithleySourceRequest:
         """Set function, range-safe level and compliance while output is guaranteed OFF."""
 
         if request.channel not in {"A", "B"}:
@@ -550,7 +550,7 @@ class KeithleyAdapter(DeviceAdapter):
             self._verify_applied_configuration(request)
             self._last_request[request.channel] = request
             self._update_aggregate_output_state()
-            return
+            return request
         if request.mode == "current":
             session.write(f"{smu}.source.func = {smu}.OUTPUT_DCAMPS")
             session.write(f"{smu}.source.limitv = {request.compliance_si:.12g}")
@@ -566,9 +566,10 @@ class KeithleyAdapter(DeviceAdapter):
         self._verify_applied_configuration(request)
         self._last_request[request.channel] = request
         self._update_aggregate_output_state()
+        return request
 
     def _verify_applied_configuration(
-        self, expected: KeithleySourceRequest
+        self, expected: KeithleySourceRequest, *, expected_output: bool = False
     ) -> None:
         """Read back every programmed source and measurement-path parameter."""
 
@@ -633,8 +634,12 @@ class KeithleyAdapter(DeviceAdapter):
                 f"{field} {response!r} != {expected_name} ({expected_numeric})"
             )
 
-        if self._output_is_enabled(expected.channel):
-            mismatches.append(f"{smu}.source.output is ON after configuration")
+        actual_output = self._output_is_enabled(expected.channel)
+        if actual_output != expected_output:
+            mismatches.append(
+                f"{smu}.source.output is {'ON' if actual_output else 'OFF'}; "
+                f"expected {'ON' if expected_output else 'OFF'}"
+            )
         numeric(f"{smu}.measure.nplc", expected.nplc)
         enum(
             f"{smu}.sense",
@@ -813,6 +818,22 @@ class KeithleyAdapter(DeviceAdapter):
         suffix = "i" if mode == "current" else "v"
         session = self._require_session()
         output_before = self._output_is_enabled(channel)
+        if updated.level_si == current.level_si:
+            if output_before != self._output_states[channel]:
+                self._fail_measurement_output_invariant(
+                    "Keithley OUTPUT state changed before a source-level update."
+                )
+            try:
+                self._verify_applied_configuration(
+                    current, expected_output=output_before
+                )
+            except Exception:
+                if output_before:
+                    self.emergency_off()
+                raise
+            self._output_states[channel] = output_before
+            self._update_aggregate_output_state()
+            return current.level_si
         try:
             session.write(f"{smu}.source.level{suffix} = {updated.level_si:.12g}")
             self._check_errors()
@@ -868,6 +889,22 @@ class KeithleyAdapter(DeviceAdapter):
         field = "limitv" if mode == "current" else "limiti"
         session = self._require_session()
         output_before = self._output_is_enabled(channel)
+        if updated.compliance_si == current.compliance_si:
+            if output_before != self._output_states[channel]:
+                self._fail_measurement_output_invariant(
+                    "Keithley OUTPUT state changed before a compliance update."
+                )
+            try:
+                self._verify_applied_configuration(
+                    current, expected_output=output_before
+                )
+            except Exception:
+                if output_before:
+                    self.emergency_off()
+                raise
+            self._output_states[channel] = output_before
+            self._update_aggregate_output_state()
+            return current.compliance_si
         try:
             session.write(f"{smu}.source.{field} = {updated.compliance_si:.12g}")
             self._check_errors()
@@ -987,6 +1024,58 @@ class KeithleyAdapter(DeviceAdapter):
         if request.measure_current_range_si is not None:
             commands.append(f"{smu}.measure.rangei = {request.measure_current_range_si:.12g}")
         return commands
+
+    def last_source_request(
+        self, channel: Literal["A", "B"]
+    ) -> KeithleySourceRequest:
+        """Return the request whose complete readback just passed validation."""
+
+        try:
+            return self._last_request[channel]
+        except KeyError as exc:
+            raise SafetyViolation(
+                "Configure and validate the Keithley channel before reading its applied request."
+            ) from exc
+
+    def assert_output_state(
+        self,
+        channel: Literal["A", "B"],
+        *,
+        expected_enabled: bool,
+    ) -> bool:
+        """Confirm output and source configuration immediately before use."""
+
+        if channel not in {"A", "B"}:
+            raise SafetyViolation("Keithley channel must be A or B.")
+        cached = self._output_states[channel]
+        try:
+            observed = self._output_is_enabled(channel)
+        except Exception:
+            self.emergency_off()
+            raise
+        if observed != cached:
+            self._fail_measurement_output_invariant(
+                f"Keithley {channel} OUTPUT changed outside the configured control path."
+            )
+        request = self.last_source_request(channel)
+        try:
+            self._verify_applied_configuration(
+                request, expected_output=expected_enabled
+            )
+        except Exception:
+            if observed:
+                self.emergency_off()
+            raise
+        if observed != expected_enabled:
+            if observed:
+                self.emergency_off()
+            raise DeviceError(
+                f"Keithley {channel} OUTPUT is {'ON' if observed else 'OFF'}; "
+                f"expected {'ON' if expected_enabled else 'OFF'}."
+            )
+        self._output_states[channel] = observed
+        self._update_aggregate_output_state()
+        return observed
 
     def set_output(self, channel: Literal["A", "B"], enabled: bool) -> bool:
         if channel not in {"A", "B"}:

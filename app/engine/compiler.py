@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from dataclasses import asdict, dataclass, is_dataclass
+from dataclasses import asdict, dataclass, field, is_dataclass, replace
 from collections.abc import Iterable
 import hashlib
 import json
@@ -30,18 +30,28 @@ from app.domain.quantities import (
 from app.recipes.models import Recipe, RecipeNode
 from app.recipes.parameter_registry import SWEEP_DIMENSIONS
 from app.recipes.sweep_points import generate_sweep_points
-from app.safety.keithley import KeithleySourceRequest, validate_keithley_source
+from app.safety.keithley import (
+    KeithleySourceRequest,
+    quantize_keithley_value,
+    validate_keithley_source,
+)
 from app.safety.anritsu import (
     validate_anritsu_advanced_spectrum,
     validate_anritsu_signal_generator,
     validate_anritsu_spectrum,
     validate_anritsu_trace_name,
 )
-from app.safety.rigol_current import validate_rigol_waveform
+from app.safety.rigol_current import (
+    quantize_rigol_frequency,
+    quantize_rigol_voltage,
+    validate_rigol_waveform,
+)
 from app.settings.models import StationSettings
 
 
 _REFERENCE_RE: Final = re.compile(r"^\$\{([A-Za-z0-9_.-]+)}$")
+
+
 @dataclass(frozen=True, slots=True)
 class PlanAction:
     node_id: str
@@ -61,6 +71,7 @@ class ExecutionPlan:
     required_devices: frozenset[str] = frozenset()
     total_spectra: int = 0
     safe_shutdown_actions: tuple[str, ...] = ()
+    recipe_dut_limits: dict[str, Any] = field(default_factory=dict)
 
 
 def required_devices_for_actions(actions: Iterable[PlanAction]) -> frozenset[str]:
@@ -145,6 +156,7 @@ class RecipeCompiler:
                 for item in actions
                 ],
                 "safe_shutdown_actions": safe_shutdown_actions,
+                "recipe_dut_limits": self._canonicalize(recipe.dut_limits),
             },
             sort_keys=True,
             separators=(",", ":"),
@@ -159,6 +171,7 @@ class RecipeCompiler:
             required_devices,
             total_spectra,
             safe_shutdown_actions,
+            dict(recipe.dut_limits),
         )
 
     @staticmethod
@@ -315,15 +328,193 @@ class RecipeCompiler:
             "rigol": "rigol.outputs_off",
             "anritsu": "anritsu.rf_off_and_abort",
         }
-        # Every recipe ends with a station-wide output-off attempt. A sweep
-        # must never leave an unrelated manual source energized merely because
-        # it was not referenced by the compiled action list.
-        for device in ("keithley", "rigol", "anritsu"):
+        # A normal measurement owns the complete station and therefore keeps
+        # the station-wide shutdown invariant.  A dry run never enables an
+        # output; it is intentionally scoped to the devices referenced by the
+        # plan so an Anritsu-only simulation does not require unrelated source
+        # sessions just to prove a state it is forbidden to energise.
+        shutdown_devices = (
+            tuple(device for device in ("keithley", "rigol", "anritsu") if device in required_devices)
+            if self._outputs_forced_off
+            else ("keithley", "rigol", "anritsu")
+        )
+        for device in shutdown_devices:
             action = required_actions[device]
             if action not in result:
                 result.append(action)
         result.append("storage.flush_checkpoint")
         return tuple(result)
+
+    @staticmethod
+    def _action_value(action: dict[str, Any], node_id: str, parameter_id: str) -> Any:
+        if "value" not in action:
+            raise ConfigurationError(
+                f"{node_id}: parameter action {parameter_id!r} requires a value."
+            )
+        return action["value"]
+
+    def _apply_keithley_set_actions(
+        self,
+        configure_data: dict[str, Any],
+        parameter_actions: list[dict[str, Any]],
+        node_id: str,
+    ) -> None:
+        """Make explicit ``Set`` rows authoritative over the snapshot.
+
+        The UI writes both a complete snapshot and the selected parameter rows.
+        Applying the rows here keeps hand-authored recipes deterministic too;
+        otherwise the visible action could be silently ignored by the compiler.
+        Sweep rows are applied later because their first point is the initial
+        configuration value.
+        """
+
+        target_for_parameter = {
+            "source.level": "level",
+            "source.compliance": "compliance",
+            "measurement.nplc": "nplc",
+            "measurement.settling_time": "settle_time",
+            "measurement.sense_mode": "sense_mode",
+            "source.range": "source_range",
+            "measurement.voltage_range": "measure_voltage_range",
+            "measurement.current_range": "measure_current_range",
+        }
+        for action in parameter_actions:
+            if str(action.get("mode", "")) != "set":
+                continue
+            parameter_id = str(action.get("parameter_id", ""))
+            target = target_for_parameter.get(parameter_id)
+            if target is None:
+                raise ConfigurationError(
+                    f"{node_id}: unsupported Keithley parameter action {parameter_id!r}."
+                )
+            configure_data[target] = self._action_value(action, node_id, parameter_id)
+
+    def _apply_rigol_set_actions(
+        self,
+        config_data: dict[str, Any],
+        parameter_actions: list[dict[str, Any]],
+        context: dict[str, Quantity],
+        node_id: str,
+    ) -> None:
+        """Apply explicit Rigol ``Set`` rows to the canonical HighL/LowL pair."""
+
+        for action in parameter_actions:
+            if str(action.get("mode", "")) != "set":
+                continue
+            parameter_id = str(action.get("parameter_id", ""))
+            value = self._action_value(action, node_id, parameter_id)
+            if parameter_id == "carrier.frequency":
+                config_data["frequency"] = value
+            elif parameter_id == "carrier.high_level":
+                config_data["high_level"] = value
+            elif parameter_id == "carrier.low_level":
+                config_data["low_level"] = value
+            elif parameter_id in {"carrier.amplitude", "carrier.offset"}:
+                high = self._resolve_quantity(
+                    config_data["high_level"], DIMENSION_VOLTAGE, context
+                ).si_value
+                low = self._resolve_quantity(
+                    config_data["low_level"], DIMENSION_VOLTAGE, context
+                ).si_value
+                amplitude = high - low
+                offset = (high + low) / 2.0
+                selected = self._resolve_quantity(value, DIMENSION_VOLTAGE, context).si_value
+                if parameter_id == "carrier.amplitude":
+                    amplitude = selected
+                else:
+                    offset = selected
+                config_data["high_level"] = Quantity(
+                    offset + amplitude / 2.0, DIMENSION_VOLTAGE
+                )
+                config_data["low_level"] = Quantity(
+                    offset - amplitude / 2.0, DIMENSION_VOLTAGE
+                )
+
+    def _quantize_keithley_request(
+        self, request: KeithleySourceRequest
+    ) -> KeithleySourceRequest:
+        """Return the exact setpoint representation used at the TSP boundary."""
+
+        if request.mode == "measure_only":
+            return request
+        level_dimension = (
+            DIMENSION_CURRENT if request.mode == "current" else DIMENSION_VOLTAGE
+        )
+        compliance_dimension = (
+            DIMENSION_VOLTAGE if request.mode == "current" else DIMENSION_CURRENT
+        )
+        source_range = (
+            request.source_range_si if not request.source_autorange else None
+        )
+        return replace(
+            request,
+            level_si=quantize_keithley_value(
+                request.level_si,
+                level_dimension,
+                requested_range_si=source_range,
+            ),
+            compliance_si=quantize_keithley_value(
+                request.compliance_si,
+                compliance_dimension,
+            ),
+        )
+
+    @staticmethod
+    def _quantize_rigol_config(config: RigolChannelConfig) -> RigolChannelConfig:
+        """Return the exact frequency/voltage representation sent by the adapter."""
+
+        return replace(
+            config,
+            frequency_hz=quantize_rigol_frequency(config.frequency_hz),
+            high_level_v=quantize_rigol_voltage(config.high_level_v),
+            low_level_v=quantize_rigol_voltage(config.low_level_v),
+        )
+
+    def _rigol_sweep_signature(
+        self, config: RigolChannelConfig, parameter: str | None
+    ) -> float | tuple[float, float] | None:
+        if parameter == "carrier.frequency":
+            return quantize_rigol_frequency(config.frequency_hz)
+        if parameter is None:
+            return None
+        applied = self._quantize_rigol_config(config)
+        return applied.high_level_v, applied.low_level_v
+
+    def _keithley_sweep_request(
+        self,
+        request: KeithleySourceRequest,
+        parameter: str,
+        value: Quantity,
+    ) -> KeithleySourceRequest:
+        candidate = request
+        if parameter == "source.level":
+            candidate = replace(candidate, level_si=value.si_value)
+        elif parameter == "source.compliance":
+            candidate = replace(candidate, compliance_si=value.si_value)
+        elif parameter == "measurement.settling_time":
+            candidate = replace(candidate, settle_time_s=value.si_value)
+        else:
+            raise ConfigurationError(
+                f"Unsupported Keithley sweep parameter {parameter!r}."
+            )
+        channel_settings = self._settings.keithley.safety.channels[candidate.channel]
+        validate_keithley_source(channel_settings, candidate)
+        applied = self._quantize_keithley_request(candidate)
+        validate_keithley_source(channel_settings, applied)
+        return applied
+
+    def _keithley_sweep_signature(
+        self,
+        request: KeithleySourceRequest,
+        parameter: str,
+        value: Quantity,
+    ) -> float:
+        applied = self._keithley_sweep_request(request, parameter, value)
+        if parameter == "source.level":
+            return applied.level_si
+        if parameter == "source.compliance":
+            return applied.compliance_si
+        return applied.settle_time_s
 
     @staticmethod
     def _canonicalize(value: Any) -> Any:
@@ -520,6 +711,13 @@ class RecipeCompiler:
                     f"{node.id}: unsupported Keithley parameter action "
                     f"{parameter_id!r}/{action_mode!r}."
                 )
+            if mode == "measure_only" and parameter_id in {
+                "source.level",
+                "source.compliance",
+            }:
+                raise ConfigurationError(
+                    f"{node.id}: measure_only cannot select {parameter_id}."
+                )
         sweep_actions = [
             action for action in parameter_actions if action.get("mode") == "sweep"
         ]
@@ -550,6 +748,7 @@ class RecipeCompiler:
                 "measure_current_range", "AUTO"
             ),
         }
+        self._apply_keithley_set_actions(configure_data, parameter_actions, node.id)
         sweep_values: tuple[Quantity, ...] = ()
         axis_target = f"keithley.{channel}.{mode}"
         sweep_parameter = (
@@ -635,6 +834,9 @@ class RecipeCompiler:
             configure_node, configure_context, is_finally=False
         )
         configured_request = configure_action.payload["request"]
+        applied_configured_request = self._quantize_keithley_request(
+            configured_request
+        )
         if output_policy == "continue":
             self._append_output_continuity_assertion(
                 actions,
@@ -643,18 +845,18 @@ class RecipeCompiler:
                 channel=channel,
                 context=context,
                 expected_state={
-                    "mode": configured_request.mode,
-                    "source_level_si": configured_request.level_si,
-                    "compliance_si": configured_request.compliance_si,
-                    "nplc": configured_request.nplc,
-                    "settle_time_s": configured_request.settle_time_s,
-                    "sense_mode": configured_request.sense_mode,
-                    "source_autorange": configured_request.source_autorange,
-                    "source_range_si": configured_request.source_range_si,
-                    "measure_voltage_autorange": configured_request.measure_voltage_autorange,
-                    "measure_voltage_range_si": configured_request.measure_voltage_range_si,
-                    "measure_current_autorange": configured_request.measure_current_autorange,
-                    "measure_current_range_si": configured_request.measure_current_range_si,
+                    "mode": applied_configured_request.mode,
+                    "source_level_si": applied_configured_request.level_si,
+                    "compliance_si": applied_configured_request.compliance_si,
+                    "nplc": applied_configured_request.nplc,
+                    "settle_time_s": applied_configured_request.settle_time_s,
+                    "sense_mode": applied_configured_request.sense_mode,
+                    "source_autorange": applied_configured_request.source_autorange,
+                    "source_range_si": applied_configured_request.source_range_si,
+                    "measure_voltage_autorange": applied_configured_request.measure_voltage_autorange,
+                    "measure_voltage_range_si": applied_configured_request.measure_voltage_range_si,
+                    "measure_current_autorange": applied_configured_request.measure_current_autorange,
+                    "measure_current_range_si": applied_configured_request.measure_current_range_si,
                 },
             )
         else:
@@ -685,13 +887,19 @@ class RecipeCompiler:
                 )
             )
 
-        point_values = sweep_values or (None,)
-        for value in point_values:
+        previous_applied_signature: float | None = (
+            self._keithley_sweep_signature(
+                configured_request, sweep_parameter, sweep_values[0]
+            )
+            if sweep_values and sweep_parameter is not None
+            else None
+        )
+        for point_index, value in enumerate(sweep_values or (None,)):
             self._check_cancelled()
             nested = dict(context)
             if value is not None:
                 nested[axis_target] = value
-                if output_policy == "continue":
+                if output_policy == "continue" and point_index > 0:
                     self._append_output_continuity_assertion(
                         actions,
                         node_id=f"{node.id}.point",
@@ -699,36 +907,43 @@ class RecipeCompiler:
                         channel=channel,
                         context=nested,
                     )
+                update_action: PlanAction | None = None
                 if sweep_parameter == "source.level":
-                    actions.append(
-                        self._compile_action(
-                            RecipeNode(
-                                f"{node.id}.update-level",
-                                "update_keithley_level",
-                                {
-                                    "channel": channel,
-                                    "mode": mode,
-                                    "level": value,
-                                },
-                            ),
-                            nested,
-                            is_finally=False,
-                        )
+                    update_action = self._compile_action(
+                        RecipeNode(
+                            f"{node.id}.update-level",
+                            "update_keithley_level",
+                            {
+                                "channel": channel,
+                                "mode": mode,
+                                "level": value,
+                            },
+                        ),
+                        nested,
+                        is_finally=False,
                     )
                 elif sweep_parameter == "source.compliance":
                     point_config = dict(configure_data)
                     point_config["compliance"] = value
-                    actions.append(
-                        self._compile_action(
-                            RecipeNode(
-                                f"{node.id}.update-compliance",
-                                "update_keithley_compliance",
-                                point_config,
-                            ),
-                            nested,
-                            is_finally=False,
-                        )
+                    update_action = self._compile_action(
+                        RecipeNode(
+                            f"{node.id}.update-compliance",
+                            "update_keithley_compliance",
+                            point_config,
+                        ),
+                        nested,
+                        is_finally=False,
                     )
+                if update_action is not None:
+                    applied_signature = self._keithley_sweep_signature(
+                        configured_request, sweep_parameter, value
+                    )
+                    if (
+                        point_index > 0
+                        and applied_signature != previous_applied_signature
+                    ):
+                        actions.append(update_action)
+                    previous_applied_signature = applied_signature
             settle_value = (
                 value
                 if sweep_parameter == "measurement.settling_time"
@@ -861,6 +1076,7 @@ class RecipeCompiler:
                     f"{node.id}: unsupported Rigol parameter action "
                     f"{parameter_id!r}/{action_mode!r}."
                 )
+        self._apply_rigol_set_actions(config_data, parameter_actions, context, node.id)
         sweep_actions = [
             action for action in parameter_actions if action.get("mode") == "sweep"
         ]
@@ -945,6 +1161,7 @@ class RecipeCompiler:
         )
         if output_policy == "continue":
             config = configure_action.payload["config"]
+            applied_config = self._quantize_rigol_config(config)
             output_config = output_path_action.payload["config"]
             self._append_output_continuity_assertion(
                 actions,
@@ -953,17 +1170,17 @@ class RecipeCompiler:
                 channel=str(channel),
                 context=context,
                 expected_state={
-                    "frequency_hz": config.frequency_hz,
-                    "high_level_v": config.high_level_v,
-                    "low_level_v": config.low_level_v,
-                    "output_load": config.output_load,
-                    "waveform": config.waveform,
-                    "phase_deg": config.phase_deg,
-                    "square_duty_percent": config.square_duty_percent,
-                    "ramp_symmetry_percent": config.ramp_symmetry_percent,
-                    "pulse_width_s": config.pulse_width_s,
-                    "pulse_leading_s": config.pulse_leading_s,
-                    "pulse_trailing_s": config.pulse_trailing_s,
+                    "frequency_hz": applied_config.frequency_hz,
+                    "high_level_v": applied_config.high_level_v,
+                    "low_level_v": applied_config.low_level_v,
+                    "output_load": applied_config.output_load,
+                    "waveform": applied_config.waveform,
+                    "phase_deg": applied_config.phase_deg,
+                    "square_duty_percent": applied_config.square_duty_percent,
+                    "ramp_symmetry_percent": applied_config.ramp_symmetry_percent,
+                    "pulse_width_s": applied_config.pulse_width_s,
+                    "pulse_leading_s": applied_config.pulse_leading_s,
+                    "pulse_trailing_s": applied_config.pulse_trailing_s,
                     "output_path": {
                         "polarity": output_config.polarity,
                         "mode": output_config.mode,
@@ -1004,12 +1221,15 @@ class RecipeCompiler:
                 )
             )
 
-        for value in sweep_values or (None,):
+        previous_rigol_signature = self._rigol_sweep_signature(
+            configure_action.payload["config"], sweep_parameter
+        )
+        for point_index, value in enumerate(sweep_values or (None,)):
             self._check_cancelled()
             nested = dict(context)
             if value is not None and axis_target is not None:
                 nested[axis_target] = value
-                if output_policy == "continue":
+                if output_policy == "continue" and point_index > 0:
                     self._append_output_continuity_assertion(
                         actions,
                         node_id=f"{node.id}.point",
@@ -1060,11 +1280,25 @@ class RecipeCompiler:
                         "update_rigol_levels",
                         point_config,
                     )
-                actions.append(
-                    self._compile_action(
-                        update_node, nested, is_finally=False
-                    )
+                update_action = self._compile_action(
+                    update_node, nested, is_finally=False
                 )
+                if sweep_parameter == "carrier.frequency":
+                    applied_signature = quantize_rigol_frequency(
+                        update_action.payload["frequency_hz"]
+                    )
+                else:
+                    candidate_config = replace(
+                        configure_action.payload["config"],
+                        high_level_v=update_action.payload["high_level_v"],
+                        low_level_v=update_action.payload["low_level_v"],
+                    )
+                    applied_signature = self._rigol_sweep_signature(
+                        candidate_config, sweep_parameter
+                    )
+                if point_index > 0 and applied_signature != previous_rigol_signature:
+                    actions.append(update_action)
+                previous_rigol_signature = applied_signature
             for child in node.children:
                 self._visit(child, nested, actions, is_finally=False)
 
@@ -1984,6 +2218,16 @@ class RecipeCompiler:
             low_level=config.low_level_v,
             output_load=config.output_load,
         )
+        applied = self._quantize_rigol_config(config)
+        validate_rigol_waveform(
+            channel=settings,
+            safety=self._settings.rigol.safety,
+            waveform=applied.waveform,
+            frequency=applied.frequency_hz,
+            high_level=applied.high_level_v,
+            low_level=applied.low_level_v,
+            output_load=applied.output_load,
+        )
         return {"config": config}
 
     def _compile_keithley(self, data: dict[str, Any], node_id: str) -> dict[str, Any]:
@@ -2011,6 +2255,10 @@ class RecipeCompiler:
             measure_current_range_si=self._optional_quantity(data, "measure_current_range", DIMENSION_CURRENT),
         )
         validate_keithley_source(self._settings.keithley.safety.channels[channel], request)
+        applied = self._quantize_keithley_request(request)
+        validate_keithley_source(
+            self._settings.keithley.safety.channels[channel], applied
+        )
         return {"request": request}
 
     def _compile_anritsu(self, data: dict[str, Any]) -> dict[str, Any]:

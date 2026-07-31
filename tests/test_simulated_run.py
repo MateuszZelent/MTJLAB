@@ -35,6 +35,7 @@ from app.storage.hdf5_reader import Hdf5RunReader
 from app.storage.pythat_reader import read_pythat_run_data
 from app.storage.pythat_bridge import open_measurement_tree
 from app.settings.models import StationSettings
+from app.safety.rigol_current import quantize_rigol_frequency
 from tests.helpers import loaded_settings
 
 
@@ -392,8 +393,10 @@ root:
             for index, point in enumerate(points):
                 self.assertAlmostEqual(
                     point.setpoints["rigol.1.frequency"],
-                    100e3 + index * (30e6 - 100e3) / 9,
-                    places=6,
+                    float(
+                        f"{quantize_rigol_frequency(100e3 + index * (30e6 - 100e3) / 9):.12g}"
+                    ),
+                    places=9,
                 )
             for index in range(10):
                 spectrum = Hdf5RunReader.spectrum(path, index)

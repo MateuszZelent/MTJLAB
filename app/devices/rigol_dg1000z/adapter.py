@@ -20,6 +20,7 @@ from app.domain.models import DeviceCapabilities, DeviceIdentity, DeviceState
 from app.domain.quantities import DIMENSION_TIME, parse_quantity
 from app.safety.rigol_current import (
     RigolCurrentEstimate,
+    RIGOL_DG1000Z_FREQUENCY_RESOLUTION_HZ,
     quantize_rigol_frequency,
     quantize_rigol_voltage,
     validate_rigol_waveform,
@@ -590,8 +591,8 @@ class RigolAdapter(DeviceAdapter):
                 session.write(f"{prefix}:PHAS {config.phase_deg:.12g}")
             self._write_shape_parameters(prefix, waveform, config)
         self._check_errors()
-        self._verify_applied_configuration(config)
-        self._last_config[config.channel] = config
+        applied = self._verify_applied_configuration(config)
+        self._last_config[config.channel] = applied
         self._update_aggregate_output_state()
         return estimate
 
@@ -625,6 +626,13 @@ class RigolAdapter(DeviceAdapter):
         output_before = self._parse_output_state(
             session.query(f":OUTP{channel}?"), channel=channel
         )
+        if output_before != self._output_states[channel]:
+            self._fail_live_setpoint_update(
+                output_was_on=output_before,
+                cause=DeviceError(
+                    f"Rigol CH{channel} OUTPUT changed before a frequency update."
+                ),
+            )
         try:
             self._verify_applied_configuration(
                 config, expected_output=output_before
@@ -635,6 +643,11 @@ class RigolAdapter(DeviceAdapter):
             )
         if output_before:
             self._validate_active_quick_update(channel, updated)
+        if self._same_frequency_readback(config.frequency_hz, updated.frequency_hz):
+            self._last_config[channel] = config
+            self._output_states[channel] = output_before
+            self._update_aggregate_output_state()
+            return config.frequency_hz
         self._last_config.pop(channel, None)
         try:
             session.write(f"{prefix}:FREQ {self._format_wire_number(updated.frequency_hz)}")
@@ -648,14 +661,14 @@ class RigolAdapter(DeviceAdapter):
             )
             if output_after != output_before:
                 raise DeviceError("Rigol OUTPUT state changed during a frequency update.")
-            if not self._same_number(actual, updated.frequency_hz, absolute=1e-3):
+            if not self._same_frequency_readback(actual, updated.frequency_hz):
                 raise DeviceError(
                     f"Rigol frequency readback {actual:.9g} Hz does not match "
                     f"{updated.frequency_hz:.9g} Hz."
                 )
         except Exception as exc:
             self._fail_live_setpoint_update(output_was_on=output_before, cause=exc)
-        self._last_config[channel] = updated
+        self._last_config[channel] = replace(updated, frequency_hz=actual)
         self._output_states[channel] = output_after
         self._update_aggregate_output_state()
         return actual
@@ -705,6 +718,27 @@ class RigolAdapter(DeviceAdapter):
             applied = self.last_channel_config(channel)
             return applied.high_level_v, applied.low_level_v
         if not high_changed and not low_changed:
+            session = self._require_session()
+            output_before = self._parse_output_state(
+                session.query(f":OUTP{channel}?"), channel=channel
+            )
+            if output_before != self._output_states[channel]:
+                self._fail_live_setpoint_update(
+                    output_was_on=output_before,
+                    cause=DeviceError(
+                        f"Rigol CH{channel} OUTPUT changed before a level update."
+                    ),
+                )
+            try:
+                self._verify_applied_configuration(
+                    config, expected_output=output_before
+                )
+            except Exception as exc:
+                self._fail_live_setpoint_update(
+                    output_was_on=output_before, cause=exc
+                )
+            self._output_states[channel] = output_before
+            self._update_aggregate_output_state()
             return config.high_level_v, config.low_level_v
         old_offset = (config.high_level_v + config.low_level_v) / 2.0
         new_offset = (updated.high_level_v + updated.low_level_v) / 2.0
@@ -764,7 +798,11 @@ class RigolAdapter(DeviceAdapter):
                 )
         except Exception as exc:
             self._fail_live_setpoint_update(output_was_on=output_before, cause=exc)
-        self._last_config[channel] = updated
+        self._last_config[channel] = replace(
+            updated,
+            high_level_v=actual_high,
+            low_level_v=actual_low,
+        )
         self._output_states[channel] = output_after
         self._update_aggregate_output_state()
         return actual_high, actual_low
@@ -844,7 +882,11 @@ class RigolAdapter(DeviceAdapter):
                     )
             except Exception as exc:
                 self._fail_live_setpoint_update(output_was_on=output_before, cause=exc)
-            self._last_config[channel] = updated
+            self._last_config[channel] = replace(
+                updated,
+                high_level_v=actual_offset,
+                low_level_v=actual_offset,
+            )
             self._output_states[channel] = output_after
             self._update_aggregate_output_state()
             return actual_offset
@@ -968,7 +1010,11 @@ class RigolAdapter(DeviceAdapter):
                 )
         except Exception as exc:
             self._fail_live_setpoint_update(output_was_on=output_before, cause=exc)
-        self._last_config[channel] = updated
+        self._last_config[channel] = replace(
+            updated,
+            high_level_v=actual_high,
+            low_level_v=actual_low,
+        )
         self._output_states[channel] = output_after
         self._update_aggregate_output_state()
         if command_suffix == "VOLT":
@@ -1029,6 +1075,47 @@ class RigolAdapter(DeviceAdapter):
                 "Configure and validate the Rigol channel before changing its level."
             ) from exc
 
+    def assert_output_state(self, channel: int, *, expected_enabled: bool) -> bool:
+        """Confirm the selected output and its complete carrier state."""
+
+        if channel not in {1, 2}:
+            raise SafetyViolation("Rigol channel number must be 1 or 2.")
+        cached = dict(self._output_states)
+        try:
+            observed_states = self._read_output_states()
+        except Exception:
+            self.emergency_off()
+            raise
+        if observed_states != cached:
+            self.emergency_off()
+            raise DeviceError(
+                "Rigol OUTPUT changed outside the configured control path; "
+                "both outputs were forced OFF."
+            )
+        config = self.last_channel_config(channel)
+        try:
+            self._verify_applied_configuration(
+                config, expected_output=expected_enabled
+            )
+            if expected_enabled:
+                output_config = self._last_output_config.get(channel)
+                if output_config is not None:
+                    self._verify_output_configuration(output_config)
+        except Exception:
+            if any(observed_states.values()):
+                self.emergency_off()
+            raise
+        actual = observed_states[channel]
+        if actual != expected_enabled:
+            if actual:
+                self.emergency_off()
+            raise DeviceError(
+                f"Rigol CH{channel} OUTPUT is {'ON' if actual else 'OFF'}; "
+                f"expected {'ON' if expected_enabled else 'OFF'}."
+            )
+        self._update_aggregate_output_state()
+        return actual
+
     def quick_control_snapshot(self) -> dict[str, float]:
         """Return the last configuration verified against instrument readback."""
 
@@ -1071,7 +1158,7 @@ class RigolAdapter(DeviceAdapter):
         expected: RigolChannelConfig,
         *,
         expected_output: bool = False,
-    ) -> None:
+    ) -> RigolChannelConfig:
         """Reject silent quantisation or clamping after every write transaction.
 
         The DG1032Z may enforce a minimum Vpp and therefore alter LowL/HighL.
@@ -1094,12 +1181,12 @@ class RigolAdapter(DeviceAdapter):
                 float(session.query(f"{prefix}:VOLT:OFFS?")) if is_dc else None
             )
             actual_high = (
-                expected.high_level_v
+                actual_dc_level
                 if is_dc
                 else float(session.query(f"{prefix}:VOLT:HIGH?"))
             )
             actual_low = (
-                expected.low_level_v
+                actual_dc_level
                 if is_dc
                 else float(session.query(f"{prefix}:VOLT:LOW?"))
             )
@@ -1126,7 +1213,9 @@ class RigolAdapter(DeviceAdapter):
             mismatches.append(f"FUNC {actual_waveform} ≠ {expected.waveform.upper()}")
         if actual_arb_mode is not None and actual_arb_mode not in {"FREQ", "FERQ"}:
             mismatches.append(f"ARB:MODE {actual_arb_mode} != FREQ")
-        if expected.waveform.upper() not in {"DC", "NOIS"} and not self._same_number(actual_frequency, expected.frequency_hz, absolute=1e-3):
+        if expected.waveform.upper() not in {"DC", "NOIS"} and not self._same_frequency_readback(
+            actual_frequency, expected.frequency_hz
+        ):
             mismatches.append(f"FREQ {actual_frequency:.9g} ≠ {expected.frequency_hz:.9g} Hz")
         if is_dc and actual_dc_level is not None and not self._same_number(
             actual_dc_level, expected.high_level_v, absolute=1e-6
@@ -1208,10 +1297,38 @@ class RigolAdapter(DeviceAdapter):
             raise DeviceError(
                 description + "; ".join(mismatches)
             )
+        return replace(
+            expected,
+            frequency_hz=actual_frequency,
+            high_level_v=actual_high,
+            low_level_v=actual_low,
+            phase_deg=actual_phase,
+        )
 
     @staticmethod
     def _same_number(actual: float, expected: float, *, absolute: float) -> bool:
         return abs(actual - expected) <= max(absolute, abs(expected) * 1e-8)
+
+    @staticmethod
+    def _same_frequency_readback(actual: float, expected: float) -> bool:
+        """Allow decimal query formatting without hiding a frequency clamp."""
+
+        if not math.isfinite(actual) or not math.isfinite(expected):
+            return False
+        magnitude = abs(expected)
+        if magnitude == 0:
+            formatted_step = 10.0**-11
+        else:
+            # Simulators and some firmware revisions return about 12
+            # significant digits even though the programming resolution is
+            # 1 uHz. Accept that display-format rounding, but no larger clamp.
+            formatted_step = 10.0 ** (math.floor(math.log10(magnitude)) - 11)
+        float_rounding_margin = 4.0 * max(math.ulp(actual), math.ulp(expected))
+        tolerance = max(
+            RIGOL_DG1000Z_FREQUENCY_RESOLUTION_HZ / 2.0,
+            formatted_step / 2.0 + float_rounding_margin,
+        )
+        return abs(actual - expected) <= tolerance
 
     @staticmethod
     def _format_wire_number(value: float) -> str:

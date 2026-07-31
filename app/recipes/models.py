@@ -72,6 +72,7 @@ class Recipe:
     root: RecipeNode
     finally_nodes: tuple[RecipeNode, ...]
     source_text: str
+    dut_limits: dict[str, Any] = field(default_factory=dict)
 
 
 def _require_mapping(value: object, where: str) -> dict[str, Any]:
@@ -208,7 +209,12 @@ def parse_recipe_text(source: str, *, origin: str = "<memory>") -> Recipe:
         raise ConfigurationError("recipe.finally must be a list.")
     finally_nodes = tuple(_parse_node(item, f"recipe.finally[{index}]") for index, item in enumerate(finally_raw))
     _assert_unique_node_ids((root, *finally_nodes))
-    return Recipe(1, name, root, finally_nodes, source)
+    dut_limits = root_raw.get("dut_limits", {})
+    if dut_limits is None:
+        dut_limits = {}
+    if not isinstance(dut_limits, dict):
+        raise ConfigurationError("recipe.dut_limits must be a YAML mapping.")
+    return Recipe(1, name, root, finally_nodes, source, dict(dut_limits))
 
 
 def _assert_unique_node_ids(nodes: tuple[RecipeNode, ...]) -> None:

@@ -193,11 +193,21 @@ class RunWorker(QObject):
                     )
                 lakeshore = candidate
                 devices["lakeshore_gaussmeter"] = lakeshore
-            # A recipe owns the complete station for its lifetime. Connecting
-            # every configured device lets the final emergency-off sequence
-            # confirm that *all* outputs are disabled after success, stop or
-            # any fault, not just the devices named by the recipe.
-            required = set(devices)
+            # Normal measurements retain the station-wide safe-shutdown
+            # contract. A dry run cannot enable any output, so it is scoped to
+            # the immutable plan dependency set; this keeps an Anritsu-only
+            # simulation independent of unrelated source sessions.
+            missing = required_by_plan - set(devices)
+            if missing:
+                raise RuntimeError(
+                    "The execution plan references unavailable devices: "
+                    + ", ".join(sorted(missing))
+                )
+            required = (
+                (required_by_plan or set(devices))
+                if self._outputs_forced_off
+                else set(devices)
+            )
             identities = {name: devices[name].connect().idn for name in sorted(required)}
             settings_source = self._settings_snapshot()
             if self._recovery is None:
@@ -341,6 +351,15 @@ class RunWorker(QObject):
             **metadata,
             "execution_mode": self._execution_mode.value,
             "outputs_forced_off": self._outputs_forced_off,
+            "output_guard_devices": (
+                tuple(
+                    name
+                    for name in ("keithley", "rigol", "anritsu")
+                    if name in required_devices
+                )
+                if self._outputs_forced_off and required_devices
+                else ("keithley", "rigol", "anritsu")
+            ),
         }
 
     # These methods intentionally only set thread-safe Event flags on

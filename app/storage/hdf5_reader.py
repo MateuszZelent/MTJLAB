@@ -328,6 +328,64 @@ class Hdf5RunReader:
             return tuple(result)
 
     @staticmethod
+    def reference(
+        path: str | Path,
+        index: int = 0,
+        *,
+        max_points: int | None = None,
+    ) -> StoredReference | None:
+        """Read one immutable reference spectrum, optionally decimated.
+
+        The browser uses this narrow accessor when an operator asks to compare
+        a checkpoint with its stored reference.  Keeping the lookup lazy avoids
+        loading every reference from a large run merely to render one plot.
+        ``/reference`` is retained as the legacy alias for reference ``0``.
+        """
+
+        if index < 0:
+            raise ExecutionError("Reference index cannot be negative.")
+        with Hdf5RunReader._open(path) as file:
+            container = file.get("references")
+            group = None
+            if container is not None and str(index) in container:
+                group = container[str(index)]
+            elif index == 0:
+                group = file.get("reference")
+            if group is None:
+                return None
+            try:
+                frequencies = tuple(float(value) for value in group["frequency_hz"][:])
+                powers = tuple(float(value) for value in group["power_dbm"][:])
+            except KeyError as exc:
+                raise ExecutionError(
+                    f"Reference {index} does not contain a complete spectrum."
+                ) from exc
+            if len(frequencies) != len(powers) or not frequencies:
+                raise ExecutionError(
+                    f"Reference {index} has a mismatched or empty point count."
+                )
+            source_count = len(frequencies)
+            if max_points is not None and max_points > 0 and source_count > max_points:
+                selected = peak_preserving_indices(powers, max_points)
+                frequencies = tuple(frequencies[item] for item in selected)
+                powers = tuple(powers[item] for item in selected)
+            return StoredReference(
+                index=index,
+                trace_name=Hdf5RunReader._attribute_text(
+                    group.attrs.get("trace_name")
+                )
+                or "TRAC1",
+                acquired_at_utc=Hdf5RunReader._attribute_text(
+                    group.attrs.get("acquired_at_utc")
+                ),
+                kind=Hdf5RunReader._attribute_text(group.attrs.get("kind"))
+                or "single",
+                average_count=int(group.attrs.get("average_count", 1)),
+                frequencies_hz=frequencies,
+                powers_dbm=powers,
+            )
+
+    @staticmethod
     def _events(file: Any) -> tuple[StoredEvent, ...]:
         group = file.get("events")
         if group is None:
