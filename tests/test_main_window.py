@@ -900,6 +900,83 @@ class MainWindowTests(unittest.TestCase):
             window.close()
             self.application.processEvents()
 
+    def test_sweep_automatically_hands_off_connected_manual_sessions(self) -> None:
+        window = MainWindow(".config/settings.yml", simulation=True)
+        try:
+            plan = ExecutionPlan(
+                recipe_name="automatic-session-handoff",
+                actions=(),
+                total_points=0,
+                sha256="automatic-session-handoff",
+                recipe_source=(
+                    "schema_version: 1\nname: automatic-session-handoff\n"
+                ),
+            )
+            window._run_controller.start = Mock()
+            for controller in window._controllers.values():
+                controller.call = Mock()
+            window._device_states["keithley"] = "output_off"
+            window._device_states["rigol"] = "verified"
+
+            with patch(
+                "app.ui.shell.main_window.QMessageBox.warning"
+            ) as warning:
+                window._start_run(plan, True)
+
+            warning.assert_not_called()
+            window._controllers["keithley"].call.assert_called_once_with(
+                "disconnect"
+            )
+            window._controllers["rigol"].call.assert_called_once_with(
+                "disconnect"
+            )
+            window._run_controller.start.assert_not_called()
+
+            window._set_device_state("keithley", "disconnected")
+            self.application.processEvents()
+            window._run_controller.start.assert_not_called()
+
+            window._set_device_state("rigol", "disconnected")
+            self.application.processEvents()
+
+            window._run_controller.start.assert_called_once()
+            self.assertIsNone(window._pending_run_handoff)
+        finally:
+            window.close()
+            self.application.processEvents()
+
+    def test_sweep_aborts_when_manual_session_handoff_fails(self) -> None:
+        window = MainWindow(".config/settings.yml", simulation=True)
+        try:
+            plan = ExecutionPlan(
+                recipe_name="failed-session-handoff",
+                actions=(),
+                total_points=0,
+                sha256="failed-session-handoff",
+                recipe_source="schema_version: 1\nname: failed-session-handoff\n",
+            )
+            window._run_controller.start = Mock()
+            window._controllers["keithley"].call = Mock()
+            window._device_states["keithley"] = "verified"
+            window._start_run(plan, True)
+
+            with patch(
+                "app.ui.shell.main_window.QMessageBox.critical"
+            ) as critical:
+                window._device_error(
+                    "keithley",
+                    "disconnect",
+                    "injected disconnect failure",
+                )
+
+            critical.assert_called_once()
+            self.assertIn("not started", critical.call_args.args[1].lower())
+            self.assertIsNone(window._pending_run_handoff)
+            window._run_controller.start.assert_not_called()
+        finally:
+            window.close()
+            self.application.processEvents()
+
     def test_hardware_run_asks_before_connecting_required_sweep_devices(self) -> None:
         window = MainWindow(".config/settings.yml", simulation=True)
         try:
@@ -1994,6 +2071,18 @@ class MainWindowTests(unittest.TestCase):
         try:
             keithley = window.keithley_page
             keithley._controller.call = Mock()
+            safety = keithley._station_settings.keithley.safety.model_copy(
+                update={"output_off_mode": "high_impedance"}
+            )
+            keithley_settings = keithley._station_settings.keithley.model_copy(
+                update={"safety": safety}
+            )
+            devices = keithley._station_settings.devices.model_copy(
+                update={"keithley": keithley_settings}
+            )
+            keithley._station_settings = keithley._station_settings.model_copy(
+                update={"devices": devices}
+            )
             keithley._device_state_changed("verified")
 
             self.assertTrue(keithley.live_channel_a.isEnabled())
@@ -2196,6 +2285,44 @@ class MainWindowTests(unittest.TestCase):
                 keithley.channel_cards["A"]["dut_isolation"].isEnabled()
             )
             self.assertFalse(keithley.channel_cards["B"]["measure"].isEnabled())
+        finally:
+            window.close()
+            self.application.processEvents()
+
+    def test_keithley_dut_modal_blocks_measurement_dispatch(self) -> None:
+        window = MainWindow(".config/settings.yml", simulation=True)
+        try:
+            keithley = window.keithley_page
+            keithley._controller.call = Mock()
+            keithley._device_state_changed("verified")
+            keithley.request_dut_isolation("A")
+
+            def try_measure_during_modal(*_args: object, **_kwargs: object) -> object:
+                keithley.request_measurement("A")
+                return QMessageBox.StandardButton.Ok
+
+            with patch(
+                "app.devices.keithley_2600.ui.page.QMessageBox.information",
+                side_effect=try_measure_during_modal,
+            ):
+                keithley._result(
+                    "set_dut_output_off_mode",
+                    KeithleyOutputOffModeResult("A", "high_impedance", False),
+                )
+
+            self.assertEqual(
+                [call.args for call in keithley._controller.call.call_args_list],
+                [
+                    (
+                        "set_dut_output_off_mode",
+                        ("A", "high_impedance"),
+                    ),
+                    (
+                        "set_dut_output_off_mode",
+                        ("A", "normal"),
+                    ),
+                ],
+            )
         finally:
             window.close()
             self.application.processEvents()

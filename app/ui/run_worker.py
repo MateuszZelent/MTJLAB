@@ -30,6 +30,43 @@ from app.settings.models import StationSettings
 from app.storage import Hdf5RunWriter
 
 
+def sanitize_run_file_stem(raw_name: object, *, fallback: str = "run") -> str:
+    """Convert a user- or recipe-provided name into a safe file stem."""
+
+    candidate = Path(str(raw_name or "").strip()).name
+    if candidate.lower().endswith((".h5", ".hdf5")):
+        candidate = Path(candidate).stem
+    safe_name = re.sub(r"[^A-Za-z0-9_.-]+", "_", candidate).strip("_")
+    return safe_name or fallback
+
+
+def planned_run_paths(
+    settings: StationSettings,
+    recipe_name: str,
+    *,
+    output_dir_override: str | Path | None = None,
+    file_stem_override: str | None = None,
+    timestamp: datetime | None = None,
+) -> tuple[Path, Path | None]:
+    """Return the HDF5 and optional CSV path for a new run."""
+
+    raw_output_dir = output_dir_override or settings.storage.get(
+        "output_directory", "./measurements"
+    )
+    output_dir = Path(str(raw_output_dir)).expanduser()
+    base_name = sanitize_run_file_stem(file_stem_override or recipe_name)
+    run_timestamp = (timestamp or datetime.now(timezone.utc)).strftime(
+        "%Y%m%dT%H%M%S.%fZ"
+    )
+    run_stem = f"{run_timestamp}_{base_name}"
+    csv_path = (
+        output_dir / f"{run_stem}.csv"
+        if settings.storage.get("write_csv_summary")
+        else None
+    )
+    return output_dir / f"{run_stem}.h5", csv_path
+
+
 def serialize_settings_snapshot(
     settings: StationSettings,
     settings_path: Path,
@@ -62,6 +99,8 @@ class RunWorker(QObject):
         simulation_seed: int | None = None,
         outputs_forced_off: bool = False,
         execution_mode: str = ExecutionMode.MEASUREMENT.value,
+        output_dir_override: str | None = None,
+        file_stem_override: str | None = None,
         parent: QObject | None = None,
     ) -> None:
         super().__init__(parent)
@@ -73,6 +112,8 @@ class RunWorker(QObject):
         self._operator_context = dict(operator_context or {})
         self._simulation_seed = simulation_seed
         self._execution_mode = ExecutionMode.coerce(execution_mode)
+        self._output_dir_override = output_dir_override
+        self._file_stem_override = file_stem_override
         if outputs_forced_off:
             self._execution_mode = ExecutionMode.DRY_RUN
         self._outputs_forced_off = self._execution_mode is ExecutionMode.DRY_RUN
@@ -158,17 +199,16 @@ class RunWorker(QObject):
             # any fault, not just the devices named by the recipe.
             required = set(devices)
             identities = {name: devices[name].connect().idn for name in sorted(required)}
-            output_dir = Path(str(self._settings.storage.get("output_directory", "./measurements")))
             settings_source = self._settings_snapshot()
             if self._recovery is None:
-                safe_name = re.sub(r"[^A-Za-z0-9_.-]+", "_", self._plan.recipe_name).strip("_") or "run"
-                # Microseconds make accidental collisions across fast repeated
-                # runs practically impossible; the writer additionally refuses
-                # to overwrite an existing artefact.
-                timestamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S.%fZ")
-                run_stem = f"{timestamp}_{safe_name}"
+                result_path, csv_summary_path = planned_run_paths(
+                    self._settings,
+                    self._plan.recipe_name,
+                    output_dir_override=self._output_dir_override,
+                    file_stem_override=self._file_stem_override,
+                )
                 writer = Hdf5RunWriter(
-                    output_dir / f"{run_stem}.h5",
+                    result_path,
                     recipe_source=self._plan.recipe_source,
                     settings_source=settings_source,
                     plan_hash=self._plan.sha256,
@@ -181,7 +221,7 @@ class RunWorker(QObject):
                     simulation_metadata=self._execution_metadata(
                         simulation_context, required
                     ),
-                    csv_summary_path=output_dir / f"{run_stem}.csv" if self._settings.storage.get("write_csv_summary") else None,
+                    csv_summary_path=csv_summary_path,
                 )
             else:
                 writer = Hdf5RunWriter.resume(
@@ -406,6 +446,8 @@ class RunController(QObject):
         operator_context: dict[str, object] | None = None,
         outputs_forced_off: bool = False,
         execution_mode: str = ExecutionMode.MEASUREMENT.value,
+        output_dir_override: str | None = None,
+        file_stem_override: str | None = None,
     ) -> None:
         if self.running:
             raise RuntimeError("A measurement is already running.")
@@ -429,6 +471,8 @@ class RunController(QObject):
             operator_context=operator_context,
             outputs_forced_off=self._run_outputs_forced_off,
             execution_mode=selected_mode.value,
+            output_dir_override=output_dir_override,
+            file_stem_override=file_stem_override,
         )
         self._worker.moveToThread(self._thread)
         self._thread.started.connect(self._worker.run)

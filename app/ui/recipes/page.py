@@ -92,6 +92,7 @@ from app.devices.rigol_dg1000z.ui.recipe_extension import (
     RigolPage,
 )
 from app.ui.recipes.sweep_editor import SweepGeneratorDialog
+from app.ui.run_worker import planned_run_paths
 from app.ui.widgets import LimitEditDialog, LimitField, SpectrumPlotWidget
 from app.ui.workers import RecipePreflightWorker
 
@@ -232,7 +233,7 @@ def set_keithley_shutdown_ramps_in_recipe(
 
 class RecipePage(QWidget):
     status = Signal(str)
-    run_requested = Signal(object, bool, str)
+    run_requested = Signal(object, bool, str, str, str)
     plan_preflight_changed = Signal(object)
     settings_issue_requested = Signal(object)
     operator_row_role = int(Qt.ItemDataRole.UserRole) + 17
@@ -480,6 +481,38 @@ class RecipePage(QWidget):
         )
         path_line.addWidget(self.restore_button)
         document_layout.addLayout(path_line)
+        output_line = QGridLayout()
+        output_line.setSpacing(8)
+        output_directory_label = CaptionLabel("Result directory", self.document_card)
+        output_line.addWidget(output_directory_label, 0, 0)
+        self.output_directory = LineEdit(self.document_card)
+        self.output_directory.setText(self._default_output_directory())
+        self.output_directory.setClearButtonEnabled(True)
+        self.output_directory.setAccessibleName("Sweep result directory")
+        self.output_directory.setProperty("precisionArrowStepping", False)
+        output_line.addWidget(self.output_directory, 0, 1)
+        self.output_directory_button = PushButton("Browse...", self.document_card)
+        output_line.addWidget(self.output_directory_button, 0, 2)
+        output_file_label = CaptionLabel("Result file name", self.document_card)
+        output_line.addWidget(output_file_label, 1, 0)
+        self.output_file_stem = LineEdit(self.document_card)
+        self.output_file_stem.setPlaceholderText("Auto from recipe name")
+        self.output_file_stem.setClearButtonEnabled(True)
+        self.output_file_stem.setAccessibleName("Sweep result file name")
+        self.output_file_stem.setProperty("precisionArrowStepping", False)
+        self.output_file_stem.setToolTip(
+            "The run keeps its automatic UTC timestamp prefix to avoid accidental overwrites."
+        )
+        output_line.addWidget(self.output_file_stem, 1, 1, 1, 2)
+        self.output_file_preview = CaptionLabel(self.document_card)
+        self.output_file_preview.setObjectName("muted")
+        self.output_file_preview.setWordWrap(True)
+        self.output_file_preview.setTextInteractionFlags(
+            Qt.TextInteractionFlag.TextSelectableByMouse
+        )
+        output_line.addWidget(self.output_file_preview, 2, 0, 1, 3)
+        output_line.setColumnStretch(1, 1)
+        document_layout.addLayout(output_line)
         execution_line = QGridLayout()
         execution_line.setSpacing(8)
         execution_label = CaptionLabel("Execution mode", self.document_card)
@@ -682,6 +715,9 @@ class RecipePage(QWidget):
         layout.addWidget(self.status_card)
         self.restore_button.clicked.connect(self.restore_autosave)
         self.run_button.clicked.connect(self.request_run)
+        self.output_directory.textChanged.connect(self._refresh_output_preview)
+        self.output_file_stem.textChanged.connect(self._refresh_output_preview)
+        self.output_directory_button.clicked.connect(self.browse_output_directory)
         self.execution_mode.currentIndexChanged.connect(
             self._execution_mode_changed
         )
@@ -716,6 +752,64 @@ class RecipePage(QWidget):
             QShortcut(QKeySequence("Enter"), self.tree, activated=self._edit_selected_node),
         )
         self.load_editor(show_error=False)
+
+    def _default_output_directory(self) -> str:
+        return str(self._settings.storage.get("output_directory", "./measurements"))
+
+    def _requested_output_directory(self) -> str:
+        text = self.output_directory.text().strip()
+        return str(Path(text or self._default_output_directory()).expanduser())
+
+    def _requested_output_file_stem(self) -> str:
+        return self.output_file_stem.text().strip()
+
+    def _suggested_recipe_name(self) -> str:
+        if self._plan is not None:
+            name = getattr(self._plan, "recipe_name", None)
+            if name:
+                return str(name)
+        for source in (self.editor.toPlainText(), self._tree_source):
+            match = re.search(r"(?m)^name:\s*(.+?)\s*$", source)
+            if not match:
+                continue
+            raw_name = match.group(1).strip()
+            if raw_name.startswith(("'", '"')) and raw_name.endswith(("'", '"')):
+                raw_name = raw_name[1:-1].strip()
+            if raw_name:
+                return raw_name
+        current_path = self.path.text().strip()
+        if current_path:
+            stem = Path(current_path).stem.strip()
+            if stem:
+                return stem
+        return "run"
+
+    def _refresh_output_preview(self, _text: str = "") -> None:
+        if not hasattr(self, "output_file_preview"):
+            return
+        try:
+            result_path, csv_summary_path = planned_run_paths(
+                self._settings,
+                self._suggested_recipe_name(),
+                output_dir_override=self._requested_output_directory(),
+                file_stem_override=self._requested_output_file_stem() or None,
+            )
+        except Exception as exc:
+            self.output_file_preview.setText(f"Run output preview unavailable: {exc}")
+            return
+        preview_lines = [f"Next run file: {result_path}"]
+        if csv_summary_path is not None:
+            preview_lines.append(f"CSV summary: {csv_summary_path}")
+        self.output_file_preview.setText("\n".join(preview_lines))
+
+    def browse_output_directory(self) -> None:
+        selected = QFileDialog.getExistingDirectory(
+            self,
+            "Choose sweep result directory",
+            self._requested_output_directory(),
+        )
+        if selected:
+            self.output_directory.setText(str(Path(selected)))
 
     def _workspace_splitter_moved(self, _position: int, _index: int) -> None:
         if not self._workspace_layout_updating:
@@ -1600,7 +1694,11 @@ class RecipePage(QWidget):
             QMessageBox.warning(self, "Add Keithley setting", str(exc))
 
     def set_settings(self, settings: StationSettings) -> None:
+        previous_default_output_directory = self._default_output_directory()
         self._settings = settings
+        current_output_directory = self.output_directory.text().strip()
+        if not current_output_directory or current_output_directory == previous_default_output_directory:
+            self.output_directory.setText(self._default_output_directory())
         self._update_lakeshore_library_availability()
         self.recipe_profile_badge.setText("LIMITS + READBACK ACTIVE")
         self.recipe_profile_badge.setProperty("safetyState", "verified")
@@ -1745,6 +1843,7 @@ class RecipePage(QWidget):
         self._set_tree_editing_enabled(self._tree_editing_allowed())
         self._update_tree_history_controls()
         self._tree_drag_status_changed("", True)
+        self._refresh_output_preview()
 
     def _builder_source(self) -> str:
         if not self._tree_editing_allowed():
@@ -6571,6 +6670,8 @@ class RecipePage(QWidget):
                 self._plan,
                 self.execution_mode.currentData() == "dry_run",
                 str(self.execution_mode.currentData()),
+                self._requested_output_directory(),
+                self._requested_output_file_stem(),
             )
 
     def _execution_mode_changed(self, _index: int = -1) -> None:

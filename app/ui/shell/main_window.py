@@ -1230,6 +1230,8 @@ class MainWindow(FluentWindow):
         plan: object,
         outputs_forced_off: bool = False,
         execution_mode: str = "measurement",
+        output_dir_override: str = "",
+        file_stem_override: str = "",
     ) -> None:
         selected_execution_mode = ExecutionMode.coerce(execution_mode)
         if outputs_forced_off:
@@ -1275,6 +1277,8 @@ class MainWindow(FluentWindow):
                 operator_context=self._access.identity.as_context(),
                 outputs_forced_off=outputs_forced_off,
                 execution_mode=selected_execution_mode.value,
+                output_dir_override=output_dir_override,
+                file_stem_override=file_stem_override,
             )
         except Exception as exc:
             issue = settings_issue_for_error(exc)
@@ -1511,6 +1515,11 @@ class MainWindow(FluentWindow):
     def _run_finished(self, result: object) -> None:
         self._set_run_ui_locked(False)
         self.run_monitor.complete(result)
+        result_path = None
+        if isinstance(result, dict) and result.get("path"):
+            result_path = Path(str(result["path"]))
+        if result_path is not None:
+            self.results_page.set_output_directory(result_path.parent)
         self.results_page.refresh()
         run_result = result["result"]
         state = str(getattr(getattr(run_result, "state", None), "value", "unknown"))
