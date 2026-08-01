@@ -14,8 +14,8 @@ from PySide6.QtWidgets import QApplication
 
 from app.devices.anritsu_ms2830a import SpectrumTrace
 from app.domain.models import MeasurementPoint
-from app.storage import Hdf5RunWriter
-from app.ui.results import ResultsPage
+from app.storage import Hdf5RunWriter, ThatecRunReader
+from app.ui.results import HeatmapResultsTab, ResultsPage
 
 
 class ResultsBrowserTests(unittest.TestCase):
@@ -150,6 +150,57 @@ class ResultsBrowserTests(unittest.TestCase):
                 self.assertIn("1 of 2", filters.filter_summary.text())
             finally:
                 page.close()
+
+    def test_heatmap_selects_raw_or_processed_spectrum_variant(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            path = Path(temporary) / "variants.h5"
+            writer = Hdf5RunWriter(
+                path,
+                recipe_source="name: heatmap variants\n",
+                settings_source="schema_version: 1\n",
+                plan_hash="heatmap-variants",
+                device_idn={},
+                expected_points=2,
+            )
+            for index in range(2):
+                writer.append(
+                    MeasurementPoint(index=index, setpoints={}, measurements={}),
+                    SpectrumTrace(
+                        (1.0, 2.0, 3.0),
+                        (-50.0 - index, -40.0 - index, -45.0 - index),
+                        datetime.now(timezone.utc),
+                        "TRAC1",
+                    ),
+                    processed_values=(-1.0 - index, -2.0 - index, -3.0 - index),
+                    processed_unit="dB",
+                    processing_operation="difference_db",
+                )
+            writer.close("completed")
+
+            tab = HeatmapResultsTab()
+            try:
+                tab.resize(1000, 700)
+                tab.show()
+                self.application.processEvents()
+                tab.load(path, ThatecRunReader.describe(path))
+
+                self.assertEqual(tab.variant_combo.currentData(), "raw")
+                self.assertGreaterEqual(tab.variant_combo.findData("processed"), 0)
+                tab.load_heatmap_for_row(str(tab.row_combo.currentData()))
+                self.assertTrue(np.allclose(tab.heatmap._data[0], (-50.0, -40.0, -45.0)))
+
+                tab.variant_combo.setCurrentIndex(
+                    tab.variant_combo.findData("processed")
+                )
+                self.application.processEvents()
+                tab.load_heatmap_for_row(str(tab.row_combo.currentData()))
+                self.assertTrue(np.allclose(tab.heatmap._data[0], (-1.0, -2.0, -3.0)))
+                self.assertEqual(
+                    tab.heatmap.color_bar.getAxis("right").label.toPlainText().strip(),
+                    "Processed amplitude (dB)",
+                )
+            finally:
+                tab.close()
 
     def test_public_result_browser_builds_checkpoint_index_and_navigates(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:

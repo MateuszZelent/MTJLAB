@@ -1198,9 +1198,7 @@ class RecipeRunner:
                 processed_values=processed,
                 processed_unit=processed_unit,
                 processing_operation=operation,
-                reference_index=(
-                    self._reference_index if operation != "none" else None
-                ),
+                reference_index=self._reference_index,
             )
         elif action.kind == "checkpoint":
             pass

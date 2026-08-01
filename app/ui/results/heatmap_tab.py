@@ -312,7 +312,7 @@ class HeatmapPlotWidget(QWidget):
 
         self.plot.setLabel("bottom", x_label, units=x_unit)
         self.plot.setLabel("left", y_label, units=y_unit if y_unit else None)
-        self.color_bar.setLabel(z_label)
+        self.color_bar.setLabel("right", text=z_label)
 
         self._apply_colormap(self.colormap_combo.currentText())
         if levels is None:
@@ -476,6 +476,7 @@ class HeatmapResultsTab(QWidget):
         self._selected_path: Path | None = None
         self._run: ThatecRun | None = None
         self._spectrum_rows: list[ThatecRow] = []
+        self._spectrum_rows_by_variant: dict[str, list[ThatecRow]] = {}
         self._read_pool = QThreadPool(self)
         self._read_pool.setMaxThreadCount(1)
         self._read_pool.setExpiryTimeout(15_000)
@@ -488,6 +489,12 @@ class HeatmapResultsTab(QWidget):
 
         # --- Row selector ---
         selector = QHBoxLayout()
+        selector.addWidget(BodyLabel("Data:"))
+        self.variant_combo = ComboBox(self)
+        self.variant_combo.setToolTip(
+            "Choose raw power or the stored processed spectrum (raw minus reference)."
+        )
+        selector.addWidget(self.variant_combo)
         selector.addWidget(BodyLabel("Spectrum row:"))
         self.row_combo = ComboBox(self)
         self.row_combo.setMinimumWidth(300)
@@ -517,6 +524,7 @@ class HeatmapResultsTab(QWidget):
 
         # --- Connections ---
         self.load_button.clicked.connect(self._load_selected_row)
+        self.variant_combo.currentIndexChanged.connect(self._variant_changed)
         self.row_combo.currentIndexChanged.connect(self._row_changed)
         self.heatmap.checkpoint_clicked.connect(self._on_checkpoint_clicked)
         self.heatmap.status_changed.connect(self._show_plot_status)
@@ -541,15 +549,20 @@ class HeatmapResultsTab(QWidget):
         self._selected_path = path
         self._run = run
         self._spectrum_rows = find_heatmap_rows(run)
-
-        self.row_combo.blockSignals(True)
-        self.row_combo.clear()
         self.heatmap.clear()
-        for row in self._spectrum_rows:
-            label = row.control_name or row.device_name or row.id
-            detail = f"{label}  ({row.id}, {row.shape[0]}×{row.shape[1]})"
-            self.row_combo.addItem(detail, userData=row.id)
-        self.row_combo.blockSignals(False)
+        self._spectrum_rows_by_variant = self._split_spectrum_rows_by_variant(
+            self._spectrum_rows
+        )
+        self.variant_combo.blockSignals(True)
+        self.variant_combo.clear()
+        for variant, label in (
+            ("raw", "Raw (dBm)"),
+            ("processed", "Processed — Raw − Reference (dB)"),
+        ):
+            if self._spectrum_rows_by_variant.get(variant):
+                self.variant_combo.addItem(label, userData=variant)
+        self.variant_combo.blockSignals(False)
+        self._populate_rows_for_selected_variant()
 
         if self._spectrum_rows:
             self.load_button.setEnabled(True)
@@ -638,8 +651,10 @@ class HeatmapResultsTab(QWidget):
         """Reset the tab."""
         self._invalidate_pending_read()
         self.row_combo.clear()
+        self.variant_combo.clear()
         self.heatmap.clear()
         self._spectrum_rows = []
+        self._spectrum_rows_by_variant = {}
         self._selected_path = None
         self._run = None
         self.load_button.setEnabled(False)
@@ -667,6 +682,36 @@ class HeatmapResultsTab(QWidget):
             "Load the selected spectral row to compare all recorded checkpoints.",
             action_text="Load selected heatmap",
         )
+
+    @staticmethod
+    def _split_spectrum_rows_by_variant(
+        rows: list[ThatecRow],
+    ) -> dict[str, list[ThatecRow]]:
+        """Classify public spectrum rows using their persisted thaTEC role."""
+
+        variants = {"raw": [], "processed": []}
+        for row in rows:
+            role = dict(row.definition).get("lab control role", "")
+            variant = "processed" if role == "spectrum_processed" else "raw"
+            variants[variant].append(row)
+        return variants
+
+    def _populate_rows_for_selected_variant(self) -> None:
+        variant = str(self.variant_combo.currentData() or "raw")
+        rows = self._spectrum_rows_by_variant.get(variant, [])
+        self.row_combo.blockSignals(True)
+        self.row_combo.clear()
+        for row in rows:
+            label = row.control_name or row.device_name or row.id
+            detail = f"{label}  ({row.id}, {row.shape[0]}×{row.shape[1]})"
+            self.row_combo.addItem(detail, userData=row.id)
+        self.row_combo.blockSignals(False)
+
+    def _variant_changed(self, *_args: object) -> None:
+        self._invalidate_pending_read()
+        self.heatmap.clear()
+        self._populate_rows_for_selected_variant()
+        self._row_changed()
 
     def _start_read(self, path: Path, row: ThatecRow) -> None:
         self._read_request += 1

@@ -407,6 +407,71 @@ root:
                 self.assertEqual(len(spectrum.processed_values or ()), 1001)
                 self.assertEqual(spectrum.processing_operation, "difference_db")
 
+    def test_raw_spectrum_links_to_previously_acquired_reference(self) -> None:
+        """A raw acquisition retains the reference needed for later comparison."""
+
+        recipe_source = """\
+schema_version: 1
+name: raw-spectrum-with-reference
+root:
+  id: root
+  type: sequence
+  children:
+    - id: anritsu-config
+      type: configure_anritsu
+      start_frequency: "1 MHz"
+      stop_frequency: "2 MHz"
+      reference_level: "0 dBm"
+      points: 101
+    - {id: reference, type: acquire_reference, trace: TRAC1}
+    - {id: raw-spectrum, type: acquire_spectrum, trace: TRAC1}
+"""
+        settings = simulated_station_settings(loaded_settings())
+        plan = RecipeCompiler(settings).compile(parse_recipe_text(recipe_source))
+
+        with tempfile.TemporaryDirectory() as temporary:
+            path = Path(temporary) / "raw-spectrum-with-reference.h5"
+            rigol = RigolAdapter(
+                settings, session_factory=SimulatedVisaFactory("rigol")
+            )
+            keithley = KeithleyAdapter(
+                settings, session_factory=SimulatedVisaFactory("keithley")
+            )
+            anritsu = AnritsuAdapter(
+                settings, session_factory=SimulatedVisaFactory("anritsu")
+            )
+            for device in (rigol, keithley, anritsu):
+                device.connect()
+            writer = Hdf5RunWriter(
+                path,
+                recipe_source=recipe_source,
+                settings_source="simulation: true\n",
+                plan_hash=plan.sha256,
+                device_idn={},
+                expected_points=plan.total_points,
+            )
+
+            result = RecipeRunner(
+                rigol=rigol,
+                keithley=keithley,
+                anritsu=anritsu,
+                writer=writer,
+            ).run(plan)
+
+            self.assertIsNone(result.error)
+            self.assertEqual(result.stored_points, 1)
+            self.assertEqual(
+                tuple(reference.index for reference in Hdf5RunReader.references(path)),
+                (0,),
+            )
+            spectrum = Hdf5RunReader.spectrum(path, 0)
+            self.assertIsNotNone(spectrum)
+            assert spectrum is not None
+            self.assertEqual(spectrum.reference_index, 0)
+            self.assertEqual(Hdf5RunReader.points(path)[0].metadata["reference_index"], 0)
+            with h5py.File(path, "r") as file:
+                self.assertEqual(int(file["spectra/0"].attrs["reference_index"]), 0)
+
     def test_lakeshore_recipe_compiles_runs_and_round_trips(self) -> None:
         raw = deepcopy(simulated_station_settings(loaded_settings()).model_dump(mode="python"))
         raw["devices"]["lakeshore_gaussmeter"].update(
