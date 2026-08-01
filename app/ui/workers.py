@@ -7,6 +7,8 @@ QObject/QThread pair.  GUI code only emits queued operation requests.
 from __future__ import annotations
 
 from collections.abc import Callable
+from dataclasses import dataclass, field
+from threading import Event
 
 from PySide6.QtCore import QEventLoop, QMetaObject, QObject, QThread, QTimer, Qt, Signal, Slot
 
@@ -19,6 +21,55 @@ from app.engine.compiler import RecipeCompiler
 from app.engine.estimation import PlanEstimator
 from app.recipes import parse_recipe_text
 from app.settings.models import StationSettings
+
+
+@dataclass(slots=True)
+class _RunCall:
+    """One synchronous call from the run worker to an adapter owner thread."""
+
+    member: str
+    args: tuple[object, ...] = ()
+    kwargs: dict[str, object] = field(default_factory=dict)
+    read_attribute: bool = False
+    completed: Event = field(default_factory=Event)
+    result: object = None
+    error: BaseException | None = None
+
+
+class RunDeviceAdapter:
+    """Duck-typed adapter proxy used exclusively by :class:`RunWorker`.
+
+    The proxy intentionally never exposes the underlying adapter. Every call
+    returns to the dedicated InstrumentWorker thread that owns the transport.
+    """
+
+    def __init__(self, controller: "DeviceController") -> None:
+        self._controller = controller
+
+    @property
+    def state(self) -> object:
+        return self._controller.read_for_run("state")
+
+    @property
+    def identity(self) -> object:
+        return self._controller.read_for_run("identity")
+
+    @property
+    def capabilities(self) -> object:
+        return self._controller.read_for_run("capabilities")
+
+    @property
+    def connected(self) -> bool:
+        return bool(self._controller.read_for_run("connected"))
+
+    def __getattr__(self, member: str) -> Callable[..., object]:
+        if member.startswith("_"):
+            raise AttributeError(member)
+
+        def invoke(*args: object, **kwargs: object) -> object:
+            return self._controller.call_for_run(member, *args, **kwargs)
+
+        return invoke
 
 
 class RecipePreflightWorker(QObject):
@@ -119,6 +170,26 @@ class InstrumentWorker(QObject):
         except Exception:
             pass
         self.shutdown_complete.emit()
+
+    @Slot(object)
+    def invoke_for_run(self, request: _RunCall) -> None:
+        """Run a lease call in this worker's adapter-owning thread."""
+
+        try:
+            member = getattr(self._adapter, request.member)
+            if request.read_attribute:
+                if request.args or request.kwargs:
+                    raise ValueError("A run attribute request cannot include arguments.")
+                request.result = member
+            else:
+                if not callable(member):
+                    raise TypeError(f"Adapter member {request.member!r} is not callable.")
+                request.result = member(*request.args, **request.kwargs)
+        except BaseException as exc:
+            request.error = exc
+        finally:
+            self.state_changed.emit(self._adapter.state.value)
+            request.completed.set()
 
     def _dispatch(self, operation: str, payload: object) -> object:
         if operation == "replace_adapter":
@@ -248,6 +319,7 @@ class DeviceController(QObject):
     state_changed = Signal(str)
     capabilities_changed = Signal(object)
     traffic = Signal(str)
+    run_request = Signal(object)
 
     def __init__(
         self,
@@ -267,6 +339,10 @@ class DeviceController(QObject):
         self._worker.state_changed.connect(self.state_changed)
         self._worker.capabilities_changed.connect(self.capabilities_changed)
         self._worker.traffic.connect(self.traffic)
+        self.run_request.connect(
+            self._worker.invoke_for_run,
+            Qt.ConnectionType.QueuedConnection,
+        )
         self._thread.start()
 
     def call(self, operation: str, payload: object = None) -> None:
@@ -282,6 +358,31 @@ class DeviceController(QObject):
         """Install a GUI-thread interlock evaluated before a command is queued."""
 
         self._operation_guard = guard
+
+    def adapter_for_run(self) -> RunDeviceAdapter:
+        """Return an adapter-shaped proxy without transferring thread ownership."""
+
+        return RunDeviceAdapter(self)
+
+    def call_for_run(self, method: str, *args: object, **kwargs: object) -> object:
+        """Synchronously invoke one adapter method for an active recipe run."""
+
+        request = _RunCall(method, tuple(args), dict(kwargs))
+        self.run_request.emit(request)
+        request.completed.wait()
+        if request.error is not None:
+            raise request.error
+        return request.result
+
+    def read_for_run(self, attribute: str) -> object:
+        """Read one adapter property through its owning worker thread."""
+
+        request = _RunCall(attribute, read_attribute=True)
+        self.run_request.emit(request)
+        request.completed.wait()
+        if request.error is not None:
+            raise request.error
+        return request.result
 
     def reconfigure(self, adapter: DeviceAdapter) -> None:
         """Safely discard the session before applying a newly saved profile."""
