@@ -14,13 +14,41 @@ import h5py
 from PySide6.QtCore import QEventLoop, QTimer
 from PySide6.QtWidgets import QApplication
 
+from app.devices.base import DeviceAdapter
 from app.devices.simulators import simulated_station_settings
+from app.domain.models import DeviceIdentity, DeviceState
 from app.engine import RecipeCompiler
+from app.engine.compiler import ExecutionPlan
 from app.recipes import load_recipe
 from app.settings.models import StationSettings
 from app.storage import Hdf5RunReader
 from app.ui.run_worker import RunController
+from app.ui.workers import DeviceController
 from tests.helpers import loaded_settings
+
+
+class _RunLeaseAdapter(DeviceAdapter):
+    def __init__(self) -> None:
+        super().__init__()
+        self.connect_count = 0
+        self.emergency_off_count = 0
+        self.disconnect_count = 0
+
+    def connect(self) -> DeviceIdentity:
+        if self._state is DeviceState.DISCONNECTED:
+            self.connect_count += 1
+            self._state = DeviceState.VERIFIED
+            self._identity = DeviceIdentity("SIM::LEASE", "LEASE,MODEL,1,1")
+        assert self._identity is not None
+        return self._identity
+
+    def disconnect(self) -> None:
+        self.disconnect_count += 1
+        self._state = DeviceState.DISCONNECTED
+
+    def emergency_off(self) -> None:
+        self.emergency_off_count += 1
+        self._state = DeviceState.OUTPUT_OFF
 
 
 class RunControllerTests(unittest.TestCase):
@@ -222,6 +250,58 @@ finally:
             controller._worker_event("watchdog_timeout", {"node_id": "slow"})
 
         emergency.assert_called_once_with(settings, simulation=True)
+
+    def test_run_controller_reuses_a_provided_connected_session(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            raw = simulated_station_settings(loaded_settings()).model_dump(mode="python")
+            raw["storage"]["output_directory"] = str(root / "measurements")
+            settings = StationSettings.model_validate(raw)
+            plan = ExecutionPlan(
+                "leased-session",
+                (),
+                0,
+                "a" * 64,
+                "name: leased-session\n",
+                frozenset({"anritsu"}),
+                0,
+            )
+            adapter = _RunLeaseAdapter()
+            device_controller = DeviceController(adapter)
+            connected = QEventLoop()
+            device_controller.result.connect(
+                lambda operation, _result: operation == "connect" and connected.quit()
+            )
+            device_controller.call("connect")
+            QTimer.singleShot(2_000, connected.quit)
+            connected.exec()
+            self.assertEqual(adapter.connect_count, 1)
+
+            controller = RunController()
+            finished: list[object] = []
+            failures: list[str] = []
+            loop = QEventLoop()
+            controller.finished.connect(lambda result: (finished.append(result), loop.quit()))
+            controller.failed.connect(lambda error: (failures.append(error), loop.quit()))
+            try:
+                controller.start(
+                    settings,
+                    root / "settings.yml",
+                    plan,
+                    simulation=True,
+                    outputs_forced_off=True,
+                    device_controllers={"anritsu": device_controller},
+                )
+                QTimer.singleShot(5_000, loop.quit)
+                loop.exec()
+                self.assertFalse(failures)
+                self.assertEqual(len(finished), 1)
+                self.assertEqual(adapter.connect_count, 1)
+                self.assertGreaterEqual(adapter.emergency_off_count, 1)
+                self.assertGreaterEqual(adapter.disconnect_count, 1)
+            finally:
+                controller.close()
+                device_controller.close()
 
 
 if __name__ == "__main__":

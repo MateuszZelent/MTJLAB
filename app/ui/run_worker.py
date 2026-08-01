@@ -7,6 +7,7 @@ from io import StringIO
 from pathlib import Path
 import re
 import secrets
+from typing import Mapping
 
 from PySide6.QtCore import QObject, QThread, Signal, Slot
 from ruamel.yaml import YAML
@@ -28,6 +29,7 @@ from app.engine.recovery import RecoveryCheckpoint
 from app.engine.runner import ExecutionMode, RecipeRunner
 from app.settings.models import StationSettings
 from app.storage import Hdf5RunWriter
+from app.ui.workers import DeviceController
 
 
 def sanitize_run_file_stem(raw_name: object, *, fallback: str = "run") -> str:
@@ -101,6 +103,7 @@ class RunWorker(QObject):
         execution_mode: str = ExecutionMode.MEASUREMENT.value,
         output_dir_override: str | None = None,
         file_stem_override: str | None = None,
+        device_controllers: Mapping[str, DeviceController] | None = None,
         parent: QObject | None = None,
     ) -> None:
         super().__init__(parent)
@@ -114,6 +117,7 @@ class RunWorker(QObject):
         self._execution_mode = ExecutionMode.coerce(execution_mode)
         self._output_dir_override = output_dir_override
         self._file_stem_override = file_stem_override
+        self._device_controllers = dict(device_controllers or {})
         if outputs_forced_off:
             self._execution_mode = ExecutionMode.DRY_RUN
         self._outputs_forced_off = self._execution_mode is ExecutionMode.DRY_RUN
@@ -128,32 +132,41 @@ class RunWorker(QObject):
             if self._simulation
             else None
         )
-        rigol = RigolAdapter(
-            self._settings,
-            session_factory=(
-                SimulatedVisaFactory("rigol", context=simulation_context)
-                if self._simulation
-                else None
+        rigol = self._adapter_for_run(
+            "rigol",
+            lambda: RigolAdapter(
+                self._settings,
+                session_factory=(
+                    SimulatedVisaFactory("rigol", context=simulation_context)
+                    if self._simulation
+                    else None
+                ),
             ),
         )
-        keithley = KeithleyAdapter(
-            self._settings,
-            session_factory=(
-                SimulatedVisaFactory("keithley", context=simulation_context)
-                if self._simulation
-                else None
+        keithley = self._adapter_for_run(
+            "keithley",
+            lambda: KeithleyAdapter(
+                self._settings,
+                session_factory=(
+                    SimulatedVisaFactory("keithley", context=simulation_context)
+                    if self._simulation
+                    else None
+                ),
             ),
         )
-        anritsu = AnritsuAdapter(
-            self._settings,
-            session_factory=(
-                SimulatedVisaFactory("anritsu", context=simulation_context)
-                if self._simulation
-                else None
+        anritsu = self._adapter_for_run(
+            "anritsu",
+            lambda: AnritsuAdapter(
+                self._settings,
+                session_factory=(
+                    SimulatedVisaFactory("anritsu", context=simulation_context)
+                    if self._simulation
+                    else None
+                ),
             ),
         )
         writer: Hdf5RunWriter | None = None
-        devices: dict[str, DeviceAdapter] = {
+        devices: dict[str, object] = {
             "rigol": rigol,
             "keithley": keithley,
             "anritsu": anritsu,
@@ -168,15 +181,18 @@ class RunWorker(QObject):
                 or required_devices_for_actions(self._plan.actions)
             )
             if "moke_box" in required_by_plan:
-                candidate = (
-                    MokeBoxAdapter(
-                        MokeBoxConfig(endpoint="SIM::MOKE::INSTR", expected_model="MOKE SIM"),
-                        SimulatedMokeBoxTransport(simulation_context),
-                    )
-                    if simulation_context is not None
-                    else StationComposition(self._settings, simulation=False).create_adapter("moke_box")
+                candidate = self._adapter_for_run(
+                    "moke_box",
+                    lambda: (
+                        MokeBoxAdapter(
+                            MokeBoxConfig(endpoint="SIM::MOKE::INSTR", expected_model="MOKE SIM"),
+                            SimulatedMokeBoxTransport(simulation_context),
+                        )
+                        if simulation_context is not None
+                        else StationComposition(self._settings, simulation=False).create_adapter("moke_box")
+                    ),
                 )
-                if not isinstance(candidate, MokeBoxAdapter):
+                if "moke_box" not in self._device_controllers and not isinstance(candidate, MokeBoxAdapter):
                     raise RuntimeError(
                         "MOKE Hall measurement requires an enabled, protocol-qualified "
                         "MOKE Box profile and is unavailable in simulation."
@@ -184,10 +200,16 @@ class RunWorker(QObject):
                 moke_box = candidate
                 devices["moke_box"] = moke_box
             if "lakeshore_gaussmeter" in required_by_plan:
-                candidate = StationComposition(
-                    self._settings, simulation=self._simulation
-                ).create_adapter("lakeshore_gaussmeter")
-                if not isinstance(candidate, LakeShore475Adapter):
+                candidate = self._adapter_for_run(
+                    "lakeshore_gaussmeter",
+                    lambda: StationComposition(
+                        self._settings, simulation=self._simulation
+                    ).create_adapter("lakeshore_gaussmeter"),
+                )
+                if (
+                    "lakeshore_gaussmeter" not in self._device_controllers
+                    and not isinstance(candidate, LakeShore475Adapter)
+                ):
                     raise RuntimeError(
                         "Lake Shore measurement requires an enabled 475 VISA profile."
                     )
@@ -330,6 +352,14 @@ class RunWorker(QObject):
             self._plan.required_devices or required_devices_for_actions(self._plan.actions)
         )
 
+    def _adapter_for_run(self, name: str, create: object) -> object:
+        controller = self._device_controllers.get(name)
+        if controller is not None:
+            return controller.adapter_for_run()
+        if not callable(create):
+            raise TypeError(f"Run adapter factory for {name!r} is not callable.")
+        return create()
+
     def _settings_snapshot(self) -> str:
         return serialize_settings_snapshot(
             self._settings,
@@ -467,6 +497,7 @@ class RunController(QObject):
         execution_mode: str = ExecutionMode.MEASUREMENT.value,
         output_dir_override: str | None = None,
         file_stem_override: str | None = None,
+        device_controllers: Mapping[str, DeviceController] | None = None,
     ) -> None:
         if self.running:
             raise RuntimeError("A measurement is already running.")
@@ -492,6 +523,7 @@ class RunController(QObject):
             execution_mode=selected_mode.value,
             output_dir_override=output_dir_override,
             file_stem_override=file_stem_override,
+            device_controllers=device_controllers,
         )
         self._worker.moveToThread(self._thread)
         self._thread.started.connect(self._worker.run)
