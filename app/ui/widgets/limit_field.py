@@ -13,7 +13,15 @@ from PySide6.QtWidgets import (
     QVBoxLayout,
     QWidget,
 )
-from qfluentwidgets import BodyLabel, LineEdit, PrimaryPushButton, PushButton, StrongBodyLabel
+from qfluentwidgets import (
+    BodyLabel,
+    LineEdit,
+    PlainTextEdit,
+    PrimaryPushButton,
+    PushButton,
+    StrongBodyLabel,
+)
+from app.safety.keithley_limit_reconciliation import KeithleyLimitProposal
 from app.ui.dialogs import StationDialog
 from app.ui.design_system import apply_validation_style
 
@@ -118,12 +126,13 @@ class LimitField(QWidget):
     ) -> tuple[float, float | None, float | None, str | None] | None:
         if not isinstance(self.editor, QLineEdit):
             return None
-        boundaries = [value for value in (self._minimum_value, self._maximum_value) if value is not None]
+        boundaries = [
+            value for value in (self._minimum_value, self._maximum_value) if value is not None
+        ]
         if not boundaries:
             return None
         if all(
-            isinstance(value, (int, float)) and not isinstance(value, bool)
-            for value in boundaries
+            isinstance(value, (int, float)) and not isinstance(value, bool) for value in boundaries
         ):
             try:
                 current = float(self.editor.text().strip().replace(",", "."))
@@ -131,16 +140,8 @@ class LimitField(QWidget):
                 return None
             if not math.isfinite(current):
                 return None
-            minimum = (
-                float(self._minimum_value)
-                if self._minimum_value is not None
-                else None
-            )
-            maximum = (
-                float(self._maximum_value)
-                if self._maximum_value is not None
-                else None
-            )
+            minimum = float(self._minimum_value) if self._minimum_value is not None else None
+            maximum = float(self._maximum_value) if self._maximum_value is not None else None
             return current, minimum, maximum, None
         if any(not isinstance(value, str) for value in boundaries):
             return None
@@ -201,12 +202,16 @@ class LimitField(QWidget):
         if minimum is not None and value < minimum:
             replacement = str(self._minimum_value)
             self._set_editor_value(self._minimum_value)
-            self._show_validation_warning(f"Value was below MIN and has been changed to {replacement}.")
+            self._show_validation_warning(
+                f"Value was below MIN and has been changed to {replacement}."
+            )
             return False
         if maximum is not None and value > maximum:
             replacement = str(self._maximum_value)
             self._set_editor_value(self._maximum_value)
-            self._show_validation_warning(f"Value exceeded MAX and has been changed to {replacement}.")
+            self._show_validation_warning(
+                f"Value exceeded MAX and has been changed to {replacement}."
+            )
             return False
         if isinstance(self.editor, QLineEdit):
             if self.editor.property("precisionArrowStepInProgress"):
@@ -217,9 +222,7 @@ class LimitField(QWidget):
                 self._last_valid = self.editor.text().strip()
             else:
                 normalized = (
-                    f"{value:.12g}"
-                    if dimension is None
-                    else format_quantity_auto(value, dimension)
+                    f"{value:.12g}" if dimension is None else format_quantity_auto(value, dimension)
                 )
                 self.editor.setText(normalized)
                 self._last_valid = normalized
@@ -288,3 +291,55 @@ class LimitEditDialog(StationDialog):
         footer.addWidget(cancel)
         footer.addWidget(save)
         layout.addLayout(footer)
+
+
+class KeithleyLimitProposalDialog(StationDialog):
+    """Ask for explicit approval before widening or narrowing dependent limits."""
+
+    def __init__(self, proposal: KeithleyLimitProposal, parent: QWidget | None = None) -> None:
+        super().__init__(parent)
+        self.setWindowTitle("Confirm Keithley safety-limit changes")
+        self.setModal(True)
+        parent_width = parent.width() if parent is not None else 720
+        self.setMinimumWidth(min(520, max(360, parent_width - 48)))
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(24, 22, 24, 20)
+        layout.setSpacing(12)
+
+        heading = StrongBodyLabel("Dependent Keithley limit changes", self)
+        layout.addWidget(heading)
+        guidance = BodyLabel(
+            "To keep the requested limit, the following station safety-envelope "
+            "changes are required. They are staged only; no hardware is changed "
+            "until you explicitly save settings.",
+            self,
+        )
+        guidance.setWordWrap(True)
+        layout.addWidget(guidance)
+
+        self.adjustments_text = PlainTextEdit(self)
+        self.adjustments_text.setObjectName("keithleyLimitAdjustments")
+        self.adjustments_text.setReadOnly(True)
+        self.adjustments_text.setMinimumHeight(132)
+        self.adjustments_text.setMaximumHeight(240)
+        self.adjustments_text.setPlainText(
+            "\n\n".join(
+                f"{'.'.join(adjustment.path)}: {adjustment.previous} -> "
+                f"{adjustment.proposed}\nReason: {adjustment.reason}"
+                for adjustment in proposal.adjustments
+            )
+        )
+        layout.addWidget(self.adjustments_text)
+
+        footer = QHBoxLayout()
+        footer.addStretch(1)
+        self.cancel_button = PushButton("Cancel", self)
+        self.cancel_button.setObjectName("cancelKeithleyLimitChanges")
+        self.accept_button = PrimaryPushButton(f"Accept {len(proposal.adjustments)} changes", self)
+        self.accept_button.setObjectName("acceptKeithleyLimitChanges")
+        self.cancel_button.clicked.connect(self.reject)
+        self.accept_button.clicked.connect(self.accept)
+        footer.addWidget(self.cancel_button)
+        footer.addWidget(self.accept_button)
+        layout.addLayout(footer)
+        self.accept_button.setFocus()

@@ -496,7 +496,7 @@ class ResultsPage(QWidget):
         # Heatmap tab (only for results with 2-D spectral data)
         if find_heatmap_rows(self._thatec_run):
             self._set_heatmap_visible(True)
-            self.heatmap_tab.load(path, self._thatec_run)
+            self.heatmap_tab.load(path, self._thatec_run, points)
         else:
             self._set_heatmap_visible(False)
         self.result_state.hide()

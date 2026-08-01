@@ -69,6 +69,9 @@ from app.domain.quantities import (
     parse_quantity,
 )
 from app.security import AccessPolicy, Permission
+from app.safety.keithley_limit_reconciliation import (
+    propose_keithley_limit_adjustments,
+)
 from app.ui.dialogs import StationFileDialog as QFileDialog
 from app.ui.dialogs import StationDialog, StationMessageBox as QMessageBox
 from app.settings import SettingsRepository
@@ -79,7 +82,7 @@ from app.settings.diagnostics import (
 )
 from app.settings.models import StationSettings
 from app.settings.validation import format_settings_validation_error
-from app.ui.widgets import show_toast
+from app.ui.widgets import KeithleyLimitProposalDialog, show_toast
 from app.ui.settings_guidance import SettingsPath
 
 
@@ -376,7 +379,9 @@ class SettingsPage(QWidget):
         diagnostics_layout.setSpacing(12)
         diagnostics_title = StrongBodyLabel("Configuration diagnostics")
         diagnostics_title.setObjectName("sectionTitle")
-        diagnostics_description = BodyLabel("Read-only checks for the active station configuration.")
+        diagnostics_description = BodyLabel(
+            "Read-only checks for the active station configuration."
+        )
         diagnostics_description.setObjectName("muted")
         diagnostics_card = CardWidget()
         diagnostics_card.setObjectName("settingsTableCard")
@@ -423,13 +428,15 @@ class SettingsPage(QWidget):
         self.diff_button = PushButton(FluentIcon.DOCUMENT, "Show changes…")
         self.validate_button = PushButton("Validate")
         self.save_button = PrimaryPushButton(FluentIcon.SAVE, "Save changes")
-        for index, button in enumerate((
-            self.reload_button,
-            self.discard_button,
-            self.diff_button,
-            self.validate_button,
-            self.save_button,
-        )):
+        for index, button in enumerate(
+            (
+                self.reload_button,
+                self.discard_button,
+                self.diff_button,
+                self.validate_button,
+                self.save_button,
+            )
+        ):
             button.setMinimumWidth(136)
             buttons.addWidget(button, index // 3, index % 3)
         action_layout.addLayout(buttons, 3)
@@ -458,16 +465,12 @@ class SettingsPage(QWidget):
             return
         self._compact_layout = compact
         self.action_layout.setDirection(
-            QBoxLayout.Direction.TopToBottom
-            if compact
-            else QBoxLayout.Direction.LeftToRight
+            QBoxLayout.Direction.TopToBottom if compact else QBoxLayout.Direction.LeftToRight
         )
 
     def set_access_policy(self, access_policy: AccessPolicy) -> None:
         self._access = access_policy
-        self._read_only = self._base_read_only or not access_policy.allows(
-            Permission.EDIT_SETTINGS
-        )
+        self._read_only = self._base_read_only or not access_policy.allows(Permission.EDIT_SETTINGS)
         can_edit = not self._read_only or self._can_edit_operator_output()
         self.validate_button.setEnabled(can_edit)
         self.save_button.setEnabled(can_edit)
@@ -476,16 +479,10 @@ class SettingsPage(QWidget):
         self.reload()
 
     def _can_edit_operator_output(self) -> bool:
-        return (
-            not self._base_read_only
-            and self._access.allows(Permission.OPERATE_OUTPUT)
-        )
+        return not self._base_read_only and self._access.allows(Permission.OPERATE_OUTPUT)
 
     def _update_role_controls(self) -> None:
-        allowed = (
-            not self._base_read_only
-            and self._access.allows(Permission.MANAGE_ROLES)
-        )
+        allowed = not self._base_read_only and self._access.allows(Permission.MANAGE_ROLES)
         self.add_role_button.setEnabled(allowed)
         self.edit_role_button.setEnabled(allowed)
         self.remove_role_button.setEnabled(allowed)
@@ -522,9 +519,7 @@ class SettingsPage(QWidget):
         self._refresh_diagnostics()
         self.status.emit("settings.yml reloaded")
 
-    def accept_external_snapshot(
-        self, settings: StationSettings, raw: dict[str, Any]
-    ) -> None:
+    def accept_external_snapshot(self, settings: StationSettings, raw: dict[str, Any]) -> None:
         """Refresh a clean settings page after a background external save.
 
         An open local draft keeps its widgets untouched.  ``save_draft`` merges
@@ -534,9 +529,7 @@ class SettingsPage(QWidget):
 
         self._settings = settings
         if self._dirty:
-            self.status.emit(
-                "External settings saved; the open local draft was preserved"
-            )
+            self.status.emit("External settings saved; the open local draft was preserved")
             return
         self._raw = deepcopy(raw)
         self._persisted_raw = deepcopy(raw)
@@ -544,9 +537,7 @@ class SettingsPage(QWidget):
         self._update_subtitle()
         self._refresh_diagnostics()
 
-    def stage_external_snapshot(
-        self, settings: StationSettings, raw: dict[str, Any]
-    ) -> None:
+    def stage_external_snapshot(self, settings: StationSettings, raw: dict[str, Any]) -> None:
         """Replace the in-memory draft without persisting it."""
 
         self._autosave_timer.stop()
@@ -557,6 +548,45 @@ class SettingsPage(QWidget):
         self._update_subtitle()
         self._refresh_diagnostics()
         self.status.emit("Unsaved settings changes; press SAVE SETTINGS")
+
+    def stage_limit_snapshot(
+        self,
+        settings: StationSettings,
+        raw: dict[str, Any],
+        changed_paths: set[tuple[str | int, ...]],
+    ) -> None:
+        """Stage changed safety-limit leaves without rebuilding every settings route."""
+
+        if not self._can_stage_limit_snapshot(changed_paths):
+            raise ValueError("Limit staging accepts only changed safety-limit leaves.")
+        self._autosave_timer.stop()
+        self._settings = settings
+        self._raw = deepcopy(raw)
+        self._dirty = self._raw != self._persisted_raw
+        previous_changing = self._changing
+        self._changing = True
+        try:
+            for path in changed_paths:
+                value = self._get_path(self._raw, path)
+                self._sync_limit_from_tree(path, self._format_scalar(value))
+        finally:
+            self._changing = previous_changing
+        self._update_subtitle()
+        self.status.emit("Unsaved settings changes; press SAVE SETTINGS")
+
+    @staticmethod
+    def _can_stage_limit_snapshot(
+        changed_paths: set[tuple[str | int, ...]],
+    ) -> bool:
+        """Return whether every changed leaf belongs to a direct safety-limit edit."""
+
+        return bool(changed_paths) and all(
+            len(path) >= 5
+            and path[0] == "devices"
+            and path[2] == "safety"
+            and ("lab_limits" in path or path[-1] in {"min", "max"})
+            for path in changed_paths
+        )
 
     def _update_subtitle(self) -> None:
         if self._settings is None:
@@ -683,9 +713,7 @@ class SettingsPage(QWidget):
     def _title(text: object) -> str:
         return str(text).replace("_", " ").replace("-", " ").title()
 
-    def _populate_form(
-        self, name: str, data: Any, prefix: tuple[str | int, ...]
-    ) -> None:
+    def _populate_form(self, name: str, data: Any, prefix: tuple[str | int, ...]) -> None:
         host = QWidget()
         host.setProperty("stationSurface", "page")
         host.setMinimumWidth(0)
@@ -802,14 +830,19 @@ class SettingsPage(QWidget):
                     pass
                 else:
                     precision_steppable = True
-            elif value is None and path and str(path[-1]) in {
-                "max",
-                "max_abs",
-                "max_expected_power_at_connector",
-                "min",
-                "minimum_internal_attenuation",
-                "nominal",
-            }:
+            elif (
+                value is None
+                and path
+                and str(path[-1])
+                in {
+                    "max",
+                    "max_abs",
+                    "max_expected_power_at_connector",
+                    "min",
+                    "minimum_internal_attenuation",
+                    "nominal",
+                }
+            ):
                 # Optional safety quantities start empty but become explicit
                 # number-plus-unit values when configured.
                 precision_steppable = True
@@ -918,7 +951,11 @@ class SettingsPage(QWidget):
         return str(value)
 
     def _changed(self, item: QTreeWidgetItem, column: int) -> None:
-        if not self._changing and column == 1 and item.data(0, Qt.ItemDataRole.UserRole) is not None:
+        if (
+            not self._changing
+            and column == 1
+            and item.data(0, Qt.ItemDataRole.UserRole) is not None
+        ):
             path = tuple(item.data(0, Qt.ItemDataRole.UserRole))
             self._sync_limit_from_tree(path, item.text(1))
             editor = self._form_editors.get(path)
@@ -1110,9 +1147,7 @@ class SettingsPage(QWidget):
             label.setMinimumWidth(250)
             values_layout.addWidget(label, 1)
             scalar_limit = not max_path
-            values_layout.addWidget(
-                self._safety_boundary_label("LIMIT" if scalar_limit else "MIN")
-            )
+            values_layout.addWidget(self._safety_boundary_label("LIMIT" if scalar_limit else "MIN"))
             minimum_editor = self._make_safety_limit_editor(min_path, minimum.text())
             values_layout.addWidget(minimum_editor)
             if not scalar_limit:
@@ -1133,10 +1168,9 @@ class SettingsPage(QWidget):
                 "Ignore this station-profile limit. Immutable hardware limits remain active."
             )
             disable_limit.toggled.connect(
-                lambda disabled, p=enabled_path, row=row_widget, editors=(
-                    minimum_editor,
-                    None if scalar_limit else maximum_editor,
-                ): self._set_limit_disabled(p, disabled, row, editors)
+                lambda disabled, p=enabled_path, row=row_widget, editors=(minimum_editor, None if scalar_limit else maximum_editor): (
+                    self._set_limit_disabled(p, disabled, row, editors)
+                )
             )
             values_layout.addWidget(disable_limit)
             minimum_editor.setEnabled(enabled and not self._read_only)
@@ -1197,25 +1231,70 @@ class SettingsPage(QWidget):
         label.setObjectName("safetyLimitTag")
         return label
 
-    def _make_safety_limit_editor(
-        self, path: tuple[str | int, ...], value: str
-    ) -> QLineEdit:
+    def _make_safety_limit_editor(self, path: tuple[str | int, ...], value: str) -> QLineEdit:
         editor = LineEdit()
         editor.setText(value)
         editor.setObjectName("safetyLimitInput")
         editor.setMinimumWidth(156)
         editor.setReadOnly(self._read_only)
         editor.setProperty("limitPath", path)
-        editor.editingFinished.connect(lambda p=path, e=editor: self._commit_safety_limit_editor(p, e))
+        editor.editingFinished.connect(
+            lambda p=path, e=editor: self._commit_safety_limit_editor(p, e)
+        )
         self._safety_limit_editors[path] = editor
         return editor
 
-    def _commit_safety_limit_editor(
-        self, path: tuple[str | int, ...], editor: QLineEdit
-    ) -> None:
+    def _commit_safety_limit_editor(self, path: tuple[str | int, ...], editor: QLineEdit) -> None:
+        if self._is_keithley_limit_path(path):
+            self._commit_keithley_safety_limit_editor(path, editor)
+            return
         item = self._limit_items_by_path.get(path)
         if item is not None and item.text() != editor.text():
             item.setText(editor.text())
+
+    @staticmethod
+    def _is_keithley_limit_path(path: tuple[str | int, ...]) -> bool:
+        return (
+            len(path) >= 7
+            and path[:3] == ("devices", "keithley", "safety")
+            and "lab_limits" in path
+        )
+
+    def _commit_keithley_safety_limit_editor(
+        self, path: tuple[str | int, ...], editor: QLineEdit
+    ) -> None:
+        try:
+            draft = self._apply_tree_values()
+            original = self._get_path(draft, path)
+            primary_value = self._parse_scalar(editor.text(), original)
+            self._set_path(draft, path, primary_value)
+            limit_index = path.index("lab_limits")
+            channel_limits = self._get_path(draft, path[: limit_index + 1])
+            if not isinstance(channel_limits, dict):
+                raise ConfigurationError("Keithley channel limits are not configured.")
+            relative_path = tuple(str(part) for part in path[limit_index + 1 :])
+            proposal = propose_keithley_limit_adjustments(
+                channel_limits, relative_path, str(primary_value)
+            )
+            if proposal.adjustments:
+                confirmation = KeithleyLimitProposalDialog(proposal, self)
+                if confirmation.exec() != QDialog.DialogCode.Accepted:
+                    editor.setText(str(self._get_path(self._raw, path)))
+                    return
+                for adjustment in proposal.adjustments:
+                    target: Any = channel_limits
+                    for part in adjustment.path[:-1]:
+                        target = target[part]
+                    target[adjustment.path[-1]] = adjustment.proposed
+            settings = StationSettings.model_validate(draft)
+        except (ConfigurationError, ValueError, KeyError, TypeError) as exc:
+            self._set_limit_validation(self._limit_items_by_path.get(path), str(exc))
+            editor.setText(str(self._get_path(self._raw, path)))
+            return
+        changed_paths = {path}
+        prefix = path[: limit_index + 1]
+        changed_paths.update(prefix + adjustment.path for adjustment in proposal.adjustments)
+        self.stage_limit_snapshot(settings, draft, changed_paths)
 
     def _populate_roles(self) -> None:
         self.role_table.setRowCount(0)
@@ -1223,11 +1302,15 @@ class SettingsPage(QWidget):
         assignments = access.get("user_roles", {}) if isinstance(access, dict) else {}
         if not isinstance(assignments, dict):
             return
-        for username, roles in sorted(assignments.items(), key=lambda item: str(item[0]).casefold()):
+        for username, roles in sorted(
+            assignments.items(), key=lambda item: str(item[0]).casefold()
+        ):
             row = self.role_table.rowCount()
             self.role_table.insertRow(row)
             self.role_table.setItem(row, 0, QTableWidgetItem(str(username)))
-            role_text = ", ".join(str(role) for role in roles) if isinstance(roles, list) else str(roles)
+            role_text = (
+                ", ".join(str(role) for role in roles) if isinstance(roles, list) else str(roles)
+            )
             self.role_table.setItem(row, 1, QTableWidgetItem(role_text))
 
     def _role_choices(self) -> tuple[str, ...]:
@@ -1275,7 +1358,9 @@ class SettingsPage(QWidget):
         selected = tuple(str(check.property("role")) for check in checkboxes if check.isChecked())
         normalized = account.text().strip()
         if not normalized or not selected:
-            QMessageBox.warning(self, "User role", "Enter an account name and select at least one role.")
+            QMessageBox.warning(
+                self, "User role", "Enter an account name and select at least one role."
+            )
             return None
         return normalized, selected
 
@@ -1373,7 +1458,9 @@ class SettingsPage(QWidget):
     def _add_limit_row(self, path: tuple[str | int, ...], value: dict[str, Any]) -> None:
         row = self.limits_table.rowCount()
         self.limits_table.insertRow(row)
-        scope_parts = [str(part) for part in path[1:-1] if str(part) not in {"safety", "lab_limits"}]
+        scope_parts = [
+            str(part) for part in path[1:-1] if str(part) not in {"safety", "lab_limits"}
+        ]
         scope = " / ".join(scope_parts) or str(path[1])
         parameter = str(path[-1]).replace("_", " ")
         minimum = self._format_scalar(value.get("min"))
@@ -1397,17 +1484,13 @@ class SettingsPage(QWidget):
                 item.setFlags(item.flags() & ~Qt.ItemFlag.ItemIsEditable)
             self.limits_table.setItem(row, column, item)
 
-    def _add_scalar_limit_row(
-        self, path: tuple[str | int, ...], value: str
-    ) -> None:
+    def _add_scalar_limit_row(self, path: tuple[str | int, ...], value: str) -> None:
         """Add a one-value safety limit such as maximum allowed power."""
 
         row = self.limits_table.rowCount()
         self.limits_table.insertRow(row)
         scope_parts = [
-            str(part)
-            for part in path[1:-1]
-            if str(part) not in {"safety", "lab_limits"}
+            str(part) for part in path[1:-1] if str(part) not in {"safety", "lab_limits"}
         ]
         scope = " / ".join(scope_parts) or str(path[1])
         parameter = str(path[-1]).replace("_", " ")
@@ -1453,11 +1536,7 @@ class SettingsPage(QWidget):
     @staticmethod
     def _limit_dimension(path: tuple[str | int, ...]) -> str | None:
         leaf = str(path[-1]) if path else ""
-        parameter = (
-            str(path[-2])
-            if len(path) >= 2 and leaf in {"min", "max", "max_abs"}
-            else leaf
-        )
+        parameter = str(path[-2]) if len(path) >= 2 and leaf in {"min", "max", "max_abs"} else leaf
         exact = {
             "frequency": DIMENSION_FREQUENCY,
             "reference_level": DIMENSION_DBM,
@@ -1484,7 +1563,12 @@ class SettingsPage(QWidget):
             return exact[parameter]
         if "current" in parameter:
             return DIMENSION_CURRENT
-        if "voltage" in parameter or parameter in {"high_level", "low_level", "offset", "amplitude_vpp"}:
+        if "voltage" in parameter or parameter in {
+            "high_level",
+            "low_level",
+            "offset",
+            "amplitude_vpp",
+        }:
             return DIMENSION_VOLTAGE
         if "frequency" in parameter:
             return DIMENSION_FREQUENCY
@@ -1526,16 +1610,12 @@ class SettingsPage(QWidget):
                 if dimension is None:
                     float(minimum.text().strip().replace(",", "."))
                 else:
-                    value = parse_quantity(
-                        minimum.text(), dimension, require_unit=True
-                    ).si_value
+                    value = parse_quantity(minimum.text(), dimension, require_unit=True).si_value
                     if value <= 0:
                         raise ValueError("Value must be greater than zero.")
             except (QuantityError, ValueError) as exc:
                 expected = f" Enter {self._dimension_unit_hint(dimension)}."
-                self._set_limit_validation(
-                    minimum, f"Invalid limit value:{expected} {exc}"
-                )
+                self._set_limit_validation(minimum, f"Invalid limit value:{expected} {exc}")
             return
         values: dict[str, float] = {}
         for item, boundary in ((minimum, "minimum"), (maximum, "maximum")):
@@ -1605,7 +1685,10 @@ class SettingsPage(QWidget):
             for row in range(self.limits_table.rowCount()):
                 for column in (2, 3):
                     item = self.limits_table.item(row, column)
-                    if item is not None and tuple(item.data(Qt.ItemDataRole.UserRole) or ()) == path:
+                    if (
+                        item is not None
+                        and tuple(item.data(Qt.ItemDataRole.UserRole) or ()) == path
+                    ):
                         item.setText(text)
                         safety_editor = self._safety_limit_editors.get(path)
                         if safety_editor is not None and safety_editor.text() != text:
@@ -1714,20 +1797,15 @@ class SettingsPage(QWidget):
 
     def _mark_invalid_path(self, path: tuple[str | int, ...], message: str) -> QWidget | None:
         candidates = [
-            candidate for candidate in self._form_editors
-            if (
-                len(candidate) <= len(path) and tuple(path[: len(candidate)]) == candidate
-            )
-            or (
-                len(path) <= len(candidate) and tuple(candidate[: len(path)]) == path
-            )
+            candidate
+            for candidate in self._form_editors
+            if (len(candidate) <= len(path) and tuple(path[: len(candidate)]) == candidate)
+            or (len(path) <= len(candidate) and tuple(candidate[: len(path)]) == path)
         ]
         marked_editor: QWidget | None = None
         if candidates:
             longest = max(len(candidate) for candidate in candidates)
-            for matched in (
-                candidate for candidate in candidates if len(candidate) == longest
-            ):
+            for matched in (candidate for candidate in candidates if len(candidate) == longest):
                 editor = self._form_editors[matched]
                 self._set_validation_state(editor, "error")
                 label = self._field_errors[matched]
@@ -1749,7 +1827,9 @@ class SettingsPage(QWidget):
         if not paths:
             return
         first_path = paths[0]
-        device = str(first_path[1]) if len(first_path) > 1 and first_path[0] == "devices" else "general"
+        device = (
+            str(first_path[1]) if len(first_path) > 1 and first_path[0] == "devices" else "general"
+        )
         form = self.forms.get(device)
         if form is not None:
             self.tabs.setCurrentWidget(form)
@@ -1759,6 +1839,7 @@ class SettingsPage(QWidget):
             if first_editor is None and editor is not None:
                 first_editor = editor
         if first_editor is not None:
+
             def focus_issue() -> None:
                 if form is not None:
                     form.ensureWidgetVisible(first_editor, 36, 72)
@@ -1793,13 +1874,13 @@ class SettingsPage(QWidget):
         message = str(error).lower()
         anritsu_safety = ("devices", "anritsu", "safety")
         if "anritsu acquisition requires a complete frequency limit" in message:
-            return tuple(
-                anritsu_safety + ("frequency", boundary)
-                for boundary in ("min", "max")
-            )
+            return tuple(anritsu_safety + ("frequency", boundary) for boundary in ("min", "max"))
         if "optional range must define both limits" in message:
             return self._missing_range_boundaries(draft)
-        if "signal generator output permission requires complete frequency and power limits" in message:
+        if (
+            "signal generator output permission requires complete frequency and power limits"
+            in message
+        ):
             return tuple(
                 ("devices", "anritsu", "signal_generator", range_name, boundary)
                 for range_name in ("frequency", "power")
@@ -1807,7 +1888,9 @@ class SettingsPage(QWidget):
             )
         return ()
 
-    def _show_validation_errors(self, error: Exception, draft: dict[str, Any] | None = None) -> None:
+    def _show_validation_errors(
+        self, error: Exception, draft: dict[str, Any] | None = None
+    ) -> None:
         previous_changing = self._changing
         self._changing = True
         try:
@@ -1883,9 +1966,7 @@ class SettingsPage(QWidget):
             return True
         try:
             local_draft = self._apply_tree_values()
-            local_changed_paths = self._changed_leaf_paths(
-                self._persisted_raw, local_draft
-            )
+            local_changed_paths = self._changed_leaf_paths(self._persisted_raw, local_draft)
             changed_paths = local_changed_paths
             general_edit_allowed = self._access.allows(Permission.EDIT_SETTINGS)
             operator_output_edit = (
@@ -1899,19 +1980,15 @@ class SettingsPage(QWidget):
                     Permission.EDIT_SETTINGS,
                     action="saving station settings",
                 )
-            if (
-                local_draft.get("access_control")
-                != self._persisted_raw.get("access_control")
-                and not self._access.allows(Permission.MANAGE_ROLES)
-            ):
+            if local_draft.get("access_control") != self._persisted_raw.get(
+                "access_control"
+            ) and not self._access.allows(Permission.MANAGE_ROLES):
                 raise AuthorizationError(
                     "An engineer or service identity is required to change access-control settings."
                 )
             repair_result = [False]
 
-            def merge_latest(
-                latest: dict[str, Any], _settings: StationSettings
-            ) -> dict[str, Any]:
+            def merge_latest(latest: dict[str, Any], _settings: StationSettings) -> dict[str, Any]:
                 # A device page may have saved defaults in the background
                 # while this draft was open. Overlay only locally edited
                 # leaves onto the newest document under one repository lock.
@@ -1979,9 +2056,7 @@ class SettingsPage(QWidget):
                     changed.add(path + (str(key),))
                 else:
                     changed.update(
-                        cls._changed_leaf_paths(
-                            before[key], after[key], path + (str(key),)
-                        )
+                        cls._changed_leaf_paths(before[key], after[key], path + (str(key),))
                     )
             return changed
         if isinstance(before, list) and isinstance(after, list):
@@ -1991,9 +2066,7 @@ class SettingsPage(QWidget):
                     changed.add(path + (index,))
                 else:
                     changed.update(
-                        cls._changed_leaf_paths(
-                            before[index], after[index], path + (index,)
-                        )
+                        cls._changed_leaf_paths(before[index], after[index], path + (index,))
                     )
             return changed
         return {path} if before != after else set()

@@ -14,7 +14,7 @@ from PySide6.QtWidgets import QApplication
 
 from app.devices.anritsu_ms2830a import SpectrumTrace
 from app.domain.models import MeasurementPoint
-from app.storage import Hdf5RunWriter, ThatecRunReader
+from app.storage import Hdf5RunReader, Hdf5RunWriter, ThatecRunReader
 from app.ui.results import HeatmapResultsTab, ResultsPage
 
 
@@ -164,7 +164,11 @@ class ResultsBrowserTests(unittest.TestCase):
             )
             for index in range(2):
                 writer.append(
-                    MeasurementPoint(index=index, setpoints={}, measurements={}),
+                    MeasurementPoint(
+                        index=index,
+                        setpoints={"keithley.B.current": index * 0.001},
+                        measurements={},
+                    ),
                     SpectrumTrace(
                         (1.0, 2.0, 3.0),
                         (-50.0 - index, -40.0 - index, -45.0 - index),
@@ -182,12 +186,29 @@ class ResultsBrowserTests(unittest.TestCase):
                 tab.resize(1000, 700)
                 tab.show()
                 self.application.processEvents()
-                tab.load(path, ThatecRunReader.describe(path))
+                tab.load(
+                    path,
+                    ThatecRunReader.describe(path),
+                    Hdf5RunReader.points(path),
+                )
 
                 self.assertEqual(tab.variant_combo.currentData(), "raw")
                 self.assertGreaterEqual(tab.variant_combo.findData("processed"), 0)
+                self.assertEqual(tab.x_axis_combo.currentData(), "frequency")
+                self.assertEqual(tab.y_axis_combo.currentData(), "keithley.B.current")
+                tab.x_axis_combo.setCurrentIndex(
+                    tab.x_axis_combo.findData("keithley.B.current")
+                )
+                self.application.processEvents()
+                self.assertEqual(tab.y_axis_combo.currentData(), "frequency")
+                tab.x_axis_combo.setCurrentIndex(tab.x_axis_combo.findData("frequency"))
+                self.application.processEvents()
                 tab.load_heatmap_for_row(str(tab.row_combo.currentData()))
                 self.assertTrue(np.allclose(tab.heatmap._data[0], (-50.0, -40.0, -45.0)))
+                self.assertIn(
+                    "Keithley B current",
+                    tab.heatmap.plot.getAxis("left").label.toPlainText(),
+                )
 
                 tab.variant_combo.setCurrentIndex(
                     tab.variant_combo.findData("processed")

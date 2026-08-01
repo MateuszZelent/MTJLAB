@@ -5,6 +5,7 @@ import unittest
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
+import numpy as np
 from PySide6.QtWidgets import QApplication
 
 from app.ui.design_system import plot_theme, tokens_for
@@ -25,6 +26,24 @@ class FluentResultsThemeTests(unittest.TestCase):
                 expected = plot_theme(tokens_for(name))
                 axis_pen = plot.plot.getAxis("bottom").pen().color().name()
                 self.assertEqual(axis_pen, expected.axes)
+        finally:
+            plot.close()
+
+    def test_heatmap_colorbar_has_a_visible_interactive_gradient(self) -> None:
+        plot = HeatmapPlotWidget()
+        try:
+            plot.show()
+            self.application.processEvents()
+            plot.set_data(
+                np.asarray(((-80.0, -75.0), (-72.0, -70.0))),
+                x_values=np.asarray((1.0, 2.0)),
+                y_values=np.asarray((0.0, 1.0)),
+                z_label="Power (dBm)",
+            )
+            self.assertIsNotNone(plot.color_bar._colorMap)
+            self.assertFalse(plot.color_bar.bar.pixmap().isNull())
+            self.assertEqual(plot.color_bar.values, (-80.0, -70.0))
+            self.assertTrue(plot.color_bar.region.isVisible())
         finally:
             plot.close()
 

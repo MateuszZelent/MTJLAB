@@ -3,6 +3,8 @@ from __future__ import annotations
 import os
 import inspect
 import unittest
+from copy import deepcopy
+from unittest.mock import patch
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
@@ -22,6 +24,7 @@ from app.settings.models import StationSettings
 from app.ui.settings_page import SettingsPage
 from app.ui.settings_page import _SafetyLimitValidationDelegate
 from app.ui.shell import MainWindow
+from tests.helpers import SETTINGS_TEMPLATE
 
 
 class FluentSettingsPageTests(unittest.TestCase):
@@ -117,15 +120,103 @@ class FluentSettingsPageTests(unittest.TestCase):
                 settings.keithley.safety.channels["A"].lab_limits.max_abs_power,
                 "6.7 mW",
             )
-            self.assertEqual(
-                page.limits_table.item(item.row(), 4).text(), "explicit unit"
-            )
+            self.assertEqual(page.limits_table.item(item.row(), 4).text(), "explicit unit")
 
             item.setText("6700")
             self.application.processEvents()
             self.assertIn(item, page._limit_error_items)
             message = str(item.data(256 + 101))
             self.assertIn("power unit", message)
+        finally:
+            page.close()
+
+    def test_staging_limit_snapshot_updates_only_changed_safety_editors(self) -> None:
+        repository = SettingsRepository(SETTINGS_TEMPLATE)
+        page = SettingsPage(repository)
+        source_max_path = (
+            "devices",
+            "keithley",
+            "safety",
+            "channels",
+            "B",
+            "lab_limits",
+            "source_current",
+            "max",
+        )
+        power_path = (
+            "devices",
+            "keithley",
+            "safety",
+            "channels",
+            "B",
+            "lab_limits",
+            "max_abs_power",
+        )
+        try:
+            raw = deepcopy(repository.load().raw)
+            limits = raw["devices"]["keithley"]["safety"]["channels"]["B"]["lab_limits"]
+            limits["source_current"]["max"] = "150 mA"
+            limits["source_current"]["max_abs"] = "150 mA"
+            limits["measured_current_trip"]["max"] = "150 mA"
+            limits["max_abs_power"] = "10.05 mW"
+            settings = StationSettings.model_validate(raw)
+            changed_paths = {
+                source_max_path,
+                source_max_path[:-1] + ("max_abs",),
+                source_max_path[:-2] + ("measured_current_trip", "max"),
+                power_path,
+            }
+
+            with (
+                patch.object(page, "_populate") as populate,
+                patch.object(page, "_refresh_diagnostics") as refresh_diagnostics,
+            ):
+                page.stage_limit_snapshot(settings, raw, changed_paths)
+
+            populate.assert_not_called()
+            refresh_diagnostics.assert_not_called()
+            self.assertEqual(page._safety_limit_editors[source_max_path].text(), "150 mA")
+            self.assertEqual(page._safety_limit_editors[power_path].text(), "10.05 mW")
+            self.assertTrue(page._dirty)
+        finally:
+            page.close()
+
+    def test_keithley_safety_card_accepts_dependent_limit_proposal(self) -> None:
+        repository = SettingsRepository(SETTINGS_TEMPLATE)
+        page = SettingsPage(repository)
+        source_max_path = (
+            "devices",
+            "keithley",
+            "safety",
+            "channels",
+            "B",
+            "lab_limits",
+            "source_current",
+            "max",
+        )
+        current_trip_path = source_max_path[:-2] + ("measured_current_trip", "max")
+        power_path = source_max_path[:-2] + ("max_abs_power",)
+        try:
+            editor = page._safety_limit_editors[source_max_path]
+            editor.setText("150 mA")
+            with (
+                patch(
+                    "app.ui.settings_page.KeithleyLimitProposalDialog",
+                    create=True,
+                ) as proposal_dialog,
+                patch.object(page, "_populate") as populate,
+                patch.object(page, "_refresh_diagnostics") as refresh_diagnostics,
+            ):
+                proposal_dialog.return_value.exec.return_value = 1
+                page._commit_safety_limit_editor(source_max_path, editor)
+
+            proposal_dialog.assert_called_once()
+            populate.assert_not_called()
+            refresh_diagnostics.assert_not_called()
+            self.assertEqual(editor.text(), "150 mA")
+            self.assertEqual(page._safety_limit_editors[current_trip_path].text(), "150 mA")
+            self.assertEqual(page._safety_limit_editors[power_path].text(), "10.05 mW")
+            self.assertTrue(page._dirty)
         finally:
             page.close()
 
@@ -139,7 +230,9 @@ class FluentSettingsPageTests(unittest.TestCase):
             page = window.settings_page
             host = window.navigation_routes["settings"]
 
-            self.assertLessEqual(page.minimumSizeHint().width(), host.scroll_area.viewport().width())
+            self.assertLessEqual(
+                page.minimumSizeHint().width(), host.scroll_area.viewport().width()
+            )
             self.assertTrue(page.save_button.isVisibleTo(window))
             self.assertLessEqual(
                 page.action_card.mapTo(window, page.action_card.rect().bottomRight()).x(),
@@ -180,18 +273,11 @@ class FluentSettingsPageTests(unittest.TestCase):
             page.resize(1360, 880)
             page.show()
             self.application.processEvents()
-            form = next(
-                child
-                for child in page.forms["anritsu"].widget().findChildren(QFormLayout)
-            )
-            self.assertEqual(
-                form.rowWrapPolicy(), QFormLayout.RowWrapPolicy.DontWrapRows
-            )
+            form = next(child for child in page.forms["anritsu"].widget().findChildren(QFormLayout))
+            self.assertEqual(form.rowWrapPolicy(), QFormLayout.RowWrapPolicy.DontWrapRows)
             labels = [
                 label
-                for label in page.forms["anritsu"].widget().findChildren(
-                    type(page._subtitle)
-                )
+                for label in page.forms["anritsu"].widget().findChildren(type(page._subtitle))
                 if label.objectName() != "settingsFieldError"
             ]
             self.assertTrue(any(label.minimumWidth() >= 240 for label in labels))

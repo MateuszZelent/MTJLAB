@@ -7,11 +7,16 @@ from PySide6.QtCore import Qt
 from PySide6.QtCore import QPoint
 from PySide6.QtWidgets import (
     QApplication,
+    QDialog,
     QFileDialog,
     QMessageBox,
 )
-from qfluentwidgets import PushButton, TransparentPushButton
+from qfluentwidgets import PrimaryPushButton, PushButton, TransparentPushButton
 
+from app.safety.keithley_limit_reconciliation import (
+    KeithleyLimitAdjustment,
+    KeithleyLimitProposal,
+)
 from app.ui.design_system import apply_application_theme, tokens_for
 from app.ui.dialogs import (
     StationAlertDialog,
@@ -20,7 +25,12 @@ from app.ui.dialogs import (
     SweepDeviceReadinessDialog,
 )
 from app.ui.recipes.fluent_dialog import FluentRecipeDialog
-from app.ui.widgets import LimitEditDialog, LimitField, SpectrumPlotWidget
+from app.ui.widgets import (
+    KeithleyLimitProposalDialog,
+    LimitEditDialog,
+    LimitField,
+    SpectrumPlotWidget,
+)
 from app.ui.common import line_edit
 
 
@@ -55,6 +65,53 @@ class FluentDialogTests(unittest.TestCase):
             limit.close()
             dialog.close()
             plot.close()
+
+    def test_keithley_limit_proposal_dialog_renders_adjustments_in_narrow_parent(self) -> None:
+        proposal = KeithleyLimitProposal(
+            ("source_current", "max"),
+            "150 mA",
+            (
+                KeithleyLimitAdjustment(
+                    ("source_current", "max_abs"),
+                    "10 mA",
+                    "150 mA",
+                    "Synchronise the source envelope.",
+                ),
+                KeithleyLimitAdjustment(
+                    ("measured_current_trip", "max"),
+                    "10.5 mA",
+                    "150 mA",
+                    "Cover the current source envelope.",
+                ),
+                KeithleyLimitAdjustment(
+                    ("max_abs_power",),
+                    "670 uW",
+                    "10.05 mW",
+                    "Cover the source x compliance power.",
+                ),
+            ),
+        )
+        parent = StationDialog()
+        parent.resize(820, 560)
+        dialog = KeithleyLimitProposalDialog(proposal, parent)
+        try:
+            parent.show()
+            dialog.show()
+            self.application.processEvents()
+
+            accept = dialog.findChild(PrimaryPushButton, "acceptKeithleyLimitChanges")
+            self.assertIsNotNone(accept)
+            self.assertTrue(accept.isVisible())
+            self.assertGreater(dialog.width(), 430)
+            self.assertLessEqual(dialog.width(), parent.width())
+            self.assertTrue(dialog.adjustments_text.isVisible())
+            self.assertIn("10.05 mW", dialog.adjustments_text.toPlainText())
+
+            dialog.reject()
+            self.assertEqual(dialog.result(), QDialog.DialogCode.Rejected)
+        finally:
+            dialog.close()
+            parent.close()
 
     def test_unitless_numeric_limit_accepts_valid_nplc_and_clamps_outside_value(self) -> None:
         editor = line_edit("1")

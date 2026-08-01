@@ -80,6 +80,9 @@ from app.settings import SettingsRepository
 from app.settings.models import StationSettings
 from app.settings.validation import format_settings_validation_error
 from app.security import AccessPolicy, Permission
+from app.safety.keithley_limit_reconciliation import (
+    propose_keithley_limit_adjustments,
+)
 from app.storage import Hdf5RunReader
 from app.ui.settings_page import SettingsPage
 from app.ui.settings_guidance import SettingsIssue, settings_issue_for_error
@@ -92,12 +95,22 @@ from app.ui.results import HeatmapResultsTab, ResultsPage
 from app.ui.design_system import apply_application_theme, effective_theme
 from app.ui.recipes import DeviceParameterDialog, SweepGeneratorDialog  # noqa: F401
 from app.ui.recipes.page import (  # noqa: F401
-    AnritsuAcquisitionEditorDialog, CommentEditorDialog, FixedValueDialog,
-    KeithleySweepBuilderDialog, RecipePage, RecipeTreeWidget, SweepLibraryButton,
+    AnritsuAcquisitionEditorDialog,
+    CommentEditorDialog,
+    FixedValueDialog,
+    KeithleySweepBuilderDialog,
+    RecipePage,
+    RecipeTreeWidget,
+    SweepLibraryButton,
 )
 from app.ui.shell.page_host import FluentPageHost
 from app.ui.shell.safety_strip import StationSafetySnapshot, StationSafetyStrip
-from app.ui.widgets import LimitEditDialog, LimitField, SpectrumPlotWidget
+from app.ui.widgets import (
+    KeithleyLimitProposalDialog,
+    LimitEditDialog,
+    LimitField,
+    SpectrumPlotWidget,
+)
 from app.ui.quick_controls import QuickControlCoordinator, QuickControlsWindow
 
 
@@ -127,25 +140,15 @@ class MainWindow(FluentWindow):
         self._keithley_defaults_timer.setSingleShot(True)
         self._keithley_defaults_timer.setInterval(2_000)
         self._keithley_defaults_thread = QThread(self)
-        self._keithley_defaults_worker = KeithleyDefaultsSaveWorker(
-            self._repository.path
-        )
-        self._keithley_defaults_worker.moveToThread(
-            self._keithley_defaults_thread
-        )
+        self._keithley_defaults_worker = KeithleyDefaultsSaveWorker(self._repository.path)
+        self._keithley_defaults_worker.moveToThread(self._keithley_defaults_thread)
         self._keithley_defaults_write_requested.connect(
             self._keithley_defaults_worker.save,
             Qt.ConnectionType.QueuedConnection,
         )
-        self._keithley_defaults_worker.succeeded.connect(
-            self._keithley_defaults_saved
-        )
-        self._keithley_defaults_worker.failed.connect(
-            self._keithley_defaults_save_failed
-        )
-        self._keithley_defaults_thread.finished.connect(
-            self._keithley_defaults_worker.deleteLater
-        )
+        self._keithley_defaults_worker.succeeded.connect(self._keithley_defaults_saved)
+        self._keithley_defaults_worker.failed.connect(self._keithley_defaults_save_failed)
+        self._keithley_defaults_thread.finished.connect(self._keithley_defaults_worker.deleteLater)
         self._keithley_defaults_thread.start()
         self._pending_limit_rollbacks: dict[str, StationSettings] = {}
         self._access = AccessPolicy.from_settings(
@@ -180,7 +183,8 @@ class MainWindow(FluentWindow):
                 )
             )
         self._device_states = {
-            key: "disconnected" for key in ("rigol", "keithley", "anritsu", "moke_box", "lakeshore_gaussmeter")
+            key: "disconnected"
+            for key in ("rigol", "keithley", "anritsu", "moke_box", "lakeshore_gaussmeter")
         }
         self._manual_device_idn: dict[str, str] = {}
         self._run_controller = RunController(self)
@@ -245,9 +249,7 @@ class MainWindow(FluentWindow):
         # The full panel becomes a temporary MENU overlay only when the operator
         # explicitly opens it; it must not consume 248 px at the 820 px minimum.
         self._navigation_expand_threshold = 1_008
-        self.navigationInterface.setMinimumExpandWidth(
-            self._navigation_expand_threshold
-        )
+        self.navigationInterface.setMinimumExpandWidth(self._navigation_expand_threshold)
 
         registry = self._composition.registry
         self.dashboard = DashboardPage(
@@ -280,34 +282,22 @@ class MainWindow(FluentWindow):
         self.quick_control_coordinator = QuickControlCoordinator(
             self._controllers, self, settings=self._settings
         )
-        self.quick_controls_window = QuickControlsWindow(
-            self.quick_control_coordinator, self
-        )
+        self.quick_controls_window = QuickControlsWindow(self.quick_control_coordinator, self)
         self.quick_controls_window.restore_workspace()
-        self.quick_controls_window.output_requested.connect(
-            self._request_quick_control_output
-        )
-        self.rigol_page.quick_setpoint_requested.connect(
-            self.quick_control_coordinator.submit
-        )
-        self.keithley_page.quick_setpoint_requested.connect(
-            self.quick_control_coordinator.submit
-        )
+        self.quick_controls_window.output_requested.connect(self._request_quick_control_output)
+        self.rigol_page.quick_setpoint_requested.connect(self.quick_control_coordinator.submit)
+        self.keithley_page.quick_setpoint_requested.connect(self.quick_control_coordinator.submit)
         self.quick_control_coordinator.state_changed.connect(
             self.rigol_page.quick_setpoint_state_changed
         )
         self.quick_control_coordinator.state_changed.connect(
             self.keithley_page.quick_setpoint_state_changed
         )
-        self.quick_control_coordinator.value_read.connect(
-            self.rigol_page.quick_setpoint_value_read
-        )
+        self.quick_control_coordinator.value_read.connect(self.rigol_page.quick_setpoint_value_read)
         self.quick_control_coordinator.value_read.connect(
             self.keithley_page.quick_setpoint_value_read
         )
-        self.anritsu_page.quick_controls_requested.connect(
-            self._show_quick_controls
-        )
+        self.anritsu_page.quick_controls_requested.connect(self._show_quick_controls)
         self.rigol_page.quick_controls_requested.connect(self._show_quick_controls)
         self.keithley_page.quick_controls_requested.connect(self._show_quick_controls)
         self.connection_panels: dict[str, DeviceConnectionPanel] = {}
@@ -333,9 +323,7 @@ class MainWindow(FluentWindow):
         self.recipe_page.set_keithley_snapshot_provider(
             self.keithley_page.configuration_snapshot_for
         )
-        self.recipe_page.set_rigol_snapshot_provider(
-            self.rigol_page.configuration_snapshot_for
-        )
+        self.recipe_page.set_rigol_snapshot_provider(self.rigol_page.configuration_snapshot_for)
         self.recipe_page.set_anritsu_snapshot_provider(
             self.anritsu_page.configuration_panel.configuration_snapshot
         )
@@ -343,18 +331,16 @@ class MainWindow(FluentWindow):
             self.anritsu_page.signal_generator_snapshot
         )
         self.run_monitor = RunMonitorPage()
-        self.results_page = ResultsPage(str(self._settings.storage.get("output_directory", "./measurements")))
+        self.results_page = ResultsPage(
+            str(self._settings.storage.get("output_directory", "./measurements"))
+        )
         self.settings_page = SettingsPage(
             self._repository,
             read_only=self._simulation,
             access_policy=self._access,
         )
-        self.dashboard.set_assignment_allowed(
-            self._access.allows(Permission.ASSIGN_VISA)
-        )
-        roles = ", ".join(
-            sorted(role.value for role in self._access.identity.roles)
-        ) or "none"
+        self.dashboard.set_assignment_allowed(self._access.allows(Permission.ASSIGN_VISA))
+        roles = ", ".join(sorted(role.value for role in self._access.identity.roles)) or "none"
 
         def configure_limit_button(
             field: LimitField,
@@ -382,33 +368,33 @@ class MainWindow(FluentWindow):
                 )
             else:
                 enabled = True
-                reason = (
-                    "Edit this safety range. Values are validated before saving."
-                )
+                reason = "Edit this safety range. Values are validated before saving."
             field.edit_button.setEnabled(enabled)
             field.edit_button.setToolTip(reason)
-            field.edit_button.setAccessibleName(
-                f"Edit {device} safety limits"
-            )
+            field.edit_button.setAccessibleName(f"Edit {device} safety limits")
             field.edit_button.setAccessibleDescription(reason)
             return enabled
 
         for field in self.rigol_page.findChildren(LimitField):
             configure_limit_button(field, device="Rigol")
-            field.edit_requested.connect(lambda field=field: self._edit_device_limit("rigol", field))
+            field.edit_requested.connect(
+                lambda field=field: self._edit_device_limit("rigol", field)
+            )
         for field in self.keithley_page.findChildren(LimitField):
             editable = configure_limit_button(
                 field,
                 device="Keithley",
-                fixed_instrument_range=(
-                    str(field.property("limitKey")) == "nplc"
-                ),
+                fixed_instrument_range=(str(field.property("limitKey")) == "nplc"),
             )
             if editable:
-                field.edit_requested.connect(lambda field=field: self._edit_device_limit("keithley", field))
+                field.edit_requested.connect(
+                    lambda field=field: self._edit_device_limit("keithley", field)
+                )
         for field in self.anritsu_page.findChildren(LimitField):
             configure_limit_button(field, device="Anritsu")
-            field.edit_requested.connect(lambda field=field: self._edit_device_limit("anritsu", field))
+            field.edit_requested.connect(
+                lambda field=field: self._edit_device_limit("anritsu", field)
+            )
         route_icons = {
             "overview": FluentIcon.HOME,
             "discovery": FluentIcon.SEARCH,
@@ -486,9 +472,7 @@ class MainWindow(FluentWindow):
             host.setObjectName(f"{route}PageHost")
             self.navigation_routes[route] = host
             position = (
-                NavigationItemPosition.BOTTOM
-                if route == "settings"
-                else NavigationItemPosition.TOP
+                NavigationItemPosition.BOTTOM if route == "settings" else NavigationItemPosition.TOP
             )
             self.addSubInterface(
                 host,
@@ -550,22 +534,16 @@ class MainWindow(FluentWindow):
         self.shell_splitter.setStretchFactor(1, 0)
         self.shell_splitter.setSizes([700, 120])
         self.dashboard.emergency_requested.connect(self._emergency_off_all)
-        self.dashboard.readiness_changed.connect(
-            lambda _ready: self._refresh_safety_strip()
-        )
+        self.dashboard.readiness_changed.connect(lambda _ready: self._refresh_safety_strip())
         self.dashboard.assignments_requested.connect(self._save_discovered_assignments)
         self.dashboard.moke_assignment_requested.connect(self._save_moke_assignment)
         self.dashboard.status.connect(self._log)
         self.settings_page.settings_saved.connect(self._settings_saved)
-        self.anritsu_page.settings_readback_requested.connect(
-            self._save_anritsu_readback_defaults
-        )
+        self.anritsu_page.settings_readback_requested.connect(self._save_anritsu_readback_defaults)
         self.keithley_page.settings_assignment_requested.connect(
             self._queue_keithley_assignment_save
         )
-        self.keithley_page.settings_defaults_requested.connect(
-            self._stage_keithley_defaults
-        )
+        self.keithley_page.settings_defaults_requested.connect(self._stage_keithley_defaults)
         self.recipe_page.run_requested.connect(self._start_run)
         self.recipe_page.settings_issue_requested.connect(self._open_settings_issue)
         self.recipe_page.plan_preflight_changed.connect(self.dashboard.update_plan_preflight)
@@ -574,9 +552,7 @@ class MainWindow(FluentWindow):
         self.run_monitor.stop_requested.connect(self._run_controller.request_stop)
         self.run_monitor.pause_requested.connect(self._run_controller.request_pause)
         self.run_monitor.resume_requested.connect(self._run_controller.request_resume)
-        self.run_monitor.manual_next_requested.connect(
-            self._run_controller.advance_manual_step
-        )
+        self.run_monitor.manual_next_requested.connect(self._run_controller.advance_manual_step)
         self._run_controller.event.connect(self._run_event)
         self._run_controller.finished.connect(self._run_finished)
         self._run_controller.failed.connect(self._run_failed)
@@ -604,17 +580,13 @@ class MainWindow(FluentWindow):
             action.setData(mode)
             action.setChecked(mode == configured_theme)
             action.triggered.connect(
-                lambda checked=False, mode=mode: (
-                    checked and self._activate_theme_mode(mode)
-                )
+                lambda checked=False, mode=mode: checked and self._activate_theme_mode(mode)
             )
             self.theme_group.addAction(action)
             self.addAction(action)
             self.theme_actions[mode] = action
         self.theme_navigation_menu = RoundMenu("Theme", self)
-        self.theme_navigation_menu.addActions(
-            tuple(self.theme_actions.values())
-        )
+        self.theme_navigation_menu.addActions(tuple(self.theme_actions.values()))
         self.event_log_action = QAction("Event log", self)
         self.event_log_action.setCheckable(True)
         self.event_log_action.setChecked(True)
@@ -660,11 +632,7 @@ class MainWindow(FluentWindow):
     def _current_route(self) -> str:
         current = self.stackedWidget.currentWidget()
         return next(
-            (
-                route
-                for route, host in self.navigation_routes.items()
-                if host is current
-            ),
+            (route for route, host in self.navigation_routes.items() if host is current),
             "overview",
         )
 
@@ -676,18 +644,14 @@ class MainWindow(FluentWindow):
             item.setEnabled(enabled)
 
     def _refresh_safety_strip(self) -> None:
-        active_outputs = sum(
-            state == "output_on" for state in self._device_states.values()
-        )
+        active_outputs = sum(state == "output_on" for state in self._device_states.values())
         self.safety_strip.update_snapshot(
             StationSafetySnapshot(
                 ready=self.dashboard.evaluate_readiness().ready,
                 active_outputs=active_outputs,
                 simulation=self._simulation,
                 actor=self._access.identity.username,
-                roles=tuple(
-                    sorted(role.value for role in self._access.identity.roles)
-                ),
+                roles=tuple(sorted(role.value for role in self._access.identity.roles)),
             )
         )
 
@@ -729,7 +693,10 @@ class MainWindow(FluentWindow):
         if device == "moke_box":
             return settings.moke_box.endpoint, "TCP/IP"
         if device == "lakeshore_gaussmeter":
-            return settings.lakeshore_gaussmeter.resource, settings.lakeshore_gaussmeter.visa_backend
+            return (
+                settings.lakeshore_gaussmeter.resource,
+                settings.lakeshore_gaussmeter.visa_backend,
+            )
         connection = getattr(settings, device).connection
         return connection.resource, connection.visa_backend
 
@@ -768,12 +735,8 @@ class MainWindow(FluentWindow):
                 maximum_si = parse_quantity(str(maximum), dimension).si_value
             except Exception:
                 continue
-            return format_quantity_auto(
-                max(abs(minimum_si), abs(maximum_si)), dimension
-            )
-        raise ValueError(
-            f"Cannot synchronize max_abs={original_max_abs!r} with the edited range."
-        )
+            return format_quantity_auto(max(abs(minimum_si), abs(maximum_si)), dimension)
+        raise ValueError(f"Cannot synchronize max_abs={original_max_abs!r} with the edited range.")
 
     def _limit_edit_spec(self, device: str, field: LimitField) -> tuple[str, tuple[str, ...], bool]:
         key = str(field.property("limitKey"))
@@ -788,7 +751,9 @@ class MainWindow(FluentWindow):
         channel = self.keithley_page.channel.currentText()
         mode = self.keithley_page.mode.currentText()
         if mode == "measure_only" and key in {"level", "compliance", "source_range"}:
-            raise ConfigurationError("Source limits are not applicable while Keithley is in measure-only mode.")
+            raise ConfigurationError(
+                "Source limits are not applicable while Keithley is in measure-only mode."
+            )
         mappings = {
             "level": "source_current" if mode == "current" else "source_voltage",
             "compliance": "voltage_compliance" if mode == "current" else "current_compliance",
@@ -821,18 +786,15 @@ class MainWindow(FluentWindow):
             return
         try:
             loaded = self._repository.load()
-            raw = deepcopy(loaded.raw)
+            base_raw = self.settings_page._raw if self.settings_page._dirty else loaded.raw
+            raw = deepcopy(base_raw)
             title, path, maximum_enabled = self._limit_edit_spec(device, field)
             range_data = self._nested_value(raw, path)
             if range_data is None:
                 range_data = {"min": "", "max": ""}
             scalar_limit = not isinstance(range_data, dict)
             minimum = range_data if scalar_limit else range_data.get("min")
-            maximum = (
-                range_data.get("max")
-                if maximum_enabled and not scalar_limit
-                else None
-            )
+            maximum = range_data.get("max") if maximum_enabled and not scalar_limit else None
         except (ConfigurationError, KeyError, TypeError) as exc:
             QMessageBox.critical(self, "Cannot edit limits", str(exc))
             return
@@ -856,7 +818,7 @@ class MainWindow(FluentWindow):
                 replacement["min"] = self._coerce_limit_value(dialog.minimum.text(), minimum)
                 if maximum_enabled:
                     replacement["max"] = self._coerce_limit_value(dialog.maximum.text(), maximum)
-                if "max_abs" in replacement and maximum_enabled:
+                if device != "keithley" and "max_abs" in replacement and maximum_enabled:
                     replacement["max_abs"] = self._synchronised_max_abs(
                         replacement["min"],
                         replacement["max"],
@@ -866,6 +828,35 @@ class MainWindow(FluentWindow):
             for part in path[:-1]:
                 container = container[part]
             container[path[-1]] = replacement
+            if device == "keithley":
+                channel_limits = self._nested_value(raw, path[: path.index("lab_limits") + 1])
+                if not isinstance(channel_limits, dict):
+                    raise ConfigurationError("Keithley channel limits are not configured.")
+                if scalar_limit:
+                    primary_path = ("max_abs_power",)
+                    primary_value = str(replacement)
+                else:
+                    changed_boundaries = [
+                        boundary
+                        for boundary in ("min", "max")
+                        if maximum_enabled or boundary == "min"
+                        if replacement.get(boundary) != range_data.get(boundary)
+                    ]
+                    primary_boundary = "max" if "max" in changed_boundaries else "min"
+                    primary_path = (str(path[-1]), primary_boundary)
+                    primary_value = str(replacement[primary_boundary])
+                proposal = propose_keithley_limit_adjustments(
+                    channel_limits, primary_path, primary_value
+                )
+                if proposal.adjustments:
+                    confirmation = KeithleyLimitProposalDialog(proposal, self)
+                    if confirmation.exec() != QDialog.DialogCode.Accepted:
+                        return
+                    for adjustment in proposal.adjustments:
+                        adjustment_target: Any = channel_limits
+                        for part in adjustment.path[:-1]:
+                            adjustment_target = adjustment_target[part]
+                        adjustment_target[adjustment.path[-1]] = adjustment.proposed
             settings = StationSettings.model_validate(raw)
         except (ConfigurationError, ValueError, KeyError, TypeError) as exc:
             QMessageBox.critical(
@@ -875,7 +866,11 @@ class MainWindow(FluentWindow):
             )
             return
 
-        self.settings_page.stage_external_snapshot(settings, raw)
+        changed_paths = SettingsPage._changed_leaf_paths(base_raw, raw)
+        if self.settings_page._can_stage_limit_snapshot(changed_paths):
+            self.settings_page.stage_limit_snapshot(settings, raw, changed_paths)
+        else:
+            self.settings_page.stage_external_snapshot(settings, raw)
         if scalar_limit:
             field.editor.setText(str(replacement))
         else:
@@ -890,9 +885,9 @@ class MainWindow(FluentWindow):
                     if candidate.property("limitKey") == field.property("limitKey")
                 )
             for candidate in fields:
-                candidate.set_limits(
-                    replacement["min"], replacement.get("max", "N/A")
-                )
+                candidate.set_limits(replacement["min"], replacement.get("max", "N/A"))
+        if device == "keithley":
+            self.keithley_page.set_settings(settings)
         if device == "anritsu":
             self.anritsu_page.banner.show_message(
                 "Anritsu safety limits are staged. Press SAVE SETTINGS before "
@@ -993,7 +988,9 @@ class MainWindow(FluentWindow):
                     current.call("connect"),
                 )
             )
-            panel.disconnect_requested.connect(lambda current=controller: current.call("disconnect"))
+            panel.disconnect_requested.connect(
+                lambda current=controller: current.call("disconnect")
+            )
             panel.test_requested.connect(
                 lambda current=controller, current_card=panel: (
                     current_card.set_testing(True),
@@ -1002,13 +999,17 @@ class MainWindow(FluentWindow):
             )
             controller.state_changed.connect(card.update_state)
             controller.state_changed.connect(panel.update_state)
-            controller.state_changed.connect(lambda state, device=name: self._set_device_state(device, state))
+            controller.state_changed.connect(
+                lambda state, device=name: self._set_device_state(device, state)
+            )
             controller.result.connect(
                 lambda operation, result, device=name, current=panel: self._device_result(
                     device, current, operation, result
                 )
             )
-            controller.error.connect(lambda operation, error, device=name: self._device_error(device, operation, error))
+            controller.error.connect(
+                lambda operation, error, device=name: self._device_error(device, operation, error)
+            )
             controller.traffic.connect(
                 lambda message, device=name: self._log(
                     f"{device.upper()} {'TCP' if device == 'moke_box' else 'VISA'} {message}"
@@ -1029,9 +1030,7 @@ class MainWindow(FluentWindow):
         self.quick_controls_window.raise_()
         self.quick_controls_window.activateWindow()
 
-    def _request_quick_control_output(
-        self, device: str, channel: str, enabled: bool
-    ) -> None:
+    def _request_quick_control_output(self, device: str, channel: str, enabled: bool) -> None:
         """Send floating-window output requests through the owning device page."""
 
         if device == "rigol":
@@ -1075,7 +1074,9 @@ class MainWindow(FluentWindow):
 
         return dict(self._manual_device_idn)
 
-    def _device_result(self, device: str, card: DeviceConnectionPanel, operation: str, result: object) -> None:
+    def _device_result(
+        self, device: str, card: DeviceConnectionPanel, operation: str, result: object
+    ) -> None:
         if operation == "connect":
             identity = str(getattr(result, "idn", "") or "")
             if identity:
@@ -1101,7 +1102,10 @@ class MainWindow(FluentWindow):
             # a successful identity check must not look like an active link.
             card.update_state("disconnected")
             features = ", ".join(str(item) for item in result.get("features", ())) or "basic VISA"
-            options = ", ".join(str(item) for item in result.get("hardware_options", ())) or "not reported"
+            options = (
+                ", ".join(str(item) for item in result.get("hardware_options", ()))
+                or "not reported"
+            )
             card.identity.setText(
                 f"TEST PASS: {result.get('vendor', '')} {result.get('model', '')} • "
                 f"SN {result.get('serial', '—')} • FW {result.get('firmware', '—')}\n"
@@ -1162,9 +1166,7 @@ class MainWindow(FluentWindow):
         self.dashboard.update_device_state(device, state)
         self._refresh_safety_strip()
 
-    def _guard_manual_operation(
-        self, device: str, operation: str, payload: object
-    ) -> None:
+    def _guard_manual_operation(self, device: str, operation: str, payload: object) -> None:
         """Fail closed for new energy-producing operations after audit I/O failure."""
 
         if device in self._leased_run_devices and operation != "emergency_off":
@@ -1307,13 +1309,13 @@ class MainWindow(FluentWindow):
                 )
             )
             controller.result.connect(
-                lambda _operation, _result, device=device, current=dialog: self._update_sweep_readiness_device(
-                    current, device
+                lambda _operation, _result, device=device, current=dialog: (
+                    self._update_sweep_readiness_device(current, device)
                 )
             )
             controller.error.connect(
-                lambda _operation, error, device=device, current=dialog: self._update_sweep_readiness_device(
-                    current, device, error
+                lambda _operation, error, device=device, current=dialog: (
+                    self._update_sweep_readiness_device(current, device, error)
                 )
             )
         dialog.connect_missing_requested.connect(self._connect_sweep_devices)
@@ -1397,7 +1399,8 @@ class MainWindow(FluentWindow):
                 )
                 raise ConfigurationError("Station preflight is blocked:\n" + details)
             recipe_tree_items = self.recipe_page.execution_tree_snapshot(
-                plan.recipe_source, plan  # type: ignore[union-attr]
+                plan.recipe_source,
+                plan,  # type: ignore[union-attr]
             )
             active_controllers = self._active_device_controllers()
             self._run_controller.start(
@@ -1469,9 +1472,7 @@ class MainWindow(FluentWindow):
             return
         try:
             detail = Hdf5RunReader.detail(path)
-            outputs_forced_off = bool(
-                detail.simulation_metadata.get("outputs_forced_off", False)
-            )
+            outputs_forced_off = bool(detail.simulation_metadata.get("outputs_forced_off", False))
             stored_execution_mode = ExecutionMode.coerce(
                 str(detail.simulation_metadata.get("execution_mode", "measurement"))
             )
@@ -1489,9 +1490,9 @@ class MainWindow(FluentWindow):
                     "Restore the exact station configuration before resuming."
                 )
             recipe = parse_recipe_text(detail.recipe_yaml, origin=str(path))
-            plan = RecipeCompiler(
-                self._settings, outputs_forced_off=outputs_forced_off
-            ).compile(recipe)
+            plan = RecipeCompiler(self._settings, outputs_forced_off=outputs_forced_off).compile(
+                recipe
+            )
             checkpoint = RunRecoveryManager().inspect(path, plan)
             if (
                 checkpoint.stored_points >= plan.total_points
@@ -1546,9 +1547,7 @@ class MainWindow(FluentWindow):
             return
         try:
             estimate = PlanEstimator(self._settings).estimate(plan)  # type: ignore[arg-type]
-            recipe_tree_items = self.recipe_page.execution_tree_snapshot(
-                plan.recipe_source, plan
-            )
+            recipe_tree_items = self.recipe_page.execution_tree_snapshot(plan.recipe_source, plan)
             active_controllers = self._active_device_controllers()
             self._run_controller.start(
                 self._settings,
@@ -1577,9 +1576,7 @@ class MainWindow(FluentWindow):
             ),
             recipe_source=plan.recipe_source,
             recipe_tree_items=recipe_tree_items,
-            execution_mode=(
-                estimate_execution_mode.value
-            ),
+            execution_mode=(estimate_execution_mode.value),
         )
         self._set_run_ui_locked(True)
         self._navigate_to("execution")
@@ -1599,14 +1596,21 @@ class MainWindow(FluentWindow):
         if name == "run_started":
             value = payload.get("correlation_id") or payload.get("hash")
             self._run_correlation_id = str(value) if value else None
-        severity = "error" if name in {
-            "action_failed",
-            "run_fault",
-            "shutdown_error",
-            "watchdog_timeout",
-            "worker_cleanup_warning",
-        } else (
-            "warning" if name in {"compliance_detected", "run_aborted", "safe_finally_error"} else "info"
+        severity = (
+            "error"
+            if name
+            in {
+                "action_failed",
+                "run_fault",
+                "shutdown_error",
+                "watchdog_timeout",
+                "worker_cleanup_warning",
+            }
+            else (
+                "warning"
+                if name in {"compliance_detected", "run_aborted", "safe_finally_error"}
+                else "info"
+            )
         )
         if name != "spectrum_preview":
             self._audit_record(
@@ -1627,9 +1631,7 @@ class MainWindow(FluentWindow):
         if name in {"run_completed", "run_aborted", "run_fault"}:
             self._run_correlation_id = None
 
-    def _apply_runner_device_readback(
-        self, event_name: str, payload: dict[str, object]
-    ) -> None:
+    def _apply_runner_device_readback(self, event_name: str, payload: dict[str, object]) -> None:
         """Dispatch one confirmed runner event through every device module.
 
         Pages receive immutable event/snapshot mappings and may only render
@@ -1725,9 +1727,7 @@ class MainWindow(FluentWindow):
 
     def _settings_saved(self, settings: StationSettings) -> None:
         previous_settings = self._settings
-        updated_settings = (
-            simulated_station_settings(settings) if self._simulation else settings
-        )
+        updated_settings = simulated_station_settings(settings) if self._simulation else settings
         changes_by_device = {
             name: self._setting_changes(
                 getattr(previous_settings.devices, name).model_dump(mode="python"),
@@ -1735,9 +1735,7 @@ class MainWindow(FluentWindow):
             )
             for name in self._controllers
         }
-        changed_devices = {
-            name for name, changes in changes_by_device.items() if changes
-        }
+        changed_devices = {name for name, changes in changes_by_device.items() if changes}
         self._apply_settings_to_ui(settings, changed_devices=changed_devices)
 
         for name, controller in self._controllers.items():
@@ -1753,10 +1751,7 @@ class MainWindow(FluentWindow):
             if not operational_changes:
                 controller.call("refresh_station_context", self._settings)
                 continue
-            if all(
-                path and path[-1] in {"min", "max", "max_abs"}
-                for path in operational_changes
-            ):
+            if all(path and path[-1] in {"min", "max", "max_abs"} for path in operational_changes):
                 if self._device_states.get(name) in {
                     None,
                     "disconnected",
@@ -1793,9 +1788,7 @@ class MainWindow(FluentWindow):
         )
 
     @staticmethod
-    def _is_non_operational_device_preference(
-        device: str, path: tuple[str, ...]
-    ) -> bool:
+    def _is_non_operational_device_preference(device: str, path: tuple[str, ...]) -> bool:
         if device in {"rigol", "keithley"} and "defaults" in path:
             return True
         if device == "anritsu":
@@ -1811,12 +1804,8 @@ class MainWindow(FluentWindow):
         return (
             device == "moke_box"
             and path
-            and path[0]
-            in {"live_interval", "plot_refresh_interval", "history_window"}
-        ) or (
-            device == "lakeshore_gaussmeter"
-            and path == ("live_interval",)
-        )
+            and path[0] in {"live_interval", "plot_refresh_interval", "history_window"}
+        ) or (device == "lakeshore_gaussmeter" and path == ("live_interval",))
 
     def _apply_settings_to_ui(
         self,
@@ -1860,9 +1849,7 @@ class MainWindow(FluentWindow):
                 if key not in previous or key not in updated:
                     changes.add(path)
                 else:
-                    changes.update(
-                        cls._setting_changes(previous[key], updated[key], path)
-                    )
+                    changes.update(cls._setting_changes(previous[key], updated[key], path))
             return changes
         return set() if previous == updated else {prefix}
 
@@ -1890,9 +1877,7 @@ class MainWindow(FluentWindow):
         self.settings_page.reload()
         self.anritsu_page.set_settings(self._settings)
         self.recipe_page.set_settings(self._settings)
-        self._controllers["anritsu"].call(
-            "refresh_station_context", self._settings
-        )
+        self._controllers["anritsu"].call("refresh_station_context", self._settings)
         self._refresh_safety_strip()
         self.anritsu_page.banner.show_message(
             "Instrument readback saved to settings.yml as acquisition defaults. "
@@ -1915,19 +1900,13 @@ class MainWindow(FluentWindow):
         defaults.update(
             {
                 "application": basic.instrument_mode or "SPECT",
-                "start_frequency": format_quantity_auto(
-                    basic.start_hz, DIMENSION_FREQUENCY
-                ),
-                "stop_frequency": format_quantity_auto(
-                    basic.stop_hz, DIMENSION_FREQUENCY
-                ),
+                "start_frequency": format_quantity_auto(basic.start_hz, DIMENSION_FREQUENCY),
+                "stop_frequency": format_quantity_auto(basic.stop_hz, DIMENSION_FREQUENCY),
                 "center_frequency": format_quantity_auto(
                     (basic.start_hz + basic.stop_hz) / 2,
                     DIMENSION_FREQUENCY,
                 ),
-                "span": format_quantity_auto(
-                    basic.stop_hz - basic.start_hz, DIMENSION_FREQUENCY
-                ),
+                "span": format_quantity_auto(basic.stop_hz - basic.start_hz, DIMENSION_FREQUENCY),
                 "reference_level": f"{basic.reference_level_dbm:.9g} dBm",
                 "sweep_points": basic.points,
             }
@@ -1935,34 +1914,26 @@ class MainWindow(FluentWindow):
         if isinstance(advanced, AdvancedSpectrumSnapshot):
             defaults.update(
                 {
-                    "rbw": format_quantity_auto(
-                        advanced.rbw_hz, DIMENSION_FREQUENCY
-                    ),
+                    "rbw": format_quantity_auto(advanced.rbw_hz, DIMENSION_FREQUENCY),
                     "rbw_auto": advanced.rbw_auto,
                     "vbw": (
                         None
                         if advanced.vbw_hz is None
-                        else format_quantity_auto(
-                            advanced.vbw_hz, DIMENSION_FREQUENCY
-                        )
+                        else format_quantity_auto(advanced.vbw_hz, DIMENSION_FREQUENCY)
                     ),
                     "vbw_mode": advanced.vbw_mode,
                     "detector": advanced.detector,
                     "attenuation": f"{advanced.attenuation_db:.9g} dB",
                     "attenuation_auto": advanced.attenuation_auto,
                     "preamplifier_enabled": advanced.preamplifier_enabled,
-                    "sweep_time": format_quantity_auto(
-                        advanced.sweep_time_s, DIMENSION_TIME
-                    ),
+                    "sweep_time": format_quantity_auto(advanced.sweep_time_s, DIMENSION_TIME),
                     "sweep_time_auto": advanced.sweep_time_auto,
                 }
             )
 
     def _save_anritsu_form_defaults(
         self,
-        captured: tuple[
-            AnritsuConfigurationSnapshot, AdvancedSpectrumSnapshot, object, int, int
-        ]
+        captured: tuple[AnritsuConfigurationSnapshot, AdvancedSpectrumSnapshot, object, int, int]
         | None = None,
     ) -> bool:
         """Persist the visible basic Spectrum form without touching hardware."""
@@ -1983,20 +1954,14 @@ class MainWindow(FluentWindow):
             loaded = self._repository.load()
             raw = loaded.raw
             before = deepcopy(raw["devices"]["anritsu"]["safety"]["defaults"])
-            before_generator = deepcopy(
-                raw["devices"]["anritsu"]["signal_generator"]
-            )
-            before_acquisition = deepcopy(
-                raw["devices"]["anritsu"]["acquisition"]
-            )
+            before_generator = deepcopy(raw["devices"]["anritsu"]["signal_generator"])
+            before_acquisition = deepcopy(raw["devices"]["anritsu"]["acquisition"])
             self._update_anritsu_defaults(raw, snapshot, advanced)
             generator = raw["devices"]["anritsu"]["signal_generator"]
             generator["default_frequency"] = format_quantity_auto(
                 signal_generator.frequency_hz, DIMENSION_FREQUENCY
             )
-            generator["default_power"] = (
-                f"{signal_generator.power_dbm:.9g} dBm"
-            )
+            generator["default_power"] = f"{signal_generator.power_dbm:.9g} dBm"
             acquisition = raw["devices"]["anritsu"]["acquisition"]
             acquisition["application_average_count"] = average_count
             acquisition["live_refresh_interval"] = format_quantity_auto(
@@ -2019,15 +1984,11 @@ class MainWindow(FluentWindow):
             self._log(f"ANRITSU FORM SAVE FAILED: {type(exc).__name__}: {exc}")
             return False
 
-        self._settings = (
-            simulated_station_settings(persisted) if self._simulation else persisted
-        )
+        self._settings = simulated_station_settings(persisted) if self._simulation else persisted
         self.settings_page.reload()
         self.anritsu_page.set_settings(self._settings)
         self.recipe_page.set_settings(self._settings)
-        self._controllers["anritsu"].call(
-            "refresh_station_context", self._settings
-        )
+        self._controllers["anritsu"].call("refresh_station_context", self._settings)
         self._refresh_safety_strip()
         self.anritsu_page.banner.show_message(
             "Current Spectrum form saved to settings.yml as acquisition defaults. "
@@ -2053,9 +2014,7 @@ class MainWindow(FluentWindow):
             raw = loaded.raw
             changed = False
             for channel, payload in channel_defaults.items():
-                defaults = raw["devices"]["rigol"]["safety"]["channels"][
-                    str(channel)
-                ]["defaults"]
+                defaults = raw["devices"]["rigol"]["safety"]["channels"][str(channel)]["defaults"]
                 if defaults != payload:
                     defaults.clear()
                     defaults.update(payload)
@@ -2071,9 +2030,7 @@ class MainWindow(FluentWindow):
             self._log(f"RIGOL FORM SAVE FAILED: {type(exc).__name__}: {exc}")
             return False
 
-        self._settings = (
-            simulated_station_settings(persisted) if self._simulation else persisted
-        )
+        self._settings = simulated_station_settings(persisted) if self._simulation else persisted
         self.settings_page.reload()
         self.rigol_page.set_settings(self._settings)
         self.recipe_page.set_settings(self._settings)
@@ -2092,9 +2049,7 @@ class MainWindow(FluentWindow):
 
         try:
             if interval_ms is None:
-                interval_ms = int(
-                    self.lakeshore_gaussmeter_page.sample_interval.currentData()
-                )
+                interval_ms = int(self.lakeshore_gaussmeter_page.sample_interval.currentData())
             self._access.require(
                 Permission.EDIT_SETTINGS,
                 action="saving Lake Shore display defaults to settings.yml",
@@ -2111,9 +2066,7 @@ class MainWindow(FluentWindow):
             QMessageBox.critical(self, "Lake Shore settings not saved", str(exc))
             self._log(f"LAKESHORE FORM SAVE FAILED: {type(exc).__name__}: {exc}")
             return False
-        self._settings = (
-            simulated_station_settings(persisted) if self._simulation else persisted
-        )
+        self._settings = simulated_station_settings(persisted) if self._simulation else persisted
         self.settings_page.reload()
         self.lakeshore_gaussmeter_page.set_settings(self._settings)
         self.recipe_page.set_settings(self._settings)
@@ -2121,9 +2074,7 @@ class MainWindow(FluentWindow):
         self._log("LAKESHORE DISPLAY DEFAULTS SAVED: settings.yml updated")
         return True
 
-    def _save_moke_form_defaults(
-        self, captured: tuple[int, int, int] | None = None
-    ) -> bool:
+    def _save_moke_form_defaults(self, captured: tuple[int, int, int] | None = None) -> bool:
         """Persist MOKE read-only sampling and plot preferences."""
 
         try:
@@ -2143,12 +2094,8 @@ class MainWindow(FluentWindow):
             profile = raw["devices"]["moke_box"]
             updates = {
                 "live_interval": format_quantity_auto(live_ms / 1000, DIMENSION_TIME),
-                "plot_refresh_interval": format_quantity_auto(
-                    refresh_ms / 1000, DIMENSION_TIME
-                ),
-                "history_window": format_quantity_auto(
-                    history_seconds, DIMENSION_TIME
-                ),
+                "plot_refresh_interval": format_quantity_auto(refresh_ms / 1000, DIMENSION_TIME),
+                "history_window": format_quantity_auto(history_seconds, DIMENSION_TIME),
             }
             if all(profile.get(key) == value for key, value in updates.items()):
                 return True
@@ -2158,9 +2105,7 @@ class MainWindow(FluentWindow):
             QMessageBox.critical(self, "MOKE settings not saved", str(exc))
             self._log(f"MOKE FORM SAVE FAILED: {type(exc).__name__}: {exc}")
             return False
-        self._settings = (
-            simulated_station_settings(persisted) if self._simulation else persisted
-        )
+        self._settings = simulated_station_settings(persisted) if self._simulation else persisted
         self.settings_page.reload()
         self.moke_box_page.set_settings(self._settings)
         self.recipe_page.set_settings(self._settings)
@@ -2182,9 +2127,7 @@ class MainWindow(FluentWindow):
             elif isinstance(snapshot, dict):
                 values = deepcopy(snapshot)
             else:
-                raise ConfigurationError(
-                    f"Channel {channel}: invalid Keithley form snapshot."
-                )
+                raise ConfigurationError(f"Channel {channel}: invalid Keithley form snapshot.")
             payload[channel] = values
         return payload
 
@@ -2194,9 +2137,7 @@ class MainWindow(FluentWindow):
     def _queue_keithley_assignment_save(self, snapshots: object) -> None:
         self._stage_keithley_defaults_save(snapshots, assignment=True)
 
-    def _stage_keithley_defaults_save(
-        self, snapshots: object, *, assignment: bool
-    ) -> None:
+    def _stage_keithley_defaults_save(self, snapshots: object, *, assignment: bool) -> None:
         try:
             self._access.require(
                 Permission.EDIT_SETTINGS,
@@ -2213,12 +2154,8 @@ class MainWindow(FluentWindow):
         ) as exc:
             self.keithley_page.readback_assignment_completed(False)
             QMessageBox.critical(self, "Keithley settings not saved", str(exc))
-            self.keithley_page.banner.show_message(
-                f"Keithley settings were not queued: {exc}"
-            )
-            self._log(
-                f"KEITHLEY SETTINGS QUEUE FAILED: {type(exc).__name__}: {exc}"
-            )
+            self.keithley_page.banner.show_message(f"Keithley settings were not queued: {exc}")
+            self._log(f"KEITHLEY SETTINGS QUEUE FAILED: {type(exc).__name__}: {exc}")
             return
 
         self._keithley_defaults_generation += 1
@@ -2233,9 +2170,7 @@ class MainWindow(FluentWindow):
         )
         self._log(f"KEITHLEY SETTINGS STAGED: generation {generation}; file unchanged")
 
-    def _stage_current_keithley_forms_if_changed(
-        self, snapshots: object = None
-    ) -> bool:
+    def _stage_current_keithley_forms_if_changed(self, snapshots: object = None) -> bool:
         """Include ordinary manual A/B edits in the global settings save."""
 
         try:
@@ -2248,8 +2183,7 @@ class MainWindow(FluentWindow):
             updates = validate_keithley_default_snapshots(self._settings, payload)
             changed = any(
                 any(
-                    self._settings.keithley.safety.channels[channel].defaults.get(key)
-                    != value
+                    self._settings.keithley.safety.channels[channel].defaults.get(key) != value
                     for key, value in values.items()
                 )
                 for channel, values in updates.items()
@@ -2262,9 +2196,7 @@ class MainWindow(FluentWindow):
             ValueError,
         ) as exc:
             QMessageBox.critical(self, "Keithley settings not saved", str(exc))
-            self.keithley_page.banner.show_message(
-                f"Keithley settings were not saved: {exc}"
-            )
+            self.keithley_page.banner.show_message(f"Keithley settings were not saved: {exc}")
             self._log(f"KEITHLEY FORM SAVE FAILED: {type(exc).__name__}: {exc}")
             return False
         if changed:
@@ -2320,15 +2252,11 @@ class MainWindow(FluentWindow):
 
         def merge_device_forms(raw: dict[str, Any]) -> None:
             for channel, payload in rigol_defaults.items():
-                defaults = raw["devices"]["rigol"]["safety"]["channels"][
-                    str(channel)
-                ]["defaults"]
+                defaults = raw["devices"]["rigol"]["safety"]["channels"][str(channel)]["defaults"]
                 defaults.clear()
                 defaults.update(deepcopy(payload))
 
-            snapshot, advanced, signal_generator, average_count, refresh_ms = (
-                anritsu_defaults
-            )
+            snapshot, advanced, signal_generator, average_count, refresh_ms = anritsu_defaults
             self._update_anritsu_defaults(raw, snapshot, advanced)
             generator = raw["devices"]["anritsu"]["signal_generator"]
             generator["default_frequency"] = format_quantity_auto(
@@ -2341,28 +2269,22 @@ class MainWindow(FluentWindow):
                 refresh_ms / 1000, DIMENSION_TIME
             )
 
-            raw["devices"]["lakeshore_gaussmeter"]["live_interval"] = (
-                format_quantity_auto(lakeshore_interval_ms / 1000, DIMENSION_TIME)
+            raw["devices"]["lakeshore_gaussmeter"]["live_interval"] = format_quantity_auto(
+                lakeshore_interval_ms / 1000, DIMENSION_TIME
             )
             live_ms, refresh_plot_ms, history_seconds = moke_defaults
             raw["devices"]["moke_box"].update(
                 {
-                    "live_interval": format_quantity_auto(
-                        live_ms / 1000, DIMENSION_TIME
-                    ),
+                    "live_interval": format_quantity_auto(live_ms / 1000, DIMENSION_TIME),
                     "plot_refresh_interval": format_quantity_auto(
                         refresh_plot_ms / 1000, DIMENSION_TIME
                     ),
-                    "history_window": format_quantity_auto(
-                        history_seconds, DIMENSION_TIME
-                    ),
+                    "history_window": format_quantity_auto(history_seconds, DIMENSION_TIME),
                 }
             )
 
             candidate = StationSettings.model_validate(raw)
-            updates = validate_keithley_default_snapshots(
-                candidate, keithley_payload
-            )
+            updates = validate_keithley_default_snapshots(candidate, keithley_payload)
             channels = raw["devices"]["keithley"]["safety"]["channels"]
             for channel, values in updates.items():
                 channels[channel]["defaults"].update(values)
@@ -2391,13 +2313,9 @@ class MainWindow(FluentWindow):
         self.safety_strip.save_settings.setText("SAVING...")
         generation, payload = pending
         self._keithley_defaults_write_requested.emit(generation, payload)
-        self._log(
-            f"KEITHLEY SETTINGS SAVE STARTED: generation {generation}"
-        )
+        self._log(f"KEITHLEY SETTINGS SAVE STARTED: generation {generation}")
 
-    def _keithley_defaults_saved(
-        self, generation: int, persisted: object, raw: object
-    ) -> None:
+    def _keithley_defaults_saved(self, generation: int, persisted: object, raw: object) -> None:
         self._keithley_defaults_in_flight = False
         self._active_keithley_defaults = None
         self.safety_strip.save_settings.setEnabled(True)
@@ -2408,17 +2326,13 @@ class MainWindow(FluentWindow):
         )
         if isinstance(persisted, StationSettings) and isinstance(raw, dict):
             self._settings = (
-                simulated_station_settings(persisted)
-                if self._simulation
-                else persisted
+                simulated_station_settings(persisted) if self._simulation else persisted
             )
             self.settings_page.accept_external_snapshot(persisted, raw)
             self.keithley_page.set_settings(self._settings)
             self.recipe_page.set_settings(self._settings)
             self.quick_control_coordinator.set_settings(self._settings)
-            self._controllers["keithley"].call(
-                "refresh_station_context", self._settings
-            )
+            self._controllers["keithley"].call("refresh_station_context", self._settings)
             self._refresh_safety_strip()
         self.keithley_page.banner.show_message(
             "Keithley defaults saved after explicit SAVE SETTINGS. The live instrument and "
@@ -2426,9 +2340,7 @@ class MainWindow(FluentWindow):
             severity="success",
             timeout_ms=4_000,
         )
-        self._log(
-            f"KEITHLEY SETTINGS SAVE COMPLETED: generation {generation}"
-        )
+        self._log(f"KEITHLEY SETTINGS SAVE COMPLETED: generation {generation}")
 
     def _keithley_defaults_save_failed(self, generation: int, error: str) -> None:
         self._keithley_defaults_in_flight = False
@@ -2439,12 +2351,8 @@ class MainWindow(FluentWindow):
         self.safety_strip.save_settings.setText("SAVE SETTINGS")
         self.keithley_page.readback_assignment_completed(False)
         QMessageBox.critical(self, "Keithley settings not saved", error)
-        self.keithley_page.banner.show_message(
-            f"Keithley background save failed: {error}"
-        )
-        self._log(
-            f"KEITHLEY SETTINGS SAVE FAILED: generation {generation}: {error}"
-        )
+        self.keithley_page.banner.show_message(f"Keithley background save failed: {error}")
+        self._log(f"KEITHLEY SETTINGS SAVE FAILED: generation {generation}: {error}")
 
     def _save_keithley_readback_defaults(self, snapshots: object) -> None:
         """Synchronous compatibility entry point used by tests and shutdown."""
@@ -2455,9 +2363,7 @@ class MainWindow(FluentWindow):
                 action="saving Keithley defaults to settings.yml",
             )
             payload = self._keithley_snapshot_payload(snapshots)
-            persisted, raw = persist_keithley_default_snapshots(
-                self._repository.path, payload
-            )
+            persisted, raw = persist_keithley_default_snapshots(self._repository.path, payload)
         except (
             AuthorizationError,
             ConfigurationError,
@@ -2468,12 +2374,8 @@ class MainWindow(FluentWindow):
         ) as exc:
             self.keithley_page.readback_assignment_completed(False)
             QMessageBox.critical(self, "Keithley settings not saved", str(exc))
-            self.keithley_page.banner.show_message(
-                f"Keithley settings were not saved: {exc}"
-            )
-            self._log(
-                f"KEITHLEY SETTINGS IMPORT FAILED: {type(exc).__name__}: {exc}"
-            )
+            self.keithley_page.banner.show_message(f"Keithley settings were not saved: {exc}")
+            self._log(f"KEITHLEY SETTINGS IMPORT FAILED: {type(exc).__name__}: {exc}")
             return
         self._keithley_defaults_saved(0, persisted, raw)
         self.keithley_page.readback_assignment_completed(True)
@@ -2533,11 +2435,7 @@ class MainWindow(FluentWindow):
             raw = deepcopy(loaded.raw)
             for device, (resource, backend, _idn) in assignments.items():
                 profile = raw["devices"][device]
-                old = (
-                    profile
-                    if device == "lakeshore_gaussmeter"
-                    else profile["connection"]
-                )
+                old = profile if device == "lakeshore_gaussmeter" else profile["connection"]
                 self._log(
                     f"VISA ASSIGN WRITE [{device}]: {old.get('resource')!r}/{old.get('visa_backend')!r} "
                     f"-> {resource!r}/{backend!r}"
@@ -2547,9 +2445,7 @@ class MainWindow(FluentWindow):
                 connection["visa_backend"] = backend
                 if device == "lakeshore_gaussmeter":
                     connection["enabled"] = True
-                    detected_baud = self.dashboard.discovered_serial_baud(
-                        resource, backend
-                    )
+                    detected_baud = self.dashboard.discovered_serial_baud(resource, backend)
                     if detected_baud is not None:
                         connection["baud_rate"] = detected_baud
                         self._log(
@@ -2613,9 +2509,7 @@ class MainWindow(FluentWindow):
     def _set_run_ui_locked(self, locked: bool) -> None:
         self.quick_controls_window.setEnabled(not locked)
         if locked:
-            self.quick_control_coordinator.cancel_all(
-                "Recipe run owns the instruments"
-            )
+            self.quick_control_coordinator.cancel_all("Recipe run owns the instruments")
         if locked:
             self.moke_box_page.stop_live(
                 "Live Hall readout paused while a recipe run owns the MOKE Box."
@@ -2804,9 +2698,7 @@ class MainWindow(FluentWindow):
         self._navigation_layout_initialized = True
         application = QApplication.instance()
         if application is not None:
-            applied_theme = apply_application_theme(
-                application, self._configured_theme_mode
-            )
+            applied_theme = apply_application_theme(application, self._configured_theme_mode)
             self._apply_navigation_surface(applied_theme.tokens.surface)
         if (
             self._navigation_expanded_preference
