@@ -19,11 +19,14 @@ from app.ui.shell import MainWindow
 from app.ui.design_system import tokens_for
 from app.settings import SettingsRepository
 from app.devices.anritsu_ms2830a import SpectrumTrace
-from app.devices.anritsu_ms2830a.ui.manual_save import ManualSpectrumSaveDialog
+from app.devices.anritsu_ms2830a.ui.manual_save import (
+    ManualSpectrumSaveDialog,
+    ManualSpectrumSaveOptions,
+)
 from app.devices.discovery import DiscoveredInstrument, identify_device
 from app.domain.manual_metadata import ManualMetadataValue
 from app.domain.quantities import DIMENSION_CURRENT
-from app.storage import ManualSpectrumSaveMode
+from app.storage import Hdf5RunReader, ManualSpectrumSaveMode
 from app.devices.lakeshore_475.models import FieldUnit, GaussmeterReading, GaussmeterSnapshot, MeasurementMode
 from app.devices.moke_box.models import MokeHallVoltageReading
 from tests.test_main_window import (
@@ -333,6 +336,9 @@ class FluentAnritsuAndMokePageTests(unittest.TestCase):
         self.assertIsInstance(page.manual_save_card, CardWidget)
         self.assertTrue(page.manual_save_card.isVisibleTo(self.window))
         self.assertGreater(page.manual_save_card.height(), 120)
+        self.assertIsInstance(page.configure_manual_spectrum, PushButton)
+        self.assertTrue(page.configure_manual_spectrum.isVisibleTo(self.window))
+        self.assertFalse(page.save_manual_spectrum.isEnabled())
 
         page._show_trace(
             SpectrumTrace(
@@ -343,8 +349,8 @@ class FluentAnritsuAndMokePageTests(unittest.TestCase):
             )
         )
         self.application.processEvents()
-        self.assertTrue(page.save_manual_spectrum.isEnabled())
-        self.assertIn("Completed spectrum ready", page.manual_save_status.text())
+        self.assertFalse(page.save_manual_spectrum.isEnabled())
+        self.assertIn("Configure the archive", page.manual_save_status.text())
 
         metadata = ManualMetadataValue(
             key="keithley.B.current_a",
@@ -382,6 +388,96 @@ class FluentAnritsuAndMokePageTests(unittest.TestCase):
         self.application.processEvents()
         host = self.window.navigation_routes["anritsu"]
         self.assertEqual(host.scroll_area.horizontalScrollBar().maximum(), 0)
+
+    def test_anritsu_manual_archive_reuses_one_accepted_configuration(self) -> None:
+        self.window._navigate_to("anritsu")
+        self.application.processEvents()
+        page = self.window.anritsu_page
+        first = SpectrumTrace(
+            frequencies_hz=(1e6, 2e6, 3e6),
+            powers_dbm=(-60.0, -50.0, -55.0),
+            acquired_at_utc=datetime.now(timezone.utc),
+            trace_name="TRAC1",
+        )
+        second = SpectrumTrace(
+            frequencies_hz=first.frequencies_hz,
+            powers_dbm=(-58.0, -48.0, -53.0),
+            acquired_at_utc=datetime.now(timezone.utc),
+            trace_name="TRAC1",
+        )
+
+        with tempfile.TemporaryDirectory() as temporary:
+            path = Path(temporary) / "manual.h5"
+            options = ManualSpectrumSaveOptions(
+                destination=path,
+                mode=ManualSpectrumSaveMode.APPEND,
+                metadata_scope="none",
+                metadata_values=(),
+                trace_variant="raw",
+            )
+            page._show_trace(first)
+            self.assertFalse(page.save_manual_spectrum.isEnabled())
+            page._apply_manual_save_options(options)
+            self.application.processEvents()
+            self.assertTrue(page.save_manual_spectrum.isEnabled())
+            self.assertFalse(path.exists())
+
+            page.save_manual_spectrum.click()
+            page._show_trace(second)
+            page.save_manual_spectrum.click()
+
+            self.assertEqual(Hdf5RunReader.summary(path).point_count, 2)
+            self.assertEqual(page._manual_save_options, options)
+            page.close_manual_archive_session()
+
+    def test_anritsu_manual_archive_reconfiguration_and_failure_keep_state(self) -> None:
+        self.window._navigate_to("anritsu")
+        self.application.processEvents()
+        page = self.window.anritsu_page
+        trace = SpectrumTrace(
+            frequencies_hz=(1e6, 2e6, 3e6),
+            powers_dbm=(-60.0, -50.0, -55.0),
+            acquired_at_utc=datetime.now(timezone.utc),
+            trace_name="TRAC1",
+        )
+
+        with tempfile.TemporaryDirectory() as temporary:
+            first_path = Path(temporary) / "first.h5"
+            second_path = Path(temporary) / "second.h5"
+            first_options = ManualSpectrumSaveOptions(
+                destination=first_path,
+                mode=ManualSpectrumSaveMode.APPEND,
+                metadata_scope="none",
+                metadata_values=(),
+                trace_variant="raw",
+            )
+            second_options = ManualSpectrumSaveOptions(
+                destination=second_path,
+                mode=ManualSpectrumSaveMode.APPEND,
+                metadata_scope="none",
+                metadata_values=(),
+                trace_variant="raw",
+            )
+            page._show_trace(trace)
+            page._apply_manual_save_options(first_options)
+            page.save_manual_spectrum.click()
+            page._apply_manual_save_options(second_options)
+            page.save_manual_spectrum.click()
+
+            self.assertEqual(Hdf5RunReader.summary(first_path).point_count, 1)
+            self.assertEqual(Hdf5RunReader.summary(second_path).point_count, 1)
+
+            incompatible = SpectrumTrace(
+                frequencies_hz=(1e6, 2.1e6, 3e6),
+                powers_dbm=(-58.0, -48.0, -53.0),
+                acquired_at_utc=datetime.now(timezone.utc),
+                trace_name="TRAC1",
+            )
+            page._show_trace(incompatible)
+            page.save_manual_spectrum.click()
+            self.assertEqual(page._manual_save_options, second_options)
+            self.assertIn("failed", page.manual_save_status.text().lower())
+            page.close_manual_archive_session()
 
     def test_anritsu_workspace_stacks_without_clipping_at_minimum_window_size(self) -> None:
         self.window.resize(820, 560)

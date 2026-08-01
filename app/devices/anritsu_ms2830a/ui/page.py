@@ -68,7 +68,7 @@ from app.ui.widgets import FluentTabView, LimitField, NotificationBanner, Spectr
 from app.ui.workers import DeviceController
 
 from .peak_analysis import PeakTableDialog, PeakTrackingWindow
-from .manual_save import ManualSpectrumSaveDialog
+from .manual_save import ManualSpectrumSaveDialog, ManualSpectrumSaveOptions
 from .analysis_worker import (
     SpectrumAnalysisController,
     SpectrumAnalysisOutcome,
@@ -930,6 +930,7 @@ class AnritsuPage(QWidget):
         self._manual_archive: ManualSpectrumArchive | None = None
         self._manual_archive_last_path: Path | None = None
         self._manual_last_mode: ManualSpectrumSaveMode | None = None
+        self._manual_save_options: ManualSpectrumSaveOptions | None = None
         self._timer = QTimer(self)
         self._timer.setInterval(500)
         self._timer.timeout.connect(self.fetch_live)
@@ -1186,11 +1187,14 @@ class AnritsuPage(QWidget):
         manual_layout.addWidget(self.manual_save_target)
         manual_buttons = QVBoxLayout()
         manual_buttons.setSpacing(6)
-        self.save_manual_spectrum = PrimaryPushButton("Save current spectrum…")
+        self.configure_manual_spectrum = PushButton("Configure archive…")
+        self.configure_manual_spectrum.setProperty("compact", True)
+        self.save_manual_spectrum = PrimaryPushButton("Save current spectrum")
         self.save_manual_spectrum.setProperty("compact", True)
         self.close_manual_archive = PushButton("Close append session")
         self.close_manual_archive.setProperty("compact", True)
         self.close_manual_archive.setEnabled(False)
+        manual_buttons.addWidget(self.configure_manual_spectrum)
         manual_buttons.addWidget(self.save_manual_spectrum)
         manual_buttons.addWidget(self.close_manual_archive)
         manual_layout.addLayout(manual_buttons)
@@ -1368,7 +1372,8 @@ class AnritsuPage(QWidget):
         self.clear_reference.clicked.connect(self.remove_reference)
         self.load_reference.clicked.connect(self.load_reference_file)
         self.save_reference.clicked.connect(self.save_reference_file)
-        self.save_manual_spectrum.clicked.connect(self._show_manual_save_dialog)
+        self.configure_manual_spectrum.clicked.connect(self._show_manual_save_dialog)
+        self.save_manual_spectrum.clicked.connect(self._save_configured_manual_spectrum)
         self.close_manual_archive.clicked.connect(self.close_manual_archive_session)
         self.reference_operation.currentIndexChanged.connect(
             self._reference_operation_changed
@@ -1414,7 +1419,8 @@ class AnritsuPage(QWidget):
             self.clear_reference: "Remove the in-memory reference and all derived display results. It does not delete raw measurements from HDF5.",
             self.load_reference: "Load a Lab Control reference HDF5 artefact. The current analyser is not queried or configured.",
             self.save_reference: "Save the complete reference trace and provenance as a thaTEC/PyThat-compatible HDF5 artefact.",
-            self.save_manual_spectrum: "Save the latest completed spectrum to a new or appendable HDF5 archive. Device metadata uses only values already confirmed in the station UI.",
+            self.configure_manual_spectrum: "Choose the manual archive destination, file policy, trace variant and confirmed metadata. This does not create a file or query the instrument.",
+            self.save_manual_spectrum: "Save the latest completed spectrum using the accepted manual archive configuration. This does not open the configuration dialog or query the instrument.",
             self.close_manual_archive: "Close the current append session as a valid resumable HDF5 file. It does not delete data.",
             self.reference_operation: "Choose point-wise reference mathematics. Difference in dB equals a power ratio expressed logarithmically; linear operations first convert dBm to mW.",
             self.show_raw: "Show the latest untouched trace returned by Anritsu.",
@@ -1989,18 +1995,26 @@ class AnritsuPage(QWidget):
         self._update_manual_save_controls()
 
     def _update_manual_save_controls(self) -> None:
-        ready = self._latest_trace is not None
+        configured = self._manual_save_options is not None
+        ready = self._latest_trace is not None and configured
+        self.configure_manual_spectrum.setEnabled(True)
         self.save_manual_spectrum.setEnabled(ready)
         self.close_manual_archive.setEnabled(
             self._manual_archive is not None
             and self._manual_archive.active_path is not None
         )
-        if ready and self._manual_archive is None:
+        if not configured:
             self.manual_save_status.setText(
-                "Completed spectrum ready — choose a file and metadata policy."
+                "Configure the archive before saving a completed spectrum."
             )
-        elif not ready:
-            self.manual_save_status.setText("No completed spectrum ready to save.")
+        elif self._latest_trace is None:
+            self.manual_save_status.setText(
+                "Archive configured. Acquire a completed spectrum before saving."
+            )
+        elif self._manual_archive is None:
+            self.manual_save_status.setText(
+                "Completed spectrum ready — press Save current spectrum."
+            )
 
     def _set_sg_output_state(self, enabled: bool | None) -> None:
         self._sg_output_known = enabled is not None
@@ -2785,9 +2799,7 @@ class AnritsuPage(QWidget):
         self.status.emit(f"Anritsu reference loaded: {path}")
 
     def _manual_trace_choices(self) -> tuple[tuple[str, str], ...]:
-        choices: list[tuple[str, str]] = []
-        if self._latest_trace is not None:
-            choices.append(("raw", "Latest raw trace"))
+        choices: list[tuple[str, str]] = [("raw", "Latest raw trace")]
         if self._averaged_trace is not None:
             choices.append(("averaged", "Application averaged trace"))
         if self._cleanup_result is not None and self._latest_trace is not None:
@@ -2833,6 +2845,8 @@ class AnritsuPage(QWidget):
         return tuple(unique.values())
 
     def _manual_default_destination(self) -> Path:
+        if self._manual_save_options is not None:
+            return self._manual_save_options.destination
         if self._manual_last_mode is ManualSpectrumSaveMode.APPEND and self._manual_archive_last_path:
             return self._manual_archive_last_path
         directory = Path(
@@ -2842,22 +2856,62 @@ class AnritsuPage(QWidget):
 
     def _show_manual_save_dialog(self) -> None:
         choices = self._manual_trace_choices()
-        if not choices:
-            self.manual_save_status.setText(
-                "Acquire a completed spectrum before opening the manual saver."
-            )
-            return
-        default_mode = self._manual_last_mode or ManualSpectrumSaveMode.APPEND
+        previous_options = self._manual_save_options
+        default_mode = (
+            previous_options.mode
+            if previous_options is not None
+            else self._manual_last_mode or ManualSpectrumSaveMode.APPEND
+        )
         dialog = ManualSpectrumSaveDialog(
             self,
             trace_choices=choices,
             metadata_values=self._manual_metadata_for_dialog(),
             default_destination=self._manual_default_destination(),
             default_mode=default_mode,
+            default_trace_variant=(
+                previous_options.trace_variant if previous_options is not None else "raw"
+            ),
+            default_metadata_scope=(
+                previous_options.metadata_scope
+                if previous_options is not None
+                else "all"
+            ),
+            default_metadata_keys=(
+                tuple(value.key for value in previous_options.metadata_values)
+                if previous_options is not None
+                else ()
+            ),
         )
         if dialog.exec() != QDialog.DialogCode.Accepted:
             return
-        options = dialog.options()
+        self._apply_manual_save_options(dialog.options())
+
+    def _apply_manual_save_options(self, options: ManualSpectrumSaveOptions) -> None:
+        """Store a validated archive policy without creating a file or writer."""
+
+        self._manual_save_options = options
+        policy = (
+            "append session"
+            if options.mode is ManualSpectrumSaveMode.APPEND
+            else "new timestamped file"
+        )
+        self.manual_save_target.setText(
+            f"Configured archive: {options.destination} · {policy}"
+        )
+        self._update_manual_save_controls()
+
+    def _save_configured_manual_spectrum(self) -> None:
+        options = self._manual_save_options
+        if options is None:
+            self.manual_save_status.setText(
+                "Configure the archive before saving a completed spectrum."
+            )
+            return
+        if self._latest_trace is None:
+            self.manual_save_status.setText(
+                "Acquire a completed spectrum before saving it."
+            )
+            return
         try:
             trace, processed, processed_unit, operation = self._manual_trace_payload(
                 options.trace_variant
@@ -2897,7 +2951,6 @@ class AnritsuPage(QWidget):
                 processing_operation=operation,
             )
         except Exception as exc:
-            self.manual_save_status.setText(f"Manual spectrum save failed: {exc}")
             self.banner.show_message(
                 f"Manual spectrum save failed: {exc}",
                 severity="error",
@@ -2905,6 +2958,7 @@ class AnritsuPage(QWidget):
             )
             self.status.emit(f"Anritsu manual spectrum save failed: {exc}")
             self._update_manual_save_controls()
+            self.manual_save_status.setText(f"Manual spectrum save failed: {exc}")
             return
         self._manual_archive_last_path = result.path
         self._manual_last_mode = result.mode

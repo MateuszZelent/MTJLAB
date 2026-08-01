@@ -47,6 +47,9 @@ class ManualSpectrumSaveDialog(StationDialog):
         metadata_values: Sequence[ManualMetadataValue],
         default_destination: str | Path,
         default_mode: ManualSpectrumSaveMode = ManualSpectrumSaveMode.APPEND,
+        default_trace_variant: str = "raw",
+        default_metadata_scope: str = "all",
+        default_metadata_keys: Sequence[str] = (),
     ) -> None:
         super().__init__(parent)
         self.setObjectName("manualSpectrumSaveDialog")
@@ -113,6 +116,8 @@ class ManualSpectrumSaveDialog(StationDialog):
         self.trace = ComboBox(self)
         for key, label in trace_choices:
             self.trace.addItem(label, userData=key)
+        trace_index = self.trace.findData(default_trace_variant)
+        self.trace.setCurrentIndex(max(0, trace_index))
         form.addRow("Spectrum variant", self.trace)
 
         self.metadata_scope = ComboBox(self)
@@ -125,7 +130,9 @@ class ManualSpectrumSaveDialog(StationDialog):
             userData="selected",
         )
         self.metadata_scope.addItem("No device values", userData="none")
-        self.metadata_scope.setCurrentIndex(0 if self._metadata_values else 2)
+        default_scope = default_metadata_scope if self._metadata_values else "none"
+        scope_index = self.metadata_scope.findData(default_scope)
+        self.metadata_scope.setCurrentIndex(max(0, scope_index))
         self.metadata_scope.currentIndexChanged.connect(self._metadata_scope_changed)
         form.addRow("Device metadata", self.metadata_scope)
         layout.addLayout(form)
@@ -144,6 +151,7 @@ class ManualSpectrumSaveDialog(StationDialog):
         self.values_scroll.setHorizontalScrollBarPolicy(
             Qt.ScrollBarPolicy.ScrollBarAlwaysOff
         )
+        selected_metadata_keys = set(default_metadata_keys)
         values_host = QWidget(self.values_scroll)
         values_layout = QVBoxLayout(values_host)
         values_layout.setContentsMargins(4, 4, 8, 4)
@@ -151,7 +159,13 @@ class ManualSpectrumSaveDialog(StationDialog):
         if self._metadata_values:
             for value in self._metadata_values:
                 check = CheckBox(value.label, values_host)
-                check.setChecked(True)
+                check.setChecked(
+                    default_scope == "all"
+                    or (
+                        default_scope == "selected"
+                        and value.key in selected_metadata_keys
+                    )
+                )
                 check.setToolTip(f"{value.source} · {value.key}")
                 value_label = CaptionLabel(
                     f"{value.display_value}  ·  {value.device}", values_host
