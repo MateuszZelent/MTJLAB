@@ -32,8 +32,10 @@ by a compiled plan.
    **Start sweep**.  It must also explain that manual controls become
    read-only for the duration of the run.
 4. Starting transfers each required, verified adapter into an exclusive run
-   lease.  The runner uses these adapters rather than constructing second
-   sessions, so the connection is retained across the transition.
+   lease. Any other manually connected station source is also leased, so the
+   runner never opens a duplicate session to it. The runner may still create
+   a short-lived session for a disconnected, configured safety-source device
+   when its existing station-wide shutdown policy requires one.
 5. While a lease is held, device-page actions cannot issue I/O.  E-STOP
    remains available through its independent, short-lived emergency path.
 6. The runner retains the existing output-off, configure, arm, enable,
