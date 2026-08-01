@@ -13,7 +13,12 @@ from PySide6.QtWidgets import (
 from qfluentwidgets import PushButton, TransparentPushButton
 
 from app.ui.design_system import apply_application_theme, tokens_for
-from app.ui.dialogs import StationAlertDialog, StationDialog, StationFileDialog
+from app.ui.dialogs import (
+    StationAlertDialog,
+    StationDialog,
+    StationFileDialog,
+    SweepDeviceReadinessDialog,
+)
 from app.ui.recipes.fluent_dialog import FluentRecipeDialog
 from app.ui.widgets import LimitEditDialog, LimitField, SpectrumPlotWidget
 from app.ui.common import line_edit
@@ -158,3 +163,27 @@ class FluentDialogTests(unittest.TestCase):
         finally:
             box.close()
             parent.close()
+
+    def test_sweep_readiness_dialog_gates_start_on_all_required_devices(self) -> None:
+        dialog = SweepDeviceReadinessDialog(
+            ("anritsu", "keithley"),
+            {"anritsu": "Anritsu MS2830A", "keithley": "Keithley 2600"},
+        )
+        try:
+            dialog.show()
+            self.application.processEvents()
+            self.assertGreater(dialog.geometry().width(), 0)
+            self.assertGreater(dialog.geometry().height(), 0)
+            self.assertFalse(dialog.start_button.isEnabled())
+            self.assertEqual(dialog.connect_missing_button.text(), "Connect missing devices")
+
+            dialog.update_device("anritsu", "verified", True)
+            dialog.update_device("keithley", "output_off", True)
+
+            self.assertTrue(dialog.start_button.isEnabled())
+            dialog.resize(820, dialog.height())
+            self.application.processEvents()
+            self.assertTrue(dialog.start_button.isVisible())
+            self.assertTrue(dialog.rows["anritsu"].isVisible())
+        finally:
+            dialog.close()
