@@ -187,3 +187,13 @@ class FluentDialogTests(unittest.TestCase):
             self.assertTrue(dialog.rows["anritsu"].isVisible())
         finally:
             dialog.close()
+
+    def test_sweep_readiness_dialog_does_not_offer_connect_for_an_unsafe_device(self) -> None:
+        dialog = SweepDeviceReadinessDialog(("anritsu",), {"anritsu": "Anritsu MS2830A"})
+        try:
+            dialog.update_device("anritsu", "unknown", True)
+
+            self.assertFalse(dialog.start_button.isEnabled())
+            self.assertFalse(dialog.connect_missing_button.isEnabled())
+        finally:
+            dialog.close()

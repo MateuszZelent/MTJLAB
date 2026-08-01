@@ -5,7 +5,7 @@ from __future__ import annotations
 from copy import deepcopy
 from dataclasses import asdict, is_dataclass
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 from PySide6.QtCore import QSettings, QThread, QTimer, Qt, Signal
 from PySide6.QtGui import (
@@ -83,7 +83,7 @@ from app.security import AccessPolicy, Permission
 from app.storage import Hdf5RunReader
 from app.ui.settings_page import SettingsPage
 from app.ui.settings_guidance import SettingsIssue, settings_issue_for_error
-from app.ui.dialogs import StationMessageBox as QMessageBox
+from app.ui.dialogs import SweepDeviceReadinessDialog, StationMessageBox as QMessageBox
 from app.ui.settings_workers import KeithleyDefaultsSaveWorker
 from app.ui.run_worker import RunController, serialize_settings_snapshot
 from app.ui.dashboard import DashboardPage, DeviceConnectionPanel
@@ -173,13 +173,19 @@ class MainWindow(FluentWindow):
         self._controllers = self._composition.create_controllers(
             ("rigol", "keithley", "anritsu", "moke_box", "lakeshore_gaussmeter"), self
         )
-        for controller in self._controllers.values():
-            controller.set_operation_guard(self._guard_manual_operation)
+        for device, controller in self._controllers.items():
+            controller.set_operation_guard(
+                lambda operation, payload, device=device: self._guard_manual_operation(
+                    device, operation, payload
+                )
+            )
         self._device_states = {
             key: "disconnected" for key in ("rigol", "keithley", "anritsu", "moke_box", "lakeshore_gaussmeter")
         }
         self._manual_device_idn: dict[str, str] = {}
         self._run_controller = RunController(self)
+        self._leased_run_devices: set[str] = set()
+        self._sweep_readiness_dialog: SweepDeviceReadinessDialog | None = None
         self._build()
         self._apply_accessibility()
         self._connect_controllers()
@@ -1156,12 +1162,14 @@ class MainWindow(FluentWindow):
         self.dashboard.update_device_state(device, state)
         self._refresh_safety_strip()
 
-    def _guard_manual_operation(self, operation: str, payload: object) -> None:
+    def _guard_manual_operation(
+        self, device: str, operation: str, payload: object
+    ) -> None:
         """Fail closed for new energy-producing operations after audit I/O failure."""
 
-        if operation == "quick_setpoint" and self._run_controller.running:
+        if device in self._leased_run_devices and operation != "emergency_off":
             raise ConfigurationError(
-                "Quick controls are locked while a recipe run owns the instruments."
+                f"{getattr(self._settings, device).display_name} is leased to the active recipe run."
             )
 
         # De-energising and disconnecting are never blocked by RBAC or audit
@@ -1235,37 +1243,6 @@ class MainWindow(FluentWindow):
                 "The durable audit log is unavailable. A measurement run cannot start."
             )
 
-    def _confirm_run_engine_connections(self, plan: object) -> bool:
-        """Obtain consent before the run worker opens its hardware sessions."""
-
-        if self._simulation:
-            return True
-        required = sorted(set(getattr(plan, "required_devices", ()) or ()))
-        if not required:
-            return True
-        display_names = {
-            "rigol": "Rigol DG1032Z",
-            "keithley": "Keithley 2600",
-            "anritsu": "Anritsu MS2830A",
-            "moke_box": "MOKE Box",
-            "lakeshore_gaussmeter": "Lake Shore 475",
-        }
-        devices = "\n".join(
-            f"• {display_names.get(device, device)}" for device in required
-        )
-        return QMessageBox.action_guidance(
-            self,
-            "Connect devices for Sweep",
-            "The Sweep requires the following instruments:\n\n"
-            f"{devices}\n\n"
-            "Run Engine will open and verify its own connections. Manual-control "
-            "sessions remain disconnected. It may also verify configured source "
-            "devices so station-wide safe shutdown can be confirmed. Connecting "
-            "does not enable any output; output actions still require the normal "
-            "safety checks.",
-            "Connect and run",
-        )
-
     def _start_run(
         self,
         plan: object,
@@ -1288,17 +1265,129 @@ class MainWindow(FluentWindow):
         except (AuthorizationError, ConfigurationError) as exc:
             QMessageBox.critical(self, "Run not started", str(exc))
             return
-        connected = [name for name, state in self._device_states.items() if state != "disconnected"]
-        if connected:
-            QMessageBox.warning(
-                self,
-                "Disconnect manual control",
-                "Run Engine opens its own VISA sessions. Disconnect first: " + ", ".join(connected) + ".",
+        self._open_sweep_readiness(
+            plan,
+            outputs_forced_off=outputs_forced_off,
+            execution_mode=selected_execution_mode.value,
+            output_dir_override=output_dir_override,
+            file_stem_override=file_stem_override,
+        )
+
+    def _open_sweep_readiness(
+        self,
+        plan: object,
+        *,
+        outputs_forced_off: bool = False,
+        execution_mode: str = "measurement",
+        output_dir_override: str = "",
+        file_stem_override: str = "",
+        on_start: Callable[[SweepDeviceReadinessDialog], None] | None = None,
+    ) -> SweepDeviceReadinessDialog:
+        """Show current connection evidence for every device the plan needs."""
+
+        required = tuple(sorted(set(getattr(plan, "required_devices", ()) or ())))
+        display_names = {
+            "rigol": "Rigol DG1032Z",
+            "keithley": "Keithley 2600",
+            "anritsu": "Anritsu MS2830A",
+            "moke_box": "MOKE Box",
+            "lakeshore_gaussmeter": "Lake Shore 475",
+        }
+        previous = self._sweep_readiness_dialog
+        if previous is not None:
+            previous.close()
+        dialog = SweepDeviceReadinessDialog(required, display_names, self)
+        self._sweep_readiness_dialog = dialog
+        for device in required:
+            self._update_sweep_readiness_device(dialog, device)
+            controller = self._controllers[device]
+            controller.state_changed.connect(
+                lambda _state, device=device, current=dialog: self._update_sweep_readiness_device(
+                    current, device
+                )
             )
+            controller.result.connect(
+                lambda _operation, _result, device=device, current=dialog: self._update_sweep_readiness_device(
+                    current, device
+                )
+            )
+            controller.error.connect(
+                lambda _operation, error, device=device, current=dialog: self._update_sweep_readiness_device(
+                    current, device, error
+                )
+            )
+        dialog.connect_missing_requested.connect(self._connect_sweep_devices)
+        if on_start is not None:
+            dialog.start_requested.connect(lambda current=dialog: on_start(current))
+        else:
+            dialog.start_requested.connect(
+                lambda current=dialog: self._start_run_from_ready_dialog(
+                    current,
+                    plan,
+                    outputs_forced_off=outputs_forced_off,
+                    execution_mode=execution_mode,
+                    output_dir_override=output_dir_override,
+                    file_stem_override=file_stem_override,
+                )
+            )
+        dialog.finished.connect(
+            lambda _result, current=dialog: self._clear_sweep_readiness_dialog(current)
+        )
+        dialog.show()
+        dialog.raise_()
+        dialog.activateWindow()
+        return dialog
+
+    def _clear_sweep_readiness_dialog(self, dialog: SweepDeviceReadinessDialog) -> None:
+        if self._sweep_readiness_dialog is dialog:
+            self._sweep_readiness_dialog = None
+
+    def _update_sweep_readiness_device(
+        self,
+        dialog: SweepDeviceReadinessDialog,
+        device: str,
+        error: str | None = None,
+    ) -> None:
+        if self._sweep_readiness_dialog is not dialog:
             return
-        if not self._confirm_run_engine_connections(plan):
-            self._log("Run cancelled before connecting required devices")
+        dialog.update_device(
+            device,
+            self._device_states.get(device, "disconnected"),
+            bool(self._manual_device_idn.get(device)),
+            error,
+        )
+
+    def _connect_sweep_devices(self, devices: tuple[str, ...]) -> None:
+        for device in devices:
+            if self._device_states.get(device, "disconnected") != "disconnected":
+                continue
+            panel = self.connection_panels[device]
+            panel.set_connecting(True)
+            self._controllers[device].call("connect")
+
+    def _active_device_controllers(self) -> dict[str, object]:
+        return {
+            device: controller
+            for device, controller in self._controllers.items()
+            if self._device_states.get(device) != "disconnected"
+        }
+
+    def _start_run_from_ready_dialog(
+        self,
+        dialog: SweepDeviceReadinessDialog,
+        plan: object,
+        *,
+        outputs_forced_off: bool,
+        execution_mode: str,
+        output_dir_override: str,
+        file_stem_override: str,
+    ) -> None:
+        if dialog.missing_devices:
             return
+        selected_execution_mode = ExecutionMode.coerce(execution_mode)
+        if outputs_forced_off:
+            selected_execution_mode = ExecutionMode.DRY_RUN
+        outputs_forced_off = selected_execution_mode is ExecutionMode.DRY_RUN
         try:
             estimate = PlanEstimator(self._settings).estimate(plan)  # type: ignore[arg-type]
             readiness = self.dashboard.evaluate_readiness(plan, estimate)
@@ -1310,6 +1399,7 @@ class MainWindow(FluentWindow):
             recipe_tree_items = self.recipe_page.execution_tree_snapshot(
                 plan.recipe_source, plan  # type: ignore[union-attr]
             )
+            active_controllers = self._active_device_controllers()
             self._run_controller.start(
                 self._settings,
                 self._repository.path,
@@ -1320,6 +1410,7 @@ class MainWindow(FluentWindow):
                 execution_mode=selected_execution_mode.value,
                 output_dir_override=output_dir_override,
                 file_stem_override=file_stem_override,
+                device_controllers=active_controllers,
             )
         except Exception as exc:
             issue = settings_issue_for_error(exc)
@@ -1330,6 +1421,8 @@ class MainWindow(FluentWindow):
             elif issue is None:
                 QMessageBox.critical(self, "Run not started", str(exc))
             return
+        self._leased_run_devices = set(active_controllers)
+        dialog.accept()
         self.run_monitor.run_started(
             len(plan.actions),  # type: ignore[union-attr]
             estimate.nominal_duration_s,
@@ -1373,18 +1466,6 @@ class MainWindow(FluentWindow):
         path = Path(selected) if isinstance(selected, (str, Path)) else None
         if path is None:
             QMessageBox.warning(self, "Resume run", "No valid run file was selected.")
-            return
-        connected = [
-            name for name, state in self._device_states.items() if state != "disconnected"
-        ]
-        if connected:
-            QMessageBox.warning(
-                self,
-                "Disconnect manual control",
-                "Run Engine opens its own VISA sessions. Disconnect first: "
-                + ", ".join(connected)
-                + ".",
-            )
             return
         try:
             detail = Hdf5RunReader.detail(path)
@@ -1437,11 +1518,38 @@ class MainWindow(FluentWindow):
         )
         if answer != QMessageBox.StandardButton.Yes:
             return
+        self._open_sweep_readiness(
+            plan,
+            outputs_forced_off=outputs_forced_off,
+            execution_mode=stored_execution_mode.value,
+            on_start=lambda dialog: self._start_resume_from_ready_dialog(
+                dialog,
+                plan,
+                checkpoint,
+                estimate_execution_mode=stored_execution_mode,
+                outputs_forced_off=outputs_forced_off,
+                discarded=discarded,
+            ),
+        )
+
+    def _start_resume_from_ready_dialog(
+        self,
+        dialog: SweepDeviceReadinessDialog,
+        plan: object,
+        checkpoint: object,
+        *,
+        estimate_execution_mode: ExecutionMode,
+        outputs_forced_off: bool,
+        discarded: int,
+    ) -> None:
+        if dialog.missing_devices:
+            return
         try:
             estimate = PlanEstimator(self._settings).estimate(plan)  # type: ignore[arg-type]
             recipe_tree_items = self.recipe_page.execution_tree_snapshot(
                 plan.recipe_source, plan
             )
+            active_controllers = self._active_device_controllers()
             self._run_controller.start(
                 self._settings,
                 self._repository.path,
@@ -1450,11 +1558,14 @@ class MainWindow(FluentWindow):
                 recovery=checkpoint,
                 operator_context=self._access.identity.as_context(),
                 outputs_forced_off=outputs_forced_off,
-                execution_mode=stored_execution_mode.value,
+                execution_mode=estimate_execution_mode.value,
+                device_controllers=active_controllers,
             )
         except Exception as exc:
             QMessageBox.critical(self, "Resume not started", str(exc))
             return
+        self._leased_run_devices = set(active_controllers)
+        dialog.accept()
         remaining = len(plan.actions) - checkpoint.next_action_index
         remaining_fraction = remaining / max(1, len(plan.actions))
         self.run_monitor.run_started(
@@ -1467,7 +1578,7 @@ class MainWindow(FluentWindow):
             recipe_source=plan.recipe_source,
             recipe_tree_items=recipe_tree_items,
             execution_mode=(
-                stored_execution_mode.value
+                estimate_execution_mode.value
             ),
         )
         self._set_run_ui_locked(True)
@@ -1554,6 +1665,7 @@ class MainWindow(FluentWindow):
                 control.setEnabled(False)
 
     def _run_finished(self, result: object) -> None:
+        self._leased_run_devices.clear()
         self._set_run_ui_locked(False)
         self.run_monitor.complete(result)
         result_path = None
@@ -1575,6 +1687,7 @@ class MainWindow(FluentWindow):
             self._log("Run Engine completed the measurement")
 
     def _run_failed(self, error: str) -> None:
+        self._leased_run_devices.clear()
         self._set_run_ui_locked(False)
         self.run_monitor.failed(error)
         self._log(f"Run Engine: {error}")

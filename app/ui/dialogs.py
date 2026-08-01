@@ -244,6 +244,14 @@ class SweepDeviceReadinessDialog(StationDialog):
             device for device in self._required_devices if not self._device_is_ready(device)
         )
 
+    @property
+    def connectable_devices(self) -> tuple[str, ...]:
+        return tuple(
+            device
+            for device in self.missing_devices
+            if self._states[device][0] not in self._UNSAFE_STATES
+        )
+
     def _device_is_ready(self, device: str) -> bool:
         state, identity_verified, _error = self._states[device]
         return identity_verified and state in self._READY_STATES
@@ -271,11 +279,11 @@ class SweepDeviceReadinessDialog(StationDialog):
             label.setProperty("stationState", semantic_state)
             label.update()
         missing = self.missing_devices
-        self.connect_missing_button.setEnabled(bool(missing))
+        self.connect_missing_button.setEnabled(bool(self.connectable_devices))
         self.start_button.setEnabled(not missing)
 
     def _request_missing_connections(self) -> None:
-        self.connect_missing_requested.emit(self.missing_devices)
+        self.connect_missing_requested.emit(self.connectable_devices)
 
     def _request_start(self) -> None:
         if not self.missing_devices:

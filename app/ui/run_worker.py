@@ -14,7 +14,6 @@ from ruamel.yaml import YAML
 
 from app.bootstrap import StationComposition
 from app.devices.anritsu_ms2830a import AnritsuAdapter
-from app.devices.base import DeviceAdapter
 from app.devices.keithley_2600 import KeithleyAdapter
 from app.devices.moke_box import MokeBoxAdapter
 from app.devices.moke_box.models import MokeBoxConfig

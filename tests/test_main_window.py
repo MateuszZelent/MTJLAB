@@ -18,6 +18,7 @@ from PySide6.QtCore import QPoint, QTimer, Qt
 from PySide6.QtWidgets import QApplication, QLabel, QMessageBox, QPushButton, QScrollArea, QTabWidget, QTreeWidgetItemIterator
 from PySide6.QtTest import QTest
 
+from app.domain.errors import ConfigurationError
 from app.domain.models import DeviceCapabilities
 from app.engine import ExecutionPlan, PlanAction
 from app.domain.quick_controls import QuickControlCommand
@@ -882,11 +883,18 @@ class MainWindowTests(unittest.TestCase):
                 ),
                 total_points=0,
                 sha256="dry-run-ui-contract",
-                recipe_source="schema_version: 1\nname: dry-run-ui-contract\n",
+                recipe_source=(
+                    "schema_version: 1\nname: dry-run-ui-contract\n"
+                    "root:\n  id: root\n  type: sequence\n  children: []\n"
+                ),
             )
             window._run_controller.start = Mock()
 
             window._start_run(plan, True)
+            dialog = window._sweep_readiness_dialog
+            self.assertIsNotNone(dialog)
+            assert dialog is not None
+            dialog.start_button.click()
 
             window._run_controller.start.assert_called_once()
             self.assertTrue(
@@ -900,84 +908,84 @@ class MainWindowTests(unittest.TestCase):
             window.close()
             self.application.processEvents()
 
-    def test_sweep_automatically_hands_off_connected_manual_sessions(self) -> None:
+    def test_sweep_readiness_modal_connects_only_missing_required_devices(self) -> None:
         window = MainWindow(".config/settings.yml", simulation=True)
         try:
             plan = ExecutionPlan(
-                recipe_name="automatic-session-handoff",
+                recipe_name="sweep-readiness-connect",
                 actions=(),
                 total_points=0,
-                sha256="automatic-session-handoff",
-                recipe_source=(
-                    "schema_version: 1\nname: automatic-session-handoff\n"
-                ),
+                sha256="sweep-readiness-connect",
+                recipe_source="schema_version: 1\nname: sweep-readiness-connect\n",
+                required_devices=frozenset({"keithley", "rigol"}),
             )
-            window._run_controller.start = Mock()
             for controller in window._controllers.values():
                 controller.call = Mock()
-            window._device_states["keithley"] = "output_off"
-            window._device_states["rigol"] = "verified"
 
-            with patch(
-                "app.ui.shell.main_window.QMessageBox.warning"
-            ) as warning:
-                window._start_run(plan, True)
+            dialog = window._open_sweep_readiness(plan)
+            dialog.connect_missing_button.click()
 
-            warning.assert_not_called()
-            window._controllers["keithley"].call.assert_called_once_with(
-                "disconnect"
-            )
-            window._controllers["rigol"].call.assert_called_once_with(
-                "disconnect"
-            )
-            window._run_controller.start.assert_not_called()
-
-            window._set_device_state("keithley", "disconnected")
-            self.application.processEvents()
-            window._run_controller.start.assert_not_called()
-
-            window._set_device_state("rigol", "disconnected")
-            self.application.processEvents()
-
-            window._run_controller.start.assert_called_once()
-            self.assertIsNone(window._pending_run_handoff)
+            window._controllers["keithley"].call.assert_called_once_with("connect")
+            window._controllers["rigol"].call.assert_called_once_with("connect")
+            window._controllers["anritsu"].call.assert_not_called()
         finally:
             window.close()
             self.application.processEvents()
 
-    def test_sweep_aborts_when_manual_session_handoff_fails(self) -> None:
+    def test_connected_required_devices_start_without_disconnect_warning(self) -> None:
         window = MainWindow(".config/settings.yml", simulation=True)
         try:
             plan = ExecutionPlan(
-                recipe_name="failed-session-handoff",
+                recipe_name="connected-session-run",
                 actions=(),
                 total_points=0,
-                sha256="failed-session-handoff",
-                recipe_source="schema_version: 1\nname: failed-session-handoff\n",
+                sha256="connected-session-run",
+                recipe_source=(
+                    "schema_version: 1\nname: connected-session-run\n"
+                    "root:\n  id: root\n  type: sequence\n  children: []\n"
+                ),
+                required_devices=frozenset({"keithley"}),
             )
             window._run_controller.start = Mock()
-            window._controllers["keithley"].call = Mock()
             window._device_states["keithley"] = "verified"
-            window._start_run(plan, True)
+            window._manual_device_idn["keithley"] = "KEITHLEY,MODEL,1,1"
+            window.dashboard.update_device_state("keithley", "verified")
+            window.dashboard.mark_identity_verified("keithley")
 
-            with patch(
-                "app.ui.shell.main_window.QMessageBox.critical"
-            ) as critical:
-                window._device_error(
-                    "keithley",
-                    "disconnect",
-                    "injected disconnect failure",
-                )
+            dialog = window._open_sweep_readiness(plan, outputs_forced_off=True)
+            self.assertTrue(dialog.start_button.isEnabled())
 
-            critical.assert_called_once()
-            self.assertIn("not started", critical.call_args.args[1].lower())
-            self.assertIsNone(window._pending_run_handoff)
-            window._run_controller.start.assert_not_called()
+            with (
+                patch("app.ui.shell.main_window.QMessageBox.warning") as warning,
+                patch("app.ui.shell.main_window.QMessageBox.critical") as critical,
+            ):
+                dialog.start_button.click()
+
+            warning.assert_not_called()
+            critical.assert_not_called()
+            window._run_controller.start.assert_called_once()
+            self.assertEqual(
+                window._run_controller.start.call_args.kwargs["device_controllers"],
+                {"keithley": window._controllers["keithley"]},
+            )
         finally:
             window.close()
             self.application.processEvents()
 
-    def test_hardware_run_asks_before_connecting_required_sweep_devices(self) -> None:
+    def test_run_leased_device_rejects_manual_io_but_keeps_emergency_off_available(self) -> None:
+        window = MainWindow(".config/settings.yml", simulation=True)
+        try:
+            window._leased_run_devices.add("keithley")
+
+            with self.assertRaisesRegex(ConfigurationError, "leased to the active recipe run"):
+                window._guard_manual_operation("keithley", "set_output", ("A", True))
+
+            window._guard_manual_operation("keithley", "emergency_off", None)
+        finally:
+            window.close()
+            self.application.processEvents()
+
+    def test_hardware_run_opens_the_device_readiness_modal(self) -> None:
         window = MainWindow(".config/settings.yml", simulation=True)
         try:
             window._simulation = False
@@ -990,20 +998,17 @@ class MainWindowTests(unittest.TestCase):
                 required_devices=frozenset({"anritsu", "keithley"}),
             )
             with patch(
-                "app.ui.shell.main_window.QMessageBox.action_guidance",
-                return_value=False,
+                "app.ui.shell.main_window.QMessageBox.action_guidance"
             ) as guidance:
-                accepted = window._confirm_run_engine_connections(plan)
+                window._start_run(plan)
 
-            self.assertFalse(accepted)
-            guidance.assert_called_once()
-            title = guidance.call_args.args[1]
-            message = guidance.call_args.args[2]
-            self.assertEqual(title, "Connect devices for Sweep")
-            self.assertIn("Anritsu MS2830A", message)
-            self.assertIn("Keithley 2600", message)
-            self.assertIn("does not enable any output", message)
-            self.assertEqual(guidance.call_args.args[3], "Connect and run")
+            dialog = window._sweep_readiness_dialog
+            self.assertIsNotNone(dialog)
+            assert dialog is not None
+            self.assertTrue(dialog.isVisible())
+            self.assertIn("anritsu", dialog.rows)
+            self.assertIn("keithley", dialog.rows)
+            guidance.assert_not_called()
         finally:
             window.close()
             self.application.processEvents()
