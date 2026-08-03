@@ -1,7 +1,6 @@
 """Non-intrusive Fluent toast notifications.
 
-``NotificationBanner`` deliberately retains its former public API so device
-pages do not have to own a second notification mechanism.  Unlike the old
+``NotificationBanner`` is a page-scoped notification boundary. Unlike the old
 inline card it occupies no layout space: messages are rendered by QFluent's
 overlay layer and therefore never move a page's controls or plots.
 """
@@ -44,11 +43,10 @@ def show_toast(
 
 
 class NotificationBanner(QWidget):
-    """Compatibility host for the former inline notification card.
+    """Zero-height host for page-scoped Fluent notifications.
 
-    Pages may keep an instance in their existing layout, but it stays hidden
-    with zero height for its complete lifetime.  ``show_message`` uses a toast
-    above that layout instead of making it reflow.
+    ``last_message`` is retained as lightweight page state for diagnostics and
+    automated verification; it is not a second visual notification surface.
     """
 
     def __init__(self, parent: QWidget | None = None) -> None:
@@ -59,6 +57,8 @@ class NotificationBanner(QWidget):
             QSizePolicy.Policy.Ignored,
             QSizePolicy.Policy.Fixed,
         )
+        self.last_message = ""
+        self.last_severity = ""
         self.hide()
 
     def show_message(
@@ -68,6 +68,8 @@ class NotificationBanner(QWidget):
         severity: str = "warning",
         timeout_ms: int = 10_000,
     ) -> None:
+        self.last_message = message
+        self.last_severity = severity.strip().lower()
         show_toast(
             self,
             message,

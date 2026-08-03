@@ -69,7 +69,7 @@ from app.ui.recipes.common_dialogs import (
     KeithleySweepBuilderDialog, RecipeTreeMoveRequest, RecipeTreeWidget,
     OutputPolicyDialog, RepeatCountDialog, SweepLibraryButton,
 )
-from app.devices.anritsu_ms2830a.ui.recipe_extension import (
+from app.ui.recipes.device_extensions import (
     AnritsuAdvancedSpectrumPanel,
     AnritsuConfigurationSnapshot,
     AnritsuNodeEditorDialog,
@@ -77,19 +77,15 @@ from app.devices.anritsu_ms2830a.ui.recipe_extension import (
     AnritsuPageState,
     AnritsuSignalGeneratorNodeEditorDialog,
     AnritsuSpectrumConfigurationPanel,
-    SignalGeneratorSnapshot,
-)
-from app.devices.keithley_2600.ui.recipe_extension import (
     KeithleyConfigurationPanel,
     KeithleyConfigurationSnapshot,
     KeithleyNodeEditorDialog,
     KeithleyPage,
-    _keithley_roi_definition,
-)
-from app.devices.rigol_dg1000z.ui.recipe_extension import (
     RigolConfigurationSnapshot,
     RigolNodeEditorDialog,
     RigolPage,
+    SignalGeneratorSnapshot,
+    _keithley_roi_definition,
 )
 from app.ui.recipes.sweep_editor import SweepGeneratorDialog
 from app.ui.run_worker import planned_run_paths

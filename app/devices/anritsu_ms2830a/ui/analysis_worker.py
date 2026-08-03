@@ -6,7 +6,13 @@ from dataclasses import dataclass
 
 from PySide6.QtCore import QObject, QThread, Qt, Signal, Slot
 
-from app.spectrum import SpectrumCleanupResult, SpectrumPeak, clean_spectrum_dbm, detect_spectrum_peaks
+from app.spectrum import (
+    SpectrumCleanupResult,
+    SpectrumPeak,
+    clean_spectrum_dbm,
+    clean_spectrum_values,
+    detect_spectrum_peaks,
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -17,6 +23,10 @@ class SpectrumAnalysisRequest:
     mode: str
     history_dbm: tuple[tuple[float, ...], ...]
     detect_peaks: bool
+    source_key: str = "raw"
+    frame_id: int = 0
+    source_unit: str = "dBm"
+    provenance: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True, slots=True)
@@ -24,6 +34,10 @@ class SpectrumAnalysisOutcome:
     generation: int
     cleanup: SpectrumCleanupResult
     peaks: tuple[SpectrumPeak, ...] | None
+    source_key: str = "raw"
+    frame_id: int = 0
+    source_unit: str = "dBm"
+    provenance: tuple[str, ...] = ()
 
 
 class _SpectrumAnalysisWorker(QObject):
@@ -36,11 +50,19 @@ class _SpectrumAnalysisWorker(QObject):
             self.failed.emit(-1, "Invalid spectrum-analysis request.")
             return
         try:
-            cleanup = clean_spectrum_dbm(
-                request.powers_dbm,
-                mode=request.mode,
-                history_dbm=request.history_dbm,
-            )
+            if request.source_unit == "dBm":
+                cleanup = clean_spectrum_dbm(
+                    request.powers_dbm,
+                    mode=request.mode,
+                    history_dbm=request.history_dbm,
+                )
+            else:
+                cleanup = clean_spectrum_values(
+                    request.powers_dbm,
+                    unit=request.source_unit,
+                    mode=request.mode,
+                    history_dbm=request.history_dbm,
+                )
             peaks: tuple[SpectrumPeak, ...] | None = (
                 detect_spectrum_peaks(
                     request.frequencies_hz,
@@ -48,13 +70,22 @@ class _SpectrumAnalysisWorker(QObject):
                     min_snr_db=6.0,
                     min_prominence_db=3.0,
                     max_peaks=20,
-                    fit=True,
+                    fit=request.source_unit == "dBm",
+                    unit=request.source_unit,
                 )
                 if request.detect_peaks
                 else None
             )
             self.completed.emit(
-                SpectrumAnalysisOutcome(request.generation, cleanup, peaks)
+                SpectrumAnalysisOutcome(
+                    request.generation,
+                    cleanup,
+                    peaks,
+                    request.source_key,
+                    request.frame_id,
+                    request.source_unit,
+                    request.provenance,
+                )
             )
         except Exception as exc:
             self.failed.emit(request.generation, str(exc))

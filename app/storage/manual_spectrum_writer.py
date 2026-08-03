@@ -63,6 +63,24 @@ class ManualSpectrumArchive:
         self._path: Path | None = None
         self._frequency_grid: tuple[float, ...] | None = None
 
+    def __del__(self) -> None:
+        # A page can be destroyed without receiving a Qt close event (for
+        # example when its route is replaced).  Release the native HDF5 handle
+        # defensively so a later append does not fail with a Windows file-lock
+        # error.  Explicit close() remains the normal transaction boundary.
+        writer = getattr(self, "_writer", None)
+        if writer is None:
+            return
+        try:
+            writer.close("incomplete")
+        except Exception:
+            file_handle = getattr(writer, "_file", None)
+            try:
+                if file_handle is not None and bool(file_handle.id.valid):
+                    file_handle.close()
+            except Exception:
+                pass
+
     @property
     def active_path(self) -> Path | None:
         return self._path
@@ -100,7 +118,7 @@ class ManualSpectrumArchive:
                 raise ExecutionError("The processed manual spectrum contains NaN or infinity.")
         else:
             processed = None
-        path = Path(destination).expanduser()
+        path = Path(destination).expanduser().resolve()
         if not path.suffix:
             path = path.with_suffix(".h5")
         if path.suffix.lower() not in {".h5", ".hdf5"}:
@@ -170,6 +188,7 @@ class ManualSpectrumArchive:
     def _open_for(
         self, path: Path, mode: ManualSpectrumSaveMode
     ) -> Hdf5RunWriter:
+        path = path.expanduser().resolve()
         if self._writer is not None and self._path == path:
             return self._writer
         if self._writer is not None:

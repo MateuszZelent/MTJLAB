@@ -76,4 +76,6 @@ Testy domyślnie używają fake VISA i nie dotykają urządzeń. Testy sprzętow
 
 ## Narzędzia historyczne
 
-`gui.py` i zapisujący tryb `test.py --apply` są zachowane wyłącznie do serwisu starego prototypu. Oba wymagają teraz jawnego przełącznika `--unsafe-legacy`, mogą omijać limity z `settings.yml` i nie są częścią produkcyjnej ścieżki sterowania.
+Stary prototyp Tkinter został usunięty z produkcyjnego drzewa. `test.py --apply` pozostaje
+wyłącznie serwisowym narzędziem legacy i wymaga jawnego przełącznika `--unsafe-legacy`; nie
+jest częścią produkcyjnej ścieżki sterowania.

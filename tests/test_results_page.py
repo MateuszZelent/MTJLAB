@@ -8,6 +8,7 @@ import unittest
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
+from PySide6.QtTest import QTest
 from PySide6.QtWidgets import QApplication, QTabWidget
 from qfluentwidgets import CardWidget, Pivot, PrimaryPushButton
 
@@ -105,8 +106,39 @@ class ResultsPageTests(unittest.TestCase):
             finally:
                 page.close()
 
+    def test_large_result_selection_uses_background_reader_without_stale_ui_apply(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            path = Path(temporary) / "large.h5"
+            writer = Hdf5RunWriter(
+                path,
+                recipe_source="name: background-reader\n",
+                settings_source="schema_version: 1\n",
+                plan_hash="background-reader",
+                device_idn={},
+            )
+            writer.close("completed")
+
+            page = ResultsPage(temporary)
+            page._ASYNC_LOAD_BYTES = 0
+            try:
+                page.runs.setCurrentItem(page.runs.topLevelItem(0))
+                deadline = QTest.qWait
+                for _ in range(200):
+                    self.application.processEvents()
+                    if page.result_state.isHidden():
+                        break
+                    deadline(10)
+                self.assertTrue(page.result_state.isHidden())
+                self.assertIn("State: completed", page.metadata.toPlainText())
+            finally:
+                page.close()
+
+    @unittest.skipUnless(
+        REFERENCE_FILE.is_file(),
+        "The licensed golden THATEC HDF5 fixture is not present in this checkout.",
+    )
     def test_browses_real_thatec_tree_without_private_run_groups(self) -> None:
-        reference = next(ROOT.glob("*.h5"))
+        reference = REFERENCE_FILE
         page = ResultsPage(str(reference.parent))
         try:
             run_item = next(
@@ -129,9 +161,13 @@ class ResultsPageTests(unittest.TestCase):
         finally:
             page.close()
 
+    @unittest.skipUnless(
+        REFERENCE_FILE.is_file(),
+        "The licensed golden THATEC HDF5 fixture is not present in this checkout.",
+    )
     def test_reference_thatec_result_can_rebuild_the_sweep_tree(self) -> None:
         """The public THATEC tree becomes the same complete historical Sweep tree."""
-        reference = next(ROOT.glob("*.h5"))
+        reference = REFERENCE_FILE
         results = ResultsPage(str(reference.parent))
         sweeps = RecipePage(simulation_settings())
         try:
@@ -219,6 +255,7 @@ class ResultsPageTests(unittest.TestCase):
                 self.assertEqual(page.tree.topLevelItem(0).text(0), "Measurement sequence")
                 self.assertIn("restored from public THATEC", page.summary.text())
             finally:
+                page._close_discard_confirmed = True
                 page.close()
 
     def test_can_open_a_thatec_file_outside_the_results_directory(self) -> None:

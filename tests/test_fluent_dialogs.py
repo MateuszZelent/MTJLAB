@@ -254,3 +254,16 @@ class FluentDialogTests(unittest.TestCase):
             self.assertFalse(dialog.connect_missing_button.isEnabled())
         finally:
             dialog.close()
+
+    def test_sweep_readiness_explains_station_safe_shutdown_devices(self) -> None:
+        dialog = SweepDeviceReadinessDialog(
+            ("anritsu",),
+            {"anritsu": "Anritsu MS2830A", "rigol": "Rigol DG1032Z"},
+            additional_safety_devices=("rigol",),
+        )
+        try:
+            self.assertIn("Rigol DG1032Z", dialog.safety_guidance.text())
+            self.assertIn("safe shutdown", dialog.safety_guidance.text().lower())
+            self.assertFalse(dialog.start_button.isEnabled())
+        finally:
+            dialog.close()

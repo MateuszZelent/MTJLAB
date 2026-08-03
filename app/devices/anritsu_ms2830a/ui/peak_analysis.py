@@ -115,7 +115,7 @@ class PeakTableDialog(StationDialog):
             values = (
                 str(row + 1),
                 _frequency(peak.frequency_hz),
-                f"{peak.amplitude_dbm:.5g} dBm",
+                f"{peak.amplitude_dbm:.5g} {getattr(peak, 'amplitude_unit', 'dBm')}",
                 f"{peak.snr_db:.4g} dB",
                 f"{peak.prominence_db:.4g} dB",
                 _frequency(peak.fit_fwhm_hz or peak.fwhm_hz),
@@ -235,7 +235,9 @@ class PeakTrackingWindow(StationDialog):
         first = self._frequencies_hz[0]
         self.frequency.setText(_frequency(peak.frequency_hz))
         self.drift.setText(f"Δ {_frequency(peak.frequency_hz - first)}")
-        self.amplitude.setText(f"{peak.amplitude_dbm:.5g} dBm")
+        self.amplitude.setText(
+            f"{peak.amplitude_dbm:.5g} {getattr(peak, 'amplitude_unit', 'dBm')}"
+        )
         self.status.setText(
             f"Tracking {source} · {self.point_count} point(s) · "
             f"FWHM {_frequency(peak.fit_fwhm_hz or peak.fwhm_hz)}"

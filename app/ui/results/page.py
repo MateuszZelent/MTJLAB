@@ -2,9 +2,10 @@
 
 from __future__ import annotations
 
+from dataclasses import dataclass
 from pathlib import Path
 
-from PySide6.QtCore import QEvent, QTimer, Qt, Signal
+from PySide6.QtCore import QEvent, QThreadPool, QTimer, Qt, Signal
 from PySide6.QtGui import QResizeEvent, QShowEvent
 from PySide6.QtWidgets import (
     QBoxLayout,
@@ -29,6 +30,60 @@ from app.ui.results.metadata_panel import MetadataPanel
 from app.ui.results.spectrum_tab import SpectrumResultsTab
 from app.ui.results.state_card import ResultsStateCard
 from app.ui.results.sweep_tree_panel import SweepTreePanel
+from app.ui.results.workers import ResultReadTask
+
+
+@dataclass(frozen=True, slots=True)
+class _ResultPayload:
+    """Immutable reader output passed from a worker to the GUI thread."""
+
+    path: Path
+    thatec_run: object
+    tree: tuple[object, ...]
+    tree_available: bool
+    detail: object | None
+    points: tuple[object, ...]
+    references: tuple[object, ...]
+    pythat_data: object | None
+
+
+def _read_result_payload(path: Path) -> _ResultPayload:
+    """Read all optional result layers without touching Qt widgets."""
+
+    thatec_run = ThatecRunReader.describe(path)
+    try:
+        tree = ThatecRunReader.tree(path)
+        tree_available = True
+    except Exception:
+        tree = ()
+        tree_available = False
+
+    try:
+        detail = Hdf5RunReader.detail(path)
+    except Exception:
+        detail = None
+    try:
+        points = Hdf5RunReader.points(path)
+    except Exception:
+        points = ()
+    try:
+        references = Hdf5RunReader.references(path)
+    except Exception:
+        references = ()
+    try:
+        pythat_data = read_pythat_run_data(path)
+    except Exception:
+        pythat_data = None
+    return _ResultPayload(
+        path=path,
+        thatec_run=thatec_run,
+        tree=tuple(tree),
+        tree_available=tree_available,
+        detail=detail,
+        points=tuple(points),
+        references=tuple(references),
+        pythat_data=pythat_data,
+    )
 
 
 class _FluentResultSections(QWidget):
@@ -163,12 +218,15 @@ class ResultsPage(QWidget):
 
     resume_requested = Signal(object)
     open_sweep_requested = Signal(object, object)
+    _ASYNC_LOAD_BYTES = 4 * 1024 * 1024
 
     def __init__(self, output_dir: str, parent: QWidget | None = None) -> None:
         super().__init__(parent)
         self._selected_path: Path | None = None
         self._thatec_run = None
         self._thatec_tree_available = False
+        self._result_request_id = 0
+        self._result_task: ResultReadTask | None = None
 
         layout = QVBoxLayout(self)
 
@@ -265,6 +323,7 @@ class ResultsPage(QWidget):
 
         # --- Connections ---
         self.file_browser.file_selected.connect(self._on_file_selected)
+        self.file_browser.files_loaded.connect(self._on_file_list_loaded)
         self.resume_button.clicked.connect(self._request_resume)
         self.open_sweep_button.clicked.connect(self._request_open_sweep)
         self.result_state.action_requested.connect(self.browse_result_file)
@@ -347,6 +406,7 @@ class ResultsPage(QWidget):
 
     def refresh(self) -> None:
         """Refresh the file list and clear result views."""
+        self._cancel_result_load()
         self.resume_button.setEnabled(False)
         self.open_sweep_button.setEnabled(False)
         self._thatec_tree_available = False
@@ -356,6 +416,8 @@ class ResultsPage(QWidget):
         self.heatmap_tab.clear()
         self._set_heatmap_visible(False)
         self.file_browser.refresh()
+        if self._selected_path is not None or self._result_task is not None:
+            return
         if not self.file_browser.has_files():
             self._show_result_state(
                 "No recorded results yet",
@@ -387,6 +449,7 @@ class ResultsPage(QWidget):
 
     def _on_file_selected(self, path_or_none: object) -> None:
         """Handle file selection from the file browser."""
+        self._cancel_result_load()
         self.resume_button.setEnabled(False)
         self.open_sweep_button.setEnabled(False)
         self._thatec_tree_available = False
@@ -420,86 +483,96 @@ class ResultsPage(QWidget):
             f"Reading public and station metadata from {path.name}...",
             loading=True,
         )
-
-        # --- Load THATEC tree ---
-        try:
-            self._thatec_run = ThatecRunReader.describe(path)
-        except Exception as exc:
-            self._show_result_state(
-                "Cannot read result",
-                str(exc),
-                action_text="Open another file...",
-            )
-            self._thatec_run = None
+        request_id = self._begin_result_request()
+        if self._should_load_async(path):
+            task = ResultReadTask(request_id, _read_result_payload, path)
+            self._result_task = task
+            task.signals.loaded.connect(self._on_result_loaded)
+            task.signals.failed.connect(self._on_result_failed)
+            QThreadPool.globalInstance().start(task)
             return
-
-        # A public PyThat-compatible measurement can legitimately omit the
-        # optional visual tree. That must not hide its spectra or metadata.
         try:
-            tree = ThatecRunReader.tree(path)
-            self._thatec_tree_available = True
-        except Exception:
-            tree = ()
-            self._thatec_tree_available = False
+            payload = _read_result_payload(path)
+        except Exception as exc:
+            self._on_result_failed(request_id, str(exc))
+            return
+        self._apply_result_payload(request_id, payload)
 
-        self.open_sweep_button.setEnabled(self._thatec_tree_available)
+    def _should_load_async(self, path: Path) -> bool:
+        """Keep large HDF5 reads and optional bridges off the GUI thread."""
 
-        # --- Load private HDF5 detail (if available) ---
         try:
-            detail = Hdf5RunReader.detail(path)
-            points = Hdf5RunReader.points(path)
-        except Exception:
-            detail = None
-            points = ()
-        try:
-            references = Hdf5RunReader.references(path)
-        except Exception:
-            references = ()
+            return path.stat().st_size >= self._ASYNC_LOAD_BYTES
+        except OSError:
+            return False
 
-        # The tree is intentionally enriched with the private checkpoint and
-        # reference layers when present.  Public-only THATEC files still get
+    def _begin_result_request(self) -> int:
+        self._result_request_id += 1
+        return self._result_request_id
+
+    def _cancel_result_load(self) -> None:
+        self._result_request_id += 1
+        if self._result_task is not None:
+            self._result_task.cancel()
+            self._result_task = None
+
+    def _on_result_loaded(self, request_id: int, payload: object) -> None:
+        if request_id != self._result_request_id or not isinstance(payload, _ResultPayload):
+            return
+        self._result_task = None
+        self._apply_result_payload(request_id, payload)
+
+    def _on_result_failed(self, request_id: int, message: str) -> None:
+        if request_id != self._result_request_id:
+            return
+        self._result_task = None
+        self._show_result_state(
+            "Cannot read result",
+            message,
+            action_text="Open another file...",
+        )
+        self._thatec_run = None
+
+    def _apply_result_payload(self, request_id: int, payload: _ResultPayload) -> None:
+        if request_id != self._result_request_id:
+            return
+        self._thatec_run = payload.thatec_run
+        self._thatec_tree_available = payload.tree_available
+        self.open_sweep_button.setEnabled(payload.tree_available)
+
+        # The tree is intentionally enriched with private checkpoint and
+        # reference layers when present. Public-only THATEC files still get
         # their complete /measurement tree from ``run.rows``.
         self.sweep_tree.load(
-            path,
-            self._thatec_run,
-            tree,
-            points=points,
-            references=references,
+            payload.path,
+            payload.thatec_run,
+            payload.tree,
+            points=payload.points,
+            references=payload.references,
         )
-
-        # PyThat enriches metadata when available, but it must not suppress
-        # the core HDF5 browser when an optional bridge cannot open a file.
-        try:
-            pythat_data = read_pythat_run_data(path)
-        except Exception:
-            pythat_data = None
-
-        # Resume button
         self.resume_button.setEnabled(
             bool(
-                detail
-                and detail.summary.status
+                payload.detail
+                and payload.detail.summary.status
                 in {"aborted", "faulted", "incomplete"}
             )
         )
-
-        # Metadata panel
-        if detail is not None:
-            self.metadata_panel.show_detail(detail)
+        if payload.detail is not None:
+            self.metadata_panel.show_detail(payload.detail)
         else:
-            self.metadata_panel.show_thatec_summary(path, self._thatec_run)
-        self.metadata_panel.show_pythat(pythat_data)
-
-        # Spectrum tab
-        self.spectrum_tab.load(path, self._thatec_run, points)
-
-        # Heatmap tab (only for results with 2-D spectral data)
-        if find_heatmap_rows(self._thatec_run):
+            self.metadata_panel.show_thatec_summary(payload.path, payload.thatec_run)
+        self.metadata_panel.show_pythat(payload.pythat_data)
+        self.spectrum_tab.load(payload.path, payload.thatec_run, payload.points)
+        if find_heatmap_rows(payload.thatec_run):
             self._set_heatmap_visible(True)
-            self.heatmap_tab.load(path, self._thatec_run, points)
+            self.heatmap_tab.load(payload.path, payload.thatec_run, payload.points)
         else:
             self._set_heatmap_visible(False)
         self.result_state.hide()
+
+    def closeEvent(self, event) -> None:
+        self._cancel_result_load()
+        super().closeEvent(event)
 
     def _show_result_state(
         self,
@@ -517,6 +590,23 @@ class ResultsPage(QWidget):
             action_text=action_text,
         )
         self.result_state.show()
+
+    def _on_file_list_loaded(self, has_files: bool) -> None:
+        """Refresh the page-level empty state after a background index completes."""
+
+        if self._selected_path is not None or self._result_task is not None:
+            return
+        if has_files:
+            self._show_result_state(
+                "Select a recorded result",
+                "Choose a file from the browser to inspect its immutable contents.",
+            )
+        else:
+            self._show_result_state(
+                "No recorded results yet",
+                "Open a THATEC/PyThat HDF5 file or choose another result directory.",
+                action_text="Open result file...",
+            )
 
     # ------------------------------------------------------------------
     # Tab management

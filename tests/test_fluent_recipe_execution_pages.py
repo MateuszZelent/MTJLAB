@@ -389,6 +389,7 @@ finally:
             requested: list[bool] = []
             monitor.manual_next_requested.connect(lambda: requested.append(True))
             monitor.run_started(1, 1.0, execution_mode="manual_step")
+            self.assertEqual(monitor.state.text(), "MANUAL — PREPARING")
             self.application.processEvents()
             self.assertTrue(monitor._manual_dialog.isVisible())
             monitor.append_event(

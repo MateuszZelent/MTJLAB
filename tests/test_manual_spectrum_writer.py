@@ -113,6 +113,28 @@ class ManualSpectrumWriterTests(unittest.TestCase):
             finally:
                 archive.close()
 
+    def test_append_reuses_one_writer_for_path_aliases(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            directory = Path(temporary)
+            path = directory / "manual.h5"
+            archive = ManualSpectrumArchive()
+            acquired = datetime.now(timezone.utc)
+            try:
+                archive.save(
+                    self._trace(acquired_at=acquired),
+                    destination=path,
+                    mode=ManualSpectrumSaveMode.APPEND,
+                )
+                result = archive.save(
+                    self._trace(acquired_at=acquired + timedelta(seconds=1), offset=1.0),
+                    destination=path.absolute(),
+                    mode=ManualSpectrumSaveMode.APPEND,
+                )
+                self.assertEqual(result.point_index, 1)
+                self.assertEqual(archive.point_count, 2)
+            finally:
+                archive.close()
+
     def test_timestamped_mode_creates_a_completed_collision_safe_file(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             base = Path(temporary) / "capture.h5"

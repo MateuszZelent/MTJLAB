@@ -558,7 +558,15 @@ class SweepGeneratorDialog(FluentRecipeDialog):
         self.plot.clear()
         # PlotItem.clear() removes data but preserves the legend, so the labels
         # always describe precisely the intervals visible in this refresh.
-        palette = ("#4fa3ff", "#ef9b4b", "#73c991", "#d484d8", "#e6ce55", "#69cbd0")
+        tokens = tokens_for(self.plot_theme)
+        palette = (
+            tokens.plot_measurement,
+            tokens.plot_reference,
+            tokens.success,
+            tokens.caution,
+            tokens.accent,
+            tokens.focus,
+        )
         point_index = 0
         previous_point: float | None = None
         for stage_index, stage in enumerate(stages):

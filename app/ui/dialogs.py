@@ -163,6 +163,8 @@ class SweepDeviceReadinessDialog(StationDialog):
         required_devices: tuple[str, ...],
         display_names: dict[str, str],
         parent: QWidget | None = None,
+        *,
+        additional_safety_devices: tuple[str, ...] = (),
     ) -> None:
         super().__init__(parent)
         self.setWindowTitle("Sweep device readiness")
@@ -189,6 +191,21 @@ class SweepDeviceReadinessDialog(StationDialog):
         guidance.setWordWrap(True)
         layout.addWidget(heading)
         layout.addWidget(guidance)
+        self.safety_guidance = BodyLabel(parent=self)
+        self.safety_guidance.setObjectName("muted")
+        self.safety_guidance.setWordWrap(True)
+        if additional_safety_devices:
+            names = ", ".join(
+                display_names.get(device, device) for device in additional_safety_devices
+            )
+            self.safety_guidance.setText(
+                "Normal measurement also prepares safe shutdown for: "
+                f"{names}. These devices are informational here and are not "
+                "additional sweep prerequisites."
+            )
+            layout.addWidget(self.safety_guidance)
+        else:
+            self.safety_guidance.hide()
 
         for device in self._required_devices:
             row = SimpleCardWidget(self)

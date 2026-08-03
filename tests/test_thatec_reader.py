@@ -8,9 +8,16 @@ from app.storage.thatec_reader import ThatecRunReader
 from tests.helpers import ROOT
 
 
-REFERENCE_FILE = next(ROOT.glob("*.h5"))
+REFERENCE_FILE = ROOT / (
+    "05062026_YIG20CoFeB1_FMR_S12_S21_2A_-2A_10MHz_4GHz_"
+    "Measurement_#3.h5"
+)
 
 
+@unittest.skipUnless(
+    REFERENCE_FILE.is_file(),
+    "The licensed golden THATEC HDF5 fixture is not present in this checkout.",
+)
 class ThatecRunReaderReferenceTests(unittest.TestCase):
     def test_reference_file_describes_public_rows_devices_and_lazy_spectrum_slice(self) -> None:
         run = ThatecRunReader.describe(REFERENCE_FILE)

@@ -5,7 +5,7 @@ from __future__ import annotations
 from collections.abc import Callable
 from pathlib import Path
 
-from PySide6.QtCore import Qt, Signal
+from PySide6.QtCore import QThreadPool, Qt, Signal
 from PySide6.QtWidgets import (
     QHBoxLayout,
     QStackedWidget,
@@ -18,6 +18,7 @@ from qfluentwidgets import BodyLabel, LineEdit, PrimaryPushButton, PushButton, T
 from app.storage import Hdf5RunReader, ThatecRunReader
 from app.ui.dialogs import StationFileDialog as QFileDialog
 from app.ui.results.state_card import ResultsStateCard
+from app.ui.results.workers import ResultReadTask
 
 
 class FileBrowserPanel(QWidget):
@@ -26,12 +27,17 @@ class FileBrowserPanel(QWidget):
     file_selected = Signal(object)  # Path | None
     file_opened = Signal(object)  # Path
     directory_changed = Signal(object)  # Path
+    files_loaded = Signal(bool)
+    _ASYNC_REFRESH_FILE_COUNT = 8
+    _ASYNC_REFRESH_BYTES = 32 * 1024 * 1024
 
     def __init__(self, output_dir: str, parent: QWidget | None = None) -> None:
         super().__init__(parent)
         self._output_dir = Path(output_dir)
         self._selected_path: Path | None = None
         self._state_action: Callable[[], None] = self.browse_file
+        self._refresh_request_id = 0
+        self._refresh_task: ResultReadTask | None = None
 
         layout = QVBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
@@ -108,9 +114,67 @@ class FileBrowserPanel(QWidget):
 
         self.location.setText(f"Directory: {self._output_dir.resolve()}")
         previous = self._selected_path
+        self._cancel_refresh()
+        if self._should_refresh_async():
+            self.runs.clear()
+            self.state_card.show_state(
+                title="Loading result files",
+                description="Reading the result index in the background...",
+                accessible_name="Loading result files",
+                loading=True,
+            )
+            self.content.setCurrentWidget(self.state_card)
+            request_id = self._refresh_request_id
+            task = ResultReadTask(request_id, Hdf5RunReader.list_runs, self._output_dir)
+            self._refresh_task = task
+            task.signals.loaded.connect(self._on_refresh_loaded)
+            task.signals.failed.connect(self._on_refresh_failed)
+            QThreadPool.globalInstance().start(task)
+            return
+        self._populate_summaries(Hdf5RunReader.list_runs(self._output_dir), previous)
+
+    def _should_refresh_async(self) -> bool:
+        try:
+            paths = tuple(self._output_dir.glob("*.h5")) + tuple(
+                self._output_dir.glob("*.hdf5")
+            )
+            total_bytes = sum(path.stat().st_size for path in paths if path.is_file())
+        except OSError:
+            return False
+        return len(paths) >= self._ASYNC_REFRESH_FILE_COUNT or total_bytes >= self._ASYNC_REFRESH_BYTES
+
+    def _cancel_refresh(self) -> None:
+        self._refresh_request_id += 1
+        if self._refresh_task is not None:
+            self._refresh_task.cancel()
+            self._refresh_task = None
+
+    def _on_refresh_loaded(self, request_id: int, summaries: object) -> None:
+        if request_id != self._refresh_request_id:
+            return
+        self._refresh_task = None
+        if not isinstance(summaries, tuple):
+            self._on_refresh_failed(request_id, "The result index returned an invalid payload.")
+            return
+        self._populate_summaries(summaries, self._selected_path)
+
+    def _on_refresh_failed(self, request_id: int, message: str) -> None:
+        if request_id != self._refresh_request_id:
+            return
+        self._refresh_task = None
+        self._state_action = self.refresh
+        self.state_card.show_state(
+            title="Cannot index result files",
+            description=message,
+            accessible_name="Cannot index result files",
+            action_text="Retry refresh",
+        )
+        self.content.setCurrentWidget(self.state_card)
+
+    def _populate_summaries(self, summaries: tuple[object, ...], previous: Path | None) -> None:
         self.runs.blockSignals(True)
         self.runs.clear()
-        for summary in Hdf5RunReader.list_runs(self._output_dir):
+        for summary in summaries:
             item = QTreeWidgetItem(
                 [
                     summary.path.name,
@@ -134,6 +198,7 @@ class FileBrowserPanel(QWidget):
             self._selected_path = None
             self.file_selected.emit(None)
         self._apply_filter(self.search.text())
+        self.files_loaded.emit(self.has_files())
 
     def choose_directory(self) -> None:
         """Browse another directory without changing persisted station settings."""
@@ -304,3 +369,7 @@ class FileBrowserPanel(QWidget):
 
     def _run_state_action(self) -> None:
         self._state_action()
+
+    def closeEvent(self, event) -> None:
+        self._cancel_refresh()
+        super().closeEvent(event)

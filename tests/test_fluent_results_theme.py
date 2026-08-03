@@ -47,6 +47,20 @@ class FluentResultsThemeTests(unittest.TestCase):
         finally:
             plot.close()
 
+    def test_heatmap_readout_uses_physical_cell_boundaries_for_nonuniform_axes(self) -> None:
+        plot = HeatmapPlotWidget()
+        try:
+            plot.set_data(
+                np.arange(6, dtype=float).reshape(2, 3),
+                x_values=np.asarray((0.0, 1.0, 3.0)),
+                y_values=np.asarray((10.0, 20.0)),
+            )
+
+            self.assertTrue(np.allclose(plot._x_edges, (-0.5, 0.5, 2.0, 4.0)))
+            self.assertEqual(plot._cell_indices(0.75, 14.0), (0, 1))
+        finally:
+            plot.close()
+
     def test_shell_live_theme_switch_rethemes_embedded_heatmap(self) -> None:
         window = MainWindow(".config/settings.yml", simulation=True)
         try:

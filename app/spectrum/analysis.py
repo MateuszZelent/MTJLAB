@@ -1,8 +1,10 @@
 """Read-only spectrum cleanup, peak measurement, and fitting.
 
 Every function returns derived arrays and leaves the acquired trace untouched.
-Frequency values remain in Hz, logarithmic absolute power in dBm, and relative
-quantities in dB.
+Frequency values remain in Hz.  The legacy dBm names are retained for API
+compatibility, while ``clean_spectrum_values`` and the ``unit`` fields keep
+relative/linear display traces explicitly labelled instead of relabelling them
+as dBm.
 """
 
 from __future__ import annotations
@@ -30,6 +32,7 @@ class SpectrumPeak:
     fit_center_hz: float | None
     fit_fwhm_hz: float | None
     fit_rmse_db: float | None
+    amplitude_unit: str = "dBm"
 
 
 @dataclass(frozen=True, slots=True)
@@ -38,6 +41,13 @@ class SpectrumCleanupResult:
     noise_sigma_db: float
     stationary_interference_indices: tuple[int, ...]
     method: str
+    unit: str = "dBm"
+
+    @property
+    def values(self) -> tuple[float, ...]:
+        """Unit-neutral alias used by the display/analysis pipeline."""
+
+        return self.values_dbm
 
 
 def _finite_vectors(
@@ -177,11 +187,27 @@ def clean_spectrum_dbm(
     mode: str,
     history_dbm: Sequence[Sequence[float]] = (),
 ) -> SpectrumCleanupResult:
-    values = tuple(float(value) for value in values_dbm)
+    return clean_spectrum_values(values_dbm, unit="dBm", mode=mode, history_dbm=history_dbm)
+
+
+def clean_spectrum_values(
+    values: Sequence[float],
+    *,
+    unit: str,
+    mode: str,
+    history_dbm: Sequence[Sequence[float]] = (),
+) -> SpectrumCleanupResult:
+    """Clean the numeric values of any displayed spectrum unit.
+
+    The algorithms are value-domain operations and do not change units.  The
+    legacy ``clean_spectrum_dbm`` entry point remains the dBm-specialized API.
+    """
+
+    values = tuple(float(value) for value in values)
     sigma = robust_noise_sigma_db(values)
     mode = mode.lower()
     if mode == "raw":
-        return SpectrumCleanupResult(values, sigma, (), "Raw (no processing)")
+        return SpectrumCleanupResult(values, sigma, (), "Raw (no processing)", unit)
     interference = detect_stationary_interference(history_dbm)
     if mode == "denoise":
         cleaned = bilateral_denoise_dbm(values)
@@ -195,7 +221,7 @@ def clean_spectrum_dbm(
         method = "Bilateral denoise + stationary-line rejection (display only)"
     else:
         raise ValueError(f"Unsupported spectrum cleanup mode: {mode!r}.")
-    return SpectrumCleanupResult(tuple(cleaned), sigma, interference, method)
+    return SpectrumCleanupResult(tuple(cleaned), sigma, interference, method, unit)
 
 
 def _crossing_frequency(
@@ -292,6 +318,7 @@ def detect_spectrum_peaks(
     min_prominence_db: float = 3.0,
     max_peaks: int = 20,
     fit: bool = True,
+    unit: str = "dBm",
 ) -> tuple[SpectrumPeak, ...]:
     frequencies, values = _finite_vectors(frequencies_hz, values_dbm)
     detection_values = _gaussian_detection_trace(
@@ -330,7 +357,10 @@ def detect_spectrum_peaks(
             frequencies, detection_values, int(index)
         )
         amplitude_dbm = float(values[index])
-        half_power = float(detection_values[index] - 10.0 * math.log10(2.0))
+        half_power = float(
+            detection_values[index]
+            - (10.0 * math.log10(2.0) if unit in {"dBm", "dB"} else detection_values[index] / 2.0)
+        )
         left_hz = _crossing_frequency(
             frequencies, detection_values, int(index), -1, half_power
         )
@@ -344,7 +374,7 @@ def detect_spectrum_peaks(
         )
         fit_model, fit_center, fit_width, fit_rmse = (
             _fit_peak_shape(frequencies, values, int(index), fwhm_hz)
-            if fit
+            if fit and unit == "dBm"
             else ("not fitted", None, None, None)
         )
         effective_center = fit_center if fit_center is not None else center_hz
@@ -365,6 +395,7 @@ def detect_spectrum_peaks(
                 fit_center_hz=fit_center,
                 fit_fwhm_hz=fit_width,
                 fit_rmse_db=fit_rmse,
+                amplitude_unit=unit,
             )
         )
     measured.sort(

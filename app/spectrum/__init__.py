@@ -12,12 +12,14 @@ from .analysis import (
     SpectrumPeak,
     bilateral_denoise_dbm,
     clean_spectrum_dbm,
+    clean_spectrum_values,
     detect_spectrum_peaks,
     detect_stationary_interference,
     robust_noise_sigma_db,
     rolling_noise_floor_dbm,
     suppress_stationary_lines_dbm,
 )
+from .display_model import SpectrumDisplayState, SpectrumDisplayTrace, build_display_state
 
 __all__ = [
     "LinearPowerAverager",
@@ -29,9 +31,13 @@ __all__ = [
     "SpectrumPeak",
     "bilateral_denoise_dbm",
     "clean_spectrum_dbm",
+    "clean_spectrum_values",
     "detect_spectrum_peaks",
     "detect_stationary_interference",
     "robust_noise_sigma_db",
     "rolling_noise_floor_dbm",
     "suppress_stationary_lines_dbm",
+    "SpectrumDisplayState",
+    "SpectrumDisplayTrace",
+    "build_display_state",
 ]

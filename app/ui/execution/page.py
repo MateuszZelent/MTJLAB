@@ -391,15 +391,16 @@ class RunMonitorPage(QWidget):
                 "The runner pauses before every normal recipe action until the "
                 "operator explicitly confirms the next stage."
             )
-        self.state.setText("DRY RUN — OUTPUTS OFF" if dry_run else "RUNNING")
-        self.state.setToolTip(
-            (
-                "Configurations, setpoints and acquisitions are executing while "
-                "every source output is forced OFF."
+        else:
+            self.state.setText("DRY RUN — OUTPUTS OFF" if dry_run else "RUNNING")
+            self.state.setToolTip(
+                (
+                    "Configurations, setpoints and acquisitions are executing while "
+                    "every source output is forced OFF."
+                )
+                if dry_run
+                else "Normal measurement execution; recipe OUTPUT actions are active."
             )
-            if dry_run
-            else "Normal measurement execution; recipe OUTPUT actions are active."
-        )
         self._planned_actions = max(0, actions)
         self.progress.setRange(0, max(actions, 1))
         self.progress.setValue(0)

@@ -3,9 +3,11 @@ from __future__ import annotations
 from copy import deepcopy
 from datetime import datetime, timezone
 import json
+import os
 from pathlib import Path
 import tempfile
 import unittest
+from unittest.mock import patch
 
 from ruamel.yaml import YAML
 
@@ -181,6 +183,92 @@ class QualificationEvidenceTests(unittest.TestCase):
             report_path = next((root / "qualification").glob("HIL-*.json"))
             document = QualificationReport.verify_file(report_path)
             self.assertEqual(document["overall_status"], "incomplete")
+
+    def test_recipe_cli_writes_a_blocked_report_without_all_energized_gates(self) -> None:
+        raw = deepcopy(SettingsRepository(SETTINGS_TEMPLATE).load().raw)
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            settings_path = root / "settings.yml"
+            recipe_path = root / "qualification.yml"
+            with settings_path.open("w", encoding="utf-8") as stream:
+                YAML().dump(raw, stream)
+            recipe_path.write_text(
+                """schema_version: 1
+name: qualification-gate
+root:
+  id: checkpoint
+  type: checkpoint
+""",
+                encoding="utf-8",
+            )
+
+            exit_code = qualification_main(
+                [
+                    "--settings",
+                    str(settings_path),
+                    "--output-directory",
+                    str(root / "qualification"),
+                    "--simulate",
+                    "recipe",
+                    str(recipe_path),
+                    "--allow-energized",
+                    "--dummy-load-id",
+                    "LOAD-TEST",
+                    "--interlock-confirmed",
+                    "--confirmation",
+                    ENERGIZED_CONFIRMATION,
+                ]
+            )
+
+            self.assertEqual(exit_code, 1)
+            report_path = next((root / "qualification").glob("HIL-*.json"))
+            document = QualificationReport.verify_file(report_path)
+            self.assertEqual(document["overall_status"], "blocked")
+            self.assertEqual(
+                {item["case_id"] for item in document["cases"]},
+                {"recipe.authorization"},
+            )
+
+    def test_authorized_recipe_uses_production_runner_and_persists_result(self) -> None:
+        raw = deepcopy(SettingsRepository(SETTINGS_TEMPLATE).load().raw)
+        raw["profile"]["state"] = "approved"
+        raw["access_control"]["default_roles"] = ["service"]
+        with tempfile.TemporaryDirectory() as directory, patch.dict(
+            os.environ, {ENERGIZED_HIL_ENVIRONMENT: "YES"}, clear=False
+        ):
+            root = Path(directory)
+            settings_path = root / "settings.yml"
+            recipe_path = root / "qualification.yml"
+            with settings_path.open("w", encoding="utf-8") as stream:
+                YAML().dump(raw, stream)
+            recipe_path.write_text(
+                """schema_version: 1
+name: qualification-checkpoint
+root:
+  id: checkpoint
+  type: checkpoint
+""",
+                encoding="utf-8",
+            )
+            runner = QualificationRunner(
+                settings_path,
+                output_directory=root / "qualification",
+            )
+            report_path = runner.run_recipe(
+                recipe_path,
+                authorization=EnergizedAuthorization(
+                    allow_energized=True,
+                    dummy_load_id="LOAD-TEST",
+                    interlock_confirmed=True,
+                    confirmation=ENERGIZED_CONFIRMATION,
+                ),
+            )
+
+            document = QualificationReport.verify_file(report_path)
+            self.assertEqual(document["overall_status"], "passed")
+            execute = next(item for item in document["cases"] if item["case_id"] == "recipe.execute")
+            result_path = Path(execute["evidence"]["result_path"])
+            self.assertTrue(result_path.is_file())
 
 
 if __name__ == "__main__":

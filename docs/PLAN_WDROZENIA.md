@@ -538,9 +538,13 @@ Dla obciążeń reaktywnych, nieznanej impedancji, kabli o istotnej pojemności 
 
 ## 9. Audyt bieżącego GUI
 
-`gui.py` jest prototypem Tkinter przeznaczonym głównie dla Rigola. Nie powinien być rozszerzany do produkcyjnego GUI trzech urządzeń, bo utrudni drzewo receptury, docki, rozbudowane modele tabel oraz kontrolowane wątki.
+Historyczny prototyp Tkinter został usunięty z drzewa produkcyjnego. Nie należy wracać do
+jednowidokowego GUI Rigola; produkcyjna aplikacja trzech urządzeń korzysta wyłącznie z
+Fluent shell, drzewa receptur, docków i kontrolowanych wątków.
 
-Kod komunikacji i obliczenia, które przejdą testy, można przenieść. Warstwy widoku należy zbudować od nowa w PySide6. Migracja ma zachować możliwość uruchomienia starego prototypu do czasu osiągnięcia parytetu funkcji.
+Kod komunikacji i obliczenia, które przejdą testy, można przenieść. Warstwy widoku należy
+budować i utrzymywać wyłącznie w PySide6-Fluent; serwisowe narzędzia legacy nie są ścieżką
+uruchamiania aplikacji pomiarowej.
 
 ## 10. Plik `.config/settings.yml`
 

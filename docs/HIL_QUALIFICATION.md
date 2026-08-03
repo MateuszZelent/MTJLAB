@@ -98,7 +98,8 @@ does not require enabling SG control in the profile.
 An energized run is accepted only when all of these independent gates are true:
 
 - the OS account has the `service` role;
-- the station profile is `approved`;
+- the required device safety permissions in the station profile allow the recipe's output
+  actions (the compiler re-checks these permissions before execution);
 - the recipe passes the normal compiler and all DUT/device limits;
 - `--allow-energized` is present;
 - `LAB_CONTROL_ENABLE_ENERGIZED_HIL` equals exactly `YES` in that terminal;
@@ -116,7 +117,9 @@ python -m app.qualification --settings .config/settings.yml `
   --confirmation "I CONFIRM DUMMY LOAD AND PHYSICAL INTERLOCK"
 ```
 
-The recipe is never translated into arbitrary commands. It is executed by `RecipeRunner`; OUTPUT ON
+The legacy `profile.state` field is not part of the current settings schema and is removed during
+settings repair. The report keeps its historical profile-state field for evidence compatibility;
+it is not an authorization shortcut. The recipe is never translated into arbitrary commands. It is executed by `RecipeRunner`; OUTPUT ON
 still needs the normal configure/ARM/enable sequence, compliance is applied before Keithley output,
 the watchdog is active, checkpoints are flushed to HDF5, and final shutdown uses the hashed shutdown
 manifest. A recipe failure remains a failed qualification even if shutdown succeeds.

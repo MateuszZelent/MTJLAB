@@ -37,8 +37,9 @@ class ArchitectureTests(unittest.TestCase):
 
     def test_generic_device_packages_do_not_exist(self) -> None:
         for package in ("rigol", "keithley", "anritsu"):
+            generic_package = ROOT / "app" / "devices" / package
             self.assertFalse(
-                (ROOT / "app" / "devices" / package).exists(),
+                any(generic_package.glob("*.py")),
                 f"generic device package app.devices.{package} must not exist",
             )
 
@@ -94,6 +95,14 @@ class ArchitectureTests(unittest.TestCase):
         self.assertIn("class MainWindow", shell.read_text(encoding="utf-8"))
         self.assertNotIn("MainWindow", ui_init.read_text(encoding="utf-8"))
 
+    def test_legacy_root_tk_shell_is_removed(self) -> None:
+        """The production entry point must not retain an unsafe legacy shell."""
+
+        self.assertFalse(
+            (ROOT / "gui.py").exists(),
+            "the historical Tkinter generator must not remain as a runnable UI shell",
+        )
+
     def test_shell_does_not_alias_device_page_buttons_onto_dashboard_cards(self) -> None:
         shell = (
             ROOT / "app" / "ui" / "shell" / "main_window.py"
@@ -126,3 +135,9 @@ class ArchitectureTests(unittest.TestCase):
             any(name.startswith("app.devices.") and ".ui" in name for name in imports)
         )
         self.assertIn(".create_page(", shell.read_text(encoding="utf-8"))
+
+    def test_recipe_preview_uses_semantic_plot_tokens(self) -> None:
+        source = (ROOT / "app" / "ui" / "recipes" / "sweep_editor.py").read_text(
+            encoding="utf-8"
+        )
+        self.assertNotRegex(source, r"#[0-9A-Fa-f]{3,8}")

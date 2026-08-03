@@ -530,6 +530,12 @@ class DashboardPage(QWidget):
             self._device_errors.pop(device, None)
         self._refresh_readiness()
 
+    def clear_identity_verified(self, device: str) -> None:
+        """Forget active-session identity evidence after a session ends."""
+
+        self._verified_resources.pop(device, None)
+        self._refresh_readiness()
+
     def record_device_error(self, device: str, error: str) -> None:
         self._device_errors[device] = error
         self._refresh_readiness()

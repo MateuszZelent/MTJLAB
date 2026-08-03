@@ -50,10 +50,12 @@ from app.settings.models import StationSettings
 from app.spectrum import (
     LinearPowerAverager,
     SpectrumCleanupResult,
+    SpectrumDisplayState,
     SpectrumPeak,
     apply_reference_operation,
     detect_spectrum_peaks,
     frequency_grids_match,
+    build_display_state,
 )
 from app.storage import (
     ManualSpectrumArchive,
@@ -889,6 +891,16 @@ class AnritsuPage(QWidget):
         self._detected_peaks: tuple[SpectrumPeak, ...] = ()
         self._last_peak_analysis_monotonic: float | None = None
         self._analysis_generation = 0
+        self._display_revision = 0
+        self._analysis_source_key: str | None = None
+        self._display_state = build_display_state(
+            raw=None,
+            averaged=None,
+            reference=None,
+            reference_operation="none",
+            visible={},
+            frame_id=0,
+        )
         self._analysis_controller = SpectrumAnalysisController(self)
         self._analysis_controller.result.connect(self._analysis_completed)
         self._analysis_controller.error.connect(self._analysis_failed)
@@ -1241,7 +1253,15 @@ class AnritsuPage(QWidget):
             "Choose local display processing. Raw remains untouched. Stationary-line "
             "rejection is conservative and cannot prove that a stable carrier is EMI."
         )
-        analysis_controls.addWidget(self.cleanup_mode, 0, 1, 1, 2)
+        analysis_controls.addWidget(BodyLabel("Analyze trace"), 0, 0)
+        self.analysis_source = ComboBox(self.signal_analysis_card)
+        self.analysis_source.setToolTip(
+            "Choose exactly which currently displayed trace is analysed. "
+            "The selection is retained while that trace remains visible."
+        )
+        analysis_controls.addWidget(self.analysis_source, 0, 1, 1, 2)
+        analysis_controls.addWidget(BodyLabel("Cleanup"), 1, 0)
+        analysis_controls.addWidget(self.cleanup_mode, 1, 1, 1, 2)
         self.auto_peak_detection = CheckBox("Auto-detect peaks")
         self.auto_peak_detection.setChecked(True)
         self.highlight_peaks = CheckBox("Highlight peaks")
@@ -1258,17 +1278,17 @@ class AnritsuPage(QWidget):
             "It never starts acquisition or changes analyser settings."
         )
         self.open_floating_spectrum.setAccessibleName("Open floating spectrum")
-        analysis_controls.addWidget(self.auto_peak_detection, 1, 0)
-        analysis_controls.addWidget(self.highlight_peaks, 1, 1)
-        analysis_controls.addWidget(self.analyze_peaks, 1, 2)
-        analysis_controls.addWidget(self.open_peak_table, 1, 3)
+        analysis_controls.addWidget(self.auto_peak_detection, 2, 0)
+        analysis_controls.addWidget(self.highlight_peaks, 2, 1)
+        analysis_controls.addWidget(self.analyze_peaks, 2, 2)
+        analysis_controls.addWidget(self.open_peak_table, 2, 3)
         analysis_controls.addWidget(self.open_floating_spectrum, 0, 3)
         self.analysis_status = CaptionLabel(
             "Waiting for a completed spectrum.", self.signal_analysis_card
         )
         self.analysis_status.setObjectName("muted")
         self.analysis_status.setWordWrap(True)
-        analysis_controls.addWidget(self.analysis_status, 2, 0, 1, 4)
+        analysis_controls.addWidget(self.analysis_status, 3, 0, 1, 4)
         analysis_controls.setColumnStretch(1, 1)
         current_spectrum_layout.addWidget(self.signal_analysis_card)
         current_spectrum_layout.addWidget(self.spectrum_plot, 1)
@@ -1379,7 +1399,7 @@ class AnritsuPage(QWidget):
             self._reference_operation_changed
         )
         for checkbox in (self.show_raw, self.show_average, self.show_reference, self.show_processed):
-            checkbox.toggled.connect(self._refresh_spectrum_display)
+            checkbox.toggled.connect(self._display_controls_changed)
         self.spectrogram_source.currentIndexChanged.connect(
             self._spectrogram_controls_changed
         )
@@ -1393,6 +1413,9 @@ class AnritsuPage(QWidget):
         self.open_floating_spectrum.clicked.connect(self._open_spectrum_window)
         self.cleanup_mode.currentIndexChanged.connect(
             self._signal_analysis_controls_changed
+        )
+        self.analysis_source.currentIndexChanged.connect(
+            self._analysis_source_changed
         )
         self.auto_peak_detection.toggled.connect(
             self._signal_analysis_controls_changed
@@ -1423,6 +1446,7 @@ class AnritsuPage(QWidget):
             self.save_manual_spectrum: "Save the latest completed spectrum using the accepted manual archive configuration. This does not open the configuration dialog or query the instrument.",
             self.close_manual_archive: "Close the current append session as a valid resumable HDF5 file. It does not delete data.",
             self.reference_operation: "Choose point-wise reference mathematics. Difference in dB equals a power ratio expressed logarithmically; linear operations first convert dBm to mW.",
+            self.analysis_source: "Select the currently displayed Raw, Averaged, Reference, or Processed trace used by live analysis.",
             self.show_raw: "Show the latest untouched trace returned by Anritsu.",
             self.show_average: "Show the application-side linear-power average.",
             self.show_reference: "Overlay the captured reference spectrum.",
@@ -2701,6 +2725,8 @@ class AnritsuPage(QWidget):
     def _set_reference(self, reference: ReferenceSpectrum) -> None:
         self._reference_spectrum = reference
         self._reference_trace = reference.trace
+        self._display_revision += 1
+        self._invalidate_analysis_results()
         self.show_reference.setChecked(True)
         self._update_reference_status()
         self._apply_page_state()
@@ -2722,6 +2748,8 @@ class AnritsuPage(QWidget):
         )
 
     def remove_reference(self) -> None:
+        self._display_revision += 1
+        self._invalidate_analysis_results()
         self._reference_trace = None
         self._reference_spectrum = None
         self._pending_reference_kind = None
@@ -2799,32 +2827,45 @@ class AnritsuPage(QWidget):
         self.status.emit(f"Anritsu reference loaded: {path}")
 
     def _manual_trace_choices(self) -> tuple[tuple[str, str], ...]:
-        choices: list[tuple[str, str]] = [("raw", "Latest raw trace")]
-        if self._averaged_trace is not None:
-            choices.append(("averaged", "Application averaged trace"))
-        if self._cleanup_result is not None and self._latest_trace is not None:
-            choices.append(
-                (
-                    "processed",
-                    f"Displayed processed trace · {self._cleanup_result.method}",
-                )
-            )
+        choices: list[tuple[str, str]] = []
+        for trace in self._display_state.traces:
+            if trace.key.startswith("analysis:"):
+                label = f"{trace.label} [{trace.unit}]"
+            else:
+                label = f"{trace.label} [{trace.unit}]"
+            choices.append((trace.key, label))
+        if not choices:
+            choices.append(("raw", "Latest raw trace [dBm]"))
         return tuple(choices)
 
     def _manual_trace_payload(
         self, variant: str
     ) -> tuple[SpectrumTrace, tuple[float, ...] | None, str | None, str]:
-        if variant == "averaged" and self._averaged_trace is not None:
-            return self._averaged_trace, None, None, "none"
-        if variant == "processed" and self._latest_trace is not None:
-            cleanup = self._cleanup_result
-            if cleanup is None:
-                raise ValueError("The displayed processed spectrum is no longer available.")
+        source = self._display_state.by_key.get(variant)
+        if source is None and variant == "processed":
+            source = self._display_state.by_key.get("processed")
+        if source is None and self._analysis_source_key is not None:
+            source = self._display_state.by_key.get(f"analysis:{self._analysis_source_key}")
+        if source is None and self._latest_trace is not None:
+            source = self._display_state.by_key.get("raw")
+        if source is not None and self._latest_trace is not None:
+            if source.key in {"raw", "averaged", "reference"} and source.unit == "dBm":
+                source_trace = {
+                    "raw": self._latest_trace,
+                    "averaged": self._averaged_trace,
+                    "reference": self._reference_trace,
+                }.get(source.key)
+                if source_trace is not None:
+                    return source_trace, None, None, "none"
+            # HDF5 keeps the acquired dBm trace as the canonical source and
+            # stores any relative/cleaned values as an explicitly unit-tagged
+            # derived dataset.  This makes the archive match the exact display
+            # snapshot without relabelling dB/ratio values as dBm.
             return (
                 self._latest_trace,
-                tuple(float(value) for value in cleanup.values_dbm),
-                "dBm",
-                f"display_{cleanup.method}",
+                source.values,
+                source.unit,
+                "display_" + "_".join(source.provenance),
             )
         if self._latest_trace is not None:
             return self._latest_trace, None, None, "none"
@@ -3158,6 +3199,8 @@ class AnritsuPage(QWidget):
                         completion = f"Averaged reference completed: {target} / {target}"
                     else:
                         self._averaged_trace = averaged_trace
+                        self._display_revision += 1
+                        self._invalidate_analysis_results()
                         self.show_average.setChecked(True)
                         completion = f"Averaged spectrum completed: {target} / {target}"
                     self._finish_temporal_averaging(resume_live=True)
@@ -3175,6 +3218,8 @@ class AnritsuPage(QWidget):
         self, trace: SpectrumTrace, *, update_controls: bool = True
     ) -> None:
         self._latest_trace = trace
+        self._display_revision += 1
+        self._analysis_generation += 1
         self._received_trace_count += 1
         if self._trace_diagnostics_dialog is not None:
             self._trace_diagnostics_dialog.set_trace(
@@ -3232,6 +3277,27 @@ class AnritsuPage(QWidget):
             f"max {max(trace.powers_dbm):.4g} dBm{live_detail}"
         )
 
+    def _invalidate_analysis_results(self) -> None:
+        self._analysis_generation += 1
+        self._cleanup_result = None
+        self._detected_peaks = ()
+        self._sync_peak_markers()
+
+    def _display_controls_changed(self, *_args: object) -> None:
+        self._display_revision += 1
+        self._invalidate_analysis_results()
+        self._refresh_spectrum_display()
+        if self._latest_trace is not None:
+            self._update_signal_analysis(self._latest_trace, force=True)
+
+    def _analysis_source_changed(self, *_args: object) -> None:
+        selected = self.analysis_source.currentData()
+        self._analysis_source_key = str(selected) if selected else None
+        self._invalidate_analysis_results()
+        self._refresh_spectrum_display()
+        if self._latest_trace is not None:
+            self._update_signal_analysis(self._latest_trace, force=True)
+
     def _cleanup_history(self) -> tuple[tuple[float, ...], ...]:
         return self._spectrogram_buffer.recent_power_rows(24)
 
@@ -3241,11 +3307,22 @@ class AnritsuPage(QWidget):
             self._detected_peaks = ()
             self._sync_peak_markers()
             return
+        self._invalidate_analysis_results()
         self._update_signal_analysis(self._latest_trace, force=True)
 
     def _update_signal_analysis(
         self, trace: SpectrumTrace, *, force: bool = False
     ) -> None:
+        del trace  # the immutable display snapshot below is the source of truth
+        self._refresh_spectrum_display()
+        source = self._display_state.by_key.get(self._analysis_source_key or "")
+        if source is None:
+            source = self._display_state.selected
+        if source is None:
+            self.analysis_status.setText(
+                "Choose a visible spectrum trace before starting analysis."
+            )
+            return
         mode = str(self.cleanup_mode.currentData() or "raw")
         now = time.monotonic()
         peak_analysis_due = (
@@ -3256,16 +3333,20 @@ class AnritsuPage(QWidget):
         self._analysis_generation += 1
         request = SpectrumAnalysisRequest(
             generation=self._analysis_generation,
-            frequencies_hz=trace.frequencies_hz,
-            powers_dbm=trace.powers_dbm,
+            frequencies_hz=source.frequencies_hz,
+            powers_dbm=source.values,
             mode=mode,
-            history_dbm=self._cleanup_history(),
+            history_dbm=(self._cleanup_history() if source.key == "raw" else ()),
             detect_peaks=(
                 self.auto_peak_detection.isChecked() and peak_analysis_due
             ),
+            source_key=source.key,
+            frame_id=self._display_revision,
+            source_unit=source.unit,
+            provenance=source.provenance,
         )
         self.analysis_status.setText(
-            "Analyzing newest completed frame on the background CPU worker..."
+            f"Analyzing {source.label} ({source.unit}) on the background CPU worker..."
         )
         self._analysis_controller.submit(request)
 
@@ -3273,6 +3354,13 @@ class AnritsuPage(QWidget):
         if not isinstance(result, SpectrumAnalysisOutcome):
             return
         if result.generation != self._analysis_generation:
+            return
+        if result.frame_id != self._display_revision:
+            return
+        if result.source_key != self._analysis_source_key:
+            return
+        source = self._display_state.by_key.get(result.source_key)
+        if source is None or source.unit != result.source_unit:
             return
         self._cleanup_result = result.cleanup
         if result.peaks is not None:
@@ -3297,11 +3385,17 @@ class AnritsuPage(QWidget):
         self._refresh_spectrum_display()
 
     def _analysis_values(self) -> tuple[tuple[float, ...], tuple[float, ...]] | None:
-        trace = self._latest_trace
         cleanup = self._cleanup_result
-        if trace is None or cleanup is None:
+        if cleanup is None or self._analysis_source_key is None:
             return None
-        return trace.frequencies_hz, cleanup.values_dbm
+        source = self._display_state.by_key.get(self._analysis_source_key)
+        if (
+            source is None
+            or source.frame_id != self._display_revision
+            or source.unit != cleanup.unit
+        ):
+            return None
+        return source.frequencies_hz, cleanup.values_dbm
 
     def _analyze_current_spectrum(self, *, force: bool = False) -> None:
         trace = self._latest_trace
@@ -3427,6 +3521,7 @@ class AnritsuPage(QWidget):
                 min_prominence_db=2.0,
                 max_peaks=40,
                 fit=False,
+                unit=self._cleanup_result.unit if self._cleanup_result is not None else "dBm",
             )
         except ValueError:
             candidates = ()
@@ -3632,41 +3727,37 @@ class AnritsuPage(QWidget):
             self.analysis_status.setText(
                 "Capture or load a reference before displaying Raw − reference."
             )
+        self._display_revision += 1
+        self._invalidate_analysis_results()
         self._refresh_spectrum_display()
+        if self._latest_trace is not None:
+            self._update_signal_analysis(self._latest_trace, force=True)
+
+    def _sync_analysis_source_combo(self, state: SpectrumDisplayState) -> None:
+        choices = tuple(trace for trace in state.traces if not trace.key.startswith("analysis:"))
+        previous = self._analysis_source_key
+        blocked = self.analysis_source.blockSignals(True)
+        self.analysis_source.clear()
+        if not choices:
+            self.analysis_source.addItem("No visible spectrum", userData=None)
+            self._analysis_source_key = None
+        else:
+            for trace in choices:
+                self.analysis_source.addItem(
+                    f"{trace.label} [{trace.unit}]", userData=trace.key
+                )
+            selected = previous if previous in {trace.key for trace in choices} else state.selected_key
+            index = self.analysis_source.findData(selected)
+            self.analysis_source.setCurrentIndex(index if index >= 0 else 0)
+            self._analysis_source_key = self.analysis_source.currentData()
+        self.analysis_source.blockSignals(blocked)
 
     def _refresh_spectrum_display(self, *_args: object) -> None:
-        traces: list[tuple[str, SpectrumTrace, tuple[float, ...], str, str]] = []
-        if self._latest_trace is not None and self.show_raw.isChecked():
-            traces.append(("Raw", self._latest_trace, self._latest_trace.powers_dbm, "dBm", "#2196f3"))
-        if (
-            self._latest_trace is not None
-            and self._cleanup_result is not None
-            and str(self.cleanup_mode.currentData() or "raw") != "raw"
-        ):
-            traces.append(
-                (
-                    "Analysis",
-                    self._latest_trace,
-                    self._cleanup_result.values_dbm,
-                    "dBm",
-                    "#00b7c3",
-                )
-            )
-        if self._averaged_trace is not None and self.show_average.isChecked():
-            traces.append(("Averaged", self._averaged_trace, self._averaged_trace.powers_dbm, "dBm", "#00a67d"))
-        if self._reference_trace is not None and self.show_reference.isChecked():
-            traces.append(("Reference", self._reference_trace, self._reference_trace.powers_dbm, "dBm", "#ffb300"))
-
         operation = str(self.reference_operation.currentData() or "none")
-        processed: tuple[float, ...] | None = None
-        processed_unit = "dBm"
-        # Reference processing is explicitly Raw − reference. A previously
-        # calculated application average must not silently replace the newest
-        # current TRAC1 frame selected by the operator.
-        signal = self._latest_trace
-        if operation != "none" and signal is not None and self._reference_trace is not None:
+        effective_operation = operation
+        if operation != "none" and self._latest_trace is not None and self._reference_trace is not None:
             try:
-                if not frequency_grids_match(signal.frequencies_hz, self._reference_trace.frequencies_hz):
+                if not frequency_grids_match(self._latest_trace.frequencies_hz, self._reference_trace.frequencies_hz):
                     raise ValueError("Reference frequency grid differs from the current spectrum.")
                 reference_level = (
                     self._reference_spectrum.reference_level_dbm
@@ -3691,21 +3782,72 @@ class AnritsuPage(QWidget):
                     self._validate_reference_acquisition_compatibility(
                         self._reference_spectrum
                     )
-                if signal is self._reference_trace:
+                if self._latest_trace is self._reference_trace:
                     raise ValueError(
                         "Reference captured — acquire the next spectrum before "
                         "displaying Signal − reference."
                     )
-                processed, processed_unit = apply_reference_operation(
-                    signal.powers_dbm, self._reference_trace.powers_dbm, operation
-                )
             except ValueError as exc:
                 message = f"Reference processing unavailable: {exc}"
                 self.info.setText(message)
                 self.analysis_status.setText(message)
-            else:
-                if self.show_processed.isChecked():
-                    traces.append(("Processed", signal, processed, processed_unit, "#ab47bc"))
+                effective_operation = "none"
+
+        visible = {
+            "raw": self.show_raw.isChecked(),
+            "averaged": self.show_average.isChecked(),
+            "reference": self.show_reference.isChecked(),
+            "processed": self.show_processed.isChecked(),
+        }
+        base_state = build_display_state(
+            raw=self._latest_trace,
+            averaged=self._averaged_trace,
+            reference=self._reference_trace,
+            reference_operation=effective_operation,
+            visible=visible,
+            frame_id=self._display_revision,
+            preferred_key=self._analysis_source_key,
+        )
+        processed = base_state.by_key.get("processed")
+        if processed is not None and processed.unit != "dBm" and self.show_processed.isChecked():
+            # Do not put incompatible dBm overlays on a relative/linear axis.
+            visible.update({"raw": False, "averaged": False, "reference": False})
+            base_state = build_display_state(
+                raw=self._latest_trace,
+                averaged=self._averaged_trace,
+                reference=self._reference_trace,
+                reference_operation=effective_operation,
+                visible=visible,
+                frame_id=self._display_revision,
+                preferred_key=self._analysis_source_key,
+            )
+        self._sync_analysis_source_combo(base_state)
+
+        analysis_values: tuple[float, ...] | None = None
+        analysis_source_key: str | None = None
+        analysis_method: str | None = None
+        cleanup = self._cleanup_result
+        if cleanup is not None and str(self.cleanup_mode.currentData() or "raw") != "raw":
+            if self._analysis_source_key in base_state.by_key:
+                analysis_values = cleanup.values
+                analysis_source_key = self._analysis_source_key
+                analysis_method = cleanup.method
+                visible[f"analysis:{analysis_source_key}"] = True
+        state = build_display_state(
+            raw=self._latest_trace,
+            averaged=self._averaged_trace,
+            reference=self._reference_trace,
+            reference_operation=effective_operation,
+            visible=visible,
+            frame_id=self._display_revision,
+            preferred_key=self._analysis_source_key,
+            analysis_values=analysis_values,
+            analysis_unit=cleanup.unit if cleanup is not None else "dBm",
+            analysis_source_key=analysis_source_key,
+            analysis_method=analysis_method,
+        )
+        self._display_state = state
+        traces = list(state.traces)
 
         plots = [self.spectrum_plot]
         floating = self._spectrum_window
@@ -3721,10 +3863,19 @@ class AnritsuPage(QWidget):
                     "Acquire a spectrum to update this read-only display."
                 )
             return
-        if processed is not None and processed_unit != "dBm" and self.show_processed.isChecked():
-            traces = [item for item in traces if item[0] == "Processed"]
         displayed = 0
-        for name, trace, values, _unit, color in traces:
+        colors = {
+            "raw": "#2196f3",
+            "averaged": "#00a67d",
+            "reference": "#ffb300",
+            "processed": "#ab47bc",
+        }
+        for trace in traces:
+            name = "Analysis" if trace.key.startswith("analysis:") else trace.key.capitalize()
+            if trace.key == "processed":
+                name = "Processed"
+            values = trace.values
+            color = "#00b7c3" if trace.key.startswith("analysis:") else colors.get(trace.key, "#2196f3")
             for plot in plots:
                 plot.set_trace(
                     name,
@@ -3742,7 +3893,7 @@ class AnritsuPage(QWidget):
             if floating is not None:
                 floating.status.setText("No finite spectrum points are available.")
             return
-        active_unit = traces[-1][3]
+        active_unit = traces[-1].unit
         unit_changed = active_unit != self._active_spectrum_unit
         for plot in plots:
             plot.set_labels(
@@ -3853,6 +4004,19 @@ class AnritsuPage(QWidget):
                 timeout_ms=0,
             )
             self.status.emit(f"Anritsu {operation} failed: {error}")
+
+    def closeEvent(self, event: QCloseEvent) -> None:
+        """Release background workers and HDF5 handles before page teardown."""
+
+        self._timer.stop()
+        archive = self._manual_archive
+        if archive is not None:
+            try:
+                archive.close()
+            except Exception as exc:
+                self.status.emit(f"Anritsu manual archive close failed: {exc}")
+        self._analysis_controller.close()
+        super().closeEvent(event)
 
 
 _SWEEPABLE_PARAMETERS = SWEEPABLE_PARAMETERS

@@ -222,11 +222,11 @@ class RigolPage(QWidget):
                 ("", self.level_mode_hint),
                 ("High Level", self._bounded(self.high_level, "high_level")),
                 ("Low Level", self._bounded(self.low_level, "low_level")),
-                ("Amplitude (Vpp)", self._bounded(self.vpp, "amplitude_vpp")),
-                ("Offset / DC level", self._bounded(self.offset, "offset")),
-                ("Phase [deg]", self.phase),
+            ("Amplitude (Vpp)", self._bounded(self.vpp, "amplitude_vpp")),
+            ("Offset / DC level", self._bounded(self.offset, "offset")),
+            ("Phase [deg]", self.phase),
             ),
-            (),
+            (configure,),
         )
         self.basic_form = self.basic_scroll.widget().findChild(QFormLayout)
         shape_apply = PrimaryPushButton("Apply shape parameters")

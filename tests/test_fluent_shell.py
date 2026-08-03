@@ -130,11 +130,13 @@ class MainWindowFluentShellTests(unittest.TestCase):
                 "results", "settings",
             ))
             self.assertIsNotNone(window.safety_strip)
-            self.assertEqual(window.safety_strip.estop.text(), "E-STOP")
-            self.assertLessEqual(window.safety_strip.estop.maximumWidth(), 96)
+            self.assertEqual(
+                window.safety_strip.estop.text(), "E-STOP  |  ALL OUTPUTS OFF"
+            )
+            self.assertGreaterEqual(window.safety_strip.estop.minimumWidth(), 184)
             self.assertEqual(
                 window.safety_strip.estop.property("visualPriority"),
-                "low",
+                "high",
             )
             self.assertFalse(hasattr(window, "ribbon"))
             self.assertFalse(hasattr(window, "tabs"))
@@ -346,10 +348,12 @@ class MainWindowFluentShellTests(unittest.TestCase):
 
             navigation = window.navigationInterface
             panel = navigation.panel
-            self.assertFalse(panel.isCollapsed())
+            self.assertTrue(panel.isCollapsed())
             self.assertIs(panel.parentWidget(), navigation)
-            self.assertEqual(navigation.width(), 248)
-            self.assertGreaterEqual(window.fluent_content.geometry().left(), 248)
+            self.assertLessEqual(navigation.width(), 64)
+            self.assertGreaterEqual(
+                window.fluent_content.geometry().left(), navigation.width()
+            )
             self.assertLess(
                 navigation.geometry().right(),
                 window.fluent_content.geometry().left(),

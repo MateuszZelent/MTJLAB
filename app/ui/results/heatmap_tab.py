@@ -85,7 +85,7 @@ def _read_heatmap_payload(
 
 
 class HeatmapPlotWidget(QWidget):
-    """Interactive 2-D heatmap built on ``pyqtgraph.ImageItem``.
+    """Interactive 2-D heatmap built on ``pyqtgraph.PColorMeshItem``.
 
     Axes:
         X — frequency (or spectrum sample index), derived from THATEC scale.
@@ -101,6 +101,8 @@ class HeatmapPlotWidget(QWidget):
         self._data: np.ndarray | None = None  # shape (Y coordinates, X coordinates)
         self._x_values: np.ndarray | None = None
         self._y_values: np.ndarray | None = None
+        self._x_edges: np.ndarray | None = None
+        self._y_edges: np.ndarray | None = None
         self._x_export_label = "X"
         self._y_export_label = "Y"
         self._cell_checkpoint_indices: np.ndarray | None = None
@@ -152,7 +154,7 @@ class HeatmapPlotWidget(QWidget):
         self.plot.setMenuEnabled(True)
         self.plot.setMouseEnabled(x=True, y=True)
 
-        self.image_item = pg.ImageItem()
+        self.image_item = pg.PColorMeshItem()
         self.plot.addItem(self.image_item)
 
         # Color bar
@@ -251,36 +253,27 @@ class HeatmapPlotWidget(QWidget):
             y_axis = y_axis[::-1]
             matrix = matrix[::-1, :]
             checkpoint_indices = checkpoint_indices[::-1, :]
+        x_edges = self._cell_edges(x_axis)
+        y_edges = self._cell_edges(y_axis)
         self._data = matrix
         self._x_values = x_axis
         self._y_values = y_axis
+        self._x_edges = x_edges
+        self._y_edges = y_edges
         self._x_export_label = _axis_export_label(x_label, x_unit)
         self._y_export_label = _axis_export_label(y_label, y_unit)
         self._cell_checkpoint_indices = checkpoint_indices
         self._last_readout_cell = None
 
-        # Transform to correctly position the image
-        x_min, x_max = float(self._x_values[0]), float(self._x_values[-1])
-        y_min, y_max = float(self._y_values[0]), float(self._y_values[-1])
-        dx = (
-            (x_max - x_min) / (cols - 1)
-            if cols > 1
-            else max(abs(x_min) * 1e-9, 1.0)
-        )
-        dy = (
-            (y_max - y_min) / (rows - 1)
-            if rows > 1
-            else max(abs(y_min) * 1e-9, 1.0)
-        )
-
-        self.image_item.setImage(
-            self._data.T, autoLevels=False
-        )  # ImageItem expects (cols, rows)
-        self.image_item.setRect(
-            x_min - dx / 2,
-            y_min - dy / 2,
-            (x_max - x_min) + dx,
-            (y_max - y_min) + dy,
+        # PColorMeshItem accepts the physical cell vertices directly.  An
+        # ImageItem can only apply one affine scale, which silently distorts
+        # logarithmic and otherwise nonuniform sweep axes.
+        x_vertices, y_vertices = np.meshgrid(self._x_edges, self._y_edges)
+        self.image_item.setData(
+            x_vertices,
+            y_vertices,
+            self._data,
+            autoLevels=False,
         )
 
         self.plot.setLabel("bottom", x_label, units=x_unit)
@@ -304,10 +297,12 @@ class HeatmapPlotWidget(QWidget):
         self.auto_range()
 
     def clear(self) -> None:
-        self.image_item.clear()
+        self.image_item.setData()
         self._data = None
         self._x_values = None
         self._y_values = None
+        self._x_edges = None
+        self._y_edges = None
         self._cell_checkpoint_indices = None
         self._last_readout_cell = None
         self._x_export_label = "X"
@@ -362,6 +357,21 @@ class HeatmapPlotWidget(QWidget):
             cmap = pg.colormap.get("viridis")
         self.color_bar.setColorMap(cmap)
 
+    @staticmethod
+    def _cell_edges(values: np.ndarray) -> np.ndarray:
+        """Return physical boundaries around coordinate values treated as centers."""
+
+        if values.size == 1:
+            half_width = max(abs(float(values[0])) * 1e-9, 1.0)
+            return np.asarray(
+                (values[0] - half_width, values[0] + half_width),
+                dtype=float,
+            )
+        midpoints = (values[:-1] + values[1:]) / 2.0
+        first = values[0] - (midpoints[0] - values[0])
+        last = values[-1] + (values[-1] - midpoints[-1])
+        return np.concatenate((np.asarray((first,), dtype=float), midpoints, np.asarray((last,), dtype=float)))
+
     def _mouse_moved(self, event: tuple[object, ...]) -> None:
         position = event[0]
         if not self.plot.sceneBoundingRect().contains(position):
@@ -409,17 +419,23 @@ class HeatmapPlotWidget(QWidget):
         return None if cell is None else float(self._data[cell[0], cell[1]])
 
     def _cell_indices(self, x: float, y: float) -> tuple[int, int] | None:
-        if self._data is None or self._x_values is None or self._y_values is None:
-            return None
         if (
-            x < self._x_values[0]
-            or x > self._x_values[-1]
-            or y < self._y_values[0]
-            or y > self._y_values[-1]
+            self._data is None
+            or self._x_values is None
+            or self._y_values is None
+            or self._x_edges is None
+            or self._y_edges is None
         ):
             return None
-        col = int(np.searchsorted(self._x_values, x, side="right") - 1)
-        row = int(np.searchsorted(self._y_values, y, side="right") - 1)
+        if (
+            x < self._x_edges[0]
+            or x > self._x_edges[-1]
+            or y < self._y_edges[0]
+            or y > self._y_edges[-1]
+        ):
+            return None
+        col = int(np.searchsorted(self._x_edges, x, side="right") - 1)
+        row = int(np.searchsorted(self._y_edges, y, side="right") - 1)
         col = max(0, min(col, self._data.shape[1] - 1))
         row = max(0, min(row, self._data.shape[0] - 1))
         return row, col

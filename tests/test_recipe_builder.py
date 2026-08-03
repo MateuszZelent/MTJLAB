@@ -119,6 +119,7 @@ class RecipeBuilderTests(unittest.TestCase):
                 ],
             )
         finally:
+            page._close_discard_confirmed = True
             page.close()
 
     def test_tree_builder_exposes_node_actions_and_yaml_as_secondary_tab(self) -> None:
@@ -278,6 +279,7 @@ class RecipeBuilderTests(unittest.TestCase):
 
             self.assertTrue(ids(original).isdisjoint(ids(duplicate)))
         finally:
+            page._close_discard_confirmed = True
             page.close()
 
     def test_command_bar_load_and_save_actions_execute_without_checked_argument(self) -> None:
@@ -362,6 +364,7 @@ finally: []
             self.assertFalse(page.run_button.isEnabled())
             self.assertIn("stale result was discarded", page.summary.text())
         finally:
+            page._close_discard_confirmed = True
             page.close()
 
     def test_native_sweeps_render_their_legacy_ranges_as_clickable_roi_rows(self) -> None:
@@ -475,6 +478,7 @@ finally: []
                 ),
             )
         finally:
+            page._close_discard_confirmed = True
             page.close()
 
     def test_sweeps_library_contains_devices_and_flow_not_device_parameters(self) -> None:
@@ -1857,6 +1861,7 @@ root:
             self.assertEqual(updated.children[-1].type, "acquire_spectrum")
             self.assertEqual(updated.children[-1].data["trace"], "TRAC1")
         finally:
+            page._close_discard_confirmed = True
             page.close()
 
     def test_flow_drop_preserves_requested_branch_and_insertion_index(self) -> None:
@@ -1876,6 +1881,7 @@ root:
             self.assertEqual(updated.children[0].type, "wait")
             self.assertEqual(updated.children[1].type, "comment")
         finally:
+            page._close_discard_confirmed = True
             page.close()
 
     def test_editing_anritsu_configuration_preserves_separate_acquisition_child(self) -> None:
@@ -2745,6 +2751,7 @@ root:
             finally:
                 dialog.close()
         finally:
+            page._close_discard_confirmed = True
             page.close()
 
     def test_tree_builder_undo_and_redo_restore_recipe_structure(self) -> None:

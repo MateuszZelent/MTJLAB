@@ -1087,16 +1087,24 @@ class MainWindow(FluentWindow):
             self.dashboard.mark_identity_verified(device)
             self._log(f"Connected: {getattr(result, 'idn', result)}")
         elif operation == "disconnect":
+            self._manual_device_idn.pop(device, None)
+            card.set_connecting(False)
+            card.identity.setText("IDN: not connected")
+            self.dashboard.cards[device].identity.setText("IDN: not connected")
+            self.dashboard.clear_identity_verified(device)
             self._log("Instrument disconnected")
         elif operation == "replace_adapter":
+            self._manual_device_idn.pop(device, None)
             card.set_reconfiguring(False)
             card.update_state("disconnected")
             card.identity.setText("IDN: not connected")
             self.dashboard.cards[device].set_reconfiguring(False)
             self.dashboard.cards[device].update_state("disconnected")
             self.dashboard.cards[device].identity.setText("IDN: not connected")
+            self.dashboard.clear_identity_verified(device)
             self._log(f"VISA ADAPTER REPLACE COMPLETE: {card.summary.text()}")
         elif operation == "test_communication" and isinstance(result, dict):
+            self._manual_device_idn.pop(device, None)
             card.set_testing(False)
             # Communication test uses a temporary session and disconnects it;
             # a successful identity check must not look like an active link.
@@ -1112,7 +1120,7 @@ class MainWindow(FluentWindow):
                 f"Protocols/features: {features} • Options: {options}"
             )
             self.dashboard.cards[device].identity.setText(card.identity.text())
-            self.dashboard.mark_identity_verified(device)
+            self.dashboard.clear_identity_verified(device)
             self._log(
                 f"Communication test passed: {result.get('idn', '')}; "
                 f"features={features}; options={options}"
@@ -1295,10 +1303,22 @@ class MainWindow(FluentWindow):
             "moke_box": "MOKE Box",
             "lakeshore_gaussmeter": "Lake Shore 475",
         }
+        additional_safety_devices = ()
+        if execution_mode != ExecutionMode.DRY_RUN.value:
+            additional_safety_devices = tuple(
+                device
+                for device in ("rigol", "keithley", "anritsu")
+                if device not in required
+            )
         previous = self._sweep_readiness_dialog
         if previous is not None:
             previous.close()
-        dialog = SweepDeviceReadinessDialog(required, display_names, self)
+        dialog = SweepDeviceReadinessDialog(
+            required,
+            display_names,
+            self,
+            additional_safety_devices=additional_safety_devices,
+        )
         self._sweep_readiness_dialog = dialog
         for device in required:
             self._update_sweep_readiness_device(dialog, device)

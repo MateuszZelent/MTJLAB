@@ -1009,6 +1009,30 @@ class MainWindowTests(unittest.TestCase):
             window.close()
             self.application.processEvents()
 
+    def test_disconnect_clears_active_identity_and_manual_provenance(self) -> None:
+        window = MainWindow(".config/settings.yml", simulation=True)
+        try:
+            panel = window.connection_panels["rigol"]
+            identity = SimpleNamespace(idn="RIGOL,SIM,123,1.0")
+
+            window._device_result("rigol", panel, "connect", identity)
+            window._set_device_state("rigol", "verified")
+            self.assertEqual(window._manual_spectrum_device_idn()["rigol"], identity.idn)
+
+            window._device_result("rigol", panel, "disconnect", None)
+            window._set_device_state("rigol", "disconnected")
+
+            self.assertEqual(panel.summary.text(), "IDN: not connected")
+            self.assertEqual(
+                window.dashboard.cards["rigol"].identity.text(),
+                "IDN: not connected",
+            )
+            self.assertNotIn("rigol", window._manual_spectrum_device_idn())
+            self.assertNotIn("rigol", window.dashboard._verified_resources)
+        finally:
+            window.close()
+            self.application.processEvents()
+
     def test_run_leased_device_rejects_manual_io_but_keeps_emergency_off_available(self) -> None:
         window = MainWindow(".config/settings.yml", simulation=True)
         try:
@@ -1747,8 +1771,7 @@ class MainWindowTests(unittest.TestCase):
             rigol._controller.call = Mock()
             rigol.configure()
             rigol._controller.call.assert_not_called()
-            self.assertFalse(rigol.banner.isHidden())
-            self.assertIn("outside the configured", rigol.banner.label.text())
+            self.assertIn("outside the configured", rigol.banner.last_message)
 
         finally:
             window.close()
@@ -2574,7 +2597,7 @@ class MainWindowTests(unittest.TestCase):
                 keithley._output_toggled(True)
 
             keithley._controller.call.assert_not_called()
-            self.assertIn("Invalid Keithley settings", keithley.banner.label.text())
+            self.assertIn("Invalid Keithley settings", keithley.banner.last_message)
             self.assertFalse(keithley._output_states["B"])
             self.assertIn("outside", warning.call_args.args[2])
             self.assertIn("No command was sent to Keithley", warning.call_args.args[2])
@@ -2961,8 +2984,7 @@ class MainWindowTests(unittest.TestCase):
             self.assertFalse(anritsu._timer.isActive())
             self.assertFalse(anritsu._fetch_pending)
             self.assertEqual(anritsu._page_state, AnritsuPageState.ERROR)
-            self.assertFalse(anritsu.banner.isHidden())
-            self.assertIn("VI_ERROR_TMO", anritsu.banner.label.text())
+            self.assertIn("VI_ERROR_TMO", anritsu.banner.last_message)
             self.assertTrue(anritsu.single.isEnabled())
         finally:
             window.close()
@@ -3237,9 +3259,9 @@ class MainWindowTests(unittest.TestCase):
             keithley._controller.call.assert_called_once()
             self.assertFalse(keithley._output_states["B"])
             self.assertTrue(keithley.apply_configuration_button.isEnabled())
-            self.assertIn("all instrument settings applied", keithley.banner.label.text())
-            self.assertIn("settling time validated locally", keithley.banner.label.text())
-            self.assertIn("OUTPUT remains OFF", keithley.banner.label.text())
+            self.assertIn("all instrument settings applied", keithley.banner.last_message)
+            self.assertIn("settling time validated locally", keithley.banner.last_message)
+            self.assertIn("OUTPUT remains OFF", keithley.banner.last_message)
         finally:
             window.close()
             self.application.processEvents()
@@ -3438,7 +3460,7 @@ class MainWindowTests(unittest.TestCase):
             keithley.apply_configuration_button.click()
 
             keithley._controller.call.assert_not_called()
-            self.assertIn("Invalid Keithley settings", keithley.banner.label.text())
+            self.assertIn("Invalid Keithley settings", keithley.banner.last_message)
             self.assertTrue(keithley.apply_configuration_button.isEnabled())
         finally:
             window.close()
@@ -3625,7 +3647,7 @@ class MainWindowTests(unittest.TestCase):
                     return_value=None,
                 ) as error:
                     window._save_keithley_readback_defaults(snapshots)
-                self.assertFalse(error.called, window.keithley_page.banner.label.text())
+                self.assertFalse(error.called, window.keithley_page.banner.last_message)
                 saved = (
                     SettingsRepository(path).load().raw["devices"]["keithley"]["safety"]["channels"]
                 )
@@ -3642,7 +3664,7 @@ class MainWindowTests(unittest.TestCase):
                 ) as error:
                     window._save_keithley_readback_defaults(invalid)
                 self.assertTrue(error.called)
-                self.assertIn("outside", window.keithley_page.banner.label.text().lower())
+                self.assertIn("outside", window.keithley_page.banner.last_message.lower())
                 self.assertEqual(path.read_text(encoding="utf-8"), before_invalid_save)
             finally:
                 window.close()
@@ -3757,6 +3779,46 @@ class MainWindowTests(unittest.TestCase):
             self.assertIsNotNone(first.fit_fwhm_hz)
             self.assertGreater(first.snr_db, 20.0)
             self.assertIn(first.fit_model, {"Gaussian", "Lorentzian"})
+        finally:
+            window.close()
+            self.application.processEvents()
+
+    def test_anritsu_analysis_source_follows_visible_trace_selection(self) -> None:
+        window = MainWindow(".config/settings.yml", simulation=True)
+        try:
+            anritsu = window.anritsu_page
+            trace = SpectrumTrace(
+                tuple(float(index) for index in range(5)),
+                (-30.0, -29.0, -20.0, -29.0, -30.0),
+                datetime.now(timezone.utc),
+                "TRAC1",
+            )
+            reference = SpectrumTrace(
+                trace.frequencies_hz,
+                (-40.0, -39.0, -30.0, -39.0, -40.0),
+                trace.acquired_at_utc,
+                "REF",
+            )
+            with patch.object(anritsu._analysis_controller, "submit") as submit:
+                anritsu._show_trace(trace)
+                anritsu._set_reference(
+                    anritsu._build_reference(reference, kind="single", count=1)
+                )
+                anritsu._show_trace(trace)
+                anritsu.reference_operation.setCurrentIndex(
+                    anritsu.reference_operation.findData("add_power")
+                )
+                self.assertIn("processed", anritsu._display_state.available_keys)
+                anritsu.analysis_source.setCurrentIndex(
+                    anritsu.analysis_source.findData("processed")
+                )
+                self.assertEqual(anritsu.analysis_source.currentData(), "processed")
+                self.assertTrue(submit.call_args)
+                self.assertEqual(submit.call_args.args[0].source_key, "processed")
+                anritsu.analysis_source.setCurrentIndex(
+                    anritsu.analysis_source.findData("raw")
+                )
+                self.assertEqual(submit.call_args.args[0].source_key, "raw")
         finally:
             window.close()
             self.application.processEvents()

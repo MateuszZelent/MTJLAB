@@ -103,6 +103,13 @@ class FluentLakeShorePageTests(unittest.TestCase):
         page._timer.stop()
         page._plot_timer.stop()
 
+    def test_lakeshore_read_error_remains_visible_on_the_page(self) -> None:
+        page = self.window.lakeshore_gaussmeter_page
+
+        page._error("read_measurement", "timeout while reading field")
+
+        self.assertIn("Read failed: timeout while reading field", page.banner.text())
+
     def test_lakeshore_plots_expose_fluent_reset_pan_and_zoom_controls(self) -> None:
         page = self.window.lakeshore_gaussmeter_page
         navigation = page.plot_navigation
@@ -211,7 +218,9 @@ class FluentLakeShorePageTests(unittest.TestCase):
             form.labelForField(page.field),
             form.labelForField(page.frequency),
             form.labelForField(page.configuration),
-            self.window.safety_strip.profile,
+            self.window.safety_strip.readiness,
+            self.window.safety_strip.outputs,
+            self.window.safety_strip.mode,
             self.window.safety_strip.actor,
         )
         for label in required:
