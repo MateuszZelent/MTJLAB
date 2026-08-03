@@ -264,7 +264,9 @@ QUICK_CONTROL_DESCRIPTORS: Final[tuple[QuickControlDescriptor, ...]] = (
             f"Rigol CH{channel} · {label}",
             dimension,
             default,
-            f"rigol.{channel}.levels" if field in {"amplitude", "offset"} else f"rigol.{channel}.frequency",
+            f"rigol.{channel}.levels"
+            if field in {"high_level", "low_level", "amplitude", "offset"}
+            else f"rigol.{channel}.frequency",
         )
         for channel in (1, 2)
         for field, label, dimension, default in (

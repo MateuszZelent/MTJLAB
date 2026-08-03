@@ -50,6 +50,8 @@ class KeithleyMeasurement:
     measurement_path_connected: bool = True
     compliance_detected: bool = False
     compliance_stop_required: bool = False
+    source_level_si: float | None = None
+    source_mode: Literal["current", "voltage"] | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -154,6 +156,17 @@ class KeithleyAdapter(DeviceAdapter):
         self._factory = session_factory or PyVisaSessionFactory()
         self._session: InstrumentSession | None = None
         self._last_request: dict[str, KeithleySourceRequest] = {}
+        self._last_safe_request: dict[str, KeithleySourceRequest] = {}
+        self._compliance_channels: set[Literal["A", "B"]] = set()
+        self._compliance_warnings: set[Literal["A", "B"]] = set()
+        self._compliance_block_levels: dict[Literal["A", "B"], float] = {}
+        self._compliance_block_modes: dict[
+            Literal["A", "B"], Literal["current", "voltage"]
+        ] = {}
+        self._stop_on_compliance: dict[Literal["A", "B"], bool] = {
+            "A": bool(self._settings.safety.stop_on_compliance),
+            "B": bool(self._settings.safety.stop_on_compliance),
+        }
         self._output_states: dict[Literal["A", "B"], bool] = {"A": False, "B": False}
 
     def _require_session(self) -> InstrumentSession:
@@ -193,6 +206,13 @@ class KeithleyAdapter(DeviceAdapter):
             )
             self._session = session
             self._identity = identity
+            self._compliance_channels.clear()
+            self._compliance_warnings.clear()
+            self._compliance_block_levels.clear()
+            self._compliance_block_modes.clear()
+            self._last_safe_request.clear()
+            default_stop = bool(self._settings.safety.stop_on_compliance)
+            self._stop_on_compliance.update({"A": default_stop, "B": default_stop})
             self._capabilities = DeviceCapabilities(
                 device_name="keithley",
                 model=identity.model or "2600",
@@ -238,6 +258,11 @@ class KeithleyAdapter(DeviceAdapter):
                 self._identity = None
                 self._capabilities = None
                 self._last_request.clear()
+                self._last_safe_request.clear()
+                self._compliance_channels.clear()
+                self._compliance_warnings.clear()
+                self._compliance_block_levels.clear()
+                self._compliance_block_modes.clear()
                 self._output_states = {"A": False, "B": False}
                 self._state = DeviceState.DISCONNECTED
 
@@ -340,7 +365,49 @@ class KeithleyAdapter(DeviceAdapter):
             self._state = DeviceState.UNKNOWN
         else:
             self._output_states = {"A": False, "B": False}
-            self._state = DeviceState.OUTPUT_OFF
+            self._update_aggregate_output_state()
+
+    def recover_from_compliance(
+        self,
+        channel: Literal["A", "B"],
+        choice: Literal["restore_previous", "keep_off"],
+    ) -> dict[str, object]:
+        """Acknowledge one compliance latch without energizing any channel."""
+
+        if channel not in {"A", "B"}:
+            raise SafetyViolation("Keithley channel must be A or B.")
+        if choice not in {"restore_previous", "keep_off"}:
+            raise SafetyViolation(
+                "Keithley compliance recovery choice must be restore_previous or keep_off."
+            )
+        self._require_session()
+        # Repeat the channel-only shutdown before accepting the operator's
+        # choice. This catches a front-panel/remote transition after the trip.
+        self._disable_channel_and_verify(channel)
+        restored_request: KeithleySourceRequest | None = None
+        if choice == "restore_previous":
+            restored_request = self._last_safe_request.get(channel)
+            if restored_request is None:
+                raise DeviceError(
+                    f"Keithley channel {channel} has no previous non-compliance "
+                    "setpoint to restore; keep OUTPUT OFF and edit a new value."
+                )
+            # configure_source validates and readbacks the complete request;
+            # it guarantees OUTPUT OFF and never enables the channel.
+            self.configure_source(restored_request)
+        self._compliance_channels.discard(channel)
+        self._compliance_warnings.discard(channel)
+        self._compliance_block_levels.pop(channel, None)
+        self._compliance_block_modes.pop(channel, None)
+        self._output_states[channel] = False
+        self._update_aggregate_output_state()
+        return {
+            "state": self._state.value,
+            "channel": channel,
+            "choice": choice,
+            "outputs_confirmed_off": True,
+            "restored_request": restored_request,
+        }
 
     def apply_limit_settings(self, station: object) -> None:
         if not isinstance(station, StationSettings):
@@ -359,6 +426,10 @@ class KeithleyAdapter(DeviceAdapter):
                 )
         self._station = station
         self._settings = station.keithley
+        default_stop = bool(self._settings.safety.stop_on_compliance)
+        self._stop_on_compliance.update({"A": default_stop, "B": default_stop})
+        if default_stop:
+            self._compliance_channels.update(self._compliance_warnings)
         self._last_request.clear()
 
     def refresh_station_context(self, station: object) -> None:
@@ -366,6 +437,8 @@ class KeithleyAdapter(DeviceAdapter):
             raise TypeError("Keithley context refresh requires StationSettings.")
         self._station = station
         self._settings = station.keithley
+        default_stop = bool(self._settings.safety.stop_on_compliance)
+        self._stop_on_compliance.update({"A": default_stop, "B": default_stop})
 
     def _clear_errors(self) -> None:
         self._require_session().write("errorqueue.clear()")
@@ -538,6 +611,9 @@ class KeithleyAdapter(DeviceAdapter):
         request = self._quantize_source_request(request)
         validate_keithley_source(channel, request)
         self._validate_model_hardware_request(request)
+        self._assert_compliance_increase_allowed(
+            request.channel, request.level_si, mode=request.mode
+        )
         smu = self._smu(request.channel)
         session = self._require_session()
         session.write(f"{smu}.source.output = {smu}.OUTPUT_OFF")
@@ -814,6 +890,9 @@ class KeithleyAdapter(DeviceAdapter):
         updated = self._quantize_source_request(raw_updated)
         validate_keithley_source(channel_settings, updated)
         self._validate_model_hardware_request(updated)
+        self._assert_compliance_increase_allowed(
+            channel, updated.level_si, mode=mode
+        )
         smu = self._smu(channel)
         suffix = "i" if mode == "current" else "v"
         session = self._require_session()
@@ -1002,8 +1081,79 @@ class KeithleyAdapter(DeviceAdapter):
         self._output_states.update(states)
         return states
 
+    def _disable_channel_and_verify(self, channel: Literal["A", "B"]) -> None:
+        """Command and confirm OFF for one channel; escalate only if uncertain."""
+
+        smu = self._smu(channel)
+        try:
+            self._require_session().write(f"{smu}.source.output = {smu}.OUTPUT_OFF")
+            self._check_errors()
+            active = self._output_is_enabled(channel)
+        except Exception:
+            # An ambiguous channel state can leave the DUT energized. The
+            # existing all-channel emergency path is the only safe fallback.
+            self.emergency_off()
+            self._state = DeviceState.UNKNOWN
+            raise
+        if active:
+            self.emergency_off()
+            self._state = DeviceState.UNKNOWN
+            raise DeviceError(
+                f"Keithley channel {channel} did not confirm OUTPUT OFF."
+            )
+        self._output_states[channel] = False
+
     def _update_aggregate_output_state(self) -> None:
-        self._state = DeviceState.OUTPUT_ON if any(self._output_states.values()) else DeviceState.OUTPUT_OFF
+        if self._compliance_channels or self._compliance_warnings:
+            self._state = DeviceState.COMPLIANCE
+        else:
+            self._state = (
+                DeviceState.OUTPUT_ON
+                if any(self._output_states.values())
+                else DeviceState.OUTPUT_OFF
+            )
+
+    def set_compliance_policy(
+        self,
+        channel: Literal["A", "B"],
+        stop_on_compliance: bool,
+    ) -> bool:
+        """Set one channel's runtime compliance response without changing limits."""
+
+        if channel not in {"A", "B"}:
+            raise SafetyViolation("Keithley channel must be A or B.")
+        self._stop_on_compliance[channel] = bool(stop_on_compliance)
+        if self._stop_on_compliance[channel] and channel in self._compliance_warnings:
+            self._disable_channel_and_verify(channel)
+            self._compliance_channels.add(channel)
+        self._update_aggregate_output_state()
+        return self._stop_on_compliance[channel]
+
+    def compliance_policy(self, channel: Literal["A", "B"]) -> bool:
+        if channel not in {"A", "B"}:
+            raise SafetyViolation("Keithley channel must be A or B.")
+        return self._stop_on_compliance[channel]
+
+    def _assert_compliance_increase_allowed(
+        self,
+        channel: Literal["A", "B"],
+        level_si: float,
+        *,
+        mode: Literal["current", "voltage"] | None = None,
+    ) -> None:
+        blocked = self._compliance_block_levels.get(channel)
+        blocked_mode = self._compliance_block_modes.get(channel)
+        if blocked is None or (
+            mode is not None and blocked_mode is not None and mode != blocked_mode
+        ):
+            return
+        tolerance = max(abs(blocked), 1.0) * 1e-12
+        if abs(level_si) > abs(blocked) + tolerance:
+            raise SafetyViolation(
+                f"Keithley channel {channel} is at compliance; increasing the "
+                f"source above {blocked:.12g} SI is blocked until the measured "
+                "compliance warning clears."
+            )
 
     @staticmethod
     def _configure_measurement_ranges_and_sense(
@@ -1080,6 +1230,11 @@ class KeithleyAdapter(DeviceAdapter):
     def set_output(self, channel: Literal["A", "B"], enabled: bool) -> bool:
         if channel not in {"A", "B"}:
             raise SafetyViolation("Keithley channel must be A or B.")
+        if enabled and channel in self._compliance_channels:
+            raise SafetyViolation(
+                f"Keithley channel {channel} compliance stop is latched. Choose "
+                "a recovery action before enabling OUTPUT."
+            )
         settings = self._channel_settings(channel)
         if enabled:
             if not self._settings.safety.allow_output_enable:
@@ -1090,6 +1245,9 @@ class KeithleyAdapter(DeviceAdapter):
             if request is None:
                 raise SafetyViolation("Configure a safe Keithley source before enabling OUTPUT.")
             validate_keithley_source(settings, request)
+            self._assert_compliance_increase_allowed(
+                channel, request.level_si, mode=request.mode
+            )
             self._ensure_normal_output_off_mode(channel)
             # Re-read the complete programmed source immediately before the
             # single energising transition. This also proves OUTPUT is still
@@ -1157,10 +1315,27 @@ class KeithleyAdapter(DeviceAdapter):
         compliance_detected = hardware_compliance or self._at_compliance_limit(
             request, voltage=voltage, current=current
         )
-        stop_required = compliance_detected and self._settings.safety.stop_on_compliance
+        compliance_latched = channel in self._compliance_channels
+        stop_required = compliance_detected and self._stop_on_compliance[channel]
+        if compliance_detected:
+            self._compliance_warnings.add(channel)
+            if request is not None:
+                self._compliance_block_levels[channel] = request.level_si
+                if request.mode in {"current", "voltage"}:
+                    self._compliance_block_modes[channel] = request.mode
+        elif not compliance_latched:
+            self._compliance_warnings.discard(channel)
+            self._compliance_block_levels.pop(channel, None)
+            self._compliance_block_modes.pop(channel, None)
         if stop_required:
-            self.emergency_off()
-            self._state = DeviceState.COMPLIANCE
+            self._disable_channel_and_verify(channel)
+            self._compliance_channels.add(channel)
+        elif request is not None and not compliance_detected:
+            # Only a measurement that completed outside compliance is a valid
+            # candidate for the operator's later "restore previous setpoint"
+            # choice.
+            self._last_safe_request[channel] = request
+        self._update_aggregate_output_state()
         try:
             validate_keithley_measurement(
                 self._channel_settings(channel),
@@ -1193,8 +1368,10 @@ class KeithleyAdapter(DeviceAdapter):
             voltage * current,
             self._output_states[channel],
             True,
-            compliance_detected,
-            stop_required,
+            compliance_detected or compliance_latched,
+            stop_required or compliance_latched,
+            request.level_si if request is not None else None,
+            request.mode if request is not None and request.mode in {"current", "voltage"} else None,
         )
 
     def _fail_measurement_output_invariant(self, message: str) -> None:
@@ -1254,8 +1431,9 @@ class KeithleyAdapter(DeviceAdapter):
 
         The actual starting level is queried from the instrument. Every point
         is checked against the configured source/DUT envelope and followed by an
-        atomic I/V measurement. Any transport, compliance or limit failure
-        attempts to turn both SMU outputs off.
+        atomic I/V measurement. Compliance follows the selected channel policy;
+        transport, limit, or ambiguous-state failures use the global
+        emergency-off path.
         """
 
         channel = request.channel
@@ -1351,9 +1529,16 @@ class KeithleyAdapter(DeviceAdapter):
             if not self._output_is_enabled(channel):
                 raise DeviceError("Keithley OUTPUT switched off unexpectedly during the ramp.")
         except Exception:
-            self.emergency_off()
-            if self._state not in {DeviceState.UNKNOWN, DeviceState.COMPLIANCE}:
-                self._state = DeviceState.FAULT
+            if channel in self._compliance_channels:
+                # measure() already disabled and verified this channel. Keep
+                # an independent channel alive; escalate only if that local
+                # invariant cannot be maintained.
+                self._output_states[channel] = False
+                self._update_aggregate_output_state()
+            else:
+                self.emergency_off()
+                if self._state is not DeviceState.UNKNOWN:
+                    self._state = DeviceState.FAULT
             raise
         self._last_request[channel] = target_request
         self._output_states[channel] = True

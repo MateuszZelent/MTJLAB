@@ -186,6 +186,7 @@ class MainWindowTests(unittest.TestCase):
             window._guard_manual_operation("set_output", (1, False))
             window._guard_manual_operation("set_signal_generator_output", False)
             window._guard_manual_operation("emergency_off", None)
+            window._guard_manual_operation("recover_from_compliance", None)
         finally:
             window.close()
             self.application.processEvents()
@@ -1854,6 +1855,8 @@ class MainWindowTests(unittest.TestCase):
             rigol = window.rigol_page
             for editor, target in (
                 (rigol.frequency, "rigol.1.frequency"),
+                (rigol.high_level, "rigol.1.high_level"),
+                (rigol.low_level, "rigol.1.low_level"),
                 (rigol.vpp, "rigol.1.amplitude"),
                 (rigol.offset, "rigol.1.offset"),
             ):
@@ -1903,7 +1906,13 @@ class MainWindowTests(unittest.TestCase):
                 keithley._limit_fields["level"].maximum.text(),
                 f"MAX  {voltage_bound.maximum_text}",
             )
-            self.assertEqual(keithley._limit_fields["compliance"].maximum.text(), "MAX  10 mA")
+            expected_compliance_max = window._settings.keithley.safety.channels[
+                "B"
+            ].lab_limits.current_compliance.max
+            self.assertEqual(
+                keithley._limit_fields["compliance"].maximum.text(),
+                f"MAX  {expected_compliance_max}",
+            )
 
             anritsu = window.anritsu_page
             expected_anritsu_minimum = window._settings.anritsu.safety.frequency.min
@@ -3530,6 +3539,22 @@ class MainWindowTests(unittest.TestCase):
             dialog = keithley._readback_dialog
             self.assertTrue(dialog.isModal())
             self.assertEqual(dialog.table.rowCount(), 13)
+            headers = [
+                dialog.table.horizontalHeaderItem(column).text()
+                for column in range(dialog.table.columnCount())
+            ]
+            self.assertEqual(
+                headers,
+                [
+                    "Parameter",
+                    "Hardware value\nChannel A",
+                    "Form comparison\nChannel A",
+                    "Action\nChannel A",
+                    "Hardware value\nChannel B",
+                    "Form comparison\nChannel B",
+                    "Action\nChannel B",
+                ],
+            )
             table_values = {
                 dialog.table.item(row, 0).text(): (
                     dialog.table.item(row, 1).text(),
@@ -3552,6 +3577,41 @@ class MainWindowTests(unittest.TestCase):
             }
             self.assertTrue(status_values["Source level"][0])
             self.assertEqual(status_values["Active source range"][0], "MATCH")
+            row_for = {
+                dialog.table.item(row, 0).text(): row
+                for row in range(dialog.table.rowCount())
+            }
+            source_level_row = row_for["Source level"]
+            active_source_range_row = row_for["Active source range"]
+            output_state_row = row_for["OUTPUT state"]
+            output_off_mode_row = row_for["OUTPUT OFF mode"]
+            self.assertTrue(
+                dialog.table.item(source_level_row, 2).text().startswith("Form:")
+            )
+            self.assertEqual(
+                dialog.table.item(active_source_range_row, 2).text(), "MATCH"
+            )
+            self.assertIn("Source autorange", dialog.range_guidance.text())
+            self.assertIn("Active source range", dialog.range_guidance.text())
+            self.assertIn("measurement range", dialog.range_guidance.text().lower())
+            self.assertIn(
+                "same source and measurement function",
+                dialog.range_guidance.text().lower(),
+            )
+            source_action = dialog.table.cellWidget(source_level_row, 3)
+            self.assertIsNotNone(source_action)
+            self.assertEqual(source_action.text(), "Use hardware value")
+            self.assertIn("Source level", source_action.accessibleName())
+            self.assertIn("channel A", source_action.accessibleName())
+            self.assertEqual(dialog.table.cellWidget(output_state_row, 3), None)
+            self.assertEqual(dialog.table.cellWidget(output_off_mode_row, 3), None)
+            output_action_item = dialog.table.item(output_state_row, 3)
+            self.assertIsNotNone(output_action_item)
+            self.assertEqual(output_action_item.text(), "—")
+            self.assertIn("cannot be copied", output_action_item.toolTip().lower())
+            self.assertEqual(
+                dialog.assign_all_button.text(), "Use all compatible values"
+            )
             self.assertIsNotNone(dialog.table.cellWidget(2, 3))
             self.assertIsNotNone(dialog.table.cellWidget(2, 6))
 
@@ -3593,8 +3653,16 @@ class MainWindowTests(unittest.TestCase):
             dialog.show()
             self.application.processEvents()
             self.assertTrue(dialog.isVisible())
-            self.assertGreater(dialog.table.width(), 600)
+            self.assertGreaterEqual(dialog.width(), 980)
+            self.assertGreaterEqual(dialog.height(), 620)
+            self.assertGreater(dialog.table.width(), 850)
             self.assertGreater(dialog.table.height(), 300)
+            dialog.resize(980, 620)
+            self.application.processEvents()
+            self.assertTrue(dialog.isVisible())
+            self.assertGreater(dialog.table.width(), 700)
+            self.assertGreater(dialog.table.height(), 250)
+            self.assertTrue(dialog.assign_all_button.isVisible())
             dialog.close()
         finally:
             window.close()
@@ -3779,6 +3847,165 @@ class MainWindowTests(unittest.TestCase):
             self.assertIsNotNone(first.fit_fwhm_hz)
             self.assertGreater(first.snr_db, 20.0)
             self.assertIn(first.fit_model, {"Gaussian", "Lorentzian"})
+        finally:
+            window.close()
+            self.application.processEvents()
+
+    def test_keithley_per_channel_compliance_does_not_stop_other_channel(self) -> None:
+        window = MainWindow(".config/settings.yml", simulation=True)
+        try:
+            keithley = window.keithley_page
+            keithley._controller.call = Mock()
+            keithley._device_state_changed("verified")
+            keithley._set_channel_output("A", True)
+            keithley._set_channel_output("B", True)
+            measurement = SimpleNamespace(
+                channel="A",
+                voltage_v=0.067,
+                current_a=0.001,
+                power_w=0.000067,
+                output_enabled=False,
+                compliance_detected=True,
+                compliance_stop_required=True,
+            )
+
+            keithley._result("measure", measurement)
+
+            keithley._controller.call.assert_not_called()
+            self.assertIn("COMPLIANCE", keithley.channel_cards["A"]["output"].text())
+            self.assertEqual(keithley.channel_cards["B"]["output"].text(), "OUTPUT ON")
+            self.assertFalse(keithley.channel_cards["A"]["output_on_action"].isEnabled())
+            self.assertFalse(keithley.channel_cards["A"]["restore_compliance"].isHidden())
+        finally:
+            window.close()
+            self.application.processEvents()
+
+    def test_quick_control_slider_projects_rigol_level_group_immediately(self) -> None:
+        window = MainWindow(".config/settings.yml", simulation=True)
+        try:
+            quick = window.quick_controls_window
+            quick.set_targets(
+                (
+                    "rigol.1.amplitude",
+                    "rigol.1.high_level",
+                    "rigol.1.low_level",
+                    "rigol.1.offset",
+                )
+            )
+            rigol = window.rigol_page
+            self.application.processEvents()
+
+            row = quick._rows["rigol.1.amplitude"]
+            row.set_value_text("0.200 V")
+            position = row.slider.slider.value()
+            row.slider.slider.setValue(position + 1)
+            self.application.processEvents()
+
+            self.assertEqual(row.value.text(), rigol.vpp.text())
+            for target, editor in (
+                ("rigol.1.high_level", rigol.high_level),
+                ("rigol.1.low_level", rigol.low_level),
+                ("rigol.1.offset", rigol.offset),
+            ):
+                self.assertEqual(quick._rows[target].value.text(), editor.text())
+        finally:
+            window.close()
+            self.application.processEvents()
+
+    def test_quick_control_slider_preserves_keithley_typed_precision(self) -> None:
+        window = MainWindow(".config/settings.yml", simulation=True)
+        try:
+            quick = window.quick_controls_window
+            quick.set_targets(("keithley.A.current",))
+            keithley = window.keithley_page
+            keithley.channel.setCurrentText("A")
+            keithley.mode.setCurrentText("current")
+            self.application.processEvents()
+
+            row = quick._rows["keithley.A.current"]
+            row.value.setText("0.00100 A")
+            self.application.processEvents()
+            self.assertEqual(keithley.level.text(), "0.00100 A")
+            position = row.slider.slider.value()
+            row.slider.slider.setValue(position + 1)
+            self.application.processEvents()
+
+            self.assertEqual(row.value.text(), "0.00101 A")
+            self.assertEqual(keithley.level.text(), "0.00101 A")
+        finally:
+            window.close()
+            self.application.processEvents()
+
+    def test_quick_controls_and_rigol_card_share_draft_immediately(self) -> None:
+        window = MainWindow(".config/settings.yml", simulation=True)
+        try:
+            quick = window.quick_controls_window
+            quick.set_targets(("rigol.1.frequency",))
+            rigol = window.rigol_page
+            rigol.waveform.setCurrentText("DC")
+
+            rigol.frequency.setText("12.000 kHz")
+            self.application.processEvents()
+
+            self.assertEqual(quick._rows["rigol.1.frequency"].value.text(), "12.000 kHz")
+
+            window.quick_control_coordinator.publish_draft(
+                "rigol.1.frequency", "13.000 kHz", source="quick_controls"
+            )
+            self.application.processEvents()
+
+            self.assertEqual(rigol.frequency.text(), "13.000 kHz")
+        finally:
+            window.close()
+            self.application.processEvents()
+
+    def test_keithley_compliance_recovery_choice_is_channel_scoped(self) -> None:
+        window = MainWindow(".config/settings.yml", simulation=True)
+        try:
+            keithley = window.keithley_page
+            keithley._controller.call = Mock()
+            keithley._device_state_changed("verified")
+            keithley._mark_channel_compliance("A")
+
+            keithley.channel_cards["A"]["keep_off_compliance"].click()
+
+            keithley._controller.call.assert_called_once_with(
+                "recover_from_compliance", ("A", "keep_off")
+            )
+            self.assertTrue(keithley._compliance_recovery_pending["A"])
+            self.assertTrue(keithley.channel_cards["B"]["output_on_action"].isEnabled())
+        finally:
+            window.close()
+            self.application.processEvents()
+
+    def test_keithley_continue_policy_highlights_without_turning_channel_off(self) -> None:
+        window = MainWindow(".config/settings.yml", simulation=True)
+        try:
+            keithley = window.keithley_page
+            keithley._controller.call = Mock()
+            keithley._device_state_changed("verified")
+            keithley._set_channel_output("A", True)
+            keithley._set_channel_output("B", True)
+
+            keithley._set_compliance_policy("A", False)
+            keithley._result("set_compliance_policy", False)
+            measurement = SimpleNamespace(
+                channel="A",
+                voltage_v=0.067,
+                current_a=0.001,
+                power_w=0.000067,
+                output_enabled=True,
+                compliance_detected=True,
+                compliance_stop_required=False,
+                source_level_si=0.001,
+            )
+            keithley._result("measure", measurement)
+
+            self.assertTrue(keithley._output_states["A"])
+            self.assertIn("COMPLIANCE ACTIVE", keithley.channel_cards["A"]["compliance"].text())
+            self.assertIn("CONTINUES", keithley.channel_cards["A"]["compliance"].text())
+            self.assertEqual(keithley.channel_cards["B"]["output"].text(), "OUTPUT ON")
+            self.assertTrue(keithley.channel_cards["A"]["output_on_action"].isEnabled())
         finally:
             window.close()
             self.application.processEvents()

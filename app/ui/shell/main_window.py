@@ -285,6 +285,34 @@ class MainWindow(FluentWindow):
         self.quick_controls_window = QuickControlsWindow(self.quick_control_coordinator, self)
         self.quick_controls_window.restore_workspace()
         self.quick_controls_window.output_requested.connect(self._request_quick_control_output)
+
+        self.rigol_page.quick_control_draft_changed.connect(
+            lambda target, text: self.quick_control_coordinator.publish_draft(
+                target, text, source="device_card"
+            )
+        )
+        self.keithley_page.quick_control_draft_changed.connect(
+            lambda target, text: self.quick_control_coordinator.publish_draft(
+                target, text, source="device_card"
+            )
+        )
+        self.quick_control_coordinator.draft_changed.connect(
+            self.rigol_page.quick_control_draft_changed_from_coordinator
+        )
+        self.quick_control_coordinator.draft_changed.connect(
+            self.keithley_page.quick_control_draft_changed_from_coordinator
+        )
+        self.quick_control_coordinator.publish_draft_snapshot(
+            self.rigol_page.quick_control_draft_snapshot(),
+            source="device_card",
+            mark_dirty=False,
+        )
+        self.quick_control_coordinator.publish_draft_snapshot(
+            self.keithley_page.quick_control_draft_snapshot(),
+            source="device_card",
+            mark_dirty=False,
+        )
+
         self.rigol_page.quick_setpoint_requested.connect(self.quick_control_coordinator.submit)
         self.keithley_page.quick_setpoint_requested.connect(self.quick_control_coordinator.submit)
         self.quick_control_coordinator.state_changed.connect(
@@ -1177,14 +1205,25 @@ class MainWindow(FluentWindow):
     def _guard_manual_operation(self, device: str, operation: str, payload: object) -> None:
         """Fail closed for new energy-producing operations after audit I/O failure."""
 
-        if device in self._leased_run_devices and operation != "emergency_off":
+        if device in self._leased_run_devices and operation not in {
+            "emergency_off",
+            "recover_from_compliance",
+            "set_compliance_policy",
+        }:
             raise ConfigurationError(
                 f"{getattr(self._settings, device).display_name} is leased to the active recipe run."
             )
 
         # De-energising and disconnecting are never blocked by RBAC or audit
         # health. This invariant is stronger than any normal user permission.
-        if operation in {"emergency_off", "ramp_to_zero", "stop_live", "disconnect"}:
+        if operation in {
+            "emergency_off",
+            "recover_from_compliance",
+            "set_compliance_policy",
+            "ramp_to_zero",
+            "stop_live",
+            "disconnect",
+        }:
             return
         if operation == "set_signal_generator_output" and not bool(payload):
             return

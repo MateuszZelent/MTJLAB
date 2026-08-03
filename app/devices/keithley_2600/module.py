@@ -34,6 +34,12 @@ def _dispatch(adapter: DeviceAdapter, operation: str, payload: object) -> object
     if operation == "set_dut_output_off_mode":
         channel, mode = payload  # type: ignore[misc]
         return adapter.set_dut_output_off_mode(channel, mode)
+    if operation == "recover_from_compliance":
+        channel, choice = payload  # type: ignore[misc]
+        return adapter.recover_from_compliance(channel, choice)
+    if operation == "set_compliance_policy":
+        channel, stop_on_compliance = payload  # type: ignore[misc]
+        return adapter.set_compliance_policy(channel, bool(stop_on_compliance))
     if operation == "quick_setpoint":
         if not isinstance(payload, QuickControlCommand):
             raise ValueError("Keithley quick_setpoint requires an explicit-unit command.")

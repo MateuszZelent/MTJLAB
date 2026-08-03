@@ -4,9 +4,11 @@ from copy import deepcopy
 from pathlib import Path
 import tempfile
 import unittest
+from unittest.mock import patch
 
 from app.devices.anritsu_ms2830a import AnritsuAdapter, SpectrumConfig
 from app.devices.keithley_2600 import KeithleyAdapter, KeithleySourceRequest
+from app.devices.keithley_2600 import module as keithley_module
 from app.devices.rigol_dg1000z import RigolAdapter, RigolChannelConfig, RigolOutputConfig
 from app.devices.simulators import SimulatorFault, SimulatedVisaFactory, simulated_station_settings
 from app.domain.errors import ConnectionError, DeviceError, SafetyViolation
@@ -246,6 +248,203 @@ class SimulatorTests(unittest.TestCase):
         self.assertTrue(measurement.compliance_detected)
         self.assertTrue(measurement.compliance_stop_required)
         self.assertEqual(keithley.state, DeviceState.COMPLIANCE)
+
+    def test_keithley_per_channel_compliance_preserves_other_output(self) -> None:
+        raw = deepcopy(simulated_station_settings(loaded_settings()).model_dump(mode="python"))
+        raw["devices"]["keithley"]["safety"]["allow_output_enable"] = True
+        raw["devices"]["keithley"]["safety"]["channels"]["A"]["enabled"] = True
+        raw["devices"]["keithley"]["safety"]["channels"]["B"]["enabled"] = True
+        settings = StationSettings.model_validate(raw)
+        keithley = KeithleyAdapter(
+            settings,
+            session_factory=SimulatedVisaFactory(
+                "keithley", keithley_resistance_ohm=67.0
+            ),
+        )
+        keithley.connect()
+        keithley.configure_source(
+            KeithleySourceRequest("A", "current", 0.0005, 0.067)
+        )
+        keithley.set_output("A", True)
+        safe_a = keithley.measure("A")
+        self.assertFalse(safe_a.compliance_detected)
+        keithley.configure_source(
+            KeithleySourceRequest("A", "current", 0.001, 0.067)
+        )
+        keithley.configure_source(
+            KeithleySourceRequest("B", "voltage", 0.05, 0.003)
+        )
+        keithley.set_output("A", True)
+        keithley.set_output("B", True)
+
+        measurement = keithley.measure("A")
+
+        self.assertTrue(measurement.compliance_stop_required)
+        self.assertFalse(keithley._output_states["A"])
+        self.assertTrue(keithley._output_states["B"])
+        with self.assertRaisesRegex(SafetyViolation, "compliance"):
+            keithley.set_output("A", True)
+        self.assertTrue(keithley._output_states["B"])
+
+        restored = keithley.recover_from_compliance("A", "restore_previous")
+
+        self.assertEqual(restored["channel"], "A")
+        self.assertEqual(restored["choice"], "restore_previous")
+        self.assertTrue(restored["outputs_confirmed_off"])
+        self.assertFalse(keithley._output_states["A"])
+        self.assertTrue(keithley._output_states["B"])
+        self.assertAlmostEqual(keithley.last_source_request("A").level_si, 0.0005)
+
+    def test_keithley_per_channel_recovery_keep_off_never_enables_output(self) -> None:
+        raw = deepcopy(simulated_station_settings(loaded_settings()).model_dump(mode="python"))
+        raw["devices"]["keithley"]["safety"]["allow_output_enable"] = True
+        raw["devices"]["keithley"]["safety"]["channels"]["A"]["enabled"] = True
+        raw["devices"]["keithley"]["safety"]["channels"]["B"]["enabled"] = True
+        settings = StationSettings.model_validate(raw)
+        keithley = KeithleyAdapter(
+            settings,
+            session_factory=SimulatedVisaFactory(
+                "keithley", keithley_resistance_ohm=67.0
+            ),
+        )
+        keithley.connect()
+        keithley.configure_source(KeithleySourceRequest("A", "current", 0.001, 0.067))
+        keithley.set_output("A", True)
+        keithley.measure("A")
+
+        recovered = keithley.recover_from_compliance("A", "keep_off")
+
+        self.assertEqual(recovered["choice"], "keep_off")
+        self.assertTrue(recovered["outputs_confirmed_off"])
+        self.assertFalse(keithley._output_states["A"])
+
+    def test_keithley_continue_policy_keeps_output_on_and_blocks_increase(self) -> None:
+        raw = deepcopy(simulated_station_settings(loaded_settings()).model_dump(mode="python"))
+        raw["devices"]["keithley"]["safety"]["allow_output_enable"] = True
+        raw["devices"]["keithley"]["safety"]["channels"]["A"]["enabled"] = True
+        raw["devices"]["keithley"]["safety"]["channels"]["B"]["enabled"] = True
+        raw["devices"]["keithley"]["safety"]["stop_on_compliance"] = False
+        settings = StationSettings.model_validate(raw)
+        keithley = KeithleyAdapter(
+            settings,
+            session_factory=SimulatedVisaFactory(
+                "keithley", keithley_resistance_ohm=67.0
+            ),
+        )
+        keithley.connect()
+        keithley.configure_source(
+            KeithleySourceRequest("A", "voltage", 0.05, 0.001)
+        )
+        keithley.configure_source(
+            KeithleySourceRequest("B", "current", 0.001, 0.067)
+        )
+        keithley.set_output("A", True)
+        keithley.set_output("B", True)
+
+        measurement = keithley.measure("B")
+
+        self.assertTrue(measurement.compliance_detected)
+        self.assertFalse(measurement.compliance_stop_required)
+        self.assertTrue(measurement.output_enabled)
+        self.assertTrue(keithley._output_states["A"])
+        self.assertTrue(keithley._output_states["B"])
+        with self.assertRaisesRegex(SafetyViolation, "increasing"):
+            keithley.update_source_level("B", mode="current", level_si=0.002)
+        self.assertTrue(keithley._output_states["B"])
+
+        keithley.update_source_level("B", mode="current", level_si=0.0005)
+        cleared = keithley.measure("B")
+        self.assertFalse(cleared.compliance_detected)
+        self.assertEqual(keithley.state, DeviceState.OUTPUT_ON)
+        self.assertTrue(keithley._output_states["B"])
+
+    def test_keithley_enabling_stop_policy_after_warning_latches_only_channel(self) -> None:
+        raw = deepcopy(simulated_station_settings(loaded_settings()).model_dump(mode="python"))
+        raw["devices"]["keithley"]["safety"]["allow_output_enable"] = True
+        raw["devices"]["keithley"]["safety"]["stop_on_compliance"] = False
+        settings = StationSettings.model_validate(raw)
+        keithley = KeithleyAdapter(
+            settings,
+            session_factory=SimulatedVisaFactory(
+                "keithley", keithley_resistance_ohm=67.0
+            ),
+        )
+        keithley.connect()
+        keithley.configure_source(
+            KeithleySourceRequest("B", "current", 0.001, 0.067)
+        )
+        keithley.set_output("B", True)
+        warning = keithley.measure("B")
+        self.assertTrue(warning.compliance_detected)
+        self.assertTrue(keithley._output_states["B"])
+
+        keithley.set_compliance_policy("B", True)
+
+        self.assertFalse(keithley._output_states["B"])
+        with self.assertRaisesRegex(SafetyViolation, "compliance"):
+            keithley.set_output("B", True)
+
+    def test_keithley_compliance_policy_dispatch_is_channel_scoped(self) -> None:
+        raw = deepcopy(simulated_station_settings(loaded_settings()).model_dump(mode="python"))
+        settings = StationSettings.model_validate(raw)
+        keithley = KeithleyAdapter(
+            settings,
+            session_factory=SimulatedVisaFactory("keithley"),
+        )
+        with patch.object(keithley, "set_compliance_policy", return_value=False) as policy:
+            result = keithley_module._dispatch(
+                keithley,
+                "set_compliance_policy",
+                ("B", False),
+            )
+
+        self.assertFalse(result)
+        policy.assert_called_once_with("B", False)
+
+    def test_keithley_recover_dispatch_carries_channel_and_choice(self) -> None:
+        raw = deepcopy(simulated_station_settings(loaded_settings()).model_dump(mode="python"))
+        settings = StationSettings.model_validate(raw)
+        keithley = KeithleyAdapter(
+            settings,
+            session_factory=SimulatedVisaFactory("keithley"),
+        )
+        with patch.object(
+            keithley,
+            "recover_from_compliance",
+            return_value={"channel": "A", "choice": "keep_off"},
+        ) as recover:
+            result = keithley_module._dispatch(
+                keithley,
+                "recover_from_compliance",
+                ("A", "keep_off"),
+            )
+
+        self.assertEqual(result, {"channel": "A", "choice": "keep_off"})
+        recover.assert_called_once_with("A", "keep_off")
+
+    def test_keithley_compliance_can_recover_without_reconnecting(self) -> None:
+        raw = deepcopy(simulated_station_settings(loaded_settings()).model_dump(mode="python"))
+        raw["devices"]["keithley"]["safety"]["allow_output_enable"] = True
+        settings = StationSettings.model_validate(raw)
+        keithley = KeithleyAdapter(
+            settings,
+            session_factory=SimulatedVisaFactory("keithley", keithley_resistance_ohm=67.0),
+        )
+        identity = keithley.connect()
+        keithley.configure_source(KeithleySourceRequest("B", "current", 0.001, 0.067))
+        keithley.set_output("B", True)
+        measurement = keithley.measure("B")
+
+        self.assertTrue(measurement.compliance_stop_required)
+        self.assertEqual(keithley.state, DeviceState.COMPLIANCE)
+        with self.assertRaisesRegex(SafetyViolation, "compliance"):
+            keithley.set_output("B", True)
+        recovery = keithley.recover_from_compliance("B", "keep_off")
+
+        self.assertEqual(recovery["state"], DeviceState.OUTPUT_OFF.value)
+        self.assertTrue(recovery["outputs_confirmed_off"])
+        self.assertIs(keithley.identity, identity)
+        self.assertEqual(keithley.state, DeviceState.OUTPUT_OFF)
 
     def test_keithley_simulator_clips_source_at_programmed_compliance(self) -> None:
         raw = deepcopy(simulated_station_settings(loaded_settings()).model_dump(mode="python"))

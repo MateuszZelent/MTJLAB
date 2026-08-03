@@ -278,6 +278,14 @@ class InstrumentWorker(QObject):
                 return self._adapter.set_output(channel, enabled)
             if operation == "measure":
                 return self._adapter.measure(payload)  # type: ignore[arg-type]
+            if operation == "recover_from_compliance":
+                channel, choice = payload  # type: ignore[misc]
+                return self._adapter.recover_from_compliance(channel, choice)
+            if operation == "set_compliance_policy":
+                channel, stop_on_compliance = payload  # type: ignore[misc]
+                return self._adapter.set_compliance_policy(
+                    channel, bool(stop_on_compliance)
+                )
             if operation == "ramp_to_zero":
                 return self._adapter.ramp_to_zero(payload)  # type: ignore[arg-type]
             if operation == "ramp_to_level":

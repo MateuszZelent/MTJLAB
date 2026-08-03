@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import unittest
 from copy import deepcopy
+import math
 from pathlib import Path
 import tempfile
 
@@ -214,10 +215,33 @@ class QuantityAndSafetyTests(unittest.TestCase):
 
         bounds = quick_control_safety_bounds(StationSettings.model_validate(raw))
 
-        self.assertEqual(bounds["keithley.A.current"].minimum_text, "HARDWARE")
-        self.assertEqual(bounds["keithley.A.current"].maximum_text, "HARDWARE")
-        self.assertEqual(bounds["rigol.1.frequency"].minimum_si, 0.0)
+        self.assertEqual(bounds["keithley.A.current"].minimum_text, "-3 A")
+        self.assertEqual(bounds["keithley.A.current"].maximum_text, "3 A")
+        self.assertEqual(bounds["rigol.1.frequency"].minimum_si, 1e-6)
         self.assertEqual(bounds["rigol.1.frequency"].maximum_si, 30e6)
+
+    def test_disabled_quick_control_limits_resolve_to_finite_hardware_ranges(self) -> None:
+        raw = deepcopy(SettingsRepository(SETTINGS_TEMPLATE).load().raw)
+        for channel in raw["devices"]["rigol"]["safety"]["channels"].values():
+            for name in (
+                "frequency",
+                "high_level",
+                "low_level",
+                "amplitude_vpp",
+                "offset",
+            ):
+                channel["lab_limits"][name]["enabled"] = False
+        for channel in raw["devices"]["keithley"]["safety"]["channels"].values():
+            for name in ("source_current", "source_voltage"):
+                channel["lab_limits"][name]["enabled"] = False
+
+        bounds = quick_control_safety_bounds(StationSettings.model_validate(raw))
+
+        for target, bound in bounds.items():
+            with self.subTest(target=target):
+                self.assertTrue(math.isfinite(bound.minimum_si))
+                self.assertTrue(math.isfinite(bound.maximum_si))
+                self.assertLess(bound.minimum_si, bound.maximum_si)
 
     def test_rigol_current_estimate_is_limited(self) -> None:
         settings = loaded_settings()

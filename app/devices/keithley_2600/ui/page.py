@@ -750,11 +750,20 @@ class _KeithleyReadbackDialog(StationDialog):
         self.setObjectName("keithleyReadbackDialog")
         self.setWindowTitle("Keithley 2600 — settings read from device")
         self.setModal(True)
-        self.setMinimumSize(760, 500)
-        self.resize(860, 540)
+        self.setMinimumSize(QSize(980, 620))
+        self.setSizeGripEnabled(True)
+        screen = QApplication.primaryScreen()
+        if screen is None:
+            self.resize(QSize(1180, 760))
+        else:
+            available = screen.availableGeometry()
+            self.resize(
+                min(1180, max(980, available.width() - 48)),
+                min(760, max(620, available.height() - 48)),
+            )
         layout = QVBoxLayout(self)
         layout.setContentsMargins(18, 16, 18, 16)
-        layout.setSpacing(10)
+        layout.setSpacing(8)
 
         title = StrongBodyLabel("Hardware configuration snapshot", self)
         title.setObjectName("pageTitle")
@@ -780,6 +789,28 @@ class _KeithleyReadbackDialog(StationDialog):
         )
         layout.addWidget(output_status)
 
+        range_title = StrongBodyLabel("Source range vs measurement range", self)
+        range_title.setObjectName("sectionTitle")
+        layout.addWidget(range_title)
+        self.range_guidance = BodyLabel(
+            "Source autorange lets the SMU choose the range used to generate the "
+            "selected source (I or V). Active source range is the range currently "
+            "reported by the device; with autorange ON it may change as the source "
+            "level changes. These are not measurement ranges. They can indirectly "
+            "affect a result through source resolution, accuracy, range changes, "
+            "and settling. For the same source and measurement function, the device "
+            "may couple the ranges; the active measure rows show the actual "
+            "measurement range. Separate Measure V/I autorange controls apply "
+            "when the functions differ.",
+            self,
+        )
+        self.range_guidance.setObjectName("muted")
+        self.range_guidance.setAccessibleName(
+            "Explanation of source autorange and active source range"
+        )
+        self.range_guidance.setWordWrap(True)
+        layout.addWidget(self.range_guidance)
+
         self.table = TableWidget(self)
         self.table.setObjectName("keithleyReadbackTable")
         self.table.setAccessibleName(
@@ -789,14 +820,18 @@ class _KeithleyReadbackDialog(StationDialog):
         self.table.setHorizontalHeaderLabels(
             [
                 "Parameter",
-                "Device A",
-                "Current form A",
-                "",
-                "Device B",
-                "Current form B",
-                "",
+                "Hardware value\nChannel A",
+                "Form comparison\nChannel A",
+                "Action\nChannel A",
+                "Hardware value\nChannel B",
+                "Form comparison\nChannel B",
+                "Action\nChannel B",
             ]
         )
+        self.table.setSizePolicy(
+            QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding
+        )
+        self.table.setWordWrap(False)
         self.table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
         self.table.setSelectionMode(QAbstractItemView.SelectionMode.SingleSelection)
         self.table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
@@ -840,18 +875,46 @@ class _KeithleyReadbackDialog(StationDialog):
                 value_item = QTableWidgetItem(value)
                 configured_value = expected[channel].get(parameter)
                 status_item = QTableWidgetItem(
-                    "MATCH" if matches else (configured_value or "Not controlled by form")
+                    self._comparison_text(matches, configured_value)
                 )
                 colour = QColor("#168a45" if matches else "#c43b3b")
                 value_item.setForeground(colour)
                 status_item.setForeground(colour)
+                value_item.setToolTip(
+                    f"Read-only value returned by Keithley channel {channel}."
+                )
+                status_item.setToolTip(
+                    "Hardware value matches the current form configuration."
+                    if matches
+                    else (
+                        f"Current form value: {configured_value}"
+                        if configured_value
+                        else "This parameter is not controlled by the form."
+                    )
+                )
                 self.table.setItem(row, value_column, value_item)
                 self.table.setItem(row, status_column, status_item)
                 self._status_cells[(channel, parameter)] = status_item
-                if parameter not in {"OUTPUT state", "OUTPUT OFF mode"}:
-                    assign = PushButton("Assign", self.table)
+                if parameter in {"OUTPUT state", "OUTPUT OFF mode"}:
+                    action_item = QTableWidgetItem("—")
+                    action_item.setForeground(
+                        self.palette().color(QPalette.ColorRole.Mid)
+                    )
+                    action_item.setToolTip(
+                        f"{parameter} is safety-controlled and cannot be copied "
+                        "from the readback dialog."
+                    )
+                    self.table.setItem(row, button_column, action_item)
+                else:
+                    assign = PushButton("Use hardware value", self.table)
+                    assign.setMinimumWidth(142)
+                    assign.setToolTip(
+                        f"Copy the hardware value for {parameter} from channel "
+                        f"{channel} to the form."
+                    )
                     assign.setAccessibleName(
-                        f"Assign {parameter} from Keithley channel {channel}"
+                        f"Use hardware value for {parameter} from Keithley channel "
+                        f"{channel}"
                     )
                     assign.clicked.connect(
                         lambda _checked=False, ch=channel, key=parameter: (
@@ -860,31 +923,57 @@ class _KeithleyReadbackDialog(StationDialog):
                     )
                     self.table.setCellWidget(row, button_column, assign)
         header = self.table.horizontalHeader()
-        header.setSectionResizeMode(0, QHeaderView.ResizeMode.ResizeToContents)
-        header.setSectionResizeMode(1, QHeaderView.ResizeMode.Stretch)
-        header.setSectionResizeMode(2, QHeaderView.ResizeMode.ResizeToContents)
-        header.setSectionResizeMode(3, QHeaderView.ResizeMode.ResizeToContents)
-        header.setSectionResizeMode(4, QHeaderView.ResizeMode.Stretch)
-        header.setSectionResizeMode(5, QHeaderView.ResizeMode.ResizeToContents)
-        header.setSectionResizeMode(6, QHeaderView.ResizeMode.ResizeToContents)
+        header.setDefaultAlignment(Qt.AlignmentFlag.AlignCenter)
+        header.setMinimumHeight(42)
+        header.setMinimumSectionSize(105)
+        header.setSectionResizeMode(0, QHeaderView.ResizeMode.Interactive)
+        header.resizeSection(0, 145)
+        for column in (1, 2, 4, 5):
+            header.setSectionResizeMode(column, QHeaderView.ResizeMode.Stretch)
+        for column in (3, 6):
+            header.setSectionResizeMode(column, QHeaderView.ResizeMode.Fixed)
+            header.resizeSection(column, 154)
         self.table.resizeRowsToContents()
         layout.addWidget(self.table, 1)
 
+        self.comparison_legend = CaptionLabel(
+            "MATCH = hardware equals form · Form: ... = value currently in the form",
+            self,
+        )
+        self.comparison_legend.setObjectName("muted")
+        self.comparison_legend.setWordWrap(True)
+        self.comparison_legend.setAccessibleName("Readback comparison legend")
+        layout.addWidget(self.comparison_legend)
+
         footer = QHBoxLayout()
-        assign_all = PrimaryPushButton("Assign all", self)
-        assign_all.setToolTip(
+        self.assign_all_button = PrimaryPushButton(
+            "Use all compatible values", self
+        )
+        self.assign_all_button.setAccessibleName(
+            "Use all compatible hardware values in the form"
+        )
+        self.assign_all_button.setToolTip(
             "Copy all configurable A/B values to the form. Safety limits and OUTPUT "
             "states are not changed."
         )
-        assign_all.clicked.connect(
-            self._assign_all
-        )
-        footer.addWidget(assign_all)
+        self.assign_all_button.clicked.connect(self._assign_all)
+        footer.addWidget(self.assign_all_button)
         footer.addStretch(1)
-        close = PushButton("Close", self)
-        close.clicked.connect(self.accept)
-        footer.addWidget(close)
+        self.close_button = PushButton("Close", self)
+        self.close_button.setAccessibleName("Close Keithley hardware readback")
+        self.close_button.clicked.connect(self.accept)
+        footer.addWidget(self.close_button)
         layout.addLayout(footer)
+
+        self.table.setFocus()
+
+    @staticmethod
+    def _comparison_text(matches: bool, configured_value: str | None) -> str:
+        if matches:
+            return "MATCH"
+        if configured_value:
+            return f"Form: {configured_value}"
+        return "Not controlled by form"
 
     def _assign(self, channel: str, parameter: str) -> None:
         self.assign_requested.emit(channel, parameter)
@@ -1048,6 +1137,7 @@ class KeithleyPage(QWidget):
     status = Signal(str)
     quick_controls_requested = Signal()
     quick_setpoint_requested = Signal(str, str)
+    quick_control_draft_changed = Signal(str, str)
     settings_assignment_requested = Signal(object)
     settings_defaults_requested = Signal(object)
     _MANUAL_RAMP_ENABLED = False
@@ -1066,6 +1156,23 @@ class KeithleyPage(QWidget):
         self._configured_channels: set[str] = set()
         self._auto_enable_channel: str | None = None
         self._measure_pending = False
+        self._compliance_channels: set[str] = set()
+        self._compliance_recovery_pending: dict[str, bool] = {
+            "A": False,
+            "B": False,
+        }
+        self._compliance_recovery_available: set[str] = set()
+        self._pending_recovery_choice: dict[str, str] = {}
+        default_stop = bool(settings.keithley.safety.stop_on_compliance)
+        self._stop_on_compliance: dict[str, bool] = {
+            "A": default_stop,
+            "B": default_stop,
+        }
+        self._compliance_warning_channels: set[str] = set()
+        self._compliance_block_levels: dict[str, float] = {}
+        self._compliance_block_modes: dict[str, str] = {}
+        self._pending_compliance_policy: dict[str, bool] = {}
+        self._previous_compliance_policy: dict[str, bool] = {}
         self._latest_measurements: dict[str, KeithleyMeasurement] = {}
         self._last_configuration_readback: KeithleyConfigurationReadback | None = None
         self._ramp_pending = False
@@ -1087,6 +1194,7 @@ class KeithleyPage(QWidget):
         self._dut_isolation_phase = "idle"
         self._last_assignment_succeeded = False
         self._loading_form_snapshot = False
+        self._quick_control_projection = False
         self._panel_placeholders: dict[str, CardWidget] = {}
         self._live_timer = QTimer(self)
         self._live_timer.setInterval(1000)
@@ -1342,6 +1450,7 @@ class KeithleyPage(QWidget):
             self.measure_current_range,
         ):
             editor.editingFinished.connect(self._persist_form_defaults)
+        self.level.textChanged.connect(self._publish_quick_control_draft)
         self.level.editingFinished.connect(self._submit_active_source_level)
         self.sense_mode.currentIndexChanged.connect(self._persist_form_defaults)
         self.source_autorange.toggled.connect(
@@ -1390,9 +1499,12 @@ class KeithleyPage(QWidget):
                 timeout_ms=12_000,
             )
             return
+        if self._compliance_increase_is_blocked(channel, value.si_value, mode=mode):
+            self._show_compliance_increase_blocked(channel, value.si_value)
+            return
         self.quick_setpoint_requested.emit(
             f"keithley.{channel}.{mode}",
-            format_quantity_auto(value.si_value, dimension),
+            self.level.text().strip(),
         )
 
     def quick_setpoint_state_changed(self, target: str, state: str, detail: str) -> None:
@@ -1415,8 +1527,76 @@ class KeithleyPage(QWidget):
         if channel != self.channel.currentText() or mode != self.mode.currentText():
             return
         dimension = DIMENSION_CURRENT if mode == "current" else DIMENSION_VOLTAGE
-        self.level.setText(format_quantity_auto(value_si, dimension))
-        self._persist_form_defaults()
+        self._quick_control_projection = True
+        try:
+            self.level.setText(format_quantity_auto(value_si, dimension))
+            self._persist_form_defaults()
+        finally:
+            self._quick_control_projection = False
+
+    def quick_control_draft_snapshot(self) -> dict[str, str]:
+        """Return current and cached source drafts with explicit units."""
+
+        values: dict[str, str] = {}
+        for channel in ("A", "B"):
+            for mode in ("current", "voltage"):
+                snapshot = self.configuration_snapshot_for(channel, mode)
+                dimension = DIMENSION_CURRENT if mode == "current" else DIMENSION_VOLTAGE
+                try:
+                    parse_quantity(snapshot.source_level, dimension)
+                except ValueError:
+                    continue
+                values[f"keithley.{channel}.{mode}"] = snapshot.source_level
+        return values
+
+    def quick_control_draft_changed_from_coordinator(
+        self, target: str, text: str, source: str
+    ) -> None:
+        """Project a Quick Controls draft into the matching card field."""
+
+        if source == "device_card" or not target.startswith("keithley."):
+            return
+        parts = target.split(".")
+        if len(parts) != 3 or parts[1] not in {"A", "B"}:
+            return
+        channel, mode = parts[1], parts[2]
+        if mode not in {"current", "voltage"}:
+            return
+        dimension = DIMENSION_CURRENT if mode == "current" else DIMENSION_VOLTAGE
+        try:
+            parse_quantity(text, dimension)
+        except ValueError:
+            return
+        if channel != self.channel.currentText() or mode != self.mode.currentText():
+            snapshot = self.configuration_snapshot_for(channel, mode)
+            self._source_value_cache[(channel, mode)] = (
+                text,
+                snapshot.compliance,
+                snapshot.source_range,
+            )
+            return
+        self._quick_control_projection = True
+        try:
+            self.level.setText(text)
+            self._persist_form_defaults()
+        finally:
+            self._quick_control_projection = False
+
+    def _publish_quick_control_draft(self, *_args: object) -> None:
+        if self._loading_form_snapshot or self._quick_control_projection:
+            return
+        mode = self.mode.currentText()
+        if mode not in {"current", "voltage"}:
+            return
+        dimension = DIMENSION_CURRENT if mode == "current" else DIMENSION_VOLTAGE
+        try:
+            parse_quantity(self.level.text(), dimension)
+        except ValueError:
+            return
+        self.quick_control_draft_changed.emit(
+            f"keithley.{self.channel.currentText()}.{mode}",
+            self.level.text().strip(),
+        )
 
     def apply_execution_readback(
         self,
@@ -1448,12 +1628,21 @@ class KeithleyPage(QWidget):
         if compliance_detected is not None:
             compliance_label = self.channel_cards[channel]["compliance"]
             compliance_label.setText(
-                "COMPLIANCE: ACTIVE" if compliance_detected else "COMPLIANCE: clear"
+                (
+                    "COMPLIANCE ACTIVE — OUTPUT OFF"
+                    if compliance_detected and self._stop_on_compliance[channel]
+                    else "COMPLIANCE ACTIVE — OUTPUT CONTINUES (LIMIT REACHED)"
+                    if compliance_detected
+                    else "COMPLIANCE: clear"
+                )
             )
             compliance_label.setObjectName(
                 "keithleyComplianceActive"
                 if compliance_detected
                 else "keithleyComplianceClear"
+            )
+            compliance_label.setProperty(
+                "safetyState", "caution" if compliance_detected else "normal"
             )
             compliance_label.style().unpolish(compliance_label)
             compliance_label.style().polish(compliance_label)
@@ -1865,6 +2054,16 @@ class KeithleyPage(QWidget):
             lambda _checked=False, ch=channel: self._request_channel_output(ch, False)
         )
         footer.addWidget(compliance)
+        stop_compliance_toggle = CheckBox("Stop on compliance")
+        stop_compliance_toggle.setChecked(self._stop_on_compliance[channel])
+        stop_compliance_toggle.setToolTip(
+            "When enabled, compliance turns this channel OFF. When disabled, "
+            "the channel continues with a warning and the source cannot be increased."
+        )
+        stop_compliance_toggle.toggled.connect(
+            lambda enabled, ch=channel: self._set_compliance_policy(ch, enabled)
+        )
+        footer.addWidget(stop_compliance_toggle)
         footer.addStretch(1)
         card_layout.addLayout(footer)
         channel_actions = QHBoxLayout()
@@ -1887,16 +2086,41 @@ class KeithleyPage(QWidget):
         ):
             button.setFixedHeight(28)
         card_layout.addLayout(output_footer)
+        recovery_footer = QHBoxLayout()
+        recovery_footer.setSpacing(4)
+        recovery_footer.addStretch(1)
+        restore_compliance = PushButton("Restore previous setpoint")
+        keep_off_compliance = PushButton("Keep OFF / edit new setpoint")
+        for button in (restore_compliance, keep_off_compliance):
+            button.setProperty("compact", True)
+            button.setFixedHeight(26)
+            button.setVisible(False)
+        restore_compliance.clicked.connect(
+            lambda _checked=False, ch=channel: self._request_compliance_recovery(
+                ch, "restore_previous"
+            )
+        )
+        keep_off_compliance.clicked.connect(
+            lambda _checked=False, ch=channel: self._request_compliance_recovery(
+                ch, "keep_off"
+            )
+        )
+        recovery_footer.addWidget(restore_compliance)
+        recovery_footer.addWidget(keep_off_compliance)
+        card_layout.addLayout(recovery_footer)
         self.channel_cards[channel] = {
             "card": card,
             "led": led,
             "output": output,
             "compliance": compliance,
+            "stop_compliance_toggle": stop_compliance_toggle,
             "select": select,
             "measure": measure,
             "dut_isolation": dut_isolation,
             "output_on_action": output_on_action,
             "output_off_action": output_off_action,
+            "restore_compliance": restore_compliance,
+            "keep_off_compliance": keep_off_compliance,
             **values,
         }
         return card
@@ -1951,11 +2175,14 @@ class KeithleyPage(QWidget):
             self._set_help(card["card"], f"Channel {channel} overview", "Live overview of this channel. Voltage and current are direct readings; resistance and power are derived from the latest I/V pair.")
             self._set_help(card["led"], f"Channel {channel} output LED", "The indicator is lit only for confirmed OUTPUT ON. Grey means OUTPUT OFF, unknown, or disconnected; use the adjacent text to distinguish those states.")
             self._set_help(card["output"], f"Channel {channel} output state", "Shows the last state confirmed by a successful connect, configure, enable, ramp-off or compliance-stop operation.")
+            self._set_help(card["restore_compliance"], "Restore previous setpoint", "Reconfigures this channel with the last measured non-compliance setpoint while keeping OUTPUT OFF. You must apply and explicitly enable it again.")
+            self._set_help(card["keep_off_compliance"], "Keep channel OFF", "Acknowledges this channel's compliance stop and leaves OUTPUT OFF so you can edit a new safe setpoint. It never enables an output.")
             self._set_help(card["voltage"], "Measured voltage", "Direct voltage reading returned by Keithley for this channel.")
             self._set_help(card["current"], "Measured current", "Direct current reading returned by Keithley for this channel.")
             self._set_help(card["resistance"], "Derived resistance", "Calculated as |V/I| from the latest reading. It is not a dedicated resistance measurement and becomes infinity when current is effectively zero.")
             self._set_help(card["power"], "Derived power", "Calculated as V × I from the latest reading. Sign describes source/load direction; magnitude describes electrical power.")
             self._set_help(card["compliance"], "Compliance indicator", "ACTIVE means the measured opposite quantity reached the programmed compliance threshold. The safety policy may immediately disable outputs.")
+            self._set_help(card["stop_compliance_toggle"], "Stop on compliance", "Per-channel policy. ON commands this channel OUTPUT OFF when compliance is detected. OFF leaves the channel energized under the Keithley hardware limit, highlights COMPLIANCE, and blocks further increases of the source setpoint.")
             self._set_help(card["select"], f"Select channel {channel}", "Makes this channel active in the configuration form without changing its electrical output.")
             self._set_help(card["measure"], f"Measure channel {channel}", "Requests one voltage/current reading for this channel without enabling its output.")
             self._set_help(card["dut_isolation"], f"Disconnect or connect channel {channel} DUT", "Available only with confirmed OUTPUT OFF. It opens this channel relay in HIGH-Z, waits while you physically disconnect or connect the DUT, then restores and verifies NORMAL mode.")
@@ -1981,7 +2208,12 @@ class KeithleyPage(QWidget):
             self._render_execution_channel(selected)
 
     def _device_is_output_ready(self) -> bool:
-        return self._device_state_value in {"VERIFIED", "OUTPUT OFF", "OUTPUT ON"}
+        return self._device_state_value in {
+            "VERIFIED",
+            "OUTPUT OFF",
+            "OUTPUT ON",
+            "COMPLIANCE",
+        }
 
     def _output_prerequisites(
         self, channel: str | None = None
@@ -2023,11 +2255,38 @@ class KeithleyPage(QWidget):
             return
         selected_channel = self.channel.currentText()
         ready, checks = self._output_prerequisites(selected_channel)
-        self.output_readiness.setText("Output readiness: " + " • ".join(checks))
-        self.output_guidance.setText(
-            self._output_readiness_guidance(selected_channel)
+        selected_compliance = selected_channel in self._compliance_channels
+        selected_warning = selected_channel in self._compliance_warning_channels
+        selected_recovery_pending = self._compliance_recovery_pending[selected_channel]
+        recovery_blocked = selected_compliance or selected_recovery_pending
+        self.output_readiness.setText(
+            (
+                f"Safety stop: CH {selected_channel} COMPLIANCE; OUTPUT is OFF. "
+                "Choose a recovery action."
+                if selected_compliance
+                else "Confirming channel OUTPUT OFF; no output will be enabled."
+                if selected_recovery_pending
+                else f"COMPLIANCE ACTIVE on CH {selected_channel}; hardware limit reached."
+                if selected_warning
+                else "Output readiness: " + " • ".join(checks)
+            )
         )
-        self.output_toggle.setEnabled(ready or self._output_states[self.channel.currentText()])
+        self.output_guidance.setText(
+            (
+                f"CH {selected_channel} is locked after COMPLIANCE. Restore the "
+                "previous setpoint or keep it OFF and edit a new one."
+                if selected_compliance
+                else "Confirming channel OUTPUT OFF; no output will be enabled."
+                if selected_recovery_pending
+                else "Decrease the source value to clear compliance; further increases are blocked."
+                if selected_warning
+                else self._output_readiness_guidance(selected_channel)
+            )
+        )
+        self.output_toggle.setEnabled(
+            not recovery_blocked
+            and (ready or self._output_states[self.channel.currentText()])
+        )
         configure_pending = "configure" in self._pending_channels
         configuration_mutation_pending = (
             self._auto_enable_channel is not None
@@ -2065,9 +2324,25 @@ class KeithleyPage(QWidget):
             and not dut_isolation_busy
         )
         for channel, card in self.channel_cards.items():
+            channel_compliance = channel in self._compliance_channels
+            channel_warning = channel in self._compliance_warning_channels
+            channel_recovery_pending = self._compliance_recovery_pending[channel]
+            card["stop_compliance_toggle"].setEnabled(
+                channel not in self._pending_compliance_policy
+            )
+            card["stop_compliance_toggle"].blockSignals(True)
+            card["stop_compliance_toggle"].setChecked(
+                self._stop_on_compliance[channel]
+            )
+            card["stop_compliance_toggle"].blockSignals(False)
+            if channel_warning and not channel_compliance:
+                card["compliance"].setText(
+                    "COMPLIANCE ACTIVE — OUTPUT CONTINUES (LIMIT REACHED)"
+                )
             pending_enable = (
                 self._auto_enable_channel == channel
                 or self._readback_pending
+                or channel_recovery_pending
                 or any(
                     self._pending_channels.get(operation) == channel
                     for operation in ("configure", "set_output")
@@ -2083,6 +2358,7 @@ class KeithleyPage(QWidget):
             # exact unmet condition promised by the tooltip/readiness panel.
             card["output_on_action"].setEnabled(
                 self._device_is_output_ready()
+                and not channel_compliance
                 and not pending_enable
                 and not dut_isolation_busy
             )
@@ -2092,6 +2368,21 @@ class KeithleyPage(QWidget):
                     if channel_ready
                     else "Click for the blocking condition: " + missing
                 )
+            )
+            recovery_visible = channel_compliance or channel_recovery_pending
+            card["card"].setMaximumHeight(230 if recovery_visible else 180)
+            for recovery_button in (
+                card["restore_compliance"],
+                card["keep_off_compliance"],
+            ):
+                recovery_button.setVisible(recovery_visible)
+                recovery_button.setEnabled(
+                    channel_compliance and not channel_recovery_pending
+                )
+            card["restore_compliance"].setText(
+                "Restoring previous setpoint…"
+                if channel_recovery_pending
+                else "Restore previous setpoint"
             )
             # A confirmed OFF or disconnected channel has no OFF action to
             # perform. An uncertain connected state still exposes best-effort
@@ -2157,6 +2448,18 @@ class KeithleyPage(QWidget):
         self._device_state_value = normalized.replace("_", " ")
         if normalized == "DISCONNECTED":
             self._live_timer.stop()
+            self._compliance_channels.clear()
+            self._compliance_warning_channels.clear()
+            self._compliance_block_levels.clear()
+            self._compliance_block_modes.clear()
+            self._compliance_recovery_available.clear()
+            self._pending_recovery_choice.clear()
+            self._pending_compliance_policy.clear()
+            self._previous_compliance_policy.clear()
+            default_stop = bool(self._station_settings.keithley.safety.stop_on_compliance)
+            self._stop_on_compliance.update({"A": default_stop, "B": default_stop})
+            for channel in ("A", "B"):
+                self._compliance_recovery_pending[channel] = False
             for checkbox in (self.live_channel_a, self.live_channel_b):
                 checkbox.setChecked(False)
             self._configured_channels.clear()
@@ -2184,9 +2487,45 @@ class KeithleyPage(QWidget):
                     widget.style().polish(widget)
         elif normalized == "VERIFIED":
             # Connection qualification explicitly forces and verifies both outputs OFF.
+            self._compliance_channels.clear()
+            self._compliance_warning_channels.clear()
+            self._compliance_block_levels.clear()
+            self._compliance_block_modes.clear()
+            self._compliance_recovery_available.clear()
+            self._pending_recovery_choice.clear()
+            self._pending_compliance_policy.clear()
+            self._previous_compliance_policy.clear()
+            default_stop = bool(self._station_settings.keithley.safety.stop_on_compliance)
+            self._stop_on_compliance.update({"A": default_stop, "B": default_stop})
+            for channel in ("A", "B"):
+                self._compliance_recovery_pending[channel] = False
             self._set_channel_output("A", False)
             self._set_channel_output("B", False)
+        elif normalized == "COMPLIANCE":
+            # The following measurement/result or operation error identifies
+            # which channel tripped. Do not mutate either card here: the other
+            # channel may still be energized and must remain usable.
+            self.status.emit(
+                "Keithley compliance reported; identifying the affected channel"
+            )
+        elif normalized == "OUTPUT_OFF":
+            self._output_state_known = {"A": True, "B": True}
+            self._output_states = {"A": False, "B": False}
+            for channel in ("A", "B"):
+                self._set_channel_output(channel, False)
         elif normalized in {"FAULT", "UNKNOWN"}:
+            self._compliance_channels.clear()
+            self._compliance_warning_channels.clear()
+            self._compliance_block_levels.clear()
+            self._compliance_block_modes.clear()
+            self._compliance_recovery_available.clear()
+            self._pending_recovery_choice.clear()
+            self._pending_compliance_policy.clear()
+            self._previous_compliance_policy.clear()
+            default_stop = bool(self._station_settings.keithley.safety.stop_on_compliance)
+            self._stop_on_compliance.update({"A": default_stop, "B": default_stop})
+            for channel in ("A", "B"):
+                self._compliance_recovery_pending[channel] = False
             self._output_state_known = {"A": False, "B": False}
             for channel in ("A", "B"):
                 widgets = self.channel_cards[channel]
@@ -2240,16 +2579,26 @@ class KeithleyPage(QWidget):
             else "∞ Ω"
         )
         compliance = bool(getattr(measurement, "compliance_detected", False))
+        compliance_stop = bool(
+            getattr(measurement, "compliance_stop_required", False)
+        )
         widgets["compliance"].setText(
             "PATH: HIGH-Z / FLOATING"
             if not path_connected
-            else ("COMPLIANCE: ACTIVE" if compliance else "COMPLIANCE: clear")
+            else (
+                "COMPLIANCE ACTIVE — OUTPUT OFF"
+                if compliance and compliance_stop
+                else "COMPLIANCE ACTIVE — OUTPUT CONTINUES (LIMIT REACHED)"
+                if compliance
+                else "COMPLIANCE: clear"
+            )
         )
         widgets["compliance"].setObjectName("keithleyComplianceActive" if compliance else "keithleyComplianceClear")
+        widgets["compliance"].setProperty(
+            "safetyState", "caution" if compliance else "normal"
+        )
         widgets["compliance"].style().unpolish(widgets["compliance"])
         widgets["compliance"].style().polish(widgets["compliance"])
-        if compliance:
-            self._set_channel_output(channel, False)
         elapsed = time.monotonic() - self._history_started_at
         history = self._measurement_history[channel]
         history.append(
@@ -2272,6 +2621,65 @@ class KeithleyPage(QWidget):
             f"t={elapsed:.1f} s • {len(history)} pts"
             + (" • HIGH-Z / floating" if not path_connected else "")
         )
+
+    def _mark_channel_compliance(
+        self, channel: str, measurement: object | None = None
+    ) -> None:
+        if channel not in self.channel_cards:
+            return
+        stop_required = (
+            bool(getattr(measurement, "compliance_stop_required", False))
+            if measurement is not None
+            else self._stop_on_compliance[channel]
+        )
+        self._compliance_warning_channels.add(channel)
+        source_level = getattr(measurement, "source_level_si", None)
+        if isinstance(source_level, (int, float)) and math.isfinite(float(source_level)):
+            self._compliance_block_levels[channel] = float(source_level)
+        source_mode = getattr(measurement, "source_mode", None)
+        if source_mode not in {"current", "voltage"}:
+            snapshot = self._channel_form_snapshots.get(channel)
+            source_mode = snapshot.source_mode if snapshot is not None else None
+        if source_mode in {"current", "voltage"}:
+            self._compliance_block_modes[channel] = source_mode
+        compliance_label = self.channel_cards[channel]["compliance"]
+        compliance_label.setObjectName("keithleyComplianceActive")
+        compliance_label.setProperty("safetyState", "caution")
+        compliance_label.setText(
+            "COMPLIANCE ACTIVE — OUTPUT OFF"
+            if stop_required
+            else "COMPLIANCE ACTIVE — OUTPUT CONTINUES (LIMIT REACHED)"
+        )
+        compliance_label.style().unpolish(compliance_label)
+        compliance_label.style().polish(compliance_label)
+        if stop_required:
+            self._compliance_channels.add(channel)
+            self._compliance_recovery_available.add(channel)
+            self._set_channel_output(channel, False)
+        output_label = self.channel_cards[channel]["output"]
+        output_label.setText(
+            ("OUTPUT ON" if self._output_states[channel] else "OUTPUT OFF")
+            + " · COMPLIANCE"
+        )
+        self._update_output_readiness()
+        self._update_live_controls()
+
+    def _clear_channel_compliance(self, channel: str) -> None:
+        self._compliance_channels.discard(channel)
+        self._compliance_warning_channels.discard(channel)
+        self._compliance_recovery_available.discard(channel)
+        self._compliance_block_levels.pop(channel, None)
+        self._compliance_block_modes.pop(channel, None)
+        compliance_label = self.channel_cards[channel]["compliance"]
+        compliance_label.setText("COMPLIANCE: clear")
+        compliance_label.setObjectName("keithleyComplianceClear")
+        compliance_label.setProperty("safetyState", "normal")
+        compliance_label.style().unpolish(compliance_label)
+        compliance_label.style().polish(compliance_label)
+        self.channel_cards[channel]["output"].setText(
+            "OUTPUT ON" if self._output_states[channel] else "OUTPUT OFF"
+        )
+        self._update_output_readiness()
 
     def _set_channel_output(self, channel: str, enabled: bool) -> None:
         self._output_states[channel] = enabled
@@ -2303,9 +2711,13 @@ class KeithleyPage(QWidget):
         self._update_live_controls()
 
     def request_measurement(self, channel: str | None = None) -> None:
-        if self._measure_pending or self._dut_isolation_phase != "idle":
-            return
         selected = channel or self.channel.currentText()
+        if (
+            self._measure_pending
+            or self._dut_isolation_phase != "idle"
+            or self._compliance_recovery_pending.get(selected, False)
+        ):
+            return
         self._pending_channels["measure"] = selected
         self._measure_pending = True
         self._controller.call("measure", selected)
@@ -2396,6 +2808,7 @@ class KeithleyPage(QWidget):
             )
             if checkbox.isChecked()
             and self._station_settings.keithley.safety.channels[channel].enabled
+            and channel not in self._compliance_channels
         ]
 
     def _live_interval_changed(self, interval_ms: int) -> None:
@@ -2441,7 +2854,10 @@ class KeithleyPage(QWidget):
                 not high_impedance_off or self._output_states[channel]
             )
             checkbox.setEnabled(
-                connected and channel_enabled and not dut_isolation_busy
+                connected
+                and channel_enabled
+                and not dut_isolation_busy
+                and channel not in self._compliance_channels
             )
             measure_button = self.channel_cards[channel]["measure"]
             measure_button.setEnabled(
@@ -2456,6 +2872,11 @@ class KeithleyPage(QWidget):
             elif not channel_enabled:
                 checkbox.setToolTip(
                     f"Channel {channel} is disabled in the station profile."
+                )
+            elif channel in self._compliance_channels:
+                checkbox.setToolTip(
+                    f"Channel {channel} is latched OFF after COMPLIANCE. "
+                    "Acknowledge recovery before restarting Live."
                 )
             elif not measurement_path_available:
                 checkbox.setToolTip(
@@ -3062,6 +3483,15 @@ class KeithleyPage(QWidget):
         self._channel_form_snapshots = snapshots
         self._active_channel = active_channel
         self._load_form_snapshot(self._channel_form_snapshots[active_channel])
+        default_stop = bool(settings.keithley.safety.stop_on_compliance)
+        for channel in ("A", "B"):
+            if channel not in self._pending_compliance_policy:
+                self._stop_on_compliance[channel] = default_stop
+                if channel in self.channel_cards:
+                    toggle = self.channel_cards[channel]["stop_compliance_toggle"]
+                    toggle.blockSignals(True)
+                    toggle.setChecked(default_stop)
+                    toggle.blockSignals(False)
         self._refresh_keithley_limits()
         self._update_output_readiness()
         self._update_ramp_defaults(reset_values=True)
@@ -3086,6 +3516,11 @@ class KeithleyPage(QWidget):
             request = self._source_request()
         except Exception as exc:
             self.banner.show_message(f"Invalid Keithley settings: {exc}")
+            return
+        if self._compliance_increase_is_blocked(
+            request.channel, request.level_si, mode=request.mode
+        ):
+            self._show_compliance_increase_blocked(request.channel, request.level_si)
             return
         # This is the explicit, non-energizing configuration path. It must
         # never inherit an OUTPUT-ON continuation from another UI action.
@@ -3299,6 +3734,12 @@ class KeithleyPage(QWidget):
             )
             self._reset_output_toggle()
             return
+        if self._compliance_increase_is_blocked(
+            channel, request.level_si, mode=request.mode
+        ):
+            self._show_compliance_increase_blocked(channel, request.level_si)
+            self._reset_output_toggle()
+            return
         self._auto_enable_channel = channel
         self._pending_channels["configure"] = channel
         self._pending_config_modes[channel] = request.mode
@@ -3330,11 +3771,130 @@ class KeithleyPage(QWidget):
             self._set_channel_output(channel, self._output_states[channel])
             self._update_output_readiness()
 
+    def _set_compliance_policy(self, channel: str, enabled: bool) -> None:
+        if channel not in self.channel_cards:
+            return
+        if self._pending_compliance_policy:
+            return
+        self._previous_compliance_policy[channel] = self._stop_on_compliance[channel]
+        self._stop_on_compliance[channel] = bool(enabled)
+        self._pending_compliance_policy[channel] = bool(enabled)
+        toggle = self.channel_cards[channel]["stop_compliance_toggle"]
+        toggle.setEnabled(False)
+        self.status.emit(
+            f"Keithley CH {channel}: {'stop' if enabled else 'continue'} on compliance requested"
+        )
+        self._controller.call("set_compliance_policy", (channel, bool(enabled)))
+
+    def _compliance_increase_is_blocked(
+        self,
+        channel: str,
+        level_si: float,
+        *,
+        mode: str | None = None,
+    ) -> bool:
+        blocked = self._compliance_block_levels.get(channel)
+        if channel not in self._compliance_warning_channels or blocked is None:
+            return False
+        blocked_mode = self._compliance_block_modes.get(channel)
+        if mode is not None and blocked_mode is not None and mode != blocked_mode:
+            return False
+        tolerance = max(abs(blocked), 1.0) * 1e-12
+        return abs(float(level_si)) > abs(blocked) + tolerance
+
+    def _show_compliance_increase_blocked(self, channel: str, level_si: float) -> None:
+        blocked = self._compliance_block_levels.get(channel)
+        detail = (
+            f"CH {channel} is at COMPLIANCE. Increasing the source to "
+            f"{level_si:.12g} SI is blocked; reduce the source or edit the "
+            "compliance/limit settings first. Hardware and laboratory safety "
+            "limits remain enforced."
+        )
+        if blocked is not None:
+            detail += f" The last accepted source level was {blocked:.12g} SI."
+        self.banner.show_message(detail, severity="warning", timeout_ms=15_000)
+        self.status.emit(f"Keithley CH {channel}: source increase blocked by compliance")
+
+    def _apply_restored_source_request(self, request: KeithleySourceRequest) -> None:
+        channel = request.channel
+        source_dimension = (
+            DIMENSION_CURRENT if request.mode == "current" else DIMENSION_VOLTAGE
+        )
+        compliance_dimension = (
+            DIMENSION_VOLTAGE if request.mode == "current" else DIMENSION_CURRENT
+        )
+        snapshot = self._channel_form_snapshots[channel]
+        restored = replace(
+            snapshot,
+            source_mode=request.mode,
+            source_level=format_quantity_auto(request.level_si, source_dimension),
+            compliance=format_quantity_auto(
+                request.compliance_si, compliance_dimension
+            ),
+            nplc=f"{request.nplc:.9g}",
+            settling_time=format_quantity_auto(request.settle_time_s, DIMENSION_TIME),
+            sense_mode=request.sense_mode,
+            source_autorange=request.source_autorange,
+            source_range=(
+                "AUTO"
+                if request.source_range_si is None
+                else format_quantity_auto(request.source_range_si, source_dimension)
+            ),
+            measure_voltage_autorange=request.measure_voltage_autorange,
+            measure_voltage_range=(
+                "AUTO"
+                if request.measure_voltage_range_si is None
+                else format_quantity_auto(
+                    request.measure_voltage_range_si, DIMENSION_VOLTAGE
+                )
+            ),
+            measure_current_autorange=request.measure_current_autorange,
+            measure_current_range=(
+                "AUTO"
+                if request.measure_current_range_si is None
+                else format_quantity_auto(
+                    request.measure_current_range_si, DIMENSION_CURRENT
+                )
+            ),
+        )
+        self._channel_form_snapshots[channel] = restored
+        self._source_value_cache[(channel, request.mode)] = (
+            restored.source_level,
+            restored.compliance,
+            restored.source_range,
+        )
+        if channel == self.channel.currentText():
+            self._load_form_snapshot(restored)
+
     def _style_output_toggle(self, enabled: bool) -> None:
         self.output_toggle.setText("OUTPUT ON" if enabled else "OUTPUT OFF")
         self.output_toggle.setObjectName("outputOnButton" if enabled else "outputOffButton")
         self.output_toggle.style().unpolish(self.output_toggle)
         self.output_toggle.style().polish(self.output_toggle)
+
+    def _request_compliance_recovery(self, channel: str, choice: str) -> None:
+        if channel not in self.channel_cards or choice not in {
+            "restore_previous",
+            "keep_off",
+        }:
+            return
+        if self._compliance_recovery_pending[channel]:
+            return
+        if self._device_state_value == "DISCONNECTED":
+            self.banner.show_message(
+                f"Connect and verify Keithley before recovering channel {channel}.",
+                severity="error",
+                timeout_ms=12_000,
+            )
+            return
+        self._compliance_recovery_pending[channel] = True
+        self._pending_recovery_choice[channel] = choice
+        self._update_output_readiness()
+        self._update_live_controls()
+        self.status.emit(
+            f"Keithley CH {channel}: compliance recovery {choice} requested; OUTPUT remains OFF"
+        )
+        self._controller.call("recover_from_compliance", (channel, choice))
 
     def _result(self, operation: str, result: object) -> None:
         if operation == "read_configuration" and isinstance(
@@ -3419,6 +3979,11 @@ class KeithleyPage(QWidget):
                     str(measurement.channel), bool(measurement.output_enabled)
                 )
             self._update_channel_measurement(measurement)
+            channel = str(measurement.channel)
+            if getattr(measurement, "compliance_detected", False):
+                self._mark_channel_compliance(channel, measurement)
+            else:
+                self._clear_channel_compliance(channel)
             self.readout.setText(
                 f"I: {measurement.current_a * 1e3:.8g} mA   "
                 f"V: {measurement.voltage_v * 1e3:.8g} mV   P: {measurement.power_w * 1e6:.8g} µW"
@@ -3430,6 +3995,49 @@ class KeithleyPage(QWidget):
                 )
             )
             self.status.emit("Keithley measurement completed")
+        elif operation == "set_compliance_policy":
+            channel = next(
+                iter(self._pending_compliance_policy), self.channel.currentText()
+            )
+            self._pending_compliance_policy.pop(channel, None)
+            self._previous_compliance_policy.pop(channel, None)
+            if channel in self.channel_cards:
+                self._stop_on_compliance[channel] = bool(result)
+                toggle = self.channel_cards[channel]["stop_compliance_toggle"]
+                toggle.setEnabled(True)
+                toggle.blockSignals(True)
+                toggle.setChecked(bool(result))
+                toggle.blockSignals(False)
+                if bool(result) and channel in self._compliance_warning_channels:
+                    # The operator changed the policy after a continue-mode
+                    # warning was already visible. The adapter has now
+                    # disabled only this channel; mirror that transition and
+                    # expose the same recovery choices as a fresh trip.
+                    self._mark_channel_compliance(channel)
+            self.status.emit(
+                f"Keithley CH {channel}: {'stop' if result else 'continue'} on compliance active"
+            )
+        elif operation == "recover_from_compliance" and isinstance(result, dict):
+            channel = str(result.get("channel", ""))
+            if channel not in self.channel_cards:
+                return
+            self._compliance_recovery_pending[channel] = False
+            self._pending_recovery_choice.pop(channel, None)
+            self._clear_channel_compliance(channel)
+            self._set_channel_output(channel, False)
+            restored_request = result.get("restored_request")
+            if isinstance(restored_request, KeithleySourceRequest):
+                self._apply_restored_source_request(restored_request)
+            choice = str(result.get("choice", "keep_off"))
+            self.banner.show_message(
+                f"Keithley CH {channel}: compliance acknowledged ({choice}); "
+                "OUTPUT remains OFF. Apply settings and enable it explicitly.",
+                severity="warning",
+                timeout_ms=12_000,
+            )
+            self.status.emit(
+                f"Keithley CH {channel}: compliance recovery complete; OUTPUT remains OFF"
+            )
         elif operation == "configure":
             channel = self._pending_channels.pop("configure", self.channel.currentText())
             mode = self._pending_config_modes.pop(channel, "measure_only")
@@ -3478,8 +4086,16 @@ class KeithleyPage(QWidget):
                 self.compliance.text(),
                 self.source_range.text(),
             )
-            self._update_channel_measurement(result.final_measurement)
-            self._set_channel_output(channel, True)
+            final_measurement = result.final_measurement
+            self._update_channel_measurement(final_measurement)
+            if getattr(final_measurement, "compliance_detected", False):
+                self._mark_channel_compliance(channel, final_measurement)
+                self._set_channel_output(
+                    channel, bool(getattr(final_measurement, "output_enabled", True))
+                )
+            else:
+                self._clear_channel_compliance(channel)
+                self._set_channel_output(channel, True)
             self.ramp_preview.setText(
                 f"Ramp completed: {len(result.levels_si)} point(s), target "
                 f"{result.target_si:.6g} SI."
@@ -3487,6 +4103,51 @@ class KeithleyPage(QWidget):
             self.status.emit(f"Keithley CH {channel}: manual ramp completed")
 
     def _error(self, operation: str, error: str) -> None:
+        if operation == "recover_from_compliance":
+            channel = next(
+                iter(self._pending_recovery_choice), self.channel.currentText()
+            )
+            if channel in self._compliance_recovery_pending:
+                self._compliance_recovery_pending[channel] = False
+                self._compliance_recovery_available.add(channel)
+                self._compliance_channels.add(channel)
+            self._update_output_readiness()
+            self._update_live_controls()
+            self.banner.show_message(
+                f"Keithley CH {channel} compliance recovery failed; that channel "
+                f"remains locked and OFF: {error}",
+                severity="error",
+                timeout_ms=0,
+            )
+            self.status.emit(
+                f"Keithley CH {channel} compliance recovery failed: {error}"
+            )
+            return
+        if operation == "set_compliance_policy":
+            channel = next(
+                iter(self._pending_compliance_policy), self.channel.currentText()
+            )
+            previous = self._previous_compliance_policy.pop(
+                channel, self._stop_on_compliance.get(channel, True)
+            )
+            self._pending_compliance_policy.pop(channel, None)
+            if channel in self._stop_on_compliance:
+                self._stop_on_compliance[channel] = previous
+            if channel in self.channel_cards:
+                toggle = self.channel_cards[channel]["stop_compliance_toggle"]
+                toggle.setEnabled(True)
+                toggle.blockSignals(True)
+                toggle.setChecked(previous)
+                toggle.blockSignals(False)
+            self._update_output_readiness()
+            self.banner.show_message(
+                f"Keithley CH {channel}: compliance policy was not applied; "
+                f"the previous setting remains active. {error}",
+                severity="error",
+                timeout_ms=15_000,
+            )
+            self.status.emit(f"Keithley CH {channel}: compliance policy failed: {error}")
+            return
         if operation == "set_dut_output_off_mode":
             channel = self._dut_isolation_channel
             restoring = self._dut_isolation_phase in {
@@ -3536,7 +4197,15 @@ class KeithleyPage(QWidget):
             channel = self._pending_channels.pop("ramp_to_level", self.channel.currentText())
             self._ramp_pending = False
             self.ramp_execute_button.setText("Ramp to target")
-            self._set_channel_output(channel, False)
+            if self._device_state_value == "COMPLIANCE":
+                # A ramp may terminate because this channel reached its
+                # hardware compliance. Preserve the other channel and reflect
+                # the selected policy instead of applying a blanket shutdown.
+                self._mark_channel_compliance(channel)
+                if not self._stop_on_compliance[channel]:
+                    self._set_channel_output(channel, True)
+            else:
+                self._set_channel_output(channel, False)
             self._update_ramp_defaults()
         if operation in {"configure", "set_output", "ramp_to_zero"}:
             self._auto_enable_channel = None

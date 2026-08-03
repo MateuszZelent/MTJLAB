@@ -92,6 +92,27 @@ def rigol_hardware_frequency_max_hz(waveform: str | None = None) -> float:
     )
 
 
+def rigol_hardware_frequency_min_hz() -> float:
+    """Return the documented minimum frequency resolution for UI bounds."""
+
+    return RIGOL_DG1000Z_FREQUENCY_RESOLUTION_HZ
+
+
+def rigol_hardware_voltage_bounds_v() -> tuple[float, float]:
+    """Return the conservative open-circuit peak voltage envelope."""
+
+    return -_DG1032Z_MAX_OPEN_CIRCUIT_PEAK_V, _DG1032Z_MAX_OPEN_CIRCUIT_PEAK_V
+
+
+def rigol_hardware_amplitude_bounds_vpp() -> tuple[float, float]:
+    """Return the documented open-circuit amplitude envelope."""
+
+    return (
+        _DG1032Z_MIN_OPEN_CIRCUIT_VPP,
+        max(value for _frequency, value in _DG1032Z_MAX_OPEN_CIRCUIT_VPP_BY_FREQUENCY),
+    )
+
+
 def _rigol_hardware_open_circuit_vpp_max(frequency_hz: float) -> float:
     for upper_frequency_hz, maximum_vpp in _DG1032Z_MAX_OPEN_CIRCUIT_VPP_BY_FREQUENCY:
         if frequency_hz <= upper_frequency_hz:

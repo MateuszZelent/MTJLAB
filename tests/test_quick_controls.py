@@ -18,6 +18,7 @@ from app.domain.quick_controls import (
 from app.domain.quantities import (
     DIMENSION_CURRENT,
     DIMENSION_FREQUENCY,
+    DIMENSION_VOLTAGE,
     format_quantity_auto,
     parse_quantity,
 )
@@ -167,6 +168,99 @@ class QuickControlTests(unittest.TestCase):
         rigol.result.emit("quick_setpoint", 1002.0)
         self.assertTrue(any(state == "applied" for _target, state, _detail in states))
 
+    def test_device_card_draft_is_available_to_quick_controls_state(self) -> None:
+        parent = QWidget()
+        coordinator = QuickControlCoordinator(
+            {"rigol": _FakeController(), "keithley": _FakeController()},
+            parent,
+        )
+        changes: list[tuple[str, str, str]] = []
+        coordinator.draft_changed.connect(
+            lambda target, text, source: changes.append((target, text, source))
+        )
+
+        coordinator.publish_draft("rigol.1.frequency", "12 kHz")
+
+        self.assertEqual(coordinator.draft_text("rigol.1.frequency"), "12 kHz")
+        self.assertEqual(
+            changes[-1], ("rigol.1.frequency", "12 kHz", "device_card")
+        )
+
+    def test_readback_does_not_overwrite_newer_device_card_draft(self) -> None:
+        parent = QWidget()
+        coordinator = QuickControlCoordinator(
+            {"rigol": _FakeController(), "keithley": _FakeController()},
+            parent,
+        )
+        coordinator.publish_draft("rigol.1.frequency", "12 kHz")
+
+        coordinator.confirmed_snapshot(
+            "rigol.1.frequency", 10_000.0, adopt_draft=False
+        )
+
+        self.assertEqual(coordinator.draft_text("rigol.1.frequency"), "12 kHz")
+
+    def test_confirmed_quick_setpoint_adopts_quantized_readback(self) -> None:
+        parent = QWidget()
+        coordinator = QuickControlCoordinator(
+            {"rigol": _FakeController(), "keithley": _FakeController()},
+            parent,
+        )
+        coordinator.publish_draft(
+            "rigol.1.frequency", "12 kHz", source="quick_controls"
+        )
+
+        coordinator.confirmed_snapshot(
+            "rigol.1.frequency", 12_001.0, adopt_draft=True
+        )
+
+        self.assertAlmostEqual(
+            parse_quantity(
+                coordinator.draft_text("rigol.1.frequency"), DIMENSION_FREQUENCY
+            ).si_value,
+            12_001.0,
+        )
+
+    def test_rigol_level_readback_adopts_every_coupled_quick_draft(self) -> None:
+        parent = QWidget()
+        rigol = _FakeController()
+        coordinator = QuickControlCoordinator(
+            {"rigol": rigol, "keithley": _FakeController()}, parent
+        )
+        for target, text in {
+            "rigol.1.amplitude": "0.200 V",
+            "rigol.1.high_level": "100 mV",
+            "rigol.1.low_level": "-100 mV",
+            "rigol.1.offset": "0 V",
+        }.items():
+            coordinator.publish_draft(target, text, source="quick_controls")
+
+        coordinator.submit("rigol.1.amplitude", "0.200 V")
+        rigol.result.emit("quick_setpoint", 0.201)
+        self.assertEqual(rigol.calls[-1][0], "quick_readback")
+        rigol.result.emit(
+            "quick_readback",
+            {
+                "rigol.1.amplitude": 0.201,
+                "rigol.1.high_level": 0.1005,
+                "rigol.1.low_level": -0.1005,
+                "rigol.1.offset": 0.0,
+            },
+        )
+
+        self.assertAlmostEqual(
+            parse_quantity(
+                coordinator.draft_text("rigol.1.high_level"), DIMENSION_VOLTAGE
+            ).si_value,
+            0.1005,
+        )
+        self.assertAlmostEqual(
+            parse_quantity(
+                coordinator.draft_text("rigol.1.amplitude"), DIMENSION_VOLTAGE
+            ).si_value,
+            0.201,
+        )
+
     def test_estop_cancels_pending_value_without_dispatching_it(self) -> None:
         parent = QWidget()
         rigol = _FakeController()
@@ -204,6 +298,19 @@ class QuickControlTests(unittest.TestCase):
                 bool(window.windowFlags() & Qt.WindowType.WindowStaysOnTopHint)
             )
             self.assertTrue(all(row.value.isVisibleTo(window) for row in window._rows.values()))
+            self.assertTrue(
+                all(
+                    row.slider.slider.isVisibleTo(window)
+                    and row.slider.slider.width() > 0
+                    and row.height() > 0
+                    for row in window._rows.values()
+                )
+            )
+            for target, row in window._rows.items():
+                bound = coordinator.bound(target)
+                if bound is not None:
+                    self.assertEqual(row.slider.minimum_label.text(), f"MIN  {bound.minimum_text}")
+                    self.assertEqual(row.slider.maximum_label.text(), f"MAX  {bound.maximum_text}")
             self.assertEqual(
                 window.controls_scroll.horizontalScrollBar().maximum(), 0
             )

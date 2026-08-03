@@ -114,6 +114,15 @@ QWidget#settingsPage QScrollArea#settingsForm > QWidget > QWidget {{
     background: transparent;
     border: none;
 }}
+QScrollArea#quickControlsScroll,
+QScrollArea#quickControlsScroll > QWidget,
+QScrollArea#quickControlsScroll > QWidget > QWidget {{
+    background: transparent;
+    border: none;
+}}
+QLabel#quickControlLimits {{
+    color: {tokens.text_muted};
+}}
 QWidget#settingsPage QTableWidget,
 QWidget#settingsPage QPlainTextEdit {{
     background: {tokens.surface_raised};
