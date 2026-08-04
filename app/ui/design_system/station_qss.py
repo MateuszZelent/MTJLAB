@@ -145,11 +145,16 @@ QWidget#settingsPage QLabel#settingsFieldError {{
     color: {tokens.danger};
 }}
 QLabel[deviceState="verified"], QLabel[outputState="off"],
+QLabel#quickOutputState[quickOutputState="on"],
+QLabel#quickOutputState[quickOutputState="off"],
 QLabel[stationState="connected"], QLabel[stationState="verified"],
 QLabel[stationState="output_off"] {{
     color: {tokens.success};
 }}
 QLabel[outputState="neutral"] {{
+    color: {tokens.text_muted};
+}}
+QLabel#quickOutputState[quickOutputState="unknown"] {{
     color: {tokens.text_muted};
 }}
 QLabel[deviceState="fault"], QLabel[safetyState="danger"],

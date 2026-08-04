@@ -31,6 +31,9 @@ def _dispatch(adapter: DeviceAdapter, operation: str, payload: object) -> object
     if operation == "set_output":
         channel, enabled = payload  # type: ignore[misc]
         return adapter.set_output(channel, enabled)
+    if operation == "set_output_group":
+        channels, enabled = payload  # type: ignore[misc]
+        return adapter.set_output_group(tuple(channels), bool(enabled))
     if operation == "set_dut_output_off_mode":
         channel, mode = payload  # type: ignore[misc]
         return adapter.set_dut_output_off_mode(channel, mode)

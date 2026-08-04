@@ -736,7 +736,7 @@ class KeithleyNodeEditorDialog(FluentRecipeDialog):
 
 
 class _KeithleyReadbackDialog(StationDialog):
-    """Modal, read-only comparison of both Keithley channel configurations."""
+    """Modeless, read-only comparison of both Keithley channel configurations."""
 
     assign_requested = Signal(str, str)
 
@@ -749,7 +749,12 @@ class _KeithleyReadbackDialog(StationDialog):
         super().__init__(parent)
         self.setObjectName("keithleyReadbackDialog")
         self.setWindowTitle("Keithley 2600 — settings read from device")
-        self.setModal(True)
+        # This is a read-only floating comparison surface.  It must not create
+        # an application-modal event loop: Quick Controls and other live
+        # windows remain valid operator surfaces while the snapshot is open.
+        self.setModal(False)
+        self.setWindowModality(Qt.WindowModality.NonModal)
+        self.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose, True)
         self.setMinimumSize(QSize(980, 620))
         self.setSizeGripEnabled(True)
         screen = QApplication.primaryScreen()
@@ -1122,6 +1127,7 @@ class _KeithleyFloatingPanelWindow(StationDialog):
         self.setObjectName("keithleyFloatingPanelWindow")
         self.setWindowFlag(Qt.WindowType.WindowStaysOnTopHint, True)
         self.setModal(False)
+        self.setWindowModality(Qt.WindowModality.NonModal)
         self.setMinimumSize(460, 230)
         self.resize(760, 360 if "plot" in title.lower() else 270)
         layout = QVBoxLayout(self)
@@ -1135,6 +1141,7 @@ class _KeithleyFloatingPanelWindow(StationDialog):
 
 class KeithleyPage(QWidget):
     status = Signal(str)
+    output_state_changed = Signal(str, str)
     quick_controls_requested = Signal()
     quick_setpoint_requested = Signal(str, str)
     quick_control_draft_changed = Signal(str, str)
@@ -1152,6 +1159,7 @@ class KeithleyPage(QWidget):
         self._execution_readbacks: dict[str, dict[str, object]] = {}
         self._pending_channels: dict[str, str] = {}
         self._pending_output_enabled: dict[str, bool] = {}
+        self._pending_output_group: tuple[tuple[str, ...], bool] | None = None
         self._pending_config_modes: dict[str, str] = {}
         self._configured_channels: set[str] = set()
         self._auto_enable_channel: str | None = None
@@ -1621,7 +1629,7 @@ class KeithleyPage(QWidget):
         elif output_state == "off":
             self._set_channel_output(channel, False)
         elif output_state == "unknown":
-            self._output_state_known[channel] = False
+            self._set_channel_output_unknown(channel)
             self._update_output_readiness()
             self._update_live_controls()
 
@@ -1693,7 +1701,7 @@ class KeithleyPage(QWidget):
             elif state == "off":
                 self._set_channel_output(channel, False)
             elif state == "unknown":
-                self._output_state_known[channel] = False
+                self._set_channel_output_unknown(channel)
 
         if event_name in {"action_started", "manual_stage_waiting"}:
             channel_hint = event.get("channel")
@@ -2470,21 +2478,7 @@ class KeithleyPage(QWidget):
             self.output_toggle.blockSignals(False)
             self._style_output_toggle(False)
             for channel in ("A", "B"):
-                widgets = self.channel_cards[channel]
-                widgets["output"].setText("OUTPUT UNKNOWN")
-                widgets["output"].setProperty("outputState", "neutral")
-                widgets["led"].setProperty("outputState", "neutral")
-                widgets["output_on_action"].setChecked(False)
-                widgets["output_on_action"].setProperty(
-                    "controlState", "available"
-                )
-                for widget in (
-                    widgets["output"],
-                    widgets["led"],
-                    widgets["output_on_action"],
-                ):
-                    widget.style().unpolish(widget)
-                    widget.style().polish(widget)
+                self._set_channel_output_unknown(channel)
         elif normalized == "VERIFIED":
             # Connection qualification explicitly forces and verifies both outputs OFF.
             self._compliance_channels.clear()
@@ -2528,21 +2522,7 @@ class KeithleyPage(QWidget):
                 self._compliance_recovery_pending[channel] = False
             self._output_state_known = {"A": False, "B": False}
             for channel in ("A", "B"):
-                widgets = self.channel_cards[channel]
-                widgets["output"].setText("OUTPUT UNKNOWN")
-                widgets["output"].setProperty("outputState", "neutral")
-                widgets["led"].setProperty("outputState", "neutral")
-                widgets["output_on_action"].setChecked(False)
-                widgets["output_on_action"].setProperty(
-                    "controlState", "available"
-                )
-                for widget in (
-                    widgets["output"],
-                    widgets["led"],
-                    widgets["output_on_action"],
-                ):
-                    widget.style().unpolish(widget)
-                    widget.style().polish(widget)
+                self._set_channel_output_unknown(channel)
         self._update_live_controls()
         self._update_output_readiness()
 
@@ -2709,6 +2689,41 @@ class KeithleyPage(QWidget):
         self._update_ramp_defaults()
         self._update_output_readiness()
         self._update_live_controls()
+        self.output_state_changed.emit(channel, "on" if enabled else "off")
+
+    def _set_channel_output_unknown(self, channel: str) -> None:
+        self._output_state_known[channel] = False
+        widgets = self.channel_cards[channel]
+        widgets["output"].setText("OUTPUT UNKNOWN")
+        widgets["output"].setProperty("outputState", "neutral")
+        widgets["led"].setProperty("outputState", "neutral")
+        widgets["output_on_action"].setChecked(False)
+        widgets["output_on_action"].setProperty("controlState", "available")
+        for widget in (
+            widgets["output"],
+            widgets["led"],
+            widgets["output_on_action"],
+        ):
+            widget.style().unpolish(widget)
+            widget.style().polish(widget)
+        if channel == self.channel.currentText():
+            self.output_toggle.blockSignals(True)
+            self.output_toggle.setChecked(False)
+            self.output_toggle.blockSignals(False)
+            self._style_output_toggle(False)
+        self.output_state_changed.emit(channel, "unknown")
+
+    def output_state_snapshot(self) -> dict[str, str]:
+        return {
+            channel: (
+                "unknown"
+                if not self._output_state_known[channel]
+                else "on"
+                if self._output_states[channel]
+                else "off"
+            )
+            for channel in ("A", "B")
+        }
 
     def request_measurement(self, channel: str | None = None) -> None:
         selected = channel or self.channel.currentText()
@@ -2798,6 +2813,21 @@ class KeithleyPage(QWidget):
             raise ValueError(f"Unknown Keithley channel {channel!r}.")
         self.channel.setCurrentText(channel)
         self._request_channel_output(channel, enabled)
+
+    def request_output_group(
+        self, channels: tuple[str, ...], enabled: bool
+    ) -> None:
+        """Request a verified group transition without inferring channel state."""
+
+        normalized = tuple(channels)
+        if not normalized or any(channel not in self.channel_cards for channel in normalized):
+            raise ValueError(f"Unknown Keithley output group {normalized!r}.")
+        if len(set(normalized)) != len(normalized):
+            raise ValueError("Keithley output group cannot contain duplicate channels.")
+        if self._pending_output_group is not None:
+            return
+        self._pending_output_group = (normalized, bool(enabled))
+        self._controller.call("set_output_group", (normalized, bool(enabled)))
 
     def _selected_live_channels(self) -> list[str]:
         return [
@@ -3562,6 +3592,9 @@ class KeithleyPage(QWidget):
         readback: KeithleyConfigurationReadback,
     ) -> None:
         self._remember_source_values()
+        existing = self._readback_dialog
+        if existing is not None:
+            existing.close()
         dialog = _KeithleyReadbackDialog(
             readback, dict(self._channel_form_snapshots), self
         )
@@ -3571,7 +3604,16 @@ class KeithleyPage(QWidget):
             )
         )
         self._readback_dialog = dialog
-        dialog.exec()
+        dialog.finished.connect(
+            lambda _result, current=dialog: self._readback_dialog_finished(current)
+        )
+        dialog.show()
+        dialog.raise_()
+        dialog.activateWindow()
+
+    def _readback_dialog_finished(self, dialog: _KeithleyReadbackDialog) -> None:
+        if self._readback_dialog is dialog:
+            self._readback_dialog = None
 
     def _assign_configuration_readback(
         self,
@@ -4071,6 +4113,23 @@ class KeithleyPage(QWidget):
             self.status.emit(
                 f"Keithley CH {channel} OUTPUT {'ON' if actual_enabled else 'OFF'}"
             )
+        elif operation == "set_output_group":
+            pending = self._pending_output_group
+            self._pending_output_group = None
+            if isinstance(result, Mapping):
+                for channel, actual_enabled in result.items():
+                    if channel in self.channel_cards and isinstance(actual_enabled, bool):
+                        self._set_channel_output(channel, actual_enabled)
+                if pending is not None:
+                    self.status.emit(
+                        "Keithley CH "
+                        + "+".join(pending[0])
+                        + " OUTPUT "
+                        + ("ON" if all(bool(result.get(ch)) for ch in pending[0]) else "OFF")
+                    )
+            elif pending is not None:
+                for channel in pending[0]:
+                    self._set_channel_output_unknown(channel)
         elif operation == "ramp_to_zero":
             channel = self._pending_channels.pop("ramp_to_zero", self.channel.currentText())
             self._set_channel_output(channel, False)
@@ -4193,6 +4252,12 @@ class KeithleyPage(QWidget):
         if operation == "set_output":
             channel = self._pending_channels.get("set_output", self.channel.currentText())
             self._pending_output_enabled.pop(channel, None)
+        if operation == "set_output_group":
+            pending = self._pending_output_group
+            self._pending_output_group = None
+            if pending is not None:
+                for channel in pending[0]:
+                    self._set_channel_output_unknown(channel)
         if operation == "ramp_to_level":
             channel = self._pending_channels.pop("ramp_to_level", self.channel.currentText())
             self._ramp_pending = False
@@ -4222,6 +4287,7 @@ class KeithleyPage(QWidget):
             "read_configuration",
             "measure",
             "set_output",
+            "set_output_group",
             "ramp_to_zero",
             "ramp_to_level",
         }:

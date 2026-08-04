@@ -256,6 +256,9 @@ class InstrumentWorker(QObject):
             if operation == "set_output":
                 channel, enabled = payload  # type: ignore[misc]
                 return self._adapter.set_output(channel, enabled)
+            if operation == "set_output_group":
+                channels, enabled = payload  # type: ignore[misc]
+                return self._adapter.set_output_group(tuple(channels), bool(enabled))
             if operation == "configure_modulation":
                 return self._adapter.configure_modulation(payload)  # type: ignore[arg-type]
             if operation == "configure_sweep":

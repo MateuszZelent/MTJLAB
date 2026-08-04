@@ -2,8 +2,8 @@
 
 ## Goal
 
-Make the Keithley 2600 read-only configuration dialog understandable and
-usable at its first opening size while preserving the existing query-only
+Make the Keithley 2600 modeless, read-only configuration dialog understandable
+and usable at its first opening size while preserving the existing query-only
 readback and explicit assignment workflows.
 
 ## Scope
@@ -87,7 +87,8 @@ table.
 ## Safety and compatibility invariants
 
 - `read_configuration()` remains query-only and no OUTPUT state changes.
-- The dialog remains modal and read-only.
+- The dialog remains modeless and read-only so other floating station surfaces
+  remain interactive while the snapshot is open.
 - No assignment is performed unless the operator explicitly presses a row or
   footer action.
 - OUTPUT state and OUTPUT OFF mode remain excluded from assignment.
@@ -99,7 +100,8 @@ table.
 ## Verification
 
 Focused tests will verify the exact new headers, comparison copy and action
-labels, the range explanation, the non-assignable output rows, the modal
+labels, the range explanation, the non-assignable output rows, the modeless
 geometry after `show()` at normal and narrow sizes, and the existing readback
-assignment behavior. The relevant Keithley UI tests plus `ruff check app tests`
-will be run before completion.
+assignment behavior. A two-floating-window regression also proves that the
+readback surface does not block Quick Controls; the relevant Keithley UI tests
+plus `ruff check app tests` will be run before completion.

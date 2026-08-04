@@ -6,8 +6,10 @@ import unittest
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
-from PySide6.QtCore import QObject, QSettings, Qt, Signal
+from PySide6.QtCore import QObject, QPoint, QSettings, Qt, Signal
+from PySide6.QtGui import QPalette
 from PySide6.QtWidgets import QApplication, QWidget
+from qfluentwidgets import FluentWidget
 
 from app.domain.quick_controls import (
     QuickControlCommand,
@@ -23,7 +25,14 @@ from app.domain.quantities import (
     parse_quantity,
 )
 from app.recipes.parameter_registry import QUICK_CONTROLS_BY_TARGET
-from app.ui.quick_controls import QuickControlCoordinator, QuickControlsWindow
+from app.ui.design_system.fluent_theme import apply_application_theme
+from app.ui.design_system.tokens import tokens_for
+from app.ui.quick_controls import (
+    QUICK_OUTPUT_TARGETS,
+    QuickControlCoordinator,
+    QuickControlPicker,
+    QuickControlsWindow,
+)
 from tests.helpers import simulation_settings
 
 
@@ -49,7 +58,11 @@ class QuickControlTests(unittest.TestCase):
         settings = QSettings("LabControl", "LabControl")
         self._saved_settings = {
             key: (settings.contains(key), settings.value(key))
-            for key in ("quick_controls/targets", "quick_controls/geometry")
+            for key in (
+                "quick_controls/targets",
+                "quick_controls/outputs",
+                "quick_controls/geometry",
+            )
         }
 
     def tearDown(self) -> None:
@@ -314,12 +327,221 @@ class QuickControlTests(unittest.TestCase):
             self.assertEqual(
                 window.controls_scroll.horizontalScrollBar().maximum(), 0
             )
+            self.assertEqual(window.controls_scroll.verticalScrollBar().value(), 0)
             coordinator.refresh()
             self.assertEqual(controllers["rigol"].calls[-1][0], "quick_readback")
             controllers["rigol"].result.emit(
                 "quick_readback", {"rigol.1.frequency": 2_000.0}
             )
             self.assertIn("kHz", window._rows["rigol.1.frequency"].value.text())
+        finally:
+            window.close()
+
+    def test_floating_window_is_fluent_and_exposes_independent_output_rows(self) -> None:
+        parent = QWidget()
+        controllers = {"rigol": _FakeController(), "keithley": _FakeController()}
+        coordinator = QuickControlCoordinator(controllers, parent)  # type: ignore[arg-type]
+        window = QuickControlsWindow(coordinator, parent)
+        output_requests: list[tuple[str, str, bool]] = []
+        group_requests: list[tuple[str, bool]] = []
+        window.output_requested.connect(
+            lambda device, channel, enabled: output_requests.append(
+                (device, channel, enabled)
+            )
+        )
+        window.output_group_requested.connect(
+            lambda device, enabled: group_requests.append((device, enabled))
+        )
+        try:
+            self.assertIsInstance(window, FluentWidget)
+            window.show()
+            self.application.processEvents()
+            self.assertGreater(window.width(), 0)
+            self.assertGreater(window.height(), 0)
+
+            window._output_rows[("keithley", "A")].on_button.click()
+            window._output_rows[("keithley", "B")].on_button.click()
+            window._output_group_buttons["keithley"].click()
+
+            self.assertEqual(
+                output_requests,
+                [("keithley", "A", True), ("keithley", "B", True)],
+            )
+            self.assertEqual(group_requests, [("keithley", True)])
+
+            window.set_output_state("keithley", "A", "on")
+            window.set_output_state("keithley", "B", "unknown")
+            self.assertEqual(window._output_rows[("keithley", "A")].state.text(), "ON")
+            self.assertEqual(
+                window._output_rows[("keithley", "B")].state.text(), "UNKNOWN"
+            )
+        finally:
+            window.close()
+
+    def test_output_channels_are_configurable_from_choose_and_collapse_cleanly(self) -> None:
+        parent = QWidget()
+        coordinator = QuickControlCoordinator(
+            {"rigol": _FakeController(), "keithley": _FakeController()},
+            parent,
+        )
+        window = QuickControlsWindow(coordinator, parent)
+        try:
+            self.assertEqual(window.output_targets(), QUICK_OUTPUT_TARGETS)
+            window.set_output_targets(("output.keithley.B", "output.keithley.group"))
+            self.assertEqual(
+                window.output_targets(),
+                ("output.keithley.B", "output.keithley.group"),
+            )
+            window.show()
+            self.application.processEvents()
+            self.assertFalse(window._output_rows[("rigol", "1")].isVisible())
+            self.assertFalse(window._output_rows[("keithley", "A")].isVisible())
+            self.assertTrue(window._output_rows[("keithley", "B")].isVisibleTo(window))
+            self.assertTrue(window._output_group_containers["keithley"].isVisibleTo(window))
+            self.assertLessEqual(window._output_rows[("keithley", "B")].on_button.width(), 42)
+            self.assertLessEqual(window._output_rows[("keithley", "B")].off_button.width(), 42)
+        finally:
+            window.close()
+
+    def test_choose_picker_exposes_output_visibility_choices(self) -> None:
+        parent = QWidget()
+        picker = QuickControlPicker(
+            ("keithley.A.current",),
+            ("output.keithley.A", "output.keithley.group"),
+            parent,
+        )
+        self.assertTrue(picker.output_checkboxes["output.keithley.A"].isChecked())
+        self.assertFalse(picker.output_checkboxes["output.keithley.B"].isChecked())
+        self.assertTrue(picker.output_checkboxes["output.keithley.group"].isChecked())
+        self.assertEqual(
+            picker.selected_output_targets(),
+            ("output.keithley.A", "output.keithley.group"),
+        )
+        picker.close()
+
+    def test_panel_has_theme_contrast_and_expands_with_the_window(self) -> None:
+        parent = QWidget()
+        coordinator = QuickControlCoordinator(
+            {"rigol": _FakeController(), "keithley": _FakeController()},
+            parent,
+        )
+        window = QuickControlsWindow(coordinator, parent)
+        previous_theme = self.application.property("stationAppliedTheme")
+        try:
+            self.assertGreater(
+                window.maximumSize().width(), window.minimumSize().width()
+            )
+            self.assertTrue(
+                bool(window.windowFlags() & Qt.WindowType.WindowMaximizeButtonHint)
+            )
+            window.show()
+            self.application.processEvents()
+            self.assertTrue(window.titleBar.maxBtn.isVisible())
+            self.assertEqual(window.property("stationSurface"), "raised")
+            self.assertEqual(window.backdrop.property("stationSurface"), "raised")
+
+            for theme in ("light", "dark"):
+                apply_application_theme(self.application, theme)
+                window.show()
+                self.application.processEvents()
+                self.assertEqual(
+                    window.backdrop.palette()
+                    .color(QPalette.ColorRole.Window)
+                    .name(),
+                    tokens_for(theme).surface_raised,
+                )
+
+            initial_width = window.surface.width()
+            window.resize(520, 680)
+            self.application.processEvents()
+            self.assertEqual(window._output_layout_mode, "wide")
+            window.resize(420, 620)
+            self.application.processEvents()
+            self.assertEqual(window._output_layout_mode, "narrow")
+            self.assertEqual(window.controls_scroll.horizontalScrollBar().maximum(), 0)
+            window.resize(760, 820)
+            self.application.processEvents()
+            self.assertGreater(window.surface.width(), initial_width)
+            self.assertGreater(window.controls_scroll.viewport().width(), 500)
+        finally:
+            window.close()
+            if previous_theme in {"light", "dark"}:
+                apply_application_theme(self.application, previous_theme)
+
+    def test_quick_controls_auto_fit_height_and_caps_at_seventy_percent(self) -> None:
+        parent = QWidget()
+        coordinator = QuickControlCoordinator(
+            {"rigol": _FakeController(), "keithley": _FakeController()},
+            parent,
+            settings=simulation_settings(approved=True),
+        )
+        window = QuickControlsWindow(coordinator, parent)
+        # Keep the rendering assertion deterministic on both offscreen CI and
+        # a developer workstation with a different monitor resolution.
+        window._screen_available_height = lambda: 1000  # type: ignore[method-assign]
+        try:
+            window.set_targets(())
+            window.show()
+            self.application.processEvents()
+            empty_height = window.height()
+
+            window.set_targets(("keithley.A.current",))
+            self.application.processEvents()
+            one_control_height = window.height()
+
+            window.set_targets(tuple(coordinator._bounds))
+            self.application.processEvents()
+            many_controls_height = window.height()
+
+            self.assertGreater(one_control_height, empty_height)
+            self.assertGreater(many_controls_height, one_control_height)
+            self.assertLessEqual(many_controls_height, 700)
+            self.assertGreater(
+                window.controls_content.sizeHint().height(),
+                window.controls_scroll.viewport().height(),
+            )
+
+            # The cap belongs to automatic fitting; an explicit user resize
+            # remains available so the existing resize handles stay useful.
+            window.resize(window.width(), 760)
+            self.application.processEvents()
+            self.assertGreater(window.height(), 700)
+
+            window.set_targets(())
+            self.application.processEvents()
+            self.assertLess(window.height(), 760)
+        finally:
+            window.close()
+
+    def test_resize_handles_expose_cursor_zones_and_resize_the_frameless_window(self) -> None:
+        parent = QWidget()
+        coordinator = QuickControlCoordinator(
+            {"rigol": _FakeController(), "keithley": _FakeController()},
+            parent,
+        )
+        window = QuickControlsWindow(coordinator, parent)
+        try:
+            window.show()
+            self.application.processEvents()
+            expected_cursors = {
+                "left": Qt.CursorShape.SizeHorCursor,
+                "right": Qt.CursorShape.SizeHorCursor,
+                "top": Qt.CursorShape.SizeVerCursor,
+                "bottom": Qt.CursorShape.SizeVerCursor,
+                "top_left": Qt.CursorShape.SizeFDiagCursor,
+                "bottom_right": Qt.CursorShape.SizeFDiagCursor,
+                "top_right": Qt.CursorShape.SizeBDiagCursor,
+                "bottom_left": Qt.CursorShape.SizeBDiagCursor,
+            }
+            self.assertEqual(set(window._resize_handles), set(expected_cursors))
+            for name, cursor in expected_cursors.items():
+                handle = window._resize_handles[name]
+                self.assertTrue(handle.isVisible())
+                self.assertEqual(handle.cursor().shape(), cursor)
+
+            initial_width = window.width()
+            window._resize_handles["right"]._resize_from_delta(QPoint(80, 0))
+            self.assertGreaterEqual(window.width(), initial_width + 80)
         finally:
             window.close()
 

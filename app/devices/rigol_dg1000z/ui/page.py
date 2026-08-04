@@ -77,6 +77,7 @@ class _RigolUiOperation:
 
 class RigolPage(QWidget):
     status = Signal(str)
+    output_state_changed = Signal(str, str)
     quick_controls_requested = Signal()
     quick_setpoint_requested = Signal(str, str)
     quick_control_draft_changed = Signal(str, str)
@@ -250,7 +251,7 @@ class RigolPage(QWidget):
         self.sync_phases_button = PushButton("Synchronize CH1/CH2 phases")
         self.sync_phases_button.setEnabled(False)
         self.output_on = PushButton("OUTPUT ON")
-        self.output_on.setCheckable(False)
+        self.output_on.setCheckable(True)
         self.output_off = PushButton("OUTPUT OFF")
         self.output_on.setEnabled(False)
         self.output_off.setEnabled(False)
@@ -640,7 +641,7 @@ class RigolPage(QWidget):
         elif output_state == "off":
             self._set_rigol_channel_output(channel, False)
         elif output_state == "unknown":
-            self._output_state_known[channel] = False
+            self._set_rigol_channel_output_unknown(channel)
             self._refresh_rigol_output_controls()
         if channel != int(self.channel.currentText()):
             return
@@ -680,7 +681,7 @@ class RigolPage(QWidget):
             elif state == "off":
                 self._set_rigol_channel_output(channel, False)
             elif state == "unknown":
-                self._output_state_known[channel] = False
+                self._set_rigol_channel_output_unknown(channel)
 
         if event_name in {"action_started", "manual_stage_waiting"}:
             channel_hint = event.get("channel")
@@ -1574,6 +1575,7 @@ class RigolPage(QWidget):
             for channel in (1, 2):
                 self._output_states[channel] = False
                 self._output_state_known[channel] = True
+                self.output_state_changed.emit(str(channel), "off")
         elif normalized == "output_on":
             # The controller state confirms that at least one physical output
             # is active, but it does not identify CH1/CH2.  Never paint the
@@ -1581,15 +1583,16 @@ class RigolPage(QWidget):
             # aggregate state alone; wait for the channel-specific result.
             if self._pending_output_channel is not None:
                 self._output_state_known[self._pending_output_channel] = False
+                self.output_state_changed.emit(str(self._pending_output_channel), "unknown")
             elif not any(
                 self._output_state_known[channel] and self._output_states[channel]
                 for channel in (1, 2)
             ):
                 for channel in (1, 2):
-                    self._output_state_known[channel] = False
+                    self._set_rigol_channel_output_unknown(channel)
         elif normalized in {"disconnected", "fault", "unknown"}:
             for channel in (1, 2):
-                self._output_state_known[channel] = False
+                self._set_rigol_channel_output_unknown(channel)
                 self._confirmed_carrier_configs[channel] = None
                 for mode in ("modulation", "sweep", "burst"):
                     self._confirmed_advanced_states[channel][mode] = None
@@ -1657,6 +1660,24 @@ class RigolPage(QWidget):
         self._output_states[channel] = enabled
         self._output_state_known[channel] = True
         self._refresh_rigol_output_controls()
+        self.output_state_changed.emit(str(channel), "on" if enabled else "off")
+
+    def _set_rigol_channel_output_unknown(self, channel: int) -> None:
+        self._output_state_known[channel] = False
+        self._refresh_rigol_output_controls()
+        self.output_state_changed.emit(str(channel), "unknown")
+
+    def output_state_snapshot(self) -> dict[str, str]:
+        return {
+            str(channel): (
+                "unknown"
+                if not self._output_state_known[channel]
+                else "on"
+                if self._output_states[channel]
+                else "off"
+            )
+            for channel in (1, 2)
+        }
 
     def _refresh_rigol_output_controls(self) -> None:
         channel = int(self.channel.currentText())
@@ -2472,6 +2493,11 @@ class RigolPage(QWidget):
             )
             if self._pending_output_matches(request, stage="set_output"):
                 self._clear_pending_output(request_id=request.request_id)
+            elif request is None and self._pending_output_channel == channel:
+                # Deterministic controller/test results can arrive without a
+                # UI operation envelope; the channel-specific result still
+                # conclusively closes its matching pending state.
+                self._clear_pending_output()
             self._set_rigol_channel_output(channel, bool(result))
             self.status.emit(
                 f"Rigol CH{channel} OUTPUT "
@@ -2521,10 +2547,9 @@ class RigolPage(QWidget):
                 if self._pending_output_matches(request):
                     self._clear_pending_output(request_id=request.request_id)
                 if self._device_state_value in {"verified", "output_off"}:
-                    self._output_states[channel] = False
-                    self._output_state_known[channel] = True
+                    self._set_rigol_channel_output(channel, False)
                 else:
-                    self._output_state_known[channel] = False
+                    self._set_rigol_channel_output_unknown(channel)
                 self._refresh_rigol_output_controls()
             QMessageBox.warning(
                 self,

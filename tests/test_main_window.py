@@ -178,15 +178,21 @@ class MainWindowTests(unittest.TestCase):
         try:
             window._audit_healthy = False
             with self.assertRaisesRegex(Exception, "audit log is unavailable"):
-                window._guard_manual_operation("set_output", (1, True))
+                window._guard_manual_operation("keithley", "set_output", (1, True))
             with self.assertRaisesRegex(Exception, "audit log is unavailable"):
-                window._guard_manual_operation("ramp_to_level", object())
+                window._guard_manual_operation("keithley", "ramp_to_level", object())
             with self.assertRaisesRegex(Exception, "audit log is unavailable"):
-                window._guard_manual_operation("set_signal_generator_output", True)
-            window._guard_manual_operation("set_output", (1, False))
-            window._guard_manual_operation("set_signal_generator_output", False)
-            window._guard_manual_operation("emergency_off", None)
-            window._guard_manual_operation("recover_from_compliance", None)
+                window._guard_manual_operation(
+                    "anritsu", "set_signal_generator_output", True
+                )
+            with self.assertRaisesRegex(Exception, "audit log is unavailable"):
+                window._guard_manual_operation(
+                    "keithley", "set_output_group", (("A", "B"), True)
+                )
+            window._guard_manual_operation("keithley", "set_output", (1, False))
+            window._guard_manual_operation("anritsu", "set_signal_generator_output", False)
+            window._guard_manual_operation("keithley", "emergency_off", None)
+            window._guard_manual_operation("keithley", "recover_from_compliance", None)
         finally:
             window.close()
             self.application.processEvents()
@@ -3475,7 +3481,7 @@ class MainWindowTests(unittest.TestCase):
             window.close()
             self.application.processEvents()
 
-    def test_keithley_reads_both_channels_and_shows_modal_configuration(self) -> None:
+    def test_keithley_reads_both_channels_and_shows_modeless_configuration(self) -> None:
         window = MainWindow(".config/settings.yml", simulation=True)
         try:
             keithley = window.keithley_page
@@ -3530,14 +3536,13 @@ class MainWindowTests(unittest.TestCase):
                     ),
                 )
             )
-            with patch(
-                "app.devices.keithley_2600.ui.page._KeithleyReadbackDialog.exec",
-                return_value=0,
-            ):
-                keithley._result("read_configuration", readback)
+            keithley._result("read_configuration", readback)
 
             dialog = keithley._readback_dialog
-            self.assertTrue(dialog.isModal())
+            self.assertIsNotNone(dialog)
+            assert dialog is not None
+            self.assertFalse(dialog.isModal())
+            self.assertEqual(dialog.windowModality(), Qt.WindowModality.NonModal)
             self.assertEqual(dialog.table.rowCount(), 13)
             headers = [
                 dialog.table.horizontalHeaderItem(column).text()
@@ -3849,6 +3854,127 @@ class MainWindowTests(unittest.TestCase):
             self.assertIn(first.fit_model, {"Gaussian", "Lorentzian"})
         finally:
             window.close()
+            self.application.processEvents()
+
+    def test_keithley_group_output_dispatches_both_channels_and_publishes_state(self) -> None:
+        window = MainWindow(".config/settings.yml", simulation=True)
+        try:
+            keithley = window.keithley_page
+            keithley._controller.call = Mock()
+            keithley._device_state_changed("verified")
+            states: list[tuple[str, str]] = []
+            keithley.output_state_changed.connect(
+                lambda channel, state: states.append((channel, state))
+            )
+
+            keithley.request_output_group(("A", "B"), True)
+            self.assertEqual(
+                keithley._controller.call.call_args.args,
+                ("set_output_group", (("A", "B"), True)),
+            )
+
+            keithley._result("set_output_group", {"A": True, "B": True})
+            self.assertEqual(keithley._output_states, {"A": True, "B": True})
+            self.assertIn(("A", "on"), states)
+            self.assertIn(("B", "on"), states)
+        finally:
+            window.close()
+            self.application.processEvents()
+
+    def test_quick_controls_stays_independent_from_keithley_readback_window(self) -> None:
+        window = MainWindow(".config/settings.yml", simulation=True)
+        try:
+            quick = window.quick_controls_window
+            quick.show()
+            self.application.processEvents()
+            readback = KeithleyConfigurationReadback(
+                channels=(
+                    KeithleyChannelConfigurationReadback(
+                        channel="A",
+                        output_enabled=False,
+                        output_off_mode="normal",
+                        source_mode="current",
+                        source_level_si=0.001,
+                        compliance_si=0.067,
+                        source_autorange=True,
+                        source_range_si=0.1,
+                        nplc=1.0,
+                        sense_mode="2wire",
+                        measure_voltage_autorange=True,
+                        measure_voltage_range_v=0.1,
+                        measure_current_autorange=True,
+                        measure_current_range_a=0.1,
+                    ),
+                    KeithleyChannelConfigurationReadback(
+                        channel="B",
+                        output_enabled=False,
+                        output_off_mode="normal",
+                        source_mode="current",
+                        source_level_si=0.001,
+                        compliance_si=0.067,
+                        source_autorange=True,
+                        source_range_si=0.1,
+                        nplc=1.0,
+                        sense_mode="2wire",
+                        measure_voltage_autorange=True,
+                        measure_voltage_range_v=0.1,
+                        measure_current_autorange=True,
+                        measure_current_range_a=0.1,
+                    ),
+                )
+            )
+            observed: dict[str, object] = {}
+
+            def inspect_and_close_readback() -> None:
+                dialog = window.keithley_page._readback_dialog
+                self.assertIsNotNone(dialog)
+                assert dialog is not None
+                observed["modal"] = dialog.isModal()
+                observed["modality"] = dialog.windowModality()
+                observed["visible"] = dialog.isVisible()
+                observed["active_modal"] = self.application.activeModalWidget()
+                observed["quick_enabled"] = quick.isEnabled()
+                dialog.close()
+
+            QTimer.singleShot(0, inspect_and_close_readback)
+            window.keithley_page._show_configuration_readback(readback)
+            self.application.processEvents()
+
+            self.assertFalse(observed["modal"])
+            self.assertEqual(observed["modality"], Qt.WindowModality.NonModal)
+            self.assertTrue(observed["visible"])
+            self.assertIsNone(observed["active_modal"])
+            self.assertTrue(observed["quick_enabled"])
+            self.assertIsNone(window.keithley_page._readback_dialog)
+        finally:
+            window.close()
+            self.application.processEvents()
+
+    def test_main_window_closes_owned_floating_windows_on_shutdown(self) -> None:
+        window = MainWindow(".config/settings.yml", simulation=True)
+        keithley = window.keithley_page
+        keithley._detach_panel("channel_A")
+        floating_panel = keithley._floating_panels["channel_A"]
+        floating_destroyed: list[bool] = []
+        floating_panel.destroyed.connect(lambda: floating_destroyed.append(True))
+        window.quick_controls_window.show()
+        floating_panel.show()
+        self.application.processEvents()
+        self.assertTrue(floating_panel.isVisible())
+        self.assertFalse(floating_panel.isModal())
+        self.assertEqual(floating_panel.windowModality(), Qt.WindowModality.NonModal)
+        self.assertEqual(
+            window.quick_controls_window.windowModality(), Qt.WindowModality.NonModal
+        )
+        try:
+            window.close()
+            self.application.processEvents()
+            self.assertFalse(window.isVisible())
+            self.assertTrue(floating_destroyed)
+            self.assertFalse(window.quick_controls_window.isVisible())
+        finally:
+            if window.isVisible():
+                window.close()
             self.application.processEvents()
 
     def test_keithley_per_channel_compliance_does_not_stop_other_channel(self) -> None:

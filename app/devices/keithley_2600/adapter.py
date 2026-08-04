@@ -1230,24 +1230,8 @@ class KeithleyAdapter(DeviceAdapter):
     def set_output(self, channel: Literal["A", "B"], enabled: bool) -> bool:
         if channel not in {"A", "B"}:
             raise SafetyViolation("Keithley channel must be A or B.")
-        if enabled and channel in self._compliance_channels:
-            raise SafetyViolation(
-                f"Keithley channel {channel} compliance stop is latched. Choose "
-                "a recovery action before enabling OUTPUT."
-            )
-        settings = self._channel_settings(channel)
         if enabled:
-            if not self._settings.safety.allow_output_enable:
-                raise SafetyViolation(
-                    "Keithley OUTPUT ON is disabled in the station configuration."
-                )
-            request = self._last_request.get(channel)
-            if request is None:
-                raise SafetyViolation("Configure a safe Keithley source before enabling OUTPUT.")
-            validate_keithley_source(settings, request)
-            self._assert_compliance_increase_allowed(
-                channel, request.level_si, mode=request.mode
-            )
+            request = self._validate_output_enable(channel)
             self._ensure_normal_output_off_mode(channel)
             # Re-read the complete programmed source immediately before the
             # single energising transition. This also proves OUTPUT is still
@@ -1270,6 +1254,87 @@ class KeithleyAdapter(DeviceAdapter):
         self._output_states[channel] = active
         self._update_aggregate_output_state()
         return active
+
+    def _validate_output_enable(
+        self, channel: Literal["A", "B"]
+    ) -> KeithleySourceRequest:
+        """Validate one channel without performing an OUTPUT transition."""
+
+        if channel in self._compliance_channels:
+            raise SafetyViolation(
+                f"Keithley channel {channel} compliance stop is latched. Choose "
+                "a recovery action before enabling OUTPUT."
+            )
+        if not self._settings.safety.allow_output_enable:
+            raise SafetyViolation(
+                "Keithley OUTPUT ON is disabled in the station configuration."
+            )
+        request = self._last_request.get(channel)
+        if request is None:
+            raise SafetyViolation("Configure a safe Keithley source before enabling OUTPUT.")
+        settings = self._channel_settings(channel)
+        validate_keithley_source(settings, request)
+        self._assert_compliance_increase_allowed(
+            channel, request.level_si, mode=request.mode
+        )
+        return request
+
+    def set_output_group(
+        self,
+        channels: tuple[Literal["A", "B"], ...],
+        enabled: bool,
+    ) -> dict[str, bool]:
+        """Apply one deliberate, readback-verified output state to channels.
+
+        Group enable validates every channel before the first energising write,
+        then enables in deterministic A-then-B order. A failure after a
+        transition uses the all-channel emergency-off path, so a partially
+        enabled group cannot be reported as successful.
+        """
+
+        requested = tuple(channels)
+        if not requested or any(channel not in {"A", "B"} for channel in requested):
+            raise SafetyViolation("Keithley output group must contain channel A or B.")
+        if len(set(requested)) != len(requested):
+            raise SafetyViolation("Keithley output group cannot contain duplicate channels.")
+        ordered = tuple(channel for channel in ("A", "B") if channel in requested)
+
+        if enabled:
+            # Complete validation happens before any channel is energised.
+            before_states: dict[str, bool] = {}
+            for channel in ordered:
+                request = self._validate_output_enable(channel)
+                actual = self._output_is_enabled(channel)
+                if actual != self._output_states[channel]:
+                    self._fail_measurement_output_invariant(
+                        f"Keithley channel {channel} OUTPUT changed outside the "
+                        "group control path."
+                    )
+                before_states[channel] = actual
+            results: dict[str, bool] = {}
+            try:
+                for channel in ordered:
+                    if before_states[channel]:
+                        request = self._last_request[channel]
+                        self._verify_applied_configuration(request, expected_output=True)
+                        results[channel] = True
+                    else:
+                        results[channel] = self.set_output(channel, True)
+            except Exception:
+                self.emergency_off()
+                raise
+            return results
+
+        results = {}
+        first_error: Exception | None = None
+        for channel in ordered:
+            try:
+                results[channel] = self.set_output(channel, False)
+            except Exception as exc:
+                first_error = first_error or exc
+        if first_error is not None:
+            raise first_error
+        return results
 
     def measure(self, channel: Literal["A", "B"]) -> KeithleyMeasurement:
         if channel not in {"A", "B"}:

@@ -285,6 +285,19 @@ class MainWindow(FluentWindow):
         self.quick_controls_window = QuickControlsWindow(self.quick_control_coordinator, self)
         self.quick_controls_window.restore_workspace()
         self.quick_controls_window.output_requested.connect(self._request_quick_control_output)
+        self.quick_controls_window.output_group_requested.connect(
+            self._request_quick_control_output_group
+        )
+        self.rigol_page.output_state_changed.connect(
+            lambda channel, state: self.quick_controls_window.set_output_state(
+                "rigol", channel, state
+            )
+        )
+        self.keithley_page.output_state_changed.connect(
+            lambda channel, state: self.quick_controls_window.set_output_state(
+                "keithley", channel, state
+            )
+        )
 
         self.rigol_page.quick_control_draft_changed.connect(
             lambda target, text: self.quick_control_coordinator.publish_draft(
@@ -1054,6 +1067,12 @@ class MainWindow(FluentWindow):
         # Output controls remain available even when the operator has not
         # pinned a numeric quick-control row yet.
         self.quick_control_coordinator.refresh()
+        for device, page in (
+            ("rigol", self.rigol_page),
+            ("keithley", self.keithley_page),
+        ):
+            for channel, state in page.output_state_snapshot().items():
+                self.quick_controls_window.set_output_state(device, channel, state)
         self.quick_controls_window.show()
         self.quick_controls_window.raise_()
         self.quick_controls_window.activateWindow()
@@ -1075,6 +1094,14 @@ class MainWindow(FluentWindow):
             self.keithley_page.request_channel_output(channel, enabled)
             return
         self._log(f"Rejected Quick controls output request for {device!r}")
+
+    def _request_quick_control_output_group(self, device: str, enabled: bool) -> None:
+        """Route an explicit group request through the device safety boundary."""
+
+        if device == "keithley":
+            self.keithley_page.request_output_group(("A", "B"), enabled)
+            return
+        self._log(f"Rejected Quick controls output group request for {device!r}")
 
     def _manual_spectrum_metadata_values(self) -> tuple[ManualMetadataValue, ...]:
         """Collect last-confirmed numeric values from the visible device pages."""
@@ -1234,6 +1261,13 @@ class MainWindow(FluentWindow):
                 enabled = True
             if not bool(enabled):
                 return
+        if operation == "set_output_group":
+            try:
+                _channels, enabled = payload  # type: ignore[misc]
+            except (TypeError, ValueError):
+                enabled = True
+            if not bool(enabled):
+                return
         energizing_operations = {
             "configure",
             "configure_output",
@@ -1242,6 +1276,7 @@ class MainWindow(FluentWindow):
             "configure_burst",
             "synchronize_phases",
             "set_output",
+            "set_output_group",
             "trigger_sweep",
             "trigger_burst",
             "ramp_to_level",
@@ -1274,6 +1309,13 @@ class MainWindow(FluentWindow):
         if operation == "set_output":
             try:
                 _channel, enabled = payload  # type: ignore[misc]
+            except (TypeError, ValueError):
+                energizing = True
+            else:
+                energizing = bool(enabled)
+        if operation == "set_output_group":
+            try:
+                _channels, enabled = payload  # type: ignore[misc]
             except (TypeError, ValueError):
                 energizing = True
             else:
@@ -2807,6 +2849,30 @@ class MainWindow(FluentWindow):
         )
         self._sync_apparatus_navigation_height()
 
+    def _owned_floating_windows(self) -> tuple[QWidget, ...]:
+        """Return visible top-level widgets owned by this application shell.
+
+        A top-level QWidget can still have a QWidget parent. Closing the parent
+        does not reliably close such a native child window, so shutdown must
+        enumerate the ownership chain explicitly.
+        """
+
+        owned: list[QWidget] = []
+        for widget in QApplication.topLevelWidgets():
+            if widget is self or not widget.isVisible():
+                continue
+            owner = widget.parentWidget()
+            while owner is not None:
+                if owner is self:
+                    owned.append(widget)
+                    break
+                owner = owner.parentWidget()
+        return tuple(owned)
+
+    def _close_owned_floating_windows(self) -> None:
+        for widget in self._owned_floating_windows():
+            widget.close()
+
     def closeEvent(self, event: QCloseEvent) -> None:
         # RecipePage is hosted inside the Fluent stack, so its own closeEvent
         # is not delivered when the application window closes. Ask it before
@@ -2858,7 +2924,7 @@ class MainWindow(FluentWindow):
         self._pending_keithley_defaults = None
         self._keithley_defaults_thread.quit()
         self._keithley_defaults_thread.wait(5_000)
-        self.quick_controls_window.close()
+        self._close_owned_floating_windows()
         self.quick_control_coordinator.cancel_all("Application closing")
         self.anritsu_page._timer.stop()
         try:

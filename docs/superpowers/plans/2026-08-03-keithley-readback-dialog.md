@@ -2,16 +2,16 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** Make the Keithley 2600 read-only configuration comparison clear, responsive, and explicit about the difference between source autorange/source range and measurement ranges.
+**Goal:** Make the Keithley 2600 modeless, read-only configuration comparison clear, responsive, and explicit about the difference between source autorange/source range and measurement ranges.
 
-**Architecture:** Keep the existing `_KeithleyReadbackDialog` as the single owner of readback presentation and preserve its existing `assign_requested` signal. Improve only its labels, explanatory copy, comparison-cell formatting, action affordances, and geometry; the adapter/model and TSP query path remain unchanged. Add focused Qt regression tests in the existing `MainWindowTests` class, including `show()` and event processing at desktop and narrow sizes.
+**Architecture:** Keep the existing `_KeithleyReadbackDialog` as the single owner of readback presentation and preserve its existing `assign_requested` signal. Host it as a modeless floating surface so Quick Controls and other live windows remain usable while the snapshot is open. Improve only its labels, explanatory copy, comparison-cell formatting, action affordances, and geometry; the adapter/model and TSP query path remain unchanged. Add focused Qt regression tests in the existing `MainWindowTests` class, including `show()` and event processing at desktop and narrow sizes.
 
 **Tech Stack:** Python 3, PySide6, PySide6-Fluent-Widgets, Qt `TableWidget`/layouts, unittest/pytest, existing quantity formatting helpers, Ruff.
 
 ## Global Constraints
 
 - `read_configuration()` remains read-only: no TSP mutation and no OUTPUT state change.
-- The dialog remains modal and the table remains non-editable.
+- The dialog remains modeless and the table remains non-editable.
 - OUTPUT state and OUTPUT OFF mode are never assignable from this dialog.
 - Existing per-row source-group assignment and autorange-aware comparison rules remain unchanged.
 - Use the existing quantity helpers and explicit dimension names; do not add a second unit registry.
@@ -20,10 +20,10 @@
 
 ---
 
-### Task 1: Add failing readback-dialog regression tests
+### Task 1: Add failing modeless readback-dialog regression tests
 
 **Files:**
-- Modify: `tests/test_main_window.py` near `test_keithley_reads_both_channels_and_shows_modal_configuration`
+- Modify: `tests/test_main_window.py` near `test_keithley_reads_both_channels_and_shows_modeless_configuration`
 - Test: `tests/test_main_window.py`
 
 **Interfaces:**
@@ -86,7 +86,7 @@ Then resize to `980×620`, process events, and assert the dialog/table/footer re
 Run:
 
 ```powershell
-pytest tests/test_main_window.py -k "keithley_reads_both_channels_and_shows_modal_configuration" -q
+pytest tests/test_main_window.py -k "keithley_reads_both_channels_and_shows_modeless_configuration" -q
 ```
 
 Expected: FAIL because the current dialog still has `Device A`, `Current form A`, blank action headers, `Assign` labels, and the old fixed geometry/copy.
@@ -146,7 +146,7 @@ Create `PushButton("Use hardware value", ...)` for assignable rows, keep output 
 Run:
 
 ```powershell
-pytest tests/test_main_window.py -k "keithley_reads_both_channels_and_shows_modal_configuration" -q
+pytest tests/test_main_window.py -k "keithley_reads_both_channels_and_shows_modeless_configuration" -q
 ```
 
 Expected: PASS, including the existing assignment assertions and the new exact labels/copy assertions.
@@ -180,7 +180,7 @@ Add a short legend such as `MATCH = hardware equals form / Form: ... = value cur
 Run:
 
 ```powershell
-pytest tests/test_main_window.py -k "keithley_reads_both_channels_and_shows_modal_configuration" -q
+pytest tests/test_main_window.py -k "keithley_reads_both_channels_and_shows_modeless_configuration" -q
 ```
 
 Expected: PASS with positive rendered geometry after `show()` and after resizing to `980×620`.

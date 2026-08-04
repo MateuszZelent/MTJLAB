@@ -295,6 +295,76 @@ class SimulatorTests(unittest.TestCase):
         self.assertTrue(keithley._output_states["B"])
         self.assertAlmostEqual(keithley.last_source_request("A").level_si, 0.0005)
 
+    def test_keithley_group_output_enables_and_disables_both_channels_in_order(self) -> None:
+        raw = deepcopy(simulated_station_settings(loaded_settings()).model_dump(mode="python"))
+        raw["devices"]["keithley"]["safety"]["allow_output_enable"] = True
+        raw["devices"]["keithley"]["safety"]["channels"]["A"]["enabled"] = True
+        raw["devices"]["keithley"]["safety"]["channels"]["B"]["enabled"] = True
+        settings = StationSettings.model_validate(raw)
+        keithley = KeithleyAdapter(
+            settings,
+            session_factory=SimulatedVisaFactory("keithley"),
+        )
+        keithley.connect()
+        keithley.configure_source(KeithleySourceRequest("A", "current", 0.0005, 0.067))
+        keithley.configure_source(KeithleySourceRequest("B", "voltage", 0.05, 0.003))
+        session = keithley._session
+        assert session is not None
+        session.commands.clear()  # type: ignore[attr-defined]
+
+        self.assertEqual(
+            keithley.set_output_group(("A", "B"), True),
+            {"A": True, "B": True},
+        )
+        commands = session.commands  # type: ignore[attr-defined]
+        self.assertLess(
+            commands.index("smua.source.output = smua.OUTPUT_ON"),
+            commands.index("smub.source.output = smub.OUTPUT_ON"),
+        )
+        self.assertEqual(
+            keithley.set_output_group(("A", "B"), False),
+            {"A": False, "B": False},
+        )
+
+    def test_keithley_group_output_rolls_back_first_channel_when_second_is_unconfigured(self) -> None:
+        raw = deepcopy(simulated_station_settings(loaded_settings()).model_dump(mode="python"))
+        raw["devices"]["keithley"]["safety"]["allow_output_enable"] = True
+        raw["devices"]["keithley"]["safety"]["channels"]["A"]["enabled"] = True
+        raw["devices"]["keithley"]["safety"]["channels"]["B"]["enabled"] = True
+        settings = StationSettings.model_validate(raw)
+        keithley = KeithleyAdapter(
+            settings,
+            session_factory=SimulatedVisaFactory("keithley"),
+        )
+        keithley.connect()
+        keithley.configure_source(KeithleySourceRequest("A", "current", 0.0005, 0.067))
+
+        with self.assertRaisesRegex(SafetyViolation, "Configure a safe Keithley source"):
+            keithley.set_output_group(("A", "B"), True)
+
+        self.assertFalse(keithley._output_states["A"])
+        self.assertFalse(keithley._output_states["B"])
+
+    def test_keithley_group_output_keeps_confirmed_a_on_while_enabling_b(self) -> None:
+        raw = deepcopy(simulated_station_settings(loaded_settings()).model_dump(mode="python"))
+        raw["devices"]["keithley"]["safety"]["allow_output_enable"] = True
+        raw["devices"]["keithley"]["safety"]["channels"]["A"]["enabled"] = True
+        raw["devices"]["keithley"]["safety"]["channels"]["B"]["enabled"] = True
+        settings = StationSettings.model_validate(raw)
+        keithley = KeithleyAdapter(
+            settings,
+            session_factory=SimulatedVisaFactory("keithley"),
+        )
+        keithley.connect()
+        keithley.configure_source(KeithleySourceRequest("A", "current", 0.0005, 0.067))
+        keithley.configure_source(KeithleySourceRequest("B", "voltage", 0.05, 0.003))
+        keithley.set_output("A", True)
+
+        self.assertEqual(
+            keithley.set_output_group(("A", "B"), True),
+            {"A": True, "B": True},
+        )
+
     def test_keithley_per_channel_recovery_keep_off_never_enables_output(self) -> None:
         raw = deepcopy(simulated_station_settings(loaded_settings()).model_dump(mode="python"))
         raw["devices"]["keithley"]["safety"]["allow_output_enable"] = True
