@@ -633,19 +633,20 @@ class SettingsPage(QWidget):
         dialog = StationDialog(self)
         dialog.setWindowTitle("Settings changes")
         dialog.resize(760, 480)
-        layout = QVBoxLayout(dialog)
+        surface = dialog.use_modal_shell_content().surface
+        layout = dialog.modal_content_layout(spacing=10)
         summary = BodyLabel(
             f"{len(changes)} unsaved structural change(s). Values will be validated before saving."
         )
         summary.setWordWrap(True)
-        text = PlainTextEdit(dialog)
+        text = PlainTextEdit(surface)
         text.setReadOnly(True)
         text.setPlainText("\n".join(changes) if changes else "No unsaved changes.")
         layout.addWidget(summary)
         layout.addWidget(text, 1)
         footer = QHBoxLayout()
         footer.addStretch(1)
-        close = PushButton("Close", dialog)
+        close = PushButton("Close", surface)
         close.clicked.connect(dialog.reject)
         footer.addWidget(close)
         layout.addLayout(footer)
@@ -1324,12 +1325,13 @@ class SettingsPage(QWidget):
         dialog = StationDialog(self)
         dialog.setWindowTitle("User access role")
         dialog.setMinimumWidth(420)
-        layout = QVBoxLayout(dialog)
+        surface = dialog.use_modal_shell_content().surface
+        layout = dialog.modal_content_layout(spacing=10)
         note = BodyLabel("Assign one or more station roles to an operating-system account.")
         note.setWordWrap(True)
         layout.addWidget(note)
         layout.addWidget(BodyLabel("Operating-system account"))
-        account = LineEdit(dialog)
+        account = LineEdit(surface)
         # Account names are identifiers even when an installation happens to
         # use digits only; Up/Down must not rewrite them as numeric values.
         account.setProperty("precisionArrowStepping", False)
@@ -1339,15 +1341,15 @@ class SettingsPage(QWidget):
         layout.addWidget(BodyLabel("Roles"))
         checkboxes: list[QCheckBox] = []
         for role in self._role_choices():
-            check = CheckBox(role.capitalize(), dialog)
+            check = CheckBox(role.capitalize(), surface)
             check.setProperty("role", role)
             check.setChecked(role in roles)
             layout.addWidget(check)
             checkboxes.append(check)
         footer = QHBoxLayout()
         footer.addStretch(1)
-        cancel = PushButton("Cancel", dialog)
-        save = PrimaryPushButton("Save roles", dialog)
+        cancel = PushButton("Cancel", surface)
+        save = PrimaryPushButton("Save roles", surface)
         cancel.clicked.connect(dialog.reject)
         save.clicked.connect(dialog.accept)
         footer.addWidget(cancel)

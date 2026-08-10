@@ -9,7 +9,7 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 from PySide6.QtCore import QObject, QPoint, QSettings, Qt, Signal
 from PySide6.QtGui import QPalette
 from PySide6.QtWidgets import QApplication, QWidget
-from qfluentwidgets import FluentWidget
+from qfluentwidgets import FluentTitleBar, FluentWidget, ScrollArea
 
 from app.domain.quick_controls import (
     QuickControlCommand,
@@ -41,8 +41,9 @@ class _FakeController(QObject):
     error = Signal(str, str)
     state_changed = Signal(str)
 
-    def __init__(self) -> None:
+    def __init__(self, state: str = "output_off") -> None:
         super().__init__()
+        self.state_value = state
         self.calls: list[tuple[str, object]] = []
 
     def call(self, operation: str, payload: object = None) -> None:
@@ -118,6 +119,86 @@ class QuickControlTests(unittest.TestCase):
 
         self.assertEqual(rigol.calls, [])
         self.assertEqual(keithley.calls, [])
+
+    def test_disconnected_submit_updates_only_the_shared_draft(self) -> None:
+        parent = QWidget()
+        rigol = _FakeController("disconnected")
+        keithley = _FakeController("disconnected")
+        coordinator = QuickControlCoordinator(  # type: ignore[arg-type]
+            {"rigol": rigol, "keithley": keithley}, parent
+        )
+        states: list[tuple[str, str, str]] = []
+        coordinator.state_changed.connect(
+            lambda target, state, detail: states.append((target, state, detail))
+        )
+
+        coordinator.submit("keithley.A.current", "1.00 mA")
+
+        self.assertEqual(rigol.calls, [])
+        self.assertEqual(keithley.calls, [])
+        self.assertEqual(coordinator.draft_text("keithley.A.current"), "1.00 mA")
+        self.assertEqual(states[-1][1], "draft")
+
+    def test_output_off_uses_the_device_dry_run_builder(self) -> None:
+        parent = QWidget()
+        keithley = _FakeController("output_off")
+        coordinator = QuickControlCoordinator(  # type: ignore[arg-type]
+            {"rigol": _FakeController("disconnected"), "keithley": keithley},
+            parent,
+        )
+
+        coordinator.set_hardware_request_builder(
+            "keithley",
+            lambda request, state: (
+                "quick_configure",
+                {"target": request.target, "state": state},
+            ),
+        )
+        coordinator.submit("keithley.A.current", "1.00 mA")
+
+        self.assertEqual(
+            keithley.calls,
+            [
+                (
+                    "quick_configure",
+                    {"target": "keithley.A.current", "state": "output_off"},
+                )
+            ],
+        )
+
+        verified: list[tuple[str, object]] = []
+        coordinator.configuration_verified.connect(
+            lambda target, command: verified.append((target, command))
+        )
+        keithley.result.emit("quick_configure", 0.001)
+        self.assertEqual(verified[0][0], "keithley.A.current")
+
+    def test_output_on_keeps_the_live_quick_setpoint_path(self) -> None:
+        parent = QWidget()
+        keithley = _FakeController("output_on")
+        coordinator = QuickControlCoordinator(  # type: ignore[arg-type]
+            {"rigol": _FakeController("disconnected"), "keithley": keithley},
+            parent,
+        )
+
+        coordinator.set_hardware_request_builder(
+            "keithley",
+            lambda request, _state: (
+                "quick_setpoint",
+                QuickControlCommand(request.target, request.text),
+            ),
+        )
+        coordinator.submit("keithley.A.current", "1.00 mA")
+
+        self.assertEqual(
+            keithley.calls,
+            [
+                (
+                    "quick_setpoint",
+                    QuickControlCommand("keithley.A.current", "1.00 mA"),
+                )
+            ],
+        )
 
     def test_arrows_stop_at_every_user_limit_for_rigol_and_keithley(self) -> None:
         parent = QWidget()
@@ -378,6 +459,21 @@ class QuickControlTests(unittest.TestCase):
         finally:
             window.close()
 
+    def test_quick_controls_uses_shared_modal_shell_and_larger_default_size(self) -> None:
+        parent = QWidget()
+        coordinator = QuickControlCoordinator(
+            {"rigol": _FakeController(), "keithley": _FakeController()},
+            parent,
+        )
+        window = QuickControlsWindow(coordinator, parent)
+        try:
+            self.assertEqual(window.size().toTuple(), (550, 720))
+            self.assertIs(window.surface, window.modal_shell.surface)
+            self.assertIs(window.backdrop, window.modal_shell.backdrop)
+            self.assertIs(window.surface_layout, window.modal_shell.surface_layout)
+        finally:
+            window.close()
+
     def test_output_channels_are_configurable_from_choose_and_collapse_cleanly(self) -> None:
         parent = QWidget()
         coordinator = QuickControlCoordinator(
@@ -419,6 +515,34 @@ class QuickControlTests(unittest.TestCase):
         )
         picker.close()
 
+    def test_choose_picker_uses_fluent_titlebar_and_modal_surface(self) -> None:
+        parent = QWidget()
+        picker = QuickControlPicker(("keithley.A.current",), parent=parent)
+        try:
+            parent.show()
+            picker.resize(620, 560)
+            picker.show()
+            self.application.processEvents()
+
+            self.assertTrue(
+                bool(picker.windowFlags() & Qt.WindowType.FramelessWindowHint)
+            )
+            self.assertIsInstance(picker.titleBar, FluentTitleBar)
+            self.assertTrue(picker.titleBar.closeBtn.isVisible())
+            picker_scroll = picker.findChild(ScrollArea, "quickPickerScroll")
+            self.assertIsNotNone(picker_scroll)
+            assert picker_scroll is not None
+            self.assertIs(picker_scroll.parentWidget(), picker.modal_shell.surface)
+            self.assertTrue(picker.modal_shell.surface.isVisibleTo(picker))
+
+            picker.titleBar.closeBtn.click()
+            self.application.processEvents()
+            self.assertFalse(picker.isVisible())
+            self.assertTrue(parent.isVisible())
+        finally:
+            picker.close()
+            parent.close()
+
     def test_panel_has_theme_contrast_and_expands_with_the_window(self) -> None:
         parent = QWidget()
         coordinator = QuickControlCoordinator(
@@ -437,8 +561,11 @@ class QuickControlTests(unittest.TestCase):
             window.show()
             self.application.processEvents()
             self.assertTrue(window.titleBar.maxBtn.isVisible())
+            self.assertTrue(window.titleBar.closeBtn.isVisible())
             self.assertEqual(window.property("stationSurface"), "raised")
             self.assertEqual(window.backdrop.property("stationSurface"), "raised")
+            self.assertEqual(window.surface.property("stationHover"), "disabled")
+            self.assertEqual(window.backdrop.property("stationHover"), "disabled")
 
             for theme in ("light", "dark"):
                 apply_application_theme(self.application, theme)
@@ -467,6 +594,25 @@ class QuickControlTests(unittest.TestCase):
             window.close()
             if previous_theme in {"light", "dark"}:
                 apply_application_theme(self.application, previous_theme)
+
+    def test_quick_controls_close_button_closes_only_the_panel(self) -> None:
+        parent = QWidget()
+        parent.show()
+        coordinator = QuickControlCoordinator(
+            {"rigol": _FakeController(), "keithley": _FakeController()},
+            parent,
+        )
+        window = QuickControlsWindow(coordinator, parent)
+        try:
+            window.show()
+            self.application.processEvents()
+            window.titleBar.closeBtn.click()
+            self.application.processEvents()
+            self.assertFalse(window.isVisible())
+            self.assertTrue(parent.isVisible())
+        finally:
+            window.close()
+            parent.close()
 
     def test_quick_controls_auto_fit_height_and_caps_at_seventy_percent(self) -> None:
         parent = QWidget()

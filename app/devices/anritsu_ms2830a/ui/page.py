@@ -642,43 +642,48 @@ class _AnritsuSpectrogramWindow(StationDialog):
         self.setModal(False)
         self.resize(820, 560)
         self.setMinimumSize(520, 380)
-        layout = QVBoxLayout(self)
-        layout.setContentsMargins(16, 14, 16, 14)
-        layout.setSpacing(8)
+        surface = self.use_modal_shell_content().surface
+        layout = self.modal_content_layout(spacing=8)
         header = QHBoxLayout()
-        header.addWidget(StrongBodyLabel("Live spectrogram"))
+        header.addWidget(StrongBodyLabel("Live spectrogram", surface))
         header.addStretch(1)
         layout.addLayout(header)
         controls = QGridLayout()
         controls.setHorizontalSpacing(8)
         controls.setVerticalSpacing(6)
-        self.source = ComboBox(self)
+        self.source = ComboBox(surface)
         self.source.addItem("Raw", userData="raw")
         self.source.addItem("Processed (Raw − reference)", userData="processed")
         self.source.setToolTip(
             "Switch between untouched TRAC1 frames and local Raw − reference processing."
         )
-        self.window_span = ComboBox(self)
+        self.window_span = ComboBox(surface)
         for seconds in (30, 60, 90, 120):
             self.window_span.addItem(f"{seconds} s", userData=seconds)
         self.window_span.setToolTip(
             "Choose the rolling time window retained in the spectrogram."
         )
-        self.reset_view = PushButton("Reset view", self)
+        self.reset_view = PushButton("Reset view", surface)
         self.reset_view.setToolTip("Show the complete frequency and time range.")
-        controls.addWidget(BodyLabel("Trace"), 0, 0)
+        controls.addWidget(BodyLabel("Trace", surface), 0, 0)
         controls.addWidget(self.source, 0, 1, 1, 2)
-        controls.addWidget(BodyLabel("Window"), 1, 0)
+        controls.addWidget(BodyLabel("Window", surface), 1, 0)
         controls.addWidget(self.window_span, 1, 1)
         controls.addWidget(self.reset_view, 1, 2)
         controls.setColumnStretch(1, 1)
         layout.addLayout(controls)
-        self.spectrogram = _AnritsuSpectrogramWidget(self)
+        self.spectrogram = _AnritsuSpectrogramWidget(surface)
         layout.addWidget(self.spectrogram, 1)
-        self.status = CaptionLabel("Waiting for completed Live frames.", self)
+        self.status = CaptionLabel("Waiting for completed Live frames.", surface)
         self.status.setObjectName("muted")
         self.status.setWordWrap(True)
         layout.addWidget(self.status)
+        footer = QHBoxLayout()
+        footer.addStretch(1)
+        self.close_button = PushButton("Close", surface)
+        self.close_button.clicked.connect(self.close)
+        footer.addWidget(self.close_button)
+        layout.addLayout(footer)
         self.source.currentIndexChanged.connect(
             lambda: self.source_changed.emit(str(self.source.currentData() or "raw"))
         )
@@ -705,14 +710,13 @@ class _AnritsuSpectrumWindow(StationDialog):
         self.setModal(False)
         self.resize(920, 620)
         self.setMinimumSize(580, 400)
-        layout = QVBoxLayout(self)
-        layout.setContentsMargins(16, 14, 16, 14)
-        layout.setSpacing(8)
+        surface = self.use_modal_shell_content().surface
+        layout = self.modal_content_layout(spacing=8)
         header = QHBoxLayout()
-        header.addWidget(StrongBodyLabel("Current spectrum", self))
+        header.addWidget(StrongBodyLabel("Current spectrum", surface))
         header.addStretch(1)
         layout.addLayout(header)
-        self.spectrum = SpectrumPlotWidget(legend=True, parent=self)
+        self.spectrum = SpectrumPlotWidget(legend=True, parent=surface)
         self.spectrum.set_title("Waiting for a completed spectrum")
         self.spectrum.set_labels(
             x="Frequency", x_unit="Hz", y="Amplitude", y_unit="dBm"
@@ -725,6 +729,12 @@ class _AnritsuSpectrumWindow(StationDialog):
         self.status.setObjectName("muted")
         self.status.setWordWrap(True)
         layout.addWidget(self.status)
+        footer = QHBoxLayout()
+        footer.addStretch(1)
+        self.close_button = PushButton("Close", surface)
+        self.close_button.clicked.connect(self.close)
+        footer.addWidget(self.close_button)
+        layout.addLayout(footer)
 
     def closeEvent(self, event: QCloseEvent) -> None:
         super().closeEvent(event)
@@ -745,23 +755,22 @@ class _AnritsuTraceDiagnosticsDialog(StationDialog):
         self.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose, True)
         self.resize(780, 560)
         self.setMinimumSize(540, 400)
-        layout = QVBoxLayout(self)
-        layout.setContentsMargins(16, 14, 16, 14)
-        layout.setSpacing(10)
+        surface = self.use_modal_shell_content().surface
+        layout = self.modal_content_layout(spacing=10)
 
-        title = StrongBodyLabel("Anritsu read-only diagnostics", self)
+        title = StrongBodyLabel("Anritsu read-only diagnostics", surface)
         title.setObjectName("sectionTitle")
         layout.addWidget(title)
         description = BodyLabel(
             "This window mirrors completed TRAC1 data already returned by the "
             "instrument. Opening it never starts or configures a measurement.",
-            self,
+            surface,
         )
         description.setWordWrap(True)
         description.setObjectName("muted")
         layout.addWidget(description)
 
-        self.tabs = FluentTabView(self)
+        self.tabs = FluentTabView(surface)
         raw_page = QWidget(self.tabs)
         raw_layout = QVBoxLayout(raw_page)
         raw_layout.setContentsMargins(0, 0, 0, 0)
@@ -801,9 +810,9 @@ class _AnritsuTraceDiagnosticsDialog(StationDialog):
 
         actions = QHBoxLayout()
         actions.addStretch(1)
-        close_button = PushButton("Close", self)
-        close_button.clicked.connect(self.close)
-        actions.addWidget(close_button)
+        self.close_button = PushButton("Close", surface)
+        self.close_button.clicked.connect(self.close)
+        actions.addWidget(self.close_button)
         layout.addLayout(actions)
 
     def set_hardware_details(self, details: str) -> None:
@@ -1549,7 +1558,8 @@ class AnritsuPage(QWidget):
         dialog.setWindowTitle("Anritsu advanced Spectrum settings")
         dialog.setModal(False)
         dialog.resize(620, 470)
-        layout = QVBoxLayout(dialog)
+        surface = dialog.use_modal_shell_content().surface
+        layout = dialog.modal_content_layout(spacing=10)
         explanation = BodyLabel(
             "These controls change bandwidth, detector and the RF input path. Readback is "
             "always available as an explicit diagnostic action. Apply remains locked until "
@@ -1561,7 +1571,7 @@ class AnritsuPage(QWidget):
         self.advanced_protocol_status.setWordWrap(True)
         layout.addWidget(self.advanced_protocol_status)
 
-        self.advanced_configuration_panel = AnritsuAdvancedSpectrumPanel(dialog)
+        self.advanced_configuration_panel = AnritsuAdvancedSpectrumPanel(surface)
         self.advanced_configuration_panel.load_settings_defaults(
             self._station_settings
         )
@@ -1589,9 +1599,9 @@ class AnritsuPage(QWidget):
         help_text.setWordWrap(True)
         layout.addWidget(help_text)
         actions = QHBoxLayout()
-        self.advanced_read_button = PushButton("Read from instrument", dialog)
-        self.advanced_apply_button = PrimaryPushButton("Apply and verify", dialog)
-        close_button = PushButton("Close", dialog)
+        self.advanced_read_button = PushButton("Read from instrument", surface)
+        self.advanced_apply_button = PrimaryPushButton("Apply and verify", surface)
+        close_button = PushButton("Close", surface)
         actions.addWidget(self.advanced_read_button)
         actions.addWidget(self.advanced_apply_button)
         actions.addStretch(1)

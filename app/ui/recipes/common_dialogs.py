@@ -70,17 +70,16 @@ class OutputPolicyDialog(FluentRecipeDialog):
         super().__init__(parent)
         self.setWindowTitle("Output mode")
         self.setMinimumWidth(440)
-        layout = QVBoxLayout(self)
-        layout.setContentsMargins(24, 20, 24, 20)
-        layout.setSpacing(12)
-        heading = StrongBodyLabel("Output mode for this block", self)
+        surface = self.use_modal_shell_content().surface
+        layout = self.modal_content_layout(spacing=12)
+        heading = StrongBodyLabel("Output mode for this block", surface)
         description = BodyLabel(
             "Changing this recipe policy does not change a live instrument. "
             "Safety limits and output confirmation are checked again before execution.",
-            self,
+            surface,
         )
         description.setWordWrap(True)
-        self.policy = ComboBox(self)
+        self.policy = ComboBox(surface)
         for label, value in self._OPTIONS:
             self.policy.addItem(label, userData=value)
         selected = self.policy.findData(current_policy)
@@ -93,8 +92,8 @@ class OutputPolicyDialog(FluentRecipeDialog):
         layout.addStretch(1)
         footer = QHBoxLayout()
         footer.addStretch(1)
-        cancel = PushButton("Cancel", self)
-        apply = PrimaryPushButton("Apply output mode", self)
+        cancel = PushButton("Cancel", surface)
+        apply = PrimaryPushButton("Apply output mode", surface)
         cancel.clicked.connect(self.reject)
         apply.clicked.connect(self.accept)
         footer.addWidget(cancel)
@@ -118,22 +117,21 @@ class RepeatCountDialog(FluentRecipeDialog):
         super().__init__(parent)
         self.setWindowTitle("Wrap in Repeat")
         self.setMinimumWidth(430)
-        layout = QVBoxLayout(self)
-        layout.setContentsMargins(24, 22, 24, 20)
-        layout.setSpacing(12)
-        title = StrongBodyLabel("Repeat this part of the sweep", self)
+        surface = self.use_modal_shell_content().surface
+        layout = self.modal_content_layout(spacing=12)
+        title = StrongBodyLabel("Repeat this part of the sweep", surface)
         title.setObjectName("pageTitle")
         layout.addWidget(title)
         explanation = BodyLabel(
             f"{selection_label} will become the child of one Repeat block. "
             "The change is committed only after the complete recipe is valid.",
-            self,
+            surface,
         )
         explanation.setWordWrap(True)
         explanation.setObjectName("muted")
         layout.addWidget(explanation)
         form = QFormLayout()
-        self.count = SpinBox(self)
+        self.count = SpinBox(surface)
         self.count.setRange(1, 100_000)
         self.count.setValue(max(1, min(initial_count, 100_000)))
         self.count.setAccessibleName("Repeat count")
@@ -141,8 +139,8 @@ class RepeatCountDialog(FluentRecipeDialog):
         layout.addLayout(form)
         footer = QHBoxLayout()
         footer.addStretch(1)
-        cancel = PushButton("Cancel", self)
-        apply = PrimaryPushButton("Wrap in Repeat", self)
+        cancel = PushButton("Cancel", surface)
+        apply = PrimaryPushButton("Wrap in Repeat", surface)
         footer.addWidget(cancel)
         footer.addWidget(apply)
         layout.addLayout(footer)
@@ -183,14 +181,15 @@ class ActionNodeEditorDialog(FluentRecipeDialog):
         self.setWindowTitle(f"Action settings — {node.type.replace('_', ' ').title()}")
         self.setMinimumSize(480, 280)
         self.resize(620, 420)
-        layout = QVBoxLayout(self)
-        heading = StrongBodyLabel(node.type.replace("_", " ").title(), self)
+        surface = self.use_modal_shell_content().surface
+        layout = self.modal_content_layout(spacing=10)
+        heading = StrongBodyLabel(node.type.replace("_", " ").title(), surface)
         heading.setObjectName("pageTitle")
         layout.addWidget(heading)
         note = BodyLabel(
             "These values are stored in the recipe only. Hardware limits and output "
             "interlocks are validated again during preflight and by the device adapter.",
-            self,
+            surface,
         )
         note.setObjectName("muted")
         note.setWordWrap(True)
@@ -202,7 +201,9 @@ class ActionNodeEditorDialog(FluentRecipeDialog):
                 continue
             editor, value_kind = self._editor_for(key, value)
             if editor is None:
-                rendered = BodyLabel(json.dumps(value, ensure_ascii=False, default=str), self)
+                rendered = BodyLabel(
+                    json.dumps(value, ensure_ascii=False, default=str), surface
+                )
                 rendered.setWordWrap(True)
                 form.addRow(key.replace("_", " ").title(), rendered)
                 continue
@@ -212,7 +213,7 @@ class ActionNodeEditorDialog(FluentRecipeDialog):
             empty = BodyLabel(
                 "This block has no configurable scalar parameters. Its behavior is "
                 "defined by its position and child actions.",
-                self,
+                surface,
             )
             empty.setObjectName("muted")
             empty.setWordWrap(True)
@@ -221,8 +222,8 @@ class ActionNodeEditorDialog(FluentRecipeDialog):
         layout.addStretch(1)
         footer = QHBoxLayout()
         footer.addStretch(1)
-        self.cancel_button = PushButton("Cancel", self)
-        self.apply_button = PrimaryPushButton("Apply action settings", self)
+        self.cancel_button = PushButton("Cancel", surface)
+        self.apply_button = PrimaryPushButton("Apply action settings", surface)
         footer.addWidget(self.cancel_button)
         footer.addWidget(self.apply_button)
         layout.addLayout(footer)
@@ -239,7 +240,7 @@ class ActionNodeEditorDialog(FluentRecipeDialog):
 
     def _editor_for(self, key: str, value: object) -> tuple[QWidget | None, str]:
         if key == "channel":
-            combo = ComboBox(self)
+            combo = ComboBox(self.modal_shell.surface)
             values: tuple[object, ...] = (
                 (1, 2)
                 if isinstance(value, int) or "rigol" in self._node.type
@@ -251,7 +252,7 @@ class ActionNodeEditorDialog(FluentRecipeDialog):
             combo.setCurrentIndex(index if index >= 0 else 0)
             return combo, "choice"
         if key == "enabled":
-            combo = ComboBox(self)
+            combo = ComboBox(self.modal_shell.surface)
             combo.addItem("OUTPUT OFF", userData=False)
             if not self._in_finally:
                 combo.addItem("OUTPUT ON", userData=True)
@@ -277,29 +278,29 @@ class ActionNodeEditorDialog(FluentRecipeDialog):
             "sync_polarity": ("NORM", "INV"),
         }.get(key)
         if choices is not None:
-            combo = ComboBox(self)
+            combo = ComboBox(self.modal_shell.surface)
             for choice in choices:
                 combo.addItem(choice, userData=choice)
             index = combo.findData(str(value))
             combo.setCurrentIndex(index if index >= 0 else 0)
             return combo, "choice"
         if isinstance(value, bool):
-            checkbox = CheckBox(self)
+            checkbox = CheckBox(self.modal_shell.surface)
             checkbox.setChecked(value)
             return checkbox, "bool"
         if isinstance(value, int):
-            spin = SpinBox(self)
+            spin = SpinBox(self.modal_shell.surface)
             minimum = 2 if key == "points" else 1 if key in {"count", "average_count"} else 0
             maximum = 9_999 if key == "average_count" else 100_000
             spin.setRange(minimum, maximum)
             spin.setValue(value)
             return spin, "int"
         if isinstance(value, float):
-            line = LineEdit(self)
+            line = LineEdit(self.modal_shell.surface)
             line.setText(f"{value:.12g}")
             return line, "float"
         if isinstance(value, str):
-            line = LineEdit(self)
+            line = LineEdit(self.modal_shell.surface)
             line.setText(value)
             return line, "str"
         return None, "readonly"
@@ -405,18 +406,18 @@ class KeithleySweepBuilderDialog(SweepGeneratorDialog):
         # above the generic generator.
         self.setMinimumSize(900, 650)
         self.resize(1180, 720)
-        parameters = CardWidget(self)
+        parameters = CardWidget(self.segment_panel)
         parameters.setObjectName("recipeEditorParameters")
         parameter_layout = QVBoxLayout(parameters)
         parameter_layout.setContentsMargins(10, 8, 10, 8)
-        title = BodyLabel("Keithley source settings")
+        title = BodyLabel("Keithley source settings", parameters)
         title.setObjectName("sectionTitle")
         parameter_layout.addWidget(title)
         form = QFormLayout()
-        self.channel = ComboBox(self)
+        self.channel = ComboBox(parameters)
         self.channel.addItems(("A", "B"))
         self.channel.setCurrentText(initial_channel)
-        self.mode = ComboBox(self)
+        self.mode = ComboBox(parameters)
         self.mode.addItems(("current", "voltage"))
         self.mode.setCurrentText(initial_mode)
         self._last_default_compliance = self._default_compliance(
@@ -425,7 +426,9 @@ class KeithleySweepBuilderDialog(SweepGeneratorDialog):
         self.compliance = _line(self._last_default_compliance)
         self.nplc = _line("1")
         self.settle_time = _line("100 ms")
-        self.sense_mode = ComboBox(self)
+        for editor in (self.compliance, self.nplc, self.settle_time):
+            editor.setParent(parameters)
+        self.sense_mode = ComboBox(parameters)
         self.sense_mode.addItems(("2wire", "4wire"))
         form.addRow("Channel", self.channel)
         form.addRow("Source mode", self.mode)
@@ -436,12 +439,13 @@ class KeithleySweepBuilderDialog(SweepGeneratorDialog):
         parameter_layout.addLayout(form)
         guidance = BodyLabel(
             "The source is configured at every generated point. This window only designs "
-            "the recipe; it never enables OUTPUT."
+            "the recipe; it never enables OUTPUT.",
+            parameters,
         )
         guidance.setObjectName("muted")
         guidance.setWordWrap(True)
         parameter_layout.addWidget(guidance)
-        self.limit_status = BodyLabel()
+        self.limit_status = BodyLabel(parent=parameters)
         self.limit_status.setObjectName("recipeLimitStatus")
         self.limit_status.setWordWrap(True)
         parameter_layout.addWidget(self.limit_status)
@@ -577,7 +581,8 @@ class FixedValueDialog(FluentRecipeDialog):
         self.setProperty("stationSurface", "page")
         self.definition = definition
         self.setWindowTitle(f"Fixed value — {definition['label']}")
-        layout = QVBoxLayout(self)
+        surface = self.use_modal_shell_content().surface
+        layout = self.modal_content_layout(spacing=10)
         layout.addWidget(
             BodyLabel(
                 "This node configures one value at its position in the tree. It does not "
@@ -585,7 +590,7 @@ class FixedValueDialog(FluentRecipeDialog):
             )
         )
         form = QFormLayout()
-        self.value = LineEdit(self)
+        self.value = LineEdit(surface)
         self.value.setText(_sweep_default(definition["dimension"])[0])
         form.addRow(definition["label"], self.value)
         layout.addLayout(form)
@@ -593,8 +598,8 @@ class FixedValueDialog(FluentRecipeDialog):
         layout.addWidget(self.preview)
         footer = QHBoxLayout()
         footer.addStretch(1)
-        self.cancel_button = PushButton("Cancel", self)
-        self.create_button = PrimaryPushButton("Create fixed setting", self)
+        self.cancel_button = PushButton("Cancel", surface)
+        self.create_button = PrimaryPushButton("Create fixed setting", surface)
         footer.addWidget(self.cancel_button)
         footer.addWidget(self.create_button)
         layout.addLayout(footer)
@@ -646,7 +651,8 @@ class AnritsuAcquisitionEditorDialog(FluentRecipeDialog):
             else "Anritsu spectrum acquisition"
         )
         self.setMinimumSize(480, 300)
-        layout = QVBoxLayout(self)
+        surface = self.use_modal_shell_content().surface
+        layout = self.modal_content_layout(spacing=10)
         heading = BodyLabel(
             "Reference acquisition"
             if self._reference_only
@@ -662,30 +668,30 @@ class AnritsuAcquisitionEditorDialog(FluentRecipeDialog):
         note.setObjectName("muted")
         layout.addWidget(note)
         form = QFormLayout()
-        self.trace = ComboBox(self)
+        self.trace = ComboBox(surface)
         self.trace.addItems(("TRAC1",))
         self.trace.setCurrentText(str(node.data.get("trace", "TRAC1")))
         form.addRow("Trace", self.trace)
-        self.average_count = SpinBox(self)
+        self.average_count = SpinBox(surface)
         self.average_count.setRange(1, 9999)
         self.average_count.setValue(int(node.data.get("average_count", 1)))
         self.average_count.setToolTip(
             "Complete spectra are averaged in linear mW, never directly in dBm."
         )
         form.addRow("Average complete spectra", self.average_count)
-        self.reference_operation = ComboBox(self)
+        self.reference_operation = ComboBox(surface)
         for label, value in self.operations:
             self.reference_operation.addItem(label, userData=value)
         operation = str(node.data.get("reference_operation", "none"))
         index = self.reference_operation.findData(operation)
         self.reference_operation.setCurrentIndex(index if index >= 0 else 0)
-        self.store_raw = CheckBox("Store raw spectrum", self)
+        self.store_raw = CheckBox("Store raw spectrum", surface)
         self.store_raw.setChecked(True)
         self.store_raw.setEnabled(False)
         self.store_raw.setToolTip(
             "RAW is always stored as the scientific source record and frequency-grid provenance."
         )
-        self.store_processed = CheckBox("Store processed spectrum", self)
+        self.store_processed = CheckBox("Store processed spectrum", surface)
         self.store_processed.setChecked(
             bool(node.data.get("store_processed", operation != "none"))
         )
@@ -704,12 +710,12 @@ class AnritsuAcquisitionEditorDialog(FluentRecipeDialog):
         layout.addStretch(1)
         footer = QHBoxLayout()
         footer.addStretch(1)
-        self.cancel_button = PushButton("Cancel", self)
+        self.cancel_button = PushButton("Cancel", surface)
         self.apply_button = PrimaryPushButton(
             "Apply reference acquisition"
             if self._reference_only
             else "Apply spectrum acquisition",
-            self,
+            surface,
         )
         footer.addWidget(self.cancel_button)
         footer.addWidget(self.apply_button)
@@ -760,11 +766,10 @@ class CommentEditorDialog(FluentRecipeDialog):
         self.setWindowTitle("Edit comment")
         self.resize(680, 460)
         self.setMinimumSize(500, 360)
-        layout = QVBoxLayout(self)
-        layout.setContentsMargins(18, 18, 18, 16)
-        layout.setSpacing(12)
+        surface = self.use_modal_shell_content().surface
+        layout = self.modal_content_layout(spacing=12)
 
-        hero = CardWidget(self)
+        hero = CardWidget(surface)
         hero.setObjectName("commentEditorHero")
         hero_layout = QHBoxLayout(hero)
         hero_layout.setContentsMargins(14, 12, 14, 12)
@@ -787,7 +792,7 @@ class CommentEditorDialog(FluentRecipeDialog):
         hero_layout.addLayout(heading, 1)
         layout.addWidget(hero)
 
-        self.editor = PlainTextEdit(self)
+        self.editor = PlainTextEdit(surface)
         self.editor.setObjectName("commentEditorText")
         self.editor.setPlaceholderText(
             "For example: Wait until the sample temperature is stable before acquisition…"
@@ -799,8 +804,8 @@ class CommentEditorDialog(FluentRecipeDialog):
         self.counter.setObjectName("commentEditorCounter")
         footer.addWidget(self.counter)
         footer.addStretch(1)
-        self.cancel_button = PushButton("Cancel", self)
-        self.save_button = PrimaryPushButton("Save comment", self)
+        self.cancel_button = PushButton("Cancel", surface)
+        self.save_button = PrimaryPushButton("Save comment", surface)
         footer.addWidget(self.cancel_button)
         footer.addWidget(self.save_button)
         layout.addLayout(footer)

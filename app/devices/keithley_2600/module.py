@@ -4,7 +4,8 @@ from __future__ import annotations
 
 from app.contracts import DeviceModule, RecipeExtension
 from app.devices.base import DeviceAdapter
-from app.domain.quick_controls import QuickControlCommand
+from app.devices.keithley_2600 import KeithleySourceRequest
+from app.domain.quick_controls import QuickConfigureCommand, QuickControlCommand
 from app.domain.quantities import parse_quantity
 from app.recipes.parameter_registry import QUICK_CONTROLS_BY_TARGET
 from app.devices.keithley_2600 import KeithleyAdapter
@@ -62,6 +63,27 @@ def _dispatch(adapter: DeviceAdapter, operation: str, payload: object) -> object
         return adapter.quick_update_source_level(
             channel, mode=mode, level_si=float(value_si)  # type: ignore[arg-type]
         )
+    if operation == "quick_configure":
+        if not isinstance(payload, QuickConfigureCommand):
+            raise ValueError(
+                "Keithley quick_configure requires a complete device-page configuration."
+            )
+        descriptor = QUICK_CONTROLS_BY_TARGET.get(payload.target)
+        request = payload.configuration
+        if (
+            descriptor is None
+            or descriptor.device_module != "keithley"
+            or not isinstance(request, KeithleySourceRequest)
+        ):
+            raise ValueError(
+                f"Unsupported Keithley quick configuration target {payload.target!r}."
+            )
+        _device, channel, mode = payload.target.split(".")
+        if request.channel != channel or request.mode != mode:
+            raise ValueError(
+                "Keithley quick configuration target and source request do not match."
+            )
+        return adapter.configure_source(request).level_si
     if operation == "quick_readback":
         return adapter.quick_control_snapshot()
     try:

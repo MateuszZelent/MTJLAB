@@ -3,10 +3,28 @@
 from __future__ import annotations
 
 from PySide6.QtCore import QEvent, Qt, Signal
-from PySide6.QtWidgets import QFileDialog, QMessageBox as QtMessageBox, QWidget
-from PySide6.QtWidgets import QDialog, QHBoxLayout, QVBoxLayout
+from PySide6.QtGui import (
+    QColor,
+    QLinearGradient,
+    QPainter,
+    QPalette,
+    QPen,
+    QResizeEvent,
+)
+from PySide6.QtWidgets import (
+    QFileDialog,
+    QGraphicsDropShadowEffect,
+    QMessageBox as QtMessageBox,
+    QDialog,
+    QHBoxLayout,
+    QSizePolicy,
+    QVBoxLayout,
+    QWidget,
+)
+from qframelesswindow import FramelessDialog
 from qfluentwidgets import (
     BodyLabel,
+    FluentTitleBar,
     PrimaryPushButton,
     PushButton,
     SimpleCardWidget,
@@ -14,13 +32,160 @@ from qfluentwidgets import (
 )
 
 
-class StationDialog(QDialog):
+def _blend_modal_colors(first: QColor, second: QColor, weight: float) -> QColor:
+    amount = max(0.0, min(1.0, weight))
+    return QColor.fromRgb(
+        round(first.red() * (1.0 - amount) + second.red() * amount),
+        round(first.green() * (1.0 - amount) + second.green() * amount),
+        round(first.blue() * (1.0 - amount) + second.blue() * amount),
+    )
+
+
+class _StationModalBackdrop(QWidget):
+    """Shared quiet elevation layer behind station modal surfaces."""
+
+    def paintEvent(self, event) -> None:  # noqa: N802 - Qt override
+        del event
+        palette = self.palette()
+        window = palette.color(QPalette.ColorRole.Window)
+        base = palette.color(QPalette.ColorRole.Base)
+        accent = palette.color(QPalette.ColorRole.Highlight)
+        gradient = QLinearGradient(0, 0, 0, max(1, self.height()))
+        gradient.setColorAt(0.0, _blend_modal_colors(window.lighter(106), accent, 0.08))
+        gradient.setColorAt(0.52, window)
+        gradient.setColorAt(1.0, _blend_modal_colors(base.darker(104), accent, 0.04))
+
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+        painter.setBrush(gradient)
+        painter.setPen(QPen(palette.color(QPalette.ColorRole.Mid), 1))
+        painter.drawRoundedRect(self.rect().adjusted(0, 0, -1, -1), 16, 16)
+
+
+class StationCardWidget(SimpleCardWidget):
+    """Calm station card with a stable surface while the pointer moves over it."""
+
+    def __init__(self, parent: QWidget | None = None) -> None:
+        super().__init__(parent)
+        self.setProperty("stationHover", "disabled")
+
+
+def _add_station_modal_shadow(widget: QWidget, *, blur: float = 32, y: float = 6) -> None:
+    shadow = QGraphicsDropShadowEffect(widget)
+    shadow.setBlurRadius(blur)
+    shadow.setOffset(0, y)
+    color = widget.palette().color(QPalette.ColorRole.Shadow)
+    color.setAlpha(58)
+    shadow.setColor(color)
+    widget.setGraphicsEffect(shadow)
+
+
+class StationModalShell(QWidget):
+    """Reusable raised Fluent surface for station dialogs and floating tools."""
+
+    def __init__(
+        self,
+        parent: QWidget | None = None,
+        *,
+        outer_margins: tuple[int, int, int, int] = (10, 10, 10, 10),
+        backdrop_margins: tuple[int, int, int, int] = (10, 10, 10, 10),
+        surface_margins: tuple[int, int, int, int] = (16, 14, 16, 14),
+    ) -> None:
+        super().__init__(parent)
+        self.setObjectName("stationModalShell")
+        self.setProperty("stationSurface", "raised")
+        self.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
+
+        self.outer_layout = QVBoxLayout(self)
+        self.outer_layout.setContentsMargins(*outer_margins)
+        self.outer_layout.setSpacing(0)
+
+        self.backdrop = _StationModalBackdrop(self)
+        self.backdrop.setObjectName("stationModalBackdrop")
+        self.backdrop.setProperty("stationSurface", "raised")
+        self.backdrop.setProperty("stationHover", "disabled")
+        self.backdrop.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
+        self.backdrop.setSizePolicy(
+            QSizePolicy.Policy.Expanding,
+            QSizePolicy.Policy.Expanding,
+        )
+        self.backdrop_layout = QVBoxLayout(self.backdrop)
+        self.backdrop_layout.setContentsMargins(*backdrop_margins)
+        self.backdrop_layout.setSpacing(0)
+        self.outer_layout.addWidget(self.backdrop)
+
+        self.surface = StationCardWidget(self.backdrop)
+        self.surface.setObjectName("stationModalSurface")
+        self.surface.setProperty("stationSurface", "card")
+        self.surface.setSizePolicy(
+            QSizePolicy.Policy.Expanding,
+            QSizePolicy.Policy.Expanding,
+        )
+        self.surface_layout = QVBoxLayout(self.surface)
+        self.surface_layout.setContentsMargins(*surface_margins)
+        self.surface_layout.setSpacing(8)
+        # A named alias makes the intended insertion point explicit for new
+        # dialogs without forcing existing subclasses to change their layout.
+        self.content_layout = self.surface_layout
+        self.backdrop_layout.addWidget(self.surface)
+        _add_station_modal_shadow(self.surface)
+
+
+class StationDialog(FramelessDialog):
     """Theme-aware host for every station-owned popup or floating window."""
 
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
+        self.setTitleBar(FluentTitleBar(self))
+        self.titleBar.minBtn.hide()
+        self.titleBar.maxBtn.hide()
+        self.titleBar.setDoubleClickEnabled(False)
+        self.titleBar.closeBtn.clicked.disconnect()
+        self.titleBar.closeBtn.clicked.connect(self.close)
         self.setProperty("stationSurface", "page")
         self.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
+        self.modal_shell = StationModalShell(self)
+        self._modal_shell_is_content = False
+        self._position_modal_shell()
+
+    def use_modal_shell_content(self) -> StationModalShell:
+        """Raise the shared shell so a migrated dialog can own its content."""
+
+        self._modal_shell_is_content = True
+        self.modal_shell.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents, False)
+        self._position_modal_shell()
+        return self.modal_shell
+
+    def modal_content_layout(self, *, spacing: int | None = None) -> QVBoxLayout:
+        """Return the supported content layout for station-owned modals."""
+
+        layout = self.use_modal_shell_content().surface_layout
+        if spacing is not None:
+            layout.setSpacing(spacing)
+        return layout
+
+    def _position_modal_shell(self) -> None:
+        inset = 8
+        title_bar_height = self.titleBar.height() if hasattr(self, "titleBar") else 0
+        top_inset = max(inset, title_bar_height + 6)
+        self.modal_shell.setGeometry(
+            self.rect().adjusted(inset, top_inset, -inset, -inset)
+        )
+        if self._modal_shell_is_content:
+            self.modal_shell.raise_()
+        else:
+            self.modal_shell.setAttribute(
+                Qt.WidgetAttribute.WA_TransparentForMouseEvents, True
+            )
+            self.modal_shell.lower()
+
+    def showEvent(self, event) -> None:  # noqa: N802 - Qt override
+        super().showEvent(event)
+        self._position_modal_shell()
+
+    def resizeEvent(self, event: QResizeEvent) -> None:  # noqa: N802 - Qt override
+        super().resizeEvent(event)
+        self._position_modal_shell()
 
     def changeEvent(self, event: QEvent) -> None:
         super().changeEvent(event)
@@ -54,10 +219,11 @@ class StationAlertDialog(StationDialog):
         preferred_width = max(360, min(640, parent_width - 48))
         self.setMinimumWidth(preferred_width)
         self.setMaximumWidth(preferred_width)
+        surface = self.use_modal_shell_content().surface
 
-        self.title_label = SubtitleLabel(title, self)
+        self.title_label = SubtitleLabel(title, surface)
         self.title_label.setWordWrap(True)
-        self.content_label = BodyLabel(text, self)
+        self.content_label = BodyLabel(text, surface)
         self.content_label.setWordWrap(True)
         self.content_label.setTextInteractionFlags(
             Qt.TextInteractionFlag.TextSelectableByMouse
@@ -65,14 +231,14 @@ class StationAlertDialog(StationDialog):
         )
 
         self.primary_button = PrimaryPushButton(
-            StationMessageBox._button_label(primary), self
+            StationMessageBox._button_label(primary), surface
         )
         self.primary_button.setMinimumWidth(120)
         self.primary_button.clicked.connect(lambda: self._finish(primary, True))
         self.secondary_button: PushButton | None = None
         if secondary is not None:
             self.secondary_button = PushButton(
-                StationMessageBox._button_label(secondary), self
+                StationMessageBox._button_label(secondary), surface
             )
             self.secondary_button.setMinimumWidth(120)
             self.secondary_button.clicked.connect(
@@ -86,9 +252,7 @@ class StationAlertDialog(StationDialog):
             buttons.addWidget(self.secondary_button)
         buttons.addWidget(self.primary_button)
 
-        layout = QVBoxLayout(self)
-        layout.setContentsMargins(24, 22, 24, 20)
-        layout.setSpacing(12)
+        layout = self.modal_content_layout(spacing=12)
         layout.addWidget(self.title_label)
         layout.addWidget(self.content_label)
         layout.addSpacing(8)
@@ -123,12 +287,11 @@ class StationSettingsGuidanceDialog(StationDialog):
         self.setModal(True)
         self.setProperty("stationSurface", "raised")
         self.setMinimumWidth(max(360, min(640, (parent.width() if parent else 720) - 48)))
+        surface = self.use_modal_shell_content().surface
 
-        layout = QVBoxLayout(self)
-        layout.setContentsMargins(24, 22, 24, 20)
-        layout.setSpacing(12)
-        heading = SubtitleLabel(title, self)
-        body = BodyLabel(text, self)
+        layout = self.modal_content_layout(spacing=12)
+        heading = SubtitleLabel(title, surface)
+        body = BodyLabel(text, surface)
         body.setWordWrap(True)
         body.setTextInteractionFlags(
             Qt.TextInteractionFlag.TextSelectableByMouse
@@ -139,8 +302,8 @@ class StationSettingsGuidanceDialog(StationDialog):
         layout.addSpacing(8)
         buttons = QHBoxLayout()
         buttons.addStretch(1)
-        close = PushButton("Close", self)
-        self.go_to_settings_button = PrimaryPushButton(action_label, self)
+        close = PushButton("Close", surface)
+        self.go_to_settings_button = PrimaryPushButton(action_label, surface)
         close.clicked.connect(self.reject)
         self.go_to_settings_button.clicked.connect(self.accept)
         buttons.addWidget(close)
@@ -179,19 +342,18 @@ class SweepDeviceReadinessDialog(StationDialog):
         parent_width = parent.width() if parent is not None else 720
         self.setMinimumWidth(max(420, min(680, parent_width - 48)))
 
-        layout = QVBoxLayout(self)
-        layout.setContentsMargins(24, 22, 24, 20)
-        layout.setSpacing(12)
-        heading = SubtitleLabel("Device readiness", self)
+        surface = self.use_modal_shell_content().surface
+        layout = self.modal_content_layout(spacing=12)
+        heading = SubtitleLabel("Device readiness", surface)
         guidance = BodyLabel(
             "Connect and verify every device used by this sweep before starting. "
             "Connecting never enables an output.",
-            self,
+            surface,
         )
         guidance.setWordWrap(True)
         layout.addWidget(heading)
         layout.addWidget(guidance)
-        self.safety_guidance = BodyLabel(parent=self)
+        self.safety_guidance = BodyLabel(parent=surface)
         self.safety_guidance.setObjectName("muted")
         self.safety_guidance.setWordWrap(True)
         if additional_safety_devices:
@@ -208,7 +370,7 @@ class SweepDeviceReadinessDialog(StationDialog):
             self.safety_guidance.hide()
 
         for device in self._required_devices:
-            row = SimpleCardWidget(self)
+            row = SimpleCardWidget(surface)
             row.setProperty("stationSurface", "card")
             row_layout = QHBoxLayout(row)
             row_layout.setContentsMargins(14, 10, 14, 10)
@@ -226,9 +388,9 @@ class SweepDeviceReadinessDialog(StationDialog):
         layout.addSpacing(4)
         buttons = QHBoxLayout()
         buttons.addStretch(1)
-        self.cancel_button = PushButton("Cancel", self)
-        self.connect_missing_button = PushButton("Connect missing devices", self)
-        self.start_button = PrimaryPushButton("Start sweep", self)
+        self.cancel_button = PushButton("Cancel", surface)
+        self.connect_missing_button = PushButton("Connect missing devices", surface)
+        self.start_button = PrimaryPushButton("Start sweep", surface)
         self.cancel_button.setAccessibleName("Cancel sweep readiness")
         self.connect_missing_button.setAccessibleName("Connect missing sweep devices")
         self.start_button.setAccessibleName("Start verified sweep")

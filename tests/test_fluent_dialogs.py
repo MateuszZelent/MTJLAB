@@ -5,13 +5,30 @@ from unittest.mock import patch
 
 from PySide6.QtCore import Qt
 from PySide6.QtCore import QPoint
+from PySide6.QtGui import QPalette
 from PySide6.QtWidgets import (
     QApplication,
     QDialog,
     QFileDialog,
     QMessageBox,
+    QWidget,
 )
 from qfluentwidgets import PrimaryPushButton, PushButton, TransparentPushButton
+
+from app.devices.anritsu_ms2830a.ui.manual_save import ManualSpectrumSaveDialog
+from app.devices.anritsu_ms2830a.ui.page import (
+    _AnritsuSpectrogramWindow,
+    _AnritsuSpectrumWindow,
+    _AnritsuTraceDiagnosticsDialog,
+)
+from app.devices.anritsu_ms2830a.ui.peak_analysis import (
+    PeakTableDialog,
+    PeakTrackingWindow,
+)
+from app.devices.keithley_2600.ui.page import _KeithleyFloatingPanelWindow
+from app.devices.lakeshore_475.ui.page import LakeShoreLiveWindow
+from app.devices.moke_box.ui.page import MokeHallLiveWindow
+from app.recipes import RecipeNode
 
 from app.safety.keithley_limit_reconciliation import (
     KeithleyLimitAdjustment,
@@ -22,6 +39,8 @@ from app.ui.dialogs import (
     StationAlertDialog,
     StationDialog,
     StationFileDialog,
+    StationModalShell,
+    StationSettingsGuidanceDialog,
     SweepDeviceReadinessDialog,
 )
 from app.ui.recipes.fluent_dialog import FluentRecipeDialog
@@ -32,6 +51,8 @@ from app.ui.widgets import (
     SpectrumPlotWidget,
 )
 from app.ui.common import line_edit
+from app.ui.recipes import ActionNodeEditorDialog, DeviceParameterDialog, SweepGeneratorDialog
+from app.ui.recipes.common_dialogs import OutputPolicyDialog, RepeatCountDialog
 
 
 class FluentDialogTests(unittest.TestCase):
@@ -49,6 +70,190 @@ class FluentDialogTests(unittest.TestCase):
         finally:
             station.close()
             recipe.close()
+
+    def test_station_dialog_exposes_the_shared_modal_shell_after_rendering(self) -> None:
+        dialog = StationDialog()
+        previous_theme = self.application.property("stationAppliedTheme")
+        try:
+            self.assertIsInstance(dialog.modal_shell, StationModalShell)
+            self.assertEqual(dialog.modal_shell.objectName(), "stationModalShell")
+            self.assertEqual(
+                dialog.modal_shell.surface.objectName(), "stationModalSurface"
+            )
+            self.assertEqual(
+                dialog.modal_shell.surface.property("stationSurface"), "card"
+            )
+
+            dialog.resize(520, 360)
+            observed: dict[str, str] = {}
+            for theme in ("light", "dark"):
+                apply_application_theme(self.application, theme)
+                dialog.show()
+                self.application.processEvents()
+                self.assertGreater(dialog.modal_shell.width(), 0)
+                self.assertGreater(dialog.modal_shell.height(), 0)
+                self.assertGreater(dialog.modal_shell.surface.width(), 0)
+                self.assertGreater(dialog.modal_shell.surface.height(), 0)
+                observed[theme] = (
+                    dialog.modal_shell.surface.palette()
+                    .color(QPalette.ColorRole.Window)
+                    .name()
+                )
+            self.assertNotEqual(observed["light"], observed["dark"])
+        finally:
+            dialog.close()
+            if previous_theme in {"light", "dark"}:
+                apply_application_theme(self.application, previous_theme)
+
+    def test_core_modal_actions_are_inside_the_shared_surface(self) -> None:
+        dialogs = (
+            StationAlertDialog(
+                None,
+                "Safety warning",
+                "The requested operation is not safe.",
+                QMessageBox.StandardButton.Ok,
+                None,
+                QMessageBox.StandardButton.Ok,
+            ),
+            StationSettingsGuidanceDialog(
+                None,
+                "Configuration required",
+                "Update the station profile before continuing.",
+            ),
+            SweepDeviceReadinessDialog(
+                ("keithley",),
+                {"keithley": "Keithley 2600"},
+            ),
+        )
+        try:
+            for dialog in dialogs:
+                dialog.resize(640, 420)
+                dialog.show()
+                self.application.processEvents()
+                self.assertIsNone(dialog.layout())
+                self.assertGreater(dialog.modal_shell.surface_layout.count(), 0)
+                self.assertGreater(dialog.modal_shell.surface.width(), 0)
+            self.assertIs(
+                dialogs[0].primary_button.parentWidget(),
+                dialogs[0].modal_shell.surface,
+            )
+            self.assertIs(
+                dialogs[1].go_to_settings_button.parentWidget(),
+                dialogs[1].modal_shell.surface,
+            )
+            self.assertIs(
+                dialogs[2].start_button.parentWidget(),
+                dialogs[2].modal_shell.surface,
+            )
+        finally:
+            for dialog in dialogs:
+                dialog.close()
+
+    def test_device_modal_windows_render_inside_the_shared_surface(self) -> None:
+        parent = QWidget()
+        panel = QWidget()
+        dialogs = (
+            PeakTableDialog(parent),
+            PeakTrackingWindow(parent),
+            _AnritsuSpectrogramWindow(parent),
+            _AnritsuSpectrumWindow(parent),
+            _AnritsuTraceDiagnosticsDialog(parent),
+            ManualSpectrumSaveDialog(
+                parent,
+                trace_choices=(("raw", "Raw"),),
+                metadata_values=(),
+                default_destination="manual.h5",
+            ),
+            LakeShoreLiveWindow(parent),
+            MokeHallLiveWindow(parent),
+            _KeithleyFloatingPanelWindow("plot", panel, parent),
+        )
+        try:
+            for dialog in dialogs:
+                dialog.resize(760, 520)
+                dialog.show()
+            self.application.processEvents()
+            for dialog in dialogs:
+                self.assertIsNone(dialog.layout())
+                self.assertGreater(dialog.modal_shell.surface.width(), 0)
+                self.assertGreater(dialog.modal_shell.surface.height(), 0)
+                actions = dialog.modal_shell.surface.findChildren(PushButton)
+                self.assertTrue(
+                    any(action.isVisible() and action.isEnabled() for action in actions),
+                    dialog.objectName(),
+                )
+
+            for dialog in dialogs:
+                close_button = getattr(
+                    dialog,
+                    "close_button",
+                    getattr(dialog, "cancel_button", None),
+                )
+                if close_button is not None and not dialog.testAttribute(
+                    Qt.WidgetAttribute.WA_DeleteOnClose
+                ):
+                    close_button.click()
+            self.application.processEvents()
+            visible = [
+                dialog.objectName()
+                for dialog in dialogs
+                if not dialog.testAttribute(Qt.WidgetAttribute.WA_DeleteOnClose)
+                and dialog.isVisible()
+            ]
+            self.assertFalse(visible, visible)
+        finally:
+            for dialog in dialogs:
+                if dialog.testAttribute(Qt.WidgetAttribute.WA_DeleteOnClose):
+                    dialog.hide()
+                else:
+                    dialog.close()
+            parent.close()
+
+    def test_recipe_modals_keep_forms_and_actions_on_the_fluent_surface(self) -> None:
+        dialogs = (
+            OutputPolicyDialog("unchanged"),
+            RepeatCountDialog(initial_count=3),
+            ActionNodeEditorDialog(
+                RecipeNode("wait-node", "wait", {"duration": "1 s"})
+            ),
+            DeviceParameterDialog(
+                definitions=(
+                    {
+                        "device": "Keithley",
+                        "label": "Source current",
+                        "target": "keithley.B.current",
+                        "dimension": "current",
+                    },
+                )
+            ),
+            SweepGeneratorDialog(
+                {
+                    "device": "Keithley",
+                    "label": "Source current",
+                    "target": "keithley.B.current",
+                    "dimension": "current",
+                }
+            ),
+        )
+        try:
+            for dialog in dialogs:
+                dialog.resize(760, 540)
+                dialog.show()
+            self.application.processEvents()
+            for dialog in dialogs:
+                self.assertIsNone(dialog.layout())
+                self.assertGreater(dialog.modal_shell.surface.width(), 0)
+                self.assertGreater(dialog.modal_shell.surface.height(), 0)
+                self.assertTrue(
+                    any(
+                        button.isVisible() and button.isEnabled()
+                        for button in dialog.modal_shell.surface.findChildren(PushButton)
+                    ),
+                    dialog.objectName(),
+                )
+        finally:
+            for dialog in dialogs:
+                dialog.close()
 
     def test_limit_and_plot_popup_actions_are_fluent_controls(self) -> None:
         limit = LimitField(line_edit("1 V"), "0 V", "2 V")

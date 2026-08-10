@@ -73,9 +73,8 @@ class SweepGeneratorDialog(FluentRecipeDialog):
         self.setWindowTitle(f"Point generator — {definition['label']}")
         self.setMinimumSize(640, 560)
         self.resize(1180, 700)
-        layout = QVBoxLayout(self)
-        layout.setContentsMargins(14, 12, 14, 12)
-        layout.setSpacing(10)
+        surface = self.use_modal_shell_content().surface
+        layout = self.modal_content_layout(spacing=10)
         heading = BodyLabel(
             "Build any number of inclusive intervals. Each interval uses either a point count "
             "or a physical step; the scatter plot always shows the exact generated points."
@@ -83,7 +82,7 @@ class SweepGeneratorDialog(FluentRecipeDialog):
         heading.setWordWrap(True)
         layout.addWidget(heading)
         self._safety_bound = self._resolve_safety_bound()
-        self.safety_limits = CaptionLabel(self)
+        self.safety_limits = CaptionLabel("", surface)
         self.safety_limits.setObjectName("sweepSafetyLimits")
         self.safety_limits.setWordWrap(True)
         if self._safety_bound is None:
@@ -167,8 +166,8 @@ class SweepGeneratorDialog(FluentRecipeDialog):
         layout.addWidget(self.splitter, 1)
         footer = QHBoxLayout()
         footer.addStretch(1)
-        self.cancel_button = PushButton("Cancel", self)
-        self.create_button = PrimaryPushButton("Create sweep node", self)
+        self.cancel_button = PushButton("Cancel", surface)
+        self.create_button = PrimaryPushButton("Create sweep node", surface)
         footer.addWidget(self.cancel_button)
         footer.addWidget(self.create_button)
         layout.addLayout(footer)

@@ -898,7 +898,8 @@ class DashboardPage(QWidget):
         dialog.setObjectName("mokeProtocolTraceDialog")
         dialog.setWindowTitle(f"MOKE protocol test — {endpoint}")
         dialog.setMinimumSize(680, 460)
-        layout = QVBoxLayout(dialog)
+        surface = dialog.use_modal_shell_content().surface
+        layout = dialog.modal_content_layout(spacing=10)
 
         result = BodyLabel("MOKE Box verified" if verified else "MOKE verification failed")
         result.setObjectName("sectionTitle")
@@ -907,7 +908,7 @@ class DashboardPage(QWidget):
         detail_label.setWordWrap(True)
         layout.addWidget(detail_label)
 
-        trace_card = CardWidget(dialog)
+        trace_card = CardWidget(surface)
         trace_card.setObjectName("mokeProtocolTraceCard")
         trace_layout = QVBoxLayout(trace_card)
         trace_layout.setContentsMargins(12, 12, 12, 12)
@@ -929,7 +930,7 @@ class DashboardPage(QWidget):
 
         actions = QHBoxLayout()
         actions.addStretch(1)
-        close_button = PushButton("Close", dialog)
+        close_button = PushButton("Close", surface)
         close_button.clicked.connect(dialog.accept)
         actions.addWidget(close_button)
         layout.addLayout(actions)

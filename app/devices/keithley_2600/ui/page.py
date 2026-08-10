@@ -37,8 +37,9 @@ from app.devices.keithley_2600 import (
     build_keithley_ramp_levels,
 )
 from app.devices.keithley_2600.adapter import KeithleyMeasurement
-from app.domain.errors import ConfigurationError
+from app.domain.errors import ConfigurationError, SafetyViolation
 from app.domain.manual_metadata import ManualMetadataValue
+from app.domain.quick_controls import QuickConfigureCommand, QuickControlCommand
 from app.domain.quantities import (
     DIMENSION_CURRENT, DIMENSION_POWER, DIMENSION_RESISTANCE, DIMENSION_TIME,
     DIMENSION_VOLTAGE,
@@ -348,7 +349,8 @@ class KeithleyNodeEditorDialog(FluentRecipeDialog):
         ] = {}
         self.setWindowTitle("Keithley 2600 — configure sweep node")
         self.resize(1120, 720)
-        layout = QVBoxLayout(self)
+        surface = self.use_modal_shell_content().surface
+        layout = self.modal_content_layout(spacing=10)
         heading = BodyLabel("Keithley 2600")
         heading.setObjectName("recipePageTitle")
         layout.addWidget(heading)
@@ -368,7 +370,7 @@ class KeithleyNodeEditorDialog(FluentRecipeDialog):
         self.nplc = self.configuration_panel.nplc
         self.settle = self.configuration_panel.settle
         self.sense_mode = self.configuration_panel.sense_mode
-        parameter_card = CardWidget(self)
+        parameter_card = CardWidget(surface)
         parameter_card.setObjectName("recipeEditorParameters")
         parameter_layout = QGridLayout(parameter_card)
         parameter_layout.setContentsMargins(10, 10, 10, 10)
@@ -380,7 +382,7 @@ class KeithleyNodeEditorDialog(FluentRecipeDialog):
         self.parameter_selectors: dict[str, ComboBox] = {}
         mode_label = BodyLabel("Source mode")
         parameter_layout.addWidget(mode_label, 2, 0)
-        self.source_mode_action = ComboBox(self)
+        self.source_mode_action = ComboBox(parameter_card)
         self.source_mode_action.addItem("Set", userData="set")
         self.source_mode_action.setEnabled(False)
         parameter_layout.addWidget(self.source_mode_action, 2, 1)
@@ -399,7 +401,7 @@ class KeithleyNodeEditorDialog(FluentRecipeDialog):
             parameter_label = BodyLabel(label)
             parameter_layout.addWidget(parameter_label, row, 0)
             self.parameter_labels[parameter_id] = parameter_label
-            selector = ComboBox(self)
+            selector = ComboBox(parameter_card)
             selector.setProperty("parameterId", parameter_id)
             selector.addItem("Unchanged", userData="unchanged")
             selector.addItem("Set", userData="set")
@@ -409,7 +411,7 @@ class KeithleyNodeEditorDialog(FluentRecipeDialog):
             self.parameter_selectors[parameter_id] = selector
         output_row = 3 + len(definitions)
         parameter_layout.addWidget(BodyLabel("Output state"), output_row, 0)
-        self.output_policy = ComboBox(self)
+        self.output_policy = ComboBox(parameter_card)
         self.output_policy.addItem(
             "Keep OUTPUT OFF (safe default)", userData="unchanged"
         )
@@ -424,7 +426,7 @@ class KeithleyNodeEditorDialog(FluentRecipeDialog):
         )
         self.output_policy.addItem("Force OUTPUT OFF", userData="off")
         parameter_layout.addWidget(self.output_policy, output_row, 1)
-        self.open_roi_button = PrimaryPushButton("Go to ROI…", self)
+        self.open_roi_button = PrimaryPushButton("Go to ROI…", parameter_card)
         self.open_roi_button.setEnabled(False)
         self.open_roi_button.setToolTip(
             "Open the interval and point editor for the single parameter marked Sweep."
@@ -458,9 +460,9 @@ class KeithleyNodeEditorDialog(FluentRecipeDialog):
         layout.addWidget(workspace, 1)
         footer = QHBoxLayout()
         footer.addStretch(1)
-        self.cancel_button = PushButton("Cancel", self)
-        self.validate_button = PushButton("Validate", self)
-        self.apply_button = PrimaryPushButton("Apply selected actions", self)
+        self.cancel_button = PushButton("Cancel", surface)
+        self.validate_button = PushButton("Validate", surface)
+        self.apply_button = PrimaryPushButton("Apply selected actions", surface)
         footer.addWidget(self.cancel_button)
         footer.addWidget(self.validate_button)
         footer.addWidget(self.apply_button)
@@ -766,18 +768,19 @@ class _KeithleyReadbackDialog(StationDialog):
                 min(1180, max(980, available.width() - 48)),
                 min(760, max(620, available.height() - 48)),
             )
-        layout = QVBoxLayout(self)
-        layout.setContentsMargins(18, 16, 18, 16)
+        surface = self.use_modal_shell_content().surface
+        layout = self.modal_content_layout(spacing=10)
+        # The shared modal shell owns the outer content margins.
         layout.setSpacing(8)
 
-        title = StrongBodyLabel("Hardware configuration snapshot", self)
+        title = StrongBodyLabel("Hardware configuration snapshot", surface)
         title.setObjectName("pageTitle")
         layout.addWidget(title)
         note = BodyLabel(
             "Read-only TSP queries were used for both channels. No setting or OUTPUT "
             "state was changed. Settling time belongs to the application and is not "
             "stored in the Keithley.",
-            self,
+            surface,
         )
         note.setWordWrap(True)
         layout.addWidget(note)
@@ -792,9 +795,10 @@ class _KeithleyReadbackDialog(StationDialog):
         output_status.setObjectName(
             "keithleyReadbackOutputOn" if output_on else "sectionTitle"
         )
+        output_status.setParent(surface)
         layout.addWidget(output_status)
 
-        range_title = StrongBodyLabel("Source range vs measurement range", self)
+        range_title = StrongBodyLabel("Source range vs measurement range", surface)
         range_title.setObjectName("sectionTitle")
         layout.addWidget(range_title)
         self.range_guidance = BodyLabel(
@@ -813,10 +817,11 @@ class _KeithleyReadbackDialog(StationDialog):
         self.range_guidance.setAccessibleName(
             "Explanation of source autorange and active source range"
         )
+        self.range_guidance.setParent(surface)
         self.range_guidance.setWordWrap(True)
         layout.addWidget(self.range_guidance)
 
-        self.table = TableWidget(self)
+        self.table = TableWidget(surface)
         self.table.setObjectName("keithleyReadbackTable")
         self.table.setAccessibleName(
             "Keithley hardware settings read from channels A and B"
@@ -946,17 +951,19 @@ class _KeithleyReadbackDialog(StationDialog):
             self,
         )
         self.comparison_legend.setObjectName("muted")
+        self.comparison_legend.setParent(surface)
         self.comparison_legend.setWordWrap(True)
         self.comparison_legend.setAccessibleName("Readback comparison legend")
         layout.addWidget(self.comparison_legend)
 
         footer = QHBoxLayout()
         self.assign_all_button = PrimaryPushButton(
-            "Use all compatible values", self
+            "Use all compatible values", surface
         )
         self.assign_all_button.setAccessibleName(
             "Use all compatible hardware values in the form"
         )
+        self.assign_all_button.setParent(surface)
         self.assign_all_button.setToolTip(
             "Copy all configurable A/B values to the form. Safety limits and OUTPUT "
             "states are not changed."
@@ -964,7 +971,7 @@ class _KeithleyReadbackDialog(StationDialog):
         self.assign_all_button.clicked.connect(self._assign_all)
         footer.addWidget(self.assign_all_button)
         footer.addStretch(1)
-        self.close_button = PushButton("Close", self)
+        self.close_button = PushButton("Close", surface)
         self.close_button.setAccessibleName("Close Keithley hardware readback")
         self.close_button.clicked.connect(self.accept)
         footer.addWidget(self.close_button)
@@ -1130,9 +1137,16 @@ class _KeithleyFloatingPanelWindow(StationDialog):
         self.setWindowModality(Qt.WindowModality.NonModal)
         self.setMinimumSize(460, 230)
         self.resize(760, 360 if "plot" in title.lower() else 270)
-        layout = QVBoxLayout(self)
-        layout.setContentsMargins(12, 12, 12, 12)
+        surface = self.use_modal_shell_content().surface
+        layout = self.modal_content_layout(spacing=8)
+        panel.setParent(surface)
         layout.addWidget(panel)
+        footer = QHBoxLayout()
+        footer.addStretch(1)
+        self.close_button = PushButton("Close", surface)
+        self.close_button.clicked.connect(self.close)
+        footer.addWidget(self.close_button)
+        layout.addLayout(footer)
 
     def closeEvent(self, event: QCloseEvent) -> None:
         self.closed.emit()
@@ -1556,6 +1570,74 @@ class KeithleyPage(QWidget):
                     continue
                 values[f"keithley.{channel}.{mode}"] = snapshot.source_level
         return values
+
+    def quick_control_hardware_request(
+        self, target: str, text: str, state: str
+    ) -> tuple[str, object]:
+        """Build the safe hardware operation for one shared quick-control draft.
+
+        A connected channel with OUTPUT OFF receives the complete current card
+        configuration, so the adapter can validate and read back the entire
+        source envelope without energising the DUT.  OUTPUT ON is deliberately
+        limited to a level-only update backed by a configuration already
+        verified by the card.
+        """
+
+        parts = target.split(".")
+        if len(parts) != 3 or parts[0] != "keithley":
+            raise ValueError(f"Unsupported Keithley quick-control target {target!r}.")
+        _device, channel, mode = parts
+        if channel not in {"A", "B"} or mode not in {"current", "voltage"}:
+            raise ValueError(f"Unsupported Keithley quick-control target {target!r}.")
+
+        normalized_state = str(state).strip().lower()
+        channel_output_on = (
+            self._output_state_known[channel] and self._output_states[channel]
+        )
+        if normalized_state == "output_on" and channel_output_on:
+            if channel not in self._configured_channels:
+                raise SafetyViolation(
+                    f"Keithley {channel} has no source configuration verified by the card; "
+                    "turn OUTPUT OFF and apply the settings before live quick control."
+                )
+            dimension = DIMENSION_CURRENT if mode == "current" else DIMENSION_VOLTAGE
+            parse_quantity(text, dimension)
+            return "quick_setpoint", QuickControlCommand(target, text)
+
+        if normalized_state == "output_on" and not self._output_state_known[channel]:
+            raise SafetyViolation(
+                f"Keithley channel {channel} OUTPUT is not individually confirmed."
+            )
+        if normalized_state not in {"output_off", "output_on"}:
+            raise SafetyViolation(
+                "Keithley quick control requires a confirmed OUTPUT OFF or OUTPUT ON state."
+            )
+
+        snapshot = self.configuration_snapshot_for(channel, mode)
+        request = self._source_request_from_snapshot(
+            replace(snapshot, source_level=text)
+        )
+        if self._compliance_increase_is_blocked(
+            channel, request.level_si, mode=request.mode
+        ):
+            raise SafetyViolation(
+                f"Keithley channel {channel} source increase is blocked by compliance."
+            )
+        return "quick_configure", QuickConfigureCommand(target, request)
+
+    def quick_control_configuration_verified(
+        self, target: str, command: object
+    ) -> None:
+        """Record a successful dry-run as the next live-control prerequisite."""
+
+        if not isinstance(command, QuickConfigureCommand):
+            return
+        request = command.configuration
+        if not isinstance(request, KeithleySourceRequest):
+            return
+        if command.target != target or request.channel not in {"A", "B"}:
+            return
+        self._configured_channels.add(request.channel)
 
     def quick_control_draft_changed_from_coordinator(
         self, target: str, text: str, source: str
@@ -3713,23 +3795,44 @@ class KeithleyPage(QWidget):
         self._last_assignment_succeeded = succeeded
 
     def _source_request(self) -> KeithleySourceRequest:
-        mode = self.mode.currentText()
+        return self._source_request_from_snapshot(
+            self.configuration_snapshot_for(self.channel.currentText(), self.mode.currentText())
+        )
+
+    def _source_request_from_snapshot(
+        self, snapshot: KeithleyConfigurationSnapshot
+    ) -> KeithleySourceRequest:
+        mode = snapshot.source_mode
         level_dimension = DIMENSION_CURRENT if mode == "current" else DIMENSION_VOLTAGE
         compliance_dimension = DIMENSION_VOLTAGE if mode == "current" else DIMENSION_CURRENT
         request = KeithleySourceRequest(
-            channel=self.channel.currentText(),  # type: ignore[arg-type]
+            channel=snapshot.channel,  # type: ignore[arg-type]
             mode=mode,  # type: ignore[arg-type]
-            level_si=0.0 if mode == "measure_only" else parse_quantity(self.level.text(), level_dimension).si_value,
-            compliance_si=0.0 if mode == "measure_only" else parse_quantity(self.compliance.text(), compliance_dimension).si_value,
-            nplc=float(self.nplc.text().replace(",", ".")),
-            settle_time_s=parse_quantity(self.settle.text(), "time").si_value,
-            sense_mode=self.sense_mode.currentText(),  # type: ignore[arg-type]
-            source_autorange=self.source_autorange.isChecked(),
-            source_range_si=self._manual_range(self.source_range.text(), level_dimension, self.source_autorange.isChecked()),
-            measure_voltage_autorange=self.measure_voltage_autorange.isChecked(),
-            measure_voltage_range_si=self._manual_range(self.measure_voltage_range.text(), DIMENSION_VOLTAGE, self.measure_voltage_autorange.isChecked()),
-            measure_current_autorange=self.measure_current_autorange.isChecked(),
-            measure_current_range_si=self._manual_range(self.measure_current_range.text(), DIMENSION_CURRENT, self.measure_current_autorange.isChecked()),
+            level_si=0.0
+            if mode == "measure_only"
+            else parse_quantity(snapshot.source_level, level_dimension).si_value,
+            compliance_si=0.0
+            if mode == "measure_only"
+            else parse_quantity(snapshot.compliance, compliance_dimension).si_value,
+            nplc=float(snapshot.nplc.replace(",", ".")),
+            settle_time_s=parse_quantity(snapshot.settling_time, "time").si_value,
+            sense_mode=snapshot.sense_mode,  # type: ignore[arg-type]
+            source_autorange=snapshot.source_autorange,
+            source_range_si=self._manual_range(
+                snapshot.source_range, level_dimension, snapshot.source_autorange
+            ),
+            measure_voltage_autorange=snapshot.measure_voltage_autorange,
+            measure_voltage_range_si=self._manual_range(
+                snapshot.measure_voltage_range,
+                DIMENSION_VOLTAGE,
+                snapshot.measure_voltage_autorange,
+            ),
+            measure_current_autorange=snapshot.measure_current_autorange,
+            measure_current_range_si=self._manual_range(
+                snapshot.measure_current_range,
+                DIMENSION_CURRENT,
+                snapshot.measure_current_autorange,
+            ),
         )
         # First safety layer: reject unit mistakes and out-of-profile values in
         # the UI before any request reaches the worker or VISA session. The

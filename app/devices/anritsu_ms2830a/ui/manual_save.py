@@ -65,16 +65,15 @@ class ManualSpectrumSaveDialog(StationDialog):
         self._metadata_values = tuple(unique_metadata.values())
         self._metadata_checks: dict[str, CheckBox] = {}
 
-        layout = QVBoxLayout(self)
-        layout.setContentsMargins(24, 22, 24, 20)
-        layout.setSpacing(12)
-        heading = TitleLabel("Manual spectrum archive", self)
+        surface = self.use_modal_shell_content().surface
+        layout = self.modal_content_layout(spacing=12)
+        heading = TitleLabel("Manual spectrum archive", surface)
         layout.addWidget(heading)
         note = BodyLabel(
             "Save the completed trace currently visible in Anritsu. Device values below "
             "are the last confirmed readbacks already held by the station; this dialog "
             "does not send a new instrument query or change an output.",
-            self,
+            surface,
         )
         note.setWordWrap(True)
         note.setObjectName("muted")
@@ -82,7 +81,7 @@ class ManualSpectrumSaveDialog(StationDialog):
 
         form = QFormLayout()
         form.setFieldGrowthPolicy(QFormLayout.FieldGrowthPolicy.AllNonFixedFieldsGrow)
-        self.destination = LineEdit(self)
+        self.destination = LineEdit(surface)
         self.destination.setText(str(default_destination))
         self.destination.setPlaceholderText("Choose a base name, e.g. manual_spectrum.h5")
         self.destination.setClearButtonEnabled(True)
@@ -92,11 +91,11 @@ class ManualSpectrumSaveDialog(StationDialog):
         destination_row.setContentsMargins(0, 0, 0, 0)
         destination_row.addWidget(self.destination, 1)
         destination_row.addWidget(browse)
-        destination_host = QWidget(self)
+        destination_host = QWidget(surface)
         destination_host.setLayout(destination_row)
         form.addRow("HDF5 destination", destination_host)
 
-        self.mode = ComboBox(self)
+        self.mode = ComboBox(surface)
         self.mode.addItem(
             "Append subsequent spectra to this HDF5",
             userData=ManualSpectrumSaveMode.APPEND.value,
@@ -113,14 +112,14 @@ class ManualSpectrumSaveDialog(StationDialog):
         )
         form.addRow("File policy", self.mode)
 
-        self.trace = ComboBox(self)
+        self.trace = ComboBox(surface)
         for key, label in trace_choices:
             self.trace.addItem(label, userData=key)
         trace_index = self.trace.findData(default_trace_variant)
         self.trace.setCurrentIndex(max(0, trace_index))
         form.addRow("Spectrum variant", self.trace)
 
-        self.metadata_scope = ComboBox(self)
+        self.metadata_scope = ComboBox(surface)
         self.metadata_scope.addItem(
             "All available confirmed values",
             userData="all",
@@ -137,16 +136,18 @@ class ManualSpectrumSaveDialog(StationDialog):
         form.addRow("Device metadata", self.metadata_scope)
         layout.addLayout(form)
 
-        values_title = StrongBodyLabel("Values attached to every saved spectrum", self)
+        values_title = StrongBodyLabel(
+            "Values attached to every saved spectrum", surface
+        )
         values_title.setObjectName("sectionTitle")
         layout.addWidget(values_title)
         values_hint = CaptionLabel(
             "Select individual readings such as Keithley B current, or use the policy above.",
-            self,
+            surface,
         )
         values_hint.setObjectName("muted")
         layout.addWidget(values_hint)
-        self.values_scroll = ScrollArea(self)
+        self.values_scroll = ScrollArea(surface)
         self.values_scroll.setWidgetResizable(True)
         self.values_scroll.setHorizontalScrollBarPolicy(
             Qt.ScrollBarPolicy.ScrollBarAlwaysOff
@@ -193,14 +194,14 @@ class ManualSpectrumSaveDialog(StationDialog):
         self.values_scroll.setMinimumHeight(160)
         layout.addWidget(self.values_scroll, 1)
 
-        self.error_label = CaptionLabel("", self)
+        self.error_label = CaptionLabel("", surface)
         self.error_label.setObjectName("errorText")
         self.error_label.setWordWrap(True)
         layout.addWidget(self.error_label)
         footer = QHBoxLayout()
         footer.addStretch(1)
-        self.cancel_button = PushButton("Cancel", self)
-        self.save_button = PrimaryPushButton("Save spectrum", self)
+        self.cancel_button = PushButton("Cancel", surface)
+        self.save_button = PrimaryPushButton("Save spectrum", surface)
         footer.addWidget(self.cancel_button)
         footer.addWidget(self.save_button)
         layout.addLayout(footer)

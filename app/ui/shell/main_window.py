@@ -282,6 +282,18 @@ class MainWindow(FluentWindow):
         self.quick_control_coordinator = QuickControlCoordinator(
             self._controllers, self, settings=self._settings
         )
+        self.quick_control_coordinator.set_hardware_request_builder(
+            "rigol",
+            lambda request, state: self.rigol_page.quick_control_hardware_request(
+                request.target, request.text, state
+            ),
+        )
+        self.quick_control_coordinator.set_hardware_request_builder(
+            "keithley",
+            lambda request, state: self.keithley_page.quick_control_hardware_request(
+                request.target, request.text, state
+            ),
+        )
         self.quick_controls_window = QuickControlsWindow(self.quick_control_coordinator, self)
         self.quick_controls_window.restore_workspace()
         self.quick_controls_window.output_requested.connect(self._request_quick_control_output)
@@ -333,6 +345,12 @@ class MainWindow(FluentWindow):
         )
         self.quick_control_coordinator.state_changed.connect(
             self.keithley_page.quick_setpoint_state_changed
+        )
+        self.quick_control_coordinator.configuration_verified.connect(
+            self.rigol_page.quick_control_configuration_verified
+        )
+        self.quick_control_coordinator.configuration_verified.connect(
+            self.keithley_page.quick_control_configuration_verified
         )
         self.quick_control_coordinator.value_read.connect(self.rigol_page.quick_setpoint_value_read)
         self.quick_control_coordinator.value_read.connect(
@@ -1281,6 +1299,7 @@ class MainWindow(FluentWindow):
             "trigger_burst",
             "ramp_to_level",
             "quick_setpoint",
+            "quick_configure",
             "configure_signal_generator",
             "configure_advanced_spectrum",
             "set_signal_generator_output",

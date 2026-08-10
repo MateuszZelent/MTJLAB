@@ -16,6 +16,10 @@ from qfluentwidgets import (
     TransparentPushButton,
 )
 
+from app.devices.keithley_2600 import KeithleySourceRequest
+from app.devices.rigol_dg1000z import RigolChannelConfig
+from app.domain.errors import SafetyViolation
+from app.domain.quick_controls import QuickConfigureCommand
 from app.ui.shell import MainWindow
 from app.ui.design_system import tokens_for
 from app.domain.models import DeviceCapabilities
@@ -175,6 +179,59 @@ class FluentDevicePageTests(unittest.TestCase):
             self.assertNotEqual(light, dark)
         finally:
             window._set_theme_mode("system", persist=False)
+            window.close()
+            self.application.processEvents()
+
+    def test_quick_control_builder_uses_offline_form_dry_run_and_live_modes(self) -> None:
+        window = MainWindow(".config/settings.yml", simulation=True)
+        try:
+            keithley = window.keithley_page
+            operation, payload = keithley.quick_control_hardware_request(
+                "keithley.A.current", "1.00 mA", "output_off"
+            )
+            self.assertEqual(operation, "quick_configure")
+            self.assertIsInstance(payload, QuickConfigureCommand)
+            assert isinstance(payload, QuickConfigureCommand)
+            self.assertIsInstance(payload.configuration, KeithleySourceRequest)
+            assert isinstance(payload.configuration, KeithleySourceRequest)
+            self.assertEqual(payload.configuration.channel, "A")
+            self.assertEqual(payload.configuration.mode, "current")
+            self.assertAlmostEqual(payload.configuration.level_si, 0.001)
+
+            with self.assertRaises(SafetyViolation):
+                keithley.quick_control_hardware_request(
+                    "keithley.A.current", "1.00 mA", "output_on"
+                )
+
+            keithley._output_state_known["A"] = True
+            keithley._output_states["A"] = False
+            operation, payload = keithley.quick_control_hardware_request(
+                "keithley.A.current", "1.00 mA", "output_on"
+            )
+            self.assertEqual(operation, "quick_configure")
+            self.assertIsInstance(payload, QuickConfigureCommand)
+
+            keithley._configured_channels.add("A")
+            keithley._output_states["A"] = True
+            operation, payload = keithley.quick_control_hardware_request(
+                "keithley.A.current", "1.00 mA", "output_on"
+            )
+            self.assertEqual(operation, "quick_setpoint")
+            self.assertEqual(payload.target, "keithley.A.current")
+            self.assertEqual(payload.quantity_text, "1.00 mA")
+
+            rigol = window.rigol_page
+            operation, payload = rigol.quick_control_hardware_request(
+                "rigol.1.frequency", "2.000 kHz", "output_off"
+            )
+            self.assertEqual(operation, "quick_configure")
+            self.assertIsInstance(payload, QuickConfigureCommand)
+            assert isinstance(payload, QuickConfigureCommand)
+            self.assertIsInstance(payload.configuration, RigolChannelConfig)
+            assert isinstance(payload.configuration, RigolChannelConfig)
+            self.assertEqual(payload.configuration.channel, 1)
+            self.assertAlmostEqual(payload.configuration.frequency_hz, 2_000.0)
+        finally:
             window.close()
             self.application.processEvents()
 

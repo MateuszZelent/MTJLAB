@@ -30,7 +30,7 @@ from PySide6.QtTest import QTest
 from app.domain.errors import ConfigurationError
 from app.domain.models import DeviceCapabilities
 from app.engine import ExecutionPlan, PlanAction
-from app.domain.quick_controls import QuickControlCommand
+from app.domain.quick_controls import QuickConfigureCommand
 from app.devices.discovery import DiscoveredInstrument
 from app.devices.moke_box.models import MokeHallVoltageReading
 from app.devices.anritsu_ms2830a import (
@@ -189,6 +189,9 @@ class MainWindowTests(unittest.TestCase):
                 window._guard_manual_operation(
                     "keithley", "set_output_group", (("A", "B"), True)
                 )
+            # The OUTPUT-OFF dry-run is still permitted when the audit backend
+            # is degraded, just like the regular non-energising configure path.
+            window._guard_manual_operation("keithley", "quick_configure", object())
             window._guard_manual_operation("keithley", "set_output", (1, False))
             window._guard_manual_operation("anritsu", "set_signal_generator_output", False)
             window._guard_manual_operation("keithley", "emergency_off", None)
@@ -1111,6 +1114,9 @@ class MainWindowTests(unittest.TestCase):
             )
             window.quick_controls_window.set_targets(targets)
             window._controllers["rigol"].call = Mock()
+            # A connected but de-energised generator uses the full card
+            # configuration path; this must never fall back to a live update.
+            window._controllers["rigol"].state_changed.emit("output_off")
 
             window.anritsu_page.quick_controls_button.click()
             self.application.processEvents()
@@ -1135,10 +1141,12 @@ class MainWindowTests(unittest.TestCase):
             frequency = floating._rows["rigol.1.frequency"]
             frequency.value.setText("10.000 kHz")
             frequency.increase.click()
-            window._controllers["rigol"].call.assert_called_once_with(
-                "quick_setpoint",
-                QuickControlCommand("rigol.1.frequency", "10.001 kHz"),
-            )
+            window._controllers["rigol"].call.assert_called_once()
+            operation, payload = window._controllers["rigol"].call.call_args.args
+            self.assertEqual(operation, "quick_configure")
+            self.assertIsInstance(payload, QuickConfigureCommand)
+            assert isinstance(payload, QuickConfigureCommand)
+            self.assertEqual(payload.target, "rigol.1.frequency")
             self.assertEqual(frequency.value.text(), "10.001 kHz")
 
             window._set_run_ui_locked(True)
@@ -3950,6 +3958,29 @@ class MainWindowTests(unittest.TestCase):
             window.close()
             self.application.processEvents()
 
+    def test_quick_controls_title_bar_close_does_not_close_main_window(self) -> None:
+        window = MainWindow(".config/settings.yml", simulation=True)
+        quick = window.quick_controls_window
+        try:
+            window.show()
+            quick.show()
+            self.application.processEvents()
+
+            self.assertTrue(window.isVisible())
+            self.assertTrue(quick.isVisible())
+
+            quick.titleBar.closeBtn.click()
+            self.application.processEvents()
+
+            self.assertFalse(quick.isVisible())
+            self.assertTrue(window.isVisible())
+        finally:
+            if quick.isVisible():
+                quick.close()
+            if window.isVisible():
+                window.close()
+            self.application.processEvents()
+
     def test_main_window_closes_owned_floating_windows_on_shutdown(self) -> None:
         window = MainWindow(".config/settings.yml", simulation=True)
         keithley = window.keithley_page
@@ -4296,6 +4327,36 @@ class MainWindowTests(unittest.TestCase):
 
             anritsu.spectrogram_source.setCurrentIndex(anritsu.spectrogram_source.findData("raw"))
             self.assertEqual(floating.source.currentData(), "raw")
+        finally:
+            window.close()
+            self.application.processEvents()
+
+    def test_anritsu_floating_spectrum_uses_shared_modal_shell(self) -> None:
+        window = MainWindow(".config/settings.yml", simulation=True)
+        try:
+            window.resize(1360, 880)
+            window.show()
+            window._navigate_to("anritsu")
+            self.application.processEvents()
+            anritsu = window.anritsu_page
+            anritsu._show_trace(synthetic_anritsu_peaks())
+            anritsu._open_spectrum_window()
+            self.application.processEvents()
+
+            floating = anritsu._spectrum_window
+            self.assertIsNotNone(floating)
+            assert floating is not None
+            self.assertEqual(floating.windowModality(), Qt.WindowModality.NonModal)
+            self.assertTrue(floating.modal_shell.surface.isVisibleTo(floating))
+            self.assertIs(floating.spectrum.parentWidget(), floating.modal_shell.surface)
+            self.assertGreater(floating.spectrum.width(), 0)
+            self.assertGreater(floating.spectrum.height(), 0)
+
+            floating.resize(580, 400)
+            self.application.processEvents()
+            self.assertGreater(floating.spectrum.width(), 0)
+            self.assertGreater(floating.spectrum.height(), 0)
+            self.assertTrue(floating.status.isVisible())
         finally:
             window.close()
             self.application.processEvents()

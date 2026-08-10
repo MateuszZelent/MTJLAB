@@ -23,7 +23,9 @@ from app.devices.rigol_dg1000z import (
     RigolBurstConfig, RigolChannelConfig, RigolCounterConfig, RigolCounterReading, RigolFrequencySweepConfig,
     RigolModulationConfig, RigolOutputConfig,
 )
+from app.domain.errors import SafetyViolation
 from app.domain.manual_metadata import ManualMetadataValue
+from app.domain.quick_controls import QuickConfigureCommand, QuickControlCommand
 from app.domain.quantities import (
     DIMENSION_FREQUENCY, DIMENSION_TIME, DIMENSION_VOLTAGE,
     format_quantity_auto, parse_quantity,
@@ -486,6 +488,61 @@ class RigolPage(QWidget):
             self._quick_control_projection = False
         if projection_source:
             self._publish_quick_control_snapshot(channel)
+
+    def quick_control_hardware_request(
+        self, target: str, text: str, state: str
+    ) -> tuple[str, object]:
+        """Build the safe OFF configuration or ON live-update operation."""
+
+        parts = target.split(".")
+        if len(parts) != 3 or parts[0] != "rigol" or parts[1] not in {"1", "2"}:
+            raise ValueError(f"Unsupported Rigol quick-control target {target!r}.")
+        _device, channel_text, field = parts
+        if field not in {"frequency", "high_level", "low_level", "amplitude", "offset"}:
+            raise ValueError(f"Unsupported Rigol quick-control target {target!r}.")
+        channel = int(channel_text)
+        normalized_state = str(state).strip().lower()
+        channel_output_on = (
+            self._output_state_known[channel] and self._output_states[channel]
+        )
+        if normalized_state == "output_on" and channel_output_on:
+            if self._confirmed_carrier_configs[channel] is None:
+                raise SafetyViolation(
+                    f"Rigol CH{channel} has no carrier configuration verified by the card; "
+                    "turn OUTPUT OFF and apply the waveform before live quick control."
+                )
+            dimension = DIMENSION_FREQUENCY if field == "frequency" else DIMENSION_VOLTAGE
+            parse_quantity(text, dimension)
+            return "quick_setpoint", QuickControlCommand(target, text)
+        if normalized_state == "output_on" and not self._output_state_known[channel]:
+            raise SafetyViolation(
+                f"Rigol CH{channel} OUTPUT is not individually confirmed."
+            )
+        if normalized_state not in {"output_off", "output_on"}:
+            raise SafetyViolation(
+                "Rigol quick control requires a confirmed OUTPUT OFF or OUTPUT ON state."
+            )
+        snapshot = self.configuration_snapshot_for(channel)
+        updated = self._snapshot_with_quick_value(snapshot, field, text)
+        config = self._channel_config_from_snapshot(updated)
+        return "quick_configure", QuickConfigureCommand(target, config)
+
+    def quick_control_configuration_verified(
+        self, target: str, command: object
+    ) -> None:
+        """Cache the carrier configuration verified by an OUTPUT-OFF apply."""
+
+        if not isinstance(command, QuickConfigureCommand):
+            return
+        config = command.configuration
+        if (
+            command.target != target
+            or not isinstance(config, RigolChannelConfig)
+            or config.channel not in {1, 2}
+        ):
+            return
+        self._confirmed_carrier_configs[config.channel] = config
+        self._refresh_confirmed_advanced_controls()
 
     def _publish_quick_control_snapshot(self, channel: int) -> None:
         try:
@@ -2169,25 +2226,52 @@ class RigolPage(QWidget):
         return scroll
 
     def _visible_channel_config(self) -> RigolChannelConfig:
-        high_level, low_level = self._effective_levels()
+        return self._channel_config_from_snapshot(self.configuration_snapshot())
+
+    def _channel_config_from_snapshot(
+        self, snapshot: RigolConfigurationSnapshot
+    ) -> RigolChannelConfig:
+        waveform = snapshot.waveform
+        high_level = parse_quantity(snapshot.high_level, DIMENSION_VOLTAGE).si_value
+        low_level = parse_quantity(snapshot.low_level, DIMENSION_VOLTAGE).si_value
         frequency_hz = (
             1.0
-            if self.waveform.currentText() in {"DC", "NOIS"}
-            else parse_quantity(self.frequency.text(), DIMENSION_FREQUENCY).si_value
+            if waveform in {"DC", "NOIS"}
+            else parse_quantity(snapshot.frequency, DIMENSION_FREQUENCY).si_value
         )
         config = RigolChannelConfig(
-            channel=int(self.channel.currentText()),
-            waveform=self.waveform.currentText(),
+            channel=snapshot.channel,
+            waveform=waveform,
             frequency_hz=frequency_hz,
             high_level_v=high_level,
             low_level_v=low_level,
-            output_load=self.load.text().strip(),
-            phase_deg=float(self.phase.text().replace(",", ".")),
-            square_duty_percent=float(self.duty.text().replace(",", ".")) if self.waveform.currentText() == "SQU" else None,
-            ramp_symmetry_percent=float(self.ramp_symmetry.text().replace(",", ".")) if self.waveform.currentText() == "RAMP" else None,
-            pulse_width_s=parse_quantity(self.pulse_width.text(), DIMENSION_TIME).si_value if self.waveform.currentText() == "PULS" else None,
-            pulse_leading_s=parse_quantity(self.pulse_leading.text(), DIMENSION_TIME).si_value if self.waveform.currentText() == "PULS" else None,
-            pulse_trailing_s=parse_quantity(self.pulse_trailing.text(), DIMENSION_TIME).si_value if self.waveform.currentText() == "PULS" else None,
+            output_load=snapshot.output_load,
+            phase_deg=float(snapshot.phase_deg.replace(",", ".")),
+            square_duty_percent=(
+                float(snapshot.square_duty_percent.replace(",", "."))
+                if waveform == "SQU"
+                else None
+            ),
+            ramp_symmetry_percent=(
+                float(snapshot.ramp_symmetry_percent.replace(",", "."))
+                if waveform == "RAMP"
+                else None
+            ),
+            pulse_width_s=(
+                parse_quantity(snapshot.pulse_width, DIMENSION_TIME).si_value
+                if waveform == "PULS"
+                else None
+            ),
+            pulse_leading_s=(
+                parse_quantity(snapshot.pulse_leading, DIMENSION_TIME).si_value
+                if waveform == "PULS"
+                else None
+            ),
+            pulse_trailing_s=(
+                parse_quantity(snapshot.pulse_trailing, DIMENSION_TIME).si_value
+                if waveform == "PULS"
+                else None
+            ),
         )
         validate_rigol_waveform(
             channel=self._station_settings.rigol.safety.channels[str(config.channel)],

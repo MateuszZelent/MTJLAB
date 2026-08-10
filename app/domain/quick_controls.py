@@ -34,6 +34,14 @@ class QuickControlCommand:
     quantity_text: str
 
 
+@dataclass(frozen=True, slots=True)
+class QuickConfigureCommand:
+    """Complete device-page configuration used for a safe OUTPUT-OFF apply."""
+
+    target: str
+    configuration: object
+
+
 def quantity_step_si(text: str, dimension: str) -> float:
     """Return the SI step represented by the last written decimal place."""
 

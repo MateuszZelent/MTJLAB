@@ -254,8 +254,9 @@ class LimitEditDialog(StationDialog):
         self.setWindowTitle(f"Edit limits — {title}")
         self.setModal(True)
         self.setMinimumWidth(430)
-        layout = QVBoxLayout(self)
-        heading = StrongBodyLabel(title, self)
+        surface = self.use_modal_shell_content().surface
+        layout = self.modal_content_layout(spacing=10)
+        heading = StrongBodyLabel(title, surface)
         heading.setObjectName("pageTitle")
         layout.addWidget(heading)
         note = BodyLabel(
@@ -265,9 +266,9 @@ class LimitEditDialog(StationDialog):
         note.setWordWrap(True)
         layout.addWidget(note)
         form = QFormLayout()
-        self.minimum = LineEdit(self)
+        self.minimum = LineEdit(surface)
         self.minimum.setText("" if minimum is None else str(minimum))
-        self.maximum = LineEdit(self)
+        self.maximum = LineEdit(surface)
         self.maximum.setText("" if maximum is None else str(maximum))
         self.maximum.setEnabled(maximum_enabled)
         if not maximum_enabled:
@@ -278,14 +279,14 @@ class LimitEditDialog(StationDialog):
         warning = BodyLabel(
             "On success the new range is applied immediately. If validation or the "
             "device check fails, an error is shown and the previous range is restored.",
-            self,
+            surface,
         )
         warning.setWordWrap(True)
         layout.addWidget(warning)
         footer = QHBoxLayout()
         footer.addStretch(1)
-        cancel = PushButton("Cancel", self)
-        save = PrimaryPushButton("Save limits", self)
+        cancel = PushButton("Cancel", surface)
+        save = PrimaryPushButton("Save limits", surface)
         cancel.clicked.connect(self.reject)
         save.clicked.connect(self.accept)
         footer.addWidget(cancel)
@@ -302,22 +303,21 @@ class KeithleyLimitProposalDialog(StationDialog):
         self.setModal(True)
         parent_width = parent.width() if parent is not None else 720
         self.setMinimumWidth(min(520, max(360, parent_width - 48)))
-        layout = QVBoxLayout(self)
-        layout.setContentsMargins(24, 22, 24, 20)
-        layout.setSpacing(12)
+        surface = self.use_modal_shell_content().surface
+        layout = self.modal_content_layout(spacing=12)
 
-        heading = StrongBodyLabel("Dependent Keithley limit changes", self)
+        heading = StrongBodyLabel("Dependent Keithley limit changes", surface)
         layout.addWidget(heading)
         guidance = BodyLabel(
             "To keep the requested limit, the following station safety-envelope "
             "changes are required. They are staged only; no hardware is changed "
             "until you explicitly save settings.",
-            self,
+            surface,
         )
         guidance.setWordWrap(True)
         layout.addWidget(guidance)
 
-        self.adjustments_text = PlainTextEdit(self)
+        self.adjustments_text = PlainTextEdit(surface)
         self.adjustments_text.setObjectName("keithleyLimitAdjustments")
         self.adjustments_text.setReadOnly(True)
         self.adjustments_text.setMinimumHeight(132)
@@ -333,9 +333,11 @@ class KeithleyLimitProposalDialog(StationDialog):
 
         footer = QHBoxLayout()
         footer.addStretch(1)
-        self.cancel_button = PushButton("Cancel", self)
+        self.cancel_button = PushButton("Cancel", surface)
         self.cancel_button.setObjectName("cancelKeithleyLimitChanges")
-        self.accept_button = PrimaryPushButton(f"Accept {len(proposal.adjustments)} changes", self)
+        self.accept_button = PrimaryPushButton(
+            f"Accept {len(proposal.adjustments)} changes", surface
+        )
         self.accept_button.setObjectName("acceptKeithleyLimitChanges")
         self.cancel_button.clicked.connect(self.reject)
         self.accept_button.clicked.connect(self.accept)

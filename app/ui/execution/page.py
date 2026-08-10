@@ -10,7 +10,6 @@ from PySide6.QtCore import QEvent, QTimer, Qt, QUrl, Signal
 from PySide6.QtGui import QBrush, QColor, QDesktopServices
 from PySide6.QtWidgets import (
     QAbstractItemView,
-    QDialog,
     QGridLayout,
     QHeaderView,
     QHBoxLayout,
@@ -33,6 +32,7 @@ from qfluentwidgets import (
 )
 
 from app.ui.common import human_duration as _human_duration
+from app.ui.dialogs import StationDialog
 from app.ui.design_system import tokens_for
 from app.ui.widgets import SpectrumPlotWidget
 from app.recipes import parse_recipe_text
@@ -41,7 +41,7 @@ from app.recipes.parameter_registry import PARAMETERS_BY_TARGET
 from app.domain.quantities import format_quantity_auto
 
 
-class ManualStageDialog(QDialog):
+class ManualStageDialog(StationDialog):
     """Non-modal operator gate for one recipe action in manual-stage mode."""
 
     next_requested = Signal()
@@ -54,30 +54,29 @@ class ManualStageDialog(QDialog):
         self.setModal(False)
         self.setMinimumWidth(470)
         self._allow_close = False
-        layout = QVBoxLayout(self)
-        layout.setContentsMargins(20, 18, 20, 18)
-        layout.setSpacing(10)
-        title = StrongBodyLabel("Manual execution", self)
+        surface = self.use_modal_shell_content().surface
+        layout = self.modal_content_layout(spacing=10)
+        title = StrongBodyLabel("Manual execution", surface)
         title.setObjectName("pageTitle")
         layout.addWidget(title)
-        self.stage = StrongBodyLabel("Preparing next stage…", self)
+        self.stage = StrongBodyLabel("Preparing next stage…", surface)
         self.stage.setWordWrap(True)
         layout.addWidget(self.stage)
-        self.details = BodyLabel("The runner waits for your confirmation.", self)
+        self.details = BodyLabel("The runner waits for your confirmation.", surface)
         self.details.setObjectName("muted")
         self.details.setWordWrap(True)
         layout.addWidget(self.details)
         hint = BodyLabel(
             "The device operation itself still waits for its readback/completion. "
             "Finally and emergency shutdown do not wait for this dialog.",
-            self,
+            surface,
         )
         hint.setObjectName("muted")
         hint.setWordWrap(True)
         layout.addWidget(hint)
         buttons = QHBoxLayout()
-        self.abort_button = PushButton("Abort safely", self)
-        self.next_button = PrimaryPushButton("Next stage", self)
+        self.abort_button = PushButton("Abort safely", surface)
+        self.next_button = PrimaryPushButton("Next stage", surface)
         buttons.addWidget(self.abort_button)
         buttons.addStretch(1)
         buttons.addWidget(self.next_button)

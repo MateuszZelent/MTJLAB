@@ -57,7 +57,7 @@ from app.security import AccessPolicy, Permission
 from app.settings.models import StationSettings
 from app.storage import Hdf5RunReader, ThatecDevice, ThatecRow, ThatecRun, ThatecRunReader, ThatecTreeNode
 from app.ui.common import human_bytes as _human_bytes
-from app.ui.dialogs import StationFileDialog as QFileDialog
+from app.ui.dialogs import StationDialog, StationFileDialog as QFileDialog
 from app.ui.dialogs import StationMessageBox as QMessageBox
 from app.ui.settings_guidance import SettingsIssue, settings_issue_for_error
 from app.ui.common import human_duration as _human_duration
@@ -99,7 +99,7 @@ _KEITHLEY_OPTIONAL_SHUTDOWN_RAMP_IDS = {
 }
 
 
-class KeithleyShutdownMethodDialog(QDialog):
+class KeithleyShutdownMethodDialog(StationDialog):
     """Choose optional operator cleanup before the compiler's final OFF."""
 
     def __init__(
@@ -112,16 +112,15 @@ class KeithleyShutdownMethodDialog(QDialog):
         super().__init__(parent)
         self.setWindowTitle("Keithley shutdown method")
         self.setMinimumWidth(520)
-        layout = QVBoxLayout(self)
-        layout.setContentsMargins(24, 22, 24, 20)
-        layout.setSpacing(12)
+        surface = self.use_modal_shell_content().surface
+        layout = self.modal_content_layout(spacing=12)
 
-        title = StrongBodyLabel("Keithley shutdown before automatic OFF", self)
+        title = StrongBodyLabel("Keithley shutdown before automatic OFF", surface)
         layout.addWidget(title)
         explanation = BodyLabel(
             "Automatic final OUTPUT OFF always remains active. Ramp to zero is "
             "only added when you explicitly select it here.",
-            self,
+            surface,
         )
         explanation.setWordWrap(True)
         explanation.setObjectName("muted")
@@ -130,7 +129,7 @@ class KeithleyShutdownMethodDialog(QDialog):
         form = QFormLayout()
         self.channel_a = self._method_combo("A" in ramp_channels)
         self.channel_b = self._method_combo("B" in ramp_channels)
-        self.deadline = LineEdit(self)
+        self.deadline = LineEdit(surface)
         self.deadline.setText(deadline or "30 s")
         self.deadline.setPlaceholderText("30 s")
         self.deadline.setAccessibleName("Ramp deadline")
@@ -141,8 +140,8 @@ class KeithleyShutdownMethodDialog(QDialog):
 
         footer = QHBoxLayout()
         footer.addStretch(1)
-        cancel = PushButton("Cancel", self)
-        apply = PrimaryPushButton("Apply shutdown choice", self)
+        cancel = PushButton("Cancel", surface)
+        apply = PrimaryPushButton("Apply shutdown choice", surface)
         footer.addWidget(cancel)
         footer.addWidget(apply)
         layout.addLayout(footer)
@@ -161,7 +160,7 @@ class KeithleyShutdownMethodDialog(QDialog):
         return self.deadline.text().strip() or "30 s"
 
     def _method_combo(self, ramp_enabled: bool) -> ComboBox:
-        combo = ComboBox(self)
+        combo = ComboBox(self.modal_shell.surface)
         combo.addItem("Immediate OUTPUT OFF", userData="off")
         combo.addItem("Ramp to zero, then OUTPUT OFF", userData="ramp")
         combo.setCurrentIndex(1 if ramp_enabled else 0)

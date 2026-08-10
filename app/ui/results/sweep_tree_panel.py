@@ -465,14 +465,15 @@ class SweepTreeDialog(StationDialog):
         self.setWindowTitle(f"Sweep Tree — {path.name}")
         self.resize(720, 600)
 
-        layout = QVBoxLayout(self)
+        surface = self.use_modal_shell_content().surface
+        layout = self.modal_content_layout(spacing=10)
         self.panel = SweepTreePanel()
         self.panel.load(path, run, tree)
         layout.addWidget(self.panel, 1)
 
         footer = QHBoxLayout()
         footer.addStretch(1)
-        close = PushButton("Close", self)
+        close = PushButton("Close", surface)
         close.clicked.connect(self.reject)
         footer.addWidget(close)
         layout.addLayout(footer)

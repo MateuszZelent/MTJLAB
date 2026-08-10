@@ -67,13 +67,14 @@ class AnritsuNodeEditorDialog(FluentRecipeDialog):
         self.setWindowTitle("Anritsu MS2830A — configure sweep node")
         self.resize(1180, 760)
         self.setMinimumSize(680, 480)
-        layout = QVBoxLayout(self)
+        surface = self.use_modal_shell_content().surface
+        layout = self.modal_content_layout(spacing=10)
         heading = BodyLabel("Anritsu MS2830A · Spectrum analyser")
         heading.setObjectName("pageTitle")
         layout.addWidget(heading)
         self.content_splitter = QSplitter(Qt.Orientation.Horizontal)
         self.content_splitter.setChildrenCollapsible(False)
-        left = CardWidget(self)
+        left = CardWidget(surface)
         left.setObjectName("recipeEditorParameters")
         left_layout = QVBoxLayout(left)
         parameter_tabs = QStackedWidget(left)
@@ -104,13 +105,13 @@ class AnritsuNodeEditorDialog(FluentRecipeDialog):
         left_layout.addWidget(parameter_routes)
         left_layout.addWidget(parameter_tabs)
         self.content_splitter.addWidget(left)
-        right = CardWidget(self)
+        right = CardWidget(surface)
         right.setObjectName("recipeEditorParameters")
         right_layout = QGridLayout(right)
         title = BodyLabel("Node role and controlled parameters")
         title.setObjectName("sectionTitle")
         right_layout.addWidget(title, 0, 0, 1, 2)
-        self.node_role = ComboBox(self)
+        self.node_role = ComboBox(right)
         self.node_role.addItem("Apply spectrum settings only", userData="configure")
         self.node_role.addItem(
             "Apply settings, then acquire spectrum", userData="acquire_spectrum"
@@ -127,13 +128,13 @@ class AnritsuNodeEditorDialog(FluentRecipeDialog):
         self.acquisition_hint.setWordWrap(True)
         self.acquisition_hint.setObjectName("muted")
         right_layout.addWidget(self.acquisition_hint, 2, 0, 1, 2)
-        self.average_count = SpinBox(self)
+        self.average_count = SpinBox(right)
         self.average_count.setRange(1, 9999)
         self.average_count.setValue(1)
         self.average_count_label = BodyLabel("Average complete spectra")
         right_layout.addWidget(self.average_count_label, 3, 0)
         right_layout.addWidget(self.average_count, 3, 1)
-        self.reference_operation = ComboBox(self)
+        self.reference_operation = ComboBox(right)
         for label, value in (
             ("None — raw spectrum", "none"),
             ("Difference in dB", "difference_db"),
@@ -151,7 +152,7 @@ class AnritsuNodeEditorDialog(FluentRecipeDialog):
             self.parameter_specs, start=5
         ):
             right_layout.addWidget(BodyLabel(label), row, 0)
-            selector = ComboBox(self)
+            selector = ComboBox(right)
             selector.addItem("Unchanged", userData="unchanged")
             selector.addItem("Set", userData="set")
             if sweepable:
@@ -160,12 +161,12 @@ class AnritsuNodeEditorDialog(FluentRecipeDialog):
             self.parameter_selectors[parameter_id] = selector
             right_layout.addWidget(selector, row, 1)
         operation_row = len(self.parameter_specs) + 5
-        self.trace = ComboBox(self)
+        self.trace = ComboBox(right)
         self.trace.addItems(("TRAC1",))
         self.trace_label = BodyLabel("Trace")
         right_layout.addWidget(self.trace_label, operation_row + 1, 0)
         right_layout.addWidget(self.trace, operation_row + 1, 1)
-        self.open_roi_button = PrimaryPushButton("Go to ROI…", self)
+        self.open_roi_button = PrimaryPushButton("Go to ROI…", right)
         self.open_roi_button.setEnabled(False)
         self.open_roi_button.clicked.connect(self._open_roi)
         right_layout.addWidget(
@@ -181,7 +182,7 @@ class AnritsuNodeEditorDialog(FluentRecipeDialog):
         note.setWordWrap(True)
         right_layout.addWidget(note, operation_row + 3, 0, 1, 2)
         right_layout.setRowStretch(operation_row + 4, 1)
-        right_scroll = ScrollArea(self)
+        right_scroll = ScrollArea(surface)
         right_scroll.setWidgetResizable(True)
         right_scroll.setFrameShape(QFrame.Shape.NoFrame)
         right_scroll.setWidget(right)
@@ -190,8 +191,8 @@ class AnritsuNodeEditorDialog(FluentRecipeDialog):
         layout.addWidget(self.content_splitter, 1)
         footer = QHBoxLayout()
         footer.addStretch(1)
-        self.cancel_button = PushButton("Cancel", self)
-        self.apply_button = PrimaryPushButton("Apply Anritsu node", self)
+        self.cancel_button = PushButton("Cancel", surface)
+        self.apply_button = PrimaryPushButton("Apply Anritsu node", surface)
         footer.addWidget(self.cancel_button)
         footer.addWidget(self.apply_button)
         self.apply_button.clicked.connect(self.accept)
@@ -520,21 +521,22 @@ class AnritsuSignalGeneratorNodeEditorDialog(FluentRecipeDialog):
         self.resize(620, 420)
         self.setMinimumSize(520, 360)
         self._working_segments: dict[str, list[dict[str, object]]] = {}
-        layout = QVBoxLayout(self)
+        surface = self.use_modal_shell_content().surface
+        layout = self.modal_content_layout(spacing=10)
         heading = BodyLabel("Anritsu MS2830A · Signal generator")
         heading.setObjectName("pageTitle")
         layout.addWidget(heading)
         form = QGridLayout()
-        self.frequency = LineEdit(self)
+        self.frequency = LineEdit(surface)
         self.frequency.setText(frequency)
-        self.power = LineEdit(self)
+        self.power = LineEdit(surface)
         self.power.setText(power)
         self.parameter_selectors: dict[str, ComboBox] = {}
         for row, (parameter_id, label, _dimension) in enumerate(
             self.parameter_specs
         ):
             field = self.frequency if parameter_id == "sg.frequency" else self.power
-            selector = ComboBox(self)
+            selector = ComboBox(surface)
             selector.addItem("Unchanged", userData="unchanged")
             selector.addItem("Set", userData="set")
             selector.addItem("Sweep — ROI required", userData="sweep")
@@ -543,7 +545,7 @@ class AnritsuSignalGeneratorNodeEditorDialog(FluentRecipeDialog):
             form.addWidget(BodyLabel(label), row, 0)
             form.addWidget(field, row, 1)
             form.addWidget(selector, row, 2)
-        self.output_policy = ComboBox(self)
+        self.output_policy = ComboBox(surface)
         self.output_policy.addItem(
             "Keep RF OUTPUT OFF (safe default)", userData="unchanged"
         )
@@ -562,7 +564,7 @@ class AnritsuSignalGeneratorNodeEditorDialog(FluentRecipeDialog):
         form.addWidget(BodyLabel("RF output"), 2, 0)
         form.addWidget(self.output_policy, 2, 1, 1, 2)
         layout.addLayout(form)
-        self.open_roi_button = PrimaryPushButton("Edit ROI…", self)
+        self.open_roi_button = PrimaryPushButton("Edit ROI…", surface)
         self.open_roi_button.setEnabled(False)
         self.open_roi_button.clicked.connect(self._open_roi)
         layout.addWidget(self.open_roi_button)
@@ -579,9 +581,9 @@ class AnritsuSignalGeneratorNodeEditorDialog(FluentRecipeDialog):
         layout.addStretch(1)
         footer = QHBoxLayout()
         footer.addStretch(1)
-        self.cancel_button = PushButton("Cancel", self)
+        self.cancel_button = PushButton("Cancel", surface)
         self.apply_button = PrimaryPushButton(
-            "Apply signal generator settings · RF OFF", self
+            "Apply signal generator settings · RF OFF", surface
         )
         footer.addWidget(self.cancel_button)
         footer.addWidget(self.apply_button)

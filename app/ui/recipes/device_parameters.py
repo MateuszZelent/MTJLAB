@@ -3,9 +3,7 @@
 from __future__ import annotations
 
 from PySide6.QtCore import Qt
-from PySide6.QtWidgets import (
-    QListWidgetItem, QHBoxLayout, QVBoxLayout, QWidget,
-)
+from PySide6.QtWidgets import QListWidgetItem, QHBoxLayout, QWidget
 from qfluentwidgets import BodyLabel, ComboBox, ListWidget, PrimaryPushButton, PushButton
 from app.ui.dialogs import StationMessageBox as QMessageBox
 
@@ -35,22 +33,23 @@ class DeviceParameterDialog(FluentRecipeDialog):
         )
         self.setWindowTitle("Add device controls")
         self.setMinimumSize(460, 420)
-        layout = QVBoxLayout(self)
+        surface = self.use_modal_shell_content().surface
+        layout = self.modal_content_layout(spacing=10)
         layout.addWidget(BodyLabel("Choose an instrument, then select one or more fields to sweep."))
-        self.device = ComboBox(self)
+        self.device = ComboBox(surface)
         devices = tuple(dict.fromkeys(definition["device"] for definition in self._definitions))
         self.device.addItems(devices)
         layout.addWidget(self.device)
-        self.operation = ComboBox(self)
+        self.operation = ComboBox(surface)
         self.operation.addItem("Create dynamic sweep", userData="sweep")
         self.operation.addItem("Set one fixed value", userData="fixed")
         layout.addWidget(self.operation)
-        self.fields = ListWidget(self)
+        self.fields = ListWidget(surface)
         layout.addWidget(self.fields, 1)
         footer = QHBoxLayout()
         footer.addStretch(1)
-        self.open_button = PrimaryPushButton("Open point generators", self)
-        self.cancel_button = PushButton("Cancel", self)
+        self.open_button = PrimaryPushButton("Open point generators", surface)
+        self.cancel_button = PushButton("Cancel", surface)
         footer.addWidget(self.cancel_button)
         footer.addWidget(self.open_button)
         layout.addLayout(footer)

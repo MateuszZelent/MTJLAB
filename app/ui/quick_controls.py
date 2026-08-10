@@ -20,14 +20,10 @@ from PySide6.QtCore import (
 )
 from PySide6.QtGui import (
     QCloseEvent,
-    QColor,
     QGuiApplication,
     QKeyEvent,
-    QLinearGradient,
     QMouseEvent,
-    QPainter,
     QPalette,
-    QPen,
 )
 from PySide6.QtWidgets import (
     QDialog,
@@ -72,7 +68,7 @@ from app.recipes.parameter_registry import (
 )
 from app.safety.quick_controls import QuickControlSafetyBound, quick_control_safety_bounds
 from app.settings.models import StationSettings
-from app.ui.dialogs import StationDialog
+from app.ui.dialogs import StationCardWidget, StationDialog, StationModalShell
 from app.ui.design_system.tokens import tokens_for
 from app.ui.widgets.quick_quantity_slider import QuickQuantitySlider
 from app.ui.workers import DeviceController
@@ -89,38 +85,13 @@ QUICK_OUTPUT_TARGETS = tuple(target for target, _label in QUICK_OUTPUT_DESCRIPTO
 QUICK_OUTPUT_LABELS = dict(QUICK_OUTPUT_DESCRIPTORS)
 
 
+QuickHardwareRequestBuilder = Callable[
+    [QuickSetpoint, str], tuple[str, object]
+]
+
+
 def _output_target(device: str, channel: str) -> str:
     return f"output.{device}.{channel}"
-
-
-def _mix_colors(first: QColor, second: QColor, weight: float) -> QColor:
-    amount = max(0.0, min(1.0, weight))
-    return QColor.fromRgb(
-        round(first.red() * (1.0 - amount) + second.red() * amount),
-        round(first.green() * (1.0 - amount) + second.green() * amount),
-        round(first.blue() * (1.0 - amount) + second.blue() * amount),
-    )
-
-
-class _QuickControlsBackdrop(QWidget):
-    """Paint a quiet Fluent-like gradient behind the floating panel."""
-
-    def paintEvent(self, event) -> None:  # noqa: N802 - Qt override
-        del event
-        palette = self.palette()
-        window = palette.color(QPalette.ColorRole.Window)
-        base = palette.color(QPalette.ColorRole.Base)
-        accent = palette.color(QPalette.ColorRole.Highlight)
-        gradient = QLinearGradient(0, 0, 0, max(1, self.height()))
-        gradient.setColorAt(0.0, _mix_colors(window.lighter(106), accent, 0.08))
-        gradient.setColorAt(0.52, window)
-        gradient.setColorAt(1.0, _mix_colors(base.darker(104), accent, 0.04))
-
-        painter = QPainter(self)
-        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
-        painter.setBrush(gradient)
-        painter.setPen(QPen(palette.color(QPalette.ColorRole.Mid), 1))
-        painter.drawRoundedRect(self.rect().adjusted(0, 0, -1, -1), 16, 16)
 
 
 class _QuickOutputBody(QWidget):
@@ -225,6 +196,7 @@ def _add_quick_shadow(widget: QWidget, *, blur: float = 28, y: float = 5) -> Non
 class QuickControlCoordinator(QObject):
     state_changed = Signal(str, str, str)
     value_read = Signal(str, float)
+    configuration_verified = Signal(str, object)
     bounds_changed = Signal()
     draft_changed = Signal(str, str, str)
     confirmed_changed = Signal(str, float)
@@ -251,10 +223,25 @@ class QuickControlCoordinator(QObject):
             "rigol": set(),
             "keithley": set(),
         }
+        self._device_states: dict[str, str] = {
+            device: str(getattr(controllers[device], "state_value", "disconnected"))
+            .strip()
+            .lower()
+            for device in ("rigol", "keithley")
+        }
+        self._hardware_request_builders: dict[str, QuickHardwareRequestBuilder] = {}
         if settings is not None:
             self.set_settings(settings)
         self._sequence = 0
         self._inflight: dict[str, QuickSetpoint | None] = {
+            "rigol": None,
+            "keithley": None,
+        }
+        self._inflight_operations: dict[str, str | None] = {
+            "rigol": None,
+            "keithley": None,
+        }
+        self._inflight_payloads: dict[str, object | None] = {
             "rigol": None,
             "keithley": None,
         }
@@ -278,6 +265,24 @@ class QuickControlCoordinator(QObject):
                 lambda state, name=device: self._device_state(name, state)
             )
 
+    def set_hardware_request_builder(
+        self, device: str, builder: QuickHardwareRequestBuilder | None
+    ) -> None:
+        """Register the device-specific OFF/ON dispatch policy.
+
+        The coordinator owns the shared draft and queue, while a device page
+        supplies the complete, already validated configuration needed for a
+        non-energising ``output_off`` transaction.  When no builder is
+        registered the legacy quick-setpoint payload remains the default.
+        """
+
+        if device not in self._controllers:
+            raise KeyError(f"Unknown quick-control device {device!r}.")
+        if builder is None:
+            self._hardware_request_builders.pop(device, None)
+        else:
+            self._hardware_request_builders[device] = builder
+
     def submit(self, target: str, text: str) -> None:
         descriptor = QUICK_CONTROLS_BY_TARGET[target]
         value_si = parse_quantity(text, descriptor.dimension).si_value
@@ -286,9 +291,17 @@ class QuickControlCoordinator(QObject):
             self.state_changed.emit(target, "rejected", detail)
             return
         self.publish_draft(target, text, source="quick_controls")
+        device = descriptor.device_module
+        if not self._device_can_apply(device):
+            self.state_changed.emit(
+                target,
+                "draft",
+                f"Device {device} is not connected with a confirmed output state; "
+                "the value remains a local draft.",
+            )
+            return
         self._sequence += 1
         request = QuickSetpoint(target, text, value_si, self._sequence)
-        device = descriptor.device_module
         self._pending[device][target] = request
         self.state_changed.emit(target, "pending", "Waiting for device readback")
         self._send_next(device)
@@ -391,7 +404,8 @@ class QuickControlCoordinator(QObject):
 
     def refresh(self) -> None:
         for device in self._inflight:
-            self._controllers[device].call("quick_readback")
+            if self._device_can_apply(device):
+                self._controllers[device].call("quick_readback")
 
     def cancel_all(self, reason: str = "Cancelled") -> None:
         for targets in self._adopt_readback_targets.values():
@@ -405,11 +419,42 @@ class QuickControlCoordinator(QObject):
         if self._inflight[device] is not None or not self._pending[device]:
             return
         _target, request = self._pending[device].popitem(last=False)
+        if not self._device_can_apply(device):
+            self.state_changed.emit(
+                request.target,
+                "draft",
+                f"Device {device} is not connected with a confirmed output state; "
+                "the value remains a local draft.",
+            )
+            return
+        state = self._device_states[device]
+        builder = self._hardware_request_builders.get(device)
+        try:
+            operation, payload = (
+                builder(request, state)
+                if builder is not None
+                else (
+                    "quick_setpoint",
+                    QuickControlCommand(request.target, request.text),
+                )
+            )
+        except Exception as exc:
+            self.state_changed.emit(request.target, "rejected", str(exc))
+            self._send_next(device)
+            return
         self._inflight[device] = request
-        self.state_changed.emit(request.target, "applying", "Applying...")
-        self._controllers[device].call(
-            "quick_setpoint", QuickControlCommand(request.target, request.text)
+        self._inflight_operations[device] = operation
+        self._inflight_payloads[device] = payload
+        self.state_changed.emit(
+            request.target,
+            "applying",
+            (
+                "Applying configuration with OUTPUT OFF (dry run)..."
+                if operation == "quick_configure"
+                else "Applying live setpoint..."
+            ),
         )
+        self._controllers[device].call(operation, payload)
 
     def _result(self, device: str, operation: str, result: object) -> None:
         if operation == "quick_readback" and isinstance(result, dict):
@@ -427,11 +472,16 @@ class QuickControlCoordinator(QObject):
                         target, "ready", "Verified device configuration"
                     )
             return
-        if operation != "quick_setpoint":
+        if operation != self._inflight_operations[device]:
             return
         request = self._inflight[device]
         self._inflight[device] = None
+        self._inflight_operations[device] = None
+        payload = self._inflight_payloads[device]
+        self._inflight_payloads[device] = None
         if request is not None:
+            if operation == "quick_configure":
+                self.configuration_verified.emit(request.target, payload)
             self.confirmed_snapshot(
                 request.target, float(result), adopt_draft=True
             )
@@ -466,21 +516,31 @@ class QuickControlCoordinator(QObject):
             self._controllers[device].call("quick_readback")
 
     def _error(self, device: str, operation: str, error: str) -> None:
-        if operation != "quick_setpoint":
+        if operation != self._inflight_operations[device]:
             return
         request = self._inflight[device]
         self._inflight[device] = None
+        self._inflight_operations[device] = None
+        self._inflight_payloads[device] = None
         if request is not None:
             self.state_changed.emit(request.target, "rejected", error)
-        self._controllers[device].call("quick_readback")
+        if self._device_can_apply(device):
+            self._controllers[device].call("quick_readback")
         self._send_next(device)
 
     def _device_state(self, device: str, state: str) -> None:
-        if state in {"disconnected", "fault", "unknown"}:
+        normalized = str(state).strip().lower()
+        self._device_states[device] = normalized
+        if normalized in {"disconnected", "fault", "unknown", "compliance"}:
             pending = self._pending[device]
             for target in tuple(pending):
-                self.state_changed.emit(target, "unknown", f"Device {state}")
+                self.state_changed.emit(target, "draft", f"Device {state}")
             pending.clear()
+
+    def _device_can_apply(self, device: str) -> bool:
+        """Allow hardware traffic only for an authoritative OFF or ON state."""
+
+        return self._device_states.get(device) in {"output_off", "output_on"}
 
 
 class QuantityStepEdit(LineEdit):
@@ -509,7 +569,7 @@ class QuantityStepEdit(LineEdit):
         super().keyPressEvent(event)
 
 
-class QuickControlRow(CardWidget):
+class QuickControlRow(StationCardWidget):
     submit_requested = Signal(str, str)
     move_requested = Signal(str, int)
 
@@ -664,34 +724,34 @@ class QuickControlPicker(StationDialog):
         self.setWindowTitle("Choose quick controls")
         self.setMinimumWidth(500)
         self.resize(520, 640)
-        layout = QVBoxLayout(self)
-        layout.setContentsMargins(22, 20, 22, 18)
+        surface = self.use_modal_shell_content().surface
+        layout = self.modal_shell.surface_layout
         layout.setSpacing(12)
 
-        heading = SubtitleLabel("Choose quick controls", self)
+        heading = SubtitleLabel("Choose quick controls", surface)
         layout.addWidget(heading)
         intro = CaptionLabel(
             "Keep the values and hardware actions you use most often within reach.",
-            self,
+            surface,
         )
         intro.setObjectName("muted")
         intro.setWordWrap(True)
         layout.addWidget(intro)
 
-        picker_scroll = ScrollArea(self)
+        picker_scroll = ScrollArea(surface)
         picker_scroll.setObjectName("quickPickerScroll")
         picker_scroll.setFrameShape(QFrame.Shape.NoFrame)
         picker_scroll.setWidgetResizable(True)
         picker_scroll.setHorizontalScrollBarPolicy(
             Qt.ScrollBarPolicy.ScrollBarAlwaysOff
         )
-        picker_content = QWidget(self)
+        picker_content = QWidget(surface)
         picker_content.setProperty("stationSurface", "surface")
         picker_layout = QVBoxLayout(picker_content)
         picker_layout.setContentsMargins(0, 0, 8, 0)
         picker_layout.setSpacing(10)
 
-        setpoint_card = CardWidget(picker_content)
+        setpoint_card = StationCardWidget(picker_content)
         setpoint_card.setObjectName("quickPickerSetpoints")
         setpoint_layout = QVBoxLayout(setpoint_card)
         setpoint_layout.setContentsMargins(14, 12, 14, 12)
@@ -713,7 +773,7 @@ class QuickControlPicker(StationDialog):
             self.checkboxes[descriptor.target] = checkbox
         picker_layout.addWidget(setpoint_card)
 
-        output_card = CardWidget(picker_content)
+        output_card = StationCardWidget(picker_content)
         output_card.setObjectName("quickPickerOutputs")
         output_layout = QVBoxLayout(output_card)
         output_layout.setContentsMargins(14, 12, 14, 12)
@@ -745,8 +805,8 @@ class QuickControlPicker(StationDialog):
 
         footer = QHBoxLayout()
         footer.addStretch(1)
-        cancel = PushButton("Cancel", self)
-        apply = PrimaryPushButton("Show selected", self)
+        cancel = PushButton("Cancel", surface)
+        apply = PrimaryPushButton("Show selected", surface)
         cancel.clicked.connect(self.reject)
         apply.clicked.connect(self.accept)
         footer.addWidget(cancel)
@@ -766,7 +826,7 @@ class QuickControlPicker(StationDialog):
         )
 
 
-class QuickOutputRow(CardWidget):
+class QuickOutputRow(StationCardWidget):
     """One physical output channel with an observed state badge."""
 
     def __init__(
@@ -861,14 +921,18 @@ class QuickControlsWindow(FluentWidget):
         # Re-apply the frameless native hooks after changing window flags. The
         # QFluent base installs them before this utility adds its top-level flags.
         self.updateFrameless()
+        self._repair_title_bar_window_actions()
         self.setResizeEnabled(True)
         self.setCustomBackgroundColor(
             tokens_for("light").surface_raised,
             tokens_for("dark").surface_raised,
         )
-        self.resize(520, 680)
+        self.resize(550, 720)
         self._base_minimum_height = 460
         self._height_fit_pending = False
+        self._height_fit_timer = QTimer(self)
+        self._height_fit_timer.setSingleShot(True)
+        self._height_fit_timer.timeout.connect(self._fit_height_to_content)
         self._screen_signal_connected = False
         self.setMinimumSize(420, self._base_minimum_height)
         self._resize_handle_width = 8
@@ -917,26 +981,18 @@ class QuickControlsWindow(FluentWidget):
         self._selected_outputs: tuple[str, ...] = QUICK_OUTPUT_TARGETS
         self._selected: tuple[str, ...] = ()
         self.layout_root = QVBoxLayout(self)
-        self.layout_root.setContentsMargins(10, 38, 10, 10)
+        self.layout_root.setContentsMargins(0, 0, 0, 0)
         self.layout_root.setSpacing(0)
-
-        self.backdrop = _QuickControlsBackdrop(self)
-        self.backdrop.setObjectName("quickControlsBackdrop")
-        self.backdrop.setProperty("stationSurface", "raised")
-        self.backdrop.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
-        backdrop_layout = QVBoxLayout(self.backdrop)
-        backdrop_layout.setContentsMargins(10, 10, 10, 10)
-        backdrop_layout.setSpacing(0)
-        self.layout_root.addWidget(self.backdrop, 1)
-
-        self.surface = CardWidget(self.backdrop)
-        self.surface.setObjectName("quickControlsSurface")
-        self.surface.setProperty("stationSurface", "card")
-        self.surface_layout = QVBoxLayout(self.surface)
-        self.surface_layout.setContentsMargins(12, 12, 12, 12)
-        self.surface_layout.setSpacing(8)
-        backdrop_layout.addWidget(self.surface)
-        _add_quick_shadow(self.surface, blur=32, y=6)
+        self.modal_shell = StationModalShell(
+            self,
+            outer_margins=(10, 38, 10, 10),
+            backdrop_margins=(10, 10, 10, 10),
+            surface_margins=(12, 12, 12, 12),
+        )
+        self.layout_root.addWidget(self.modal_shell, 1)
+        self.backdrop = self.modal_shell.backdrop
+        self.surface = self.modal_shell.surface
+        self.surface_layout = self.modal_shell.surface_layout
 
         header = QHBoxLayout()
         header.setSpacing(8)
@@ -981,7 +1037,7 @@ class QuickControlsWindow(FluentWidget):
         self.content = QVBoxLayout(self.content_host)
         self.content.setContentsMargins(0, 0, 0, 0)
         self.content.setSpacing(10)
-        self.empty_state = CardWidget(self.content_host)
+        self.empty_state = StationCardWidget(self.content_host)
         self.empty_state.setProperty("stationSurface", "card")
         empty_layout = QVBoxLayout(self.empty_state)
         empty_layout.setContentsMargins(18, 18, 18, 18)
@@ -1013,6 +1069,22 @@ class QuickControlsWindow(FluentWidget):
         coordinator.value_read.connect(self._value_read)
         coordinator.bounds_changed.connect(self._refresh_limits)
 
+    def _repair_title_bar_window_actions(self) -> None:
+        """Bind title-bar actions after this widget becomes a top-level window.
+
+        ``FluentWidget`` builds its title bar while the widget still has its
+        ``MainWindow`` parent. qframelesswindow therefore resolves
+        ``self.window()`` to the parent and binds the close/minimize buttons to
+        the station shell. Quick Controls becomes a top-level window just
+        below, so those connections must target this window instead.
+        """
+        self.titleBar.minBtn.clicked.disconnect()
+        self.titleBar.minBtn.clicked.connect(self.showMinimized)
+        self.titleBar.closeBtn.clicked.disconnect()
+        self.titleBar.closeBtn.clicked.connect(self.close)
+        self.titleBar.closeBtn.show()
+        self.titleBar.closeBtn.raise_()
+
     def _screen_available_height(self) -> int | None:
         screen = self.screen()
         if screen is None and self.windowHandle() is not None:
@@ -1024,10 +1096,10 @@ class QuickControlsWindow(FluentWidget):
         return int(screen.availableGeometry().height())
 
     def _schedule_height_fit(self) -> None:
-        if self._height_fit_pending:
+        if self._height_fit_timer.isActive():
             return
         self._height_fit_pending = True
-        QTimer.singleShot(0, self._fit_height_to_content)
+        self._height_fit_timer.start(0)
 
     def _fit_height_to_content(self) -> None:
         self._height_fit_pending = False
@@ -1071,12 +1143,14 @@ class QuickControlsWindow(FluentWidget):
             )
             self._screen_signal_connected = True
         self._position_resize_handles()
+        self.titleBar.raise_()
+        self.titleBar.closeBtn.raise_()
         self._schedule_height_fit()
 
     def _build_output_controls(self) -> None:
         """Expose deliberate output requests without bypassing device pages."""
 
-        card = CardWidget(self.surface)
+        card = StationCardWidget(self.surface)
         card.setObjectName("quickControlsOutputCard")
         card.setProperty("stationSurface", "card")
         self._output_card = card
@@ -1331,7 +1405,7 @@ class QuickControlsWindow(FluentWidget):
                 groups[descriptor.device_module][2].append(target)
 
             for device, (title, hint, group_targets) in groups.items():
-                group_card = CardWidget(self.content_host)
+                group_card = StationCardWidget(self.content_host)
                 group_card.setObjectName(f"quickControlsGroup_{device}")
                 group_card.setProperty("stationSurface", "card")
                 group_layout = QVBoxLayout(group_card)
@@ -1439,6 +1513,8 @@ class QuickControlsWindow(FluentWidget):
             self._position_resize_handles()
 
     def closeEvent(self, event: QCloseEvent) -> None:
+        self._height_fit_timer.stop()
+        self._height_fit_pending = False
         QSettings("LabControl", "LabControl").setValue(
             "quick_controls/geometry", self.saveGeometry()
         )

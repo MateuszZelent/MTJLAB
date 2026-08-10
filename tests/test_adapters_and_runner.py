@@ -7,6 +7,7 @@ from contextlib import nullcontext
 import threading
 import time
 import unittest
+from unittest.mock import patch
 
 from app.devices.anritsu_ms2830a import (
     AdvancedSpectrumConfig,
@@ -36,7 +37,7 @@ from app.devices.lakeshore_475.models import (
 )
 from app.devices.visa import FakeVisaSession, FakeVisaSessionFactory
 from app.domain.errors import ConfigurationError, DeviceError, SafetyViolation
-from app.domain.quick_controls import QuickControlCommand
+from app.domain.quick_controls import QuickConfigureCommand, QuickControlCommand
 from app.domain.models import DeviceState
 from app.domain.models import ApplicationState
 from app.domain.quantities import (
@@ -961,6 +962,43 @@ class AdapterAndRunnerTests(unittest.TestCase):
                 ),
             )
         self.assertEqual(len(keithley_session.writes), keithley_writes_at_limit)
+
+    def test_quick_configure_dispatch_returns_the_verified_target_level(self) -> None:
+        settings = simulation_settings(approved=True)
+        keithley = KeithleyAdapter(settings, session_factory=FakeVisaSessionFactory(FakeVisaSession()))
+        keithley_request = KeithleySourceRequest("B", "current", 0.001, 0.067)
+        with patch.object(
+            keithley, "configure_source", return_value=keithley_request
+        ) as configure:
+            result = dispatch_keithley(
+                keithley,
+                "quick_configure",
+                QuickConfigureCommand(
+                    "keithley.B.current", keithley_request
+                ),
+            )
+        self.assertEqual(result, 0.001)
+        configure.assert_called_once_with(keithley_request)
+
+        rigol = RigolAdapter(
+            settings, session_factory=FakeVisaSessionFactory(FakeVisaSession())
+        )
+        rigol_config = RigolChannelConfig(1, "SIN", 2_000.0, 0.001, -0.001)
+        with (
+            patch.object(rigol, "configure_channel") as configure_rigol,
+            patch.object(
+                rigol,
+                "quick_control_snapshot",
+                return_value={"rigol.1.frequency": 2_000.0},
+            ) as _snapshot,
+        ):
+            result = dispatch_rigol(
+                rigol,
+                "quick_configure",
+                QuickConfigureCommand("rigol.1.frequency", rigol_config),
+            )
+        self.assertEqual(result, 2_000.0)
+        configure_rigol.assert_called_once_with(rigol_config)
 
     def test_quick_protocol_boundary_rejects_wrong_or_missing_units_before_visa(self) -> None:
         settings = simulation_settings(approved=True)

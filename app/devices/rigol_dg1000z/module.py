@@ -4,10 +4,10 @@ from __future__ import annotations
 
 from app.contracts import DeviceModule, RecipeExtension
 from app.devices.base import DeviceAdapter
-from app.domain.quick_controls import QuickControlCommand
+from app.domain.quick_controls import QuickConfigureCommand, QuickControlCommand
 from app.domain.quantities import parse_quantity
 from app.recipes.parameter_registry import QUICK_CONTROLS_BY_TARGET
-from app.devices.rigol_dg1000z import RigolAdapter
+from app.devices.rigol_dg1000z import RigolAdapter, RigolChannelConfig
 from app.devices.rigol_dg1000z.ui import RigolPage
 from app.devices.simulators import SimulatedVisaFactory
 from app.settings.models import StationSettings
@@ -62,6 +62,33 @@ def _dispatch(adapter: DeviceAdapter, operation: str, payload: object) -> object
         raise ValueError(
             f"Unsupported Rigol quick-control target {payload.target!r}."
         )
+    if operation == "quick_configure":
+        if not isinstance(payload, QuickConfigureCommand):
+            raise ValueError(
+                "Rigol quick_configure requires a complete device-page configuration."
+            )
+        descriptor = QUICK_CONTROLS_BY_TARGET.get(payload.target)
+        config = payload.configuration
+        if (
+            descriptor is None
+            or descriptor.device_module != "rigol"
+            or not isinstance(config, RigolChannelConfig)
+        ):
+            raise ValueError(
+                f"Unsupported Rigol quick configuration target {payload.target!r}."
+            )
+        _device, channel_text, field = payload.target.split(".")
+        if config.channel != int(channel_text):
+            raise ValueError(
+                "Rigol quick configuration target and channel configuration do not match."
+            )
+        adapter.configure_channel(config)
+        try:
+            return adapter.quick_control_snapshot()[payload.target]
+        except KeyError as exc:
+            raise ValueError(
+                f"Rigol did not expose a verified readback for {payload.target!r}."
+            ) from exc
     if operation == "quick_readback":
         return adapter.quick_control_snapshot()
     try:
