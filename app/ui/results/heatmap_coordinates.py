@@ -6,6 +6,7 @@ from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 import math
 from pathlib import Path
+from typing import TypeAlias
 
 import numpy as np
 
@@ -50,12 +51,40 @@ class HeatmapCoordinates:
 
 
 @dataclass(frozen=True, slots=True)
+class HeatmapRange:
+    """Inclusive range of already-normalised coordinate values."""
+
+    minimum: float
+    maximum: float
+
+    def __post_init__(self) -> None:
+        minimum = float(self.minimum)
+        maximum = float(self.maximum)
+        if not math.isfinite(minimum) or not math.isfinite(maximum):
+            raise ValueError("Heatmap range limits must be finite.")
+        if minimum > maximum:
+            raise ValueError(
+                "Heatmap range minimum must not exceed the maximum."
+            )
+        object.__setattr__(self, "minimum", minimum)
+        object.__setattr__(self, "maximum", maximum)
+
+
+HeatmapSelection: TypeAlias = float | HeatmapRange | tuple[float, float]
+
+
+@dataclass(frozen=True, slots=True)
 class HeatmapRequest:
-    """Two distinct axes and exact values for all remaining dimensions."""
+    """Two distinct axes and inclusive selections for remaining dimensions.
+
+    A scalar selection is retained for callers that need one exact value.
+    A two-item tuple or :class:`HeatmapRange` selects all persisted points in
+    the inclusive interval.
+    """
 
     x_id: str
     y_id: str
-    filters: Mapping[str, float]
+    filters: Mapping[str, HeatmapSelection]
 
 
 @dataclass(frozen=True, slots=True)
@@ -129,10 +158,30 @@ def read_heatmap_matrix(
     y_dimension = coordinates.dimension(request.y_id)
     if x_dimension.id == y_dimension.id:
         raise ValueError("Heatmap X and Y axes must be different.")
+    known_dimension_ids = {dimension.id for dimension in coordinates.dimensions}
+    unknown_filters = sorted(set(request.filters) - known_dimension_ids)
+    if unknown_filters:
+        raise ValueError(
+            "Heatmap filter coordinate(s) are unavailable: "
+            + ", ".join(unknown_filters)
+            + "."
+        )
     frequency_on_axis = x_dimension.is_frequency or y_dimension.is_frequency
-    if not frequency_on_axis and _FREQUENCY_ID not in request.filters:
+    frequency_selection = request.filters.get(_FREQUENCY_ID)
+    if not frequency_on_axis and frequency_selection is None:
         raise ValueError(
             "Choose one exact Frequency filter when Frequency is not a heatmap axis."
+        )
+    frequency_range = (
+        _selection_range(frequency_selection)
+        if frequency_selection is not None
+        else None
+    )
+    if not frequency_on_axis and frequency_range is not None and not _is_exact_range(
+        frequency_range
+    ):
+        raise ValueError(
+            "Frequency must be an exact value when it is not a heatmap axis."
         )
     checkpoint_dimensions = tuple(
         dimension for dimension in coordinates.dimensions if not dimension.is_frequency
@@ -149,14 +198,16 @@ def read_heatmap_matrix(
     ]
     if missing_filters:
         raise ValueError(
-            "Choose an exact filter value for " + ", ".join(missing_filters) + "."
+            "Choose a filter range for " + ", ".join(missing_filters) + "."
         )
-    selected = _selected_checkpoints(coordinates, filter_dimensions, request.filters)
+    selected = _selected_checkpoints(coordinates, request.filters)
     if not selected:
         raise ValueError("No stored checkpoint matches the selected heatmap filters.")
 
     traces: dict[int, tuple[np.ndarray, np.ndarray]] = {}
+    raw_frequency_grid: np.ndarray | None = None
     x_frequency: np.ndarray | None = None
+    frequency_mask: np.ndarray | None = None
     z_label = "Amplitude"
     z_unit = ""
     missing = 0
@@ -176,14 +227,24 @@ def read_heatmap_matrix(
         values = np.asarray(spectrum.traces[0].values, dtype=float)
         if frequencies.ndim != 1 or values.ndim != 1 or frequencies.shape != values.shape:
             raise ValueError(f"THATEC row {row.id} has an invalid spectral grid.")
-        if x_frequency is None:
-            x_frequency = frequencies
+        if raw_frequency_grid is None:
+            raw_frequency_grid = frequencies
             z_label = spectrum.y_label
             z_unit = spectrum.y_unit
-        elif not np.array_equal(x_frequency, frequencies):
+            if frequency_on_axis and frequency_range is not None:
+                frequency_mask = _selection_mask(frequencies, frequency_range)
+                if not np.any(frequency_mask):
+                    raise ValueError(
+                        "The selected frequency range contains no spectrum bins."
+                    )
+            else:
+                frequency_mask = np.ones(frequencies.shape, dtype=bool)
+            x_frequency = frequencies[frequency_mask]
+        elif not np.array_equal(raw_frequency_grid, frequencies):
             raise ValueError("Spectrum frequency grids differ between selected checkpoints.")
-        traces[checkpoint] = (frequencies, values)
-    if x_frequency is None:
+        assert frequency_mask is not None
+        traces[checkpoint] = (frequencies[frequency_mask], values[frequency_mask])
+    if x_frequency is None or x_frequency.size == 0:
         raise ValueError("No readable spectrum matches the selected heatmap filters.")
 
     if frequency_on_axis:
@@ -207,7 +268,8 @@ def read_heatmap_matrix(
             cell_checkpoints = cell_checkpoints.T
             x_values, y_values = axis_values, x_frequency
     else:
-        frequency = float(request.filters[_FREQUENCY_ID])
+        assert frequency_range is not None
+        frequency = frequency_range.minimum
         frequency_index = _value_index(x_frequency, frequency)
         x_values = _unique_values(x_dimension, selected)
         y_values = _unique_values(y_dimension, selected)
@@ -335,15 +397,20 @@ def _finite_and_varying(values: tuple[float, ...]) -> bool:
 
 def _selected_checkpoints(
     coordinates: HeatmapCoordinates,
-    dimensions: tuple[HeatmapDimension, ...],
-    filters: Mapping[str, float],
+    filters: Mapping[str, HeatmapSelection],
 ) -> tuple[int, ...]:
     selected = []
     for checkpoint in range(coordinates.checkpoint_count):
-        if all(
-            _values_equal(_checkpoint_value(dimension, checkpoint), float(filters[dimension.id]))
-            for dimension in dimensions
-        ):
+        matches = True
+        for dimension in coordinates.dimensions:
+            if dimension.is_frequency or dimension.id not in filters:
+                continue
+            if not _selection_contains(
+                _checkpoint_value(dimension, checkpoint), filters[dimension.id]
+            ):
+                matches = False
+                break
+        if matches:
             selected.append(checkpoint)
     return tuple(selected)
 
@@ -367,3 +434,47 @@ def _value_index(values: np.ndarray, value: float) -> int:
 
 def _values_equal(left: float, right: float) -> bool:
     return bool(np.isclose(left, right, rtol=1e-9, atol=1e-15))
+
+
+def _selection_range(selection: HeatmapSelection) -> HeatmapRange:
+    if isinstance(selection, HeatmapRange):
+        return selection
+    if isinstance(selection, tuple):
+        if len(selection) != 2:
+            raise ValueError("Heatmap ranges must contain exactly two limits.")
+        return HeatmapRange(selection[0], selection[1])
+    if isinstance(selection, (str, bytes, bool)):
+        raise ValueError("Heatmap selections must be finite numeric values.")
+    try:
+        value = float(selection)
+    except (TypeError, ValueError) as exc:
+        raise ValueError("Heatmap selections must be finite numeric values.") from exc
+    return HeatmapRange(value, value)
+
+
+def _selection_contains(value: float, selection: HeatmapSelection) -> bool:
+    selected = _selection_range(selection)
+    return (
+        (value > selected.minimum or _values_equal(value, selected.minimum))
+        and (value < selected.maximum or _values_equal(value, selected.maximum))
+    )
+
+
+def _selection_mask(values: np.ndarray, selection: HeatmapRange) -> np.ndarray:
+    return np.asarray(
+        [
+            value >= selection.minimum or _values_equal(float(value), selection.minimum)
+            for value in values
+        ],
+        dtype=bool,
+    ) & np.asarray(
+        [
+            value <= selection.maximum or _values_equal(float(value), selection.maximum)
+            for value in values
+        ],
+        dtype=bool,
+    )
+
+
+def _is_exact_range(selection: HeatmapRange) -> bool:
+    return _values_equal(selection.minimum, selection.maximum)

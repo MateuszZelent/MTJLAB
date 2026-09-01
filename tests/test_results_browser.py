@@ -10,12 +10,13 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 import h5py
 import numpy as np
-from PySide6.QtWidgets import QApplication
+from PySide6.QtWidgets import QApplication, QBoxLayout
 
 from app.devices.anritsu_ms2830a import SpectrumTrace
 from app.domain.models import MeasurementPoint
 from app.storage import Hdf5RunReader, Hdf5RunWriter, ThatecRunReader
 from app.ui.results import HeatmapResultsTab, ResultsPage
+from tests.test_heatmap_coordinates import _write_three_axis_sweep
 
 
 class ResultsBrowserTests(unittest.TestCase):
@@ -220,6 +221,95 @@ class ResultsBrowserTests(unittest.TestCase):
                     tab.heatmap.color_bar.getAxis("right").label.toPlainText().strip(),
                     "Processed amplitude (dB)",
                 )
+            finally:
+                tab.close()
+
+    def test_heatmap_exposes_engineering_range_controls_at_narrow_size(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            path = Path(temporary) / "range-controls.h5"
+            writer = Hdf5RunWriter(
+                path,
+                recipe_source="name: range controls\n",
+                settings_source="schema_version: 1\n",
+                plan_hash="range-controls",
+                device_idn={},
+                expected_points=3,
+            )
+            for index, current_a in enumerate((0.0, 0.001, 0.002)):
+                writer.append(
+                    MeasurementPoint(
+                        index=index,
+                        setpoints={"keithley.B.current": current_a},
+                        measurements={},
+                    ),
+                    SpectrumTrace(
+                        (1e6, 2e6),
+                        (-60.0 - index, -50.0 - index),
+                        datetime.now(timezone.utc),
+                        "TRAC1",
+                    ),
+                )
+            writer.close("completed")
+
+            tab = HeatmapResultsTab()
+            try:
+                tab.resize(620, 700)
+                tab.show()
+                self.application.processEvents()
+                tab.load(
+                    path,
+                    ThatecRunReader.describe(path),
+                    Hdf5RunReader.points(path),
+                )
+                self.application.processEvents()
+
+                self.assertIn("keithley.B.current", tab._range_combos)
+                minimum, maximum = tab._range_combos["keithley.B.current"]
+                self.assertEqual(minimum.currentData(), 0.0)
+                self.assertEqual(maximum.currentData(), 0.002)
+                self.assertIn("1 mA", minimum.itemText(1))
+                self.assertTrue(tab.filter_host.isVisible())
+                self.assertGreater(tab.filter_host.geometry().height(), 0)
+                self.assertEqual(
+                    tab.selector_layout.direction(),
+                    QBoxLayout.Direction.TopToBottom,
+                )
+                self.assertLessEqual(
+                    tab.filter_host.geometry().right(), tab.rect().right()
+                )
+
+                minimum.setCurrentIndex(1)
+                tab.load_heatmap_for_row(str(tab.row_combo.currentData()))
+                self.assertTrue(np.allclose(tab.heatmap._y_values, (0.001, 0.002)))
+            finally:
+                tab.close()
+
+    def test_heatmap_defaults_unselected_dimensions_to_one_measured_slice(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            path = Path(temporary) / "three-axis-controls.h5"
+            _write_three_axis_sweep(path)
+            tab = HeatmapResultsTab()
+            try:
+                tab.resize(1280, 700)
+                tab.show()
+                self.application.processEvents()
+                tab.load(
+                    path,
+                    ThatecRunReader.describe(path),
+                    Hdf5RunReader.points(path),
+                )
+                tab.y_axis_combo.setCurrentIndex(
+                    tab.y_axis_combo.findData("keithley.B.current")
+                )
+                self.application.processEvents()
+
+                minimum, maximum = tab._range_combos["rigol.1.high_level"]
+                self.assertEqual(minimum.currentData(), 1.0)
+                self.assertEqual(maximum.currentData(), 1.0)
+                tab.load_heatmap_for_row(str(tab.row_combo.currentData()))
+                tab._read_pool.waitForDone(30_000)
+                self.application.processEvents()
+                self.assertEqual(tab.heatmap._data.shape, (2, 2))
             finally:
                 tab.close()
 

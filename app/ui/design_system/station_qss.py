@@ -89,6 +89,34 @@ QWidget[stationSurface="surface"] {{
 QWidget[stationSurface="raised"] {{
     background: {tokens.surface_raised};
 }}
+QWidget#recipeWorkspaceCard {{
+    background: {tokens.surface};
+    border: 1px solid {tokens.border};
+    border-radius: 10px;
+}}
+QWidget#recipeWorkspaceCard QLabel#recipeWorkspaceState,
+QWidget#recipeExecutionLockBanner QLabel#recipeExecutionLockTitle {{
+    font-weight: 600;
+}}
+QWidget#recipeBuilderPanel,
+QWidget#recipeInspectorPanel,
+QScrollArea#recipeLibraryScroll {{
+    background: {tokens.surface};
+    border: 1px solid {tokens.border};
+    border-radius: 8px;
+}}
+QSplitter#recipeWorkspaceSplitter::handle {{
+    background: transparent;
+}}
+QSplitter#recipeWorkspaceSplitter::handle:hover {{
+    background: {tokens.border};
+}}
+QWidget#recipeExecutionLockBanner {{
+    background: {tokens.surface_raised};
+    border: 1px solid {tokens.border};
+    border-left: 3px solid {tokens.caution};
+    border-radius: 7px;
+}}
 QPlainTextEdit[stationSurface="raised"], QPlainTextEdit#eventLogText {{
     background: {tokens.surface_raised};
     color: {tokens.text_primary};

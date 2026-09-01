@@ -16,6 +16,7 @@ from typing import Any
 
 from app.devices.anritsu_ms2830a.adapter import SpectrumTrace
 from app.domain.models import MeasurementPoint
+from app.recipes.models import legacy_dut_limits_policy
 from app.storage.thatec_schema_mapper import ThatecSchemaMapper, ThatecSweepAxis
 
 
@@ -110,6 +111,10 @@ class ThatecHdf5Writer:
                     (
                         "DUT limits",
                         json.dumps(self._recipe_dut_limits(recipe_source), sort_keys=True),
+                    ),
+                    (
+                        "DUT limits policy",
+                        json.dumps(legacy_dut_limits_policy(), sort_keys=True),
                     ),
                     ("schema mapper mode", self._schema.mode),
                     ("schema mapper detail", self._schema.detail),

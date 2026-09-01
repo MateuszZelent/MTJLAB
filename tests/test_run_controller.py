@@ -22,7 +22,7 @@ from app.engine.compiler import ExecutionPlan
 from app.recipes import load_recipe
 from app.settings.models import StationSettings
 from app.storage import Hdf5RunReader
-from app.ui.run_worker import RunController
+from app.ui.run_worker import RunController, RunTelemetryCoalescer
 from app.ui.workers import DeviceController
 from tests.helpers import loaded_settings
 
@@ -55,6 +55,32 @@ class RunControllerTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls) -> None:
         cls.application = QApplication.instance() or QApplication([])
+
+    def test_run_telemetry_coalescer_keeps_critical_events_and_latest_preview(self) -> None:
+        forwarded: list[tuple[str, dict[str, object]]] = []
+        coalescer = RunTelemetryCoalescer(
+            lambda name, data: forwarded.append((name, data)),
+            interval_s=60.0,
+        )
+
+        coalescer.submit("spectrum_preview", {"point_index": 0})
+        coalescer.submit("spectrum_preview", {"point_index": 1})
+        coalescer.submit("spectrum_preview", {"point_index": 2})
+        coalescer.submit("point_stored", {"stored_points": 3})
+        coalescer.submit("watchdog_timeout", {"node_id": "slow"})
+
+        self.assertEqual(
+            forwarded,
+            [
+                ("spectrum_preview", {"point_index": 0}),
+                ("point_stored", {"stored_points": 3}),
+                ("watchdog_timeout", {"node_id": "slow"}),
+            ],
+        )
+        coalescer.flush()
+        self.assertEqual(
+            forwarded[-1], ("spectrum_preview", {"point_index": 2})
+        )
 
     def test_simulated_run_completes_in_dedicated_qthread(self) -> None:
         recipe_source = """\

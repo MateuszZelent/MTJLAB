@@ -2,6 +2,7 @@
 
 from app.ui.results.data_classifier import ResultDataKind, classify_result
 from app.ui.results.file_browser import FileBrowserPanel
+from app.ui.results.heatmap_coordinates import HeatmapRange
 from app.ui.results.heatmap_tab import HeatmapPlotWidget, HeatmapResultsTab
 from app.ui.results.metadata_panel import MetadataPanel
 from app.ui.results.page import ResultsPage
@@ -15,6 +16,7 @@ __all__ = [
     "FileBrowserPanel",
     "HeatmapPlotWidget",
     "HeatmapResultsTab",
+    "HeatmapRange",
     "MetadataPanel",
     "SpectrumResultsTab",
     "SweepTreeDialog",

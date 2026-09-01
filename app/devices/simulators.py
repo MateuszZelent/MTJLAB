@@ -892,7 +892,11 @@ def simulated_station_settings(settings: StationSettings) -> StationSettings:
     raw["devices"]["rigol"]["identity"]["require_serial_match"] = False
     raw["devices"]["rigol"]["identity"]["expected_serial"] = None
     raw["devices"]["keithley"]["connection"]["resource"] = "SIM::KEITHLEY::INSTR"
+    raw["devices"]["keithley"]["identity"]["require_serial_match"] = False
+    raw["devices"]["keithley"]["identity"]["expected_serial"] = None
     raw["devices"]["anritsu"]["connection"]["resource"] = "SIM::ANRITSU::INSTR"
+    raw["devices"]["anritsu"]["identity"]["require_serial_match"] = False
+    raw["devices"]["anritsu"]["identity"]["expected_serial"] = None
     raw["devices"]["anritsu"]["acquisition"]["single_sweep_mode"] = "standard_scpi_opc"
     raw["devices"]["anritsu"]["safety"]["acquisition_allowed"] = True
     raw["devices"]["anritsu"]["safety"]["rf_input"]["max_expected_power_at_connector"] = "-10 dBm"
@@ -904,6 +908,14 @@ def simulated_station_settings(settings: StationSettings) -> StationSettings:
             "endpoint": "SIM::MOKE::INSTR",
             "expected_model": "MOKE SIM",
             "protocol_qualified": True,
+        }
+    )
+    raw["devices"]["lakeshore_gaussmeter"].update(
+        {
+            "enabled": True,
+            "resource": "SIM::LAKESHORE::INSTR",
+            "require_serial_match": False,
+            "expected_serial": None,
         }
     )
     return StationSettings.model_validate(raw)

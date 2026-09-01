@@ -6,6 +6,7 @@ import tempfile
 import unittest
 from unittest.mock import patch
 
+from app.bootstrap import StationComposition
 from app.devices.anritsu_ms2830a import AnritsuAdapter, SpectrumConfig
 from app.devices.keithley_2600 import KeithleyAdapter, KeithleySourceRequest
 from app.devices.keithley_2600 import module as keithley_module
@@ -21,6 +22,43 @@ from tests.helpers import loaded_settings
 
 
 class SimulatorTests(unittest.TestCase):
+    def test_hardware_identity_pins_do_not_block_simulated_station_connections(self) -> None:
+        raw = deepcopy(loaded_settings().model_dump(mode="python"))
+        for device in ("rigol", "keithley", "anritsu"):
+            raw["devices"][device]["identity"]["require_serial_match"] = True
+            raw["devices"][device]["identity"]["expected_serial"] = (
+                f"PHYSICAL-{device.upper()}"
+            )
+        raw["devices"]["lakeshore_gaussmeter"].update(
+            {
+                "enabled": False,
+                "resource": None,
+                "require_serial_match": True,
+                "expected_serial": "PHYSICAL-LAKESHORE",
+            }
+        )
+        hardware_settings = StationSettings.model_validate(raw)
+
+        settings = simulated_station_settings(hardware_settings)
+        composition = StationComposition(settings, simulation=True)
+
+        for device in (
+            "rigol",
+            "keithley",
+            "anritsu",
+            "moke_box",
+            "lakeshore_gaussmeter",
+        ):
+            with self.subTest(device=device):
+                identity = composition.create_adapter(device).connect()
+                self.assertIn("SIM", identity.idn.upper())
+
+        self.assertTrue(hardware_settings.rigol.identity.require_serial_match)
+        self.assertEqual(
+            hardware_settings.rigol.identity.expected_serial,
+            "PHYSICAL-RIGOL",
+        )
+
     def test_every_simulator_exposes_deterministic_transport_faults(self) -> None:
         for device in ("rigol", "keithley", "anritsu"):
             with self.subTest(device=device, fault="normal"):

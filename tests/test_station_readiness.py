@@ -153,7 +153,7 @@ class StationReadinessTests(unittest.TestCase):
         self.assertEqual(levels["device.moke_box"], ReadinessLevel.PASS)
         self.assertEqual(levels["device.lakeshore_gaussmeter"], ReadinessLevel.PASS)
 
-    def test_anritsu_rf_output_on_requires_validated_dut_envelope(self) -> None:
+    def test_energized_plan_reports_legacy_dut_limits_as_not_enforced(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             settings = self._settings(Path(directory) / "results")
             plan = ExecutionPlan(
@@ -171,6 +171,9 @@ class StationReadinessTests(unittest.TestCase):
                 "name: readiness",
                 frozenset({"anritsu"}),
                 0,
+                recipe_dut_limits={
+                    "anritsu": {"max_signal_generator_output": "-10 dBm"}
+                },
             )
             readiness = evaluate_station_readiness(
                 settings,
@@ -180,9 +183,11 @@ class StationReadinessTests(unittest.TestCase):
                 plan=plan,
                 estimate=self._estimate(),
             )
-        detail = next(item.detail for item in readiness.items if item.key == "dut")
-        self.assertIn("validated", detail.lower())
-        self.assertNotIn("no OUTPUT ON", detail)
+        item = next(item for item in readiness.items if item.key == "dut")
+        self.assertEqual(item.level, ReadinessLevel.WARNING)
+        self.assertIn("not enforced", item.detail.lower())
+        self.assertIn("station", item.detail.lower())
+        self.assertNotIn("validated", item.detail.lower())
 
 
 if __name__ == "__main__":

@@ -75,6 +75,17 @@ class Recipe:
     dut_limits: dict[str, Any] = field(default_factory=dict)
 
 
+def legacy_dut_limits_policy() -> dict[str, object]:
+    """Describe the non-enforcing compatibility status of recipe DUT metadata."""
+
+    return {
+        "schema_version": 1,
+        "enforced": False,
+        "mode": "legacy_metadata_only",
+        "safety_authority": "station_profile_and_device_hardware",
+    }
+
+
 def _require_mapping(value: object, where: str) -> dict[str, Any]:
     if not isinstance(value, dict):
         raise ConfigurationError(f"{where} must be a YAML mapping.")
@@ -193,8 +204,8 @@ def parse_recipe_text(source: str, *, origin: str = "<memory>") -> Recipe:
     except Exception as exc:
         raise ConfigurationError(f"Cannot read recipe {origin}: {exc}") from exc
     root_raw = _require_mapping(raw, "recipe")
-    # Accept the removed field only so saved recipes from older releases still
-    # open. It has no model representation and no effect on compilation.
+    # Accept the removed safety field so saved recipes from older releases still
+    # open. Its raw value is retained for provenance but never limits execution.
     allowed_top = {"schema_version", "name", "root", "finally", "dut_limits"}
     unknown = set(root_raw) - allowed_top
     if unknown:

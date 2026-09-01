@@ -22,6 +22,7 @@ from qfluentwidgets import (
 )
 
 from app.ui.shell import MainWindow
+from app.ui.execution import RunMonitorPage
 from app.recipes import parse_recipe_text
 from app.ui.recipes import SweepGeneratorDialog
 from tests.helpers import simulation_settings
@@ -290,6 +291,126 @@ finally:
                 monitor.spectrum_preview.geometry().right(),
                 monitor.monitor_splitter.width(),
             )
+        finally:
+            window.close()
+            self.application.processEvents()
+
+    def test_execution_cockpit_prioritizes_current_operation_and_workspace(self) -> None:
+        page = RunMonitorPage()
+        try:
+            page.resize(1360, 820)
+            page.show()
+            self.application.processEvents()
+            page.run_started(1, 1.0)
+            page.append_event(
+                "action_started",
+                {
+                    "node_id": "keithley-b-current",
+                    "kind": "update_keithley_level",
+                    "channel": "B",
+                    "setpoints_si": {"keithley.B.current": 0.01},
+                },
+            )
+            self.application.processEvents()
+
+            self.assertTrue(page.current_operation_card.isVisibleTo(page))
+            self.assertIn("Keithley", page.current_operation_device.text())
+            self.assertIn("Source current", page.current_operation_parameter.text())
+            self.assertIn("10 mA", page.current_operation_value.text())
+            self.assertGreaterEqual(page.steps.geometry().height(), 220)
+            self.assertGreaterEqual(page.spectrum_preview.geometry().height(), 220)
+            self.assertTrue(page._activity_pulse_timer.isActive())
+            self.assertFalse(page.warnings.isVisible())
+        finally:
+            page.close()
+            self.application.processEvents()
+
+    def test_sweep_workspace_has_framed_scrollable_surfaces_and_read_only_run_state(self) -> None:
+        """The builder remains inspectable when a run owns the recipe."""
+
+        window = MainWindow(".config/settings.yml", simulation=True)
+        try:
+            window.resize(820, 560)
+            window.show()
+            window._navigate_to("sweeps")
+            self.application.processEvents()
+
+            page = window.recipe_page
+            host = window.navigation_routes["sweeps"]
+            self.assertIsInstance(page.workspace_card, CardWidget)
+            self.assertGreaterEqual(page.workspace_splitter.minimumHeight(), 420)
+            self.assertTrue(page.execution_lock_banner.isHidden())
+            self.assertGreater(host.scroll_area.verticalScrollBar().maximum(), 0)
+            self.assertEqual(host.scroll_area.horizontalScrollBar().maximum(), 0)
+            library_button_state = page._library_action_buttons[0].isEnabled()
+            editor_read_only = page.editor.isReadOnly()
+
+            window._set_run_ui_locked(True)
+            self.application.processEvents()
+            item = window.navigationInterface.widget(
+                host.objectName()
+            )
+            self.assertTrue(host.isEnabled())
+            self.assertIsNotNone(item)
+            self.assertTrue(item.isEnabled())
+            self.assertTrue(page.execution_lock_banner.isVisibleTo(window))
+            self.assertFalse(page.run_button.isEnabled())
+            self.assertFalse(page.path.isEnabled())
+            self.assertTrue(page.editor.isReadOnly())
+            self.assertTrue(page.library_panel.isEnabled())
+            self.assertTrue(page.tree.isVisibleTo(window))
+
+            window._set_run_ui_locked(False)
+            self.application.processEvents()
+            self.assertTrue(page.execution_lock_banner.isHidden())
+            self.assertEqual(page._library_action_buttons[0].isEnabled(), library_button_state)
+            self.assertEqual(page.editor.isReadOnly(), editor_read_only)
+        finally:
+            window._set_run_ui_locked(False)
+            window.close()
+            self.application.processEvents()
+
+    def test_spectrum_preview_updates_are_coalesced_to_latest_frame(self) -> None:
+        """A burst of worker previews must not schedule one repaint per point."""
+
+        window = MainWindow(".config/settings.yml", simulation=True)
+        try:
+            monitor = window.run_monitor
+            monitor._preview_timer.setInterval(0)
+            rendered: list[dict[str, object]] = []
+            monitor.update_spectrum_preview = rendered.append  # type: ignore[method-assign]
+            for point_index in range(25):
+                monitor.queue_spectrum_preview(
+                    {
+                        "point_index": point_index,
+                        "frequency_hz": [1.0, 2.0],
+                        "power_dbm": [-70.0, -71.0],
+                    }
+                )
+            self.application.processEvents()
+            self.assertEqual(len(rendered), 1)
+            self.assertEqual(rendered[0]["point_index"], 24)
+        finally:
+            window.close()
+            self.application.processEvents()
+
+    def test_execution_event_log_summarizes_large_payloads(self) -> None:
+        window = MainWindow(".config/settings.yml", simulation=True)
+        try:
+            monitor = window.run_monitor
+            monitor.append_event(
+                "point_stored",
+                {
+                    "point_index": 4,
+                    "state_snapshot": {"device_states": {"anritsu": {"raw": "..."}}},
+                    "frequency_hz": list(range(5_000)),
+                    "power_dbm": list(range(5_000)),
+                },
+            )
+            rendered = monitor.events.toPlainText()
+            self.assertIn("state_snapshot=<confirmed>", rendered)
+            self.assertIn("frequency_hz=<5000 values>", rendered)
+            self.assertLess(len(rendered), 1_200)
         finally:
             window.close()
             self.application.processEvents()

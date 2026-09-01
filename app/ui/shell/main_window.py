@@ -279,6 +279,13 @@ class MainWindow(FluentWindow):
             operator_context_provider=lambda: self._access.identity.as_context(),
         )
         self._run_read_only_controls: dict[QWidget, bool] = {}
+        self._pending_execution_previews: dict[str, dict[str, object]] = {}
+        self._execution_preview_timer = QTimer(self)
+        self._execution_preview_timer.setSingleShot(True)
+        self._execution_preview_timer.setInterval(100)
+        self._execution_preview_timer.timeout.connect(
+            self._flush_execution_previews
+        )
         self.quick_control_coordinator = QuickControlCoordinator(
             self._controllers, self, settings=self._settings
         )
@@ -1712,8 +1719,19 @@ class MainWindow(FluentWindow):
 
     def _run_event(self, name: str, data: object) -> None:
         payload = data if isinstance(data, dict) else {"data": data}
-        self._apply_runner_device_readback(name, payload)
+        preview_event = name in {"spectrum_preview", "reference_preview"}
+        # Heartbeats carry no confirmed state and previews are rendered at a
+        # bounded cadence.  Safety/action events still project immediately so
+        # the read-only pages never lag a confirmed output transition.
+        if preview_event and self._run_controller.running:
+            self._pending_execution_previews[name] = dict(payload)
+            if not self._execution_preview_timer.isActive():
+                self._execution_preview_timer.start()
+        elif name != "runner_heartbeat":
+            self._apply_runner_device_readback(name, payload)
         if name == "run_started":
+            self._execution_preview_timer.stop()
+            self._pending_execution_previews.clear()
             value = payload.get("correlation_id") or payload.get("hash")
             self._run_correlation_id = str(value) if value else None
         severity = (
@@ -1732,7 +1750,16 @@ class MainWindow(FluentWindow):
                 else "info"
             )
         )
-        if name != "spectrum_preview":
+        # Preview arrays, point checkpoints and watchdog heartbeats are
+        # high-rate presentation telemetry.  They are not safety transitions
+        # and must not cause a synchronous JSONL open/write on the GUI thread
+        # for every point.  Point data remains durable in the HDF5 record.
+        if name not in {
+            "runner_heartbeat",
+            "point_stored",
+            "spectrum_preview",
+            "reference_preview",
+        }:
             self._audit_record(
                 name.replace("_", " "),
                 severity=severity,
@@ -1744,12 +1771,23 @@ class MainWindow(FluentWindow):
             )
         if name == "runner_heartbeat":
             self.run_monitor.update_heartbeat(payload)
-        elif name in {"spectrum_preview", "reference_preview"}:
-            self.run_monitor.update_spectrum_preview(payload)
+        elif preview_event:
+            if self._run_controller.running:
+                self.run_monitor.queue_spectrum_preview(payload)
+            else:
+                # Direct calls used by diagnostics/tests and the final queued
+                # event remain immediately visible when no worker is active.
+                self.run_monitor.update_spectrum_preview(payload)
         else:
             self.run_monitor.append_event(name, payload)
         if name in {"run_completed", "run_aborted", "run_fault"}:
             self._run_correlation_id = None
+
+    def _flush_execution_previews(self) -> None:
+        pending = tuple(self._pending_execution_previews.items())
+        self._pending_execution_previews.clear()
+        for name, payload in pending:
+            self._apply_runner_device_readback(name, payload)
 
     def _apply_runner_device_readback(self, event_name: str, payload: dict[str, object]) -> None:
         """Dispatch one confirmed runner event through every device module.
@@ -1787,6 +1825,8 @@ class MainWindow(FluentWindow):
                 control.setEnabled(False)
 
     def _run_finished(self, result: object) -> None:
+        self._execution_preview_timer.stop()
+        self._flush_execution_previews()
         self._leased_run_devices.clear()
         self._set_run_ui_locked(False)
         self.run_monitor.complete(result)
@@ -1809,6 +1849,8 @@ class MainWindow(FluentWindow):
             self._log("Run Engine completed the measurement")
 
     def _run_failed(self, error: str) -> None:
+        self._execution_preview_timer.stop()
+        self._flush_execution_previews()
         self._leased_run_devices.clear()
         self._set_run_ui_locked(False)
         self.run_monitor.failed(error)
@@ -2638,11 +2680,15 @@ class MainWindow(FluentWindow):
                 "Live field readout paused while a recipe run owns the Lake Shore 475."
             )
         self._set_device_pages_execution_read_only(locked)
+        self.recipe_page.set_execution_controlled(locked)
         # Device routes remain available during a run so the operator can
         # inspect their last verified values, output state and plots. Recipe
         # editing and station-profile changes remain unavailable.
-        for route in ("sweeps", "settings"):
-            self._set_route_enabled(route, not locked)
+        self._set_route_enabled("settings", not locked)
+        # Sweeps is intentionally an inspectable route during execution.  The
+        # page itself switches to an explicit read-only state while the
+        # navigation item stays discoverable and clickable.
+        self._set_route_enabled("sweeps", True)
 
     def _set_device_pages_execution_read_only(self, locked: bool) -> None:
         """Keep device pages inspectable while the Run Engine owns I/O.

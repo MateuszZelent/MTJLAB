@@ -101,8 +101,20 @@ class Hdf5WriterTests(unittest.TestCase):
                     ],
                     "-10 dBm",
                 )
+                self.assertEqual(
+                    json.loads(file["run/dut_limits_policy_json"].asstr()[()]),
+                    {
+                        "enforced": False,
+                        "mode": "legacy_metadata_only",
+                        "safety_authority": "station_profile_and_device_hardware",
+                        "schema_version": 1,
+                    },
+                )
                 labbook_metadata = dict(file["labbook/metadata"].asstr()[()])
                 self.assertIn("-10 dBm", labbook_metadata["DUT limits"])
+                self.assertIn(
+                    '"enforced": false', labbook_metadata["DUT limits policy"]
+                )
                 self.assertEqual(file["events/name"].asstr()[0], "run_started")
                 self.assertEqual(tuple(file["spectra/0/frequency_hz"][:]), trace.frequencies_hz)
                 self.assertEqual(tuple(file["spectra/0/power_dbm"][:]), trace.powers_dbm)

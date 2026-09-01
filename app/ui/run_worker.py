@@ -7,7 +7,9 @@ from io import StringIO
 from pathlib import Path
 import re
 import secrets
-from typing import Mapping
+import threading
+import time
+from typing import Callable, Mapping
 
 from PySide6.QtCore import QObject, QThread, Signal, Slot
 from ruamel.yaml import YAML
@@ -84,6 +86,73 @@ def serialize_settings_snapshot(
     return stream.getvalue()
 
 
+class RunTelemetryCoalescer:
+    """Forward safety events immediately and bound high-rate UI telemetry.
+
+    Spectrum previews and point checkpoints are presentation data, not the
+    durable measurement record.  A large sweep can produce one of each per
+    point, and emitting all of them into Qt's GUI event queue makes the
+    application appear frozen even though the run worker is healthy.  Keep
+    only the newest frame per telemetry stream during the short display
+    interval.  Watchdog and other safety/action events are deliberately never
+    coalesced.
+
+    The runner's watchdog callback can arrive from a helper thread, therefore
+    the pending-frame bookkeeping is protected independently of the Qt signal
+    dispatch.  The callback itself is always invoked outside the lock.
+    """
+
+    _COALESCED_NAMES = frozenset(
+        {
+            "runner_heartbeat",
+            "point_stored",
+            "spectrum_preview",
+            "reference_preview",
+        }
+    )
+
+    def __init__(
+        self,
+        emit: Callable[[str, object], None],
+        *,
+        interval_s: float = 0.1,
+    ) -> None:
+        if interval_s <= 0:
+            raise ValueError("Telemetry coalescing interval must be positive.")
+        self._emit = emit
+        self._interval_s = float(interval_s)
+        self._lock = threading.Lock()
+        self._last_emit: dict[str, float] = {}
+        self._pending: dict[str, tuple[str, object]] = {}
+
+    def submit(self, name: str, data: object) -> None:
+        if name not in self._COALESCED_NAMES:
+            self._emit(name, data)
+            return
+        now = time.monotonic()
+        ready: tuple[str, object] | None = None
+        with self._lock:
+            self._pending[name] = (name, data)
+            last = self._last_emit.get(name)
+            if last is None or now - last >= self._interval_s:
+                ready = self._pending.pop(name)
+                self._last_emit[name] = now
+        if ready is not None:
+            self._emit(*ready)
+
+    def flush(self) -> None:
+        """Forward the newest frame from every pending stream before shutdown."""
+
+        with self._lock:
+            pending = tuple(self._pending.values())
+            self._pending.clear()
+            now = time.monotonic()
+            for name, _data in pending:
+                self._last_emit[name] = now
+        for name, data in pending:
+            self._emit(name, data)
+
+
 class RunWorker(QObject):
     event = Signal(str, object)
     finished = Signal(object)
@@ -121,6 +190,16 @@ class RunWorker(QObject):
             self._execution_mode = ExecutionMode.DRY_RUN
         self._outputs_forced_off = self._execution_mode is ExecutionMode.DRY_RUN
         self._runner: RecipeRunner | None = None
+        self._telemetry_forwarder = RunTelemetryCoalescer(
+            lambda name, data: self.event.emit(name, data),
+        )
+
+    def _forward_run_event(self, name: str, data: object) -> None:
+        """Preserve terminal ordering when a checkpoint is still pending."""
+
+        if name in {"run_completed", "run_aborted", "run_fault"}:
+            self._telemetry_forwarder.flush()
+        self._telemetry_forwarder.submit(name, data)
 
     @Slot()
     def run(self) -> None:
@@ -276,8 +355,8 @@ class RunWorker(QObject):
                 moke_box=moke_box,
                 lakeshore=lakeshore,
                 writer=writer,
-                on_event=lambda name, data: self.event.emit(name, data),
-                on_telemetry=lambda name, data: self.event.emit(name, data),
+                on_event=self._forward_run_event,
+                on_telemetry=self._telemetry_forwarder.submit,
                 policy=ExecutionPolicy.from_settings(self._settings),
                 execution_mode=self._execution_mode,
             )
@@ -338,6 +417,10 @@ class RunWorker(QObject):
                         if failure
                         else f"Emergency cleanup incomplete: {detail}"
                     )
+
+            # Do not leave the last visible spectrum frame behind merely
+            # because the worker finished between two telemetry intervals.
+            self._telemetry_forwarder.flush()
 
         if failure is not None:
             self.failed.emit(failure)

@@ -14,6 +14,7 @@ from typing import TextIO
 from app.devices.anritsu_ms2830a.adapter import SpectrumTrace
 from app.domain.errors import ExecutionError
 from app.domain.models import MeasurementPoint
+from app.recipes.models import legacy_dut_limits_policy
 from app.storage.thatec_writer import ThatecHdf5Writer
 
 
@@ -79,6 +80,11 @@ class Hdf5RunWriter:
         run.create_dataset(
             "dut_limits_json",
             data=json.dumps(self._recipe_dut_limits(recipe_source), sort_keys=True),
+            dtype=h5py.string_dtype("utf-8"),
+        )
+        run.create_dataset(
+            "dut_limits_policy_json",
+            data=json.dumps(legacy_dut_limits_policy(), sort_keys=True),
             dtype=h5py.string_dtype("utf-8"),
         )
         run.create_dataset("device_idn_json", data=json.dumps(device_idn, sort_keys=True), dtype=h5py.string_dtype("utf-8"))

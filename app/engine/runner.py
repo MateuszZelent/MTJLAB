@@ -19,14 +19,6 @@ from app.devices.lakeshore_475.adapter import LakeShore475Adapter
 from app.devices.rigol_dg1000z.adapter import RigolAdapter
 from app.domain.errors import DeviceError, ExecutionError
 from app.domain.models import ApplicationState, DeviceState, MeasurementPoint
-from app.domain.quantities import (
-    DIMENSION_CURRENT,
-    DIMENSION_DBM,
-    DIMENSION_POWER,
-    DIMENSION_RESISTANCE,
-    DIMENSION_VOLTAGE,
-    parse_quantity,
-)
 from app.engine.compiler import ExecutionPlan, PlanAction, required_devices_for_actions
 from app.engine.policy import ExecutionPolicy
 from app.spectrum import (
@@ -117,7 +109,6 @@ class RecipeRunner:
         self._required_devices: frozenset[str] = frozenset()
         self._safe_shutdown_actions: tuple[str, ...] = ()
         self._active_safety_context: dict[str, dict[str, object]] = {}
-        self._recipe_dut_limits: dict[str, object] = {}
         self._device_states: dict[str, dict[str, object]] = {}
         self._rigol_output_active = {1: False, 2: False}
         self._keithley_output_active = {"A": False, "B": False}
@@ -179,7 +170,6 @@ class RecipeRunner:
         )
         self._safe_shutdown_actions = plan.safe_shutdown_actions
         self._active_safety_context = {}
-        self._recipe_dut_limits = dict(plan.recipe_dut_limits)
         self._device_states = {}
         self._rigol_output_active = {1: False, 2: False}
         self._keithley_output_active = {"A": False, "B": False}
@@ -817,11 +807,6 @@ class RecipeRunner:
                 "pulse_leading_s": applied.pulse_leading_s,
                 "pulse_trailing_s": applied.pulse_trailing_s,
             }
-            self._attach_recipe_dut_limits(
-                self._active_safety_context[f"rigol.{applied.channel}"],
-                "rigol",
-                applied.channel,
-            )
             self._record_device_state(
                 "rigol", f"channel_{config.channel}", requested=config,
                 actual=self._active_safety_context[f"rigol.{config.channel}"],
@@ -867,11 +852,6 @@ class RecipeRunner:
                 "measure_current_autorange": applied.measure_current_autorange,
                 "measure_current_range_si": applied.measure_current_range_si,
             }
-            self._attach_recipe_dut_limits(
-                self._active_safety_context[f"keithley.{applied.channel}"],
-                "keithley",
-                applied.channel,
-            )
             self._record_device_state(
                 "keithley", f"channel_{request.channel}", requested=request,
                 actual=self._active_safety_context[f"keithley.{request.channel}"],
@@ -915,9 +895,6 @@ class RecipeRunner:
                 "points": getattr(actual, "points", config.points),
                 "instrument_mode": getattr(actual, "instrument_mode", ""),
             }
-            self._attach_recipe_dut_limits(
-                self._active_safety_context["anritsu"], "anritsu"
-            )
             self._record_device_state(
                 "anritsu", "spectrum", requested=config,
                 actual=self._active_safety_context["anritsu"],
@@ -1469,62 +1446,6 @@ class RecipeRunner:
             "requested": self._jsonable(requested),
             "actual": self._jsonable(actual),
         }
-
-    def _attach_recipe_dut_limits(
-        self,
-        context: dict[str, object],
-        device: str,
-        channel: str | int | None = None,
-    ) -> None:
-        """Add explicit recipe DUT envelopes to the checkpoint safety context."""
-
-        raw_device = self._recipe_dut_limits.get(device)
-        if not isinstance(raw_device, dict):
-            return
-        raw_limits: object = raw_device
-        if channel is not None:
-            raw_limits = raw_device.get(str(channel), raw_device.get(channel, {}))
-        if not isinstance(raw_limits, dict):
-            return
-
-        def quantity(raw: object, dimension: str, name: str) -> float:
-            try:
-                return parse_quantity(raw, dimension).si_value
-            except Exception as exc:
-                raise ExecutionError(
-                    f"Recipe DUT limit {name!r} is invalid: {raw!r}."
-                ) from exc
-
-        if device == "rigol":
-            mapping = {
-                "minimum_impedance": ("minimum_impedance_ohm", DIMENSION_RESISTANCE),
-                "max_abs_current": ("max_abs_current_a", DIMENSION_CURRENT),
-                "max_abs_power": ("max_abs_power_w", DIMENSION_POWER),
-            }
-            for source, (target, dimension) in mapping.items():
-                if source in raw_limits:
-                    context[target] = quantity(raw_limits[source], dimension, source)
-        elif device == "keithley":
-            for source, suffix, dimension in (
-                ("current", "a", DIMENSION_CURRENT),
-                ("voltage", "v", DIMENSION_VOLTAGE),
-            ):
-                envelope = raw_limits.get(source)
-                if not isinstance(envelope, dict):
-                    continue
-                for bound in ("min", "max"):
-                    if bound in envelope:
-                        context[f"{source}_{bound}_{suffix}"] = quantity(
-                            envelope[bound], dimension, f"{source}.{bound}"
-                        )
-            if "max_abs_power" in raw_limits:
-                context["max_abs_power_w"] = quantity(
-                    raw_limits["max_abs_power"], DIMENSION_POWER, "max_abs_power"
-                )
-        elif device == "anritsu" and "max_expected_input" in raw_limits:
-            context["max_expected_input_dbm"] = quantity(
-                raw_limits["max_expected_input"], DIMENSION_DBM, "max_expected_input"
-            )
 
     def _apply_actual_setpoints(self, setpoints: dict[str, float]) -> None:
         """Replace requested sweep floats with the last readback-confirmed values."""

@@ -21,6 +21,7 @@ from PySide6.QtWidgets import (
 )
 from qfluentwidgets import (
     BodyLabel,
+    CaptionLabel,
     CardWidget,
     PlainTextEdit,
     PrimaryPushButton,
@@ -134,11 +135,11 @@ class RunMonitorPage(QWidget):
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
         layout = QVBoxLayout(self)
-        layout.setContentsMargins(16, 14, 16, 14)
-        layout.setSpacing(12)
+        layout.setContentsMargins(14, 10, 14, 10)
+        layout.setSpacing(9)
         self.hero_card = CardWidget(self)
         hero_layout = QHBoxLayout(self.hero_card)
-        hero_layout.setContentsMargins(20, 16, 20, 16)
+        hero_layout.setContentsMargins(18, 11, 18, 11)
         title = StrongBodyLabel("Recipe execution", self.hero_card)
         title.setObjectName("pageTitle")
         hero_layout.addWidget(title, 1)
@@ -152,11 +153,96 @@ class RunMonitorPage(QWidget):
         self.eta.setObjectName("muted")
         self.total_estimate = BodyLabel("Plan estimate: —")
         self.total_estimate.setObjectName("muted")
+        # Keep the active device and setpoint in a stable, high-salience row.
+        # The tree and event stream are valuable context, but neither should
+        # be required to answer "what is the instrument doing right now?".
+        self.current_operation_card = CardWidget(self)
+        self.current_operation_card.setObjectName("executionCurrentOperationCard")
+        self.current_operation_card.setProperty("stationSurface", "surface")
+        operation_layout = QGridLayout(self.current_operation_card)
+        operation_layout.setContentsMargins(16, 9, 16, 9)
+        operation_layout.setHorizontalSpacing(12)
+        operation_layout.setVerticalSpacing(1)
+        self.activity_indicator = StrongBodyLabel("â—‹", self.current_operation_card)
+        self.activity_indicator.setObjectName("executionActivityIndicator")
+        self.activity_indicator.setProperty("activityPulse", "off")
+        self.activity_indicator.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.activity_indicator.setMinimumWidth(28)
+        self.activity_indicator.setToolTip(
+            "The highlighted row in the measurement tree follows this operation."
+        )
+        operation_layout.addWidget(self.activity_indicator, 0, 0, 2, 1)
+        self.current_operation_phase = CaptionLabel(
+            "WAITING FOR FIRST ACTION", self.current_operation_card
+        )
+        self.current_operation_phase.setObjectName("executionOperationPhase")
+        operation_layout.addWidget(self.current_operation_phase, 0, 1)
+        self.current_operation_device = StrongBodyLabel(
+            "Waiting for first action", self.current_operation_card
+        )
+        self.current_operation_device.setObjectName("executionOperationDevice")
+        self.current_operation_device.setMinimumWidth(0)
+        self.current_operation_device.setSizePolicy(
+            QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred
+        )
+        operation_layout.addWidget(self.current_operation_device, 1, 1)
+        self.current_operation_parameter = BodyLabel(
+            "No parameter selected", self.current_operation_card
+        )
+        self.current_operation_parameter.setObjectName("executionOperationParameter")
+        self.current_operation_parameter.setMinimumWidth(0)
+        self.current_operation_parameter.setSizePolicy(
+            QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred
+        )
+        operation_layout.addWidget(self.current_operation_parameter, 0, 2)
+        self.current_operation_detail = CaptionLabel(
+            "The active device and setpoint will appear here.",
+            self.current_operation_card,
+        )
+        self.current_operation_detail.setObjectName("muted")
+        self.current_operation_detail.setMinimumWidth(0)
+        self.current_operation_detail.setSizePolicy(
+            QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred
+        )
+        operation_layout.addWidget(self.current_operation_detail, 1, 2)
+        self.current_operation_value = StrongBodyLabel("â€”", self.current_operation_card)
+        self.current_operation_value.setObjectName("executionOperationValue")
+        self.current_operation_value.setAlignment(
+            Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter
+        )
+        self.current_operation_value.setMinimumWidth(130)
+        operation_layout.addWidget(self.current_operation_value, 0, 3)
+        self.current_operation_si = CaptionLabel("SI â€”", self.current_operation_card)
+        self.current_operation_si.setObjectName("muted")
+        self.current_operation_si.setAlignment(
+            Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter
+        )
+        operation_layout.addWidget(self.current_operation_si, 1, 3)
+        self.current_operation_state = BodyLabel("WAITING", self.current_operation_card)
+        self.current_operation_state.setObjectName("executionOperationState")
+        self.current_operation_state.setAlignment(
+            Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter
+        )
+        operation_layout.addWidget(self.current_operation_state, 0, 4, 2, 1)
+        operation_layout.setColumnStretch(1, 2)
+        operation_layout.setColumnStretch(2, 3)
+
         self.monitor_card = CardWidget(self)
+        self.monitor_card.setObjectName("executionControlCard")
         monitor_layout = QVBoxLayout(self.monitor_card)
-        monitor_layout.setContentsMargins(20, 16, 20, 16)
-        monitor_layout.setSpacing(10)
+        monitor_layout.setContentsMargins(18, 10, 18, 10)
+        monitor_layout.setSpacing(6)
+        meta_row = QHBoxLayout()
+        meta_row.setSpacing(14)
+        for label in (self.heartbeat, self.eta, self.total_estimate):
+            label.setMinimumWidth(0)
+            label.setSizePolicy(
+                QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred
+            )
+            meta_row.addWidget(label, 1)
         telemetry = QGridLayout()
+        telemetry.setHorizontalSpacing(14)
+        telemetry.setVerticalSpacing(2)
         self.current_path = BodyLabel("Current node: —")
         self.current_path.setWordWrap(True)
         self.current_setpoints = BodyLabel("Setpoints (SI): —")
@@ -201,6 +287,10 @@ class RunMonitorPage(QWidget):
         self.events = PlainTextEdit(self)
         self.events.setReadOnly(True)
         self.events.setProperty("stationSurface", "raised")
+        self.events.setMaximumBlockCount(500)
+        self.events.setUndoRedoEnabled(False)
+        self.events.setMinimumHeight(86)
+        self.events.setMaximumHeight(132)
         self.steps = TreeWidget(self)
         self.steps.setObjectName("executionSteps")
         self.steps.setHeaderLabels(
@@ -213,16 +303,24 @@ class RunMonitorPage(QWidget):
         self.steps.header().setSectionResizeMode(0, QHeaderView.ResizeMode.Stretch)
         self.steps.header().setSectionResizeMode(1, QHeaderView.ResizeMode.ResizeToContents)
         self.steps.header().setSectionResizeMode(2, QHeaderView.ResizeMode.ResizeToContents)
-        self.steps.setMinimumHeight(170)
+        self.steps.setMinimumHeight(220)
         self.warnings = PlainTextEdit(self)
         self.warnings.setReadOnly(True)
         self.warnings.setProperty("stationSurface", "raised")
-        self.warnings.setMaximumHeight(95)
+        self.warnings.setMaximumBlockCount(200)
+        self.warnings.setUndoRedoEnabled(False)
+        self.warnings.setMinimumHeight(70)
+        self.warnings.setMaximumHeight(88)
         self.warnings.setPlaceholderText("No run warnings.")
+        self.warnings.hide()
         self.spectrum_preview = SpectrumPlotWidget(
             legend=False, compact_toolbar=True
         )
         self.spectrum_preview.setMinimumWidth(0)
+        self.spectrum_preview.setMinimumHeight(240)
+        self.spectrum_preview.setSizePolicy(
+            QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding
+        )
         self.spectrum_preview.set_labels(
             x="Frequency",
             x_unit="Hz",
@@ -235,15 +333,41 @@ class RunMonitorPage(QWidget):
         self.monitor_splitter.setChildrenCollapsible(False)
         self.activity_splitter = QSplitter(Qt.Orientation.Vertical)
         self.activity_splitter.setMinimumWidth(0)
+        self.activity_splitter.setMinimumHeight(300)
         self.activity_splitter.addWidget(self.steps)
         self.activity_splitter.addWidget(self.events)
-        self.activity_splitter.setStretchFactor(0, 2)
+        self.activity_splitter.setStretchFactor(0, 5)
         self.activity_splitter.setStretchFactor(1, 1)
+        self.activity_splitter.setSizes((230, 90))
         self.monitor_splitter.addWidget(self.activity_splitter)
         self.monitor_splitter.addWidget(self.spectrum_preview)
-        self.monitor_splitter.setStretchFactor(0, 1)
-        self.monitor_splitter.setStretchFactor(1, 2)
-        self.monitor_splitter.setSizes((360, 320))
+        self.monitor_splitter.setMinimumHeight(300)
+        self.monitor_splitter.setStretchFactor(0, 5)
+        self.monitor_splitter.setStretchFactor(1, 6)
+        self.monitor_splitter.setSizes((600, 700))
+        self.workspace_card = CardWidget(self)
+        self.workspace_card.setObjectName("executionWorkspaceCard")
+        self.workspace_card.setProperty("stationSurface", "surface")
+        workspace_layout = QVBoxLayout(self.workspace_card)
+        workspace_layout.setContentsMargins(12, 8, 12, 10)
+        workspace_layout.setSpacing(5)
+        workspace_header = QHBoxLayout()
+        workspace_header.setSpacing(8)
+        workspace_title = StrongBodyLabel("Measurement workspace", self.workspace_card)
+        workspace_title.setObjectName("executionSectionTitle")
+        workspace_header.addWidget(workspace_title)
+        workspace_hint = BodyLabel(
+            "The highlighted tree row is the operation shown above.",
+            self.workspace_card,
+        )
+        workspace_hint.setObjectName("muted")
+        workspace_hint.setMinimumWidth(0)
+        workspace_hint.setSizePolicy(
+            QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred
+        )
+        workspace_header.addWidget(workspace_hint, 1)
+        workspace_layout.addLayout(workspace_header)
+        workspace_layout.addWidget(self.monitor_splitter, 1)
         self.completion_card = CardWidget(self)
         self.completion_card.setObjectName("executionCompletionCard")
         self.completion_card.setProperty("deviceState", "verified")
@@ -272,9 +396,8 @@ class RunMonitorPage(QWidget):
         self.completion_card.hide()
         layout.addWidget(self.hero_card)
         layout.addWidget(self.completion_card)
-        monitor_layout.addWidget(self.heartbeat)
-        monitor_layout.addWidget(self.eta)
-        monitor_layout.addWidget(self.total_estimate)
+        layout.addWidget(self.current_operation_card)
+        monitor_layout.addLayout(meta_row)
         monitor_layout.addLayout(telemetry)
         monitor_layout.addLayout(progress_header)
         monitor_layout.addWidget(self.progress)
@@ -292,9 +415,10 @@ class RunMonitorPage(QWidget):
         live_copy.setObjectName("muted")
         live_copy.setWordWrap(True)
         live_layout.addWidget(live_copy)
-        live_tables = QSplitter(Qt.Orientation.Horizontal, self.live_state_card)
-        live_tables.setChildrenCollapsible(False)
-        self.output_states = TreeWidget(live_tables)
+        self.live_tables = QSplitter(Qt.Orientation.Horizontal, self.live_state_card)
+        self.live_tables.setChildrenCollapsible(False)
+        self.live_tables.setMinimumHeight(82)
+        self.output_states = TreeWidget(self.live_tables)
         self.output_states.setObjectName("executionOutputStates")
         self.output_states.setHeaderLabels(("Used output", "Confirmed state", "Updated"))
         self.output_states.setRootIsDecorated(False)
@@ -302,7 +426,7 @@ class RunMonitorPage(QWidget):
         self.output_states.header().setSectionResizeMode(0, QHeaderView.ResizeMode.Stretch)
         self.output_states.header().setSectionResizeMode(1, QHeaderView.ResizeMode.ResizeToContents)
         self.output_states.header().setSectionResizeMode(2, QHeaderView.ResizeMode.ResizeToContents)
-        self.active_parameters = TreeWidget(live_tables)
+        self.active_parameters = TreeWidget(self.live_tables)
         self.active_parameters.setObjectName("executionActiveParameters")
         self.active_parameters.setHeaderLabels(("Changing parameter", "Requested", "Applied", "State"))
         self.active_parameters.setRootIsDecorated(False)
@@ -312,14 +436,16 @@ class RunMonitorPage(QWidget):
             self.active_parameters.header().setSectionResizeMode(
                 column, QHeaderView.ResizeMode.ResizeToContents
             )
-        live_tables.setStretchFactor(0, 1)
-        live_tables.setStretchFactor(1, 2)
-        live_tables.setSizes((360, 680))
-        live_layout.addWidget(live_tables)
+        self.live_tables.setStretchFactor(0, 1)
+        self.live_tables.setStretchFactor(1, 2)
+        self.live_tables.setSizes((360, 680))
+        live_layout.addWidget(self.live_tables)
+        self.live_state_card.setMinimumHeight(145)
+        self.live_state_card.setMaximumHeight(180)
         layout.addWidget(self.monitor_card)
+        layout.addWidget(self.workspace_card, 1)
         layout.addWidget(self.live_state_card)
         layout.addWidget(self.warnings)
-        layout.addWidget(self.monitor_splitter, 1)
         self.pause_button.clicked.connect(self._request_pause)
         self.resume_button.clicked.connect(self._request_resume)
         self.stop_button.clicked.connect(self._request_safe_stop)
@@ -342,11 +468,20 @@ class RunMonitorPage(QWidget):
         self._eta_timer = QTimer(self)
         self._eta_timer.setInterval(1000)
         self._eta_timer.timeout.connect(self._update_eta)
+        self._preview_timer = QTimer(self)
+        self._preview_timer.setSingleShot(True)
+        self._preview_timer.setInterval(100)
+        self._preview_timer.timeout.connect(self._flush_spectrum_preview)
+        self._pending_spectrum_preview: dict[str, object] | None = None
+        self._activity_pulse_on = False
+        self._activity_pulse_timer = QTimer(self)
+        self._activity_pulse_timer.setInterval(550)
+        self._activity_pulse_timer.timeout.connect(self._pulse_activity_indicator)
         self._last_layout_orientation: Qt.Orientation | None = None
         self._update_monitor_layout(force=True)
 
     def _update_monitor_layout(self, *, force: bool = False) -> None:
-        """Prevent the activity tree and spectrum from competing for width."""
+        """Keep the tree, plot and confirmed-state tables usable at each width."""
 
         orientation = (
             Qt.Orientation.Horizontal
@@ -358,9 +493,28 @@ class RunMonitorPage(QWidget):
         self._last_layout_orientation = orientation
         self.monitor_splitter.setOrientation(orientation)
         if orientation == Qt.Orientation.Horizontal:
-            self.monitor_splitter.setSizes((400, max(480, self.width() - 420)))
+            available = max(760, self.monitor_splitter.width())
+            left = max(480, int(available * 0.48))
+            self.monitor_splitter.setSizes((left, max(520, available - left)))
         else:
-            self.monitor_splitter.setSizes((360, 320))
+            available = max(560, self.monitor_splitter.height())
+            upper = max(300, int(available * 0.52))
+            self.monitor_splitter.setSizes((upper, max(260, available - upper)))
+        live_orientation = (
+            Qt.Orientation.Horizontal
+            if self.width() >= 1_100
+            else Qt.Orientation.Vertical
+        )
+        self.live_tables.setOrientation(live_orientation)
+        if live_orientation == Qt.Orientation.Horizontal:
+            self.live_tables.setSizes((360, max(440, self.live_tables.width() - 380)))
+        else:
+            self.live_tables.setSizes((82, 82))
+        if self.activity_splitter.height() > 0:
+            event_height = min(112, max(86, self.activity_splitter.height() // 4))
+            self.activity_splitter.setSizes(
+                (max(220, self.activity_splitter.height() - event_height), event_height)
+            )
 
     def resizeEvent(self, event: object) -> None:
         super().resizeEvent(event)  # type: ignore[arg-type]
@@ -376,6 +530,8 @@ class RunMonitorPage(QWidget):
         recipe_tree_items: tuple[QTreeWidgetItem, ...] = (),
         execution_mode: str = "measurement",
     ) -> None:
+        self._preview_timer.stop()
+        self._pending_spectrum_preview = None
         self.completion_card.hide()
         self.completion_summary.clear()
         self.completion_path.clear()
@@ -957,6 +1113,38 @@ class RunMonitorPage(QWidget):
             f"remaining {float(data.get('remaining_s', 0.0)):.2f} s"
         )
 
+    def queue_spectrum_preview(self, data: dict[str, object]) -> None:
+        """Schedule one latest-frame repaint instead of one repaint per point."""
+
+        self._pending_spectrum_preview = dict(data)
+        if not self._preview_timer.isActive():
+            self._preview_timer.start()
+
+    def _flush_spectrum_preview(self) -> None:
+        pending = self._pending_spectrum_preview
+        self._pending_spectrum_preview = None
+        if pending is not None:
+            self.update_spectrum_preview(pending)
+
+    @staticmethod
+    def _event_summary(name: str, data: dict[str, object]) -> str:
+        """Render a bounded diagnostic line without dumping state arrays."""
+
+        fields: list[str] = []
+        for key, value in data.items():
+            if key == "state_snapshot":
+                rendered = "<confirmed>"
+            elif key in {"frequency_hz", "power_dbm"} and isinstance(
+                value, (tuple, list)
+            ):
+                rendered = f"<{len(value)} values>"
+            else:
+                rendered = repr(value)
+                if len(rendered) > 220:
+                    rendered = rendered[:217] + "..."
+            fields.append(f"{key}={rendered}")
+        return f"{name}: " + ", ".join(fields)
+
     def append_event(self, name: str, data: dict[str, object]) -> None:
         if name == "manual_stage_waiting":
             self.state.setText("MANUAL — WAITING FOR NEXT")
@@ -1069,9 +1257,9 @@ class RunMonitorPage(QWidget):
             "watchdog_timeout",
             "safe_finally_error",
         }:
-            self.warnings.appendPlainText(f"{name}: {data}")
+            self.warnings.appendPlainText(self._event_summary(name, data))
         self._apply_live_snapshot(data)
-        self.events.appendPlainText(f"{name}: {data}")
+        self.events.appendPlainText(self._event_summary(name, data))
 
     def update_spectrum_preview(self, data: dict[str, object]) -> None:
         frequencies = data.get("frequency_hz")
@@ -1123,6 +1311,8 @@ class RunMonitorPage(QWidget):
         return " • ".join(rendered)
 
     def complete(self, result: object) -> None:
+        self._preview_timer.stop()
+        self._flush_spectrum_preview()
         self._manual_dialog.finish()
         self._eta_timer.stop()
         self.stop_button.setEnabled(False)
@@ -1153,6 +1343,8 @@ class RunMonitorPage(QWidget):
         self.events.appendPlainText(f"File: {result['path']}")
 
     def failed(self, error: str) -> None:
+        self._preview_timer.stop()
+        self._flush_spectrum_preview()
         self._manual_dialog.finish()
         self._eta_timer.stop()
         self.stop_button.setEnabled(False)

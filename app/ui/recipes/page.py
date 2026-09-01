@@ -248,6 +248,10 @@ class RecipePage(QWidget):
     ) -> None:
         super().__init__(parent)
         self._historical_sweep_active = False
+        self._execution_controlled = False
+        self._execution_widget_states: dict[QWidget, bool] = {}
+        self._execution_action_states: dict[QAction, bool] = {}
+        self._execution_editor_read_only = False
         self._recipe_parameter_definitions = (
             device_registry.recipe_parameter_definitions()
             if device_registry is not None
@@ -463,6 +467,27 @@ class RecipePage(QWidget):
         )
         self.recipe_command_bar.addAction(self.inspector_visibility_action)
         document_layout.addWidget(self.recipe_command_bar)
+        self.execution_lock_banner = CardWidget(self.document_card)
+        self.execution_lock_banner.setObjectName("recipeExecutionLockBanner")
+        self.execution_lock_banner.setProperty("stationSurface", "raised")
+        lock_layout = QHBoxLayout(self.execution_lock_banner)
+        lock_layout.setContentsMargins(10, 7, 10, 7)
+        lock_layout.setSpacing(10)
+        lock_title = StrongBodyLabel(
+            "RUN IN PROGRESS · READ-ONLY", self.execution_lock_banner
+        )
+        lock_title.setObjectName("recipeExecutionLockTitle")
+        lock_title.setProperty("safetyState", "caution")
+        lock_layout.addWidget(lock_title)
+        lock_copy = CaptionLabel(
+            "The Run Engine owns device I/O. Inspect the recipe and live readback; editing is paused until the run ends.",
+            self.execution_lock_banner,
+        )
+        lock_copy.setObjectName("muted")
+        lock_copy.setWordWrap(True)
+        lock_layout.addWidget(lock_copy, 1)
+        self.execution_lock_banner.hide()
+        document_layout.addWidget(self.execution_lock_banner)
         path_label = CaptionLabel("Recipe file", self.document_card)
         path_label.setObjectName("recipePathLabel")
         path_line.addWidget(path_label)
@@ -627,6 +652,9 @@ class RecipePage(QWidget):
             "container to add inside it. Actions and ROI rows never accept children."
         )
         self.builder_container = CardWidget()
+        self.builder_container.setObjectName("recipeBuilderPanel")
+        self.builder_container.setProperty("stationSurface", "surface")
+        self.builder_container.setMinimumHeight(430)
         builder_layout = QVBoxLayout(self.builder_container)
         builder_layout.setContentsMargins(12, 10, 12, 12)
         builder_layout.setSpacing(8)
@@ -654,9 +682,13 @@ class RecipePage(QWidget):
         )
         builder_layout.addWidget(self.builder_stack, 1)
         self.library_panel = self._build_device_library()
+        self.library_panel.setMinimumHeight(430)
         self.workspace_splitter.addWidget(self.library_panel)
         self.workspace_splitter.addWidget(self.builder_container)
         self.inspector_panel = QWidget()
+        self.inspector_panel.setObjectName("recipeInspectorPanel")
+        self.inspector_panel.setProperty("stationSurface", "surface")
+        self.inspector_panel.setMinimumHeight(430)
         self.inspector_panel.setMinimumWidth(280)
         self.inspector_panel.setMaximumWidth(620)
         inspector_layout = QVBoxLayout(self.inspector_panel)
@@ -684,8 +716,37 @@ class RecipePage(QWidget):
         self.workspace_splitter.setStretchFactor(0, 1)
         self.workspace_splitter.setStretchFactor(1, 4)
         self.workspace_splitter.setStretchFactor(2, 2)
+        self.workspace_splitter.setMinimumHeight(430)
+        self.workspace_splitter.setProperty("stationSurface", "surface")
         self.workspace_splitter.splitterMoved.connect(self._workspace_splitter_moved)
-        layout.addWidget(self.workspace_splitter, 1)
+        self.workspace_card = CardWidget(self)
+        self.workspace_card.setObjectName("recipeWorkspaceCard")
+        self.workspace_card.setProperty("stationSurface", "surface")
+        self.workspace_card.setMinimumHeight(500)
+        workspace_layout = QVBoxLayout(self.workspace_card)
+        workspace_layout.setContentsMargins(12, 10, 12, 12)
+        workspace_layout.setSpacing(8)
+        workspace_heading = QHBoxLayout()
+        workspace_title = StrongBodyLabel(
+            "Measurement workspace", self.workspace_card
+        )
+        workspace_title.setObjectName("recipeWorkspaceTitle")
+        workspace_heading.addWidget(workspace_title)
+        workspace_hint = CaptionLabel(
+            "Library · measurement tree · inspector", self.workspace_card
+        )
+        workspace_hint.setObjectName("muted")
+        workspace_heading.addWidget(workspace_hint)
+        workspace_heading.addStretch(1)
+        self.workspace_state = CaptionLabel(
+            "READY TO EDIT", self.workspace_card
+        )
+        self.workspace_state.setObjectName("recipeWorkspaceState")
+        self.workspace_state.setProperty("safetyState", "verified")
+        workspace_heading.addWidget(self.workspace_state)
+        workspace_layout.addLayout(workspace_heading)
+        workspace_layout.addWidget(self.workspace_splitter, 1)
+        layout.addWidget(self.workspace_card, 1)
         self._update_workspace_layout(force=True)
         self.status_card = CardWidget(self)
         self.status_card.setObjectName("recipeStatusCard")
@@ -745,6 +806,34 @@ class RecipePage(QWidget):
             QShortcut(QKeySequence("Ctrl+Shift+G"), self.tree, activated=self._edit_selected_node),
             QShortcut(QKeySequence("Return"), self.tree, activated=self._edit_selected_node),
             QShortcut(QKeySequence("Enter"), self.tree, activated=self._edit_selected_node),
+        )
+        self._execution_edit_widgets: tuple[QWidget, ...] = (
+            self.path,
+            self.restore_button,
+            self.execution_mode,
+            self.output_directory,
+            self.output_directory_button,
+            self.output_file_stem,
+            self.run_button,
+            self.edit_device_button,
+            self.edit_generator_button,
+            self.delete_node_button,
+            self.duplicate_node_button,
+            self.move_up_button,
+            self.move_down_button,
+            self.wrap_repeat_button,
+            self.open_editor_button,
+            *self._library_action_buttons,
+        )
+        self._execution_edit_actions: tuple[QAction, ...] = (
+            self.new_recipe_action,
+            self.load_recipe_action,
+            self.open_hdf5_action,
+            self.save_recipe_action,
+            self.apply_yaml_action,
+            self.undo_tree_action,
+            self.redo_tree_action,
+            self.compile_recipe_action,
         )
         self.load_editor(show_error=False)
 
@@ -903,6 +992,8 @@ class RecipePage(QWidget):
         scroll = ScrollArea()
         scroll.setObjectName("recipeLibraryScroll")
         scroll.setWidgetResizable(True)
+        scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        scroll.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
         scroll.setMinimumWidth(210)
         scroll.setMaximumWidth(400)
         panel = CardWidget(self)
@@ -1765,23 +1856,38 @@ class RecipePage(QWidget):
         )
 
     def _tree_editing_allowed(self) -> bool:
-        return not self._historical_sweep_active and not self._yaml_draft_pending()
+        return (
+            not self._historical_sweep_active
+            and not self._execution_controlled
+            and not self._yaml_draft_pending()
+        )
 
     def _set_tree_editing_enabled(self, enabled: bool) -> None:
-        self.tree.setDragEnabled(enabled)
-        self.tree.setAcceptDrops(enabled)
-        self.tree.setDropIndicatorShown(enabled)
-        self.library_panel.setEnabled(enabled)
+        effective = bool(enabled) and not self._execution_controlled
+        self.tree.setDragEnabled(effective)
+        self.tree.setAcceptDrops(effective)
+        self.tree.setDropIndicatorShown(effective)
+        # Keep the library surface enabled while a run owns the recipe so its
+        # scrollbar and search remain usable.  Only its mutating buttons are
+        # disabled by ``set_execution_controlled``.
+        self.library_panel.setEnabled(
+            True if self._execution_controlled else bool(enabled)
+        )
         for shortcut in getattr(self, "_tree_shortcuts", ()):
-            shortcut.setEnabled(enabled)
+            shortcut.setEnabled(effective)
         if not self._historical_sweep_active:
             current = self.tree.currentItem()
             self._node_selected(current, None)
-        if enabled:
+        if effective:
             self.tree.setToolTip(
                 "Drag a non-root node to reorder it or place it inside Sequence, "
                 "Sweep, Repeat or If. The complete YAML is validated before the "
                 "view changes; nodes cannot cross the Finally boundary."
+            )
+        elif self._execution_controlled:
+            self.tree.setToolTip(
+                "The Run Engine owns this recipe during execution. The tree is "
+                "read-only until the run finishes."
             )
         else:
             self.tree.setToolTip(
@@ -1789,12 +1895,83 @@ class RecipePage(QWidget):
                 "Correct the YAML and choose Apply YAML to tree."
             )
 
+    def set_execution_controlled(self, controlled: bool) -> None:
+        """Make the recipe inspectable, but immutable, while a run is active.
+
+        The route itself remains enabled so operators can inspect the exact
+        recipe and switch to device readback pages.  We snapshot each
+        control's pre-run state and restore it after completion instead of
+        guessing whether it was disabled by validation, permissions or an
+        incomplete selection.
+        """
+
+        controlled = bool(controlled)
+        if controlled == self._execution_controlled:
+            self.execution_lock_banner.setVisible(controlled)
+            self.workspace_state.setText(
+                "RUNNING · READ-ONLY" if controlled else "READY TO EDIT"
+            )
+            return
+        if controlled:
+            self._execution_controlled = True
+            self._execution_widget_states = {
+                widget: widget.isEnabled()
+                for widget in self._execution_edit_widgets
+            }
+            self._execution_action_states = {
+                action: action.isEnabled()
+                for action in self._execution_edit_actions
+            }
+            self._execution_editor_read_only = self.editor.isReadOnly()
+            for widget in self._execution_edit_widgets:
+                widget.setEnabled(False)
+            for action in self._execution_edit_actions:
+                action.setEnabled(False)
+            self.editor.setReadOnly(True)
+            self._set_tree_editing_enabled(False)
+            self.execution_lock_banner.show()
+            self.document_state_badge.setText("RUNNING · READ-ONLY")
+            self.document_state_badge.setToolTip(
+                "The Run Engine owns this recipe while the measurement is active."
+            )
+            self.document_state_badge.setProperty("safetyState", "caution")
+            self.workspace_state.setText("RUNNING · READ-ONLY")
+            self.workspace_state.setProperty("safetyState", "caution")
+        else:
+            self._execution_controlled = False
+            for widget, enabled in self._execution_widget_states.items():
+                if widget is not None:
+                    widget.setEnabled(enabled)
+            for action, enabled in self._execution_action_states.items():
+                if action is not None:
+                    action.setEnabled(enabled)
+            self.editor.setReadOnly(self._execution_editor_read_only)
+            self._execution_widget_states.clear()
+            self._execution_action_states.clear()
+            self._set_tree_editing_enabled(self._tree_editing_allowed())
+            self._refresh_document_state()
+            self.execution_lock_banner.hide()
+            self.workspace_state.setText("READY TO EDIT")
+            self.workspace_state.setProperty("safetyState", "verified")
+        for label in (self.workspace_state,):
+            label.style().unpolish(label)
+            label.style().polish(label)
+        self.document_state_badge.style().unpolish(self.document_state_badge)
+        self.document_state_badge.style().polish(self.document_state_badge)
+
     def _refresh_document_state(self) -> None:
         if not hasattr(self, "document_state_badge"):
             return
         pending = self._yaml_draft_pending()
         dirty = self._is_document_dirty()
-        if self._historical_sweep_active:
+        if self._execution_controlled:
+            text = "RUNNING · READ-ONLY"
+            safety_state = "caution"
+            tooltip = (
+                "The Run Engine owns this recipe while the measurement is active. "
+                "Editing resumes after the run finishes."
+            )
+        elif self._historical_sweep_active:
             text = "RECORDED"
             safety_state = "verified"
             tooltip = "This is an immutable historical execution."
@@ -1827,14 +2004,16 @@ class RecipePage(QWidget):
         self.document_state_badge.style().unpolish(self.document_state_badge)
         self.document_state_badge.style().polish(self.document_state_badge)
         self.apply_yaml_action.setEnabled(
-            pending and not self._historical_sweep_active
+            pending
+            and not self._historical_sweep_active
+            and not self._execution_controlled
         )
         self.apply_yaml_action.setToolTip(
             "Parse the complete YAML draft and replace the measurement tree atomically"
             if pending
             else "The YAML editor and measurement tree already match"
         )
-        self.save_recipe_action.setEnabled(dirty)
+        self.save_recipe_action.setEnabled(dirty and not self._execution_controlled)
         self._set_tree_editing_enabled(self._tree_editing_allowed())
         self._update_tree_history_controls()
         self._tree_drag_status_changed("", True)

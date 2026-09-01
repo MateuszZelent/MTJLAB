@@ -12,8 +12,11 @@ import numpy as np
 import pyqtgraph as pg
 from pyqtgraph.exporters import ImageExporter, SVGExporter
 from PySide6.QtCore import QThreadPool, Signal
+from PySide6.QtGui import QResizeEvent, QShowEvent
 from PySide6.QtWidgets import (
+    QBoxLayout,
     QHBoxLayout,
+    QLayout,
     QStackedWidget,
     QVBoxLayout,
     QWidget,
@@ -21,10 +24,13 @@ from PySide6.QtWidgets import (
 from qfluentwidgets import BodyLabel, ComboBox, PushButton
 from app.ui.dialogs import StationFileDialog as QFileDialog
 
+from app.domain.quantities import DIMENSION_FREQUENCY, format_quantity_auto
+from app.recipes.parameter_registry import parameter_descriptor
 from app.storage import StoredPoint, ThatecRow, ThatecRun, ThatecRunReader
 from app.ui.design_system import plot_theme, tokens_for
 from app.ui.results.heatmap_coordinates import (
     HeatmapCoordinates,
+    HeatmapDimension,
     HeatmapRequest,
     build_heatmap_coordinates,
     read_heatmap_matrix,
@@ -484,7 +490,10 @@ class HeatmapResultsTab(QWidget):
         layout.setContentsMargins(0, 0, 0, 0)
 
         # --- Row selector ---
-        selector = QHBoxLayout()
+        # Start compact so a hidden page never acquires a wide minimum size
+        # from the desktop toolbar before its real viewport is known.
+        self.selector_layout = QBoxLayout(QBoxLayout.Direction.TopToBottom)
+        selector = self.selector_layout
         selector.addWidget(BodyLabel("Data:"))
         self.variant_combo = ComboBox(self)
         self.variant_combo.setToolTip(
@@ -515,9 +524,10 @@ class HeatmapResultsTab(QWidget):
         layout.addLayout(selector)
 
         self.filter_host = QWidget(self)
-        self.filter_layout = QHBoxLayout(self.filter_host)
+        self.filter_layout = QVBoxLayout(self.filter_host)
         self.filter_layout.setContentsMargins(0, 0, 0, 0)
-        self.filter_layout.setSpacing(6)
+        self.filter_layout.setSpacing(4)
+        self._range_combos: dict[str, tuple[ComboBox, ComboBox]] = {}
         self._filter_combos: dict[str, ComboBox] = {}
         layout.addWidget(self.filter_host)
 
@@ -531,6 +541,7 @@ class HeatmapResultsTab(QWidget):
 
         self.info_label = BodyLabel("Select a spectrum row and click 'Load heatmap'.")
         self.info_label.setObjectName("muted")
+        self.info_label.setWordWrap(True)
         layout.addWidget(self.info_label)
 
         # --- Connections ---
@@ -545,6 +556,26 @@ class HeatmapResultsTab(QWidget):
         self._show_heatmap_state(
             "Select a heatmap",
             "Choose a two-dimensional public spectrum row to compare checkpoints.",
+        )
+        self._selector_compact: bool | None = True
+
+    def resizeEvent(self, event: QResizeEvent) -> None:
+        super().resizeEvent(event)
+        self._sync_selector_layout(event.size().width())
+
+    def showEvent(self, event: QShowEvent) -> None:
+        super().showEvent(event)
+        self._sync_selector_layout(self.width())
+
+    def _sync_selector_layout(self, width: int) -> None:
+        compact = width < 980
+        if compact == self._selector_compact:
+            return
+        self._selector_compact = compact
+        self.selector_layout.setDirection(
+            QBoxLayout.Direction.TopToBottom
+            if compact
+            else QBoxLayout.Direction.LeftToRight
         )
 
     def apply_theme(self, theme: str) -> None:
@@ -681,6 +712,8 @@ class HeatmapResultsTab(QWidget):
         self._points = ()
         self._coordinates = None
         self._coordinate_row_id = None
+        self._range_combos = {}
+        self._filter_combos = {}
         self.load_button.setEnabled(False)
         self._show_heatmap_state(
             "Select a result",
@@ -747,10 +780,25 @@ class HeatmapResultsTab(QWidget):
         return self._coordinates
 
     def _request(self) -> HeatmapRequest:
+        filters: dict[str, object] = {
+            dimension_id: (
+                float(minimum.currentData()),
+                float(maximum.currentData()),
+            )
+            for dimension_id, (minimum, maximum) in self._range_combos.items()
+            if minimum.currentData() is not None and maximum.currentData() is not None
+        }
+        filters.update(
+            {
+                dimension_id: float(combo.currentData())
+                for dimension_id, combo in self._filter_combos.items()
+                if combo.currentData() is not None
+            }
+        )
         return HeatmapRequest(
             str(self.x_axis_combo.currentData()),
             str(self.y_axis_combo.currentData()),
-            {dimension_id: float(combo.currentData()) for dimension_id, combo in self._filter_combos.items()},
+            filters,
         )
 
     def _axis_changed(self, *_args: object) -> None:
@@ -767,43 +815,150 @@ class HeatmapResultsTab(QWidget):
             item = self.filter_layout.takeAt(0)
             if item.widget() is not None:
                 item.widget().deleteLater()
+            elif item.layout() is not None:
+                self._clear_layout(item.layout())
+        self._range_combos = {}
         self._filter_combos = {}
         if self._coordinates is None:
             self.filter_host.hide()
             return
         axes = {self.x_axis_combo.currentData(), self.y_axis_combo.currentData()}
-        needs_filter = any(
-            dimension.id not in axes for dimension in self._coordinates.dimensions
-        )
-        if needs_filter:
-            self.filter_layout.addWidget(BodyLabel("Filters:"))
-        for dimension in self._coordinates.dimensions:
-            if dimension.id in axes or dimension.is_frequency:
-                continue
-            self.filter_layout.addWidget(BodyLabel(f"{dimension.label}:"))
-            combo = ComboBox(self.filter_host)
-            for value in sorted(set(dimension.values)):
-                suffix = f" {dimension.unit}" if dimension.unit else ""
-                combo.addItem(f"{value:.9g}{suffix}", userData=value)
-            combo.currentIndexChanged.connect(self._row_changed)
-            self.filter_layout.addWidget(combo)
-            self._filter_combos[dimension.id] = combo
+        physical_dimensions = [
+            dimension
+            for dimension in self._coordinates.dimensions
+            if not dimension.is_frequency
+        ]
+        if physical_dimensions:
+            self.filter_layout.addWidget(
+                BodyLabel("Parameter ranges (inclusive):", self.filter_host)
+            )
+        for dimension in physical_dimensions:
+            values = sorted(set(float(value) for value in dimension.values))
+            self._add_range_row(dimension, values, full_range=dimension.id in axes)
         if "frequency" not in axes:
-            self.filter_layout.addWidget(BodyLabel("Frequency:"))
-            combo = ComboBox(self.filter_host)
+            row = QWidget(self.filter_host)
+            row_layout = QHBoxLayout(row)
+            row_layout.setContentsMargins(0, 0, 0, 0)
+            row_layout.setSpacing(6)
+            row_layout.addWidget(BodyLabel("Frequency:", row))
+            combo = ComboBox(row)
+            combo.setMinimumWidth(150)
+            combo.setAccessibleName("Heatmap frequency slice")
             try:
                 spectrum = ThatecRunReader.spectrum_slice(
                     self._selected_path, str(self.row_combo.currentData()), 0
                 )
+                frequency = self._coordinates.dimension("frequency")
                 for value in spectrum.x_values:
-                    combo.addItem(f"{value:.9g} {spectrum.x_unit}", userData=value)
+                    combo.addItem(
+                        self._format_coordinate_value(frequency, float(value)),
+                        userData=value,
+                    )
             except Exception:
                 combo.addItem("No readable frequency grid", userData=float("nan"))
-            combo.currentIndexChanged.connect(self._row_changed)
-            self.filter_layout.addWidget(combo)
+            combo.currentIndexChanged.connect(self._frequency_changed)
+            row_layout.addWidget(combo)
+            row_layout.addStretch(1)
+            self.filter_layout.addWidget(row)
             self._filter_combos["frequency"] = combo
         self.filter_layout.addStretch(1)
-        self.filter_host.setVisible(bool(self._filter_combos))
+        self.filter_host.setVisible(bool(physical_dimensions or self._filter_combos))
+
+    def _add_range_row(
+        self,
+        dimension: HeatmapDimension,
+        values: list[float],
+        *,
+        full_range: bool,
+    ) -> None:
+        """Add two recorded-value selectors for one physical coordinate."""
+
+        if not values:
+            return
+        row = QWidget(self.filter_host)
+        row_layout = QHBoxLayout(row)
+        row_layout.setContentsMargins(0, 0, 0, 0)
+        row_layout.setSpacing(6)
+        label = BodyLabel(f"{dimension.label}:", row)
+        label.setMinimumWidth(220)
+        row_layout.addWidget(label)
+        row_layout.addWidget(BodyLabel("from", row))
+        minimum = ComboBox(row)
+        minimum.setMinimumWidth(140)
+        minimum.setAccessibleName(f"{dimension.label} minimum")
+        minimum.setObjectName("heatmapRangeMinimum")
+        row_layout.addWidget(minimum)
+        row_layout.addWidget(BodyLabel("to", row))
+        maximum = ComboBox(row)
+        maximum.setMinimumWidth(140)
+        maximum.setAccessibleName(f"{dimension.label} maximum")
+        maximum.setObjectName("heatmapRangeMaximum")
+        row_layout.addWidget(maximum)
+        row_layout.addStretch(1)
+        for value in values:
+            text = self._format_coordinate_value(dimension, value)
+            minimum.addItem(text, userData=value)
+            maximum.addItem(text, userData=value)
+        minimum.setCurrentIndex(0)
+        maximum.setCurrentIndex(len(values) - 1 if full_range else 0)
+        dimension_id = str(dimension.id)
+        minimum.currentIndexChanged.connect(
+            lambda _index, dimension_id=dimension_id: self._range_changed(
+                dimension_id, "minimum"
+            )
+        )
+        maximum.currentIndexChanged.connect(
+            lambda _index, dimension_id=dimension_id: self._range_changed(
+                dimension_id, "maximum"
+            )
+        )
+        self.filter_layout.addWidget(row)
+        self._range_combos[dimension_id] = (minimum, maximum)
+
+    def _range_changed(self, dimension_id: str, edge: str) -> None:
+        controls = self._range_combos.get(dimension_id)
+        if controls is None:
+            return
+        minimum, maximum = controls
+        lower = float(minimum.currentData())
+        upper = float(maximum.currentData())
+        if lower > upper:
+            target = maximum if edge == "minimum" else minimum
+            replacement = minimum.currentIndex() if edge == "minimum" else maximum.currentIndex()
+            target.blockSignals(True)
+            target.setCurrentIndex(replacement)
+            target.blockSignals(False)
+        self._row_changed()
+
+    def _frequency_changed(self, *_args: object) -> None:
+        self._row_changed()
+
+    @staticmethod
+    def _clear_layout(layout: QLayout) -> None:
+        while layout.count():
+            item = layout.takeAt(0)
+            if item.widget() is not None:
+                item.widget().deleteLater()
+            elif item.layout() is not None:
+                HeatmapResultsTab._clear_layout(item.layout())
+
+    @staticmethod
+    def _format_coordinate_value(dimension: HeatmapDimension, value: float) -> str:
+        """Format known SI coordinates with the registered engineering unit."""
+
+        quantity_dimension = DIMENSION_FREQUENCY if dimension.is_frequency else None
+        if quantity_dimension is None:
+            try:
+                quantity_dimension = parameter_descriptor(dimension.id).dimension
+            except KeyError:
+                quantity_dimension = None
+        if quantity_dimension is not None:
+            try:
+                return format_quantity_auto(value, quantity_dimension)
+            except ValueError:
+                pass
+        suffix = f" {dimension.unit}" if dimension.unit else ""
+        return f"{value:.9g}{suffix}"
 
     @staticmethod
     def _split_spectrum_rows_by_variant(

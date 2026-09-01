@@ -876,7 +876,7 @@ root:
             self.assertEqual(preview["source_points"], 101)
             self.assertEqual(len(preview["frequency_hz"]), 101)
 
-    def test_energized_point_runs_with_limits_and_output_permissions(self) -> None:
+    def test_energized_point_keeps_legacy_dut_limits_out_of_active_safety_context(self) -> None:
         recipe_source = """\
 schema_version: 1
 name: energized-simulation-smoke
@@ -961,10 +961,16 @@ finally:
             self.assertEqual(result.stored_points, 1)
             with h5py.File(root / "result.h5", "r") as file:
                 metadata = json.loads(file["points/0/metadata_json"].asstr()[()])
+                policy = json.loads(file["run/dut_limits_policy_json"].asstr()[()])
             safety = metadata["safety_context"]
-            self.assertEqual(safety["rigol.1"]["minimum_impedance_ohm"], 50.0)
-            self.assertEqual(safety["keithley.B"]["current_max_a"], 0.002)
-            self.assertEqual(safety["anritsu"]["max_expected_input_dbm"], -10.0)
+            self.assertEqual(safety["rigol.1"]["frequency_hz"], 1e3)
+            self.assertNotIn("minimum_impedance_ohm", safety["rigol.1"])
+            self.assertNotIn("max_abs_current_a", safety["rigol.1"])
+            self.assertEqual(safety["keithley.B"]["source_level_si"], 0.001)
+            self.assertNotIn("current_max_a", safety["keithley.B"])
+            self.assertEqual(safety["anritsu"]["start_hz"], 1e6)
+            self.assertNotIn("max_expected_input_dbm", safety["anritsu"])
+            self.assertFalse(policy["enforced"])
 
     def test_nested_sweep_round_trips_all_cartesian_points_through_pythat(self) -> None:
         recipe_source = """\

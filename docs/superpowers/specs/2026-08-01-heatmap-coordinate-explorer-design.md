@@ -8,7 +8,7 @@ Replace the positional `Checkpoint` heatmap axis with physical sweep coordinates
 
 - The heatmap toolbar exposes `X axis` and `Y axis` selectors.  Both list Frequency and every reconstructed sweep dimension, with units in their labels.
 - The initial selection is X = Frequency and Y = the innermost sweep axis.  For the current run this becomes `Frequency (Hz)` × `Keithley B current (A)`.
-- A dimension not selected for X or Y becomes a filter.  Its selector chooses one exact stored coordinate value.  When Frequency is a filter, it selects one exact spectral bin.
+- Every physical dimension exposes an inclusive `from`/`to` range over recorded coordinate values.  Axis ranges choose the displayed plane extent; a non-axis range selects the matching checkpoint slice.  When Frequency is not an axis, it remains an exact spectral-bin selector.
 - Axes must differ.  Changing either axis rebuilds the filter controls and requests a fresh matrix.
 - The UI never averages, interpolates, or merges measurements.  Missing coordinate combinations stay NaN/gaps.  Duplicate combinations are rejected with an actionable explanation asking the operator to refine filters.
 - Clicking a valid cell opens the source checkpoint spectrum.  The cell-to-checkpoint mapping, rather than a display row number, is authoritative.
@@ -27,10 +27,11 @@ Every coordinate preserves its persisted SI value and canonical unit.  Display f
 
 ## Matrix construction
 
-Given a spectrum row, two selected dimensions, and exact values for all remaining dimensions:
+Given a spectrum row, two selected dimensions, and inclusive recorded-coordinate ranges for the physical dimensions:
 
-- If Frequency is one selected axis, read each matching checkpoint spectrum and place every frequency bin against the other selected dimension.
-- If Frequency is filtered, read only the requested bin from each matching checkpoint and place its power on the two selected sweep dimensions.
+- If Frequency is one selected axis, read each checkpoint matching the non-axis ranges and place every selected frequency bin against the other selected dimension.
+- If Frequency is filtered, read only the requested bin from each checkpoint matching the two-dimensional sweep ranges and place its power on the selected sweep dimensions.
+- Range endpoints are inclusive and select only persisted coordinates; the reader never interpolates or aggregates between endpoints.
 - Build a `cell_checkpoint_indices` matrix alongside the colour matrix.  A valid cell points to one source checkpoint; a gap has no source index.
 - Sort physical coordinates monotonically for display while applying the same permutation to values and source indices.
 

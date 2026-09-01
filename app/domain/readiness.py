@@ -171,16 +171,28 @@ def evaluate_station_readiness(
             and bool(action.payload.get("enabled"))
             for action in plan.actions
         )
+        has_legacy_dut_limits = bool(plan.recipe_dut_limits)
+        if not energized:
+            dut_detail = "Plan contains no OUTPUT ON action"
+            dut_level = ReadinessLevel.PASS
+        elif has_legacy_dut_limits:
+            dut_detail = (
+                "Legacy recipe DUT limits are metadata only and are not enforced; "
+                "configured station and device hardware limits are authoritative"
+            )
+            dut_level = ReadinessLevel.WARNING
+        else:
+            dut_detail = (
+                "No per-recipe DUT envelope is enforced; configured station and "
+                "device hardware limits are authoritative"
+            )
+            dut_level = ReadinessLevel.PASS
         items.append(
             ReadinessItem(
                 "dut",
                 "DUT safety declaration",
-                (
-                    "Compiler validated the recipe DUT envelope against configured laboratory limits"
-                    if energized
-                    else "Plan contains no OUTPUT ON action"
-                ),
-                ReadinessLevel.PASS,
+                dut_detail,
+                dut_level,
             )
         )
     return StationReadiness(tuple(items))
