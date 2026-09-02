@@ -4,6 +4,7 @@ from app.contracts.device_module import (
     DeviceModule, DeviceModuleRegistry, DevicePageFactory, ExecutionTelemetryView,
     OperationDispatcher, RecipeExtension,
 )
+from app.contracts.sweep_provider import CompiledAxisSetpoint, DeviceSweepProvider
 
 __all__ = [
     "DeviceModule",
@@ -12,4 +13,6 @@ __all__ = [
     "ExecutionTelemetryView",
     "OperationDispatcher",
     "RecipeExtension",
+    "CompiledAxisSetpoint",
+    "DeviceSweepProvider",
 ]

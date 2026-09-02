@@ -9,10 +9,13 @@ from __future__ import annotations
 
 from collections.abc import Callable, Iterable
 from dataclasses import dataclass, field
-from typing import Mapping, Protocol, runtime_checkable
+from typing import TYPE_CHECKING, Mapping, Protocol, runtime_checkable
 
 from app.devices.base import DeviceAdapter
 from app.settings.models import StationSettings
+
+if TYPE_CHECKING:
+    from app.contracts.sweep_provider import DeviceSweepProvider
 
 
 class OperationDispatcher(Protocol):
@@ -52,6 +55,7 @@ class RecipeExtension:
     module_key: str
     parameter_definitions: tuple[Mapping[str, str], ...] = ()
     library_block_keys: tuple[str, ...] = ()
+    sweep_provider: "DeviceSweepProvider | None" = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -112,6 +116,13 @@ class DeviceModuleRegistry:
                     f"Recipe extension key {extension.module_key!r} does not match "
                     f"device module {module.key!r}."
                 )
+            if extension is not None and extension.sweep_provider is not None:
+                provider_key = getattr(extension.sweep_provider, "module_key", None)
+                if provider_key != module.key:
+                    raise ValueError(
+                        f"Recipe sweep provider key {provider_key!r} does not match "
+                        f"device module {module.key!r} (provider key mismatch)."
+                    )
         self._modules = indexed
 
     def get(self, key: str) -> DeviceModule:
@@ -142,3 +153,16 @@ class DeviceModuleRegistry:
         if len(targets) != len(set(targets)):
             raise ValueError("Recipe parameter targets must be unique across modules.")
         return definitions
+
+    def sweep_providers(self) -> Mapping[str, "DeviceSweepProvider"]:
+        """Return the enabled, reviewed device-owned sweep providers."""
+
+        providers = {
+            module.key: module.recipe_extension.sweep_provider
+            for module in self.enabled_modules()
+            if module.recipe_extension is not None
+            and module.recipe_extension.sweep_provider is not None
+        }
+        if any(getattr(provider, "module_key", None) != key for key, provider in providers.items()):
+            raise ValueError("Registered sweep provider key mismatch.")
+        return providers  # type: ignore[return-value]

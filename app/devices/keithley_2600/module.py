@@ -13,6 +13,7 @@ from app.devices.keithley_2600.ui import KeithleyPage
 from app.devices.simulators import SimulatedVisaFactory
 from app.settings.models import StationSettings
 from app.recipes.parameter_registry import parameter_definitions_for_module
+from app.devices.keithley_2600.sweep_provider import PROVIDER as SWEEP_PROVIDER
 
 
 def _adapter(settings: StationSettings, simulation: bool) -> DeviceAdapter:
@@ -108,6 +109,7 @@ MODULE = DeviceModule(
         module_key="keithley",
         parameter_definitions=parameter_definitions_for_module("keithley"),
         library_block_keys=("keithley",),
+        sweep_provider=SWEEP_PROVIDER,
     ),
     page_factory=_page,
 )

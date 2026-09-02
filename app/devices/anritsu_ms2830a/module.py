@@ -9,6 +9,7 @@ from app.devices.base import DeviceAdapter
 from app.devices.simulators import SimulatedVisaFactory
 from app.settings.models import StationSettings
 from app.recipes.parameter_registry import parameter_definitions_for_module
+from app.devices.anritsu_ms2830a.sweep_provider import PROVIDER as SWEEP_PROVIDER
 
 
 def _adapter(settings: StationSettings, simulation: bool) -> DeviceAdapter:
@@ -61,6 +62,7 @@ MODULE = DeviceModule(
         module_key="anritsu",
         parameter_definitions=parameter_definitions_for_module("anritsu"),
         library_block_keys=("anritsu", "anritsu_sg"),
+        sweep_provider=SWEEP_PROVIDER,
     ),
     page_factory=_page,
 )

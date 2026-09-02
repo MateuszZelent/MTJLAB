@@ -12,6 +12,7 @@ from app.devices.rigol_dg1000z.ui import RigolPage
 from app.devices.simulators import SimulatedVisaFactory
 from app.settings.models import StationSettings
 from app.recipes.parameter_registry import parameter_definitions_for_module
+from app.devices.rigol_dg1000z.sweep_provider import PROVIDER as SWEEP_PROVIDER
 
 
 def _adapter(settings: StationSettings, simulation: bool) -> DeviceAdapter:
@@ -113,6 +114,7 @@ MODULE = DeviceModule(
         module_key="rigol",
         parameter_definitions=parameter_definitions_for_module("rigol"),
         library_block_keys=("rigol",),
+        sweep_provider=SWEEP_PROVIDER,
     ),
     page_factory=_page,
 )
