@@ -3251,6 +3251,42 @@ finally: []
         finally:
             page.close()
 
+    def test_semantic_one_axis_projection_has_one_set_roi_operation(self) -> None:
+        from tests.test_execution_ui_responsiveness import (
+            SINGLE_AXIS_SOURCE,
+            build_recipe_page,
+            semantic_labels,
+        )
+
+        page = build_recipe_page(SINGLE_AXIS_SOURCE)
+        try:
+            page.show()
+            QApplication.processEvents()
+            self.assertEqual(
+                semantic_labels(page),
+                [
+                    "Measurement sequence",
+                    "Keithley B Â· configuration",
+                    "Sweep axis Â· Source current",
+                    "For each source-current point",
+                    "Set ROI value Â· Keithley B Â· source current",
+                    "Acquire spectrum Â· Anritsu",
+                    "Wait Â· 2 s",
+                    "Finally â€” safe shutdown",
+                ],
+            )
+        finally:
+            page.close()
+
+    def test_same_device_nested_axes_compile_to_cartesian_points(self) -> None:
+        from tests.test_execution_ui_responsiveness import (
+            SAME_DEVICE_TWO_AXIS_SOURCE,
+            compile_source,
+        )
+
+        plan = compile_source(SAME_DEVICE_TWO_AXIS_SOURCE)
+        self.assertEqual(plan.total_points, 6)
+
 
 if __name__ == "__main__":
     unittest.main()

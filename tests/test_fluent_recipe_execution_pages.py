@@ -399,8 +399,10 @@ root:
                 for index in range(sweep.childCount())
                 if sweep.child(index).text(0) == "For each ROI point"
             )
-            self.assertEqual(loop.childCount(), 2)
-            self.assertEqual(loop.child(0).data(0, Qt.ItemDataRole.UserRole), "current-point")
+            self.assertEqual(loop.childCount(), 3)
+            current = loop.child(0)
+            self.assertEqual(current.text(0), "Current ROI point")
+            self.assertEqual(loop.child(1).data(0, Qt.ItemDataRole.UserRole), "current-point")
             generated = page._step_items["current-sweep.update-level"]
             self.assertIs(generated.parent(), loop)
         finally:
@@ -482,6 +484,65 @@ root:
             window.close()
             self.application.processEvents()
 
+    def test_execution_tree_shows_current_roi_setpoints_inside_loop(self) -> None:
+        """The active ROI row exposes the current SI setpoint in the loop."""
+
+        window = MainWindow(".config/settings.yml", simulation=True)
+        try:
+            window.resize(1360, 880)
+            window.show()
+            window._navigate_to("execution")
+            self.application.processEvents()
+            source = (Path(__file__).parents[1] / "recipes" / "untitled_sweep.yml").read_text(
+                encoding="utf-8"
+            )
+            plan = RecipeCompiler(window._settings).compile(parse_recipe_text(source))
+            monitor = window.run_monitor
+            monitor.run_started(
+                len(plan.actions),
+                1.0,
+                plan_actions=plan.actions,
+                recipe_source=source,
+                recipe_tree_items=window.recipe_page.execution_tree_snapshot(source, plan),
+            )
+
+            update = monitor._step_items["keithley-81c50119.update-level"]
+            loop = update.parent()
+            self.assertTrue(monitor.steps.isVisibleTo(window))
+            current = next(
+                loop.child(index)
+                for index in range(loop.childCount())
+                if loop.child(index).text(0) == "Current ROI point"
+            )
+            self.assertIn("Waiting", current.text(1))
+
+            monitor.append_event(
+                "action_started",
+                {
+                    "node_id": "keithley-81c50119.update-level",
+                    "kind": "update_keithley_level",
+                    "action_index": 20,
+                    "setpoints_si": {"keithley.B.current": 0.0033333333333333335},
+                },
+            )
+            self.assertIn("keithley.B.current", current.text(1))
+            self.assertIn("3.333", current.text(1))
+            self.assertIn("ACTIVE", current.text(2))
+            self.assertIn("SI 0.00333333 A", current.toolTip(0))
+
+            monitor.append_event(
+                "point_stored",
+                {
+                    "point_index": 2,
+                    "stored_points": 3,
+                    "setpoints_si": {"keithley.B.current": 0.0033333333333333335},
+                },
+            )
+            self.assertIn("POINT 3", current.text(2))
+        finally:
+            window.close()
+            self.application.processEvents()
+
     def test_execution_event_log_throttles_repeated_action_telemetry(self) -> None:
         """Thousands of loop actions must not enqueue thousands of repaints."""
 
@@ -522,6 +583,48 @@ root:
             window._flush_execution_readback()
             self.assertEqual(projected.call_count, 1)
             self.assertEqual(projected.call_args.args[0], "action_finished")
+        finally:
+            window._run_controller._thread = None
+            window.close()
+            self.application.processEvents()
+
+    def test_main_window_drains_runner_action_events_in_bounded_gui_batches(self) -> None:
+        """A fast runner burst must yield to painting instead of monopolising Qt."""
+
+        window = MainWindow(".config/settings.yml", simulation=True)
+        try:
+            window._run_controller._thread = SimpleNamespace(isRunning=lambda: True)
+            appended: list[str] = []
+            window.run_monitor.append_event = (  # type: ignore[method-assign]
+                lambda name, _payload: appended.append(name)
+            )
+            payload = {
+                "node_id": "current-point",
+                "kind": "update_keithley_level",
+                "setpoints_si": {"keithley.B.current": 0.001},
+            }
+            for _ in range(24):
+                window._run_event("action_started", payload)
+                window._run_event("action_finished", payload)
+
+            self.assertTrue(window._pending_execution_events)
+            self.assertTrue(window._execution_event_timer.isActive())
+            self.assertLess(len(appended), 48)
+
+            window._execution_event_timer.stop()
+            window._drain_execution_events(limit=4)
+            self.assertEqual(len(appended), 4)
+            self.assertTrue(window._pending_execution_events)
+            self.assertTrue(window._execution_event_timer.isActive())
+            window._execution_event_timer.stop()
+            window._drain_execution_events()
+            self.assertEqual(len(appended), 48)
+            self.assertFalse(window._pending_execution_events)
+
+            window._run_event("action_started", payload)
+            window._run_event("run_aborting", {"reason": "operator stop"})
+            self.assertFalse(window._pending_execution_events)
+            self.assertEqual(appended[-1], "run_aborting")
         finally:
             window._run_controller._thread = None
             window.close()
