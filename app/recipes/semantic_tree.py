@@ -303,9 +303,115 @@ def _axis_id(node: RecipeNode, draft: SweepBindingDraft | None = None) -> str:
     return f"{node.id}.axis.{parameter}"
 
 
+def _device_prefix(node: RecipeNode) -> str | None:
+    """Return the concise operator-facing device name for a recipe node."""
+
+    data = node.data
+    configuration = data.get("configuration")
+    configuration = configuration if isinstance(configuration, Mapping) else data
+    module = str(data.get("device_module", ""))
+    node_type = node.type
+    if module == "keithley" or node_type.startswith("configure_keithley"):
+        channel = str(configuration.get("channel", data.get("channel", ""))).upper()
+        return f"Keithley {channel}" if channel in {"A", "B"} else "Keithley"
+    if module == "rigol" or node_type.startswith("configure_rigol"):
+        channel = str(configuration.get("channel", data.get("channel", "")))
+        return f"Rigol CH{channel}" if channel in {"1", "2"} else "Rigol"
+    if module == "anritsu" or node_type.startswith("configure_anritsu"):
+        return "Anritsu"
+    return None
+
+
+def _parameter_tail(target: str) -> str:
+    descriptor = parameter_descriptor(target)
+    text = descriptor.ui_label.split("·", 1)[-1].strip()
+    return text[:1].upper() + text[1:] if text else target.rsplit(".", 1)[-1]
+
+
+def _axis_slug(target: str) -> str:
+    parts = target.split(".")
+    if len(parts) >= 3 and parts[0] == "keithley":
+        name = parts[-1]
+        if name in {"current", "voltage"}:
+            return f"source-{name}"
+        if name.startswith("compliance_"):
+            return name.replace("_", "-")
+        return name.replace("_", "-")
+    return "-".join(parts[1:]).replace("_", "-")
+
+
+def _binding_device_prefix(binding: SweepAxisBinding, recipe_nodes: Mapping[str, RecipeNode]) -> str:
+    owner = recipe_nodes.get(binding.owner_node_id)
+    if owner is not None:
+        prefix = _device_prefix(owner)
+        if prefix:
+            return prefix
+    if binding.device_module == "keithley" and binding.endpoint.upper() in {"A", "B"}:
+        return f"Keithley {binding.endpoint.upper()}"
+    if binding.device_module == "rigol" and str(binding.endpoint) in {"1", "2"}:
+        return f"Rigol CH{binding.endpoint}"
+    if binding.device_module == "anritsu":
+        return "Anritsu"
+    return binding.endpoint
+
+
+def _canonical_parameter_id(target: str) -> str:
+    """Map a canonical target to the provider's stable control identity."""
+
+    parts = target.split(".")
+    if len(parts) >= 3 and parts[0] == "keithley":
+        return {
+            "current": "source.level",
+            "voltage": "source.level",
+            "compliance_voltage": "source.compliance",
+            "compliance_current": "source.compliance",
+            "settling_time": "measurement.settling_time",
+        }.get(parts[-1], parts[-1])
+    if len(parts) >= 3 and parts[0] == "rigol":
+        return {
+            "frequency": "carrier.frequency",
+            "high_level": "carrier.high_level",
+            "low_level": "carrier.low_level",
+        }.get(parts[-1], parts[-1])
+    if parts[:2] == ["anritsu", "sg"]:
+        return f"signal_generator.{parts[-1]}"
+    if parts[:2] == ["anritsu", "spectrum"]:
+        return f"spectrum.{parts[-1]}"
+    return target.rsplit(".", 1)[-1]
+
+
+def _endpoint_for_target(target: str) -> str:
+    parts = target.split(".")
+    if parts[:2] == ["anritsu", "sg"]:
+        return "SG"
+    if parts[:2] == ["anritsu", "spectrum"]:
+        return "SPECTRUM"
+    return parts[1] if len(parts) > 1 else target
+
+
 def _label(node: RecipeNode) -> str:
     operation = node.data.get("operation")
-    return str(operation or node.data.get("label") or node.type or node.id)
+    if node.type == "sequence" and not node.data.get("device_module"):
+        return "Measurement sequence"
+    if node.type.startswith("configure_") or node.data.get("device_module"):
+        device = _device_prefix(node)
+        if device and (
+            node.type.startswith("configure")
+            or str(operation or "").startswith("configure")
+            or node.data.get("device_module")
+        ):
+            return f"{device} · configuration"
+    if node.type == "acquire_spectrum":
+        return "Acquire spectrum · Anritsu"
+    if node.type == "acquire_reference":
+        return "Acquire reference · Anritsu"
+    if node.type == "wait":
+        return f"Wait · {node.data.get('duration', 'timing')}"
+    if node.type == "comment":
+        return f"Comment · {node.data.get('text', node.data.get('comment', ''))}".rstrip(" ·")
+    if operation:
+        return str(operation)
+    return str(node.data.get("label") or node.type or node.id)
 
 
 def _mapping(data: Mapping[str, object]) -> Mapping[str, object]:
@@ -342,7 +448,7 @@ def normalize_recipe_tree(
             roi_id,
             SemanticNodeKind.SET_ROI_VALUE,
             node.id,
-            f"Set ROI value · {binding.endpoint} · {binding.parameter_id}",
+            f"Set ROI value · {_binding_device_prefix(binding, recipe_nodes)} · {_parameter_tail(binding.target).lower()}",
             _mapping({"target": binding.target, "dimension": binding.dimension}),
             None,
             (),
@@ -354,7 +460,7 @@ def normalize_recipe_tree(
             loop_id,
             SemanticNodeKind.LOOP_BODY,
             node.id,
-            f"For each {binding.parameter_id} point · {len(binding.points)}",
+            f"For each {_axis_slug(binding.target)} point",
             _mapping({"point_count": len(binding.points)}),
             None,
             (roi, *body_children),
@@ -363,7 +469,7 @@ def normalize_recipe_tree(
             axis_id,
             SemanticNodeKind.SWEEP_AXIS,
             node.id,
-            f"Sweep axis · {binding.parameter_id}",
+            f"Sweep axis · {_parameter_tail(binding.target)}",
             _mapping({"target": binding.target, "dimension": binding.dimension}),
             binding,
             (body,),
@@ -382,8 +488,8 @@ def normalize_recipe_tree(
                 draft = SweepBindingDraft(
                     owner_node_id=node.id,
                     device_module=descriptor.device_module,
-                    endpoint=target.split(".")[1] if len(target.split(".")) > 1 else target,
-                    parameter_id=target.rsplit(".", 1)[-1],
+                    endpoint=_endpoint_for_target(target),
+                    parameter_id=_canonical_parameter_id(target),
                     target=target,
                     dimension=descriptor.dimension,
                     stages=_raw_stages(node.data),
@@ -422,9 +528,36 @@ def normalize_recipe_tree(
         add_id(node.id)
         return SemanticTreeNode(node.id, kind, node.id, _label(node), _mapping(data), None, children)
 
-    roots = (convert(recipe.root),) + tuple(
-        convert(node, SemanticNodeKind.FINALLY) for node in recipe.finally_nodes
+    # Finally is a first-class semantic branch shared by Builder and Execution.
+    # Its generated safety actions are immutable presentation rows; the
+    # concrete Run Engine shutdown manifest remains authoritative at runtime.
+    generated_shutdown = (
+        ("keithley.outputs_off", "Keithley A + B OUTPUT OFF"),
+        ("rigol.outputs_off", "Rigol CH1 + CH2 OUTPUT OFF"),
+        ("anritsu.rf_off_and_abort", "Anritsu RF OUTPUT OFF + abort"),
+        ("storage.flush_checkpoint", "Measurement checkpoint flush"),
     )
+    # The cleanup manifest is kept as metadata on the single final row. It is
+    # deliberately not expanded into technical action rows in the operator
+    # tree; the detailed, durable shutdown trace remains in the event log.
+    cleanup_ids = tuple(str(node.id) for node in recipe.finally_nodes)
+    generated_ids = tuple(action_id for action_id, _label_text in generated_shutdown)
+    finally_root = SemanticTreeNode(
+        "__finally__",
+        SemanticNodeKind.FINALLY,
+        None,
+        "Finally — safe shutdown",
+        _mapping({
+            "detail": "Guaranteed safe shutdown",
+            "operator_cleanup_ids": cleanup_ids,
+            "generated_actions": generated_ids,
+        }),
+        None,
+        (),
+        False,
+        False,
+    )
+    roots = (convert(recipe.root), finally_root)
 
     parent_by_id: dict[str, str] = {}
     children_by_id: dict[str, tuple[str, ...]] = {}

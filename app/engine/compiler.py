@@ -3,12 +3,12 @@
 from __future__ import annotations
 
 from dataclasses import asdict, dataclass, field, is_dataclass, replace
-from collections.abc import Iterable
+from collections.abc import Iterable, Mapping
 import hashlib
 import json
 import math
 import re
-from typing import Any, Callable, Final
+from typing import TYPE_CHECKING, Any, Callable, Final
 
 from app.devices.anritsu_ms2830a.adapter import (
     AdvancedSpectrumConfig,
@@ -29,7 +29,10 @@ from app.domain.quantities import (
 )
 from app.recipes.models import Recipe, RecipeNode
 from app.recipes.parameter_registry import SWEEP_DIMENSIONS
+from app.recipes.semantic_tree import AxisPointContext, SemanticMeasurementTree, normalize_recipe_tree
 from app.recipes.sweep_points import generate_sweep_points
+if TYPE_CHECKING:
+    from app.contracts import DeviceModuleRegistry
 from app.safety.keithley import (
     KeithleySourceRequest,
     quantize_keithley_value,
@@ -59,6 +62,9 @@ class PlanAction:
     payload: dict[str, Any]
     setpoints_si: dict[str, float]
     is_finally: bool = False
+    semantic_id: str | None = None
+    source_node_id: str | None = None
+    axis_context: AxisPointContext | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -106,11 +112,23 @@ class RecipeCompiler:
         *,
         cancellation_requested: Callable[[], bool] | None = None,
         outputs_forced_off: bool = False,
+        device_registry: DeviceModuleRegistry | None = None,
     ) -> None:
         self._settings = settings
         self._max_actions = int(settings.execution.get("max_expanded_points", 100_000)) * 10
         self._cancellation_requested = cancellation_requested
         self._outputs_forced_off = bool(outputs_forced_off)
+        if device_registry is None:
+            # Lazy import avoids the composition registry importing device UI
+            # modules while this compiler is still being initialized.
+            from app.devices.registry import built_in_device_registry
+
+            device_registry = built_in_device_registry()
+        self._device_registry = device_registry
+        self._semantic_tree: SemanticMeasurementTree | None = None
+        self._semantic_axes_by_source: dict[str, object] = {}
+        self._active_axis_path: tuple[str, ...] = ()
+        self._recipe_nodes: dict[str, RecipeNode] = {}
 
     def _check_cancelled(self) -> None:
         if (
@@ -119,8 +137,137 @@ class RecipeCompiler:
         ):
             raise ConfigurationError("Recipe compilation cancelled.")
 
+    def _semantic_point_count(self) -> int:
+        """Count Cartesian leaf points without changing checkpoint semantics."""
+
+        tree = self._semantic_tree
+        if tree is None:
+            return 0
+        total = 0
+
+        def visit(node) -> bool:
+            nonlocal total
+            has_axis_descendant = False
+            for child in node.children:
+                child_contains_axis = visit(child)
+                has_axis_descendant = has_axis_descendant or child_contains_axis
+            if node.kind.value == "sweep_axis" and node.axis is not None and not has_axis_descendant:
+                total += len(tree.point_contexts.get(node.source_node_id or "", ()))
+            return node.kind.value == "sweep_axis" or has_axis_descendant
+
+        for root in tree.roots:
+            visit(root)
+        return total
+
+    @staticmethod
+    def _axis_update_matches(child: RecipeNode, compiled_kind: str) -> bool:
+        """Identify an authored technical update represented by Set ROI value."""
+
+        return child.type == compiled_kind
+
+    @staticmethod
+    def _binding_configured(binding, actions: list[PlanAction]) -> bool:
+        channel = str(binding.endpoint)
+        if binding.device_module == "keithley":
+            return any(
+                action.kind == "configure_keithley"
+                and str(action.payload.get("request").channel) == channel
+                for action in actions
+            )
+        if binding.device_module == "rigol":
+            return any(
+                action.kind == "configure_rigol"
+                and str(action.payload.get("config").channel) == channel
+                for action in actions
+            )
+        if binding.device_module == "anritsu":
+            return any(
+                action.kind in {"configure_anritsu", "configure_anritsu_sg"}
+                for action in actions
+            )
+        return False
+
+    def _semantic_axis_action(
+        self,
+        node: RecipeNode,
+        binding,
+        value: Quantity,
+        context: dict[str, Quantity],
+        point_index: int,
+        point_count: int,
+        active_axis_ids: tuple[str, ...],
+    ) -> PlanAction:
+        provider = self._device_registry.sweep_providers().get(binding.device_module)
+        if provider is None:
+            raise ConfigurationError(
+                f"{node.id}: no registered sweep provider for {binding.device_module!r}."
+            )
+        owner = self._recipe_nodes.get(binding.owner_node_id, node)
+        provider_node = owner
+        if binding.owner_node_id == node.id and not owner.data.get("channel"):
+            target_tail = binding.target.rsplit(".", 1)[-1]
+            mode = "current" if target_tail in {"current", "compliance_voltage"} else "voltage"
+            provider_node = RecipeNode(
+                node.id,
+                node.type,
+                {**node.data, "channel": binding.endpoint, "source_mode": mode},
+                node.children,
+                node.else_children,
+            )
+        compiled = provider.compile_point(provider_node, binding, value, context, self._settings)
+        axis_context = AxisPointContext(
+            binding.axis_id,
+            point_index,
+            point_count,
+            next(
+                stage.stage_index
+                for stage in binding.stages
+                if any(point.si_value == value.si_value for point in stage.points)
+            ),
+            value.si_value,
+            {key: item.si_value for key, item in context.items()},
+            (*active_axis_ids, binding.source_node_id),
+        )
+        payload = dict(compiled.payload)
+        payload.setdefault("requested_si", compiled.requested_si)
+        payload.setdefault("applied_si", compiled.applied_si)
+        return PlanAction(
+            f"{binding.axis_id}.point.{point_index}",
+            compiled.action_kind,
+            payload,
+            {key: item.si_value for key, item in context.items()},
+            semantic_id=f"{binding.axis_id}.set-roi-value",
+            source_node_id=node.id,
+            axis_context=axis_context,
+        )
+
     def compile(self, recipe: Recipe) -> ExecutionPlan:
         actions: list[PlanAction] = []
+        self._recipe_nodes = {}
+
+        def index_recipe_node(node: RecipeNode) -> None:
+            self._recipe_nodes[node.id] = node
+            for child in (*node.children, *node.else_children):
+                index_recipe_node(child)
+
+        index_recipe_node(recipe.root)
+        for node in recipe.finally_nodes:
+            index_recipe_node(node)
+        try:
+            self._semantic_tree = normalize_recipe_tree(
+                recipe, self._device_registry.sweep_providers()
+            )
+            self._semantic_axes_by_source = {
+                node.source_node_id: node.axis
+                for node in self._semantic_tree.by_id.values()
+                if node.axis is not None and node.source_node_id is not None
+            }
+        except Exception:
+            # Keep the established compiler diagnostics for recipes that do not
+            # use sweep axes; axis-bearing documents fail at the same typed
+            # normalization boundary with the precise ConfigurationError.
+            self._semantic_tree = None
+            self._semantic_axes_by_source = {}
         self._visit(recipe.root, {}, actions)
         for node in recipe.finally_nodes:
             self._visit(node, {}, actions, is_finally=True)
@@ -140,6 +287,9 @@ class RecipeCompiler:
             )
             for action in actions
         )
+        semantic_points = self._semantic_point_count()
+        if semantic_points:
+            total_points = max(total_points, semantic_points)
         total_spectra = sum(action.kind == "acquire_spectrum" for action in actions)
         required_devices = required_devices_for_actions(actions)
         safe_shutdown_actions = self._safe_shutdown_actions(required_devices)
@@ -152,6 +302,9 @@ class RecipeCompiler:
                     "payload": self._canonicalize(item.payload),
                     "setpoints": item.setpoints_si,
                     "is_finally": item.is_finally,
+                    "semantic_id": item.semantic_id,
+                    "source_node_id": item.source_node_id,
+                    "axis_context": self._canonicalize(item.axis_context),
                 }
                 for item in actions
                 ],
@@ -520,7 +673,7 @@ class RecipeCompiler:
     def _canonicalize(value: Any) -> Any:
         if is_dataclass(value):
             return RecipeCompiler._canonicalize(asdict(value))
-        if isinstance(value, dict):
+        if isinstance(value, Mapping):
             return {str(key): RecipeCompiler._canonicalize(item) for key, item in value.items()}
         if isinstance(value, (tuple, list)):
             return [RecipeCompiler._canonicalize(item) for item in value]
@@ -631,8 +784,42 @@ class RecipeCompiler:
                 self._check_cancelled()
                 nested = dict(context)
                 nested[target] = value
-                for child in node.children:
-                    self._visit(child, nested, actions, is_finally=is_finally)
+                binding = self._semantic_axes_by_source.get(node.id)
+                generated_kind: str | None = None
+                if (
+                    binding is not None
+                    and not is_finally
+                    and self._binding_configured(binding, actions)
+                ):
+                    point_index = next(
+                        (
+                            index
+                            for index, point in enumerate(binding.points)
+                            if math.isclose(point.si_value, value.si_value, rel_tol=0.0, abs_tol=1e-18)
+                        ),
+                        0,
+                    )
+                    point_action = self._semantic_axis_action(
+                        node,
+                        binding,
+                        value,
+                        nested,
+                        point_index,
+                        len(binding.points),
+                        self._active_axis_path,
+                    )
+                    actions.append(point_action)
+                    generated_kind = point_action.kind
+                previous_path = self._active_axis_path
+                if binding is not None:
+                    self._active_axis_path = (*previous_path, binding.source_node_id)
+                try:
+                    for child in node.children:
+                        if generated_kind and self._axis_update_matches(child, generated_kind):
+                            continue
+                        self._visit(child, nested, actions, is_finally=is_finally)
+                finally:
+                    self._active_axis_path = previous_path
             return
         if node.type == "configure_moke_box":
             raise ConfigurationError(
@@ -2020,7 +2207,20 @@ class RecipeCompiler:
                 "set_anritsu_sg_output",
             } and payload["enabled"]:
                 raise SafetyViolation("The finally section cannot enable outputs.")
-        return PlanAction(node.id, action_kind, payload, setpoints, is_finally=is_finally)
+        semantic_id = (
+            node.id
+            if self._semantic_tree is not None and node.id in self._semantic_tree.by_id
+            else None
+        )
+        return PlanAction(
+            node.id,
+            action_kind,
+            payload,
+            setpoints,
+            is_finally=is_finally,
+            semantic_id=semantic_id,
+            source_node_id=node.id if semantic_id else None,
+        )
 
     @staticmethod
     def _require_boolean(data: dict[str, Any], key: str, node_id: str) -> bool:

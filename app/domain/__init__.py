@@ -1,6 +1,7 @@
 """Device-independent domain models and value objects."""
 
 from app.domain.models import ApplicationState, DeviceState, MeasurementPoint
+from app.domain.execution_state import SemanticOperationState
 from app.domain.quantities import Quantity, QuantityError, parse_quantity
 
 __all__ = [
@@ -10,4 +11,5 @@ __all__ = [
     "Quantity",
     "QuantityError",
     "parse_quantity",
+    "SemanticOperationState",
 ]

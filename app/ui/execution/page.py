@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import time
 from datetime import datetime, timedelta
+from dataclasses import dataclass, field
+from collections import deque
 from pathlib import Path
 
 from PySide6.QtCore import QEvent, QTimer, Qt, QUrl, Signal
@@ -39,7 +41,55 @@ from app.ui.widgets import SpectrumPlotWidget
 from app.recipes import parse_recipe_text
 from app.recipes.models import RecipeNode
 from app.recipes.parameter_registry import PARAMETERS_BY_TARGET
+from app.recipes.semantic_tree import AxisPointContext, SemanticMeasurementTree, normalize_recipe_tree
+from app.devices.registry import built_in_device_registry
 from app.domain.quantities import format_quantity_auto
+from app.domain.execution_state import SemanticOperationState
+from app.ui.measurement_tree import MeasurementTreeModel, MeasurementTreeView, TreeInteractionMode
+
+
+@dataclass(slots=True)
+class ExecutionUiMetrics:
+    """Counters used to prove bounded presentation work during long runs."""
+
+    semantic_events_received: int = 0
+    model_flushes: int = 0
+    tree_rebuilds: int = 0
+    preview_flushes: int = 0
+    log_rows_rendered: int = 0
+    max_pending_semantic: int = 0
+
+
+@dataclass(slots=True)
+class ExecutionPresentationBuffer:
+    """Latest-state buffer for non-safety execution presentation streams."""
+
+    latest_semantic: dict[str, SemanticOperationState] = field(default_factory=dict)
+    latest_device_snapshot: dict[str, object] | None = None
+    latest_preview: dict[str, object] | None = None
+    log_events: deque[tuple[str, dict[str, object]]] = field(default_factory=deque)
+    metrics: ExecutionUiMetrics = field(default_factory=ExecutionUiMetrics)
+
+    def submit(self, name: str, payload: object) -> None:
+        if name.startswith("semantic_operation_"):
+            state = payload
+            if isinstance(state, SemanticOperationState):
+                self.latest_semantic[state.semantic_id] = state
+                self.metrics.semantic_events_received += 1
+                self.metrics.max_pending_semantic = max(
+                    self.metrics.max_pending_semantic, len(self.latest_semantic)
+                )
+        elif name in {"spectrum_preview", "reference_preview"} and isinstance(payload, dict):
+            self.latest_preview = dict(payload)
+        elif isinstance(payload, dict):
+            self.log_events.append((name, dict(payload)))
+
+    def pop_semantic(self) -> tuple[SemanticOperationState, ...]:
+        values = tuple(self.latest_semantic.values())
+        self.latest_semantic.clear()
+        if values:
+            self.metrics.model_flushes += 1
+        return values
 
 
 class ManualStageDialog(StationDialog):
@@ -305,6 +355,21 @@ class RunMonitorPage(QWidget):
         self.steps.header().setSectionResizeMode(1, QHeaderView.ResizeMode.ResizeToContents)
         self.steps.header().setSectionResizeMode(2, QHeaderView.ResizeMode.ResizeToContents)
         self.steps.setMinimumHeight(220)
+        # Shared semantic execution projection. The legacy item tree is kept
+        # private for historical result compatibility and is never placed in
+        # the visible splitter during a normal run.
+        self.tree_model = MeasurementTreeModel()
+        self.measurement_tree = MeasurementTreeView(self)
+        self.measurement_tree.setObjectName("executionMeasurementTree")
+        self.measurement_tree.setModel(self.tree_model)
+        self.measurement_tree.set_interaction_mode(TreeInteractionMode.READ_ONLY)
+        self.measurement_tree.setMinimumHeight(260)
+        self._semantic_tree: SemanticMeasurementTree | None = None
+        self._semantic_mode = False
+        self.ui_metrics = ExecutionUiMetrics()
+        self.presentation_buffer = ExecutionPresentationBuffer()
+        self._semantic_state_by_id: dict[str, SemanticOperationState] = {}
+        self.steps.hide()
         self.warnings = PlainTextEdit(self)
         self.warnings.setReadOnly(True)
         self.warnings.setProperty("stationSurface", "raised")
@@ -335,7 +400,7 @@ class RunMonitorPage(QWidget):
         self.activity_splitter = QSplitter(Qt.Orientation.Vertical)
         self.activity_splitter.setMinimumWidth(0)
         self.activity_splitter.setMinimumHeight(300)
-        self.activity_splitter.addWidget(self.steps)
+        self.activity_splitter.addWidget(self.measurement_tree)
         self.activity_splitter.addWidget(self.events)
         self.activity_splitter.setStretchFactor(0, 5)
         self.activity_splitter.setStretchFactor(1, 1)
@@ -464,6 +529,14 @@ class RunMonitorPage(QWidget):
         self._step_totals: dict[str, int] = {}
         self._step_completed: dict[str, int] = {}
         self._active_step: QTreeWidgetItem | None = None
+        # Every executable loop owns a small live readout.  Keeping this row
+        # in the recipe tree makes the active ROI values unambiguous even
+        # when the generated action rows are repeated many times.
+        self._current_roi_items: dict[str, QTreeWidgetItem] = {}
+        self._current_roi_values: dict[str, dict[str, object]] = {}
+        self._active_roi_owner: str | None = None
+        self._current_roi_role = int(Qt.ItemDataRole.UserRole) + 100
+        self._current_roi_owner_role = int(Qt.ItemDataRole.UserRole) + 101
         self._pending_step_visual: tuple[QTreeWidgetItem, str] | None = None
         self._last_step_visual_at = 0.0
         self._step_visual_interval_s = 0.08
@@ -471,6 +544,16 @@ class RunMonitorPage(QWidget):
         self._step_visual_timer.setSingleShot(True)
         self._step_visual_timer.setInterval(80)
         self._step_visual_timer.timeout.connect(self._flush_step_visual)
+        # Following a changing tree row invokes a layout and scroll pass in
+        # QTreeWidget.  It is deliberately rate-limited independently from
+        # status text updates so a sweep cannot monopolise the GUI thread.
+        self._pending_step_follow: QTreeWidgetItem | None = None
+        self._last_step_follow_at = 0.0
+        self._step_follow_interval_s = 0.18
+        self._step_follow_timer = QTimer(self)
+        self._step_follow_timer.setSingleShot(True)
+        self._step_follow_timer.setInterval(180)
+        self._step_follow_timer.timeout.connect(self._flush_step_follow)
         self._event_log_last_by_group: dict[tuple[str, str], float] = {}
         self._event_log_sample_interval_s = 0.35
         self._last_operation_repolish_at = 0.0
@@ -485,6 +568,11 @@ class RunMonitorPage(QWidget):
         self._preview_timer.setInterval(100)
         self._preview_timer.timeout.connect(self._flush_spectrum_preview)
         self._pending_spectrum_preview: dict[str, object] | None = None
+        self._semantic_flush_timer = QTimer(self)
+        self._semantic_flush_timer.setSingleShot(True)
+        self._semantic_flush_timer.setInterval(33)
+        self._semantic_flush_timer.timeout.connect(self._flush_semantic_states)
+        self._pending_semantic_states: dict[str, SemanticOperationState] = {}
         self._activity_pulse_on = False
         self._activity_pulse_timer = QTimer(self)
         self._activity_pulse_timer.setInterval(550)
@@ -539,6 +627,142 @@ class RunMonitorPage(QWidget):
         super().resizeEvent(event)  # type: ignore[arg-type]
         self._update_monitor_layout()
 
+    @staticmethod
+    def _axis_context_from_event(value: object) -> AxisPointContext | None:
+        if isinstance(value, AxisPointContext):
+            return value
+        if not isinstance(value, dict):
+            return None
+        try:
+            active = value.get("active_setpoints_si", {})
+            if not isinstance(active, dict):
+                active = {}
+            loop_path = value.get("loop_path", ())
+            if not isinstance(loop_path, (list, tuple)):
+                loop_path = ()
+            return AxisPointContext(
+                str(value["axis_id"]),
+                int(value.get("point_index", 0)),
+                int(value.get("point_count", 0)),
+                int(value.get("stage_index", 0)),
+                float(value.get("value_si", 0.0)),
+                dict(active),
+                tuple(str(item) for item in loop_path),
+            )
+        except (KeyError, TypeError, ValueError):
+            return None
+
+    def _semantic_target(self, semantic_id: str) -> str | None:
+        tree = self._semantic_tree
+        if tree is None:
+            return None
+        node = tree.by_id.get(semantic_id)
+        if node is None:
+            return None
+        if node.axis is not None:
+            return node.axis.target
+        parent_id = tree.parent_by_id.get(semantic_id)
+        while parent_id:
+            parent = tree.by_id.get(parent_id)
+            if parent is not None and parent.axis is not None:
+                return parent.axis.target
+            parent_id = tree.parent_by_id.get(parent_id)
+        raw_target = node.data.get("target")
+        return str(raw_target) if raw_target else None
+
+    def _semantic_state_from_event(
+        self,
+        data: dict[str, object],
+        *,
+        phase: str,
+    ) -> SemanticOperationState | None:
+        semantic_id = data.get("semantic_id")
+        if not isinstance(semantic_id, str) or not semantic_id:
+            return None
+        try:
+            normalized_phase = phase  # Literal is enforced by the event source.
+            if normalized_phase not in {"waiting", "running", "applied", "failed", "skipped"}:
+                return None
+            requested = data.get("requested_si")
+            applied = data.get("applied_si")
+            readback = data.get("readback_si")
+            return SemanticOperationState(
+                semantic_id,
+                normalized_phase,  # type: ignore[arg-type]
+                float(requested) if isinstance(requested, (int, float)) else None,
+                float(applied) if isinstance(applied, (int, float)) else None,
+                float(readback) if isinstance(readback, (int, float)) else None,
+                str(data["verification"]) if data.get("verification") else None,  # type: ignore[arg-type]
+                int(data.get("action_index", 0)),
+                int(data.get("total_actions", self._planned_actions)),
+                self._axis_context_from_event(data.get("axis_context")),
+            )
+        except (TypeError, ValueError):
+            return None
+
+    def _apply_semantic_event(self, name: str, data: dict[str, object]) -> None:
+        phases = {
+            "semantic_operation_started": "running",
+            "semantic_operation_applied": "applied",
+            "semantic_operation_failed": "failed",
+        }
+        phase = phases.get(name)
+        if phase is None:
+            return
+        state = self._semantic_state_from_event(data, phase=phase)
+        if state is None:
+            return
+        self.ui_metrics.semantic_events_received += 1
+        self.presentation_buffer.submit(name, state)
+        self._semantic_state_by_id[state.semantic_id] = state
+        self.tree_model.apply_state(state)
+        if state.phase == "applied":
+            self.progress.setValue(
+                min(self.progress.maximum(), max(self.progress.value(), state.action_index + 1))
+            )
+            self._update_eta()
+        self.measurement_tree.follow_semantic_id(
+            state.semantic_id, force=phase in {"failed", "applied"}
+        )
+        target = self._semantic_target(state.semantic_id)
+        if target:
+            value = (
+                state.applied_si
+                if state.phase == "applied" and state.applied_si is not None
+                else state.requested_si
+            )
+            if value is not None:
+                descriptor = PARAMETERS_BY_TARGET.get(target)
+                self.current_operation_device.setText(
+                    self._operation_device(target, data)
+                )
+                self.current_operation_parameter.setText(
+                    descriptor.ui_label if descriptor is not None else target
+                )
+                self.current_operation_value.setText(
+                    self._format_parameter(target, value)
+                )
+                self.current_operation_si.setText(
+                    self._format_si_value(target, value)
+                )
+                context = state.axis_context
+                if context is not None:
+                    self.current_operation_detail.setText(
+                        f"Point {context.point_index + 1}/{context.point_count} · "
+                        f"stage {context.stage_index + 1} · {data.get('kind', 'set point')}"
+                    )
+                else:
+                    self.current_operation_detail.setText(str(data.get("kind", "set point")))
+        self.current_operation_phase.setText(
+            self._operation_phase(str(data.get("kind", "set point")))
+        )
+        self._set_current_operation_state(
+            "SETTING" if phase == "running" else "CONFIRMED" if phase == "applied" else "FAILED"
+        )
+
+    def value_for(self, semantic_id: str) -> str:
+        return self.tree_model.value_for(semantic_id)
+
     def run_started(
         self,
         actions: int,
@@ -548,15 +772,40 @@ class RunMonitorPage(QWidget):
         recipe_source: str | None = None,
         recipe_tree_items: tuple[QTreeWidgetItem, ...] = (),
         execution_mode: str = "measurement",
+        semantic_tree: SemanticMeasurementTree | None = None,
     ) -> None:
         self._preview_timer.stop()
         self._pending_spectrum_preview = None
+        self._semantic_flush_timer.stop()
+        self._pending_semantic_states.clear()
         self._activity_pulse_timer.stop()
         self._step_visual_timer.stop()
         self._pending_step_visual = None
         self._last_step_visual_at = 0.0
+        self._step_follow_timer.stop()
+        self._pending_step_follow = None
+        self._last_step_follow_at = 0.0
         self._activity_pulse_on = False
         self._set_activity_indicator("○", "off")
+        self._semantic_state_by_id.clear()
+        self.presentation_buffer = ExecutionPresentationBuffer()
+        if semantic_tree is None and isinstance(recipe_source, str) and recipe_source.strip():
+            try:
+                recipe = parse_recipe_text(recipe_source, origin="execution plan")
+                semantic_tree = normalize_recipe_tree(
+                    recipe, built_in_device_registry().sweep_providers()
+                )
+            except Exception:
+                semantic_tree = None
+        self._semantic_tree = semantic_tree
+        self._semantic_mode = semantic_tree is not None
+        if semantic_tree is not None:
+            self.tree_model.replace_tree(semantic_tree)
+            self.tree_model.set_read_only(True)
+        else:
+            self.tree_model.replace_tree(
+                SemanticMeasurementTree((), {}, source_text=recipe_source or "")
+            )
         self.completion_card.hide()
         self.completion_summary.clear()
         self.completion_path.clear()
@@ -700,6 +949,9 @@ class RunMonitorPage(QWidget):
         self._step_totals.clear()
         self._step_completed.clear()
         self._active_step = None
+        self._current_roi_items.clear()
+        self._current_roi_values.clear()
+        self._active_roi_owner = None
         if not isinstance(plan_actions, (tuple, list)):
             return
         ordered: list[tuple[str, str, bool]] = []
@@ -718,6 +970,7 @@ class RunMonitorPage(QWidget):
                 [item.clone() for item in recipe_tree_items]
             )
             self._index_recipe_tree_items()
+            self._install_current_roi_rows()
             self._project_generated_actions(plan_actions)
             self.steps.expandAll()
             return
@@ -731,6 +984,7 @@ class RunMonitorPage(QWidget):
                 recipe = None
             if recipe is not None:
                 self._build_recipe_tree(recipe.root, recipe.finally_nodes, ordered)
+                self._install_current_roi_rows()
                 self._project_generated_actions(plan_actions)
                 self.steps.expandAll()
                 return
@@ -887,9 +1141,12 @@ class RunMonitorPage(QWidget):
                 item.setData(0, Qt.ItemDataRole.UserRole, target)
                 self.active_parameters.addTopLevelItem(item)
                 self._parameter_items[target] = item
-            item.setText(1, self._format_parameter(target, value))
-            item.setText(3, "PENDING")
-            item.setForeground(3, self._step_brush("running"))
+            requested = self._format_parameter(target, value)
+            if item.text(1) != requested:
+                item.setText(1, requested)
+            if item.text(3) != "PENDING":
+                item.setText(3, "PENDING")
+                item.setForeground(3, self._step_brush("running"))
 
     def _index_recipe_tree_items(self) -> None:
         """Map cloned Builder rows to run events without changing their text.
@@ -924,6 +1181,125 @@ class RunMonitorPage(QWidget):
 
         for index in range(self.steps.topLevelItemCount()):
             visit(self.steps.topLevelItem(index))
+
+    def _install_current_roi_rows(self) -> None:
+        """Insert a live setpoint readout into every executable loop.
+
+        The recipe tree is the operator's procedure view.  Generated device
+        actions are projected below the ``For each ROI point`` boundary, so a
+        sibling readout in that same boundary is the least ambiguous place to
+        show the values that are active for the current point.
+        """
+
+        structural_role = int(Qt.ItemDataRole.UserRole) + 41
+        source_marker_role = int(Qt.ItemDataRole.UserRole) + 97
+
+        def visit(item: QTreeWidgetItem, owner_id: str | None = None) -> None:
+            raw_node = item.data(0, Qt.ItemDataRole.UserRole)
+            current_owner = owner_id
+            node_id = getattr(raw_node, "id", None)
+            if node_id is None and item.data(0, source_marker_role) is True:
+                node_id = raw_node
+            if isinstance(node_id, str) and node_id:
+                current_owner = node_id
+            if item.data(0, structural_role) == "execution" and current_owner:
+                item.setData(0, self._current_roi_owner_role, current_owner)
+                existing = next(
+                    (
+                        item.child(index)
+                        for index in range(item.childCount())
+                        if item.child(index).data(0, self._current_roi_role) is True
+                    ),
+                    None,
+                )
+                if existing is None:
+                    existing = QTreeWidgetItem(
+                        ["Current ROI point", "Waiting for first setpoint", "WAITING"]
+                    )
+                    existing.setData(0, self._current_roi_role, True)
+                    existing.setData(0, self._current_roi_owner_role, current_owner)
+                    existing.setFlags(
+                        existing.flags()
+                        & ~Qt.ItemFlag.ItemIsDragEnabled
+                        & ~Qt.ItemFlag.ItemIsDropEnabled
+                        & ~Qt.ItemFlag.ItemIsEditable
+                    )
+                    existing.setToolTip(
+                        0,
+                        "Current setpoints for this ROI loop. Values are normalized to SI.",
+                    )
+                    existing.setToolTip(1, "Waiting for the first loop setpoint.")
+                    item.insertChild(0, existing)
+                self._current_roi_items[current_owner] = existing
+                self._current_roi_values.setdefault(current_owner, {})
+                self._set_step_state(existing, "waiting")
+            for index in range(item.childCount()):
+                visit(item.child(index), current_owner)
+
+        for index in range(self.steps.topLevelItemCount()):
+            visit(self.steps.topLevelItem(index))
+
+    def _current_roi_owner_for_node(self, node_id: str) -> str | None:
+        """Return the nearest loop owner for a running action row."""
+
+        item = self._step_items.get(node_id)
+        while item is not None:
+            owner = item.data(0, self._current_roi_owner_role)
+            if isinstance(owner, str) and owner in self._current_roi_items:
+                return owner
+            item = item.parent()
+        return None
+
+    def _update_current_roi(self, data: dict[str, object], *, state: str) -> None:
+        """Render the latest normalized setpoints inside the active loop."""
+
+        if self._semantic_mode:
+            return
+
+        node_id = str(data.get("node_id", ""))
+        owner = self._current_roi_owner_for_node(node_id) if node_id else None
+        if owner is None:
+            owner = self._active_roi_owner
+        values = data.get("setpoints_si")
+        normalized: dict[str, object] = {}
+        if isinstance(values, dict):
+            normalized = {str(target): value for target, value in values.items()}
+        if owner is None and normalized and len(self._current_roi_items) == 1:
+            owner = next(iter(self._current_roi_items))
+        if owner is None:
+            return
+        current = self._current_roi_values.setdefault(owner, {})
+        if state.startswith("POINT") and normalized:
+            # A checkpoint contains the complete point set, so start the next
+            # display state from that immutable boundary rather than carrying
+            # a stale parameter from a previous ROI.
+            current.clear()
+            current.update(normalized)
+        elif normalized:
+            current.update(normalized)
+        if not current:
+            return
+        item = self._current_roi_items.get(owner)
+        if item is None:
+            return
+        display = " · ".join(
+            f"{target} = {self._format_parameter(target, value)}"
+            for target, value in sorted(current.items())
+        )
+        si_display = " · ".join(
+            f"{target} = {self._format_si_value(target, value)}"
+            for target, value in sorted(current.items())
+        )
+        item.setText(1, display)
+        item.setText(2, state)
+        item.setToolTip(0, f"Current setpoints for this ROI loop\n{si_display}")
+        item.setToolTip(1, f"Normalized setpoints: {si_display}")
+        item.setData(1, Qt.ItemDataRole.UserRole, dict(current))
+        self._set_step_state(
+            item,
+            "done" if state.startswith("POINT") else "running",
+        )
+        self._active_roi_owner = owner
 
     def _project_generated_actions(self, plan_actions: object) -> None:
         """Place compiler-generated actions under their source loop owner.
@@ -1258,6 +1634,8 @@ class RunMonitorPage(QWidget):
         return item
 
     def _mark_step(self, node_id: str, kind: str, state: str) -> None:
+        if self._semantic_mode:
+            return
         item = self._step_item(node_id, kind)
         total = self._step_totals.get(node_id, 1)
         if state == "running":
@@ -1305,6 +1683,32 @@ class RunMonitorPage(QWidget):
         self._render_step_visual(item, state)
         self._last_step_visual_at = time.monotonic()
 
+    def _queue_step_follow(self, item: QTreeWidgetItem, *, force: bool = False) -> None:
+        """Follow the active row without forcing a tree layout per action."""
+
+        if self._semantic_mode:
+            return
+
+        if self.steps.currentItem() is item:
+            return
+        now = time.monotonic()
+        if force or now - self._last_step_follow_at >= self._step_follow_interval_s:
+            self._pending_step_follow = None
+            self._step_follow_timer.stop()
+            self.steps.setCurrentItem(item)
+            self.steps.scrollToItem(item, QAbstractItemView.ScrollHint.EnsureVisible)
+            self._last_step_follow_at = now
+            return
+        self._pending_step_follow = item
+        if not self._step_follow_timer.isActive():
+            self._step_follow_timer.start()
+
+    def _flush_step_follow(self) -> None:
+        pending = self._pending_step_follow
+        self._pending_step_follow = None
+        if pending is not None:
+            self._queue_step_follow(pending, force=True)
+
     def _render_step_visual(self, item: QTreeWidgetItem, state: str) -> None:
         static_builder_row = bool(item.data(0, int(Qt.ItemDataRole.UserRole) + 98))
         if state == "running":
@@ -1313,13 +1717,9 @@ class RunMonitorPage(QWidget):
             item.setToolTip(2, "Execution state: RUNNING")
             self._set_step_state(item, state)
             # Selecting and scrolling a QTreeWidget forces a layout pass. A
-            # sweep re-enters the same action node thousands of times, so only
-            # follow the row when the active node actually changes.
-            if self.steps.currentItem() is not item:
-                self.steps.setCurrentItem(item)
-                self.steps.scrollToItem(
-                    item, QAbstractItemView.ScrollHint.EnsureVisible
-                )
+            # sweep re-enters action nodes rapidly, so row following is
+            # independently rate-limited from the live status text.
+            self._queue_step_follow(item)
             return
         if state == "done":
             raw_node_id = item.data(0, Qt.ItemDataRole.UserRole)
@@ -1337,9 +1737,7 @@ class RunMonitorPage(QWidget):
             item.setText(2, "✕ FAILED")
         item.setToolTip(2, "Execution state: FAILED")
         self._set_step_state(item, "failed")
-        if self.steps.currentItem() is not item:
-            self.steps.setCurrentItem(item)
-            self.steps.scrollToItem(item, QAbstractItemView.ScrollHint.EnsureVisible)
+        self._queue_step_follow(item, force=True)
 
     def event(self, event: QEvent) -> bool:
         if event.type() in {
@@ -1351,6 +1749,8 @@ class RunMonitorPage(QWidget):
         return super().event(event)
 
     def _set_step_state(self, item: QTreeWidgetItem, state: str) -> None:
+        if item.data(2, Qt.ItemDataRole.UserRole) == state:
+            return
         item.setData(2, Qt.ItemDataRole.UserRole, state)
         item.setForeground(2, self._step_brush(state))
 
@@ -1410,6 +1810,8 @@ class RunMonitorPage(QWidget):
         *,
         state: str | None = None,
     ) -> None:
+        if self._semantic_mode and data.get("semantic_id"):
+            return
         values = data.get("setpoints_si")
         target: str | None = None
         value: object | None = None
@@ -1516,6 +1918,8 @@ class RunMonitorPage(QWidget):
         return QBrush(QColor(color))
 
     def _mark_shutdown(self, action: str, state: str) -> None:
+        if self._semantic_mode:
+            return
         node_id = f"shutdown:{action}"
         item = self._step_items.get(node_id)
         if item is None:
@@ -1622,6 +2026,43 @@ class RunMonitorPage(QWidget):
         if not self._preview_timer.isActive():
             self._preview_timer.start()
 
+    def queue_semantic_state(self, state: SemanticOperationState) -> None:
+        """Coalesce high-rate semantic states to one model flush per cadence."""
+
+        self.presentation_buffer.submit("semantic_operation_applied", state)
+        self._pending_semantic_states[state.semantic_id] = state
+        if not self._semantic_flush_timer.isActive():
+            self._semantic_flush_timer.start()
+
+    def _flush_semantic_states(self) -> None:
+        pending = tuple(self._pending_semantic_states.values())
+        self._pending_semantic_states.clear()
+        for state in pending:
+            event = {
+                "semantic_id": state.semantic_id,
+                "requested_si": state.requested_si,
+                "applied_si": state.applied_si,
+                "readback_si": state.readback_si,
+                "verification": state.verification,
+                "action_index": state.action_index,
+                "total_actions": state.total_actions,
+                "axis_context": (
+                    {
+                        "axis_id": state.axis_context.axis_id,
+                        "point_index": state.axis_context.point_index,
+                        "point_count": state.axis_context.point_count,
+                        "stage_index": state.axis_context.stage_index,
+                        "value_si": state.axis_context.value_si,
+                        "active_setpoints_si": dict(state.axis_context.active_setpoints_si),
+                        "loop_path": list(state.axis_context.loop_path),
+                    }
+                    if state.axis_context is not None
+                    else None
+                ),
+                "kind": "set point",
+            }
+            self._apply_semantic_event("semantic_operation_applied", event)
+
     def _flush_spectrum_preview(self) -> None:
         pending = self._pending_spectrum_preview
         self._pending_spectrum_preview = None
@@ -1673,6 +2114,23 @@ class RunMonitorPage(QWidget):
         return True
 
     def append_event(self, name: str, data: dict[str, object]) -> None:
+        if name in {
+            "semantic_operation_started",
+            "semantic_operation_applied",
+            "semantic_operation_failed",
+        }:
+            self._apply_semantic_event(name, data)
+            if self._should_append_event_log(name, data):
+                self.events.appendPlainText(self._event_summary(name, data))
+            return
+        if self._semantic_mode and data.get("semantic_id") and name in {
+            "action_started",
+            "action_finished",
+        }:
+            self._apply_semantic_event(
+                "semantic_operation_started" if name == "action_started" else "semantic_operation_applied",
+                data,
+            )
         if name == "manual_stage_waiting":
             self.state.setText("MANUAL — WAITING FOR NEXT")
             self._mark_step(
@@ -1686,6 +2144,7 @@ class RunMonitorPage(QWidget):
             self.current_setpoints.setText(
                 "Setpoints (SI): " + self._format_scalars(data.get("setpoints_si"))
             )
+            self._update_current_roi(data, state="ACTIVE")
             self._set_requested_parameters(data.get("setpoints_si"))
             self._update_current_operation(data, state="AWAITING CONFIRMATION")
             self._manual_dialog.waiting(data)
@@ -1726,9 +2185,11 @@ class RunMonitorPage(QWidget):
             self.current_setpoints.setText(
                 "Setpoints (SI): " + self._format_scalars(data.get("setpoints_si"))
             )
+            self._update_current_roi(data, state="ACTIVE")
             self._set_requested_parameters(data.get("setpoints_si"))
             self._update_current_operation(data, state="SETTING")
         elif name == "point_stored":
+            self._update_current_roi(data, state=f"POINT {data.get('stored_points', '—')}")
             self.current_measurements.setText(
                 "Measurements (SI): " + self._format_scalars(data.get("measurements_si"))
             )
@@ -1870,8 +2331,12 @@ class RunMonitorPage(QWidget):
     def complete(self, result: object) -> None:
         self._preview_timer.stop()
         self._flush_spectrum_preview()
+        self._semantic_flush_timer.stop()
+        self._flush_semantic_states()
         self._step_visual_timer.stop()
         self._flush_step_visual()
+        self._step_follow_timer.stop()
+        self._flush_step_follow()
         self._manual_dialog.finish()
         self._eta_timer.stop()
         self._activity_pulse_timer.stop()
@@ -1908,8 +2373,12 @@ class RunMonitorPage(QWidget):
     def failed(self, error: str) -> None:
         self._preview_timer.stop()
         self._flush_spectrum_preview()
+        self._semantic_flush_timer.stop()
+        self._flush_semantic_states()
         self._step_visual_timer.stop()
         self._flush_step_visual()
+        self._step_follow_timer.stop()
+        self._flush_step_follow()
         self._manual_dialog.finish()
         self._eta_timer.stop()
         self._activity_pulse_timer.stop()

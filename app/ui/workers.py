@@ -17,6 +17,7 @@ from app.devices.base import DeviceAdapter
 from app.devices.keithley_2600.adapter import KeithleyAdapter
 from app.devices.rigol_dg1000z.adapter import RigolAdapter
 from app.contracts import OperationDispatcher
+from app.contracts import DeviceModuleRegistry
 from app.engine.compiler import RecipeCompiler
 from app.engine.estimation import PlanEstimator
 from app.recipes import parse_recipe_text
@@ -87,12 +88,14 @@ class RecipePreflightWorker(QObject):
         origin: str,
         *,
         outputs_forced_off: bool = False,
+        device_registry: DeviceModuleRegistry | None = None,
     ) -> None:
         super().__init__()
         self._settings = settings
         self._source = source
         self._origin = origin
         self._outputs_forced_off = bool(outputs_forced_off)
+        self._device_registry = device_registry
 
     @Slot()
     def run(self) -> None:
@@ -103,6 +106,7 @@ class RecipePreflightWorker(QObject):
                 self._settings,
                 cancellation_requested=thread.isInterruptionRequested,
                 outputs_forced_off=self._outputs_forced_off,
+                device_registry=self._device_registry,
             ).compile(recipe)
             if thread.isInterruptionRequested():
                 self.cancelled.emit()

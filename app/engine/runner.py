@@ -233,19 +233,53 @@ class RecipeRunner:
                     and not action.is_finally
                 ):
                     self._wait_for_manual_step(action, action_index, len(plan.actions))
-                self._emit(
-                    "action_started",
-                    {
-                        "node_id": action.node_id,
-                        "kind": action.kind,
-                        **self._action_display_context(action),
-                        "action_index": action_index,
-                        "setpoints_si": dict(action.setpoints_si),
-                        "deadline_s": self._policy.deadline_for(action),
-                        "cancellation_requested": self._stop_requested.is_set(),
-                    },
+                started_event = {
+                    "node_id": action.node_id,
+                    "kind": action.kind,
+                    **self._action_display_context(action),
+                    "action_index": action_index,
+                    "total_actions": len(plan.actions),
+                    "setpoints_si": dict(action.setpoints_si),
+                    "deadline_s": self._policy.deadline_for(action),
+                    "cancellation_requested": self._stop_requested.is_set(),
+                }
+                if action.semantic_id:
+                    started_event["semantic_id"] = action.semantic_id
+                    axis_context = self._axis_context_payload(action)
+                    if axis_context is not None:
+                        started_event["axis_context"] = axis_context
+                    requested = action.payload.get("requested_si")
+                    if not isinstance(requested, (int, float)) and action.axis_context is not None:
+                        requested = action.axis_context.value_si
+                    if isinstance(requested, (int, float)):
+                        started_event["requested_si"] = float(requested)
+                self._emit("action_started", started_event)
+                semantic_started = self._semantic_event_data(
+                    action,
+                    action_index=action_index,
+                    total_actions=len(plan.actions),
+                    phase="running",
                 )
+                if semantic_started is not None:
+                    self._emit("semantic_operation_started", semantic_started)
                 acquisition = self._execute_with_policy(action, point_measurements)
+                if action.semantic_id:
+                    applied_si, readback_si = self._confirmed_semantic_value(action)
+                    semantic_applied = self._semantic_event_data(
+                        action,
+                        action_index=action_index,
+                        total_actions=len(plan.actions),
+                        phase="applied",
+                        applied_si=applied_si,
+                        readback_si=readback_si,
+                        verification=(
+                            "simulated_ack"
+                            if self._execution_mode is not ExecutionMode.MEASUREMENT
+                            else "readback"
+                        ),
+                    )
+                    if semantic_applied is not None:
+                        self._emit("semantic_operation_applied", semantic_applied)
                 point_setpoints.update(action.setpoints_si)
                 self._apply_actual_setpoints(point_setpoints)
                 completed = action_index + 1
@@ -264,6 +298,8 @@ class RecipeRunner:
                             "execution_mode": self._execution_mode.value,
                             "outputs_forced_off": self.outputs_forced_off,
                             "output_guard_devices": self._output_guard_devices(),
+                            "semantic_operation_id": action.semantic_id,
+                            "axis_context": self._axis_context_payload(action),
                         },
                     )
                     write_started = time.monotonic()
@@ -312,6 +348,8 @@ class RecipeRunner:
                             "execution_mode": self._execution_mode.value,
                             "outputs_forced_off": self.outputs_forced_off,
                             "output_guard_devices": self._output_guard_devices(),
+                            "semantic_operation_id": action.semantic_id,
+                            "axis_context": self._axis_context_payload(action),
                         },
                     )
                     write_started = time.monotonic()
@@ -348,6 +386,8 @@ class RecipeRunner:
                         "node_id": action.node_id,
                         "kind": action.kind,
                         **self._action_display_context(action),
+                        "semantic_id": action.semantic_id,
+                        "axis_context": self._axis_context_payload(action),
                     },
                 )
                 current_action = None
@@ -377,6 +417,15 @@ class RecipeRunner:
             # emergency-off sequence itself confirms a safe state.
             self._mark_output_unknown()
             if current_action is not None:
+                semantic_failed = self._semantic_event_data(
+                    current_action,
+                    action_index=max(0, completed),
+                    total_actions=len(plan.actions),
+                    phase="failed",
+                )
+                if semantic_failed is not None:
+                    semantic_failed["error"] = str(exc)
+                    self._emit_after_fault("semantic_operation_failed", semantic_failed)
                 self._emit_after_fault(
                     "action_failed",
                     {
@@ -512,6 +561,110 @@ class RecipeRunner:
         if channel is not None:
             context["channel"] = channel
         return context
+
+    @staticmethod
+    def _axis_context_payload(action: PlanAction) -> dict[str, object] | None:
+        context = action.axis_context
+        if context is None:
+            return None
+        return {
+            "axis_id": context.axis_id,
+            "point_index": context.point_index,
+            "point_count": context.point_count,
+            "stage_index": context.stage_index,
+            "value_si": context.value_si,
+            "active_setpoints_si": dict(context.active_setpoints_si),
+            "loop_path": list(context.loop_path),
+        }
+
+    def _semantic_event_data(
+        self,
+        action: PlanAction,
+        *,
+        action_index: int,
+        total_actions: int,
+        phase: str,
+        applied_si: float | None = None,
+        readback_si: float | None = None,
+        verification: str | None = None,
+    ) -> dict[str, object] | None:
+        if not action.semantic_id:
+            return None
+        requested = action.payload.get("requested_si")
+        if not isinstance(requested, (int, float)) and action.axis_context is not None:
+            requested = action.axis_context.value_si
+        data: dict[str, object] = {
+            "semantic_id": action.semantic_id,
+            "phase": phase,
+            "node_id": action.node_id,
+            "kind": action.kind,
+            "action_index": action_index,
+            "total_actions": total_actions,
+            "setpoints_si": dict(action.setpoints_si),
+        }
+        axis_context = self._axis_context_payload(action)
+        if axis_context is not None:
+            data["axis_context"] = axis_context
+        if isinstance(requested, (int, float)):
+            data["requested_si"] = float(requested)
+        if applied_si is not None:
+            data["applied_si"] = float(applied_si)
+        if readback_si is not None:
+            data["readback_si"] = float(readback_si)
+        if verification is not None:
+            data["verification"] = verification
+        return data
+
+    def _confirmed_semantic_value(self, action: PlanAction) -> tuple[float | None, float | None]:
+        """Read the applied/readback value from the confirmed runtime context."""
+
+        if not action.semantic_id:
+            return None, None
+        requested = action.payload.get("requested_si")
+        if not isinstance(requested, (int, float)) and action.axis_context is not None:
+            requested = action.axis_context.value_si
+        target = ""
+        if action.axis_context is not None and action.axis_context.loop_path:
+            # The active setpoint map is explicit; select the axis target by
+            # matching the requested value, with payload metadata as fallback.
+            candidates = action.axis_context.active_setpoints_si
+            target = str(action.payload.get("target", ""))
+            if not target:
+                for key, value in candidates.items():
+                    if isinstance(requested, (int, float)) and math.isclose(float(value), float(requested), rel_tol=0.0, abs_tol=1e-15):
+                        target = str(key)
+                        break
+        applied: object | None = action.payload.get("applied_si")
+        if action.kind == "update_keithley_level":
+            applied = self._active_safety_context.get(
+                f"keithley.{action.payload.get('channel')}", {}
+            ).get("source_level_si", applied)
+        elif action.kind == "update_keithley_compliance":
+            applied = self._active_safety_context.get(
+                f"keithley.{action.payload.get('channel')}", {}
+            ).get("compliance_si", applied)
+        elif action.kind == "update_rigol_frequency":
+            applied = self._active_safety_context.get(
+                f"rigol.{action.payload.get('channel')}", {}
+            ).get("frequency_hz", applied)
+        elif action.kind == "update_rigol_levels":
+            actual = self._active_safety_context.get(
+                f"rigol.{action.payload.get('channel')}", {}
+            )
+            if target.endswith("low_level"):
+                applied = actual.get("low_level_v", applied)
+            else:
+                applied = actual.get("high_level_v", applied)
+        elif action.kind in {"update_anritsu_sg", "configure_anritsu_sg"}:
+            actual = self._active_safety_context.get("anritsu.sg", {})
+            applied = actual.get(
+                "power_dbm" if target.endswith("power") else "frequency_hz", applied
+            )
+        elif action.kind == "wait":
+            applied = action.payload.get("duration_s", applied)
+        if isinstance(applied, (int, float)):
+            return float(applied), float(applied)
+        return (float(requested) if isinstance(requested, (int, float)) else None), None
 
     def _start_watchdog(self) -> None:
         self._watchdog_stop.clear()

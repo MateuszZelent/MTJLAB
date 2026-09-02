@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from copy import deepcopy
+from collections import deque
 from dataclasses import asdict, is_dataclass
 from pathlib import Path
 from typing import Any, Callable
@@ -296,6 +297,23 @@ class MainWindow(FluentWindow):
         self._execution_readback_timer.timeout.connect(
             self._flush_execution_readback
         )
+        # Action lifecycle signals are deliberately drained in small GUI
+        # batches.  The worker remains free to run and persist every event,
+        # while Qt gets regular opportunities to paint, process input and
+        # service the safety controls during a long sweep.
+        self._pending_execution_events: deque[tuple[str, dict[str, object]]] = deque()
+        self._execution_event_drain_batch = 8
+        self._execution_event_timer = QTimer(self)
+        self._execution_event_timer.setSingleShot(True)
+        self._execution_event_timer.setInterval(20)
+        self._execution_event_timer.timeout.connect(
+            lambda: self._drain_execution_events(limit=self._execution_event_drain_batch)
+        )
+        self._pending_execution_semantic: dict[str, tuple[str, dict[str, object]]] = {}
+        self._execution_semantic_timer = QTimer(self)
+        self._execution_semantic_timer.setSingleShot(True)
+        self._execution_semantic_timer.setInterval(33)
+        self._execution_semantic_timer.timeout.connect(self._flush_execution_semantic)
         self.quick_control_coordinator = QuickControlCoordinator(
             self._controllers, self, settings=self._settings
         )
@@ -1535,7 +1553,7 @@ class MainWindow(FluentWindow):
                     f"• {item.label}: {item.detail}" for item in readiness.blocking_items
                 )
                 raise ConfigurationError("Station preflight is blocked:\n" + details)
-            recipe_tree_items = self.recipe_page.execution_tree_snapshot(
+            semantic_tree = self.recipe_page.semantic_tree_snapshot(
                 plan.recipe_source,
                 plan,  # type: ignore[union-attr]
             )
@@ -1568,7 +1586,7 @@ class MainWindow(FluentWindow):
             estimate.nominal_duration_s,
             plan_actions=plan.actions,  # type: ignore[union-attr]
             recipe_source=plan.recipe_source,  # type: ignore[union-attr]
-            recipe_tree_items=recipe_tree_items,
+            semantic_tree=semantic_tree,
             execution_mode=selected_execution_mode.value,
         )
         self._set_run_ui_locked(True)
@@ -1627,7 +1645,11 @@ class MainWindow(FluentWindow):
                     "Restore the exact station configuration before resuming."
                 )
             recipe = parse_recipe_text(detail.recipe_yaml, origin=str(path))
-            plan = RecipeCompiler(self._settings, outputs_forced_off=outputs_forced_off).compile(
+            plan = RecipeCompiler(
+                self._settings,
+                outputs_forced_off=outputs_forced_off,
+                device_registry=self._composition.registry,
+            ).compile(
                 recipe
             )
             checkpoint = RunRecoveryManager().inspect(path, plan)
@@ -1684,7 +1706,7 @@ class MainWindow(FluentWindow):
             return
         try:
             estimate = PlanEstimator(self._settings).estimate(plan)  # type: ignore[arg-type]
-            recipe_tree_items = self.recipe_page.execution_tree_snapshot(plan.recipe_source, plan)
+            semantic_tree = self.recipe_page.semantic_tree_snapshot(plan.recipe_source, plan)
             active_controllers = self._active_device_controllers()
             self._run_controller.start(
                 self._settings,
@@ -1712,7 +1734,7 @@ class MainWindow(FluentWindow):
                 *plan.actions[checkpoint.next_action_index :],
             ),
             recipe_source=plan.recipe_source,
-            recipe_tree_items=recipe_tree_items,
+            semantic_tree=semantic_tree,
             execution_mode=(estimate_execution_mode.value),
         )
         self._set_run_ui_locked(True)
@@ -1745,6 +1767,10 @@ class MainWindow(FluentWindow):
             self._pending_execution_previews.clear()
             self._execution_readback_timer.stop()
             self._pending_execution_readback = None
+            self._execution_event_timer.stop()
+            self._pending_execution_events.clear()
+            self._execution_semantic_timer.stop()
+            self._pending_execution_semantic.clear()
             value = payload.get("correlation_id") or payload.get("hash")
             self._run_correlation_id = str(value) if value else None
         severity = (
@@ -1778,6 +1804,9 @@ class MainWindow(FluentWindow):
             "action_finished",
             "recovery_prelude_started",
             "recovery_prelude_finished",
+            "semantic_operation_started",
+            "semantic_operation_applied",
+            "semantic_operation_failed",
         }:
             self._audit_record(
                 name.replace("_", " "),
@@ -1788,6 +1817,30 @@ class MainWindow(FluentWindow):
                 correlation_id=self._run_correlation_id,
                 critical=severity in {"error", "warning"},
             )
+        if name in {
+            "semantic_operation_started",
+            "semantic_operation_applied",
+            "semantic_operation_failed",
+        }:
+            immediate = (
+                name == "semantic_operation_failed"
+                or not self._run_controller.running
+            )
+            semantic_id = str(payload.get("semantic_id", ""))
+            if immediate:
+                self._execution_semantic_timer.stop()
+                self._pending_execution_semantic.pop(semantic_id, None)
+                self.run_monitor.append_event(name, payload)
+            elif semantic_id:
+                self._pending_execution_semantic[semantic_id] = (name, dict(payload))
+                if not self._execution_semantic_timer.isActive():
+                    self._execution_semantic_timer.start()
+            return
+        if name in {"action_started", "action_finished"} and payload.get("semantic_id"):
+            # The typed semantic lifecycle is the sole presentation stream for
+            # rows represented in the shared model. Technical action events
+            # remain durable in HDF5 but do not trigger a second widget pass.
+            return
         if name == "runner_heartbeat":
             self.run_monitor.update_heartbeat(payload)
         elif preview_event:
@@ -1797,10 +1850,83 @@ class MainWindow(FluentWindow):
                 # Direct calls used by diagnostics/tests and the final queued
                 # event remain immediately visible when no worker is active.
                 self.run_monitor.update_spectrum_preview(payload)
+        elif (
+            name in {
+                "action_started",
+                "action_finished",
+                "recovery_prelude_started",
+                "recovery_prelude_finished",
+                "point_stored",
+            }
+            and not payload.get("semantic_id")
+            and self._run_controller.running
+        ):
+            self._pending_execution_events.append((name, dict(payload)))
+            if not self._execution_event_timer.isActive():
+                self._execution_event_timer.start()
         else:
+            # Preserve ordering at lifecycle boundaries. Normal action events
+            # are cheap in the worker but may trigger several Qt widget
+            # layouts, so they are drained before completion; safety events
+            # instead preempt stale presentation work below.
+            if name in {
+                "run_started",
+                "manual_stage_waiting",
+                "run_completed",
+            }:
+                self._drain_execution_events()
+                if name == "run_completed":
+                    self._execution_semantic_timer.stop()
+                    self._flush_execution_semantic()
+            elif name in {
+                "action_failed",
+                "compliance_detected",
+                "run_aborting",
+                "run_aborted",
+                "run_fault",
+                "watchdog_timeout",
+                "safe_finally_started",
+                "safe_finally_finished",
+                "safe_finally_error",
+                "shutdown_action_started",
+                "shutdown_action_finished",
+                "shutdown_error",
+                "worker_cleanup_warning",
+            }:
+                # A safety boundary must not wait behind stale presentation
+                # work. The complete event stream is already durable in HDF5;
+                # discard only queued GUI projections before showing the
+                # confirmed fault/shutdown state immediately.
+                self._execution_event_timer.stop()
+                self._pending_execution_events.clear()
+                self._execution_semantic_timer.stop()
+                self._pending_execution_semantic.clear()
             self.run_monitor.append_event(name, payload)
         if name in {"run_completed", "run_aborted", "run_fault"}:
             self._run_correlation_id = None
+
+    def _drain_execution_events(self, *, limit: int | None = None) -> None:
+        """Render a bounded action-event batch and yield back to Qt.
+
+        ``RecipeRunner`` remains the authoritative event stream and persists
+        every action in HDF5.  This queue only controls the presentation
+        cadence; limiting work per timer tick prevents a burst of lifecycle
+        signals from starving paints and user input on Windows.
+        """
+
+        if limit is None:
+            limit = len(self._pending_execution_events)
+        for _ in range(max(0, min(limit, len(self._pending_execution_events)))):
+            name, payload = self._pending_execution_events.popleft()
+            self.run_monitor.append_event(name, payload)
+        if self._pending_execution_events and not self._execution_event_timer.isActive():
+            self._execution_event_timer.start()
+
+    def _flush_execution_semantic(self) -> None:
+        pending = tuple(self._pending_execution_semantic.values())
+        self._pending_execution_semantic.clear()
+        for name, payload in pending:
+            self.run_monitor.append_event(name, payload)
 
     def _flush_execution_previews(self) -> None:
         pending = tuple(self._pending_execution_previews.items())
@@ -1868,7 +1994,13 @@ class MainWindow(FluentWindow):
             for endpoint, state in output_status.items()
             if isinstance(state, str) and state in {"on", "off", "unknown"}
         }
-        for module_key, page in self._device_pages.items():
+        pages = (
+            (("anritsu", self._device_pages["anritsu"]),)
+            if event_name in {"spectrum_preview", "reference_preview"}
+            and "anritsu" in self._device_pages
+            else tuple(self._device_pages.items())
+        )
+        for module_key, page in pages:
             if not isinstance(page, ExecutionTelemetryView):
                 continue
             module = self._composition.registry.get(module_key)
@@ -1883,10 +2015,14 @@ class MainWindow(FluentWindow):
         # Rendering helpers may normally refresh manual action availability.
         # A runner-owned session must remain inspect-only after every event.
         for control in self._run_read_only_controls:
-            if control is not None:
+            if control is not None and control.isEnabled():
                 control.setEnabled(False)
 
     def _run_finished(self, result: object) -> None:
+        self._execution_event_timer.stop()
+        self._drain_execution_events()
+        self._execution_semantic_timer.stop()
+        self._flush_execution_semantic()
         self._execution_preview_timer.stop()
         self._flush_execution_previews()
         self._execution_readback_timer.stop()
@@ -1913,6 +2049,10 @@ class MainWindow(FluentWindow):
             self._log("Run Engine completed the measurement")
 
     def _run_failed(self, error: str) -> None:
+        self._execution_event_timer.stop()
+        self._drain_execution_events()
+        self._execution_semantic_timer.stop()
+        self._flush_execution_semantic()
         self._execution_preview_timer.stop()
         self._flush_execution_previews()
         self._execution_readback_timer.stop()

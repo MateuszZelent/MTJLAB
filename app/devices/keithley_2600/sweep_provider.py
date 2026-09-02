@@ -22,7 +22,12 @@ class KeithleySweepProvider:
         configuration = node.data.get("configuration")
         configuration = configuration if isinstance(configuration, Mapping) else node.data
         channel = str(configuration.get("channel", node.data.get("channel", ""))).upper()
-        mode = str(configuration.get("source_mode", node.data.get("source_mode", ""))).lower()
+        mode = str(
+            configuration.get(
+                "source_mode",
+                configuration.get("mode", node.data.get("source_mode", node.data.get("mode", ""))),
+            )
+        ).lower()
         if channel not in {"A", "B"} or mode not in {"current", "voltage", "measure_only"}:
             raise ConfigurationError(f"{node.id}: invalid Keithley channel or source mode.")
         return channel, mode
@@ -119,7 +124,7 @@ class KeithleySweepProvider:
         if limit.enabled:
             minimum = parse_quantity(limit.min, descriptor.dimension).si_value
             maximum = parse_quantity(limit.max, descriptor.dimension).si_value
-            if not minimum <= value.si_value <= maximum:
+            if not minimum - 1e-12 <= value.si_value <= maximum + 1e-12:
                 raise SafetyViolation(f"{node.id}: Keithley value {value.si_value:g} SI is outside station limits.")
         applied = quantize_keithley_value(value.si_value, descriptor.dimension)
         if binding.parameter_id == "source.level":

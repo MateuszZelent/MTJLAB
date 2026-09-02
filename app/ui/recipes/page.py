@@ -34,6 +34,7 @@ from qfluentwidgets import (
 
 from app.audit import AuditLogger
 from app.contracts import DeviceModuleRegistry
+from app.devices.registry import built_in_device_registry
 from app.domain.errors import AuthorizationError, ConfigurationError
 from app.domain.quantities import DIMENSION_CURRENT, DIMENSION_DBM, DIMENSION_FREQUENCY, DIMENSION_TIME, DIMENSION_VOLTAGE, format_quantity_auto, parse_quantity
 from app.engine.compiler import ExecutionPlan, RecipeCompiler
@@ -53,6 +54,7 @@ from app.recipes import (
 from app.recipes.parameter_registry import SWEEP_DIMENSIONS
 from app.recipes.parameter_registry import SWEEPABLE_PARAMETERS as _SWEEPABLE_PARAMETERS
 from app.recipes.parameter_registry import sweep_default as _sweep_default
+from app.recipes.semantic_tree import SemanticMeasurementTree, normalize_recipe_tree
 from app.security import AccessPolicy, Permission
 from app.settings.models import StationSettings
 from app.storage import Hdf5RunReader, ThatecDevice, ThatecRow, ThatecRun, ThatecRunReader, ThatecTreeNode
@@ -90,6 +92,7 @@ from app.ui.recipes.device_extensions import (
 from app.ui.recipes.sweep_editor import SweepGeneratorDialog
 from app.ui.run_worker import planned_run_paths
 from app.ui.widgets import LimitEditDialog, LimitField, SpectrumPlotWidget
+from app.ui.measurement_tree import MeasurementTreeModel, MeasurementTreeView, TreeInteractionMode
 from app.ui.workers import RecipePreflightWorker
 
 
@@ -247,15 +250,14 @@ class RecipePage(QWidget):
         device_registry: DeviceModuleRegistry | None = None,
     ) -> None:
         super().__init__(parent)
+        self._device_registry = device_registry or built_in_device_registry()
         self._historical_sweep_active = False
         self._execution_controlled = False
         self._execution_widget_states: dict[QWidget, bool] = {}
         self._execution_action_states: dict[QAction, bool] = {}
         self._execution_editor_read_only = False
         self._recipe_parameter_definitions = (
-            device_registry.recipe_parameter_definitions()
-            if device_registry is not None
-            else _SWEEPABLE_PARAMETERS
+            self._device_registry.recipe_parameter_definitions()
         )
         if settings.moke_box.enabled:
             self._recipe_parameter_definitions = tuple(
@@ -634,7 +636,10 @@ class RecipePage(QWidget):
         self.editor = PlainTextEdit(self)
         self.editor.setPlaceholderText("Declarative YAML recipe — no Python code and no raw SCPI.")
         self.editor.setMinimumWidth(320)
-        self.tree = RecipeTreeWidget()
+        # Keep the item-based widget as a private compatibility index for the
+        # existing recipe editing commands. The visible tree is the shared
+        # immutable semantic model below.
+        self.tree = RecipeTreeWidget(self)
         self.tree.setObjectName("recipeTree")
         self.tree.setHeaderLabels(["Measurement sequence", "Role / expansion", "Status"])
         tree_header = self.tree.header()
@@ -651,6 +656,13 @@ class RecipePage(QWidget):
             "Drop on a horizontal gap to reorder. Drop on a highlighted flow "
             "container to add inside it. Actions and ROI rows never accept children."
         )
+        self.tree_model = MeasurementTreeModel(parent=self)
+        self.measurement_tree = MeasurementTreeView(self)
+        self.measurement_tree.setObjectName("semanticMeasurementTree")
+        self.measurement_tree.setModel(self.tree_model)
+        self.measurement_tree.set_interaction_mode(TreeInteractionMode.EDITABLE)
+        self.measurement_tree.semantic_activated.connect(self._select_semantic_node)
+        self.tree.setVisible(False)
         self.builder_container = CardWidget()
         self.builder_container.setObjectName("recipeBuilderPanel")
         self.builder_container.setProperty("stationSurface", "surface")
@@ -671,7 +683,7 @@ class RecipePage(QWidget):
         builder_layout.addWidget(self.drag_feedback)
         self.builder_stack = QStackedWidget()
         self.builder_stack.setMinimumWidth(390)
-        self.builder_stack.addWidget(self.tree)
+        self.builder_stack.addWidget(self.measurement_tree)
         self.builder_stack.addWidget(self.editor)
         self.workflow_tabs.setCurrentItem("tree")
         self.workflow_tabs.currentItemChanged.connect(
@@ -1823,6 +1835,63 @@ class RecipePage(QWidget):
 
         self._anritsu_sg_snapshot_provider = provider
 
+    def _select_semantic_node(self, semantic_id: str) -> None:
+        """Bridge a semantic-row activation to the legacy editor selection.
+
+        Editing is still performed by the existing transactional YAML commands;
+        the semantic view only selects the corresponding source node and opens
+        the same inspector. Generated ROI/safety rows intentionally have no
+        editable source node.
+        """
+
+        try:
+            node = self.tree_model.tree.require(semantic_id)
+        except ConfigurationError:
+            return
+        source_id = node.source_node_id
+        if not source_id:
+            return
+        item = self._find_tree_item(source_id)
+        if item is None:
+            return
+        self.tree.setCurrentItem(item)
+        self._node_selected(item, None)
+
+    def _refresh_semantic_tree(self, source: str | None = None) -> SemanticMeasurementTree | None:
+        """Normalize the accepted recipe source into the shared Fluent model."""
+
+        source = self._tree_source if source is None else source
+        if not source.strip():
+            return None
+        try:
+            recipe = parse_recipe_text(source, origin=self.path.text() or "recipe")
+            snapshot = normalize_recipe_tree(recipe, self._device_registry.sweep_providers())
+        except Exception as exc:
+            # The old renderer remains the transactional source of truth while
+            # a draft is invalid. Never erase a previously accepted semantic
+            # snapshot because a user is midway through typing YAML.
+            self.status.emit(f"Semantic tree retained after normalization warning: {exc}")
+            return None
+        self.tree_model.replace_tree(snapshot)
+        return snapshot
+
+    def semantic_tree_snapshot(
+        self,
+        recipe_source: str | None = None,
+        plan: object | None = None,
+    ) -> SemanticMeasurementTree:
+        """Return the immutable semantic snapshot used by Builder and Runner."""
+
+        del plan  # plan metadata is attached to runtime states, not tree shape
+        source = recipe_source if recipe_source is not None else self._tree_source
+        if not source.strip():
+            source = self.editor.toPlainText()
+        recipe = parse_recipe_text(source, origin=self.path.text() or "recipe")
+        snapshot = normalize_recipe_tree(recipe, self._device_registry.sweep_providers())
+        if recipe_source is None or source == self._tree_source:
+            self.tree_model.replace_tree(snapshot)
+        return snapshot
+
     def _source_changed(self) -> None:
         if self._loading_source:
             return
@@ -1867,6 +1936,9 @@ class RecipePage(QWidget):
         self.tree.setDragEnabled(effective)
         self.tree.setAcceptDrops(effective)
         self.tree.setDropIndicatorShown(effective)
+        self.measurement_tree.set_interaction_mode(
+            TreeInteractionMode.EDITABLE if effective else TreeInteractionMode.READ_ONLY
+        )
         # Keep the library surface enabled while a run owns the recipe so its
         # scrollbar and search remain usable.  Only its mutating buttons are
         # disabled by ``set_execution_controlled``.
@@ -2102,6 +2174,7 @@ class RecipePage(QWidget):
             recipe = parse_recipe_text(source, origin=self.path.text())
             self._populate_recipe_tree(recipe.root, recipe.finally_nodes, None)
             self._tree_source = source
+            self._refresh_semantic_tree(source)
             self.summary.setText("Recipe loaded. Compile it before running.")
             tree_rendered = True
         except Exception as exc:
@@ -2176,6 +2249,9 @@ class RecipePage(QWidget):
         self._loading_source = False
         historical_source = self.editor.toPlainText()
         self._tree_source = historical_source
+        # Historical records do not contain an executable recipe; keep the
+        # semantic model empty rather than guessing axis ownership.
+        self.tree_model.replace_tree(SemanticMeasurementTree((), {}, source_text=historical_source))
         self._saved_source = historical_source
         self._saved_path = self.path.text().strip()
         self._autosave_timer.stop()
@@ -2466,7 +2542,9 @@ class RecipePage(QWidget):
                 self.execution_mode.currentData() == "dry_run"
             )
             plan = RecipeCompiler(
-                self._settings, outputs_forced_off=outputs_forced_off
+                self._settings,
+                outputs_forced_off=outputs_forced_off,
+                device_registry=self._device_registry,
             ).compile(recipe)
             estimate = PlanEstimator(self._settings).estimate(plan)
         except Exception as exc:
@@ -2517,6 +2595,7 @@ class RecipePage(QWidget):
             source,
             self.path.text(),
             outputs_forced_off=outputs_forced_off,
+            device_registry=self._device_registry,
         )
         worker.moveToThread(thread)
         thread.started.connect(worker.run)
@@ -4316,6 +4395,7 @@ class RecipePage(QWidget):
         self._loading_source = False
         self._close_discard_confirmed = False
         self._tree_source = source
+        self._refresh_semantic_tree(source)
         self._plan = None
         self.run_button.setEnabled(False)
         self.plan_preflight_changed.emit(None)
@@ -4398,6 +4478,7 @@ class RecipePage(QWidget):
         self._loading_source = False
         self._close_discard_confirmed = False
         self._tree_source = source
+        self._refresh_semantic_tree(source)
         self.run_button.setEnabled(False)
         self.plan_preflight_changed.emit(None)
         self.summary.setText("Recipe tree changed; compile it again before running.")

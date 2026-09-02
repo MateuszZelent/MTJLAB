@@ -5,10 +5,10 @@ from __future__ import annotations
 from enum import StrEnum
 import time
 
-from PySide6.QtCore import QPoint, Signal, Qt
+from PySide6.QtCore import Signal, Qt
 from qfluentwidgets import TreeView
 
-from app.ui.measurement_tree.model import MeasurementTreeModel
+from app.ui.measurement_tree.model import MeasurementTreeModel, MeasurementTreeRole
 from app.ui.measurement_tree.delegate import MeasurementTreeDelegate
 
 
@@ -34,6 +34,15 @@ class MeasurementTreeView(TreeView):
         self.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
         self._interaction_mode = TreeInteractionMode.EDITABLE
         self._last_follow_s = 0.0
+        self.doubleClicked.connect(self._emit_semantic_activation)
+
+    def _emit_semantic_activation(self, index) -> None:
+        model = self.tree_model
+        if model is None or not index.isValid():
+            return
+        semantic_id = model.data(index, MeasurementTreeRole.SEMANTIC_ID)
+        if isinstance(semantic_id, str):
+            self.semantic_activated.emit(semantic_id)
 
     @property
     def tree_model(self) -> MeasurementTreeModel | None:

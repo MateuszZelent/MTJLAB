@@ -1,8 +1,8 @@
 """Qt model for the immutable semantic measurement tree.
 
-The model is deliberately the only mutable presentation surface.  Recipe and
-execution code update a semantic snapshot or a single operation state; they do
-not manufacture or mutate thousands of QTreeWidgetItem instances.
+The model is deliberately the only mutable presentation surface. Recipe and
+execution code replace a semantic snapshot at a document boundary or update a
+single operation state while a run is active.
 """
 
 from __future__ import annotations
@@ -10,7 +10,7 @@ from __future__ import annotations
 from enum import IntEnum
 from typing import Any, Mapping
 
-from PySide6.QtCore import QAbstractItemModel, QModelIndex, QPersistentModelIndex, Qt
+from PySide6.QtCore import QAbstractItemModel, QModelIndex, Qt
 
 from app.domain.quantities import format_quantity_auto
 from app.recipes.semantic_tree import SemanticMeasurementTree, SemanticNodeKind, SemanticTreeNode
@@ -48,12 +48,18 @@ class MeasurementTreeModel(QAbstractItemModel):
     COLUMN_COUNT = 4
     HEADERS = ("Measurement sequence", "Role / expansion", "Current value", "Status")
 
-    def __init__(self, tree: SemanticMeasurementTree | None = None, parent=None) -> None:
+    def __init__(
+        self,
+        tree: SemanticMeasurementTree | None = None,
+        parent=None,
+        *,
+        states: Mapping[str, object] | None = None,
+    ) -> None:
         super().__init__(parent)
         self.tree = tree or SemanticMeasurementTree((), {}, source_text="")
         self._roots: tuple[_NodeRef, ...] = ()
         self._by_id: dict[str, _NodeRef] = {}
-        self._states: dict[str, object] = {}
+        self._states: dict[str, object] = dict(states or {})
         self._read_only = False
         self._reindex()
 
@@ -131,7 +137,13 @@ class MeasurementTreeModel(QAbstractItemModel):
         requested = _state_value(state, "requested_si")
         readback = _state_value(state, "readback_si")
         axis = ref.node.axis
-        dimension = axis.dimension if axis is not None else None
+        dimension = (
+            axis.dimension
+            if axis is not None
+            else ref.node.data.get("dimension")
+            if isinstance(ref.node.data.get("dimension"), str)
+            else None
+        )
         if applied is not None and dimension:
             text = format_quantity_auto(float(applied), dimension)
             if readback is not None and readback != applied:
@@ -143,7 +155,12 @@ class MeasurementTreeModel(QAbstractItemModel):
         if context is not None:
             value = _state_value(context, "value_si")
             if value is not None and dimension:
-                return format_quantity_auto(float(value), dimension)
+                rendered = format_quantity_auto(float(value), dimension)
+                point_index = _state_value(context, "point_index")
+                point_count = _state_value(context, "point_count")
+                if isinstance(point_index, int) and isinstance(point_count, int) and point_count > 0:
+                    rendered += f" · {point_index + 1}/{point_count}"
+                return rendered
         return "—"
 
     def data(self, index: QModelIndex, role: int = int(Qt.ItemDataRole.DisplayRole)) -> Any:
@@ -183,11 +200,11 @@ class MeasurementTreeModel(QAbstractItemModel):
         if role == int(Qt.ItemDataRole.ForegroundRole):
             phase = str(_state_value(state, "phase", "")) if state is not None else ""
             if phase == "applied":
-                from PySide6.QtGui import QColor
-                return QColor("#16a34a")
+                from PySide6.QtGui import QBrush, QColor
+                return QBrush(QColor("#16a34a"))
             if phase == "failed":
-                from PySide6.QtGui import QColor
-                return QColor("#dc2626")
+                from PySide6.QtGui import QBrush, QColor
+                return QBrush(QColor("#dc2626"))
         if role == int(MeasurementTreeRole.SEMANTIC_ID):
             return node.semantic_id
         if role == int(MeasurementTreeRole.NODE_KIND):

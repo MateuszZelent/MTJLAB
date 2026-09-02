@@ -79,6 +79,13 @@ class RigolSweepProvider:
                 raise SafetyViolation(f"{node.id}: Rigol value {value.si_value:g} SI is outside station limits.")
         configuration = node.data.get("configuration")
         configuration = configuration if isinstance(configuration, Mapping) else node.data
+        if not isinstance(configuration, Mapping) or not configuration.get("low_level"):
+            # Explicit axes commonly own a configure_rigol child. Use that
+            # authored fixed level for the non-swept side of a level pair.
+            for child in node.children:
+                if child.type == "configure_rigol":
+                    configuration = child.data
+                    break
         def level(target: str, key: str) -> float:
             item = context.get(target)
             if item is not None:
