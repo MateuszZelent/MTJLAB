@@ -20,6 +20,17 @@ from app.recipes.sweep_points import (
     generate_sweep_points,
     generate_sweep_stage_points,
 )
+from app.recipes.semantic_tree import (
+    AxisBindingResolver,
+    AxisPointContext,
+    SemanticMeasurementTree,
+    SemanticNodeKind,
+    SemanticTreeNode,
+    SweepAxisBinding,
+    SweepBindingDraft,
+    SweepStageSpec,
+    normalize_recipe_tree,
+)
 
 __all__ = [
     "CONTAINER_NODE_TYPES",
@@ -37,4 +48,13 @@ __all__ = [
     "estimate_sweep_point_count",
     "generate_sweep_points",
     "generate_sweep_stage_points",
+    "AxisBindingResolver",
+    "AxisPointContext",
+    "SemanticMeasurementTree",
+    "SemanticNodeKind",
+    "SemanticTreeNode",
+    "SweepAxisBinding",
+    "SweepBindingDraft",
+    "SweepStageSpec",
+    "normalize_recipe_tree",
 ]

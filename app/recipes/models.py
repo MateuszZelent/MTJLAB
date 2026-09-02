@@ -128,6 +128,26 @@ def _parse_node(value: object, where: str) -> RecipeNode:
     if kind == "sweep":
         if "target" not in raw:
             raise ConfigurationError(f"{where}: sweep requires field 'target'.")
+        raw["target"] = _require_string(raw["target"], f"{where}.target")
+        if "binding" in raw:
+            binding = raw["binding"]
+            if not isinstance(binding, dict):
+                raise ConfigurationError(f"{where}.binding must be a YAML mapping.")
+            expected_binding_fields = {
+                "owner_node_id",
+                "device_module",
+                "endpoint",
+                "parameter_id",
+            }
+            if set(binding) != expected_binding_fields:
+                raise ConfigurationError(
+                    f"{where}.binding must contain exactly "
+                    "owner_node_id, device_module, endpoint, and parameter_id."
+                )
+            raw["binding"] = {
+                key: _require_string(binding[key], f"{where}.binding.{key}")
+                for key in expected_binding_fields
+            }
         segments = raw.get("segments")
         if segments is not None:
             if not isinstance(segments, list) or not segments:
