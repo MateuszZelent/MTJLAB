@@ -286,6 +286,16 @@ class MainWindow(FluentWindow):
         self._execution_preview_timer.timeout.connect(
             self._flush_execution_previews
         )
+        # Device pages are read-only projections of the runner state. Keep the
+        # latest confirmed snapshot and repaint those pages at a bounded rate;
+        # instrument I/O and safety decisions remain entirely in RunWorker.
+        self._pending_execution_readback: tuple[str, dict[str, object]] | None = None
+        self._execution_readback_timer = QTimer(self)
+        self._execution_readback_timer.setSingleShot(True)
+        self._execution_readback_timer.setInterval(100)
+        self._execution_readback_timer.timeout.connect(
+            self._flush_execution_readback
+        )
         self.quick_control_coordinator = QuickControlCoordinator(
             self._controllers, self, settings=self._settings
         )
@@ -1721,17 +1731,20 @@ class MainWindow(FluentWindow):
         payload = data if isinstance(data, dict) else {"data": data}
         preview_event = name in {"spectrum_preview", "reference_preview"}
         # Heartbeats carry no confirmed state and previews are rendered at a
-        # bounded cadence.  Safety/action events still project immediately so
-        # the read-only pages never lag a confirmed output transition.
+        # bounded cadence. Read-only device pages also use a latest-state
+        # projection timer while the worker is active; the execution monitor
+        # still receives every lifecycle event needed for progress and safety.
         if preview_event and self._run_controller.running:
             self._pending_execution_previews[name] = dict(payload)
             if not self._execution_preview_timer.isActive():
                 self._execution_preview_timer.start()
         elif name != "runner_heartbeat":
-            self._apply_runner_device_readback(name, payload)
+            self._queue_runner_device_readback(name, payload)
         if name == "run_started":
             self._execution_preview_timer.stop()
             self._pending_execution_previews.clear()
+            self._execution_readback_timer.stop()
+            self._pending_execution_readback = None
             value = payload.get("correlation_id") or payload.get("hash")
             self._run_correlation_id = str(value) if value else None
         severity = (
@@ -1750,15 +1763,21 @@ class MainWindow(FluentWindow):
                 else "info"
             )
         )
-        # Preview arrays, point checkpoints and watchdog heartbeats are
-        # high-rate presentation telemetry.  They are not safety transitions
-        # and must not cause a synchronous JSONL open/write on the GUI thread
-        # for every point.  Point data remains durable in the HDF5 record.
+        # The Run Engine already persists every action event in the immutable
+        # HDF5 event stream. Re-recording thousands of loop action boundaries
+        # through AuditLogger here would synchronously open/flush a JSONL file
+        # on the GUI thread and can starve painting for the duration of a
+        # sweep. Audit the lifecycle/fault boundaries here; action-level
+        # provenance remains durable in the engine event stream.
         if name not in {
             "runner_heartbeat",
             "point_stored",
             "spectrum_preview",
             "reference_preview",
+            "action_started",
+            "action_finished",
+            "recovery_prelude_started",
+            "recovery_prelude_finished",
         }:
             self._audit_record(
                 name.replace("_", " "),
@@ -1788,6 +1807,49 @@ class MainWindow(FluentWindow):
         self._pending_execution_previews.clear()
         for name, payload in pending:
             self._apply_runner_device_readback(name, payload)
+
+    _IMMEDIATE_READBACK_EVENTS = frozenset(
+        {
+            "run_started",
+            "action_failed",
+            "compliance_detected",
+            "run_aborting",
+            "run_aborted",
+            "run_fault",
+            "watchdog_timeout",
+            "safe_finally_started",
+            "safe_finally_finished",
+            "safe_finally_error",
+            "shutdown_action_started",
+            "shutdown_action_finished",
+            "shutdown_error",
+            "worker_cleanup_warning",
+        }
+    )
+
+    def _queue_runner_device_readback(
+        self, event_name: str, payload: dict[str, object]
+    ) -> None:
+        """Schedule one latest-state repaint for read-only device pages."""
+
+        if (
+            not self._run_controller.running
+            or event_name in self._IMMEDIATE_READBACK_EVENTS
+        ):
+            if event_name in self._IMMEDIATE_READBACK_EVENTS:
+                self._execution_readback_timer.stop()
+                self._pending_execution_readback = None
+            self._apply_runner_device_readback(event_name, payload)
+            return
+        self._pending_execution_readback = (event_name, dict(payload))
+        if not self._execution_readback_timer.isActive():
+            self._execution_readback_timer.start()
+
+    def _flush_execution_readback(self) -> None:
+        pending = self._pending_execution_readback
+        self._pending_execution_readback = None
+        if pending is not None:
+            self._apply_runner_device_readback(*pending)
 
     def _apply_runner_device_readback(self, event_name: str, payload: dict[str, object]) -> None:
         """Dispatch one confirmed runner event through every device module.
@@ -1827,6 +1889,8 @@ class MainWindow(FluentWindow):
     def _run_finished(self, result: object) -> None:
         self._execution_preview_timer.stop()
         self._flush_execution_previews()
+        self._execution_readback_timer.stop()
+        self._flush_execution_readback()
         self._leased_run_devices.clear()
         self._set_run_ui_locked(False)
         self.run_monitor.complete(result)
@@ -1851,6 +1915,8 @@ class MainWindow(FluentWindow):
     def _run_failed(self, error: str) -> None:
         self._execution_preview_timer.stop()
         self._flush_execution_previews()
+        self._execution_readback_timer.stop()
+        self._flush_execution_readback()
         self._leased_run_devices.clear()
         self._set_run_ui_locked(False)
         self.run_monitor.failed(error)

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import os
 import unittest
+from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import Mock
 
@@ -23,6 +24,7 @@ from qfluentwidgets import (
 
 from app.ui.shell import MainWindow
 from app.ui.execution import RunMonitorPage
+from app.engine.compiler import RecipeCompiler
 from app.recipes import parse_recipe_text
 from app.ui.recipes import SweepGeneratorDialog
 from tests.helpers import simulation_settings
@@ -315,14 +317,214 @@ finally:
 
             self.assertTrue(page.current_operation_card.isVisibleTo(page))
             self.assertIn("Keithley", page.current_operation_device.text())
-            self.assertIn("Source current", page.current_operation_parameter.text())
+            self.assertIn("source current", page.current_operation_parameter.text().lower())
             self.assertIn("10 mA", page.current_operation_value.text())
+            self.assertIn("0.01 A", page.current_operation_si.text())
             self.assertGreaterEqual(page.steps.geometry().height(), 220)
             self.assertGreaterEqual(page.spectrum_preview.geometry().height(), 220)
             self.assertTrue(page._activity_pulse_timer.isActive())
             self.assertFalse(page.warnings.isVisible())
         finally:
             page.close()
+            self.application.processEvents()
+
+    def test_execution_tree_fallback_renders_plan_without_recipe_source(self) -> None:
+        page = RunMonitorPage()
+        try:
+            action = SimpleNamespace(
+                node_id="keithley-b-current",
+                kind="update_keithley_level",
+                is_finally=False,
+                setpoints_si={"keithley.B.current": 0.01},
+            )
+            page.run_started(2, 1.0, plan_actions=(action, action))
+            self.assertEqual(page.steps.topLevelItemCount(), 1)
+            item = page.steps.topLevelItem(0)
+            self.assertIn("keithley b current", item.text(0).lower())
+            self.assertIn("update keithley level", item.text(1).lower())
+            self.assertIn("0/2", item.text(2))
+        finally:
+            page.close()
+            self.application.processEvents()
+
+    def test_execution_tree_fallback_keeps_sweep_children_inside_roi_loop(self) -> None:
+        """A source-only fallback must preserve the executable loop boundary."""
+
+        page = RunMonitorPage()
+        try:
+            source = """\
+schema_version: 1
+name: fallback-loop
+root:
+  id: root
+  type: sequence
+  children:
+    - id: current-sweep
+      type: sweep
+      target: keithley.B.current
+      start: "0 A"
+      stop: "1 mA"
+      points: 2
+      children:
+        - id: current-point
+          type: update_keithley_level
+          channel: B
+          mode: current
+          level: "${keithley.B.current}"
+"""
+            configure = SimpleNamespace(
+                node_id="current-sweep.configure",
+                kind="configure_keithley",
+                is_finally=False,
+                setpoints_si={"keithley.B.current": 0.0},
+            )
+            update = SimpleNamespace(
+                node_id="current-sweep.update-level",
+                kind="update_keithley_level",
+                is_finally=False,
+                setpoints_si={"keithley.B.current": 0.0},
+            )
+            page.run_started(
+                2,
+                1.0,
+                plan_actions=(configure, update),
+                recipe_source=source,
+            )
+
+            root = page.steps.topLevelItem(0)
+            sweep = root.child(0)
+            self.assertIn("sweep", sweep.text(0).lower())
+            loop = next(
+                sweep.child(index)
+                for index in range(sweep.childCount())
+                if sweep.child(index).text(0) == "For each ROI point"
+            )
+            self.assertEqual(loop.childCount(), 2)
+            self.assertEqual(loop.child(0).data(0, Qt.ItemDataRole.UserRole), "current-point")
+            generated = page._step_items["current-sweep.update-level"]
+            self.assertIs(generated.parent(), loop)
+        finally:
+            page.close()
+            self.application.processEvents()
+
+    def test_execution_tree_projects_generated_device_actions_into_their_loop(self) -> None:
+        """Compiler-generated per-point IDs must never become flat top-level rows."""
+
+        window = MainWindow(".config/settings.yml", simulation=True)
+        try:
+            source = (Path(__file__).parents[1] / "recipes" / "untitled_sweep.yml").read_text(
+                encoding="utf-8"
+            )
+            plan = RecipeCompiler(window._settings).compile(parse_recipe_text(source))
+            snapshot = window.recipe_page.execution_tree_snapshot(source, plan)
+            monitor = window.run_monitor
+            monitor.run_started(
+                len(plan.actions),
+                1.0,
+                plan_actions=plan.actions,
+                recipe_source=source,
+                recipe_tree_items=snapshot,
+            )
+
+            def find_item(item, value):
+                raw = item.data(0, Qt.ItemDataRole.UserRole)
+                if raw == value or getattr(raw, "id", None) == value:
+                    return item
+                for index in range(item.childCount()):
+                    found = find_item(item.child(index), value)
+                    if found is not None:
+                        return found
+                return None
+
+            update = find_item(monitor.steps.topLevelItem(0), "keithley-81c50119.update-level")
+            settle = find_item(monitor.steps.topLevelItem(0), "keithley-81c50119.settle")
+            configure = find_item(monitor.steps.topLevelItem(0), "keithley-81c50119.configure")
+            output_off = find_item(monitor.steps.topLevelItem(0), "keithley-81c50119.output-off")
+            self.assertIsNotNone(update)
+            self.assertIsNotNone(settle)
+            self.assertIsNotNone(configure)
+            self.assertIsNotNone(output_off)
+            self.assertEqual(update.parent().text(0), "For each ROI point")
+            self.assertIs(update.parent(), settle.parent())
+            self.assertIn("Keithley B", configure.parent().text(0))
+            self.assertNotEqual(configure.parent().text(0), "For each ROI point")
+            self.assertIs(output_off.parent(), configure.parent())
+            self.assertEqual(monitor.steps.topLevelItemCount(), 2)
+
+            monitor.append_event(
+                "shutdown_action_started",
+                {"action": "keithley.outputs_off"},
+            )
+            shutdown = monitor._step_items["shutdown:keithley.outputs_off"]
+            self.assertEqual(shutdown.parent().text(0), "Finally — safe shutdown")
+            self.assertEqual(monitor.steps.topLevelItemCount(), 2)
+
+            monitor.append_event(
+                "action_started",
+                {
+                    "node_id": "keithley-81c50119.update-level",
+                    "kind": "update_keithley_level",
+                    "setpoints_si": {"keithley.B.current": 0.001},
+                },
+            )
+            self.assertEqual(update.text(2), "RUNNING")
+            monitor.append_event(
+                "action_finished",
+                {
+                    "node_id": "keithley-81c50119.update-level",
+                    "kind": "update_keithley_level",
+                },
+            )
+            monitor._step_visual_timer.stop()
+            monitor._flush_step_visual()
+            self.assertIn("1/9", update.text(2))
+        finally:
+            window.close()
+            self.application.processEvents()
+
+    def test_execution_event_log_throttles_repeated_action_telemetry(self) -> None:
+        """Thousands of loop actions must not enqueue thousands of repaints."""
+
+        page = RunMonitorPage()
+        try:
+            page.run_started(200, 1.0)
+            payload = {
+                "node_id": "current-point",
+                "kind": "update_keithley_level",
+                "setpoints_si": {"keithley.B.current": 0.001},
+            }
+            for _ in range(100):
+                page.append_event("action_started", payload)
+                page.append_event("action_finished", payload)
+            self.assertLessEqual(page.events.document().blockCount(), 12)
+        finally:
+            page.close()
+            self.application.processEvents()
+
+    def test_main_window_coalesces_read_only_device_projection_during_run(self) -> None:
+        """Worker action bursts keep only the newest device-page snapshot."""
+
+        window = MainWindow(".config/settings.yml", simulation=True)
+        try:
+            window._run_controller._thread = SimpleNamespace(isRunning=lambda: True)
+            projected = Mock()
+            window._apply_runner_device_readback = projected  # type: ignore[method-assign]
+            payload = {
+                "node_id": "current-point",
+                "kind": "update_keithley_level",
+                "setpoints_si": {"keithley.B.current": 0.001},
+            }
+            window._run_event("action_started", payload)
+            window._run_event("action_finished", payload)
+            self.assertEqual(projected.call_count, 0)
+
+            window._execution_readback_timer.stop()
+            window._flush_execution_readback()
+            self.assertEqual(projected.call_count, 1)
+            self.assertEqual(projected.call_args.args[0], "action_finished")
+        finally:
+            window._run_controller._thread = None
+            window.close()
             self.application.processEvents()
 
     def test_sweep_workspace_has_framed_scrollable_surfaces_and_read_only_run_state(self) -> None:

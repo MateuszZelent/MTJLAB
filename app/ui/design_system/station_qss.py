@@ -127,6 +127,41 @@ QPlainTextEdit#eventLogText QWidget {{
     background: {tokens.surface_raised};
     color: {tokens.text_primary};
 }}
+QWidget#executionCurrentOperationCard {{
+    background: {tokens.surface};
+    border: 1px solid {tokens.border};
+    border-left: 3px solid {tokens.accent};
+    border-radius: 8px;
+}}
+QWidget#executionWorkspaceCard,
+QWidget#executionControlCard {{
+    background: {tokens.surface};
+    border: 1px solid {tokens.border};
+    border-radius: 8px;
+}}
+QLabel#executionActivityIndicator {{
+    color: {tokens.accent};
+    font-size: 20px;
+    font-weight: 700;
+}}
+QLabel#executionActivityIndicator[activityPulse="off"] {{
+    color: {tokens.text_muted};
+}}
+QLabel#executionOperationPhase {{
+    color: {tokens.text_muted};
+    font-weight: 600;
+}}
+QLabel#executionOperationValue {{
+    color: {tokens.accent};
+    font-size: 20px;
+    font-weight: 700;
+}}
+QLabel#executionOperationState {{
+    font-weight: 600;
+}}
+QLabel#executionSectionTitle {{
+    font-weight: 600;
+}}
 QWidget#settingsPage {{
     background: {tokens.background};
 }}
