@@ -7,7 +7,6 @@ from collections.abc import Mapping
 from app.contracts.sweep_provider import CompiledAxisSetpoint
 from app.domain.errors import ConfigurationError, SafetyViolation
 from app.domain.quantities import DIMENSION_FREQUENCY, DIMENSION_VOLTAGE, Quantity, parse_quantity
-from app.devices.rigol_dg1000z.adapter import RigolChannelConfig
 from app.recipes.models import RecipeNode
 from app.recipes.parameter_registry import parameter_descriptor
 from app.recipes.semantic_tree import SweepAxisBinding, SweepBindingDraft
@@ -78,11 +77,32 @@ class RigolSweepProvider:
             upper = parse_quantity(limit.max, descriptor.dimension).si_value
             if not lower <= value.si_value <= upper:
                 raise SafetyViolation(f"{node.id}: Rigol value {value.si_value:g} SI is outside station limits.")
+        configuration = node.data.get("configuration")
+        configuration = configuration if isinstance(configuration, Mapping) else node.data
+        def level(target: str, key: str) -> float:
+            item = context.get(target)
+            if item is not None:
+                item.require_dimension(DIMENSION_VOLTAGE)
+                return item.si_value
+            raw = configuration.get(key, "0 V")
+            return parse_quantity(raw, DIMENSION_VOLTAGE).si_value
         if binding.parameter_id == "carrier.frequency":
             applied = quantize_rigol_frequency(value.si_value)
             return CompiledAxisSetpoint("update_rigol_frequency", {"channel": channel, "frequency_hz": applied}, value.si_value, applied)
-        applied = quantize_rigol_voltage(value.si_value)
-        return CompiledAxisSetpoint("update_rigol_levels", {"channel": channel, "high_level_v": applied, "low_level_v": applied}, value.si_value, applied)
+        high = level(f"rigol.{channel}.high_level", "high_level")
+        low = level(f"rigol.{channel}.low_level", "low_level")
+        if binding.parameter_id == "carrier.high_level":
+            high = value.si_value
+        else:
+            low = value.si_value
+        applied_high = quantize_rigol_voltage(high)
+        applied_low = quantize_rigol_voltage(low)
+        return CompiledAxisSetpoint(
+            "update_rigol_levels",
+            {"channel": channel, "high_level_v": applied_high, "low_level_v": applied_low},
+            value.si_value,
+            applied_high if binding.parameter_id == "carrier.high_level" else applied_low,
+        )
 
 
 PROVIDER = RigolSweepProvider()

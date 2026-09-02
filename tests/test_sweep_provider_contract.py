@@ -82,3 +82,31 @@ def test_registry_rejects_provider_module_key_mismatch() -> None:
                 ),
             )
         )
+
+
+def test_rigol_level_provider_preserves_the_other_level() -> None:
+    provider = built_in_device_registry().sweep_providers()["rigol"]
+    node = RecipeNode(
+        "rigol-1",
+        "sequence",
+        {"configuration": {"channel": 1, "high_level": "0.5 mV", "low_level": "-0.2 mV"}},
+    )
+    binding = provider.binding_for_target(node, "rigol.1.high_level")
+    result = provider.compile_point(
+        node,
+        binding,
+        parse_quantity("0.3 mV", DIMENSION_VOLTAGE),
+        {},
+        simulation_settings(),
+    )
+    assert result.payload["high_level_v"] == pytest.approx(0.0003)
+    assert result.payload["low_level_v"] == pytest.approx(-0.0002)
+
+
+def test_anritsu_provider_does_not_import_adapter_or_visa_modules() -> None:
+    from pathlib import Path
+
+    for path in Path("app/devices").glob("*/sweep_provider.py"):
+        source = path.read_text(encoding="utf-8")
+        assert "adapter import" not in source
+        assert "visa" not in source.lower()

@@ -3,9 +3,9 @@
 from __future__ import annotations
 
 from collections.abc import Mapping
+from dataclasses import dataclass
 
 from app.contracts.sweep_provider import CompiledAxisSetpoint
-from app.devices.anritsu_ms2830a.adapter import SignalGeneratorConfig, SpectrumConfig
 from app.domain.errors import ConfigurationError, SafetyViolation
 from app.domain.quantities import DIMENSION_DBM, DIMENSION_FREQUENCY, Quantity, parse_quantity
 from app.recipes.models import RecipeNode
@@ -13,6 +13,21 @@ from app.recipes.parameter_registry import parameter_descriptor
 from app.recipes.semantic_tree import SweepAxisBinding, SweepBindingDraft
 from app.safety.anritsu import validate_anritsu_signal_generator, validate_anritsu_spectrum
 from app.settings.models import StationSettings
+
+
+@dataclass(frozen=True, slots=True)
+class _SignalGeneratorConfig:
+    frequency_hz: float
+    power_dbm: float
+
+
+@dataclass(frozen=True, slots=True)
+class _SpectrumConfig:
+    start_hz: float
+    stop_hz: float
+    reference_level_dbm: float
+    points: int
+    trace: str = "TRAC1"
 
 
 class AnritsuSweepProvider:
@@ -56,6 +71,12 @@ class AnritsuSweepProvider:
     def validate_binding(self, node: RecipeNode, binding: SweepAxisBinding) -> None:
         if binding.device_module != self.module_key:
             raise ConfigurationError(f"{node.id}: Anritsu binding has an incompatible module.")
+        descriptor = parameter_descriptor(binding.target)
+        if descriptor.device_module != self.module_key or descriptor.dimension != binding.dimension:
+            raise ConfigurationError(f"{node.id}: Anritsu binding target/dimension mismatch.")
+        expected_endpoint = "SG" if binding.target.startswith("anritsu.sg.") else "SPECTRUM"
+        if binding.endpoint.upper() != expected_endpoint:
+            raise ConfigurationError(f"{node.id}: Anritsu binding endpoint does not match target.")
 
     def compile_point(self, node: RecipeNode, binding: SweepAxisBinding, value: Quantity, context: Mapping[str, Quantity], settings: StationSettings) -> CompiledAxisSetpoint:
         self.validate_binding(node, binding)
@@ -69,7 +90,7 @@ class AnritsuSweepProvider:
             else:
                 current_power = value.si_value
             validate_anritsu_signal_generator(settings.anritsu, frequency_hz=current_frequency, power_dbm=current_power)
-            config = SignalGeneratorConfig(current_frequency, current_power)
+            config = _SignalGeneratorConfig(current_frequency, current_power)
             return CompiledAxisSetpoint("update_anritsu_sg", {"config": config}, value.si_value, value.si_value)
         # Spectrum updates are represented as a complete configuration; the compiler
         # supplies the remaining fields from the active context.
@@ -82,9 +103,9 @@ class AnritsuSweepProvider:
             stop = value.si_value
         else:
             reference = value.si_value
-        points = int(getattr(settings.anritsu.spectrum, "points", 1001))
+        points = int(context.get("anritsu.spectrum.points", Quantity(1001, "ratio")).si_value)
         validate_anritsu_spectrum(settings.anritsu.safety, start_hz=start, stop_hz=stop, reference_level_dbm=reference, points=points)
-        config = SpectrumConfig(start, stop, reference, points)
+        config = _SpectrumConfig(start, stop, reference, points)
         return CompiledAxisSetpoint("configure_anritsu", {"config": config}, value.si_value, value.si_value)
 
 
