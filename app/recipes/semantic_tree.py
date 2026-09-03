@@ -177,24 +177,25 @@ def _binding_for_explicit(
         )
     owner = _as_nonempty(raw["owner_node_id"], f"sweep {node.id}.binding.owner_node_id")
     module = _as_nonempty(raw["device_module"], f"sweep {node.id}.binding.device_module")
+    provider_module = "anritsu" if module == "anritsu_sg" else module
     endpoint = _as_nonempty(raw["endpoint"], f"sweep {node.id}.binding.endpoint")
     parameter_id = _as_nonempty(raw["parameter_id"], f"sweep {node.id}.binding.parameter_id")
     if owner not in recipe_nodes:
         raise ConfigurationError(f"sweep {node.id}.binding.owner_node_id {owner!r} is unknown.")
-    if module not in resolvers:
+    if provider_module not in resolvers:
         raise ConfigurationError(f"sweep {node.id}.binding.device_module {module!r} has no resolver.")
     target = _as_nonempty(node.data.get("target"), f"sweep {node.id}.target")
     try:
         descriptor = parameter_descriptor(target)
     except KeyError as exc:
         raise ConfigurationError(f"Unknown sweep target {target!r}.") from exc
-    if descriptor.device_module != module:
+    if descriptor.device_module != provider_module:
         raise ConfigurationError(
             f"sweep {node.id}.binding.device_module {module!r} does not own target {target!r}."
         )
     return SweepBindingDraft(
         owner_node_id=owner,
-        device_module=module,
+        device_module=provider_module,
         endpoint=endpoint,
         parameter_id=parameter_id,
         target=target,
@@ -222,6 +223,12 @@ def _binding_for_legacy(
 ) -> SweepBindingDraft:
     module = _as_nonempty(node.data.get("device_module"), f"node {node.id}.device_module")
     resolver = resolvers.get(module)
+    # The Anritsu signal-generator block is a recipe-facing variant of the
+    # single Anritsu instrument module.  Keep ``anritsu_sg`` in authored YAML
+    # (and in the dedicated editor) while resolving its sweep through the
+    # registered, safety-reviewed Anritsu provider.
+    if resolver is None and module == "anritsu_sg":
+        resolver = resolvers.get("anritsu")
     if resolver is None:
         raise ConfigurationError(f"No sweep resolver registered for device module {module!r}.")
     try:
@@ -337,7 +344,10 @@ def _axis_slug(target: str) -> str:
         if name.startswith("compliance_"):
             return name.replace("_", "-")
         return name.replace("_", "-")
-    return "-".join(parts[1:]).replace("_", "-")
+    # Channel/endpoint identifiers are already shown by the axis label.  The
+    # loop caption should read “For each frequency point”, not “For each
+    # 1-frequency point”.
+    return parts[-1].replace("_", "-") if parts else target
 
 
 def _binding_device_prefix(binding: SweepAxisBinding, recipe_nodes: Mapping[str, RecipeNode]) -> str:
@@ -407,6 +417,35 @@ def _label(node: RecipeNode) -> str:
         return "Acquire reference · Anritsu"
     if node.type == "wait":
         return f"Wait · {node.data.get('duration', 'timing')}"
+    if node.type == "set_keithley_output":
+        channel = str(node.data.get("channel", "")).upper()
+        enabled = bool(node.data.get("enabled", False))
+        return f"Keithley {channel or 'output'} · OUTPUT {'ON' if enabled else 'OFF'}"
+    if node.type == "set_rigol_output":
+        channel = str(node.data.get("channel", ""))
+        enabled = bool(node.data.get("enabled", False))
+        return f"Rigol CH{channel or '?'} · OUTPUT {'ON' if enabled else 'OFF'}"
+    if node.type == "set_anritsu_sg_output":
+        enabled = bool(node.data.get("enabled", False))
+        return f"Anritsu SG · OUTPUT {'ON' if enabled else 'OFF'}"
+    if node.type == "update_keithley_level":
+        channel = str(node.data.get("channel", "")).upper()
+        return f"Set Keithley {channel} · source level"
+    if node.type == "update_keithley_compliance":
+        channel = str(node.data.get("channel", "")).upper()
+        return f"Set Keithley {channel} · compliance"
+    if node.type == "update_rigol_frequency":
+        channel = str(node.data.get("channel", ""))
+        return f"Set Rigol CH{channel or '?'} · frequency"
+    if node.type == "update_rigol_levels":
+        channel = str(node.data.get("channel", ""))
+        return f"Set Rigol CH{channel or '?'} · levels"
+    if node.type == "update_anritsu_sg":
+        return "Set Anritsu SG · carrier"
+    if node.type == "checkpoint":
+        return f"Checkpoint · {node.data.get('label', node.id)}"
+    if node.type == "connect":
+        return f"Connect · {node.data.get('device', node.id)}"
     if node.type == "comment":
         return f"Comment · {node.data.get('text', node.data.get('comment', ''))}".rstrip(" ·")
     if operation:
@@ -455,7 +494,22 @@ def normalize_recipe_tree(
             False,
             False,
         )
-        body_children = tuple(convert(child) for child in node.children)
+        provider = resolvers.get(binding.device_module)
+        represented_kinds: frozenset[str] = frozenset()
+        action_kinds = getattr(provider, "axis_action_kinds", None)
+        if callable(action_kinds):
+            represented_kinds = frozenset(
+                str(kind) for kind in action_kinds(binding)
+            )
+        # A provider-generated Set ROI value is the single semantic operation
+        # for the axis.  Its authored technical update (when present in a
+        # legacy recipe) is intentionally omitted from the operator tree; it
+        # remains available in the compiled plan/event log for diagnostics.
+        body_children = tuple(
+            convert(child)
+            for child in node.children
+            if child.type not in represented_kinds
+        )
         body = SemanticTreeNode(
             loop_id,
             SemanticNodeKind.LOOP_BODY,

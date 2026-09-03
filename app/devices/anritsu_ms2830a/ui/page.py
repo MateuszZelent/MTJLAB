@@ -948,6 +948,8 @@ class AnritsuPage(QWidget):
         self._manual_device_idn_provider: Callable[[], dict[str, str]] | None = None
         self._manual_settings_source_provider: Callable[[], str] | None = None
         self._manual_operator_context_provider: Callable[[], dict[str, object]] | None = None
+        self._manual_elab_config_provider: Callable[[], tuple[bool, bool, str]] | None = None
+        self._manual_elab_upload_callback: Callable[[Path], None] | None = None
         self._manual_archive: ManualSpectrumArchive | None = None
         self._manual_archive_last_path: Path | None = None
         self._manual_last_mode: ManualSpectrumSaveMode | None = None
@@ -1802,6 +1804,28 @@ class AnritsuPage(QWidget):
         self._manual_device_idn_provider = device_idn_provider
         self._manual_settings_source_provider = settings_source_provider
         self._manual_operator_context_provider = operator_context_provider
+
+    def set_manual_elab_context(
+        self,
+        *,
+        configuration_provider: Callable[[], tuple[bool, bool, str]] | None = None,
+        upload_callback: Callable[[Path], None] | None = None,
+    ) -> None:
+        """Bind the optional per-save eLab action without importing eLab into storage."""
+
+        self._manual_elab_config_provider = configuration_provider
+        self._manual_elab_upload_callback = upload_callback
+
+    def _manual_elab_context(self) -> tuple[bool, bool, str]:
+        provider = self._manual_elab_config_provider
+        if provider is None:
+            return False, False, "Configure a template in the eLabFTW tab first."
+        try:
+            available, default_enabled, hint = provider()
+            return bool(available), bool(default_enabled), str(hint)
+        except Exception as exc:
+            self.status.emit(f"eLab save option unavailable: {exc}")
+            return False, False, "The eLab save option is currently unavailable."
 
     def manual_metadata_values(self) -> tuple[ManualMetadataValue, ...]:
         """Expose confirmed Anritsu settings for the manual metadata picker."""
@@ -2908,6 +2932,7 @@ class AnritsuPage(QWidget):
     def _show_manual_save_dialog(self) -> None:
         choices = self._manual_trace_choices()
         previous_options = self._manual_save_options
+        elab_available, default_upload_to_elab, elab_hint = self._manual_elab_context()
         default_mode = (
             previous_options.mode
             if previous_options is not None
@@ -2932,6 +2957,13 @@ class AnritsuPage(QWidget):
                 if previous_options is not None
                 else ()
             ),
+            default_upload_to_elab=(
+                previous_options.upload_to_elab
+                if previous_options is not None
+                else default_upload_to_elab
+            ),
+            elab_upload_available=elab_available,
+            elab_upload_hint=elab_hint,
         )
         if dialog.exec() != QDialog.DialogCode.Accepted:
             return
@@ -3028,6 +3060,22 @@ class AnritsuPage(QWidget):
             f"Manual spectrum saved to {result.path.name}.", severity="success"
         )
         self.status.emit(f"Anritsu manual spectrum saved: {result.path}")
+        if options.upload_to_elab:
+            callback = self._manual_elab_upload_callback
+            if callback is None:
+                self.banner.show_message(
+                    "The result was saved locally, but no eLab upload service is configured.",
+                    severity="warning",
+                    timeout_ms=0,
+                )
+            elif result.mode is not ManualSpectrumSaveMode.TIMESTAMPED:
+                self.banner.show_message(
+                    "The result was saved locally. eLab upload requires a closed timestamped file.",
+                    severity="warning",
+                    timeout_ms=0,
+                )
+            else:
+                callback(result.path)
         self._update_manual_save_controls()
 
     def close_manual_archive_session(self) -> None:

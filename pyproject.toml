@@ -39,6 +39,9 @@ app = ["ui/assets/icons/*.svg", "resources/*.yml", "resources/*.json"]
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 addopts = "-ra"
+markers = [
+  "qualification: long-running GUI responsiveness qualification",
+]
 
 [tool.ruff]
 line-length = 100

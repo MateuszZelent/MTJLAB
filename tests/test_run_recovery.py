@@ -62,6 +62,64 @@ root:
 """
 
 
+NESTED_AXIS_RECIPE = """\
+schema_version: 1
+name: nested-recovery
+root:
+  id: root
+  type: sequence
+  children:
+    - id: current-axis
+      type: sweep
+      target: keithley.B.current
+      start: 0 A
+      stop: 1 mA
+      points: 2
+      children:
+        - id: frequency-axis
+          type: sweep
+          target: rigol.1.frequency
+          start: 1 kHz
+          stop: 2 kHz
+          points: 2
+          children:
+            - id: settle
+              type: wait
+              duration: 1 ms
+finally: []
+"""
+
+
+REVERSED_NESTED_AXIS_RECIPE = NESTED_AXIS_RECIPE.replace(
+    "    - id: current-axis\n"
+    "      type: sweep\n"
+    "      target: keithley.B.current\n"
+    "      start: 0 A\n"
+    "      stop: 1 mA\n"
+    "      points: 2\n"
+    "      children:\n"
+    "        - id: frequency-axis\n"
+    "          type: sweep\n"
+    "          target: rigol.1.frequency\n"
+    "          start: 1 kHz\n"
+    "          stop: 2 kHz\n"
+    "          points: 2\n",
+    "    - id: frequency-axis\n"
+    "      type: sweep\n"
+    "      target: rigol.1.frequency\n"
+    "      start: 1 kHz\n"
+    "      stop: 2 kHz\n"
+    "      points: 2\n"
+    "      children:\n"
+    "        - id: current-axis\n"
+    "          type: sweep\n"
+    "          target: keithley.B.current\n"
+    "          start: 0 A\n"
+    "          stop: 1 mA\n"
+    "          points: 2\n",
+)
+
+
 class RunRecoveryTests(unittest.TestCase):
     @staticmethod
     def _settings() -> StationSettings:
@@ -165,6 +223,31 @@ class RunRecoveryTests(unittest.TestCase):
             writer.close("completed")
             with self.assertRaisesRegex(ExecutionError, "completed run"):
                 RunRecoveryManager().inspect(path, plan)
+
+    def test_recovery_rejects_changed_axis_nesting_order(self) -> None:
+        settings = self._settings()
+        original = RecipeCompiler(settings).compile(
+            parse_recipe_text(NESTED_AXIS_RECIPE)
+        )
+        reversed_plan = RecipeCompiler(settings).compile(
+            parse_recipe_text(REVERSED_NESTED_AXIS_RECIPE)
+        )
+        self.assertNotEqual(original.sha256, reversed_plan.sha256)
+        self.assertEqual(original.total_points, reversed_plan.total_points)
+
+        with tempfile.TemporaryDirectory() as temporary:
+            path = Path(temporary) / "changed-axis-nesting.h5"
+            writer = Hdf5RunWriter(
+                path,
+                recipe_source=NESTED_AXIS_RECIPE,
+                settings_source="simulation: true\n",
+                plan_hash=original.sha256,
+                device_idn={},
+            )
+            writer.close("faulted")
+
+            with self.assertRaisesRegex(ExecutionError, "plan hash"):
+                RunRecoveryManager().inspect(path, reversed_plan)
 
 
 if __name__ == "__main__":

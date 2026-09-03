@@ -20,6 +20,14 @@ from app.recipes.models import legacy_dut_limits_policy
 from app.storage.thatec_schema_mapper import ThatecSchemaMapper, ThatecSweepAxis
 
 
+def _spectrum_compression(point_count: int) -> dict[str, object]:
+    """Keep large public spectrum rows portable and fast to checkpoint."""
+
+    if point_count >= 10_000:
+        return {}
+    return {"compression": "gzip", "compression_opts": 1}
+
+
 class ThatecHdf5Writer:
     """Append a crash-recoverable thaTEC view of measurement checkpoints."""
 
@@ -408,7 +416,7 @@ class ThatecHdf5Writer:
             shape=(self._checkpoint_count, self._trace_points),
             maxshape=(None, self._trace_points),
             dtype="f8",
-            compression="gzip",
+            **_spectrum_compression(self._trace_points),
         )
         data.attrs["data type"] = self._np.int32(11)
         data.attrs["dim of data"] = self._np.int32(1)
@@ -511,7 +519,7 @@ class ThatecHdf5Writer:
             shape=(self._checkpoint_count, self._processed_trace_points),
             maxshape=(None, self._processed_trace_points),
             dtype="f8",
-            compression="gzip",
+            **_spectrum_compression(self._processed_trace_points),
         )
         data.attrs["data type"] = self._np.int32(11)
         data.attrs["dim of data"] = self._np.int32(1)

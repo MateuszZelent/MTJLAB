@@ -127,7 +127,7 @@ class MainWindowFluentShellTests(unittest.TestCase):
             self.assertEqual(tuple(window.navigation_routes), (
                 "overview", "discovery", "rigol", "keithley", "anritsu",
                 "moke_box", "lakeshore_gaussmeter", "sweeps", "execution",
-                "results", "settings",
+                "results", "elab", "settings",
             ))
             self.assertIsNotNone(window.safety_strip)
             self.assertEqual(

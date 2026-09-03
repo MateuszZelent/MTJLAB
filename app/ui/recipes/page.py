@@ -13,11 +13,12 @@ from uuid import uuid4
 
 from PySide6.QtCore import QMimeData, QSize, QSettings, QThread, QTimer, Qt, Signal
 from PySide6.QtGui import QAction, QActionGroup, QBrush, QCloseEvent, QColor, QDrag, QIcon, QKeySequence, QPainter, QPixmap, QShortcut
-from PySide6.QtWidgets import QAbstractItemView, QApplication, QComboBox, QCheckBox, QDialog, QDialogButtonBox, QFormLayout, QFrame, QGridLayout, QHBoxLayout, QHeaderView, QLabel, QLineEdit, QMenu, QPlainTextEdit, QPushButton, QSizePolicy, QSplitter, QSpinBox, QStackedWidget, QStyle, QToolButton, QTreeWidget, QTreeWidgetItem, QVBoxLayout, QWidget
+from PySide6.QtWidgets import QApplication, QComboBox, QCheckBox, QDialog, QDialogButtonBox, QFormLayout, QFrame, QGridLayout, QHBoxLayout, QLabel, QLineEdit, QMenu, QPlainTextEdit, QPushButton, QSizePolicy, QSplitter, QSpinBox, QStackedWidget, QStyle, QToolButton, QVBoxLayout, QWidget
 from qfluentwidgets import (
     BodyLabel,
     CaptionLabel,
     CardWidget,
+    CheckBox,
     CommandBar,
     ComboBox,
     FlowLayout,
@@ -54,7 +55,7 @@ from app.recipes import (
 from app.recipes.parameter_registry import SWEEP_DIMENSIONS
 from app.recipes.parameter_registry import SWEEPABLE_PARAMETERS as _SWEEPABLE_PARAMETERS
 from app.recipes.parameter_registry import sweep_default as _sweep_default
-from app.recipes.semantic_tree import SemanticMeasurementTree, normalize_recipe_tree
+from app.recipes.semantic_tree import SemanticMeasurementTree, SemanticNodeKind, SemanticTreeNode, normalize_recipe_tree
 from app.security import AccessPolicy, Permission
 from app.settings.models import StationSettings
 from app.storage import Hdf5RunReader, ThatecDevice, ThatecRow, ThatecRun, ThatecRunReader, ThatecTreeNode
@@ -68,7 +69,7 @@ from app.ui.design_system import ThemeTokens, effective_theme, tokens_for
 from app.ui.recipes.device_parameters import DeviceParameterDialog
 from app.ui.recipes.common_dialogs import (
     ActionNodeEditorDialog, AnritsuAcquisitionEditorDialog, CommentEditorDialog, FixedValueDialog,
-    KeithleySweepBuilderDialog, RecipeTreeMoveRequest, RecipeTreeWidget,
+    KeithleySweepBuilderDialog,
     OutputPolicyDialog, RepeatCountDialog, SweepLibraryButton,
 )
 from app.ui.recipes.device_extensions import (
@@ -92,7 +93,14 @@ from app.ui.recipes.device_extensions import (
 from app.ui.recipes.sweep_editor import SweepGeneratorDialog
 from app.ui.run_worker import planned_run_paths
 from app.ui.widgets import LimitEditDialog, LimitField, SpectrumPlotWidget
-from app.ui.measurement_tree import MeasurementTreeModel, MeasurementTreeView, TreeInteractionMode
+from app.ui.measurement_tree import (
+    MeasurementTreeLibraryDropRequest,
+    MeasurementTreeModel,
+    MeasurementTreeMoveRequest,
+    MeasurementTreeView,
+    TreeDropPlacement,
+    TreeInteractionMode,
+)
 from app.ui.workers import RecipePreflightWorker
 
 
@@ -374,6 +382,17 @@ class RecipePage(QWidget):
         )
         self.run_button = PrimaryPushButton("Run plan")
         self.run_button.setEnabled(False)
+        self.save_to_elab_check = CheckBox("Save finished run to eLab", self.document_card)
+        self.save_to_elab_check.setEnabled(False)
+        self.save_to_elab_check.setToolTip(
+            "Configure credentials and an experiment template in the eLabFTW tab first."
+        )
+        self.elab_upload_hint = CaptionLabel(
+            "Configure an eLabFTW template to enable per-sweep upload.",
+            self.document_card,
+        )
+        self.elab_upload_hint.setObjectName("muted")
+        self.elab_upload_hint.setWordWrap(True)
 
         def command_action(
             text: str,
@@ -552,6 +571,8 @@ class RecipePage(QWidget):
         )
         execution_line.addWidget(self.execution_mode_hint, 1, 0, 1, 3)
         execution_line.addWidget(self.run_button, 0, 2)
+        execution_line.addWidget(self.save_to_elab_check, 2, 0)
+        execution_line.addWidget(self.elab_upload_hint, 2, 1, 1, 2)
         execution_line.setColumnStretch(1, 1)
         document_layout.addLayout(execution_line)
         layout.addWidget(self.document_card)
@@ -636,33 +657,26 @@ class RecipePage(QWidget):
         self.editor = PlainTextEdit(self)
         self.editor.setPlaceholderText("Declarative YAML recipe — no Python code and no raw SCPI.")
         self.editor.setMinimumWidth(320)
-        # Keep the item-based widget as a private compatibility index for the
-        # existing recipe editing commands. The visible tree is the shared
-        # immutable semantic model below.
-        self.tree = RecipeTreeWidget(self)
-        self.tree.setObjectName("recipeTree")
-        self.tree.setHeaderLabels(["Measurement sequence", "Role / expansion", "Status"])
-        tree_header = self.tree.header()
-        tree_header.setStretchLastSection(False)
-        tree_header.setMinimumSectionSize(72)
-        tree_header.setSectionResizeMode(0, QHeaderView.ResizeMode.Stretch)
-        tree_header.setSectionResizeMode(1, QHeaderView.ResizeMode.Interactive)
-        tree_header.setSectionResizeMode(2, QHeaderView.ResizeMode.Fixed)
-        self.tree.setColumnWidth(1, 190)
-        self.tree.setColumnWidth(2, 92)
-        self.tree.setAlternatingRowColors(True)
-        self.tree.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
-        self.tree.setToolTip(
-            "Drop on a horizontal gap to reorder. Drop on a highlighted flow "
-            "container to add inside it. Actions and ROI rows never accept children."
-        )
+        self._selected_semantic_id: str | None = None
+        self._selected_source_node_id: str | None = None
+        self._historical_objects_by_semantic_id: dict[str, object] = {}
         self.tree_model = MeasurementTreeModel(parent=self)
         self.measurement_tree = MeasurementTreeView(self)
         self.measurement_tree.setObjectName("semanticMeasurementTree")
         self.measurement_tree.setModel(self.tree_model)
         self.measurement_tree.set_interaction_mode(TreeInteractionMode.EDITABLE)
+        self.measurement_tree.semantic_selected.connect(self._select_semantic_node)
         self.measurement_tree.semantic_activated.connect(self._select_semantic_node)
-        self.tree.setVisible(False)
+        self.measurement_tree.move_requested.connect(
+            self._handle_semantic_tree_move_request
+        )
+        self.measurement_tree.library_drop_requested.connect(
+            self._handle_semantic_library_drop_request
+        )
+        self.measurement_tree.drag_status_changed.connect(self._tree_drag_status_changed)
+        self.measurement_tree.semantic_context_requested.connect(
+            self._show_semantic_tree_context_menu
+        )
         self.builder_container = CardWidget()
         self.builder_container.setObjectName("recipeBuilderPanel")
         self.builder_container.setProperty("stationSurface", "surface")
@@ -790,13 +804,6 @@ class RecipePage(QWidget):
             self._execution_mode_changed
         )
         self.editor.textChanged.connect(self._source_changed)
-        self.tree.currentItemChanged.connect(self._node_selected)
-        self.tree.itemClicked.connect(self._operator_row_clicked)
-        self.tree.itemDoubleClicked.connect(self._open_node_editor)
-        self.tree.move_requested.connect(self._handle_tree_move_request)
-        self.tree.library_drop_requested.connect(self._drop_library_block)
-        self.tree.drop_rejected.connect(self._tree_drop_rejected)
-        self.tree.drag_status_changed.connect(self._tree_drag_status_changed)
         self.edit_device_button.clicked.connect(
             self._edit_selected_device_settings
         )
@@ -809,20 +816,20 @@ class RecipePage(QWidget):
         self.open_editor_button.clicked.connect(self._open_current_node_editor)
         self.path.textChanged.connect(self._path_changed)
         self.path.editingFinished.connect(self._update_repository_state)
-        self.tree.customContextMenuRequested.connect(self._show_tree_context_menu)
         self._tree_shortcuts = (
-            QShortcut(QKeySequence("Delete"), self.tree, activated=self._delete_selected_node),
-            QShortcut(QKeySequence("Ctrl+D"), self.tree, activated=self._duplicate_selected_node),
-            QShortcut(QKeySequence("Alt+Up"), self.tree, activated=lambda: self._move_selected_sibling(-1)),
-            QShortcut(QKeySequence("Alt+Down"), self.tree, activated=lambda: self._move_selected_sibling(1)),
-            QShortcut(QKeySequence("Ctrl+Shift+G"), self.tree, activated=self._edit_selected_node),
-            QShortcut(QKeySequence("Return"), self.tree, activated=self._edit_selected_node),
-            QShortcut(QKeySequence("Enter"), self.tree, activated=self._edit_selected_node),
+            QShortcut(QKeySequence("Delete"), self.measurement_tree, activated=self._delete_selected_node),
+            QShortcut(QKeySequence("Ctrl+D"), self.measurement_tree, activated=self._duplicate_selected_node),
+            QShortcut(QKeySequence("Alt+Up"), self.measurement_tree, activated=lambda: self._move_selected_sibling(-1)),
+            QShortcut(QKeySequence("Alt+Down"), self.measurement_tree, activated=lambda: self._move_selected_sibling(1)),
+            QShortcut(QKeySequence("Ctrl+Shift+G"), self.measurement_tree, activated=self._edit_selected_node),
+            QShortcut(QKeySequence("Return"), self.measurement_tree, activated=self._edit_selected_node),
+            QShortcut(QKeySequence("Enter"), self.measurement_tree, activated=self._edit_selected_node),
         )
         self._execution_edit_widgets: tuple[QWidget, ...] = (
             self.path,
             self.restore_button,
             self.execution_mode,
+            self.save_to_elab_check,
             self.output_directory,
             self.output_directory_button,
             self.output_file_stem,
@@ -848,6 +855,16 @@ class RecipePage(QWidget):
             self.compile_recipe_action,
         )
         self.load_editor(show_error=False)
+
+    def set_elab_upload_state(
+        self, available: bool, default_enabled: bool, hint: str
+    ) -> None:
+        """Expose the saved eLab policy as an explicit per-sweep choice."""
+
+        self.save_to_elab_check.setEnabled(bool(available))
+        self.save_to_elab_check.setChecked(bool(available and default_enabled))
+        self.elab_upload_hint.setText(str(hint))
+        self.save_to_elab_check.setToolTip(str(hint))
 
     def _default_output_directory(self) -> str:
         return str(self._settings.storage.get("output_directory", "./measurements"))
@@ -1303,15 +1320,10 @@ class RecipePage(QWidget):
         menu = RoundMenu(parent=self)
         add_after = QAction("Add after selected step", menu)
         add_inside = QAction("Add inside selected flow container", menu)
-        current = self.tree.currentItem()
-        current_node = (
-            current.data(0, Qt.ItemDataRole.UserRole)
-            if current is not None
-            else None
-        )
+        current_node = self._selected_recipe_node()
         add_inside.setEnabled(
             isinstance(current_node, RecipeNode)
-            and RecipeTreeWidget.node_accepts_children(current_node)
+            and self._node_accepts_children(current_node)
         )
         add_after.triggered.connect(
             lambda: self._invoke_library_action(label, callback)
@@ -1693,7 +1705,7 @@ class RecipePage(QWidget):
         parent_id: str,
         branch: str,
         index: int,
-    ) -> None:
+    ) -> bool:
         try:
             category, separator, kind = drag_kind.partition(":")
             if not separator:
@@ -1708,7 +1720,7 @@ class RecipePage(QWidget):
                 self._library_add_device(
                     kind, parent_id=parent_id, branch=branch, index=index
                 )
-                return
+                return True
             if category == "safety":
                 if kind in {"keithley_a_off", "keithley_b_off"}:
                     self._library_add_output_off(
@@ -1725,7 +1737,7 @@ class RecipePage(QWidget):
                     self._library_add_output_off("set_anritsu_sg_output")
                 else:
                     raise ConfigurationError(f"Unknown safe-shutdown block {kind!r}.")
-                return
+                return True
             if category == "output":
                 if kind == "anritsu_sg":
                     self._library_add_output_on(
@@ -1735,7 +1747,7 @@ class RecipePage(QWidget):
                         branch=branch,
                         index=index,
                     )
-                    return
+                    return True
                 device, separator, channel_text = kind.partition("_")
                 if not separator:
                     raise ConfigurationError(f"Unknown OUTPUT block {kind!r}.")
@@ -1751,7 +1763,7 @@ class RecipePage(QWidget):
                     branch=branch,
                     index=index,
                 )
-                return
+                return True
             if category != "flow":
                 raise ConfigurationError(
                     f"Unknown library block category {category!r}."
@@ -1762,6 +1774,7 @@ class RecipePage(QWidget):
                 branch=branch,
                 index=index,
             )
+            return True
         except Exception as exc:
             self.status.emit(f"Library drop rejected without changing the plan: {exc}")
             QMessageBox.warning(
@@ -1769,6 +1782,7 @@ class RecipePage(QWidget):
                 "Cannot add block",
                 f"The block was not added. The existing measurement tree is unchanged.\n\n{exc}",
             )
+            return False
 
     def _library_add_fixed_keithley(self, mode: str) -> None:
         definition = next(
@@ -1836,26 +1850,89 @@ class RecipePage(QWidget):
         self._anritsu_sg_snapshot_provider = provider
 
     def _select_semantic_node(self, semantic_id: str) -> None:
-        """Bridge a semantic-row activation to the legacy editor selection.
-
-        Editing is still performed by the existing transactional YAML commands;
-        the semantic view only selects the corresponding source node and opens
-        the same inspector. Generated ROI/safety rows intentionally have no
-        editable source node.
-        """
+        """Select one immutable semantic row and its authored source node."""
 
         try:
             node = self.tree_model.tree.require(semantic_id)
         except ConfigurationError:
             return
-        source_id = node.source_node_id
-        if not source_id:
+        self._selected_semantic_id = semantic_id
+        self._selected_source_node_id = node.source_node_id
+        self._node_selected()
+
+    def _recipe_node_locations(
+        self,
+    ) -> dict[str, tuple[RecipeNode, str | None, str, int, bool]]:
+        """Index the accepted recipe graph without constructing presentation items."""
+
+        if not self._tree_source.strip() or self._historical_sweep_active:
+            return {}
+        recipe = parse_recipe_text(self._tree_source, origin=self.path.text() or "recipe")
+        result: dict[str, tuple[RecipeNode, str | None, str, int, bool]] = {
+            recipe.root.id: (recipe.root, None, "root", 0, False)
+        }
+
+        def visit(
+            nodes: tuple[RecipeNode, ...],
+            parent_id: str,
+            branch: str,
+            in_finally: bool,
+        ) -> None:
+            for index, child in enumerate(nodes):
+                result[child.id] = (child, parent_id, branch, index, in_finally)
+                visit(child.children, child.id, "children", in_finally)
+                visit(child.else_children, child.id, "else", in_finally)
+
+        visit(recipe.root.children, recipe.root.id, "children", False)
+        visit(recipe.root.else_children, recipe.root.id, "else", False)
+        visit(recipe.finally_nodes, "__finally__", "children", True)
+        return result
+
+    def _selected_recipe_location(
+        self,
+    ) -> tuple[RecipeNode, str | None, str, int, bool] | None:
+        source_id = self._selected_source_node_id
+        return self._recipe_node_locations().get(source_id) if source_id else None
+
+    def _selected_recipe_node(self) -> RecipeNode | None:
+        location = self._selected_recipe_location()
+        return location[0] if location is not None else None
+
+    @staticmethod
+    def _node_accepts_children(node: RecipeNode) -> bool:
+        if node.type not in {"sequence", "sweep", "repeat", "if"}:
+            return False
+        if not node.data.get("device_module"):
+            return True
+        actions = node.data.get("parameter_actions", [])
+        return isinstance(actions, list) and any(
+            isinstance(action, dict)
+            and (action.get("mode") == "sweep" or bool(action.get("segments")))
+            for action in actions
+        )
+
+    def _select_source_node(self, source_id: str | None) -> None:
+        self._selected_source_node_id = source_id
+        if source_id is None:
+            self._selected_semantic_id = None
+            self.measurement_tree.clearSelection()
+            self._node_selected()
             return
-        item = self._find_tree_item(source_id)
-        if item is None:
+        candidates = (
+            node for node in self.tree_model.tree.by_id.values()
+            if node.source_node_id == source_id
+        )
+        semantic = next(candidates, None)
+        if semantic is None:
+            self._selected_semantic_id = None
+            self._node_selected()
             return
-        self.tree.setCurrentItem(item)
-        self._node_selected(item, None)
+        self._selected_semantic_id = semantic.semantic_id
+        index = self.tree_model.index_for_semantic_id(semantic.semantic_id)
+        if index.isValid():
+            self.measurement_tree.setCurrentIndex(index)
+            self.measurement_tree.scrollTo(index)
+        self._node_selected()
 
     def _refresh_semantic_tree(self, source: str | None = None) -> SemanticMeasurementTree | None:
         """Normalize the accepted recipe source into the shared Fluent model."""
@@ -1867,12 +1944,16 @@ class RecipePage(QWidget):
             recipe = parse_recipe_text(source, origin=self.path.text() or "recipe")
             snapshot = normalize_recipe_tree(recipe, self._device_registry.sweep_providers())
         except Exception as exc:
-            # The old renderer remains the transactional source of truth while
-            # a draft is invalid. Never erase a previously accepted semantic
-            # snapshot because a user is midway through typing YAML.
+            # The last accepted semantic snapshot remains the transactional
+            # source of truth while a draft is invalid. Never erase it because
+            # a user is midway through typing YAML.
             self.status.emit(f"Semantic tree retained after normalization warning: {exc}")
             return None
         self.tree_model.replace_tree(snapshot)
+        selected_id = self._selected_source_node_id
+        if selected_id is None or selected_id not in self._recipe_node_locations():
+            selected_id = recipe.root.id
+        self._select_source_node(selected_id)
         return snapshot
 
     def semantic_tree_snapshot(
@@ -1933,9 +2014,6 @@ class RecipePage(QWidget):
 
     def _set_tree_editing_enabled(self, enabled: bool) -> None:
         effective = bool(enabled) and not self._execution_controlled
-        self.tree.setDragEnabled(effective)
-        self.tree.setAcceptDrops(effective)
-        self.tree.setDropIndicatorShown(effective)
         self.measurement_tree.set_interaction_mode(
             TreeInteractionMode.EDITABLE if effective else TreeInteractionMode.READ_ONLY
         )
@@ -1948,21 +2026,20 @@ class RecipePage(QWidget):
         for shortcut in getattr(self, "_tree_shortcuts", ()):
             shortcut.setEnabled(effective)
         if not self._historical_sweep_active:
-            current = self.tree.currentItem()
-            self._node_selected(current, None)
+            self._node_selected()
         if effective:
-            self.tree.setToolTip(
+            self.measurement_tree.setToolTip(
                 "Drag a non-root node to reorder it or place it inside Sequence, "
                 "Sweep, Repeat or If. The complete YAML is validated before the "
                 "view changes; nodes cannot cross the Finally boundary."
             )
         elif self._execution_controlled:
-            self.tree.setToolTip(
+            self.measurement_tree.setToolTip(
                 "The Run Engine owns this recipe during execution. The tree is "
                 "read-only until the run finishes."
             )
         else:
-            self.tree.setToolTip(
+            self.measurement_tree.setToolTip(
                 "Tree Builder is locked because the YAML draft has not been applied. "
                 "Correct the YAML and choose Apply YAML to tree."
             )
@@ -2172,9 +2249,12 @@ class RecipePage(QWidget):
         tree_rendered = False
         try:
             recipe = parse_recipe_text(source, origin=self.path.text())
-            self._populate_recipe_tree(recipe.root, recipe.finally_nodes, None)
+            snapshot = normalize_recipe_tree(
+                recipe, self._device_registry.sweep_providers()
+            )
             self._tree_source = source
-            self._refresh_semantic_tree(source)
+            self.tree_model.replace_tree(snapshot)
+            self._select_source_node(recipe.root.id)
             self.summary.setText("Recipe loaded. Compile it before running.")
             tree_rendered = True
         except Exception as exc:
@@ -2225,9 +2305,7 @@ class RecipePage(QWidget):
         self.run_button.setEnabled(False)
         self.compile_recipe_action.setEnabled(False)
         self.editor.setReadOnly(True)
-        self.tree.setDragEnabled(False)
-        self.tree.setAcceptDrops(False)
-        self.tree.setDropIndicatorShown(False)
+        self.measurement_tree.set_interaction_mode(TreeInteractionMode.READ_ONLY)
         self.library_panel.setEnabled(False)
         for button in (
             self.edit_device_button,
@@ -2249,60 +2327,78 @@ class RecipePage(QWidget):
         self._loading_source = False
         historical_source = self.editor.toPlainText()
         self._tree_source = historical_source
-        # Historical records do not contain an executable recipe; keep the
-        # semantic model empty rather than guessing axis ownership.
-        self.tree_model.replace_tree(SemanticMeasurementTree((), {}, source_text=historical_source))
         self._saved_source = historical_source
         self._saved_path = self.path.text().strip()
         self._autosave_timer.stop()
         self._tree_undo.clear()
         self._tree_redo.clear()
 
-        root = QTreeWidgetItem([
-            f"Historical THATEC Sweep — {run.path.name}",
-            "Recorded execution tree",
-            "READ-ONLY",
-        ])
-        root.setToolTip(0, str(run.path))
-        root.setData(0, Qt.ItemDataRole.UserRole, "historical-thatec-root")
+        self._historical_objects_by_semantic_id = {}
+        by_id: dict[str, SemanticTreeNode] = {}
 
-        def add_node(parent: QTreeWidgetItem, node: ThatecTreeNode) -> None:
+        def project_node(node: ThatecTreeNode) -> SemanticTreeNode:
             row = run.rows.get(node.id)
             detail = node.kind or (row.function if row is not None else "recorded")
-            item = QTreeWidgetItem([node.label, detail, "RECORDED"])
-            item.setData(0, Qt.ItemDataRole.UserRole, row)
-            item.setData(1, Qt.ItemDataRole.UserRole, node.id)
+            semantic_id = f"historical.row.{node.id}"
+            projected = SemanticTreeNode(
+                semantic_id=semantic_id,
+                kind=SemanticNodeKind.ACTION,
+                label=node.label,
+                data={"detail": detail, "status": "RECORDED"},
+                children=tuple(project_node(child) for child in node.children),
+                editable=False,
+                draggable=False,
+            )
+            by_id[semantic_id] = projected
             if row is not None:
-                item.setToolTip(
-                    0,
-                    "\n".join((
-                        f"THATEC row: {row.id}",
-                        f"Device: {row.device_name or 'internal'}",
-                        f"Control: {row.control_name or 'internal'}",
-                        f"Function: {row.function or node.kind}",
-                    )),
-                )
-            parent.addChild(item)
-            for child in node.children:
-                add_node(item, child)
+                self._historical_objects_by_semantic_id[semantic_id] = row
+            return projected
 
-        for node in tree:
-            add_node(root, node)
+        children = [project_node(node) for node in tree]
         if run.devices:
-            devices_item = QTreeWidgetItem([
-                "Recorded device configuration", "THATEC /devices", "RECORDED",
-            ])
-            devices_item.setData(0, Qt.ItemDataRole.UserRole, "historical-thatec-devices")
-            root.addChild(devices_item)
+            device_children: list[SemanticTreeNode] = []
             for device in run.devices:
-                device_item = QTreeWidgetItem([device.name, "device settings", "RECORDED"])
-                device_item.setData(0, Qt.ItemDataRole.UserRole, device)
-                device_item.setToolTip(0, "All public THATEC settings recorded for this device.")
-                devices_item.addChild(device_item)
-        self.tree.clear()
-        self.tree.addTopLevelItem(root)
-        self.tree.expandAll()
-        self.tree.setCurrentItem(root)
+                semantic_id = f"historical.device.{device.name}"
+                projected = SemanticTreeNode(
+                    semantic_id=semantic_id,
+                    kind=SemanticNodeKind.DEVICE,
+                    label=device.name,
+                    data={"detail": "device settings", "status": "RECORDED"},
+                    editable=False,
+                    draggable=False,
+                )
+                by_id[semantic_id] = projected
+                self._historical_objects_by_semantic_id[semantic_id] = device
+                device_children.append(projected)
+            devices = SemanticTreeNode(
+                semantic_id="historical.devices",
+                kind=SemanticNodeKind.SEQUENCE,
+                label="Recorded device configuration",
+                data={"detail": "THATEC /devices", "status": "RECORDED"},
+                children=tuple(device_children),
+                editable=False,
+                draggable=False,
+            )
+            by_id[devices.semantic_id] = devices
+            children.append(devices)
+        root = SemanticTreeNode(
+            semantic_id="historical.root",
+            kind=SemanticNodeKind.SEQUENCE,
+            label=f"Historical THATEC Sweep — {run.path.name}",
+            data={"detail": "Recorded execution tree", "status": "READ-ONLY"},
+            children=tuple(children),
+            editable=False,
+            draggable=False,
+        )
+        by_id[root.semantic_id] = root
+        self._historical_objects_by_semantic_id[root.semantic_id] = "historical-thatec-root"
+        self.tree_model.replace_tree(
+            SemanticMeasurementTree((root,), by_id, source_text=historical_source)
+        )
+        self.measurement_tree.expandAll()
+        self.measurement_tree.setCurrentIndex(
+            self.tree_model.index_for_semantic_id(root.semantic_id)
+        )
         self.inspector_summary.setText(
             "<b>Historical THATEC Sweep</b><br>Read-only execution tree reconstructed from the HDF5 result."
         )
@@ -2348,9 +2444,8 @@ class RecipePage(QWidget):
             return
         self._historical_sweep_active = False
         self.editor.setReadOnly(False)
-        self.tree.setDragEnabled(True)
-        self.tree.setAcceptDrops(True)
-        self.tree.setDropIndicatorShown(True)
+        self.measurement_tree.set_interaction_mode(TreeInteractionMode.EDITABLE)
+        self._historical_objects_by_semantic_id.clear()
         self.library_panel.setEnabled(True)
         self.compile_recipe_action.setEnabled(True)
         for button in (
@@ -2729,21 +2824,16 @@ class RecipePage(QWidget):
     def _open_incomplete_node_configuration(self, node_id: str) -> None:
         """Select the rejected recipe node and open its resolving editor."""
 
-        item = self._find_tree_item(node_id)
-        if item is None:
+        location = self._recipe_node_locations().get(node_id)
+        if location is None:
             QMessageBox.warning(
                 self,
                 "Recipe",
                 f"The incomplete recipe node {node_id!r} is no longer present.",
             )
             return
-        self.tree.setCurrentItem(item)
-        self.tree.scrollToItem(
-            item, QAbstractItemView.ScrollHint.PositionAtCenter
-        )
-        node = item.data(0, Qt.ItemDataRole.UserRole)
-        if not isinstance(node, RecipeNode):
-            return
+        node = location[0]
+        self._select_source_node(node_id)
         if node.data.get("device_module") == "anritsu":
             self._edit_anritsu_module_node(node, highlight_required=True)
             return
@@ -2795,30 +2885,6 @@ class RecipePage(QWidget):
     def _accept_preflight(
         self, recipe: object, plan: ExecutionPlan, estimate: PlanEstimate
     ) -> None:
-        try:
-            self._populate_recipe_tree(
-                recipe.root, recipe.finally_nodes, plan  # type: ignore[attr-defined]
-            )
-        except Exception as exc:
-            self._plan = None
-            self.run_button.setEnabled(False)
-            self.plan_preflight_changed.emit(None)
-            self._emit_tree_diagnostic(
-                "TREE_PREFLIGHT_RENDER_REJECTED",
-                error_type=type(exc).__name__,
-                error=str(exc),
-            )
-            self.summary.setText(
-                "Validation succeeded, but the operator tree could not be rendered. "
-                "Run remains disabled."
-            )
-            self._refresh_document_state()
-            QMessageBox.warning(
-                self,
-                "Recipe preview",
-                f"The validated plan could not be displayed safely:\n\n{exc}",
-            )
-            return
         self._plan = plan
         self.run_button.setEnabled(True)
         self._refresh_document_state()
@@ -2838,193 +2904,6 @@ class RecipePage(QWidget):
         )
         self.status.emit("Recipe compiled")
         self.plan_preflight_changed.emit((plan, estimate))
-
-    def _populate_recipe_tree(
-        self,
-        root: RecipeNode,
-        finally_nodes: tuple[RecipeNode, ...],
-        plan: object | None,
-        selected_id: str | None = None,
-    ) -> None:
-        tokens = self._recipe_tokens()
-        current = self.tree.currentItem()
-        current_node = (
-            current.data(0, Qt.ItemDataRole.UserRole)
-            if current is not None
-            else None
-        )
-        if selected_id is None and isinstance(current_node, RecipeNode):
-            selected_id = current_node.id
-        expanded_ids: set[str] = set()
-
-        def remember_expansion(item: QTreeWidgetItem) -> None:
-            item_node = item.data(0, Qt.ItemDataRole.UserRole)
-            if isinstance(item_node, RecipeNode) and item.isExpanded():
-                expanded_ids.add(item_node.id)
-            for child_index in range(item.childCount()):
-                remember_expansion(item.child(child_index))
-
-        for top_index in range(self.tree.topLevelItemCount()):
-            remember_expansion(self.tree.topLevelItem(top_index))
-        previous_scroll = self.tree.verticalScrollBar().value()
-        top_level_items: list[QTreeWidgetItem] = []
-        occurrences: dict[str, int] = {}
-        if plan is not None:
-            for action in plan.actions:  # type: ignore[union-attr]
-                occurrences[action.node_id] = occurrences.get(action.node_id, 0) + 1
-
-        def add_node(node: RecipeNode, parent: QTreeWidgetItem | None = None) -> None:
-            count = occurrences.get(node.id, 0)
-            detail = node.type + (f" • {count} action(s)" if plan is not None else "")
-            label, detail, icon = self._tree_presentation(node, count, plan is not None)
-            if parent is None and node.type == "sequence":
-                label = "Measurement sequence"
-                detail = "Runs top-level steps in order"
-            if node.data.get("disabled") is True:
-                label = f"Disabled — {label}"
-                detail = "Skipped with all children"
-            status_text, status_color = self._tree_status(node, detail)
-            item = QTreeWidgetItem([label, detail, status_text])
-            item.setIcon(0, self._tree_node_icon(node, icon))
-            item.setToolTip(0, f"{node.id}\nDouble-click to edit; right-click for actions.")
-            item.setToolTip(2, status_text.title())
-            item.setData(2, Qt.ItemDataRole.ForegroundRole, QBrush(QColor(status_color)))
-            status_font = item.font(2)
-            status_font.setBold(True)
-            status_font.setPointSize(8)
-            item.setFont(2, status_font)
-            item.setData(0, Qt.ItemDataRole.UserRole, node)
-            if parent is None:
-                item.setFlags(item.flags() & ~Qt.ItemFlag.ItemIsDragEnabled)
-                top_level_items.append(item)
-            else:
-                parent.addChild(item)
-            self._add_operator_control_rows(node, item)
-            self._add_native_sweep_roi_rows(node, item)
-            child_parent = item
-            if node.type in {"sweep", "repeat"} or (
-                node.data.get("device_module")
-                and RecipeTreeWidget.node_accepts_children(node)
-            ):
-                execution_label = (
-                    "For each ROI point"
-                    if node.type == "sweep" or node.data.get("device_module")
-                    else f"Repeated steps × {node.data.get('count', '?')}"
-                )
-                execution = QTreeWidgetItem(
-                    [execution_label, "Executable child steps", "FLOW"]
-                )
-                execution.setData(
-                    0,
-                    RecipeTreeWidget.structural_role,
-                    RecipeTreeWidget.execution_container,
-                )
-                execution.setFlags(
-                    execution.flags() & ~Qt.ItemFlag.ItemIsDragEnabled
-                )
-                execution.setToolTip(
-                    0,
-                    "Only blocks placed in this branch execute for every loop point.",
-                )
-                item.addChild(execution)
-                child_parent = execution
-            for child in node.children:
-                add_node(child, child_parent)
-            if node.type == "if":
-                else_item = QTreeWidgetItem(["Else branch", "Conditional alternative", "●"])
-                else_item.setData(
-                    0,
-                    RecipeTreeWidget.structural_role,
-                    RecipeTreeWidget.else_container,
-                )
-                else_item.setFlags(
-                    else_item.flags() & ~Qt.ItemFlag.ItemIsDragEnabled
-                )
-                item.addChild(else_item)
-                for child in node.else_children:
-                    add_node(child, else_item)
-
-        add_node(root)
-        automatic_shutdown = self._automatic_shutdown_projection(plan, finally_nodes)
-        cleanup_detail = (
-            f"Automatic shutdown • {len(automatic_shutdown)} guaranteed action(s)"
-            + (
-                f" • {len(finally_nodes)} operator cleanup action(s)"
-                if finally_nodes
-                else ""
-            )
-        )
-        cleanup = QTreeWidgetItem(["Finally — safe shutdown", cleanup_detail, "●"])
-        cleanup.setIcon(0, self._tree_badge_icon("Safety", tokens.neutral, "OFF"))
-        cleanup.setData(0, Qt.ItemDataRole.UserRole, None)
-        cleanup.setData(
-            0,
-            RecipeTreeWidget.structural_role,
-            RecipeTreeWidget.finally_container,
-        )
-        cleanup.setFlags(cleanup.flags() & ~Qt.ItemFlag.ItemIsDragEnabled)
-        cleanup.setToolTip(
-            0,
-            "System-generated OUTPUT OFF actions always run after success, stop "
-            "and fault. Optional operator cleanup, such as a Keithley ramp, runs "
-            "before the independent automatic shutdown.",
-        )
-        top_level_items.append(cleanup)
-        for node in finally_nodes:
-            add_node(node, cleanup)
-        for action, label, detail in automatic_shutdown:
-            item = QTreeWidgetItem([label, detail, "AUTO"])
-            item.setIcon(0, self._tree_badge_icon("Safety", tokens.neutral, "OFF"))
-            item.setFlags(
-                item.flags()
-                & ~Qt.ItemFlag.ItemIsDragEnabled
-                & ~Qt.ItemFlag.ItemIsDropEnabled
-                & ~Qt.ItemFlag.ItemIsEditable
-            )
-            item.setData(0, Qt.ItemDataRole.UserRole, None)
-            item.setData(
-                0,
-                RecipeTreeWidget.structural_role,
-                f"automatic_shutdown:{action}",
-            )
-            item.setToolTip(
-                0,
-                "Generated by the compiler and executed by the Run Engine. "
-                "It cannot be removed or disabled from the recipe tree.",
-            )
-            item.setForeground(2, QBrush(QColor(tokens.success)))
-            status_font = item.font(2)
-            status_font.setBold(True)
-            status_font.setPointSize(8)
-            item.setFont(2, status_font)
-            cleanup.addChild(item)
-        # Commit only after every row, synthetic control and icon was built.
-        # A presentation exception must never erase the operator's current tree.
-        self.tree.clear()
-        self.tree.addTopLevelItems(top_level_items)
-        if expanded_ids:
-            for node_id in expanded_ids:
-                item = self._find_tree_item(node_id)
-                if item is not None:
-                    item.setExpanded(True)
-        else:
-            self.tree.expandAll()
-        selected = (
-            self._find_tree_item(selected_id) if selected_id is not None else None
-        )
-        if selected is not None:
-            ancestor = selected.parent()
-            while ancestor is not None:
-                ancestor.setExpanded(True)
-                ancestor = ancestor.parent()
-            self.tree.setCurrentItem(selected)
-            self.tree.scrollToItem(
-                selected,
-                QAbstractItemView.ScrollHint.EnsureVisible,
-            )
-        elif self.tree.topLevelItemCount():
-            self.tree.setCurrentItem(self.tree.topLevelItem(0))
-        self.tree.verticalScrollBar().setValue(previous_scroll)
 
     @staticmethod
     def _automatic_shutdown_projection(
@@ -3084,34 +2963,6 @@ class RecipePage(QWidget):
             rows.append((action, label, detail))
         return tuple(rows)
 
-    def execution_tree_snapshot(
-        self,
-        recipe_source: str,
-        plan: object | None,
-    ) -> tuple[QTreeWidgetItem, ...]:
-        """Return a detached, read-only projection made by the Builder renderer.
-
-        Execute must never maintain a second interpretation of a recipe.  The
-        snapshot is rendered by :meth:`_populate_recipe_tree` into a temporary
-        tree and then cloned, so labels, ROI rows, structural branches, icons
-        and static status cells are byte-for-byte the same projection seen in
-        Sweep Builder.  The visible Builder tree is never changed.
-        """
-
-        recipe = parse_recipe_text(recipe_source, origin="execution plan")
-        original_tree = self.tree
-        staging_tree = RecipeTreeWidget(self)
-        try:
-            self.tree = staging_tree
-            self._populate_recipe_tree(recipe.root, recipe.finally_nodes, plan)
-            return tuple(
-                staging_tree.topLevelItem(index).clone()
-                for index in range(staging_tree.topLevelItemCount())
-            )
-        finally:
-            self.tree = original_tree
-            staging_tree.deleteLater()
-
     @staticmethod
     def _keithley_parameter_label(node: RecipeNode, parameter_id: str) -> str:
         return {
@@ -3146,227 +2997,6 @@ class RecipePage(QWidget):
             "measurement.settling_time": DIMENSION_TIME,
         }.get(parameter_id)
 
-    def _add_operator_control_rows(
-        self, node: RecipeNode, parent: QTreeWidgetItem
-    ) -> None:
-        """Render device overrides as read-only operator controls below the module."""
-
-        tokens = self._recipe_tokens()
-        device_module = str(node.data.get("device_module", ""))
-        if device_module not in {"keithley", "anritsu", "anritsu_sg", "rigol"}:
-            return
-        raw_actions = node.data.get("parameter_actions")
-        actions = (
-            [action for action in raw_actions if isinstance(action, dict)]
-            if isinstance(raw_actions, list)
-            else []
-        )
-
-        def informational_row(
-            columns: list[str],
-            *,
-            color: str,
-            badge: str,
-            metadata: dict[str, object] | None = None,
-            tooltip: str | None = None,
-            owner: QTreeWidgetItem = parent,
-        ) -> QTreeWidgetItem:
-            row = QTreeWidgetItem(columns)
-            if metadata is None:
-                row.setFlags(row.flags() & ~Qt.ItemFlag.ItemIsSelectable)
-            else:
-                row.setData(0, self.operator_row_role, metadata)
-                row.setToolTip(
-                    0,
-                    tooltip or "Click to open the ROI editor directly for this sweep axis.",
-                )
-                link_font = row.font(0)
-                link_font.setUnderline(True)
-                row.setFont(0, link_font)
-                row.setData(
-                    0, Qt.ItemDataRole.ForegroundRole, QBrush(QColor(tokens.accent))
-                )
-            row.setIcon(0, self._tree_badge_icon("Operator control", color, badge))
-            if metadata is None:
-                row.setToolTip(
-                    0,
-                    "Operator control summary. Double-click the parent device node to edit it.",
-                )
-            row.setData(2, Qt.ItemDataRole.ForegroundRole, QBrush(QColor(color)))
-            status_font = row.font(2)
-            status_font.setBold(True)
-            status_font.setPointSize(8)
-            row.setFont(2, status_font)
-            owner.addChild(row)
-            return row
-
-        for action in actions:
-            parameter_id = str(action.get("parameter_id", ""))
-            label = (
-                self._keithley_parameter_label(node, parameter_id)
-                if device_module == "keithley"
-                else {
-                    "spectrum.start_frequency": "Start frequency",
-                    "spectrum.stop_frequency": "Stop frequency",
-                    "spectrum.reference_level": "Reference level",
-                    "spectrum.points": "Trace points",
-                    "sg.frequency": "RF frequency",
-                    "sg.power": "RF power",
-                    "advanced.rbw_mode": "RBW mode",
-                    "advanced.rbw": "Resolution bandwidth",
-                    "advanced.vbw_mode": "VBW mode",
-                    "advanced.vbw": "Video bandwidth",
-                    "advanced.detector": "Detector",
-                    "advanced.attenuation_mode": "RF attenuation mode",
-                    "advanced.attenuation": "RF attenuation",
-                    "advanced.preamplifier_enabled": "Preamplifier",
-                    "advanced.sweep_time_mode": "Sweep-time mode",
-                    "advanced.sweep_time": "Sweep time",
-                }.get(parameter_id, parameter_id)
-            )
-            mode = str(action.get("mode", "set"))
-            value = str(action.get("value", ""))
-            if mode != "sweep":
-                informational_row(
-                    [label, f"Set to {value}", "SET"],
-                    color=tokens.neutral,
-                    badge="=",
-                )
-                continue
-            segments = action.get("segments")
-            dimension = (
-                self._keithley_parameter_dimension(node, parameter_id)
-                if device_module == "keithley"
-                else {
-                    "spectrum.start_frequency": DIMENSION_FREQUENCY,
-                    "spectrum.stop_frequency": DIMENSION_FREQUENCY,
-                      "spectrum.reference_level": DIMENSION_DBM,
-                      "sg.frequency": DIMENSION_FREQUENCY,
-                      "sg.power": DIMENSION_DBM,
-                  }.get(parameter_id)
-            )
-            if not isinstance(segments, list) or not segments or dimension is None:
-                informational_row(
-                    [label, "Sweep range requires ROI definition", "ROI"],
-                    color=tokens.caution,
-                    badge="!",
-                )
-                continue
-            try:
-                generated = generate_sweep_points(segments, dimension)
-                stages = generate_sweep_stage_points(segments, dimension)
-                first_value = segments[0].get(
-                    "value", segments[0].get("start", "?")
-                )
-                last_value = segments[-1].get(
-                    "value", segments[-1].get("stop", "?")
-                )
-                sweep_detail = (
-                    f"{first_value} → {last_value} · "
-                    f"{len(generated):,} pts · {len(segments)} ROI"
-                )
-            except Exception:
-                informational_row(
-                    [label, "Invalid sweep range", "ERROR"],
-                    color=tokens.danger,
-                    badge="!",
-                )
-                continue
-            sweep_row = informational_row(
-                [label, sweep_detail, "SWEEP"],
-                color=tokens.accent,
-                badge="S",
-                metadata={
-                    "kind": "sweep_parameter",
-                    "device_module": device_module,
-                    "owner_node_id": node.id,
-                    "parameter_id": parameter_id,
-                    "stage_index": None,
-                },
-            )
-            for index, (segment, stage_points) in enumerate(
-                zip(segments, stages, strict=True), start=1
-            ):
-                single_value = segment.get("value")
-                spacing = (
-                    "Single value"
-                    if single_value is not None
-                    else str(segment.get("spacing", "linear")).title()
-                )
-                stage_range = (
-                    str(single_value)
-                    if single_value is not None
-                    else f"{segment.get('start', '?')} → {segment.get('stop', '?')}"
-                )
-                stage = QTreeWidgetItem(
-                    [
-                        f"ROI {index}",
-                        f"{stage_range} · {len(stage_points):,} pts · {spacing}",
-                        "STAGE",
-                    ]
-                )
-                stage.setData(
-                    0,
-                    self.operator_row_role,
-                    {
-                        "kind": "roi_stage",
-                        "device_module": device_module,
-                        "owner_node_id": node.id,
-                        "parameter_id": parameter_id,
-                        "stage_index": index - 1,
-                    },
-                )
-                stage.setIcon(
-                    0,
-                    self._tree_badge_icon("ROI stage", tokens.focus, str(index)),
-                )
-                stage_link_font = stage.font(0)
-                stage_link_font.setUnderline(True)
-                stage.setFont(0, stage_link_font)
-                stage.setData(
-                    0, Qt.ItemDataRole.ForegroundRole, QBrush(QColor(tokens.accent))
-                )
-                stage.setForeground(1, QBrush(QColor(tokens.text_muted)))
-                stage.setForeground(2, QBrush(QColor(tokens.text_muted)))
-                stage.setToolTip(
-                    0,
-                    "Click to open this stage directly in the ROI editor.",
-                )
-                sweep_row.addChild(stage)
-
-        if device_module == "anritsu" and node.data.get("acquire_single"):
-            informational_row(
-                [
-                    "Single spectrum",
-                    f"Acquire {node.data.get('trace', 'TRAC1')} at each parent-loop point",
-                    "ACQUIRE",
-                ],
-                color=tokens.success,
-                badge="A",
-            )
-
-        output_policy = str(node.data.get("output_policy", "unchanged"))
-        if output_policy in {"unchanged", "on", "off", "on_keep", "continue"}:
-            is_on = output_policy in {"on", "on_keep", "continue"}
-            description, status, badge = {
-                "unchanged": ("Keep OUTPUT OFF (safe default)", "OFF", "OFF"),
-                "on": ("Enable safely for this node; switch OFF on exit", "ON → OFF", "ON"),
-                "on_keep": ("Enable safely and keep confirmed ON after this node", "KEEP ON", "ON"),
-                "continue": ("Inherit confirmed ON; apply live updates only", "CONTINUE", "↻"),
-                "off": ("Force and confirm OUTPUT OFF for this node", "OFF", "OFF"),
-            }[output_policy]
-            informational_row(
-                [
-                    "Output",
-                    description,
-                    status,
-                ],
-                color=tokens.success if is_on else tokens.neutral,
-                badge=badge,
-                metadata={"kind": "output_policy", "owner_node_id": node.id},
-                tooltip="Click to choose the output mode for this device block.",
-            )
-
     @staticmethod
     def _native_sweep_segments(node: RecipeNode) -> list[dict[str, object]]:
         """Return one visual ROI contract for either supported sweep syntax."""
@@ -3390,89 +3020,6 @@ class RecipePage(QWidget):
                 "spacing": node.data.get("spacing", "linear"),
             }
         ]
-
-    def _add_native_sweep_roi_rows(
-        self, node: RecipeNode, parent: QTreeWidgetItem
-    ) -> None:
-        """Expose every native sweep interval as a direct, editable ROI row."""
-
-        tokens = self._recipe_tokens()
-        if node.type != "sweep":
-            return
-        target = str(node.data.get("target", ""))
-        definition = next(
-            (
-                item
-                for item in _SWEEPABLE_PARAMETERS
-                if item["target"] == target
-            ),
-            None,
-        )
-        dimension = (
-            definition["dimension"]
-            if definition is not None
-            else SWEEP_DIMENSIONS.get(target)
-        )
-        segments = self._native_sweep_segments(node)
-        if dimension is None or not segments:
-            return
-        try:
-            stages = generate_sweep_stage_points(segments, dimension)
-        except Exception as exc:
-            self._emit_tree_diagnostic(
-                "TREE_ROI_RENDER_REJECTED",
-                node_id=node.id,
-                target=target,
-                error_type=type(exc).__name__,
-                error=str(exc),
-            )
-            return
-        for index, (segment, stage_points) in enumerate(
-            zip(segments, stages, strict=True), start=1
-        ):
-            single_value = segment.get("value")
-            stage_range = (
-                str(single_value)
-                if single_value is not None
-                else f"{segment.get('start', '?')} → {segment.get('stop', '?')}"
-            )
-            spacing = (
-                "Single value"
-                if single_value is not None
-                else str(segment.get("spacing", "linear")).title()
-            )
-            row = QTreeWidgetItem(
-                [
-                    f"ROI {index}",
-                    f"{stage_range} · {len(stage_points):,} pts · {spacing}",
-                    "STAGE",
-                ]
-            )
-            row.setData(
-                0,
-                self.operator_row_role,
-                {
-                    "kind": "native_sweep_roi",
-                    "owner_node_id": node.id,
-                    "parameter_id": target,
-                    "stage_index": index - 1,
-                },
-            )
-            row.setIcon(
-                0, self._tree_badge_icon("ROI stage", tokens.focus, str(index))
-            )
-            link_font = row.font(0)
-            link_font.setUnderline(True)
-            row.setFont(0, link_font)
-            row.setData(
-                0,
-                Qt.ItemDataRole.ForegroundRole,
-                QBrush(QColor(tokens.accent)),
-            )
-            row.setForeground(1, QBrush(QColor(tokens.text_muted)))
-            row.setForeground(2, QBrush(QColor(tokens.text_muted)))
-            row.setToolTip(0, "Click to edit this ROI without changing loop children.")
-            parent.addChild(row)
 
     def _tree_status(self, node: RecipeNode, detail: str) -> tuple[str, str]:
         tokens = self._recipe_tokens()
@@ -3979,211 +3526,104 @@ class RecipePage(QWidget):
         painter.end()
         return QIcon(pixmap)
 
-    def _node_selected(
-        self,
-        item: QTreeWidgetItem | None,
-        _previous: QTreeWidgetItem | None,
-    ) -> None:
-        editable_now = self._tree_editing_allowed()
-        selected_node = (
-            item.data(0, Qt.ItemDataRole.UserRole) if item is not None else None
-        )
-        movable = (
-            editable_now
-            and isinstance(selected_node, RecipeNode)
-            and item is not None
-            and item.parent() is not None
-        )
-        wrap_possible = bool(
-            editable_now
-            and item is not None
-            and not self._tree_item_is_in_finally(item)
+    def _node_selected(self, *_unused: object) -> None:
+        """Refresh editing controls from the selected semantic/source identity."""
+
+        editable = self._tree_editing_allowed()
+        semantic = self._selected_semantic_node()
+        location = self._selected_recipe_location()
+        node = location[0] if location is not None else None
+        movable = bool(editable and location is not None and location[1] is not None)
+        raw_actions = node.data.get("parameter_actions") if node is not None else None
+        actions = raw_actions if isinstance(raw_actions, (list, tuple)) else ()
+        has_roi = bool(
+            node is not None
             and (
-                (
-                    isinstance(selected_node, RecipeNode)
-                    and (item.parent() is not None or bool(selected_node.children))
-                )
-                or (
-                    RecipeTreeWidget.structural_kind(item)
-                    == RecipeTreeWidget.else_container
-                    and RecipeTreeWidget._logical_child_count(item) > 0
+                semantic is not None and semantic.kind is SemanticNodeKind.SWEEP_AXIS
+                or node.type == "sweep"
+                or any(
+                    isinstance(action, dict) and action.get("mode") == "sweep"
+                    for action in actions
                 )
             )
         )
-        self.delete_node_button.setEnabled(movable)
-        self.duplicate_node_button.setEnabled(movable)
-        self.move_up_button.setEnabled(movable)
-        self.move_down_button.setEnabled(movable)
-        self.wrap_repeat_button.setEnabled(wrap_possible)
-        if item is None:
+        has_device = bool(
+            node is not None
+            and (
+                node.data.get("device_module")
+                or self._legacy_device_configuration_node(node) is not None
+            )
+        )
+        for button in (
+            self.delete_node_button, self.duplicate_node_button,
+            self.move_up_button, self.move_down_button,
+        ):
+            button.setEnabled(movable)
+        self.wrap_repeat_button.setEnabled(
+            bool(
+                editable and node is not None and location is not None
+                and not location[4]
+                and (location[1] is not None or node.children)
+            )
+        )
+        if semantic is None:
             self.selection_context.setText("Select a block in the measurement tree")
+            self.inspector_summary.setText(
+                "Select a node to see its measurement role and configuration."
+            )
             self.inspector.clear()
-            self.inspector_summary.setText("Select a node to see its measurement role and configuration.")
             self.open_editor_button.setEnabled(False)
             self.edit_device_button.setEnabled(False)
             self.edit_generator_button.setEnabled(False)
             return
-        self.selection_context.setText(item.text(0).strip() or "Selected tree row")
-        operator_row = item.data(0, self.operator_row_role)
-        if isinstance(operator_row, dict):
-            if operator_row.get("kind") == "output_policy":
-                owner_id = str(operator_row.get("owner_node_id", ""))
-                self.inspector_summary.setText(
-                    "<b>Output mode</b><br>Click to choose this block's output policy"
-                )
-                self.open_editor_button.setEnabled(editable_now)
-                self.open_editor_button.setText("Edit output mode")
-                self.edit_device_button.setEnabled(False)
-                self.edit_generator_button.setEnabled(False)
-                self.inspector.setPlainText(
-                    f"Device node: {owner_id}\n\n"
-                    "Choose how output behaves for this recipe block. The selection "
-                    "is validated against safety limits again before execution."
-                )
-                return
-            stage_index = operator_row.get("stage_index")
-            parameter_id = str(operator_row.get("parameter_id", ""))
-            owner_id = str(operator_row.get("owner_node_id", ""))
-            stage_label = (
-                f"ROI {int(stage_index) + 1}"
-                if isinstance(stage_index, int)
-                else "Sweep axis"
-            )
+        self.selection_context.setText(semantic.label or "Selected measurement row")
+        historical = self._historical_objects_by_semantic_id.get(semantic.semantic_id)
+        if isinstance(historical, ThatecDevice):
             self.inspector_summary.setText(
-                f"<b>{stage_label}</b><br>{parameter_id} · direct ROI editor"
+                f"<b>Recorded device configuration</b><br>{historical.name}"
             )
-            self.open_editor_button.setEnabled(editable_now)
-            self.open_editor_button.setText("Edit ROI")
-            self.edit_device_button.setEnabled(False)
-            self.edit_generator_button.setEnabled(editable_now)
             self.inspector.setPlainText(
-                f"Device node: {owner_id}\n"
-                f"Parameter: {parameter_id}\n"
-                f"Selected: {stage_label}\n\n"
-                "Click this row or use Open parameter editor to edit ROI directly. "
-                "The device configuration window will not be opened."
-            )
-            return
-        node = item.data(0, Qt.ItemDataRole.UserRole)
-        if isinstance(node, ThatecDevice):
-            self.inspector_summary.setText(
-                f"<b>Recorded device configuration</b><br>{node.name}"
-            )
-            self.open_editor_button.setEnabled(False)
-            self.edit_device_button.setEnabled(False)
-            self.edit_generator_button.setEnabled(False)
-            self.inspector.setPlainText(
-                "\n".join(f"{key}: {value}" for key, value in node.values)
+                "\n".join(f"{key}: {value}" for key, value in historical.values)
                 or "No public device parameters were saved."
             )
-            return
-        if isinstance(node, ThatecRow):
-            definition = "\n".join(f"{key}: {value}" for key, value in node.definition)
-            metadata = "\n".join(f"{key}: {value}" for key, value in node.metadata)
+        elif isinstance(historical, ThatecRow):
             self.inspector_summary.setText(
-                f"<b>Recorded {node.function or 'THATEC'} node</b><br>"
-                f"{node.device_name or 'internal'} • {node.control_name or 'internal'}"
+                f"<b>Recorded {historical.function or 'THATEC'} node</b><br>"
+                f"{historical.device_name or 'internal'} · "
+                f"{historical.control_name or 'internal'}"
             )
-            self.open_editor_button.setEnabled(False)
-            self.edit_device_button.setEnabled(False)
-            self.edit_generator_button.setEnabled(False)
             self.inspector.setPlainText(
-                f"THATEC row: {node.id}\n"
-                f"Recorded shape: {node.shape or 'no measurement data'}\n"
-                f"Timestamps: {node.timestamp_count}\n\n"
-                f"Definition\n{definition or '—'}\n\n"
-                f"Measurement metadata\n{metadata or '—'}"
+                f"THATEC row: {historical.id}\n"
+                f"Recorded shape: {historical.shape or 'no measurement data'}\n"
+                f"Timestamps: {historical.timestamp_count}\n\n"
+                + "\n".join(f"{key}: {value}" for key, value in historical.metadata)
             )
-            return
-        if not isinstance(node, RecipeNode):
-            self.inspector_summary.setText("Safety cleanup runs after success, operator stop and faults.")
-            self.open_editor_button.setEnabled(False)
-            self.edit_device_button.setEnabled(False)
-            self.edit_generator_button.setEnabled(False)
+        elif node is None:
+            self.inspector_summary.setText("Generated measurement structure · read-only")
             self.inspector.setPlainText(
-                "Finally actions run during normal completion, operator stop and fault cleanup. "
-                "They may only ramp Keithley to zero or disable outputs."
+                str(semantic.data.get("detail", "Generated from the accepted recipe."))
             )
-            return
-        label, detail, _icon = self._tree_presentation(node, 0, False)
-        self.inspector_summary.setText(
-            f"<b>{label}</b><br>{detail} • {len(node.children)} child node(s)"
-        )
-        has_device_settings = bool(
-            node.data.get("device_module")
-            or self._legacy_device_configuration_node(node) is not None
-        )
-        has_roi = node.type == "sweep" or (
-            bool(node.data.get("device_module"))
-            and any(
-                isinstance(action, dict) and action.get("mode") == "sweep"
-                for action in node.data.get("parameter_actions", [])
+        else:
+            self.inspector_summary.setText(
+                f"<b>{semantic.label}</b><br>{node.type} · {len(node.children)} child node(s)"
             )
-        )
-        is_comment = node.type == "comment"
-        is_acquisition = node.type in {
-            "acquire_reference",
-            "acquire_spectrum",
-        }
+            self.inspector.setPlainText(
+                "\n".join((
+                    f"ID: {node.id}", f"Type: {node.type}",
+                    f"Children: {len(node.children)}",
+                    f"Else children: {len(node.else_children)}", "", "Fields:",
+                    json.dumps(node.data, ensure_ascii=False, indent=2, default=str),
+                ))
+            )
         self.open_editor_button.setText(
-            "Device settings"
-            if has_device_settings
-            else "Edit ROI"
-            if has_roi
-            else "Acquisition settings"
-            if is_acquisition
-            else "Edit comment"
-            if is_comment
+            "Device settings" if has_device else "Edit ROI" if has_roi
+            else "Acquisition settings" if node is not None and node.type in {"acquire_reference", "acquire_spectrum"}
+            else "Edit comment" if node is not None and node.type == "comment"
             else "Action settings"
         )
-        self.open_editor_button.setEnabled(editable_now)
-        self.edit_device_button.setEnabled(editable_now and has_device_settings)
-        self.edit_generator_button.setEnabled(editable_now and has_roi)
-        actions = (
-            tuple(action for action in self._plan.actions if action.node_id == node.id)
-            if self._plan is not None
-            else ()
-        )
-        setpoints: dict[str, tuple[float, float]] = {}
-        for action in actions:
-            for name, value in action.setpoints_si.items():
-                previous = setpoints.get(name, (value, value))
-                setpoints[name] = (min(previous[0], value), max(previous[1], value))
-        lines = [
-            f"ID: {node.id}",
-            f"Type: {node.type}",
-            f"Children: {len(node.children)}",
-            f"Else children: {len(node.else_children)}",
-            f"Expanded actions: {len(actions)}",
-            "",
-            "Fields:",
-            json.dumps(node.data, ensure_ascii=False, indent=2, default=str),
-        ]
-        if setpoints:
-            lines.extend(("", "Expanded setpoint ranges:"))
-            lines.extend(
-                f"  {name}: {minimum:.12g} .. {maximum:.12g} SI"
-                for name, (minimum, maximum) in sorted(setpoints.items())
-            )
-        self.inspector.setPlainText("\n".join(lines))
-
-    def _operator_row_clicked(
-        self, item: QTreeWidgetItem, _column: int
-    ) -> None:
-        if not self._tree_editing_allowed():
-            return
-        metadata = item.data(0, self.operator_row_role)
-        if (
-            isinstance(metadata, dict)
-            and metadata.get("kind")
-            in {"sweep_parameter", "roi_stage", "native_sweep_roi"}
-        ):
-            if metadata.get("kind") == "native_sweep_roi":
-                self._edit_native_sweep_roi_from_tree(dict(metadata))
-            else:
-                self._edit_device_roi_from_tree(dict(metadata))
-        elif isinstance(metadata, dict) and metadata.get("kind") == "output_policy":
-            self._edit_output_policy_from_tree(dict(metadata))
+        self.open_editor_button.setEnabled(editable and node is not None)
+        self.edit_device_button.setEnabled(editable and has_device)
+        self.edit_generator_button.setEnabled(editable and has_roi)
 
     def _move_recipe_node(
         self,
@@ -4227,141 +3667,184 @@ class RecipePage(QWidget):
             return False
         return True
 
-    def _handle_tree_move_request(self, request: RecipeTreeMoveRequest) -> None:
-        """Commit a drag only when the source transaction has succeeded."""
+    def _handle_semantic_tree_move_request(
+        self, request: MeasurementTreeMoveRequest
+    ) -> None:
+        """Translate a Fluent drop directly through the authored recipe graph."""
 
-        request.accepted = self._move_recipe_node(
-            request.node_id,
-            request.destination_parent_id,
-            request.destination_branch,
-            request.destination_index,
-        )
+        try:
+            source_semantic = self.tree_model.tree.require(request.source_semantic_id)
+            target_semantic = self.tree_model.tree.require(request.destination_semantic_id)
+            source_id = source_semantic.source_node_id
+            target_id = target_semantic.source_node_id
+            if not source_id:
+                raise ConfigurationError("This generated measurement row cannot be moved.")
+            locations = self._recipe_node_locations()
+            source_location = locations.get(source_id)
+            if source_location is None or source_location[1] is None:
+                raise ConfigurationError("The measurement-sequence root cannot be moved.")
+            if request.placement is TreeDropPlacement.ROOT_END:
+                root_location = next(
+                    (location for location in locations.values() if location[1] is None),
+                    None,
+                )
+                if root_location is None:
+                    raise ConfigurationError("The recipe root is unavailable.")
+                root_node = root_location[0]
+                destination_parent_id = root_node.id
+                destination_branch = "children"
+                destination_index = len(root_node.children)
+                destination_in_finally = False
+            elif target_semantic.kind is SemanticNodeKind.FINALLY:
+                recipe = parse_recipe_text(self._tree_source, origin="tree move")
+                destination_parent_id = "__finally__"
+                destination_branch = "children"
+                destination_index = len(recipe.finally_nodes)
+                destination_in_finally = True
+            else:
+                if not target_id:
+                    raise ConfigurationError("Drop onto an authored recipe block.")
+                target_location = locations.get(target_id)
+                if target_location is None:
+                    raise ConfigurationError("The selected drop target is no longer available.")
+                target_node, parent_id, branch, target_index, target_in_finally = target_location
+                if (
+                    request.placement is TreeDropPlacement.INSIDE
+                    and self._node_accepts_children(target_node)
+                ):
+                    destination_parent_id = target_node.id
+                    destination_branch = "children"
+                    destination_index = len(target_node.children)
+                    destination_in_finally = target_in_finally
+                else:
+                    if parent_id is None:
+                        raise ConfigurationError("Drop beside a non-root recipe block.")
+                    destination_parent_id = parent_id
+                    destination_branch = branch
+                    destination_index = target_index + (
+                        0 if request.placement is TreeDropPlacement.BEFORE else 1
+                    )
+                    destination_in_finally = target_in_finally
+            if source_location[4] != destination_in_finally:
+                raise ConfigurationError("Blocks cannot cross the Finally safety boundary.")
+            ancestor_id: str | None = destination_parent_id
+            while ancestor_id and ancestor_id != "__finally__":
+                if ancestor_id == source_id:
+                    raise ConfigurationError("A block cannot be moved into itself or its own child.")
+                ancestor = locations.get(ancestor_id)
+                ancestor_id = ancestor[1] if ancestor is not None else None
+            request.accepted = self._move_recipe_node(
+                source_id,
+                destination_parent_id,
+                destination_branch,
+                destination_index,
+            )
+        except Exception as exc:
+            self._tree_drop_rejected(str(exc))
+            request.accepted = False
 
-    def _find_tree_item(self, node_id: str) -> QTreeWidgetItem | None:
-        def visit(item: QTreeWidgetItem) -> QTreeWidgetItem | None:
-            node = item.data(0, Qt.ItemDataRole.UserRole)
-            if isinstance(node, RecipeNode) and node.id == node_id:
-                return item
-            for child_index in range(item.childCount()):
-                found = visit(item.child(child_index))
-                if found is not None:
-                    return found
-            return None
+    def _handle_semantic_library_drop_request(
+        self, request: MeasurementTreeLibraryDropRequest
+    ) -> None:
+        """Resolve an external library drop against semantic/source identities."""
 
-        for top_index in range(self.tree.topLevelItemCount()):
-            found = visit(self.tree.topLevelItem(top_index))
-            if found is not None:
-                return found
-        return None
+        try:
+            target = self.tree_model.tree.require(request.destination_semantic_id)
+            locations = self._recipe_node_locations()
+            if request.placement is TreeDropPlacement.ROOT_END:
+                root = next(
+                    (entry[0] for entry in locations.values() if entry[1] is None),
+                    None,
+                )
+                if root is None:
+                    raise ConfigurationError("The recipe root is unavailable.")
+                parent_id, branch, index = root.id, "children", len(root.children)
+            elif target.kind is SemanticNodeKind.FINALLY:
+                recipe = parse_recipe_text(self._tree_source, origin="library drop")
+                parent_id, branch, index = (
+                    "__finally__", "children", len(recipe.finally_nodes)
+                )
+            else:
+                source_id = target.source_node_id
+                location = locations.get(source_id) if source_id else None
+                if location is None:
+                    raise ConfigurationError("Drop onto an authored recipe block.")
+                node, owner_id, owner_branch, owner_index, _in_finally = location
+                if (
+                    request.placement is TreeDropPlacement.INSIDE
+                    and self._node_accepts_children(node)
+                ):
+                    parent_id, branch, index = node.id, "children", len(node.children)
+                elif owner_id is not None:
+                    parent_id, branch = owner_id, owner_branch
+                    index = owner_index + (
+                        0 if request.placement is TreeDropPlacement.BEFORE else 1
+                    )
+                else:
+                    raise ConfigurationError("Drop beside a non-root recipe block.")
+            request.accepted = self._drop_library_block(
+                request.drag_kind, parent_id, branch, index
+            )
+        except Exception as exc:
+            self._tree_drop_rejected(str(exc))
+            request.accepted = False
+
+    def _show_semantic_tree_context_menu(
+        self, semantic_id: str, global_position: object
+    ) -> None:
+        self._select_semantic_node(semantic_id)
+        self._show_tree_context_menu(None, global_position=global_position)
+
+    def _selected_semantic_node(self) -> SemanticTreeNode | None:
+        semantic_id = self._selected_semantic_id
+        return self.tree_model.tree.by_id.get(semantic_id) if semantic_id else None
 
     def _builder_parent(self) -> tuple[str, str]:
-        """Return the selected container, or the root as the safe default."""
+        """Return an insertion container from the accepted recipe graph."""
 
         self._builder_source()
-        current = self.tree.currentItem()
-        item = current
-        while item is not None:
-            structural = RecipeTreeWidget.structural_kind(item)
-            if structural == RecipeTreeWidget.finally_container:
-                return "__finally__", "children"
-            if structural == RecipeTreeWidget.else_container:
-                owner_item = item.parent()
-                owner = (
-                    owner_item.data(0, Qt.ItemDataRole.UserRole)
-                    if owner_item is not None
-                    else None
-                )
-                if isinstance(owner, RecipeNode) and owner.type == "if":
-                    return owner.id, "else"
-            node = item.data(0, Qt.ItemDataRole.UserRole)
-            if isinstance(node, RecipeNode) and node.type in {
-                "sequence",
-                "sweep",
-                "repeat",
-                "if",
-            }:
-                # A selected leaf belongs to the nearest container, whereas a
-                # selected container is itself the insertion target.
-                return node.id, "children"
-            item = item.parent()
-        root = self.tree.topLevelItem(0)
-        node = root.data(0, Qt.ItemDataRole.UserRole) if root is not None else None
-        if isinstance(node, RecipeNode):
+        semantic = self._selected_semantic_node()
+        if semantic is not None and semantic.kind is SemanticNodeKind.FINALLY:
+            return "__finally__", "children"
+        location = self._selected_recipe_location()
+        if location is None:
+            roots = [entry for entry in self._recipe_node_locations().values() if entry[1] is None]
+            if not roots:
+                raise ConfigurationError("Load a valid recipe before editing its tree.")
+            return roots[0][0].id, "children"
+        node, parent_id, branch, _index, _in_finally = location
+        if self._node_accepts_children(node):
             return node.id, "children"
-        raise ConfigurationError("Load a valid recipe before editing its tree.")
+        if parent_id is not None:
+            return parent_id, branch
+        return node.id, "children"
 
     def _library_default_destination(self) -> tuple[str, str, int]:
-        """Insert after the selection; never silently turn it into a child."""
+        """Insert after selection, or inside only after an explicit request."""
 
         self._builder_source()
-        current = self.tree.currentItem()
-        node = (
-            current.data(0, Qt.ItemDataRole.UserRole)
-            if current is not None
-            else None
-        )
-        root = self.tree.topLevelItem(0)
-        root_node = (
-            root.data(0, Qt.ItemDataRole.UserRole) if root is not None else None
-        )
-        if not isinstance(root_node, RecipeNode):
+        locations = self._recipe_node_locations()
+        roots = [entry for entry in locations.values() if entry[1] is None]
+        if not roots:
             raise ConfigurationError("Load a valid recipe before editing its tree.")
-        if (
-            current is not None
-            and RecipeTreeWidget.structural_kind(current)
-            == RecipeTreeWidget.finally_container
-        ):
-            return "__finally__", "children", RecipeTreeWidget._logical_child_count(current)
+        root = roots[0][0]
+        semantic = self._selected_semantic_node()
+        if semantic is not None and semantic.kind is SemanticNodeKind.FINALLY:
+            recipe = parse_recipe_text(self._tree_source, origin="tree insert")
+            return "__finally__", "children", len(recipe.finally_nodes)
+        location = self._selected_recipe_location()
+        if location is None:
+            return root.id, "children", len(root.children)
+        node, parent_id, branch, index, _in_finally = location
         if self._library_force_inside:
-            if not isinstance(node, RecipeNode) or not RecipeTreeWidget.node_accepts_children(node):
+            if not self._node_accepts_children(node):
                 raise ConfigurationError(
-                    "Select Sequence, Repeat, Sweep, If, or an ROI loop before adding inside."
+                    "Select Sequence, Repeat, Sweep, If, or a device ROI loop before adding inside."
                 )
             return node.id, "children", len(node.children)
-        if not isinstance(node, RecipeNode) or current is root:
-            return root_node.id, "children", RecipeTreeWidget._logical_child_count(root)
-        parent = current.parent()
-        destination = self._tree_parent_destination(parent)
-        if destination is None:
-            return root_node.id, "children", RecipeTreeWidget._logical_child_count(root)
-        parent_id, branch = destination
-        return (
-            parent_id,
-            branch,
-            RecipeTreeWidget._logical_index(parent, current, below=True),
-        )
-
-    @staticmethod
-    def _tree_parent_destination(
-        parent: QTreeWidgetItem | None,
-    ) -> tuple[str, str] | None:
-        if parent is None:
-            return None
-        structural = RecipeTreeWidget.structural_kind(parent)
-        if structural == RecipeTreeWidget.finally_container:
-            return "__finally__", "children"
-        if structural == RecipeTreeWidget.else_container:
-            owner_item = parent.parent()
-            owner = (
-                owner_item.data(0, Qt.ItemDataRole.UserRole)
-                if owner_item is not None
-                else None
-            )
-            if isinstance(owner, RecipeNode) and owner.type == "if":
-                return owner.id, "else"
-            return None
-        if (
-            structural == RecipeTreeWidget.execution_container
-            and parent.parent() is not None
-        ):
-            owner = parent.parent().data(0, Qt.ItemDataRole.UserRole)
-            if isinstance(owner, RecipeNode):
-                return owner.id, "children"
-            return None
-        owner = parent.data(0, Qt.ItemDataRole.UserRole)
-        if isinstance(owner, RecipeNode):
-            return owner.id, "children"
-        return None
+        if parent_id is None:
+            return root.id, "children", len(root.children)
+        return parent_id, branch, index + 1
 
     @staticmethod
     def _new_node_id(prefix: str) -> str:
@@ -4389,7 +3872,7 @@ class RecipePage(QWidget):
         )
 
     def _restore_tree_history_source(self, source: str, status: str) -> None:
-        recipe = parse_recipe_text(source, origin="tree-builder-history")
+        parse_recipe_text(source, origin="tree-builder-history")
         self._loading_source = True
         self.editor.setPlainText(source)
         self._loading_source = False
@@ -4399,7 +3882,6 @@ class RecipePage(QWidget):
         self._plan = None
         self.run_button.setEnabled(False)
         self.plan_preflight_changed.emit(None)
-        self._populate_recipe_tree(recipe.root, recipe.finally_nodes, None)
         self.summary.setText("Recipe tree changed; compile it again before running.")
         self._autosave_timer.start()
         self.status.emit(status)
@@ -4432,9 +3914,11 @@ class RecipePage(QWidget):
     ) -> None:
         self._leave_historical_sweep_mode()
         previous = self._tree_source
-        previous_plan = self._plan
         try:
             recipe = parse_recipe_text(source, origin="tree-builder")
+            snapshot = normalize_recipe_tree(
+                recipe, self._device_registry.sweep_providers()
+            )
         except Exception as exc:
             self._emit_tree_diagnostic(
                 "TREE_SOURCE_REJECTED",
@@ -4445,24 +3929,6 @@ class RecipePage(QWidget):
             )
             raise
         self._plan = None
-        try:
-            self._populate_recipe_tree(
-                recipe.root,
-                recipe.finally_nodes,
-                None,
-                selected_node_id,
-            )
-        except Exception as exc:
-            self._plan = previous_plan
-            self._emit_tree_diagnostic(
-                "TREE_RENDER_REJECTED",
-                operation=status,
-                root_id=recipe.root.id,
-                source_length=len(source),
-                error_type=type(exc).__name__,
-                error=str(exc),
-            )
-            raise
         if source != previous and previous:
             try:
                 parse_recipe_text(previous, origin="recipe-edit-history")
@@ -4478,7 +3944,8 @@ class RecipePage(QWidget):
         self._loading_source = False
         self._close_discard_confirmed = False
         self._tree_source = source
-        self._refresh_semantic_tree(source)
+        self.tree_model.replace_tree(snapshot)
+        self._select_source_node(selected_node_id or recipe.root.id)
         self.run_button.setEnabled(False)
         self.plan_preflight_changed.emit(None)
         self.summary.setText("Recipe tree changed; compile it again before running.")
@@ -4622,38 +4089,22 @@ class RecipePage(QWidget):
 
         try:
             self._builder_source()
-            item = self.tree.currentItem()
-            if item is None:
+            location = self._selected_recipe_location()
+            if location is None:
                 raise ConfigurationError(
                     "Select a block, or select the recipe root to repeat all root steps."
                 )
-            if self._tree_item_is_in_finally(item):
+            node, parent_id, _branch, _index, in_finally = location
+            if in_finally:
                 raise ConfigurationError(
                     "Finally safety actions cannot be wrapped in Repeat."
                 )
-            node = item.data(0, Qt.ItemDataRole.UserRole)
-            if isinstance(node, RecipeNode):
-                if item.parent() is None:
-                    node_ids = tuple(child.id for child in node.children)
-                    selection_label = f"All {len(node_ids)} root step(s)"
-                else:
-                    node_ids = (node.id,)
-                    selection_label = f'The selected block "{item.text(0)}"'
-            elif RecipeTreeWidget.structural_kind(item) == RecipeTreeWidget.else_container:
-                owner_item = item.parent()
-                owner = (
-                    owner_item.data(0, Qt.ItemDataRole.UserRole)
-                    if owner_item is not None
-                    else None
-                )
-                if not isinstance(owner, RecipeNode):
-                    raise ConfigurationError("The selected Else branch is not editable.")
-                node_ids = tuple(child.id for child in owner.else_children)
-                selection_label = f"All {len(node_ids)} Else step(s)"
+            if parent_id is None:
+                node_ids = tuple(child.id for child in node.children)
+                selection_label = f"All {len(node_ids)} root step(s)"
             else:
-                raise ConfigurationError(
-                    "Select a recipe block or the recipe root before wrapping."
-                )
+                node_ids = (node.id,)
+                selection_label = f'The selected block "{node.id}"'
             if not node_ids:
                 raise ConfigurationError(
                     "The selected container is empty. Add a real action before creating Repeat."
@@ -4754,17 +4205,7 @@ class RecipePage(QWidget):
 
         if not self._tree_editing_allowed():
             return
-        item = self.tree.currentItem()
-        operator_row = (
-            item.data(0, self.operator_row_role) if item is not None else None
-        )
-        if isinstance(operator_row, dict):
-            if operator_row.get("kind") == "output_policy":
-                self._edit_output_policy_from_tree(dict(operator_row))
-            else:
-                self._edit_selected_roi()
-            return
-        node = item.data(0, Qt.ItemDataRole.UserRole) if item is not None else None
+        node = self._selected_recipe_node()
         anritsu_role = (
             self._anritsu_node_role(node) if isinstance(node, RecipeNode) else None
         )
@@ -4816,11 +4257,13 @@ class RecipePage(QWidget):
         return None
 
     def _edit_action_node(self, node: RecipeNode) -> None:
-        item = self.tree.currentItem()
         dialog = ActionNodeEditorDialog(
             node,
             self,
-            in_finally=self._tree_item_is_in_finally(item),
+            in_finally=bool(
+                (location := self._recipe_node_locations().get(node.id))
+                and location[4]
+            ),
         )
         if dialog.exec() != QDialog.DialogCode.Accepted:
             return
@@ -4844,10 +4287,10 @@ class RecipePage(QWidget):
         """Edit only the output contract represented by the compact child row."""
 
         owner_id = str(metadata.get("owner_node_id", ""))
-        owner = self._find_tree_item(owner_id)
-        node = owner.data(0, Qt.ItemDataRole.UserRole) if owner is not None else None
-        if not isinstance(node, RecipeNode):
+        location = self._recipe_node_locations().get(owner_id)
+        if location is None:
             return
+        node = location[0]
         dialog = OutputPolicyDialog(str(node.data.get("output_policy", "unchanged")), self)
         if dialog.exec() != QDialog.DialogCode.Accepted:
             return
@@ -4866,27 +4309,22 @@ class RecipePage(QWidget):
             QMessageBox.warning(self, "Output mode", str(exc))
 
     def _edit_selected_roi(self) -> None:
-        item = self.tree.currentItem()
-        operator_row = (
-            item.data(0, self.operator_row_role) if item is not None else None
-        )
-        if isinstance(operator_row, dict):
-            if operator_row.get("kind") == "output_policy":
-                self._edit_output_policy_from_tree(dict(operator_row))
-            elif operator_row.get("kind") == "native_sweep_roi":
-                self._edit_native_sweep_roi_from_tree(dict(operator_row))
-            else:
-                self._edit_device_roi_from_tree(dict(operator_row))
-            return
-        node = item.data(0, Qt.ItemDataRole.UserRole) if item is not None else None
+        node = self._selected_recipe_node()
+        semantic = self._selected_semantic_node()
         if isinstance(node, RecipeNode) and node.type == "sweep":
-            self._edit_selected_generator(node=node)
+            stage_index = None
+            if semantic is not None:
+                raw_stage = semantic.data.get("stage_index")
+                stage_index = raw_stage if isinstance(raw_stage, int) else None
+            self._edit_selected_generator(node=node, stage_index=stage_index)
             return
         if isinstance(node, RecipeNode) and node.data.get("device_module"):
+            raw_actions = node.data.get("parameter_actions")
+            actions = raw_actions if isinstance(raw_actions, (list, tuple)) else ()
             sweep = next(
                 (
                     action
-                    for action in node.data.get("parameter_actions", [])
+                    for action in actions
                     if isinstance(action, dict) and action.get("mode") == "sweep"
                 ),
                 None,
@@ -4937,8 +4375,7 @@ class RecipePage(QWidget):
         return None
 
     def _edit_selected_device_settings(self) -> None:
-        item = self.tree.currentItem()
-        node = item.data(0, Qt.ItemDataRole.UserRole) if item is not None else None
+        node = self._selected_recipe_node()
         if not isinstance(node, RecipeNode):
             QMessageBox.information(
                 self, "Device settings", "Select a device or its sweep axis first."
@@ -4984,14 +4421,11 @@ class RecipePage(QWidget):
 
     def _edit_device_roi_from_tree(self, metadata: dict[str, object]) -> None:
         if metadata.get("device_module") == "anritsu_sg":
-            owner = self._find_tree_item(str(metadata.get("owner_node_id", "")))
-            node = (
-                owner.data(0, Qt.ItemDataRole.UserRole)
-                if owner is not None
-                else None
+            location = self._recipe_node_locations().get(
+                str(metadata.get("owner_node_id", ""))
             )
-            if isinstance(node, RecipeNode):
-                self._edit_anritsu_sg_module_node(node)
+            if location is not None:
+                self._edit_anritsu_sg_module_node(location[0])
         elif metadata.get("device_module") == "anritsu":
             self._edit_anritsu_roi_from_tree(metadata)
         elif metadata.get("device_module") == "rigol":
@@ -5003,12 +4437,8 @@ class RecipePage(QWidget):
         self, metadata: dict[str, object]
     ) -> None:
         owner_id = str(metadata.get("owner_node_id", ""))
-        owner_item = self._find_tree_item(owner_id)
-        node = (
-            owner_item.data(0, Qt.ItemDataRole.UserRole)
-            if owner_item is not None
-            else None
-        )
+        location = self._recipe_node_locations().get(owner_id)
+        node = location[0] if location is not None else None
         if not isinstance(node, RecipeNode) or node.type != "sweep":
             QMessageBox.warning(
                 self, "ROI editor", "The owning sweep no longer exists."
@@ -5025,12 +4455,8 @@ class RecipePage(QWidget):
     ) -> None:
         owner_id = str(metadata.get("owner_node_id", ""))
         parameter_id = str(metadata.get("parameter_id", ""))
-        owner_item = self._find_tree_item(owner_id)
-        node = (
-            owner_item.data(0, Qt.ItemDataRole.UserRole)
-            if owner_item is not None
-            else None
-        )
+        location = self._recipe_node_locations().get(owner_id)
+        node = location[0] if location is not None else None
         if not isinstance(node, RecipeNode):
             QMessageBox.warning(
                 self, "ROI editor", "The owning device node no longer exists."
@@ -5380,12 +4806,8 @@ class RecipePage(QWidget):
     ) -> None:
         owner_id = str(metadata.get("owner_node_id", ""))
         parameter_id = str(metadata.get("parameter_id", ""))
-        owner_item = self._find_tree_item(owner_id)
-        node = (
-            owner_item.data(0, Qt.ItemDataRole.UserRole)
-            if owner_item is not None
-            else None
-        )
+        location = self._recipe_node_locations().get(owner_id)
+        node = location[0] if location is not None else None
         if not isinstance(node, RecipeNode):
             QMessageBox.warning(
                 self, "ROI editor", "The owning Rigol node no longer exists."
@@ -6114,8 +5536,8 @@ class RecipePage(QWidget):
     ) -> None:
         owner_id = str(metadata.get("owner_node_id", ""))
         parameter_id = str(metadata.get("parameter_id", ""))
-        owner_item = self._find_tree_item(owner_id)
-        node = owner_item.data(0, Qt.ItemDataRole.UserRole) if owner_item else None
+        location = self._recipe_node_locations().get(owner_id)
+        node = location[0] if location is not None else None
         if not isinstance(node, RecipeNode):
             QMessageBox.warning(self, "ROI editor", "The Anritsu node no longer exists.")
             return
@@ -6408,34 +5830,8 @@ class RecipePage(QWidget):
         return replace(snapshot, **{field: value}) if field is not None else snapshot
 
     def _open_current_node_editor(self) -> None:
-        item = self.tree.currentItem()
-        if item is not None:
+        if self._selected_semantic_node() is not None:
             self._edit_selected_node()
-
-    def _open_node_editor(self, item: QTreeWidgetItem, _column: int) -> None:
-        """Open the appropriate parameter window from a direct tree interaction."""
-
-        if not self._tree_editing_allowed():
-            return
-        self.tree.setCurrentItem(item)
-        operator_row = item.data(0, self.operator_row_role)
-        if isinstance(operator_row, dict):
-            if operator_row.get("kind") == "output_policy":
-                self._edit_output_policy_from_tree(dict(operator_row))
-            else:
-                self._edit_selected_roi()
-            return
-        structural = item.data(0, RecipeTreeWidget.structural_role)
-        if structural == RecipeTreeWidget.finally_container:
-            self._edit_automatic_shutdown("keithley.outputs_off")
-            return
-        if isinstance(structural, str) and structural.startswith("automatic_shutdown:"):
-            self._edit_automatic_shutdown(structural.split(":", 1)[1])
-            return
-        node = item.data(0, Qt.ItemDataRole.UserRole)
-        if not isinstance(node, RecipeNode):
-            return
-        self._edit_selected_node()
 
     def _edit_selected_fixed_keithley(self, node: RecipeNode) -> None:
         channel = str(node.data.get("channel", ""))
@@ -6461,17 +5857,15 @@ class RecipePage(QWidget):
         except Exception as exc:
             QMessageBox.warning(self, "Edit Keithley setting", str(exc))
 
-    def _show_tree_context_menu(self, position: object) -> None:
+    def _show_tree_context_menu(
+        self, position: object | None, *, global_position: object | None = None
+    ) -> None:
         """Expose the same safe commands under the currently pointed node."""
 
-        point = position.toPoint() if hasattr(position, "toPoint") else position
-        item = self.tree.itemAt(point)
-        if item is not None:
-            self.tree.setCurrentItem(item)
-        else:
-            self.tree.clearSelection()
-            self.tree.setCurrentItem(None)
-        menu = RoundMenu(parent=self.tree)
+        del position
+        if global_position is None:
+            return
+        menu = RoundMenu(parent=self.measurement_tree)
 
         def add_action(text: str, callback: Callable[[], None]) -> QAction:
             action = QAction(text, menu)
@@ -6485,7 +5879,7 @@ class RecipePage(QWidget):
         if not self._tree_editing_allowed():
             if self._yaml_draft_pending() and not self._historical_sweep_active:
                 add_action("Apply YAML to tree", self.apply_yaml_to_tree)
-            menu.exec(self.tree.viewport().mapToGlobal(point))
+            menu.exec(global_position)
             return
         menu.addSeparator()
         add_action(
@@ -6507,28 +5901,17 @@ class RecipePage(QWidget):
             "Acquisition settings", self._edit_selected_node
         )
         edit_action = add_action("Action settings", self._edit_selected_node)
+        node = self._selected_recipe_node()
+        location = self._selected_recipe_location()
         toggle_enabled = add_action(
             "Enable selected node"
-            if isinstance(node := (
-                self.tree.currentItem().data(0, Qt.ItemDataRole.UserRole)
-                if self.tree.currentItem() is not None
-                else None
-            ), RecipeNode)
-            and node.data.get("disabled") is True
-            else "Disable selected node",
-            self._toggle_selected_node_disabled,
+            if node is not None and node.data.get("disabled") is True
+            else "Disable selected node", self._toggle_selected_node_disabled,
         )
         duplicate = add_action("Duplicate selected node", self._duplicate_selected_node)
         delete = add_action("Delete selected node", self._delete_selected_node)
         move_up = add_action("Move selected node up", lambda: self._move_selected_sibling(-1))
         move_down = add_action("Move selected node down", lambda: self._move_selected_sibling(1))
-        selected = self.tree.currentItem()
-        node = selected.data(0, Qt.ItemDataRole.UserRole) if selected is not None else None
-        operator_row = (
-            selected.data(0, self.operator_row_role)
-            if selected is not None
-            else None
-        )
         editable = self._tree_editing_allowed() and isinstance(node, RecipeNode)
         has_device_settings = bool(
             editable
@@ -6538,17 +5921,18 @@ class RecipePage(QWidget):
             )
         )
         has_roi = bool(
-            isinstance(operator_row, dict)
-            or (
-                editable
-                and (
-                    node.type == "sweep"
-                    or (
-                        node.data.get("device_module")
-                        and any(
-                            isinstance(action, dict)
-                            and action.get("mode") == "sweep"
-                            for action in node.data.get("parameter_actions", [])
+            editable
+            and (
+                node.type == "sweep"
+                or (
+                    node.data.get("device_module")
+                    and any(
+                        isinstance(action, dict)
+                        and action.get("mode") == "sweep"
+                        for action in (
+                            node.data.get("parameter_actions")
+                            if isinstance(node.data.get("parameter_actions"), (list, tuple))
+                            else ()
                         )
                     )
                 )
@@ -6569,13 +5953,14 @@ class RecipePage(QWidget):
             not in {"comment", "acquire_reference", "acquire_spectrum"}
         )
         toggle_enabled.setEnabled(
-            editable and not self._tree_item_is_in_finally(selected)
+            editable and bool(location is not None and not location[4])
         )
-        duplicate.setEnabled(editable and selected.parent() is not None)
-        delete.setEnabled(editable and selected.parent() is not None)
-        move_up.setEnabled(editable and selected.parent() is not None)
-        move_down.setEnabled(editable and selected.parent() is not None)
-        menu.exec(self.tree.viewport().mapToGlobal(point))
+        movable = editable and bool(location is not None and location[1] is not None)
+        duplicate.setEnabled(movable)
+        delete.setEnabled(movable)
+        move_up.setEnabled(movable)
+        move_down.setEnabled(movable)
+        menu.exec(global_position)
 
     def _fixed_node_from_dialog(
         self, definition: dict[str, str], dialog: FixedValueDialog
@@ -6647,13 +6032,8 @@ class RecipePage(QWidget):
         node: RecipeNode | None = None,
         stage_index: int | None = None,
     ) -> None:
-        item = self.tree.currentItem()
         if node is None:
-            node = (
-                item.data(0, Qt.ItemDataRole.UserRole)
-                if item is not None
-                else None
-            )
+            node = self._selected_recipe_node()
         if not isinstance(node, RecipeNode) or node.type != "sweep":
             QMessageBox.information(self, "Edit generator", "Select a generated sweep node first.")
             return
@@ -6800,8 +6180,7 @@ class RecipePage(QWidget):
         }
 
     def _delete_selected_node(self) -> None:
-        item = self.tree.currentItem()
-        node = item.data(0, Qt.ItemDataRole.UserRole) if item is not None else None
+        node = self._selected_recipe_node()
         if not isinstance(node, RecipeNode):
             QMessageBox.information(self, "Delete node", "Select a recipe node first.")
             return
@@ -6811,16 +6190,12 @@ class RecipePage(QWidget):
         except Exception as exc:
             QMessageBox.warning(self, "Delete node", str(exc))
 
-    @staticmethod
-    def _tree_item_is_in_finally(item: QTreeWidgetItem | None) -> bool:
-        return RecipeTreeWidget.item_is_in_finally(item)
-
     def _toggle_selected_node_disabled(self) -> None:
-        item = self.tree.currentItem()
-        node = item.data(0, Qt.ItemDataRole.UserRole) if item is not None else None
+        node = self._selected_recipe_node()
         if not isinstance(node, RecipeNode):
             return
-        if self._tree_item_is_in_finally(item):
+        location = self._recipe_node_locations().get(node.id)
+        if location is not None and location[4]:
             QMessageBox.warning(
                 self,
                 "Disable node",
@@ -6840,28 +6215,20 @@ class RecipePage(QWidget):
             self._apply_builder_source(
                 source,
                 f"{'Disabled' if disabled else 'Enabled'} {node.id}",
+                selected_node_id=node.id,
             )
         except Exception as exc:
             QMessageBox.warning(self, "Enable / disable node", str(exc))
 
     def _duplicate_selected_node(self) -> None:
-        item = self.tree.currentItem()
-        node = item.data(0, Qt.ItemDataRole.UserRole) if item is not None else None
-        parent = item.parent() if item is not None else None
-        if not isinstance(node, RecipeNode) or parent is None:
+        location = self._selected_recipe_location()
+        if location is None or location[1] is None:
             QMessageBox.information(
                 self, "Duplicate node", "Select a non-root recipe node to duplicate."
             )
             return
-        destination = self._tree_parent_destination(parent)
-        if destination is None:
-            QMessageBox.warning(
-                self,
-                "Duplicate node",
-                "The selected node has no editable recipe parent.",
-            )
-            return
-        parent_id, branch = destination
+        node, parent_id, branch, index, _in_finally = location
+        assert parent_id is not None
         copy = self._clone_node_mapping(self._node_to_mapping(node))
         copy_id = str(copy["id"])
         try:
@@ -6869,11 +6236,7 @@ class RecipePage(QWidget):
                 self._builder_source(),
                 parent_id=parent_id,
                 branch=branch,
-                index=RecipeTreeWidget._logical_index(
-                    parent,
-                    item,
-                    below=True,
-                ),
+                index=index + 1,
                 node=copy,
             )
             self._apply_builder_source(
@@ -6900,17 +6263,19 @@ class RecipePage(QWidget):
         return clone
 
     def _move_selected_sibling(self, delta: int) -> None:
-        item = self.tree.currentItem()
-        node = item.data(0, Qt.ItemDataRole.UserRole) if item is not None else None
-        parent = item.parent() if item is not None else None
-        if not isinstance(node, RecipeNode) or parent is None:
+        location = self._selected_recipe_location()
+        if location is None or location[1] is None:
             return
-        destination = self._tree_parent_destination(parent)
-        if destination is None:
-            return
-        parent_id, branch = destination
-        index = RecipeTreeWidget._logical_index(parent, item, below=False)
-        count = RecipeTreeWidget._logical_child_count(parent)
+        node, parent_id, branch, index, _in_finally = location
+        assert parent_id is not None
+        if parent_id == "__finally__":
+            count = len(parse_recipe_text(self._tree_source).finally_nodes)
+        else:
+            parent_location = self._recipe_node_locations().get(parent_id)
+            if parent_location is None:
+                return
+            parent_node = parent_location[0]
+            count = len(parent_node.else_children if branch == "else" else parent_node.children)
         if delta < 0:
             target = index - 1
         else:

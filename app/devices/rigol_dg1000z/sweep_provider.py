@@ -18,6 +18,16 @@ class RigolSweepProvider:
     module_key = "rigol"
 
     @staticmethod
+    def axis_action_kinds(binding: SweepAxisBinding) -> frozenset[str]:
+        """Return authored update nodes represented by one semantic ROI row."""
+
+        if binding.parameter_id == "carrier.frequency":
+            return frozenset({"update_rigol_frequency"})
+        if binding.parameter_id in {"carrier.high_level", "carrier.low_level"}:
+            return frozenset({"update_rigol_levels"})
+        return frozenset()
+
+    @staticmethod
     def _channel(node: RecipeNode) -> int:
         configuration = node.data.get("configuration")
         configuration = configuration if isinstance(configuration, Mapping) else node.data

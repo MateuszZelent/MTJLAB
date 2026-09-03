@@ -8,7 +8,7 @@ from dataclasses import asdict, is_dataclass
 from pathlib import Path
 from typing import Any, Callable
 
-from PySide6.QtCore import QSettings, QThread, QTimer, Qt, Signal
+from PySide6.QtCore import QSettings, QSignalBlocker, QThread, QTimer, Qt, Signal
 from PySide6.QtGui import (
     QAction,
     QActionGroup,
@@ -91,6 +91,7 @@ from app.ui.dialogs import SweepDeviceReadinessDialog, StationMessageBox as QMes
 from app.ui.settings_workers import KeithleyDefaultsSaveWorker
 from app.ui.run_worker import RunController, serialize_settings_snapshot
 from app.ui.dashboard import DashboardPage, DeviceConnectionPanel
+from app.ui.elab import ElabPage
 from app.ui.execution import RunMonitorPage
 from app.ui.results import HeatmapResultsTab, ResultsPage
 from app.ui.design_system import apply_application_theme, effective_theme
@@ -101,7 +102,6 @@ from app.ui.recipes.page import (  # noqa: F401
     FixedValueDialog,
     KeithleySweepBuilderDialog,
     RecipePage,
-    RecipeTreeWidget,
     SweepLibraryButton,
 )
 from app.ui.shell.page_host import FluentPageHost
@@ -131,8 +131,22 @@ class MainWindow(FluentWindow):
         super().__init__()
         self._repository = SettingsRepository(settings_path)
         self._simulation = simulation
+        self._run_upload_to_elab_requested = False
         persisted = self._repository.load().settings
         self._settings = simulated_station_settings(persisted) if simulation else persisted
+        # Establish the global Fluent theme before constructing the large page
+        # tree.  QFluent's synchronous stylesheet refresh walks every existing
+        # widget; doing it after ``_build()`` made the first ``show()`` block
+        # for tens of seconds on Windows.  Newly-created controls inherit the
+        # selected Fluent theme and the station event filter styles them when
+        # they become visible.  ``showEvent`` retains an idempotent fallback
+        # for embedders that construct a window without this composition path.
+        application = QApplication.instance()
+        if application is not None:
+            applied_theme = apply_application_theme(
+                application, str(self._settings.ui.get("theme", "system"))
+            )
+            application.setProperty("activeTheme", applied_theme.name)
         self._keithley_defaults_generation = 0
         self._keithley_defaults_in_flight = False
         self._pending_keithley_defaults: tuple[int, dict[str, dict[str, Any]]] | None = None
@@ -291,6 +305,9 @@ class MainWindow(FluentWindow):
         # latest confirmed snapshot and repaint those pages at a bounded rate;
         # instrument I/O and safety decisions remain entirely in RunWorker.
         self._pending_execution_readback: tuple[str, dict[str, object]] | None = None
+        self._execution_page_projection_cache: dict[
+            str, tuple[dict[str, object], dict[str, str]]
+        ] = {}
         self._execution_readback_timer = QTimer(self)
         self._execution_readback_timer.setSingleShot(True)
         self._execution_readback_timer.setInterval(100)
@@ -302,6 +319,10 @@ class MainWindow(FluentWindow):
         # while Qt gets regular opportunities to paint, process input and
         # service the safety controls during a long sweep.
         self._pending_execution_events: deque[tuple[str, dict[str, object]]] = deque()
+        # A checkpoint is a latest-state projection.  Keeping only the newest
+        # one prevents a fast acquisition from making Qt replay hundreds of
+        # stale QTreeWidget updates after the worker has already advanced.
+        self._pending_execution_checkpoint: tuple[str, dict[str, object]] | None = None
         self._execution_event_drain_batch = 8
         self._execution_event_timer = QTimer(self)
         self._execution_event_timer.setSingleShot(True)
@@ -309,11 +330,6 @@ class MainWindow(FluentWindow):
         self._execution_event_timer.timeout.connect(
             lambda: self._drain_execution_events(limit=self._execution_event_drain_batch)
         )
-        self._pending_execution_semantic: dict[str, tuple[str, dict[str, object]]] = {}
-        self._execution_semantic_timer = QTimer(self)
-        self._execution_semantic_timer.setSingleShot(True)
-        self._execution_semantic_timer.setInterval(33)
-        self._execution_semantic_timer.timeout.connect(self._flush_execution_semantic)
         self.quick_control_coordinator = QuickControlCoordinator(
             self._controllers, self, settings=self._settings
         )
@@ -428,6 +444,17 @@ class MainWindow(FluentWindow):
         self.results_page = ResultsPage(
             str(self._settings.storage.get("output_directory", "./measurements"))
         )
+        self.elab_page = ElabPage(
+            self._repository,
+            settings=self._settings,
+            env_path=Path(".env"),
+            simulation=self._simulation,
+        )
+        self.anritsu_page.set_manual_elab_context(
+            configuration_provider=self.elab_page.manual_upload_configuration,
+            upload_callback=self.elab_page.queue_manual_upload,
+        )
+        self._sync_elab_upload_controls()
         self.settings_page = SettingsPage(
             self._repository,
             read_only=self._simulation,
@@ -500,6 +527,7 @@ class MainWindow(FluentWindow):
             "sweeps": FluentIcon.DOCUMENT,
             "execution": FluentIcon.PLAY,
             "results": FluentIcon.FOLDER,
+            "elab": FluentIcon.GLOBE,
             "settings": FluentIcon.SETTING,
         }
         route_specs = (
@@ -533,6 +561,7 @@ class MainWindow(FluentWindow):
             (self.recipe_page, "sweeps", "Sweeps"),
             (self.run_monitor, "execution", "Execution"),
             (self.results_page, "results", "Results"),
+            (self.elab_page, "elab", "eLabFTW"),
             (self.settings_page, "settings", "Settings"),
         )
         self.navigation_routes: dict[str, FluentPageHost] = {}
@@ -581,7 +610,7 @@ class MainWindow(FluentWindow):
         self.apparatus_navigation_item.setExpanded(True, ani=False)
         self._apparatus_auto_collapsed = False
         self._apparatus_required_height = (
-            self.navigationInterface.panel.vBoxLayout.minimumSize().height() + 2
+            self.navigationInterface.panel.vBoxLayout.minimumSize().height() + 1
         )
         self.apparatus_navigation_item.clicked.connect(
             lambda: QTimer.singleShot(0, self._sync_apparatus_navigation_height)
@@ -596,6 +625,12 @@ class MainWindow(FluentWindow):
         self.event_log_panel = SimpleCardWidget(self.fluent_content)
         self.event_log_panel.setObjectName("eventLogPanel")
         self.event_log_panel.setProperty("stationSurface", "surface")
+        # The global log is a useful cross-page diagnostic surface, but it is
+        # a duplicate of the bounded Execution log during a compact run.  In
+        # that layout the procedure tree is the primary operator surface, so
+        # the log is auto-collapsed while retaining an explicit menu override.
+        self._event_log_requested_visible = True
+        self._event_log_compact_override = False
         event_log_layout = QVBoxLayout(self.event_log_panel)
         event_log_layout.setContentsMargins(12, 8, 12, 8)
         event_log_layout.setSpacing(6)
@@ -633,6 +668,8 @@ class MainWindow(FluentWindow):
         self.dashboard.moke_assignment_requested.connect(self._save_moke_assignment)
         self.dashboard.status.connect(self._log)
         self.settings_page.settings_saved.connect(self._settings_saved)
+        self.elab_page.settings_saved.connect(self._settings_saved)
+        self.elab_page.configuration_changed.connect(self._sync_elab_upload_controls)
         self.anritsu_page.settings_readback_requested.connect(self._save_anritsu_readback_defaults)
         self.keithley_page.settings_assignment_requested.connect(
             self._queue_keithley_assignment_save
@@ -643,6 +680,7 @@ class MainWindow(FluentWindow):
         self.recipe_page.plan_preflight_changed.connect(self.dashboard.update_plan_preflight)
         self.results_page.resume_requested.connect(self._resume_run)
         self.results_page.open_sweep_requested.connect(self._open_historical_thatec_sweep)
+        self.results_page.result_selected.connect(self.elab_page.set_selected_result)
         self.run_monitor.stop_requested.connect(self._run_controller.request_stop)
         self.run_monitor.pause_requested.connect(self._run_controller.request_pause)
         self.run_monitor.resume_requested.connect(self._run_controller.request_resume)
@@ -658,6 +696,7 @@ class MainWindow(FluentWindow):
             self.moke_box_page,
             self.lakeshore_gaussmeter_page,
             self.recipe_page,
+            self.elab_page,
             self.settings_page,
         ):
             page.status.connect(self._log)
@@ -684,7 +723,7 @@ class MainWindow(FluentWindow):
         self.event_log_action = QAction("Event log", self)
         self.event_log_action.setCheckable(True)
         self.event_log_action.setChecked(True)
-        self.event_log_action.toggled.connect(self.event_log_panel.setVisible)
+        self.event_log_action.toggled.connect(self._set_event_log_requested_visible)
         self.addAction(self.event_log_action)
         quit_action = QAction("Safe shutdown", self)
         quit_action.triggered.connect(self.close)
@@ -716,6 +755,51 @@ class MainWindow(FluentWindow):
 
     def _navigate_to(self, route: str) -> None:
         self.switchTo(self.navigation_routes[route])
+        self._sync_shell_splitter_layout()
+
+    def _set_event_log_requested_visible(self, visible: bool) -> None:
+        """Apply the operator's log preference to the responsive shell."""
+
+        self._event_log_requested_visible = bool(visible)
+        # A checked action while compact is an explicit request to keep the
+        # diagnostic drawer open, overriding the automatic Execution collapse.
+        self._event_log_compact_override = bool(visible)
+        self._sync_shell_splitter_layout()
+
+    def _sync_shell_splitter_layout(self) -> None:
+        """Keep the compact Execution viewport focused on the live procedure."""
+
+        if not hasattr(self, "event_log_panel") or not hasattr(
+            self, "navigation_routes"
+        ):
+            return
+        compact_execution = (
+            self._current_route() == "execution"
+            and self.width() < 1_200
+            and not self._event_log_compact_override
+        )
+        show_log = self._event_log_requested_visible and not compact_execution
+        if self.event_log_panel.isVisible() != show_log:
+            self.event_log_panel.setVisible(show_log)
+        action = getattr(self, "event_log_action", None)
+        if action is not None and compact_execution:
+            # Reflect an automatic collapse in the menu without changing the
+            # saved operator preference or invoking the toggle handler.
+            if action.isChecked():
+                with QSignalBlocker(action):
+                    action.setChecked(False)
+        elif action is not None and not compact_execution:
+            desired = bool(self._event_log_requested_visible)
+            if action.isChecked() != desired:
+                with QSignalBlocker(action):
+                    action.setChecked(desired)
+        if show_log:
+            total = max(0, self.shell_splitter.height())
+            self.shell_splitter.setSizes([max(0, total - 125), 125])
+        else:
+            # Hidden QSplitter children do not consume space, but setting an
+            # explicit size makes the expansion deterministic after resize.
+            self.shell_splitter.setSizes([max(0, self.shell_splitter.height()), 0])
 
     def _open_settings_issue(self, issue: SettingsIssue) -> None:
         """Navigate only; correcting a safety profile never changes live outputs."""
@@ -1410,6 +1494,7 @@ class MainWindow(FluentWindow):
         except (AuthorizationError, ConfigurationError) as exc:
             QMessageBox.critical(self, "Run not started", str(exc))
             return
+        self._run_upload_to_elab_requested = self.recipe_page.save_to_elab_check.isChecked()
         self._open_sweep_readiness(
             plan,
             outputs_forced_off=outputs_forced_off,
@@ -1751,6 +1836,8 @@ class MainWindow(FluentWindow):
 
     def _run_event(self, name: str, data: object) -> None:
         payload = data if isinstance(data, dict) else {"data": data}
+        if name == "run_started":
+            self._execution_page_projection_cache.clear()
         preview_event = name in {"spectrum_preview", "reference_preview"}
         # Heartbeats carry no confirmed state and previews are rendered at a
         # bounded cadence. Read-only device pages also use a latest-state
@@ -1769,8 +1856,7 @@ class MainWindow(FluentWindow):
             self._pending_execution_readback = None
             self._execution_event_timer.stop()
             self._pending_execution_events.clear()
-            self._execution_semantic_timer.stop()
-            self._pending_execution_semantic.clear()
+            self._pending_execution_checkpoint = None
             value = payload.get("correlation_id") or payload.get("hash")
             self._run_correlation_id = str(value) if value else None
         severity = (
@@ -1798,6 +1884,7 @@ class MainWindow(FluentWindow):
         if name not in {
             "runner_heartbeat",
             "point_stored",
+            "safe_resume_boundary",
             "spectrum_preview",
             "reference_preview",
             "action_started",
@@ -1817,6 +1904,11 @@ class MainWindow(FluentWindow):
                 correlation_id=self._run_correlation_id,
                 critical=severity in {"error", "warning"},
             )
+        if name == "safe_resume_boundary":
+            # Recovery boundaries are persisted by the Run Engine and are not
+            # operator-facing actions.  Replaying one log row per checkpoint
+            # would turn a long sweep into a GUI document/layout workload.
+            return
         if name in {
             "semantic_operation_started",
             "semantic_operation_applied",
@@ -1826,15 +1918,10 @@ class MainWindow(FluentWindow):
                 name == "semantic_operation_failed"
                 or not self._run_controller.running
             )
-            semantic_id = str(payload.get("semantic_id", ""))
             if immediate:
-                self._execution_semantic_timer.stop()
-                self._pending_execution_semantic.pop(semantic_id, None)
                 self.run_monitor.append_event(name, payload)
-            elif semantic_id:
-                self._pending_execution_semantic[semantic_id] = (name, dict(payload))
-                if not self._execution_semantic_timer.isActive():
-                    self._execution_semantic_timer.start()
+            else:
+                self.run_monitor.queue_semantic_event(name, payload)
             return
         if name in {"action_started", "action_finished"} and payload.get("semantic_id"):
             # The typed semantic lifecycle is the sole presentation stream for
@@ -1861,7 +1948,10 @@ class MainWindow(FluentWindow):
             and not payload.get("semantic_id")
             and self._run_controller.running
         ):
-            self._pending_execution_events.append((name, dict(payload)))
+            if name == "point_stored":
+                self._pending_execution_checkpoint = (name, dict(payload))
+            else:
+                self._pending_execution_events.append((name, dict(payload)))
             if not self._execution_event_timer.isActive():
                 self._execution_event_timer.start()
         else:
@@ -1876,8 +1966,7 @@ class MainWindow(FluentWindow):
             }:
                 self._drain_execution_events()
                 if name == "run_completed":
-                    self._execution_semantic_timer.stop()
-                    self._flush_execution_semantic()
+                    self.run_monitor.flush_semantic_states()
             elif name in {
                 "action_failed",
                 "compliance_detected",
@@ -1899,8 +1988,8 @@ class MainWindow(FluentWindow):
                 # confirmed fault/shutdown state immediately.
                 self._execution_event_timer.stop()
                 self._pending_execution_events.clear()
-                self._execution_semantic_timer.stop()
-                self._pending_execution_semantic.clear()
+                self._pending_execution_checkpoint = None
+                self.run_monitor.discard_pending_semantic()
             self.run_monitor.append_event(name, payload)
         if name in {"run_completed", "run_aborted", "run_fault"}:
             self._run_correlation_id = None
@@ -1919,14 +2008,15 @@ class MainWindow(FluentWindow):
         for _ in range(max(0, min(limit, len(self._pending_execution_events)))):
             name, payload = self._pending_execution_events.popleft()
             self.run_monitor.append_event(name, payload)
-        if self._pending_execution_events and not self._execution_event_timer.isActive():
+        checkpoint = self._pending_execution_checkpoint
+        self._pending_execution_checkpoint = None
+        if checkpoint is not None:
+            self.run_monitor.append_event(*checkpoint)
+        if (
+            self._pending_execution_events
+            or self._pending_execution_checkpoint is not None
+        ) and not self._execution_event_timer.isActive():
             self._execution_event_timer.start()
-
-    def _flush_execution_semantic(self) -> None:
-        pending = tuple(self._pending_execution_semantic.values())
-        self._pending_execution_semantic.clear()
-        for name, payload in pending:
-            self.run_monitor.append_event(name, payload)
 
     def _flush_execution_previews(self) -> None:
         pending = tuple(self._pending_execution_previews.items())
@@ -2000,17 +2090,56 @@ class MainWindow(FluentWindow):
             and "anritsu" in self._device_pages
             else tuple(self._device_pages.items())
         )
+        kind = str(payload.get("kind", "")).casefold()
+        relevant_module = next(
+            (
+                module_key
+                for module_key, markers in (
+                    ("keithley", ("keithley",)),
+                    ("rigol", ("rigol",)),
+                    ("anritsu", ("anritsu", "spectrum", "reference")),
+                    ("moke_box", ("moke",)),
+                    ("lakeshore_gaussmeter", ("lakeshore",)),
+                )
+                if any(marker in kind for marker in markers)
+            ),
+            None,
+        )
         for module_key, page in pages:
             if not isinstance(page, ExecutionTelemetryView):
+                continue
+            if (
+                self._run_controller.running
+                and event_name not in self._IMMEDIATE_READBACK_EVENTS
+                and not page.isVisibleTo(self)
+            ):
+                # The Execution page owns the live plot and semantic state.
+                # Mutating hidden, form-heavy instrument pages during every
+                # point creates needless layouts and can starve Qt. If the
+                # operator navigates to a device mid-run, the next coalesced
+                # confirmed snapshot refreshes that now-visible page.
                 continue
             module = self._composition.registry.get(module_key)
             raw_state = device_states.get(module.runner_state_key)
             device_state = raw_state if isinstance(raw_state, dict) else {}
+            cached = self._execution_page_projection_cache.get(module_key)
+            current_projection = (device_state, safe_statuses)
+            event_requires_refresh = (
+                event_name in self._IMMEDIATE_READBACK_EVENTS
+                or event_name in {"spectrum_preview", "reference_preview"}
+                or relevant_module == module_key
+            )
+            if cached == current_projection and not event_requires_refresh:
+                continue
             page.apply_execution_event(
                 event_name,
                 payload,
                 device_state,
                 safe_statuses,
+            )
+            self._execution_page_projection_cache[module_key] = (
+                deepcopy(device_state),
+                dict(safe_statuses),
             )
         # Rendering helpers may normally refresh manual action availability.
         # A runner-owned session must remain inspect-only after every event.
@@ -2021,8 +2150,7 @@ class MainWindow(FluentWindow):
     def _run_finished(self, result: object) -> None:
         self._execution_event_timer.stop()
         self._drain_execution_events()
-        self._execution_semantic_timer.stop()
-        self._flush_execution_semantic()
+        self.run_monitor.flush_semantic_states()
         self._execution_preview_timer.stop()
         self._flush_execution_previews()
         self._execution_readback_timer.stop()
@@ -2039,6 +2167,14 @@ class MainWindow(FluentWindow):
         run_result = result["result"]
         state = str(getattr(getattr(run_result, "state", None), "value", "unknown"))
         error = getattr(run_result, "error", None)
+        if result_path is not None:
+            self.elab_page.queue_automatic_upload(
+                result_path,
+                run_state=state,
+                error=error,
+                requested=self._run_upload_to_elab_requested,
+            )
+        self._run_upload_to_elab_requested = False
         if state == "fault":
             message = str(error or "The measurement finished in a fault state.")
             self._log(f"Run Engine finished in FAULT: {message}")
@@ -2051,8 +2187,7 @@ class MainWindow(FluentWindow):
     def _run_failed(self, error: str) -> None:
         self._execution_event_timer.stop()
         self._drain_execution_events()
-        self._execution_semantic_timer.stop()
-        self._flush_execution_semantic()
+        self.run_monitor.flush_semantic_states()
         self._execution_preview_timer.stop()
         self._flush_execution_previews()
         self._execution_readback_timer.stop()
@@ -2060,6 +2195,7 @@ class MainWindow(FluentWindow):
         self._leased_run_devices.clear()
         self._set_run_ui_locked(False)
         self.run_monitor.failed(error)
+        self._run_upload_to_elab_requested = False
         self._log(f"Run Engine: {error}")
         QMessageBox.critical(self, "Run Engine", error)
 
@@ -2202,6 +2338,16 @@ class MainWindow(FluentWindow):
             resource, backend = self._device_connection_details(self._settings, name)
             panel.update_resource(resource, backend)
         self.recipe_page.set_settings(self._settings)
+        self.elab_page.set_settings(self._settings)
+        self._sync_elab_upload_controls()
+
+    def _sync_elab_upload_controls(self) -> None:
+        """Refresh per-run/per-save eLab controls from the central policy."""
+
+        if not hasattr(self, "elab_page") or not hasattr(self, "recipe_page"):
+            return
+        available, default_enabled, hint = self.elab_page.upload_configuration()
+        self.recipe_page.set_elab_upload_state(available, default_enabled, hint)
 
     @classmethod
     def _setting_changes(
@@ -2576,7 +2722,17 @@ class MainWindow(FluentWindow):
         return True
 
     def _save_all_settings(self) -> None:
-        """Persist Settings and every device form in one atomic transaction."""
+        """Persist station settings while keeping live form values transient.
+
+        Keithley has two deliberately different persistence paths.  Values
+        copied from a verified hardware readback are staged in
+        ``_pending_keithley_defaults`` and are written by the dedicated worker
+        after the operator presses SAVE SETTINGS.  The level/compliance fields
+        in the normal manual form describe the next operation, so they must
+        not be copied into ``settings.yml`` by an unrelated global save.  The
+        remaining station defaults (mode, ranges, NPLC, settling time, ...)
+        still participate in the global transaction.
+        """
 
         if self._keithley_defaults_in_flight:
             self._log("SAVE SETTINGS ignored: a settings write is already running")
@@ -2618,6 +2774,8 @@ class MainWindow(FluentWindow):
             self._log(f"SAVE SETTINGS REJECTED: {type(exc).__name__}: {exc}")
             return
 
+        pending_keithley_defaults = self._pending_keithley_defaults
+
         def merge_device_forms(raw: dict[str, Any]) -> None:
             for channel, payload in rigol_defaults.items():
                 defaults = raw["devices"]["rigol"]["safety"]["channels"][str(channel)]["defaults"]
@@ -2651,17 +2809,65 @@ class MainWindow(FluentWindow):
                 }
             )
 
-            candidate = StationSettings.model_validate(raw)
-            updates = validate_keithley_default_snapshots(candidate, keithley_payload)
-            channels = raw["devices"]["keithley"]["safety"]["channels"]
-            for channel, values in updates.items():
-                channels[channel]["defaults"].update(values)
+            # A pending readback assignment owns all Keithley default fields
+            # and is persisted by the background worker below.  Do not let a
+            # stale manual form overwrite that snapshot in this transaction.
+            if pending_keithley_defaults is None:
+                candidate = StationSettings.model_validate(raw)
+                validation_snapshots = deepcopy(keithley_payload)
+                channels = raw["devices"]["keithley"]["safety"]["channels"]
+                for channel, snapshot in validation_snapshots.items():
+                    defaults = channels[channel].get("defaults", {})
+                    mode = str(snapshot.get("source_mode", "")).strip().lower()
+                    if mode == "current":
+                        snapshot["source_level"] = defaults.get(
+                            "source_current", snapshot["source_level"]
+                        )
+                        snapshot["compliance"] = defaults.get(
+                            "voltage_compliance", snapshot["compliance"]
+                        )
+                    elif mode == "voltage":
+                        snapshot["source_level"] = defaults.get(
+                            "source_voltage", snapshot["source_level"]
+                        )
+                        snapshot["compliance"] = defaults.get(
+                            "current_compliance", snapshot["compliance"]
+                        )
+                    else:
+                        snapshot["source_level"] = "0 V"
+                        snapshot["compliance"] = "0 A"
+                updates = validate_keithley_default_snapshots(
+                    candidate, validation_snapshots
+                )
+                # Source level and compliance are working setpoints.  Keep
+                # their persisted defaults unchanged during a global save.
+                transient_keys = {
+                    "source_current",
+                    "source_voltage",
+                    "voltage_compliance",
+                    "current_compliance",
+                }
+                for channel, values in updates.items():
+                    channels[channel]["defaults"].update(
+                        {
+                            key: value
+                            for key, value in values.items()
+                            if key not in transient_keys
+                        }
+                    )
 
         if not self.settings_page.save_draft(extra_transform=merge_device_forms):
             return
-        self._pending_keithley_defaults = None
-        self._active_keithley_defaults = None
-        self._log("SAVE SETTINGS: one atomic settings.yml transaction completed")
+        if pending_keithley_defaults is not None:
+            # The station-profile transaction has completed; now hand the
+            # explicitly staged readback snapshot to the non-GUI worker.  The
+            # worker reloads the latest YAML under the repository lock, so the
+            # two commits cannot lose each other's fields.
+            self._start_keithley_defaults_save()
+        else:
+            self._pending_keithley_defaults = None
+            self._active_keithley_defaults = None
+        self._log("SAVE SETTINGS: station profile transaction completed")
         self.safety_strip.save_settings.setText("SAVED")
         QTimer.singleShot(
             1_500,
@@ -3088,6 +3294,8 @@ class MainWindow(FluentWindow):
         super().resizeEvent(event)
         if hasattr(self, "apparatus_navigation_item"):
             QTimer.singleShot(0, self._sync_apparatus_navigation_height)
+        if hasattr(self, "event_log_panel"):
+            QTimer.singleShot(0, self._sync_shell_splitter_layout)
 
     def _sync_apparatus_navigation_height(self) -> None:
         """Prevent QFluent's expanded tree from overlapping sibling routes."""
@@ -3116,7 +3324,7 @@ class MainWindow(FluentWindow):
         panel = self.navigationInterface.panel
         self._apparatus_required_height = max(
             self._apparatus_required_height,
-            panel.vBoxLayout.minimumSize().height() + 2,
+            panel.vBoxLayout.minimumSize().height() + 1,
         )
         self._sync_apparatus_navigation_height()
 
@@ -3188,6 +3396,22 @@ class MainWindow(FluentWindow):
                 "The application cannot close while a measurement or emergency-OFF "
                 "worker is still active. Outputs were sent an emergency-OFF request. "
                 "Wait for the stop to finish, then close the application again.",
+            )
+            event.ignore()
+            return
+        if not self.elab_page.shutdown():
+            self._audit_record(
+                "Application close blocked: eLab network work is still stopping",
+                severity="error",
+                category="application",
+                event_type="shutdown_blocked",
+                critical=True,
+            )
+            QMessageBox.warning(
+                self,
+                "eLab upload still active",
+                "The application cannot close while an eLab connection or upload is active. "
+                "Wait for it to finish, then close the application again.",
             )
             event.ignore()
             return

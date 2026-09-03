@@ -8,7 +8,9 @@ from dataclasses import dataclass, field
 from collections import deque
 from pathlib import Path
 
-from PySide6.QtCore import QEvent, QTimer, Qt, QUrl, Signal
+import numpy as np
+
+from PySide6.QtCore import QTimer, Qt, QUrl, Signal
 from PySide6.QtGui import QBrush, QColor, QDesktopServices
 from PySide6.QtWidgets import (
     QAbstractItemView,
@@ -38,12 +40,9 @@ from app.ui.common import human_duration as _human_duration
 from app.ui.dialogs import StationDialog
 from app.ui.design_system import tokens_for
 from app.ui.widgets import SpectrumPlotWidget
-from app.recipes import parse_recipe_text
-from app.recipes.models import RecipeNode
 from app.recipes.parameter_registry import PARAMETERS_BY_TARGET
-from app.recipes.semantic_tree import AxisPointContext, SemanticMeasurementTree, normalize_recipe_tree
-from app.devices.registry import built_in_device_registry
-from app.domain.quantities import format_quantity_auto
+from app.recipes.semantic_tree import AxisPointContext, SemanticMeasurementTree, SemanticNodeKind
+from app.domain.quantities import DIMENSION_TIME, format_quantity_auto
 from app.domain.execution_state import SemanticOperationState
 from app.ui.measurement_tree import MeasurementTreeModel, MeasurementTreeView, TreeInteractionMode
 
@@ -58,6 +57,9 @@ class ExecutionUiMetrics:
     preview_flushes: int = 0
     log_rows_rendered: int = 0
     max_pending_semantic: int = 0
+    semantic_events_coalesced: int = 0
+    max_tree_update_duration_s: float = 0.0
+    max_preview_update_duration_s: float = 0.0
 
 
 @dataclass(slots=True)
@@ -74,6 +76,8 @@ class ExecutionPresentationBuffer:
         if name.startswith("semantic_operation_"):
             state = payload
             if isinstance(state, SemanticOperationState):
+                if state.semantic_id in self.latest_semantic:
+                    self.metrics.semantic_events_coalesced += 1
                 self.latest_semantic[state.semantic_id] = state
                 self.metrics.semantic_events_received += 1
                 self.metrics.max_pending_semantic = max(
@@ -184,6 +188,15 @@ class RunMonitorPage(QWidget):
 
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
+        # The page is hosted by a vertical Fluent scroll area.  Ignore the
+        # desktop width hint while retaining a preferred content height so the
+        # host can provide a real scrollbar instead of forcing child widgets
+        # to paint outside the viewport.
+        self.setMinimumWidth(0)
+        self.setSizePolicy(
+            QSizePolicy.Policy.Ignored,
+            QSizePolicy.Policy.Preferred,
+        )
         layout = QVBoxLayout(self)
         layout.setContentsMargins(14, 10, 14, 10)
         layout.setSpacing(9)
@@ -342,34 +355,26 @@ class RunMonitorPage(QWidget):
         self.events.setUndoRedoEnabled(False)
         self.events.setMinimumHeight(86)
         self.events.setMaximumHeight(132)
-        self.steps = TreeWidget(self)
-        self.steps.setObjectName("executionSteps")
-        self.steps.setHeaderLabels(
-            ("Measurement sequence", "Role / expansion", "Status")
-        )
-        self.steps.setRootIsDecorated(True)
-        self.steps.setAlternatingRowColors(True)
-        self.steps.setSelectionMode(QAbstractItemView.SelectionMode.SingleSelection)
-        self.steps.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
-        self.steps.header().setSectionResizeMode(0, QHeaderView.ResizeMode.Stretch)
-        self.steps.header().setSectionResizeMode(1, QHeaderView.ResizeMode.ResizeToContents)
-        self.steps.header().setSectionResizeMode(2, QHeaderView.ResizeMode.ResizeToContents)
-        self.steps.setMinimumHeight(220)
-        # Shared semantic execution projection. The legacy item tree is kept
-        # private for historical result compatibility and is never placed in
-        # the visible splitter during a normal run.
+        # The semantic Fluent model/view is the sole execution procedure tree.
+        # Small item-based tables below remain flat state manifests; they do
+        # not reconstruct recipe structure or own execution progress.
         self.tree_model = MeasurementTreeModel()
+        self.tree_model.unknown_semantic_state.connect(
+            self._report_unknown_semantic_operation
+        )
         self.measurement_tree = MeasurementTreeView(self)
         self.measurement_tree.setObjectName("executionMeasurementTree")
         self.measurement_tree.setModel(self.tree_model)
         self.measurement_tree.set_interaction_mode(TreeInteractionMode.READ_ONLY)
         self.measurement_tree.setMinimumHeight(260)
         self._semantic_tree: SemanticMeasurementTree | None = None
-        self._semantic_mode = False
         self.ui_metrics = ExecutionUiMetrics()
-        self.presentation_buffer = ExecutionPresentationBuffer()
+        # The buffer owns the cadence, while the page exposes one shared
+        # metrics object for diagnostics and qualification tests.  Keeping a
+        # single counter source prevents a queued state from being counted
+        # once on ingress and again when it is painted.
+        self.presentation_buffer = ExecutionPresentationBuffer(metrics=self.ui_metrics)
         self._semantic_state_by_id: dict[str, SemanticOperationState] = {}
-        self.steps.hide()
         self.warnings = PlainTextEdit(self)
         self.warnings.setReadOnly(True)
         self.warnings.setProperty("stationSurface", "raised")
@@ -408,9 +413,13 @@ class RunMonitorPage(QWidget):
         self.monitor_splitter.addWidget(self.activity_splitter)
         self.monitor_splitter.addWidget(self.spectrum_preview)
         self.monitor_splitter.setMinimumHeight(300)
-        self.monitor_splitter.setStretchFactor(0, 5)
-        self.monitor_splitter.setStretchFactor(1, 6)
-        self.monitor_splitter.setSizes((600, 700))
+        self.monitor_splitter.setStretchFactor(0, 6)
+        self.monitor_splitter.setStretchFactor(1, 5)
+        # Keep the construction-time vertical layout modest.  QSplitter uses
+        # its last sizes when calculating the page size hint; the old 600/700
+        # seed made a freshly-created page reserve more than a 900 px desktop
+        # viewport before the responsive orientation pass ran.
+        self.monitor_splitter.setSizes((300, 300))
         self.workspace_card = CardWidget(self)
         self.workspace_card.setObjectName("executionWorkspaceCard")
         self.workspace_card.setProperty("stationSurface", "surface")
@@ -520,42 +529,16 @@ class RunMonitorPage(QWidget):
         self._paused_total_s = 0.0
         self._model_duration_s = 0.0
         self._planned_actions = 0
+        self._stored_points = 0
+        self._run_active = False
+        self._active_wait_node_id: str | None = None
+        self._active_wait_duration_s: float | None = None
+        self._active_wait_position = ""
         self._dry_run = False
         self._manual_stage_mode = False
         self._manual_dialog = ManualStageDialog(self)
         self._manual_dialog.next_requested.connect(self.manual_next_requested)
         self._manual_dialog.abort_requested.connect(self._request_safe_stop)
-        self._step_items: dict[str, QTreeWidgetItem] = {}
-        self._step_totals: dict[str, int] = {}
-        self._step_completed: dict[str, int] = {}
-        self._active_step: QTreeWidgetItem | None = None
-        # Every executable loop owns a small live readout.  Keeping this row
-        # in the recipe tree makes the active ROI values unambiguous even
-        # when the generated action rows are repeated many times.
-        self._current_roi_items: dict[str, QTreeWidgetItem] = {}
-        self._current_roi_values: dict[str, dict[str, object]] = {}
-        self._active_roi_owner: str | None = None
-        self._current_roi_role = int(Qt.ItemDataRole.UserRole) + 100
-        self._current_roi_owner_role = int(Qt.ItemDataRole.UserRole) + 101
-        self._pending_step_visual: tuple[QTreeWidgetItem, str] | None = None
-        self._last_step_visual_at = 0.0
-        self._step_visual_interval_s = 0.08
-        self._step_visual_timer = QTimer(self)
-        self._step_visual_timer.setSingleShot(True)
-        self._step_visual_timer.setInterval(80)
-        self._step_visual_timer.timeout.connect(self._flush_step_visual)
-        # Following a changing tree row invokes a layout and scroll pass in
-        # QTreeWidget.  It is deliberately rate-limited independently from
-        # status text updates so a sweep cannot monopolise the GUI thread.
-        self._pending_step_follow: QTreeWidgetItem | None = None
-        self._last_step_follow_at = 0.0
-        self._step_follow_interval_s = 0.18
-        self._step_follow_timer = QTimer(self)
-        self._step_follow_timer.setSingleShot(True)
-        self._step_follow_timer.setInterval(180)
-        self._step_follow_timer.timeout.connect(self._flush_step_follow)
-        self._event_log_last_by_group: dict[tuple[str, str], float] = {}
-        self._event_log_sample_interval_s = 0.35
         self._last_operation_repolish_at = 0.0
         self._operation_repolish_interval_s = 0.08
         self._output_items: dict[str, QTreeWidgetItem] = {}
@@ -565,12 +548,16 @@ class RunMonitorPage(QWidget):
         self._eta_timer.timeout.connect(self._update_eta)
         self._preview_timer = QTimer(self)
         self._preview_timer.setSingleShot(True)
-        self._preview_timer.setInterval(100)
+        self._preview_timer.setInterval(200)
         self._preview_timer.timeout.connect(self._flush_spectrum_preview)
         self._pending_spectrum_preview: dict[str, object] | None = None
         self._semantic_flush_timer = QTimer(self)
         self._semantic_flush_timer.setSingleShot(True)
-        self._semantic_flush_timer.setInterval(33)
+        # A 10 Hz presentation cadence is fast enough for a live active-row
+        # animation, while avoiding a model/dataChanged pass for every tiny
+        # burst of worker events.  The durable Runner event stream is not
+        # throttled; only this non-safety projection is coalesced.
+        self._semantic_flush_timer.setInterval(100)
         self._semantic_flush_timer.timeout.connect(self._flush_semantic_states)
         self._pending_semantic_states: dict[str, SemanticOperationState] = {}
         self._activity_pulse_on = False
@@ -593,10 +580,23 @@ class RunMonitorPage(QWidget):
             self._last_layout_orientation = orientation
             self.monitor_splitter.setOrientation(orientation)
             if orientation == Qt.Orientation.Horizontal:
+                # The plot and tree sit side by side at desktop widths.  Keep
+                # the workspace card bounded so the current-operation card and
+                # active tree remain in the first viewport; the tree/plot
+                # retain their own scroll/zoom affordances for deeper inspection.
+                self.workspace_card.setMaximumHeight(440)
                 available = max(760, self.monitor_splitter.width())
-                left = max(480, int(available * 0.48))
-                self.monitor_splitter.setSizes((left, max(520, available - left)))
+                # The tree carries four semantic columns.  Give it a modest
+                # majority of the workspace so operation and active-value
+                # labels remain readable while the plot keeps a useful
+                # 400+ px canvas.
+                left = max(560, int(available * 0.62))
+                self.monitor_splitter.setSizes((left, max(400, available - left)))
             else:
+                # At narrow widths the plot follows the tree vertically.  A
+                # larger cap leaves both surfaces useful while still avoiding
+                # the old construction-time 600/700 splitter reservation.
+                self.workspace_card.setMaximumHeight(760)
                 available = max(560, self.monitor_splitter.height())
                 upper = max(300, int(available * 0.52))
                 self.monitor_splitter.setSizes((upper, max(260, available - upper)))
@@ -696,11 +696,32 @@ class RunMonitorPage(QWidget):
                 int(data.get("action_index", 0)),
                 int(data.get("total_actions", self._planned_actions)),
                 self._axis_context_from_event(data.get("axis_context")),
+                str(data["kind"]) if data.get("kind") is not None else None,
+                str(data["device"]) if data.get("device") is not None else None,
+                data.get("channel") if isinstance(data.get("channel"), (str, int)) else None,
+                float(data["duration_s"])
+                if isinstance(data.get("duration_s"), (int, float))
+                and not isinstance(data.get("duration_s"), bool)
+                else None,
+                str(data["trace"]) if data.get("trace") is not None else None,
+                (
+                    str(data["reference_operation"])
+                    if data.get("reference_operation") is not None
+                    else None
+                ),
             )
         except (TypeError, ValueError):
             return None
 
-    def _apply_semantic_event(self, name: str, data: dict[str, object]) -> None:
+    def _apply_semantic_event(
+        self,
+        name: str,
+        data: dict[str, object],
+        *,
+        submit_buffer: bool = True,
+        update_focus: bool = True,
+        apply_model: bool = True,
+    ) -> None:
         phases = {
             "semantic_operation_started": "running",
             "semantic_operation_applied": "applied",
@@ -712,56 +733,161 @@ class RunMonitorPage(QWidget):
         state = self._semantic_state_from_event(data, phase=phase)
         if state is None:
             return
-        self.ui_metrics.semantic_events_received += 1
-        self.presentation_buffer.submit(name, state)
+        if submit_buffer:
+            self.presentation_buffer.submit(name, state)
         self._semantic_state_by_id[state.semantic_id] = state
-        self.tree_model.apply_state(state)
+        tree_update_started = time.perf_counter()
+        if apply_model:
+            self.tree_model.apply_state(state)
+        if not update_focus:
+            self.ui_metrics.max_tree_update_duration_s = max(
+                self.ui_metrics.max_tree_update_duration_s,
+                time.perf_counter() - tree_update_started,
+            )
+            return
         if state.phase == "applied":
             self.progress.setValue(
                 min(self.progress.maximum(), max(self.progress.value(), state.action_index + 1))
             )
-            self._update_eta()
-        self.measurement_tree.follow_semantic_id(
-            state.semantic_id, force=phase in {"failed", "applied"}
+        if phase in {"running", "failed"}:
+            self.measurement_tree.follow_semantic_id(
+                state.semantic_id, force=phase == "failed"
+            )
+        self.ui_metrics.max_tree_update_duration_s = max(
+            self.ui_metrics.max_tree_update_duration_s,
+            time.perf_counter() - tree_update_started,
         )
+        node = (
+            self._semantic_tree.by_id.get(state.semantic_id)
+            if self._semantic_tree is not None
+            else None
+        )
+        operation_label = node.label if node is not None else state.kind or "operation"
+        self.current_path.setText(
+            f"Current node: {operation_label} · action "
+            f"{state.action_index + 1}/{max(1, state.total_actions)}"
+        )
+        context = state.axis_context
+        if context is not None:
+            self.current_setpoints.setText(
+                "Setpoints (SI): " + self._format_scalars(context.active_setpoints_si)
+            )
         target = self._semantic_target(state.semantic_id)
-        if target:
+        is_setpoint = node is not None and node.kind is SemanticNodeKind.SET_ROI_VALUE
+        if is_setpoint and target:
             value = (
                 state.applied_si
                 if state.phase == "applied" and state.applied_si is not None
                 else state.requested_si
             )
-            if value is not None:
-                descriptor = PARAMETERS_BY_TARGET.get(target)
-                self.current_operation_device.setText(
-                    self._operation_device(target, data)
-                )
-                self.current_operation_parameter.setText(
-                    descriptor.ui_label if descriptor is not None else target
-                )
+            descriptor = PARAMETERS_BY_TARGET.get(target)
+            self.current_operation_device.setText(self._operation_device(target, data))
+            self.current_operation_parameter.setText(
+                descriptor.ui_label if descriptor is not None else target
+            )
+            self.current_operation_value.setText(self._format_parameter(target, value))
+            self.current_operation_si.setText(self._format_si_value(target, value))
+        elif node is not None or data.get("kind"):
+            # Configuration, acquisition and wait rows are operations in their
+            # own right. They replace the previous setpoint in the prominent
+            # card instead of leaving a stale value on screen.
+            kind = str(data.get("kind", "operation"))
+            display_target = (
+                target
+                if target and context is not None and not data.get("device")
+                else ""
+            )
+            self.current_operation_device.setText(
+                self._operation_device(display_target, data)
+            )
+            self.current_operation_parameter.setText(
+                node.label if node is not None else kind.replace("_", " ").title()
+            )
+            duration = data.get("duration_s")
+            if isinstance(duration, (int, float)) and not isinstance(duration, bool):
                 self.current_operation_value.setText(
-                    self._format_parameter(target, value)
+                    format_quantity_auto(float(duration), DIMENSION_TIME)
                 )
-                self.current_operation_si.setText(
-                    self._format_si_value(target, value)
-                )
-                context = state.axis_context
-                if context is not None:
-                    self.current_operation_detail.setText(
-                        f"Point {context.point_index + 1}/{context.point_count} · "
-                        f"stage {context.stage_index + 1} · {data.get('kind', 'set point')}"
-                    )
-                else:
-                    self.current_operation_detail.setText(str(data.get("kind", "set point")))
+                self.current_operation_si.setText(f"SI {float(duration):.6g} s")
+            else:
+                self.current_operation_value.setText("—")
+                self.current_operation_si.setText("SI —")
+        if context is not None:
+            self.current_operation_detail.setText(
+                f"Point {context.point_index + 1}/{context.point_count} · "
+                f"stage {context.stage_index + 1} · {data.get('kind', 'operation')}"
+            )
+        elif node is not None:
+            self.current_operation_detail.setText(str(data.get("kind", node.kind.value)))
         self.current_operation_phase.setText(
             self._operation_phase(str(data.get("kind", "set point")))
         )
+        operation_kind = str(data.get("kind", "")).lower()
+        if operation_kind == "wait" and phase == "running":
+            duration = data.get("duration_s")
+            self._active_wait_node_id = (
+                str(data["node_id"]) if data.get("node_id") is not None else None
+            )
+            self._active_wait_duration_s = (
+                float(duration)
+                if isinstance(duration, (int, float)) and not isinstance(duration, bool)
+                else None
+            )
+            if self._active_wait_duration_s is not None:
+                self._active_wait_position = (
+                    f"Point {context.point_index + 1}/{context.point_count} · "
+                    if context is not None
+                    else ""
+                )
+                self.current_operation_detail.setText(
+                    f"{self._active_wait_position}WAIT in progress · "
+                    f"{format_quantity_auto(self._active_wait_duration_s, DIMENSION_TIME)} remaining"
+                )
+        elif operation_kind == "wait" and phase == "applied":
+            duration = self._active_wait_duration_s
+            self._active_wait_node_id = None
+            self._active_wait_duration_s = None
+            self._active_wait_position = ""
+            if duration is not None:
+                prefix = (
+                    f"Point {context.point_index + 1}/{context.point_count} · "
+                    if context is not None
+                    else ""
+                )
+                self.current_operation_detail.setText(
+                    f"{prefix}WAIT completed · "
+                    f"{format_quantity_auto(duration, DIMENSION_TIME)} elapsed"
+                )
+        elif phase == "running":
+            self._active_wait_node_id = None
+            self._active_wait_duration_s = None
+            self._active_wait_position = ""
+        running_state = (
+            "WAITING"
+            if "wait" in operation_kind
+            else "MEASURING"
+            if any(word in operation_kind for word in ("acquire", "measure", "spectrum"))
+            else "SETTING"
+        )
         self._set_current_operation_state(
-            "SETTING" if phase == "running" else "CONFIRMED" if phase == "applied" else "FAILED"
+            running_state
+            if phase == "running"
+            else "CONFIRMED"
+            if phase == "applied"
+            else "FAILED"
         )
 
     def value_for(self, semantic_id: str) -> str:
         return self.tree_model.value_for(semantic_id)
+
+    def _report_unknown_semantic_operation(self, semantic_id: str) -> None:
+        """Expose a bounded diagnostic instead of guessing a tree parent."""
+
+        self.warnings.show()
+        self.warnings.appendPlainText(
+            "Engine-generated operation is absent from the accepted semantic "
+            f"snapshot: {semantic_id}. The technical event remains durable."
+        )
 
     def run_started(
         self,
@@ -770,7 +896,6 @@ class RunMonitorPage(QWidget):
         *,
         plan_actions: object = (),
         recipe_source: str | None = None,
-        recipe_tree_items: tuple[QTreeWidgetItem, ...] = (),
         execution_mode: str = "measurement",
         semantic_tree: SemanticMeasurementTree | None = None,
     ) -> None:
@@ -779,33 +904,20 @@ class RunMonitorPage(QWidget):
         self._semantic_flush_timer.stop()
         self._pending_semantic_states.clear()
         self._activity_pulse_timer.stop()
-        self._step_visual_timer.stop()
-        self._pending_step_visual = None
-        self._last_step_visual_at = 0.0
-        self._step_follow_timer.stop()
-        self._pending_step_follow = None
-        self._last_step_follow_at = 0.0
         self._activity_pulse_on = False
         self._set_activity_indicator("○", "off")
         self._semantic_state_by_id.clear()
-        self.presentation_buffer = ExecutionPresentationBuffer()
-        if semantic_tree is None and isinstance(recipe_source, str) and recipe_source.strip():
-            try:
-                recipe = parse_recipe_text(recipe_source, origin="execution plan")
-                semantic_tree = normalize_recipe_tree(
-                    recipe, built_in_device_registry().sweep_providers()
-                )
-            except Exception:
-                semantic_tree = None
-        self._semantic_tree = semantic_tree
-        self._semantic_mode = semantic_tree is not None
-        if semantic_tree is not None:
-            self.tree_model.replace_tree(semantic_tree)
-            self.tree_model.set_read_only(True)
-        else:
-            self.tree_model.replace_tree(
-                SemanticMeasurementTree((), {}, source_text=recipe_source or "")
-            )
+        self.ui_metrics = ExecutionUiMetrics()
+        self.presentation_buffer = ExecutionPresentationBuffer(metrics=self.ui_metrics)
+        # MainWindow supplies the exact accepted preflight snapshot. Direct UI
+        # diagnostics may omit it, but they still receive the same empty
+        # semantic model rather than a second item-based interpretation.
+        self._semantic_tree = semantic_tree or SemanticMeasurementTree(
+            (), {}, source_text=recipe_source or ""
+        )
+        self.tree_model.replace_tree(self._semantic_tree)
+        self.tree_model.set_read_only(True)
+        self._run_active = True
         self.completion_card.hide()
         self.completion_summary.clear()
         self.completion_path.clear()
@@ -831,6 +943,10 @@ class RunMonitorPage(QWidget):
                 else "Normal measurement execution; recipe OUTPUT actions are active."
             )
         self._planned_actions = max(0, actions)
+        self._stored_points = 0
+        self._active_wait_node_id = None
+        self._active_wait_duration_s = None
+        self._active_wait_position = ""
         self.progress.setRange(0, max(actions, 1))
         self.progress.setValue(0)
         self.stop_button.setText("Stop safely")
@@ -838,13 +954,7 @@ class RunMonitorPage(QWidget):
         self.pause_button.setEnabled(not manual)
         self.resume_button.setEnabled(False)
         self.events.clear()
-        self._event_log_last_by_group.clear()
         self._last_operation_repolish_at = 0.0
-        self._build_step_list(
-            plan_actions,
-            recipe_source=recipe_source,
-            recipe_tree_items=recipe_tree_items,
-        )
         self._build_live_manifest(plan_actions)
         if manual:
             self._manual_dialog.abort_button.setEnabled(True)
@@ -930,75 +1040,6 @@ class RunMonitorPage(QWidget):
             )
             self._paused_started = 0.0
 
-    def _build_step_list(
-        self,
-        plan_actions: object,
-        *,
-        recipe_source: str | None = None,
-        recipe_tree_items: tuple[QTreeWidgetItem, ...] = (),
-    ) -> None:
-        """Show the immutable recipe hierarchy, annotated by its action plan.
-
-        The runner reports actions, but their flat order is not the operator's
-        procedure.  Rendering from the exact compiled recipe source preserves
-        sweep/repeat/conditional nesting and the guaranteed Finally branch.
-        """
-
-        self.steps.clear()
-        self._step_items.clear()
-        self._step_totals.clear()
-        self._step_completed.clear()
-        self._active_step = None
-        self._current_roi_items.clear()
-        self._current_roi_values.clear()
-        self._active_roi_owner = None
-        if not isinstance(plan_actions, (tuple, list)):
-            return
-        ordered: list[tuple[str, str, bool]] = []
-        seen_node_ids: set[str] = set()
-        for action in plan_actions:
-            node_id = str(getattr(action, "node_id", ""))
-            kind = str(getattr(action, "kind", ""))
-            if not node_id:
-                continue
-            self._step_totals[node_id] = self._step_totals.get(node_id, 0) + 1
-            if node_id not in seen_node_ids:
-                ordered.append((node_id, kind, bool(getattr(action, "is_finally", False))))
-                seen_node_ids.add(node_id)
-        if recipe_tree_items:
-            self.steps.addTopLevelItems(
-                [item.clone() for item in recipe_tree_items]
-            )
-            self._index_recipe_tree_items()
-            self._install_current_roi_rows()
-            self._project_generated_actions(plan_actions)
-            self.steps.expandAll()
-            return
-        if isinstance(recipe_source, str) and recipe_source.strip():
-            try:
-                recipe = parse_recipe_text(recipe_source, origin="execution plan")
-            except Exception:
-                # The execution plan is already authoritative and immutable.
-                # If the source cannot be presented, retain the legacy action
-                # list rather than hiding execution state from the operator.
-                recipe = None
-            if recipe is not None:
-                self._build_recipe_tree(recipe.root, recipe.finally_nodes, ordered)
-                self._install_current_roi_rows()
-                self._project_generated_actions(plan_actions)
-                self.steps.expandAll()
-                return
-        for node_id, kind, is_finally in ordered:
-            label = node_id.replace("-", " ").replace("_", " ")
-            if is_finally:
-                label = "Finally · " + label
-            total = self._step_totals[node_id]
-            status = "○ WAITING" if total == 1 else f"○ 0/{total} WAITING"
-            item = QTreeWidgetItem([label, kind.replace("_", " "), status])
-            item.setData(0, Qt.ItemDataRole.UserRole, node_id)
-            self.steps.addTopLevelItem(item)
-            self._step_items[node_id] = item
-
     @staticmethod
     def _action_channel(action: object, attribute: str) -> object | None:
         payload = getattr(action, "payload", None)
@@ -1062,14 +1103,16 @@ class RunMonitorPage(QWidget):
 
     def _set_output_item_state(self, item: QTreeWidgetItem, state: str) -> None:
         normalized = state.lower()
-        item.setText(1, normalized.upper())
         tokens = tokens_for("dark" if isDarkTheme() else "light")
         color = {
             "on": tokens.success,
             "off": tokens.text_muted,
             "unknown": tokens.caution,
         }.get(normalized, tokens.caution)
-        item.setForeground(1, QBrush(QColor(color)))
+        if item.text(1).casefold() != normalized:
+            item.setText(1, normalized.upper())
+        if item.foreground(1).color().name().casefold() != color.casefold():
+            item.setForeground(1, QBrush(QColor(color)))
 
     @staticmethod
     def _format_parameter(target: str, value: object) -> str:
@@ -1119,14 +1162,16 @@ class RunMonitorPage(QWidget):
                 state = statuses.get(endpoint)
                 if isinstance(state, str):
                     self._set_output_item_state(item, state)
-                    item.setText(2, updated if state != "unknown" else "Not confirmed")
+                    timestamp = updated if state != "unknown" else "Not confirmed"
+                    if item.text(2) != timestamp:
+                        item.setText(2, timestamp)
         device_states = snapshot.get("device_states")
         for target, item in self._parameter_items.items():
             applied = self._applied_parameter_value(target, device_states)
             if applied is not None:
                 item.setText(2, self._format_parameter(target, applied))
                 item.setText(3, "APPLIED")
-                item.setForeground(3, self._step_brush("done"))
+                item.setForeground(3, self._state_brush("done"))
 
     def _set_requested_parameters(self, values: object) -> None:
         if not isinstance(values, dict):
@@ -1146,613 +1191,7 @@ class RunMonitorPage(QWidget):
                 item.setText(1, requested)
             if item.text(3) != "PENDING":
                 item.setText(3, "PENDING")
-                item.setForeground(3, self._step_brush("running"))
-
-    def _index_recipe_tree_items(self) -> None:
-        """Map cloned Builder rows to run events without changing their text.
-
-        The third Builder column remains the static preflight status.  Execution
-        state is communicated by selection/highlighting and the live monitor,
-        preserving an exact visual recipe projection rather than replacing it
-        with a second, flatter execution-specific tree.
-        """
-
-        def visit(item: QTreeWidgetItem) -> None:
-            node = item.data(0, Qt.ItemDataRole.UserRole)
-            node_id = getattr(node, "id", None)
-            if isinstance(node_id, str) and node_id:
-                self._step_items[node_id] = item
-                item.setData(0, int(Qt.ItemDataRole.UserRole) + 98, True)
-            structural = item.data(0, int(Qt.ItemDataRole.UserRole) + 41)
-            if isinstance(structural, str) and structural.startswith(
-                "automatic_shutdown:"
-            ):
-                action = structural.removeprefix("automatic_shutdown:")
-                if action:
-                    shutdown_id = f"shutdown:{action}"
-                    self._step_items[shutdown_id] = item
-                    self._step_totals.setdefault(shutdown_id, 1)
-            generated_id = item.data(0, int(Qt.ItemDataRole.UserRole) + 99)
-            if isinstance(generated_id, str) and generated_id:
-                self._step_items[generated_id] = item
-            item.setFlags(item.flags() & ~Qt.ItemFlag.ItemIsDragEnabled)
-            for index in range(item.childCount()):
-                visit(item.child(index))
-
-        for index in range(self.steps.topLevelItemCount()):
-            visit(self.steps.topLevelItem(index))
-
-    def _install_current_roi_rows(self) -> None:
-        """Insert a live setpoint readout into every executable loop.
-
-        The recipe tree is the operator's procedure view.  Generated device
-        actions are projected below the ``For each ROI point`` boundary, so a
-        sibling readout in that same boundary is the least ambiguous place to
-        show the values that are active for the current point.
-        """
-
-        structural_role = int(Qt.ItemDataRole.UserRole) + 41
-        source_marker_role = int(Qt.ItemDataRole.UserRole) + 97
-
-        def visit(item: QTreeWidgetItem, owner_id: str | None = None) -> None:
-            raw_node = item.data(0, Qt.ItemDataRole.UserRole)
-            current_owner = owner_id
-            node_id = getattr(raw_node, "id", None)
-            if node_id is None and item.data(0, source_marker_role) is True:
-                node_id = raw_node
-            if isinstance(node_id, str) and node_id:
-                current_owner = node_id
-            if item.data(0, structural_role) == "execution" and current_owner:
-                item.setData(0, self._current_roi_owner_role, current_owner)
-                existing = next(
-                    (
-                        item.child(index)
-                        for index in range(item.childCount())
-                        if item.child(index).data(0, self._current_roi_role) is True
-                    ),
-                    None,
-                )
-                if existing is None:
-                    existing = QTreeWidgetItem(
-                        ["Current ROI point", "Waiting for first setpoint", "WAITING"]
-                    )
-                    existing.setData(0, self._current_roi_role, True)
-                    existing.setData(0, self._current_roi_owner_role, current_owner)
-                    existing.setFlags(
-                        existing.flags()
-                        & ~Qt.ItemFlag.ItemIsDragEnabled
-                        & ~Qt.ItemFlag.ItemIsDropEnabled
-                        & ~Qt.ItemFlag.ItemIsEditable
-                    )
-                    existing.setToolTip(
-                        0,
-                        "Current setpoints for this ROI loop. Values are normalized to SI.",
-                    )
-                    existing.setToolTip(1, "Waiting for the first loop setpoint.")
-                    item.insertChild(0, existing)
-                self._current_roi_items[current_owner] = existing
-                self._current_roi_values.setdefault(current_owner, {})
-                self._set_step_state(existing, "waiting")
-            for index in range(item.childCount()):
-                visit(item.child(index), current_owner)
-
-        for index in range(self.steps.topLevelItemCount()):
-            visit(self.steps.topLevelItem(index))
-
-    def _current_roi_owner_for_node(self, node_id: str) -> str | None:
-        """Return the nearest loop owner for a running action row."""
-
-        item = self._step_items.get(node_id)
-        while item is not None:
-            owner = item.data(0, self._current_roi_owner_role)
-            if isinstance(owner, str) and owner in self._current_roi_items:
-                return owner
-            item = item.parent()
-        return None
-
-    def _update_current_roi(self, data: dict[str, object], *, state: str) -> None:
-        """Render the latest normalized setpoints inside the active loop."""
-
-        if self._semantic_mode:
-            return
-
-        node_id = str(data.get("node_id", ""))
-        owner = self._current_roi_owner_for_node(node_id) if node_id else None
-        if owner is None:
-            owner = self._active_roi_owner
-        values = data.get("setpoints_si")
-        normalized: dict[str, object] = {}
-        if isinstance(values, dict):
-            normalized = {str(target): value for target, value in values.items()}
-        if owner is None and normalized and len(self._current_roi_items) == 1:
-            owner = next(iter(self._current_roi_items))
-        if owner is None:
-            return
-        current = self._current_roi_values.setdefault(owner, {})
-        if state.startswith("POINT") and normalized:
-            # A checkpoint contains the complete point set, so start the next
-            # display state from that immutable boundary rather than carrying
-            # a stale parameter from a previous ROI.
-            current.clear()
-            current.update(normalized)
-        elif normalized:
-            current.update(normalized)
-        if not current:
-            return
-        item = self._current_roi_items.get(owner)
-        if item is None:
-            return
-        display = " · ".join(
-            f"{target} = {self._format_parameter(target, value)}"
-            for target, value in sorted(current.items())
-        )
-        si_display = " · ".join(
-            f"{target} = {self._format_si_value(target, value)}"
-            for target, value in sorted(current.items())
-        )
-        item.setText(1, display)
-        item.setText(2, state)
-        item.setToolTip(0, f"Current setpoints for this ROI loop\n{si_display}")
-        item.setToolTip(1, f"Normalized setpoints: {si_display}")
-        item.setData(1, Qt.ItemDataRole.UserRole, dict(current))
-        self._set_step_state(
-            item,
-            "done" if state.startswith("POINT") else "running",
-        )
-        self._active_roi_owner = owner
-
-    def _project_generated_actions(self, plan_actions: object) -> None:
-        """Place compiler-generated actions under their source loop owner.
-
-        Device-module recipes intentionally generate action IDs such as
-        ``keithley-...update-level`` and ``keithley-...settle`` while compiling
-        each ROI. Those IDs are not editable :class:`RecipeNode` IDs, so a
-        naive event handler used to create them as new top-level rows. Resolve
-        the longest source-node prefix and attach each unique generated action
-        to that node's execution container instead.
-        """
-
-        if not isinstance(plan_actions, (tuple, list)):
-            return
-        structural_role = int(Qt.ItemDataRole.UserRole) + 41
-        source_marker_role = int(Qt.ItemDataRole.UserRole) + 97
-        generated_marker_role = int(Qt.ItemDataRole.UserRole) + 99
-        node_items: dict[str, QTreeWidgetItem] = {}
-        execution_items: dict[str, QTreeWidgetItem] = {}
-
-        def visit(item: QTreeWidgetItem, owner_id: str | None = None) -> None:
-            raw_node = item.data(0, Qt.ItemDataRole.UserRole)
-            current_owner = owner_id
-            node_id = getattr(raw_node, "id", None)
-            if node_id is None and item.data(0, source_marker_role) is True:
-                node_id = raw_node
-            if isinstance(node_id, str) and node_id:
-                node_items[node_id] = item
-                current_owner = node_id
-            if item.data(0, structural_role) == "execution" and current_owner:
-                execution_items[current_owner] = item
-            for index in range(item.childCount()):
-                visit(item.child(index), current_owner)
-
-        for index in range(self.steps.topLevelItemCount()):
-            visit(self.steps.topLevelItem(index))
-        if not node_items:
-            return
-
-        candidates = tuple(sorted(node_items, key=len, reverse=True))
-        generated: set[str] = set()
-        unresolved: list[tuple[str, str]] = []
-        unresolved_ids: set[str] = set()
-
-        for action in plan_actions:
-            node_id = str(getattr(action, "node_id", ""))
-            kind = str(getattr(action, "kind", ""))
-            if not node_id or node_id in self._step_items or node_id in generated:
-                continue
-            owner_id = next(
-                (
-                    candidate
-                    for candidate in candidates
-                    if node_id.startswith(candidate + ".")
-                ),
-                None,
-            )
-            if owner_id is None:
-                if node_id not in unresolved_ids:
-                    unresolved.append((node_id, kind))
-                    unresolved_ids.add(node_id)
-                continue
-            owner_item = node_items[owner_id]
-            suffix = node_id[len(owner_id) + 1 :]
-            execution_item = execution_items.get(owner_id)
-            inside_loop = execution_item is not None and self._generated_action_is_looped(
-                kind, suffix
-            )
-            parent = execution_item if inside_loop else owner_item
-            label = self._generated_action_label(kind)
-            total = self._step_totals.get(node_id, 1)
-            detail = (
-                f"Per-point operation • {total} execution(s)"
-                if inside_loop
-                else (
-                    "After ROI loop • safe output transition"
-                    if suffix.endswith("output-off")
-                    else f"Generated execution action • {total} execution(s)"
-                )
-            )
-            item = QTreeWidgetItem([label, detail, self._waiting_status(total)])
-            item.setData(0, Qt.ItemDataRole.UserRole, node_id)
-            item.setData(0, generated_marker_role, node_id)
-            item.setFlags(
-                item.flags()
-                & ~Qt.ItemFlag.ItemIsDragEnabled
-                & ~Qt.ItemFlag.ItemIsDropEnabled
-                & ~Qt.ItemFlag.ItemIsEditable
-            )
-            item.setToolTip(
-                0,
-                f"Compiler-generated action {node_id}. "
-                + (
-                    "Runs inside the ROI loop."
-                    if inside_loop
-                    else "Runs at the device block boundary."
-                ),
-            )
-            if inside_loop:
-                parent.addChild(item)
-            elif execution_item is not None:
-                # Configuration/output-on actions precede the loop container;
-                # output-off actions remain visibly after it.
-                if suffix.endswith("output-off"):
-                    parent.addChild(item)
-                else:
-                    # Re-read the execution index for each insertion. Adding
-                    # at that index keeps every pre-loop action before the
-                    # boundary while preserving first-seen plan order.
-                    position = parent.indexOfChild(execution_item)
-                    parent.insertChild(max(0, position), item)
-            else:
-                parent.addChild(item)
-            self._step_items[node_id] = item
-            generated.add(node_id)
-
-        if unresolved:
-            # Recovery/prelude actions can be synthesized without a source
-            # RecipeNode. Keep them visible in one explicit engine branch
-            # instead of allowing the event handler to create flat rows.
-            prelude = QTreeWidgetItem(
-                [
-                    "Engine-generated actions",
-                    "Actions without a source-node owner",
-                    "FLOW",
-                ]
-            )
-            prelude.setData(0, structural_role, "recovery")
-            prelude.setFlags(prelude.flags() & ~Qt.ItemFlag.ItemIsDragEnabled)
-            for node_id, kind in unresolved:
-                item = QTreeWidgetItem(
-                    [
-                        self._generated_action_label(kind),
-                        "Recovery/prelude operation",
-                        self._waiting_status(self._step_totals.get(node_id, 1)),
-                    ]
-                )
-                item.setData(0, Qt.ItemDataRole.UserRole, node_id)
-                item.setData(0, generated_marker_role, node_id)
-                item.setFlags(
-                    item.flags()
-                    & ~Qt.ItemFlag.ItemIsDragEnabled
-                    & ~Qt.ItemFlag.ItemIsDropEnabled
-                    & ~Qt.ItemFlag.ItemIsEditable
-                )
-                prelude.addChild(item)
-                self._step_items[node_id] = item
-            self.steps.insertTopLevelItem(0, prelude)
-
-    @staticmethod
-    def _generated_action_is_looped(kind: str, suffix: str) -> bool:
-        """Classify generated action IDs by the boundary that owns them."""
-
-        normalized_kind = kind.casefold()
-        normalized_suffix = suffix.casefold()
-        if normalized_suffix.startswith("configure"):
-            return False
-        if normalized_suffix.startswith("output") or normalized_kind.endswith(
-            "_output"
-        ):
-            return False
-        return True
-
-    @staticmethod
-    def _generated_action_label(kind: str) -> str:
-        if not kind:
-            return "Generated operation"
-        return kind.replace("_", " ").strip().title()
-
-    def _build_recipe_tree(
-        self,
-        root: RecipeNode,
-        finally_nodes: tuple[RecipeNode, ...],
-        ordered_actions: list[tuple[str, str, bool]],
-    ) -> None:
-        """Project every editable recipe node into the read-only run tree."""
-
-        rendered: set[str] = set()
-
-        def add_node(
-            node: RecipeNode, parent: QTreeWidgetItem | None = None
-        ) -> QTreeWidgetItem:
-            total = self._step_totals.get(node.id, 0)
-            detail = node.type.replace("_", " ")
-            if total:
-                detail += f" • {total} action{'s' if total != 1 else ''}"
-            item = QTreeWidgetItem(
-                [self._recipe_node_label(node), detail, self._waiting_status(total)]
-            )
-            item.setData(0, Qt.ItemDataRole.UserRole, node.id)
-            item.setData(0, int(Qt.ItemDataRole.UserRole) + 97, True)
-            if parent is None:
-                self.steps.addTopLevelItem(item)
-            else:
-                parent.addChild(item)
-            self._step_items[node.id] = item
-            rendered.add(node.id)
-            child_parent = item
-            # Keep the execution boundary explicit. A sweep's children are
-            # evaluated once for every ROI point; they are not sibling steps
-            # of the sweep itself. This source-only fallback mirrors the
-            # Builder projection used by the normal snapshot path.
-            if self._uses_execution_container(node):
-                execution_label = (
-                    "For each ROI point"
-                    if node.type == "sweep" or node.data.get("device_module")
-                    else f"Repeated steps × {node.data.get('count', '?')}"
-                )
-                execution = QTreeWidgetItem(
-                    [execution_label, "Executable child steps", "FLOW"]
-                )
-                execution.setData(
-                    0,
-                    int(Qt.ItemDataRole.UserRole) + 41,
-                    "execution",
-                )
-                execution.setFlags(
-                    execution.flags() & ~Qt.ItemFlag.ItemIsDragEnabled
-                )
-                execution.setToolTip(
-                    0,
-                    "Only blocks placed in this branch execute for every loop point.",
-                )
-                item.addChild(execution)
-                child_parent = execution
-            for child in node.children:
-                add_node(child, child_parent)
-            if node.else_children:
-                alternative = QTreeWidgetItem(
-                    ["Else branch", "Conditional alternative", "○ WAITING"]
-                )
-                alternative.setData(
-                    0,
-                    int(Qt.ItemDataRole.UserRole) + 41,
-                    "else",
-                )
-                alternative.setFlags(
-                    alternative.flags() & ~Qt.ItemFlag.ItemIsSelectable
-                )
-                item.addChild(alternative)
-                for child in node.else_children:
-                    add_node(child, alternative)
-            return item
-
-        add_node(root)
-        if finally_nodes:
-            cleanup = QTreeWidgetItem(
-                ["Finally — safe shutdown", "Guaranteed after success, stop or fault", "○ WAITING"]
-            )
-            cleanup.setData(
-                0,
-                int(Qt.ItemDataRole.UserRole) + 41,
-                "finally",
-            )
-            self.steps.addTopLevelItem(cleanup)
-            for node in finally_nodes:
-                add_node(node, cleanup)
-
-        # Recovery prelude actions are generated by the runner and do not
-        # necessarily exist in the source tree. Keep them visible rather than
-        # falsely attaching them to an unrelated recipe node.
-        extras = [
-            (node_id, kind, is_finally)
-            for node_id, kind, is_finally in ordered_actions
-            if node_id not in rendered
-            and not any(node_id.startswith(source_id + ".") for source_id in rendered)
-        ]
-        if extras:
-            prelude = QTreeWidgetItem(
-                ["Recovery prelude", "Re-establishing confirmed safe boundary", "○ WAITING"]
-            )
-            prelude.setData(0, Qt.ItemDataRole.UserRole, "recovery")
-            self.steps.insertTopLevelItem(0, prelude)
-            for node_id, kind, _is_finally in extras:
-                item = QTreeWidgetItem(
-                    [node_id.replace("_", " "), kind.replace("_", " "), self._waiting_status(self._step_totals[node_id])]
-                )
-                item.setData(0, Qt.ItemDataRole.UserRole, node_id)
-                prelude.addChild(item)
-                self._step_items[node_id] = item
-
-    @staticmethod
-    def _uses_execution_container(node: RecipeNode) -> bool:
-        """Return whether source children execute inside a loop boundary."""
-
-        if node.type in {"sweep", "repeat"}:
-            return True
-        if not node.data.get("device_module"):
-            return False
-        actions = node.data.get("parameter_actions", [])
-        return isinstance(actions, list) and any(
-            isinstance(action, dict)
-            and (action.get("mode") == "sweep" or bool(action.get("segments")))
-            for action in actions
-        )
-
-    @staticmethod
-    def _waiting_status(total: int) -> str:
-        return "○ WAITING" if total <= 1 else f"○ 0/{total} WAITING"
-
-    @staticmethod
-    def _recipe_node_label(node: RecipeNode) -> str:
-        """Use concise labels while retaining every node in the source tree."""
-
-        if node.type == "sequence":
-            return "Measurement sequence"
-        if node.type == "sweep":
-            return f"Sweep · {node.data.get('target', 'parameter')}"
-        if node.type == "repeat":
-            return f"Repeat × {node.data.get('count', '?')}"
-        if node.type == "if":
-            return "Conditional branch"
-        if node.type == "comment":
-            text = str(node.data.get("text", "Comment")).strip()
-            return f"Comment · {text}" if text else "Comment"
-        device = node.data.get("device_module") or node.data.get("device")
-        if device:
-            return f"{str(device).replace('_', ' ').title()} · {node.type.replace('_', ' ')}"
-        return node.type.replace("_", " ").title()
-
-    def _step_item(self, node_id: str, kind: str) -> QTreeWidgetItem:
-        item = self._step_items.get(node_id)
-        if item is not None:
-            return item
-        item = QTreeWidgetItem(
-            [node_id.replace("_", " "), kind.replace("_", " "), "○ WAITING"]
-        )
-        item.setData(0, Qt.ItemDataRole.UserRole, node_id)
-        self.steps.addTopLevelItem(item)
-        self._step_items[node_id] = item
-        self._step_totals[node_id] = 1
-        return item
-
-    def _mark_step(self, node_id: str, kind: str, state: str) -> None:
-        if self._semantic_mode:
-            return
-        item = self._step_item(node_id, kind)
-        total = self._step_totals.get(node_id, 1)
-        if state == "running":
-            self._active_step = item
-            self._queue_step_visual(item, state)
-            return
-        if state == "done":
-            completed = min(total, self._step_completed.get(node_id, 0) + 1)
-            self._step_completed[node_id] = completed
-            self._active_step = None
-            # The final completion is always rendered immediately; interim
-            # loop counts can be sampled at the display cadence.
-            self._queue_step_visual(item, state, force=completed >= total)
-            return
-        self._active_step = item
-        self._queue_step_visual(item, "failed", force=True)
-
-    def _queue_step_visual(
-        self,
-        item: QTreeWidgetItem,
-        state: str,
-        *,
-        force: bool = False,
-    ) -> None:
-        """Render tree state at a bounded cadence while keeping logic live."""
-
-        now = time.monotonic()
-        active_changed = self._active_step is item and self.steps.currentItem() is not item
-        if force or active_changed or now - self._last_step_visual_at >= self._step_visual_interval_s:
-            self._pending_step_visual = None
-            self._step_visual_timer.stop()
-            self._render_step_visual(item, state)
-            self._last_step_visual_at = now
-            return
-        self._pending_step_visual = (item, state)
-        if not self._step_visual_timer.isActive():
-            self._step_visual_timer.start()
-
-    def _flush_step_visual(self) -> None:
-        pending = self._pending_step_visual
-        self._pending_step_visual = None
-        if pending is None:
-            return
-        item, state = pending
-        self._render_step_visual(item, state)
-        self._last_step_visual_at = time.monotonic()
-
-    def _queue_step_follow(self, item: QTreeWidgetItem, *, force: bool = False) -> None:
-        """Follow the active row without forcing a tree layout per action."""
-
-        if self._semantic_mode:
-            return
-
-        if self.steps.currentItem() is item:
-            return
-        now = time.monotonic()
-        if force or now - self._last_step_follow_at >= self._step_follow_interval_s:
-            self._pending_step_follow = None
-            self._step_follow_timer.stop()
-            self.steps.setCurrentItem(item)
-            self.steps.scrollToItem(item, QAbstractItemView.ScrollHint.EnsureVisible)
-            self._last_step_follow_at = now
-            return
-        self._pending_step_follow = item
-        if not self._step_follow_timer.isActive():
-            self._step_follow_timer.start()
-
-    def _flush_step_follow(self) -> None:
-        pending = self._pending_step_follow
-        self._pending_step_follow = None
-        if pending is not None:
-            self._queue_step_follow(pending, force=True)
-
-    def _render_step_visual(self, item: QTreeWidgetItem, state: str) -> None:
-        static_builder_row = bool(item.data(0, int(Qt.ItemDataRole.UserRole) + 98))
-        if state == "running":
-            if not static_builder_row:
-                item.setText(2, "RUNNING")
-            item.setToolTip(2, "Execution state: RUNNING")
-            self._set_step_state(item, state)
-            # Selecting and scrolling a QTreeWidget forces a layout pass. A
-            # sweep re-enters action nodes rapidly, so row following is
-            # independently rate-limited from the live status text.
-            self._queue_step_follow(item)
-            return
-        if state == "done":
-            raw_node_id = item.data(0, Qt.ItemDataRole.UserRole)
-            node_id = str(getattr(raw_node_id, "id", raw_node_id))
-            total = self._step_totals.get(
-                node_id, 1
-            )
-            completed = self._step_completed.get(node_id, 0)
-            if not static_builder_row:
-                item.setText(2, "✓ DONE" if total == 1 else f"✓ {completed}/{total}")
-            item.setToolTip(2, "Execution state: DONE")
-            self._set_step_state(item, state)
-            return
-        if not static_builder_row:
-            item.setText(2, "✕ FAILED")
-        item.setToolTip(2, "Execution state: FAILED")
-        self._set_step_state(item, "failed")
-        self._queue_step_follow(item, force=True)
-
-    def event(self, event: QEvent) -> bool:
-        if event.type() in {
-            QEvent.Type.ApplicationPaletteChange,
-            QEvent.Type.PaletteChange,
-            QEvent.Type.StyleChange,
-        } and hasattr(self, "steps"):
-            self._refresh_step_colours()
-        return super().event(event)
-
-    def _set_step_state(self, item: QTreeWidgetItem, state: str) -> None:
-        if item.data(2, Qt.ItemDataRole.UserRole) == state:
-            return
-        item.setData(2, Qt.ItemDataRole.UserRole, state)
-        item.setForeground(2, self._step_brush(state))
+                item.setForeground(3, self._state_brush("running"))
 
     @staticmethod
     def _operation_phase(kind: str) -> str:
@@ -1810,7 +1249,7 @@ class RunMonitorPage(QWidget):
         *,
         state: str | None = None,
     ) -> None:
-        if self._semantic_mode and data.get("semantic_id"):
+        if data.get("semantic_id"):
             return
         values = data.get("setpoints_si")
         target: str | None = None
@@ -1871,7 +1310,12 @@ class RunMonitorPage(QWidget):
         # QFluentWidgets. Keep the text live for every action but repaint its
         # semantic colour at a bounded cadence; terminal/fault states bypass
         # the cadence so safety feedback is immediate.
-        terminal = device_state == "fault" or state in {"COMPLETE", "CONFIRMED", "CHECKPOINT SAVED"}
+        # A confirmed *action* is not a terminal safety boundary: it occurs
+        # thousands of times in a long sweep.  Keep the text immediate, but
+        # throttle the expensive Fluent dynamic-property repolish just like a
+        # running action.  Only run completion and fault states bypass the
+        # cadence.
+        terminal = device_state == "fault" or state == "COMPLETE"
         if not terminal and now - self._last_operation_repolish_at < self._operation_repolish_interval_s:
             return
         self.current_operation_state.setProperty("deviceState", device_state)
@@ -1896,19 +1340,8 @@ class RunMonitorPage(QWidget):
             "on" if self._activity_pulse_on else "off",
         )
 
-    def _refresh_step_colours(self) -> None:
-        def visit(item: QTreeWidgetItem) -> None:
-            state = item.data(2, Qt.ItemDataRole.UserRole)
-            if isinstance(state, str):
-                item.setForeground(2, self._step_brush(state))
-            for child_index in range(item.childCount()):
-                visit(item.child(child_index))
-
-        for index in range(self.steps.topLevelItemCount()):
-            visit(self.steps.topLevelItem(index))
-
     @staticmethod
-    def _step_brush(state: str) -> QBrush:
+    def _state_brush(state: str) -> QBrush:
         tokens = tokens_for("dark" if isDarkTheme() else "light")
         color = {
             "running": tokens.accent,
@@ -1916,51 +1349,6 @@ class RunMonitorPage(QWidget):
             "failed": tokens.danger,
         }.get(state, tokens.text_primary)
         return QBrush(QColor(color))
-
-    def _mark_shutdown(self, action: str, state: str) -> None:
-        if self._semantic_mode:
-            return
-        node_id = f"shutdown:{action}"
-        item = self._step_items.get(node_id)
-        if item is None:
-            item = QTreeWidgetItem(
-                ["Emergency shutdown", action.replace(".", " · "), "○ WAITING"]
-            )
-            item.setData(0, Qt.ItemDataRole.UserRole, node_id)
-            structural_role = int(Qt.ItemDataRole.UserRole) + 41
-            finally_parent: QTreeWidgetItem | None = None
-
-            def find_finally(candidate: QTreeWidgetItem) -> None:
-                nonlocal finally_parent
-                if finally_parent is not None:
-                    return
-                if candidate.data(0, structural_role) == "finally":
-                    finally_parent = candidate
-                    return
-                for child_index in range(candidate.childCount()):
-                    find_finally(candidate.child(child_index))
-
-            for top_index in range(self.steps.topLevelItemCount()):
-                find_finally(self.steps.topLevelItem(top_index))
-                if finally_parent is not None:
-                    break
-            if finally_parent is None:
-                finally_parent = QTreeWidgetItem(
-                    [
-                        "Finally — safe shutdown",
-                        "Guaranteed after success, stop or fault",
-                        "FLOW",
-                    ]
-                )
-                finally_parent.setData(0, structural_role, "finally")
-                finally_parent.setFlags(
-                    finally_parent.flags() & ~Qt.ItemFlag.ItemIsDragEnabled
-                )
-                self.steps.addTopLevelItem(finally_parent)
-            finally_parent.addChild(item)
-            self._step_items[node_id] = item
-            self._step_totals[node_id] = 1
-        self._mark_step(node_id, action, state)
 
     def _update_eta(self) -> None:
         if not self._eta_started:
@@ -2012,12 +1400,27 @@ class RunMonitorPage(QWidget):
         )
 
     def update_heartbeat(self, data: dict[str, object]) -> None:
+        elapsed_s = float(data.get("elapsed_s", 0.0))
         self.heartbeat.setText(
             "Heartbeat: "
             f"{data.get('kind', 'operation')} • attempt {data.get('attempt', '—')} • "
-            f"elapsed {float(data.get('elapsed_s', 0.0)):.2f} s • "
+            f"elapsed {elapsed_s:.2f} s • "
             f"remaining {float(data.get('remaining_s', 0.0)):.2f} s"
         )
+        if (
+            str(data.get("kind", "")).lower() == "wait"
+            and self._active_wait_duration_s is not None
+            and (
+                self._active_wait_node_id is None
+                or str(data.get("node_id", "")) == self._active_wait_node_id
+            )
+        ):
+            remaining_s = max(0.0, self._active_wait_duration_s - elapsed_s)
+            self.current_operation_detail.setText(
+                f"{self._active_wait_position}WAIT in progress · "
+                f"{format_quantity_auto(remaining_s, DIMENSION_TIME)} remaining of "
+                f"{format_quantity_auto(self._active_wait_duration_s, DIMENSION_TIME)}"
+            )
 
     def queue_spectrum_preview(self, data: dict[str, object]) -> None:
         """Schedule one latest-frame repaint instead of one repaint per point."""
@@ -2029,15 +1432,99 @@ class RunMonitorPage(QWidget):
     def queue_semantic_state(self, state: SemanticOperationState) -> None:
         """Coalesce high-rate semantic states to one model flush per cadence."""
 
-        self.presentation_buffer.submit("semantic_operation_applied", state)
+        self._queue_semantic_state("semantic_operation_applied", state)
+
+    def queue_semantic_event(self, name: str, data: dict[str, object]) -> None:
+        """Queue a typed Runner event in the page-owned presentation buffer."""
+
+        phases = {
+            "semantic_operation_started": "running",
+            "semantic_operation_applied": "applied",
+            "semantic_operation_failed": "failed",
+        }
+        phase = phases.get(name)
+        if phase is None:
+            return
+        state = self._semantic_state_from_event(data, phase=phase)
+        if state is None:
+            return
+        raw_count = data.get("_coalesced_count", 1)
+        try:
+            coalesced_count = max(1, int(raw_count))
+        except (TypeError, ValueError):
+            coalesced_count = 1
+        if phase == "failed":
+            # Fault feedback is a safety boundary and must not wait behind a
+            # visual cadence timer.
+            self._apply_semantic_event(name, data)
+            if coalesced_count > 1:
+                self.ui_metrics.semantic_events_received += coalesced_count - 1
+                self.ui_metrics.semantic_events_coalesced += coalesced_count - 1
+            return
+        self._queue_semantic_state(name, state)
+        if coalesced_count > 1:
+            self.ui_metrics.semantic_events_received += coalesced_count - 1
+            self.ui_metrics.semantic_events_coalesced += coalesced_count - 1
+
+    def _queue_semantic_state(self, name: str, state: SemanticOperationState) -> None:
+        self.presentation_buffer.submit(name, state)
         self._pending_semantic_states[state.semantic_id] = state
+        self.ui_metrics.max_pending_semantic = max(
+            self.ui_metrics.max_pending_semantic,
+            len(self._pending_semantic_states),
+        )
         if not self._semantic_flush_timer.isActive():
             self._semantic_flush_timer.start()
 
-    def _flush_semantic_states(self) -> None:
-        pending = tuple(self._pending_semantic_states.values())
+    def flush_semantic_states(self) -> None:
+        """Paint the latest semantic states before a terminal run boundary."""
+
+        self._semantic_flush_timer.stop()
+        self._flush_semantic_states()
+
+    def discard_pending_semantic(self) -> None:
+        """Drop only stale visual states while retaining durable event metrics."""
+
+        self._semantic_flush_timer.stop()
         self._pending_semantic_states.clear()
-        for state in pending:
+        self.presentation_buffer.latest_semantic.clear()
+
+    def _flush_semantic_states(self) -> None:
+        # The typed buffer is the source of truth.  The secondary dictionary
+        # only tracks pending IDs for diagnostics; it is cleared together
+        # with the buffer so one state cannot be painted twice.
+        pending = self.presentation_buffer.pop_semantic()
+        self._pending_semantic_states.clear()
+        if not pending:
+            return
+        # Several semantic IDs can become ready in the same 80 ms window
+        # (setpoint, acquisition, wait, and their loop ancestors).  Suppress
+        # intermediate viewport paints while their model roles are updated.
+        # The guard must cover ``apply_states`` itself: Qt can synchronously
+        # repaint a view for each dataChanged signal otherwise.  One explicit
+        # viewport update after the batch keeps the active-row animation
+        # smooth without sacrificing per-ID state.
+        self.measurement_tree.setUpdatesEnabled(False)
+        try:
+            # Apply all states before painting the focused operation.  The
+            # model emits one dataChanged notification per affected row instead
+            # of one notification for every state in this GUI turn.
+            model_update_started = time.perf_counter()
+            self.tree_model.apply_states(pending)
+            self.ui_metrics.max_tree_update_duration_s = max(
+                self.ui_metrics.max_tree_update_duration_s,
+                time.perf_counter() - model_update_started,
+            )
+            for state in pending:
+                self._semantic_state_by_id[state.semantic_id] = state
+            focused = max(
+                pending,
+                key=lambda state: (state.action_index, state.phase == "failed"),
+                default=None,
+            )
+            if focused is None:
+                return
+            state = focused
             event = {
                 "semantic_id": state.semantic_id,
                 "requested_si": state.requested_si,
@@ -2059,9 +1546,33 @@ class RunMonitorPage(QWidget):
                     if state.axis_context is not None
                     else None
                 ),
-                "kind": "set point",
+                "kind": state.kind or "set point",
             }
-            self._apply_semantic_event("semantic_operation_applied", event)
+            if state.device is not None:
+                event["device"] = state.device
+            if state.channel is not None:
+                event["channel"] = state.channel
+            if state.duration_s is not None:
+                event["duration_s"] = state.duration_s
+            if state.trace is not None:
+                event["trace"] = state.trace
+            if state.reference_operation is not None:
+                event["reference_operation"] = state.reference_operation
+            name = {
+                "running": "semantic_operation_started",
+                "applied": "semantic_operation_applied",
+                "failed": "semantic_operation_failed",
+            }.get(state.phase, "semantic_operation_applied")
+            self._apply_semantic_event(
+                name,
+                event,
+                submit_buffer=False,
+                update_focus=True,
+                apply_model=False,
+            )
+        finally:
+            self.measurement_tree.setUpdatesEnabled(True)
+            self.measurement_tree.viewport().update()
 
     def _flush_spectrum_preview(self) -> None:
         pending = self._pending_spectrum_preview
@@ -2089,7 +1600,7 @@ class RunMonitorPage(QWidget):
         return f"{name}: " + ", ".join(fields)
 
     def _should_append_event_log(self, name: str, data: dict[str, object]) -> bool:
-        """Sample repetitive action rows before they reach the text document.
+        """Keep repetitive action rows out of the bounded text document.
 
         The tree/current-operation card remains live for every event. The
         event log is a bounded diagnostic surface, not a durable event store;
@@ -2098,19 +1609,22 @@ class RunMonitorPage(QWidget):
         healthy.
         """
 
-        if name not in {
+        if name == "point_stored" and self._run_active:
+            return False
+        if name in {
             "action_started",
             "action_finished",
             "recovery_prelude_started",
             "recovery_prelude_finished",
+            "safe_resume_boundary",
         }:
-            return True
-        group = (str(data.get("node_id", "")), str(data.get("kind", name)))
-        now = time.monotonic()
-        last = self._event_log_last_by_group.get(group)
-        if last is not None and now - last < self._event_log_sample_interval_s:
+            # These high-rate boundaries are already losslessly persisted by
+            # the runner.  Rebuilding a QTextDocument line for every point can
+            # monopolize the GUI thread (especially when the document trims
+            # its maximum block count).  The live tree, storage card and
+            # safety/fault lines remain visible; detailed action telemetry is
+            # available in the run HDF5 event stream.
             return False
-        self._event_log_last_by_group[group] = now
         return True
 
     def append_event(self, name: str, data: dict[str, object]) -> None:
@@ -2123,28 +1637,14 @@ class RunMonitorPage(QWidget):
             if self._should_append_event_log(name, data):
                 self.events.appendPlainText(self._event_summary(name, data))
             return
-        if self._semantic_mode and data.get("semantic_id") and name in {
-            "action_started",
-            "action_finished",
-        }:
-            self._apply_semantic_event(
-                "semantic_operation_started" if name == "action_started" else "semantic_operation_applied",
-                data,
-            )
         if name == "manual_stage_waiting":
             self.state.setText("MANUAL — WAITING FOR NEXT")
-            self._mark_step(
-                str(data.get("node_id", "—")),
-                str(data.get("kind", "—")),
-                "running",
-            )
             self.current_path.setText(
                 f"Manual stage: {data.get('node_id', '—')} • {data.get('kind', '—')}"
             )
             self.current_setpoints.setText(
                 "Setpoints (SI): " + self._format_scalars(data.get("setpoints_si"))
             )
-            self._update_current_roi(data, state="ACTIVE")
             self._set_requested_parameters(data.get("setpoints_si"))
             self._update_current_operation(data, state="AWAITING CONFIRMATION")
             self._manual_dialog.waiting(data)
@@ -2153,11 +1653,7 @@ class RunMonitorPage(QWidget):
             self._manual_dialog.confirmed()
         if name in {"action_finished", "recovery_prelude_finished"}:
             self.progress.setValue(min(self.progress.value() + 1, self.progress.maximum()))
-            self._mark_step(
-                str(data.get("node_id", "—")), str(data.get("kind", "—")), "done"
-            )
             self._set_current_operation_state("CONFIRMED")
-            self._update_eta()
         elif name in {"action_started", "recovery_prelude_started"}:
             self._end_pause()
             if self._manual_stage_mode:
@@ -2169,11 +1665,6 @@ class RunMonitorPage(QWidget):
             )
             self.pause_button.setEnabled(not self._manual_stage_mode)
             self.resume_button.setEnabled(False)
-            self._mark_step(
-                str(data.get("node_id", "—")),
-                str(data.get("kind", "—")),
-                "running",
-            )
             action_number = min(
                 self.progress.value() + 1,
                 self.progress.maximum(),
@@ -2185,11 +1676,12 @@ class RunMonitorPage(QWidget):
             self.current_setpoints.setText(
                 "Setpoints (SI): " + self._format_scalars(data.get("setpoints_si"))
             )
-            self._update_current_roi(data, state="ACTIVE")
             self._set_requested_parameters(data.get("setpoints_si"))
             self._update_current_operation(data, state="SETTING")
         elif name == "point_stored":
-            self._update_current_roi(data, state=f"POINT {data.get('stored_points', '—')}")
+            raw_stored = data.get("stored_points")
+            if isinstance(raw_stored, int) and not isinstance(raw_stored, bool):
+                self._stored_points = max(self._stored_points, raw_stored)
             self.current_measurements.setText(
                 "Measurements (SI): " + self._format_scalars(data.get("measurements_si"))
             )
@@ -2201,37 +1693,23 @@ class RunMonitorPage(QWidget):
             )
             self._set_current_operation_state("CHECKPOINT SAVED")
         if name == "action_failed":
-            self._mark_step(
-                str(data.get("node_id", "—")), str(data.get("kind", "—")), "failed"
-            )
             self._set_current_operation_state("FAILED")
         elif name == "safe_finally_started":
-            self._mark_step(
-                str(data.get("node_id", "—")), str(data.get("kind", "—")), "running"
-            )
             self._update_current_operation(data, state="SAFE SHUTDOWN")
         elif name == "safe_finally_finished":
             self.progress.setValue(min(self.progress.value() + 1, self.progress.maximum()))
-            self._mark_step(
-                str(data.get("node_id", "—")), str(data.get("kind", "—")), "done"
-            )
             self._set_current_operation_state("CONFIRMED")
-            self._update_eta()
         elif name == "safe_finally_error":
-            self._mark_step(
-                str(data.get("node_id", "—")), str(data.get("kind", "—")), "failed"
-            )
+            self._set_current_operation_state("FAILED")
         elif name == "shutdown_action_started":
-            self._mark_shutdown(str(data.get("action", "unknown")), "running")
             self._update_current_operation(
                 {"kind": str(data.get("action", "shutdown")), "node_id": "shutdown"},
                 state="SAFE SHUTDOWN",
             )
         elif name == "shutdown_action_finished":
-            self._mark_shutdown(str(data.get("action", "unknown")), "done")
             self._set_current_operation_state("CONFIRMED")
         elif name == "shutdown_error":
-            self._mark_shutdown(str(data.get("action", "unknown")), "failed")
+            self._set_current_operation_state("FAILED")
         if name == "pause_pending":
             self._begin_pause()
             self.state.setText("PAUSED")
@@ -2268,7 +1746,6 @@ class RunMonitorPage(QWidget):
         if name in {
             "action_finished",
             "recovery_prelude_finished",
-            "point_stored",
             "safe_finally_finished",
             "shutdown_action_finished",
             "run_completed",
@@ -2284,14 +1761,31 @@ class RunMonitorPage(QWidget):
         powers = data.get("power_dbm")
         if not isinstance(frequencies, (tuple, list)) or not isinstance(powers, (tuple, list)):
             return
+        preview_started = time.perf_counter()
+        source_point_count = len(powers)
+        if len(frequencies) != source_point_count:
+            return
+        display_limit = max(512, self.spectrum_preview.width() * 2)
+        if source_point_count > display_limit:
+            indexes = np.linspace(
+                0,
+                source_point_count - 1,
+                num=display_limit,
+                dtype=np.intp,
+            )
+            frequency_values = np.asarray(frequencies, dtype=float)[indexes]
+            power_values = np.asarray(powers, dtype=float)[indexes]
+        else:
+            frequency_values = frequencies
+            power_values = powers
         preview_kind = str(data.get("preview_kind", "measurement"))
         trace_label = (
             "Stored reference" if preview_kind == "reference" else "Stored spectrum"
         )
         self.spectrum_preview.set_trace(
             trace_label,
-            frequencies,
-            powers,
+            frequency_values,
+            power_values,
             primary=True,
         )
         title = (
@@ -2300,7 +1794,12 @@ class RunMonitorPage(QWidget):
             else f"Stored point {data.get('point_index', '—')}"
         )
         self.spectrum_preview.set_title(
-            title + f" • {data.get('source_points', len(powers))} source values"
+            title + f" • {data.get('source_points', source_point_count)} source values"
+        )
+        self.ui_metrics.preview_flushes += 1
+        self.ui_metrics.max_preview_update_duration_s = max(
+            self.ui_metrics.max_preview_update_duration_s,
+            time.perf_counter() - preview_started,
         )
 
     @staticmethod
@@ -2329,14 +1828,11 @@ class RunMonitorPage(QWidget):
         return " • ".join(rendered)
 
     def complete(self, result: object) -> None:
+        self._run_active = False
         self._preview_timer.stop()
         self._flush_spectrum_preview()
         self._semantic_flush_timer.stop()
         self._flush_semantic_states()
-        self._step_visual_timer.stop()
-        self._flush_step_visual()
-        self._step_follow_timer.stop()
-        self._flush_step_follow()
         self._manual_dialog.finish()
         self._eta_timer.stop()
         self._activity_pulse_timer.stop()
@@ -2346,6 +1842,7 @@ class RunMonitorPage(QWidget):
         self.pause_button.setEnabled(False)
         self.resume_button.setEnabled(False)
         run_result = result["result"]
+        self._stored_points = int(getattr(run_result, "stored_points", self._stored_points))
         state = run_result.state.value.upper()
         if run_result.error and state == "SAFE":
             state = "STOPPED SAFELY"
@@ -2371,14 +1868,11 @@ class RunMonitorPage(QWidget):
         self.events.appendPlainText(f"File: {result['path']}")
 
     def failed(self, error: str) -> None:
+        self._run_active = False
         self._preview_timer.stop()
         self._flush_spectrum_preview()
         self._semantic_flush_timer.stop()
         self._flush_semantic_states()
-        self._step_visual_timer.stop()
-        self._flush_step_visual()
-        self._step_follow_timer.stop()
-        self._flush_step_follow()
         self._manual_dialog.finish()
         self._eta_timer.stop()
         self._activity_pulse_timer.stop()

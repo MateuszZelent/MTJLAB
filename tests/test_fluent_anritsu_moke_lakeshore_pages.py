@@ -439,6 +439,43 @@ class FluentAnritsuAndMokePageTests(unittest.TestCase):
             self.assertEqual(page._manual_save_options, options)
             page.close_manual_archive_session()
 
+    def test_anritsu_manual_timestamped_save_queues_optional_elab_upload(self) -> None:
+        self.window._navigate_to("anritsu")
+        self.application.processEvents()
+        page = self.window.anritsu_page
+        uploaded: list[Path] = []
+        page.set_manual_elab_context(
+            configuration_provider=lambda: (
+                True,
+                False,
+                "Uses the configured research template.",
+            ),
+            upload_callback=uploaded.append,
+        )
+        trace = SpectrumTrace(
+            frequencies_hz=(1e6, 2e6, 3e6),
+            powers_dbm=(-60.0, -50.0, -55.0),
+            acquired_at_utc=datetime.now(timezone.utc),
+            trace_name="TRAC1",
+        )
+
+        with tempfile.TemporaryDirectory() as temporary:
+            options = ManualSpectrumSaveOptions(
+                destination=Path(temporary) / "manual.h5",
+                mode=ManualSpectrumSaveMode.TIMESTAMPED,
+                metadata_scope="none",
+                metadata_values=(),
+                trace_variant="raw",
+                upload_to_elab=True,
+            )
+            page._show_trace(trace)
+            page._apply_manual_save_options(options)
+            page.save_manual_spectrum.click()
+
+            self.assertEqual(len(uploaded), 1)
+            self.assertTrue(uploaded[0].is_file())
+            self.assertEqual(Hdf5RunReader.summary(uploaded[0]).status, "completed")
+
     def test_anritsu_manual_archive_reconfiguration_and_failure_keep_state(self) -> None:
         self.window._navigate_to("anritsu")
         self.application.processEvents()

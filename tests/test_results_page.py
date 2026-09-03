@@ -252,7 +252,10 @@ class ResultsPageTests(unittest.TestCase):
                 page.load_reconstructed_thatec_sweep(run, ThatecRunReader.tree(path))
                 self.assertFalse(page.historical_sweep_active)
                 self.assertFalse(page.editor.isReadOnly())
-                self.assertEqual(page.tree.topLevelItem(0).text(0), "Measurement sequence")
+                self.assertEqual(
+                    page.tree_model.data(page.tree_model.index(0, 0)),
+                    "Measurement sequence",
+                )
                 self.assertIn("restored from public THATEC", page.summary.text())
             finally:
                 page._close_discard_confirmed = True

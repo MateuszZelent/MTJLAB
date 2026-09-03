@@ -14,6 +14,7 @@ import csv
 from app.devices.anritsu_ms2830a import SpectrumTrace
 from app.domain.models import MeasurementPoint
 from app.recipes import generate_sweep_points
+from app.recipes.semantic_tree import AxisPointContext
 from app.storage import (
     Hdf5RunReader,
     Hdf5RunWriter,
@@ -118,6 +119,9 @@ class Hdf5WriterTests(unittest.TestCase):
                 self.assertEqual(file["events/name"].asstr()[0], "run_started")
                 self.assertEqual(tuple(file["spectra/0/frequency_hz"][:]), trace.frequencies_hz)
                 self.assertEqual(tuple(file["spectra/0/power_dbm"][:]), trace.powers_dbm)
+                self.assertEqual(file["spectra/0/frequency_hz"].compression, "gzip")
+                self.assertEqual(file["spectra/0/frequency_hz"].compression_opts, 1)
+                self.assertEqual(file["spectra/0/power_dbm"].compression_opts, 1)
                 self.assertEqual(int(file.attrs["measurement running"]), 0)
                 self.assertIn("scan_definition/row_00", file)
                 definitions = {
@@ -131,6 +135,41 @@ class Hdf5WriterTests(unittest.TestCase):
                     if definition.get("control name") == "Spectrum (dBm)"
                 )
                 self.assertIn(f"measurement/{spectrum_row}/data", file)
+                self.assertEqual(
+                    file[f"measurement/{spectrum_row}/data"].compression_opts,
+                    1,
+                )
+
+    def test_preview_event_log_stores_bounded_summary_for_large_trace(self) -> None:
+        """Preview payloads stay cheap; the canonical trace remains in /spectra."""
+
+        with tempfile.TemporaryDirectory() as temporary:
+            path = Path(temporary) / "preview-event.h5"
+            writer = Hdf5RunWriter(
+                path,
+                recipe_source="schema_version: 1\n",
+                settings_source="schema_version: 1\n",
+                plan_hash="preview-event",
+                device_idn={},
+            )
+            writer.append_event(
+                "spectrum_preview",
+                {
+                    "point_index": 3,
+                    "frequency_hz": tuple(float(index) for index in range(2_000)),
+                    "power_dbm": tuple(float(-80 + index) for index in range(2_000)),
+                },
+            )
+            writer.close("completed")
+
+            with h5py.File(path, "r") as file:
+                message = json.loads(file["events/message"].asstr()[0])
+                self.assertNotIn("frequency_hz", message)
+                self.assertNotIn("power_dbm", message)
+                self.assertEqual(message["frequency_hz_count"], 2_000)
+                self.assertEqual(message["power_dbm_count"], 2_000)
+                self.assertEqual(message["frequency_hz_first"], 0.0)
+                self.assertEqual(message["power_dbm_last"], 1_919.0)
 
     def test_writer_persists_simulation_and_full_device_state_per_checkpoint(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
@@ -159,6 +198,94 @@ class Hdf5WriterTests(unittest.TestCase):
             self.assertEqual(detail.simulation_metadata["seed"], 17)
             self.assertTrue(point.device_states["rigol"]["channel_1"]["output"])
             self.assertIn("moke_box", point.device_states)
+
+    def test_large_spectra_use_uncompressed_portable_datasets(self) -> None:
+        """10k-point checkpointing must not spend seconds in per-row gzip."""
+
+        with tempfile.TemporaryDirectory() as temporary:
+            path = Path(temporary) / "large-spectrum.h5"
+            writer = Hdf5RunWriter(
+                path,
+                recipe_source="schema_version: 1\n",
+                settings_source="schema_version: 1\n",
+                plan_hash="large-spectrum",
+                device_idn={},
+            )
+            values = tuple(float(index) for index in range(10_001))
+            trace = SpectrumTrace(
+                frequencies_hz=values,
+                powers_dbm=tuple(-80.0 for _ in values),
+                acquired_at_utc=datetime.now(timezone.utc),
+                trace_name="TRAC1",
+            )
+            writer.append(
+                MeasurementPoint(index=0, setpoints={}, measurements={}),
+                trace,
+            )
+            writer.close("completed")
+
+            with h5py.File(path, "r") as file:
+                self.assertIsNone(file["spectra/0/frequency_hz"].compression)
+                self.assertIsNone(file["spectra/0/power_dbm"].compression)
+                spectrum_row = next(
+                    name
+                    for name, definition in file["scan_definition"].items()
+                    if name.startswith("row_")
+                    and dict(definition.asstr()[()]).get("lab control role")
+                    == "spectrum"
+                )
+                public = file[f"measurement/{spectrum_row}/data"]
+                self.assertIsNone(public.compression)
+                self.assertEqual(public.shape, (1, 10_001))
+
+    def test_axis_provenance_round_trips_as_additive_point_metadata(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            path = Path(temporary) / "axis-provenance.h5"
+            writer = Hdf5RunWriter(
+                path,
+                recipe_source="schema_version: 1\n",
+                settings_source="schema_version: 1\n",
+                plan_hash="axis-provenance",
+                device_idn={"keithley": "KEITHLEY,2602A,SIM,1.0"},
+            )
+            context = AxisPointContext(
+                "axis-current",
+                2,
+                10,
+                1,
+                0.005,
+                {"keithley.B.current": 0.005, "rigol.1.frequency": 2e9},
+                ("axis-current", "axis-frequency"),
+            )
+            writer.append(
+                MeasurementPoint(
+                    index=0,
+                    setpoints={"keithley.B.current": 0.005},
+                    measurements={},
+                    metadata={
+                        "semantic_operation_id": "axis-current.set-roi-value",
+                        "axis_context": context,
+                        "axis_id": context.axis_id,
+                        "stage_index": context.stage_index,
+                        "point_index": context.point_index,
+                        "loop_path": list(context.loop_path),
+                        "requested_si": 0.005,
+                        "applied_si": 0.005,
+                        "readback_si": 0.005,
+                        "verification": "simulated_ack",
+                    },
+                )
+            )
+            writer.close("completed")
+
+            point = Hdf5RunReader.points(path)[0]
+            self.assertEqual(point.setpoints["keithley.B.current"], 0.005)
+            self.assertEqual(
+                point.metadata["axis_context"]["loop_path"],
+                ["axis-current", "axis-frequency"],
+            )
+            self.assertEqual(point.metadata["axis_id"], "axis-current")
+            self.assertEqual(point.metadata["verification"], "simulated_ack")
 
     def test_public_thatec_device_record_contains_full_station_configuration(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:

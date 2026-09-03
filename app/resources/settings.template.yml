@@ -25,6 +25,17 @@ application:
   require_second_confirmation_for_limit_override: true
   settings_autosave: false
   restore_last_recipe: true
+  elab:
+    enabled: false
+    template_id:
+    template_name: ""
+    title_pattern: "PyLab measurement {run_name}"
+    tags:
+    - "pylab"
+    - "measurement"
+    upload_hdf5: true
+    upload_csv: true
+    recent_templates: []
 
 units:
   internal_system: "SI"

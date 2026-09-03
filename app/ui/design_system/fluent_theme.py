@@ -32,20 +32,28 @@ def apply_application_theme(application: QApplication, mode: str) -> AppliedThem
     install_precision_arrow_stepper(application)
     name = effective_theme(mode)
     tokens = tokens_for(name)
-    # Application properties describe the last requested theme, not proof
-    # that Qt's palette is still synchronized (tests, dialogs and QFluent
-    # repolishing can alter it independently). Always establish the native
-    # palette before considering the fast path.
-    _apply_application_palette(application, tokens, name)
     fluent_matches = isDarkTheme() == (name == "dark")
     accent_matches = application.property("stationAppliedAccent") == tokens.accent
-    if (
-        application.property("stationAppliedTheme") == name
-        and fluent_matches
-        and accent_matches
-    ):
+    theme_matches = application.property("stationAppliedTheme") == name
+    palette_matches = application.property("stationAppliedPaletteTheme") == name
+    controls_signature = f"{name}:{tokens.accent}"
+    controls_match = (
+        application.property("stationAppliedControlTheme") == controls_signature
+    )
+    if theme_matches and fluent_matches and accent_matches:
+        # Theme application is called from every window's first show event and
+        # from per-page settings.  Reapplying the global QFluent stylesheet and
+        # every visible widget here can block the GUI for tens of seconds on
+        # Windows.  The palette/control signatures make this fast path safe:
+        # a genuinely new widget is styled by the event filter when it shows,
+        # while an externally changed palette still gets repaired once.
+        if not palette_matches:
+            _apply_application_palette(application, tokens, name)
+            application.setProperty("stationAppliedPaletteTheme", name)
         _install_dialog_theme_filter(application, tokens)
-        _apply_station_control_styles(application, tokens)
+        if not controls_match:
+            _apply_station_control_styles(application, tokens)
+            application.setProperty("stationAppliedControlTheme", controls_signature)
         return AppliedTheme(name=name, tokens=tokens)
     _stage_fluent_accent(tokens)
     # Settings contains many routes that can be hidden during a theme switch.
@@ -59,9 +67,11 @@ def apply_application_theme(application: QApplication, mode: str) -> AppliedThem
     _apply_application_palette(application, tokens, name)
     application.setProperty("stationAppliedTheme", name)
     application.setProperty("stationAppliedAccent", tokens.accent)
+    application.setProperty("stationAppliedPaletteTheme", name)
     _install_dialog_theme_filter(application, tokens)
     _settle_fluent_background_animations(application)
     _apply_station_control_styles(application, tokens)
+    application.setProperty("stationAppliedControlTheme", controls_signature)
     return AppliedTheme(name=name, tokens=tokens)
 
 

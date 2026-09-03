@@ -66,6 +66,27 @@ Przykład jest celowo nieenergetyczny: nie ma w nim `ARM` ani `OUTPUT ON`. Wzorz
 
 Każdy run zapisuje HDF5 z recepturą, snapshotem ustawień, IDN, capabilities i dziennikiem zdarzeń. Gdy `storage.write_csv_summary` jest włączone, obok niego powstaje także checkpointowany indeks CSV — nie zawiera on pełnych danych widma.
 
+## eLabFTW
+
+Zakładka **eLabFTW** odczytuje poświadczenia wyłącznie z lokalnego pliku `.env`:
+
+```dotenv
+ELAB_HOST=https://elab.example.org
+ELAB_API=your-elab-api-key
+```
+
+W zakładce można sprawdzić połączenie, pobrać dostępne template’y, wybrać template
+badawczy i zapisać politykę automatycznego uploadu. Ostatnio używane template’y są
+zapisywane jako skróty w ustawieniach (bez klucza API), dzięki czemu można je szybko
+wybrać ponownie. Przycisk **Reload from .env** odświeża plik po zmianie klucza bez
+restartu aplikacji. Dla sweepu checkbox **Save finished run to eLab** pozwala
+nadpisać domyślną politykę dla konkretnego uruchomienia. Przy ręcznym zapisie
+pojedynczego widma w Anritsu analogiczny checkbox pojawia się w konfiguracji zapisu;
+upload jest wykonywany dopiero po lokalnym zamknięciu timestampowanego HDF5.
+Dane są wysyłane dopiero po bezpiecznym zamknięciu runu; lokalny HDF5 pozostaje
+źródłem prawdy, a ledger uploadów zapobiega tworzeniu duplikatów. Pliku `.env` nie
+należy commitować.
+
 ## Testy
 
 ```powershell

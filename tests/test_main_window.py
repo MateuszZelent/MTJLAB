@@ -408,12 +408,9 @@ class MainWindowTests(unittest.TestCase):
             self.assertEqual(monitor.spectrum_preview.trace_point_count("Stored spectrum"), 2)
             self.assertIn("2 of 4 actions", monitor.progress_summary.text())
             self.assertIn("estimated total:", monitor.eta.text())
-            self.assertEqual(monitor._step_items["measure-b"].text(2), "✓ DONE")
-            self.assertEqual(monitor._step_items["off-b"].text(2), "✓ DONE")
-            self.assertEqual(
-                monitor._step_items["shutdown:keithley.outputs_off"].text(2),
-                "✓ DONE",
-            )
+            self.assertFalse(hasattr(monitor, "_step_items"))
+            self.assertEqual(monitor.tree_model.rowCount(), 0)
+            self.assertEqual(monitor.current_operation_state.text(), "CONFIRMED")
 
             stop_requests: list[bool] = []
             monitor.run_started(1, 1.0)
@@ -3885,6 +3882,33 @@ class MainWindowTests(unittest.TestCase):
             self.assertEqual(keithley._output_states, {"A": True, "B": True})
             self.assertIn(("A", "on"), states)
             self.assertIn(("B", "on"), states)
+        finally:
+            window.close()
+            self.application.processEvents()
+
+    def test_narrow_execution_prioritizes_tree_over_global_event_log(self) -> None:
+        """The compact run view must show the procedure before diagnostics."""
+
+        window = MainWindow(".config/settings.yml", simulation=True)
+        try:
+            window.resize(1024, 720)
+            window.show()
+            window._navigate_to("execution")
+            self.application.processEvents()
+
+            self.assertFalse(window.event_log_panel.isVisible())
+            self.assertFalse(window.event_log_action.isChecked())
+            self.assertGreaterEqual(
+                window.navigation_routes["execution"].scroll_area.viewport().height(),
+                560,
+            )
+
+            # The application menu remains an explicit operator override for
+            # diagnostics when a compact screen is used during a run.
+            window.event_log_action.setChecked(True)
+            self.application.processEvents()
+            self.assertTrue(window.event_log_panel.isVisible())
+            self.assertTrue(window.event_log_action.isChecked())
         finally:
             window.close()
             self.application.processEvents()

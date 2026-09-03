@@ -1,112 +1,17 @@
-schema_version: 1
-name: Keithley B current × Rigol CH1 high level × Anritsu spectrum
 
-# Safe, executable 100 × 20 example. It deliberately contains no OUTPUT ON
-# action, so compiling or simulating it cannot energise a source.
+schema_version: 1
+name: semantic-editor
 root:
-  id: sequence-main
+  id: root
   type: sequence
   children:
-  - id: anritsu-spectrum-setup
-    type: configure_anritsu
-    start_frequency: 1 MHz
-    stop_frequency: 10 MHz
-    reference_level: 0 dBm
-    points: 1001
-  - id: keithley-current-sweep
-    type: sweep
-    target: keithley.B.current
-    start: 1 mA
-    stop: 10 mA
-    points: 100
-    spacing: linear
-    children:
-    - id: keithley-b-config
-      type: configure_keithley
-      channel: B
-      mode: current
-      level: ${keithley.B.current}
-      compliance: 67 mV
-      nplc: 1.0
-    - id: rigol-high-level-sweep
+    - id: source-sweep
       type: sweep
-      target: rigol.1.high_level
-      start: 1 mV
-      stop: 3 mV
-      points: 20
-      spacing: linear
+      target: keithley.B.current
+      start: "0 A"
+      stop: "1 mA"
+      points: 2
       children:
-      - id: rigol-ch1-config
-        type: configure_rigol
-        channel: 1
-        waveform: SQU
-        frequency: 1 kHz
-        high_level: ${rigol.1.high_level}
-        low_level: -1 mV
-        output_load: HIGHZ
-        dut_min_impedance: 50 ohm
-      - id: wait-for-settle
-        type: wait
-        duration: 100 ms
-      - id: measure-keithley-b
-        type: measure_keithley
-        channel: B
-      - id: acquire-spectrum
-        type: acquire_spectrum
-        trace: TRAC1
-
-  - id: keithley-43e71dbd
-    type: sequence
-    text: Keithley B · 1 selected action(s)
-    device_module: keithley
-    label: Keithley 2600
-    configuration_required: false
-    channel: B
-    source_mode: current
-    operation: configure_selected_parameters
-    parameter_actions:
-    - parameter_id: source.level
-      mode: sweep
-      value: 1 mA
-      segments:
-      - start: 0 A
-        stop: 1 mA
-        points: 3
-        spacing: linear
-      - start: 1 mA
-        stop: 0 A
-        points: 3
-        spacing: linear
-    output_policy: unchanged
-    roi_required: false
-    configuration:
-      channel: B
-      source_mode: current
-      source_level: 1 mA
-      compliance: 67 mV
-      nplc: '1'
-      settling_time: 100 ms
-      sense_mode: 2wire
-      source_autorange: true
-      source_range: AUTO
-      measure_voltage_autorange: true
-      measure_voltage_range: AUTO
-      measure_current_autorange: true
-      measure_current_range: AUTO
-    children:
-    - id: comment-1e9d2f8e
-      type: comment
-      text: Drop nested devices or flow actions here
-finally:
-- id: rigol-ch1-off-finally
-  type: set_rigol_output
-  channel: 1
-  enabled: false
-- id: keithley-b-ramp-zero-finally
-  type: ramp_keithley_to_zero
-  channel: B
-  deadline: 10 s
-- id: keithley-b-off-finally
-  type: set_keithley_output
-  channel: B
-  enabled: false
+        - id: settle
+          type: wait
+          duration: "10 ms"

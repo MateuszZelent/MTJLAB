@@ -218,6 +218,7 @@ class ResultsPage(QWidget):
 
     resume_requested = Signal(object)
     open_sweep_requested = Signal(object, object)
+    result_selected = Signal(object)
     _ASYNC_LOAD_BYTES = 4 * 1024 * 1024
 
     def __init__(self, output_dir: str, parent: QWidget | None = None) -> None:
@@ -463,6 +464,7 @@ class ResultsPage(QWidget):
             self._selected_path = None
             self._thatec_run = None
             self._thatec_tree_available = False
+            self.result_selected.emit(None)
             if self.file_browser.has_files():
                 self._show_result_state(
                     "Select a recorded result",
@@ -478,6 +480,7 @@ class ResultsPage(QWidget):
 
         path = Path(str(path_or_none))
         self._selected_path = path
+        self.result_selected.emit(path)
         self._show_result_state(
             "Loading result",
             f"Reading public and station metadata from {path.name}...",

@@ -128,6 +128,10 @@ class RecipeCompiler:
         self._semantic_tree: SemanticMeasurementTree | None = None
         self._semantic_axes_by_source: dict[str, object] = {}
         self._active_axis_path: tuple[str, ...] = ()
+        # Actions authored inside a semantic loop inherit the immutable
+        # context of the current point.  This lets Runner/storage identify
+        # the exact outer/inner axis combination without parsing node IDs.
+        self._active_axis_context: AxisPointContext | None = None
         self._recipe_nodes: dict[str, RecipeNode] = {}
 
     def _check_cancelled(self) -> None:
@@ -231,6 +235,9 @@ class RecipeCompiler:
         payload = dict(compiled.payload)
         payload.setdefault("requested_si", compiled.requested_si)
         payload.setdefault("applied_si", compiled.applied_si)
+        # Runtime confirmation must not infer the target when two active axes
+        # happen to request the same numerical value.
+        payload.setdefault("target", binding.target)
         return PlanAction(
             f"{binding.axis_id}.point.{point_index}",
             compiled.action_kind,
@@ -244,6 +251,8 @@ class RecipeCompiler:
     def compile(self, recipe: Recipe) -> ExecutionPlan:
         actions: list[PlanAction] = []
         self._recipe_nodes = {}
+        self._active_axis_path = ()
+        self._active_axis_context = None
 
         def index_recipe_node(node: RecipeNode) -> None:
             self._recipe_nodes[node.id] = node
@@ -811,8 +820,10 @@ class RecipeCompiler:
                     actions.append(point_action)
                     generated_kind = point_action.kind
                 previous_path = self._active_axis_path
-                if binding is not None:
+                previous_context = self._active_axis_context
+                if binding is not None and generated_kind:
                     self._active_axis_path = (*previous_path, binding.source_node_id)
+                    self._active_axis_context = point_action.axis_context
                 try:
                     for child in node.children:
                         if generated_kind and self._axis_update_matches(child, generated_kind):
@@ -820,6 +831,7 @@ class RecipeCompiler:
                         self._visit(child, nested, actions, is_finally=is_finally)
                 finally:
                     self._active_axis_path = previous_path
+                    self._active_axis_context = previous_context
             return
         if node.type == "configure_moke_box":
             raise ConfigurationError(
@@ -1020,6 +1032,15 @@ class RecipeCompiler:
         configure_action = self._compile_action(
             configure_node, configure_context, is_finally=False
         )
+        legacy_binding = self._semantic_axes_by_source.get(node.id)
+        if sweep_values:
+            configure_action = self._semanticize_legacy_action(
+                configure_action,
+                legacy_binding,
+                self._legacy_axis_context(node, sweep_values[0], 0),
+                sweep_values[0],
+                node.id,
+            )
         configured_request = configure_action.payload["request"]
         applied_configured_request = self._quantize_keithley_request(
             configured_request
@@ -1083,6 +1104,10 @@ class RecipeCompiler:
         )
         for point_index, value in enumerate(sweep_values or (None,)):
             self._check_cancelled()
+            previous_context = self._active_axis_context
+            point_context = self._legacy_axis_context(node, value, point_index)
+            if point_context is not None:
+                self._active_axis_context = point_context
             nested = dict(context)
             if value is not None:
                 nested[axis_target] = value
@@ -1122,6 +1147,13 @@ class RecipeCompiler:
                         is_finally=False,
                     )
                 if update_action is not None:
+                    update_action = self._semanticize_legacy_action(
+                        update_action,
+                        legacy_binding,
+                        point_context,
+                        value,
+                        node.id,
+                    )
                     applied_signature = self._keithley_sweep_signature(
                         configured_request, sweep_parameter, value
                     )
@@ -1153,6 +1185,7 @@ class RecipeCompiler:
                 )
             for child in node.children:
                 self._visit(child, nested, actions, is_finally=False)
+            self._active_axis_context = previous_context
 
         if output_policy == "on":
             actions.append(
@@ -1328,6 +1361,15 @@ class RecipeCompiler:
             configure_context,
             is_finally=False,
         )
+        legacy_binding = self._semantic_axes_by_source.get(node.id)
+        if sweep_values:
+            configure_action = self._semanticize_legacy_action(
+                configure_action,
+                legacy_binding,
+                self._legacy_axis_context(node, sweep_values[0], 0),
+                sweep_values[0],
+                node.id,
+            )
         output_path_action = self._compile_action(
             RecipeNode(
                 f"{node.id}.configure-output-path",
@@ -1413,6 +1455,10 @@ class RecipeCompiler:
         )
         for point_index, value in enumerate(sweep_values or (None,)):
             self._check_cancelled()
+            previous_context = self._active_axis_context
+            point_context = self._legacy_axis_context(node, value, point_index)
+            if point_context is not None:
+                self._active_axis_context = point_context
             nested = dict(context)
             if value is not None and axis_target is not None:
                 nested[axis_target] = value
@@ -1470,6 +1516,13 @@ class RecipeCompiler:
                 update_action = self._compile_action(
                     update_node, nested, is_finally=False
                 )
+                update_action = self._semanticize_legacy_action(
+                    update_action,
+                    legacy_binding,
+                    point_context,
+                    value,
+                    node.id,
+                )
                 if sweep_parameter == "carrier.frequency":
                     applied_signature = quantize_rigol_frequency(
                         update_action.payload["frequency_hz"]
@@ -1488,6 +1541,7 @@ class RecipeCompiler:
                 previous_rigol_signature = applied_signature
             for child in node.children:
                 self._visit(child, nested, actions, is_finally=False)
+            self._active_axis_context = previous_context
 
         if output_policy == "on":
             actions.append(
@@ -1641,8 +1695,13 @@ class RecipeCompiler:
                 f"{parameter_id!r}/{mode!r}."
             )
 
-        for value in sweep_values or (None,):
+        legacy_binding = self._semantic_axes_by_source.get(node.id)
+        for point_index, value in enumerate(sweep_values or (None,)):
             self._check_cancelled()
+            previous_context = self._active_axis_context
+            point_context = self._legacy_axis_context(node, value, point_index)
+            if point_context is not None:
+                self._active_axis_context = point_context
             nested = dict(context)
             point_base = dict(base_data)
             if value is not None and sweep_parameter is not None and axis_target is not None:
@@ -1657,6 +1716,13 @@ class RecipeCompiler:
                 ),
                 nested,
                 is_finally=False,
+            )
+            configure_action = self._semanticize_legacy_action(
+                configure_action,
+                legacy_binding,
+                point_context,
+                value,
+                node.id,
             )
             actions.append(configure_action)
             self._remember_literal_configuration(configure_action, nested)
@@ -1680,6 +1746,7 @@ class RecipeCompiler:
                 )
             for child in node.children:
                 self._visit(child, nested, actions, is_finally=False)
+            self._active_axis_context = previous_context
 
     def _visit_anritsu_sg_device_node(
         self,
@@ -1776,6 +1843,7 @@ class RecipeCompiler:
             first_key, _dimension, _target = definitions[sweep_parameter]
             first_data[first_key] = sweep_values[0]
             first_context[axis_target] = sweep_values[0]
+        legacy_binding = self._semantic_axes_by_source.get(node.id)
         first_configure = self._compile_action(
             RecipeNode(
                 f"{node.id}.configure-sg",
@@ -1785,6 +1853,14 @@ class RecipeCompiler:
             first_context,
             is_finally=False,
         )
+        if sweep_values:
+            first_configure = self._semanticize_legacy_action(
+                first_configure,
+                legacy_binding,
+                self._legacy_axis_context(node, sweep_values[0], 0),
+                sweep_values[0],
+                node.id,
+            )
         first_config = first_configure.payload["config"]
         runtime_context = dict(context)
         if output_policy == "continue":
@@ -1830,6 +1906,10 @@ class RecipeCompiler:
 
         for point_index, value in enumerate(sweep_values or (None,)):
             self._check_cancelled()
+            previous_context = self._active_axis_context
+            point_context = self._legacy_axis_context(node, value, point_index)
+            if point_context is not None:
+                self._active_axis_context = point_context
             nested = dict(runtime_context)
             current = dict(point_data)
             if value is not None and sweep_parameter is not None and axis_target:
@@ -1845,19 +1925,27 @@ class RecipeCompiler:
                         context=nested,
                     )
                 if point_index > 0:
+                    update_action = self._compile_action(
+                        RecipeNode(
+                            f"{node.id}.update-sg",
+                            "update_anritsu_sg",
+                            current,
+                        ),
+                        nested,
+                        is_finally=False,
+                    )
                     actions.append(
-                        self._compile_action(
-                            RecipeNode(
-                                f"{node.id}.update-sg",
-                                "update_anritsu_sg",
-                                current,
-                            ),
-                            nested,
-                            is_finally=False,
+                        self._semanticize_legacy_action(
+                            update_action,
+                            legacy_binding,
+                            point_context,
+                            value,
+                            node.id,
                         )
                     )
             for child in node.children:
                 self._visit(child, nested, actions, is_finally=False)
+            self._active_axis_context = previous_context
 
         if output_policy == "on":
             actions.append(
@@ -1995,6 +2083,106 @@ class RecipeCompiler:
     @staticmethod
     def _context_as_si(context: dict[str, Quantity]) -> dict[str, float]:
         return {name: value.si_value for name, value in context.items()}
+
+    def _legacy_axis_context(
+        self,
+        node: RecipeNode,
+        value: Quantity | None,
+        point_index: int,
+    ) -> AxisPointContext | None:
+        """Build the same point context for a provider-owned legacy sweep.
+
+        Device-module sweeps predate the explicit ``sweep`` node and expand
+        their points inside the provider visitor.  Without this bridge,
+        authored children (WAIT/acquire) had no axis context and the semantic
+        tree could not show which ROI value was active.
+        """
+
+        if value is None:
+            return None
+        binding = self._semantic_axes_by_source.get(node.id)
+        if binding is None:
+            return None
+        stages = tuple(getattr(binding, "stages", ()))
+        stage_index = next(
+            (
+                int(getattr(stage, "stage_index", 0))
+                for stage in stages
+                if any(
+                    math.isclose(
+                        point.si_value,
+                        value.si_value,
+                        rel_tol=0.0,
+                        abs_tol=1e-18,
+                    )
+                    for point in getattr(stage, "points", ())
+                )
+            ),
+            0,
+        )
+        active = (
+            dict(self._active_axis_context.active_setpoints_si)
+            if self._active_axis_context is not None
+            else {}
+        )
+        target = str(getattr(binding, "target", ""))
+        if target:
+            active[target] = value.si_value
+        loop_path = (
+            (*self._active_axis_context.loop_path, node.id)
+            if self._active_axis_context is not None
+            else (*self._active_axis_path, node.id)
+        )
+        return AxisPointContext(
+            str(getattr(binding, "axis_id", f"{node.id}.axis")),
+            point_index,
+            len(getattr(binding, "points", ())) or 1,
+            stage_index,
+            value.si_value,
+            active,
+            loop_path,
+        )
+
+    @staticmethod
+    def _semanticize_legacy_action(
+        action: PlanAction,
+        binding: object | None,
+        context: AxisPointContext | None,
+        value: Quantity | None,
+        source_node_id: str,
+    ) -> PlanAction:
+        """Attach the shared ROI operation identity to a legacy action."""
+
+        if binding is None or context is None or value is None:
+            return action
+        target = str(getattr(binding, "target", ""))
+        if not target:
+            return action
+        payload = dict(action.payload)
+        payload.setdefault("requested_si", value.si_value)
+        if "applied_si" not in payload:
+            if action.kind == "update_keithley_level":
+                payload["applied_si"] = payload.get("level_si", value.si_value)
+            elif action.kind == "update_keithley_compliance":
+                payload["applied_si"] = payload.get("compliance_si", value.si_value)
+            elif action.kind == "update_rigol_frequency":
+                payload["applied_si"] = payload.get("frequency_hz", value.si_value)
+            elif action.kind == "update_rigol_levels":
+                payload["applied_si"] = (
+                    payload.get("high_level_v", value.si_value)
+                    if target.endswith("high_level")
+                    else payload.get("low_level_v", value.si_value)
+                )
+            else:
+                payload["applied_si"] = value.si_value
+        payload.setdefault("target", target)
+        return replace(
+            action,
+            payload=payload,
+            semantic_id=f"{getattr(binding, 'axis_id', source_node_id)}.set-roi-value",
+            source_node_id=source_node_id,
+            axis_context=context,
+        )
 
     def _compile_action(
         self, node: RecipeNode, context: dict[str, Quantity], *, is_finally: bool
@@ -2220,6 +2408,7 @@ class RecipeCompiler:
             is_finally=is_finally,
             semantic_id=semantic_id,
             source_node_id=node.id if semantic_id else None,
+            axis_context=self._active_axis_context,
         )
 
     @staticmethod

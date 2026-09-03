@@ -6,8 +6,8 @@ from collections.abc import Mapping
 from dataclasses import dataclass
 
 from app.contracts.sweep_provider import CompiledAxisSetpoint
-from app.domain.errors import ConfigurationError, SafetyViolation
-from app.domain.quantities import DIMENSION_DBM, DIMENSION_FREQUENCY, Quantity, parse_quantity
+from app.domain.errors import ConfigurationError
+from app.domain.quantities import DIMENSION_DBM, DIMENSION_FREQUENCY, Quantity
 from app.recipes.models import RecipeNode
 from app.recipes.parameter_registry import parameter_descriptor
 from app.recipes.semantic_tree import SweepAxisBinding, SweepBindingDraft
@@ -33,13 +33,24 @@ class _SpectrumConfig:
 class AnritsuSweepProvider:
     module_key = "anritsu"
 
+    @staticmethod
+    def axis_action_kinds(binding: SweepAxisBinding) -> frozenset[str]:
+        """Return authored update nodes represented by one semantic ROI row."""
+
+        if binding.parameter_id.startswith(("signal_generator.", "sg.")):
+            return frozenset({"update_anritsu_sg"})
+        # Spectrum axes compile to a complete configure_anritsu action.
+        if binding.parameter_id.startswith("spectrum."):
+            return frozenset({"configure_anritsu"})
+        return frozenset()
+
     def bind_legacy_action(self, node: RecipeNode, action: Mapping[str, object]) -> SweepBindingDraft:
         parameter_id = str(action.get("parameter_id", ""))
         configuration = node.data.get("configuration")
         configuration = configuration if isinstance(configuration, Mapping) else node.data
-        if parameter_id == "signal_generator.frequency":
+        if parameter_id in {"signal_generator.frequency", "sg.frequency"}:
             target, dimension = "anritsu.sg.frequency", DIMENSION_FREQUENCY
-        elif parameter_id == "signal_generator.power":
+        elif parameter_id in {"signal_generator.power", "sg.power"}:
             target, dimension = "anritsu.sg.power", DIMENSION_DBM
         elif parameter_id in {"spectrum.start_frequency", "spectrum.stop_frequency", "spectrum.reference_level"}:
             target = f"anritsu.spectrum.{parameter_id.split('.', 1)[1]}"

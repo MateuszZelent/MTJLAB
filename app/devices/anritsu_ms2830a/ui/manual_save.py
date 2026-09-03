@@ -34,6 +34,7 @@ class ManualSpectrumSaveOptions:
     metadata_scope: str
     metadata_values: tuple[ManualMetadataValue, ...]
     trace_variant: str
+    upload_to_elab: bool = False
 
 
 class ManualSpectrumSaveDialog(StationDialog):
@@ -50,6 +51,9 @@ class ManualSpectrumSaveDialog(StationDialog):
         default_trace_variant: str = "raw",
         default_metadata_scope: str = "all",
         default_metadata_keys: Sequence[str] = (),
+        default_upload_to_elab: bool = False,
+        elab_upload_available: bool = False,
+        elab_upload_hint: str = "",
     ) -> None:
         super().__init__(parent)
         self.setObjectName("manualSpectrumSaveDialog")
@@ -111,6 +115,38 @@ class ManualSpectrumSaveDialog(StationDialog):
             "UTC date and time to the selected base name."
         )
         form.addRow("File policy", self.mode)
+
+        self.upload_to_elab = CheckBox("Upload this saved result to eLab", surface)
+        self.upload_to_elab.setChecked(
+            bool(default_upload_to_elab and elab_upload_available)
+        )
+        self.upload_to_elab.setEnabled(elab_upload_available)
+        self.upload_to_elab.setToolTip(
+            "Upload only after the local HDF5 save succeeds. eLab uploads use a closed "
+            "timestamped file so an append archive cannot change after upload."
+        )
+        self.elab_upload_hint = CaptionLabel(
+            elab_upload_hint
+            or (
+                "Configure a template in the eLabFTW tab first."
+                if not elab_upload_available
+                else "A closed timestamped HDF5 will be used for this eLab upload."
+            ),
+            surface,
+        )
+        self.elab_upload_hint.setObjectName("muted")
+        self.elab_upload_hint.setWordWrap(True)
+        elab_row = QVBoxLayout()
+        elab_row.setContentsMargins(0, 0, 0, 0)
+        elab_row.setSpacing(2)
+        elab_row.addWidget(self.upload_to_elab)
+        elab_row.addWidget(self.elab_upload_hint)
+        elab_host = QWidget(surface)
+        elab_host.setLayout(elab_row)
+        form.addRow("eLabFTW", elab_host)
+        self.upload_to_elab.toggled.connect(self._elab_upload_toggled)
+        self.mode.currentIndexChanged.connect(self._elab_mode_changed)
+        self._elab_upload_toggled(self.upload_to_elab.isChecked())
 
         self.trace = ComboBox(surface)
         for key, label in trace_choices:
@@ -232,6 +268,7 @@ class ManualSpectrumSaveDialog(StationDialog):
                 value for value in self._metadata_values if value.key in selected_keys
             ),
             trace_variant=str(self.trace.currentData()),
+            upload_to_elab=self.upload_to_elab.isChecked(),
         )
 
     def _browse(self) -> None:
@@ -255,3 +292,23 @@ class ManualSpectrumSaveDialog(StationDialog):
                 checkbox.setEnabled(False)
             else:
                 checkbox.setEnabled(True)
+
+    def _elab_upload_toggled(self, checked: bool) -> None:
+        append_index = self.mode.findData(ManualSpectrumSaveMode.APPEND.value)
+        if append_index >= 0:
+            self.mode.setItemEnabled(append_index, not checked)
+        if checked and self.mode.currentData() == ManualSpectrumSaveMode.APPEND.value:
+            timestamped_index = self.mode.findData(ManualSpectrumSaveMode.TIMESTAMPED.value)
+            if timestamped_index >= 0:
+                self.mode.setCurrentIndex(timestamped_index)
+        if checked:
+            self.elab_upload_hint.setText(
+                "eLab upload is enabled. The local result will be timestamped and closed "
+                "before the background upload starts."
+            )
+
+    def _elab_mode_changed(self, _index: int) -> None:
+        if self.upload_to_elab.isChecked() and self.mode.currentData() == ManualSpectrumSaveMode.APPEND.value:
+            timestamped_index = self.mode.findData(ManualSpectrumSaveMode.TIMESTAMPED.value)
+            if timestamped_index >= 0:
+                self.mode.setCurrentIndex(timestamped_index)

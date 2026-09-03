@@ -207,6 +207,27 @@ QWidget#settingsPage QLabel#settingsValidationBanner,
 QWidget#settingsPage QLabel#settingsFieldError {{
     color: {tokens.danger};
 }}
+QWidget#elabPage QLabel#elabStatus[elabStatusState="success"] {{
+    color: {tokens.success};
+}}
+QWidget#elabPage QLabel#elabStatus[elabStatusState="caution"] {{
+    color: {tokens.caution};
+}}
+QWidget#elabPage QLabel#elabStatus[elabStatusState="danger"] {{
+    color: {tokens.danger};
+}}
+QWidget#elabPage QLabel#elabStatus[elabStatusState="neutral"] {{
+    color: {tokens.text_muted};
+}}
+QWidget#elabPage QTableWidget#elabHistoryTable {{
+    background: {tokens.surface_raised};
+    color: {tokens.text_primary};
+    alternate-background-color: {tokens.surface};
+    border: 1px solid {tokens.border};
+    border-radius: 6px;
+    selection-background-color: {tokens.accent};
+    selection-color: #ffffff;
+}}
 QLabel[deviceState="verified"], QLabel[outputState="off"],
 QLabel#quickOutputState[quickOutputState="on"],
 QLabel#quickOutputState[quickOutputState="off"],

@@ -110,6 +110,13 @@ class RunTelemetryCoalescer:
             "reference_preview",
         }
     )
+    _SEMANTIC_NAMES = frozenset(
+        {
+            "semantic_operation_started",
+            "semantic_operation_applied",
+            "semantic_operation_failed",
+        }
+    )
 
     def __init__(
         self,
@@ -124,8 +131,14 @@ class RunTelemetryCoalescer:
         self._lock = threading.Lock()
         self._last_emit: dict[str, float] = {}
         self._pending: dict[str, tuple[str, object]] = {}
+        self._pending_semantic: dict[
+            tuple[str, str], tuple[str, object, int]
+        ] = {}
 
     def submit(self, name: str, data: object) -> None:
+        if name in self._SEMANTIC_NAMES:
+            self._submit_semantic(name, data)
+            return
         if name not in self._COALESCED_NAMES:
             self._emit(name, data)
             return
@@ -140,17 +153,75 @@ class RunTelemetryCoalescer:
         if ready is not None:
             self._emit(*ready)
 
+    def _submit_semantic(self, name: str, data: object) -> None:
+        """Coalesce visual semantic states while retaining event counts.
+
+        A long sweep emits a start and confirmation for every point.  The
+        runner persists each event before this method is called, so the UI can
+        receive the newest state for each semantic row at a bounded cadence.
+        ``_coalesced_count`` lets the monitor retain truthful ingress metrics
+        without replaying thousands of stale Qt signal deliveries.
+        """
+
+        if not isinstance(data, Mapping):
+            self._emit(name, data)
+            return
+        semantic_id = str(data.get("semantic_id", "")).strip()
+        if not semantic_id:
+            self._emit(name, data)
+            return
+        if name == "semantic_operation_failed":
+            # Fault feedback is a safety boundary. Flush visual states queued
+            # before the failure, then forward the fault without delay.
+            with self._lock:
+                ready = tuple(self._pending_semantic.values())
+                self._pending_semantic.clear()
+                self._last_emit["semantic"] = time.monotonic()
+            for pending_name, pending_data, count in ready:
+                self._emit_semantic(pending_name, pending_data, count)
+            self._emit(name, data)
+            return
+
+        now = time.monotonic()
+        ready: tuple[tuple[str, object, int], ...] = ()
+        key = (name, semantic_id)
+        with self._lock:
+            previous = self._pending_semantic.get(key)
+            count = (previous[2] if previous is not None else 0) + 1
+            self._pending_semantic[key] = (name, data, count)
+            last = self._last_emit.get("semantic")
+            if last is None or now - last >= self._interval_s:
+                ready = tuple(self._pending_semantic.values())
+                self._pending_semantic.clear()
+                self._last_emit["semantic"] = now
+        for pending_name, pending_data, count in ready:
+            self._emit_semantic(pending_name, pending_data, count)
+
+    def _emit_semantic(self, name: str, data: object, count: int) -> None:
+        if count <= 1 or not isinstance(data, Mapping):
+            self._emit(name, data)
+            return
+        payload = dict(data)
+        payload["_coalesced_count"] = count
+        self._emit(name, payload)
+
     def flush(self) -> None:
         """Forward the newest frame from every pending stream before shutdown."""
 
         with self._lock:
             pending = tuple(self._pending.values())
             self._pending.clear()
+            pending_semantic = tuple(self._pending_semantic.values())
+            self._pending_semantic.clear()
             now = time.monotonic()
             for name, _data in pending:
                 self._last_emit[name] = now
+            if pending_semantic:
+                self._last_emit["semantic"] = now
         for name, data in pending:
             self._emit(name, data)
+        for name, data, count in pending_semantic:
+            self._emit_semantic(name, data, count)
 
 
 class RunWorker(QObject):
@@ -200,6 +271,15 @@ class RunWorker(QObject):
         if name in {"run_completed", "run_aborted", "run_fault"}:
             self._telemetry_forwarder.flush()
         self._telemetry_forwarder.submit(name, data)
+        # The simulation backend performs deterministic HDF5/event work in
+        # this worker thread.  On Windows, a long sequence of Python and
+        # native calls can otherwise retain the interpreter lock long enough
+        # to starve the GUI event loop even though the window itself is doing
+        # bounded work.  A zero-duration sleep is a cooperative scheduler
+        # yield; it has no effect on hardware timing and is restricted to the
+        # synthetic run path used by UI qualification/training.
+        if self._simulation:
+            time.sleep(0)
 
     @Slot()
     def run(self) -> None:

@@ -126,6 +126,10 @@ class RecipeRunner:
         self._correlation_id = ""
         self._reference_trace: SpectrumTrace | None = None
         self._reference_index: int | None = None
+        # Last engine-confirmed value for each semantic axis.  Point metadata
+        # uses this snapshot so requested/applied/readback provenance remains
+        # explicit even when the checkpoint action itself is an acquisition.
+        self._semantic_confirmations: dict[str, dict[str, object]] = {}
 
     @property
     def state(self) -> ApplicationState:
@@ -180,6 +184,7 @@ class RecipeRunner:
         self._watchdog_timed_out.clear()
         self._reference_trace = None
         self._reference_index = None
+        self._semantic_confirmations = {}
         self._manual_step_permit.clear()
         self._correlation_id = str(uuid4())
         self._start_watchdog()
@@ -243,12 +248,18 @@ class RecipeRunner:
                     "deadline_s": self._policy.deadline_for(action),
                     "cancellation_requested": self._stop_requested.is_set(),
                 }
+                if action.kind == "wait":
+                    started_event["duration_s"] = float(action.payload["duration_s"])
                 if action.semantic_id:
                     started_event["semantic_id"] = action.semantic_id
                     axis_context = self._axis_context_payload(action)
                     if axis_context is not None:
                         started_event["axis_context"] = axis_context
-                    requested = action.payload.get("requested_si")
+                    requested = (
+                        action.payload.get("duration_s")
+                        if action.kind == "wait"
+                        else action.payload.get("requested_si")
+                    )
                     if not isinstance(requested, (int, float)) and action.axis_context is not None:
                         requested = action.axis_context.value_si
                     if isinstance(requested, (int, float)):
@@ -279,6 +290,7 @@ class RecipeRunner:
                         ),
                     )
                     if semantic_applied is not None:
+                        self._remember_semantic_confirmation(action, semantic_applied)
                         self._emit("semantic_operation_applied", semantic_applied)
                 point_setpoints.update(action.setpoints_si)
                 self._apply_actual_setpoints(point_setpoints)
@@ -298,8 +310,7 @@ class RecipeRunner:
                             "execution_mode": self._execution_mode.value,
                             "outputs_forced_off": self.outputs_forced_off,
                             "output_guard_devices": self._output_guard_devices(),
-                            "semantic_operation_id": action.semantic_id,
-                            "axis_context": self._axis_context_payload(action),
+                            **self._semantic_point_metadata(action),
                         },
                     )
                     write_started = time.monotonic()
@@ -348,8 +359,7 @@ class RecipeRunner:
                             "execution_mode": self._execution_mode.value,
                             "outputs_forced_off": self.outputs_forced_off,
                             "output_guard_devices": self._output_guard_devices(),
-                            "semantic_operation_id": action.semantic_id,
-                            "axis_context": self._axis_context_payload(action),
+                            **self._semantic_point_metadata(action),
                         },
                     )
                     write_started = time.monotonic()
@@ -388,6 +398,11 @@ class RecipeRunner:
                         **self._action_display_context(action),
                         "semantic_id": action.semantic_id,
                         "axis_context": self._axis_context_payload(action),
+                        **(
+                            {"duration_s": float(action.payload["duration_s"])}
+                            if action.kind == "wait"
+                            else {}
+                        ),
                     },
                 )
                 current_action = None
@@ -577,6 +592,56 @@ class RecipeRunner:
             "loop_path": list(context.loop_path),
         }
 
+    def _remember_semantic_confirmation(
+        self,
+        action: PlanAction,
+        event: dict[str, object],
+    ) -> None:
+        """Cache one confirmed axis operation for the following checkpoint."""
+
+        context = action.axis_context
+        if context is None:
+            return
+        self._semantic_confirmations[context.axis_id] = {
+            "semantic_operation_id": action.semantic_id,
+            "requested_si": event.get("requested_si"),
+            "applied_si": event.get("applied_si"),
+            "readback_si": event.get("readback_si"),
+            "verification": event.get("verification"),
+        }
+
+    def _semantic_point_metadata(self, action: PlanAction) -> dict[str, object]:
+        """Return additive, explicit provenance for a stored checkpoint."""
+
+        context = action.axis_context
+        metadata: dict[str, object] = {
+            "semantic_operation_id": action.semantic_id,
+            "axis_context": self._axis_context_payload(action),
+        }
+        if context is None:
+            return metadata
+        confirmation = self._semantic_confirmations.get(context.axis_id, {})
+        metadata.update(
+            {
+                "axis_id": context.axis_id,
+                "stage_index": context.stage_index,
+                "point_index": context.point_index,
+                "loop_path": list(context.loop_path),
+                "requested_si": confirmation.get("requested_si", context.value_si),
+                "applied_si": confirmation.get("applied_si"),
+                "readback_si": confirmation.get("readback_si"),
+                "verification": confirmation.get("verification"),
+            }
+        )
+        # The axis operation is the semantic operation that established the
+        # checkpoint setpoint.  Keep the checkpoint/action ID separately so
+        # consumers can still trace the acquisition node when needed.
+        operation_id = confirmation.get("semantic_operation_id")
+        if isinstance(operation_id, str) and operation_id:
+            metadata["semantic_operation_id"] = operation_id
+            metadata["checkpoint_operation_id"] = action.semantic_id
+        return metadata
+
     def _semantic_event_data(
         self,
         action: PlanAction,
@@ -590,7 +655,11 @@ class RecipeRunner:
     ) -> dict[str, object] | None:
         if not action.semantic_id:
             return None
-        requested = action.payload.get("requested_si")
+        requested = (
+            action.payload.get("duration_s")
+            if action.kind == "wait"
+            else action.payload.get("requested_si")
+        )
         if not isinstance(requested, (int, float)) and action.axis_context is not None:
             requested = action.axis_context.value_si
         data: dict[str, object] = {
@@ -602,6 +671,10 @@ class RecipeRunner:
             "total_actions": total_actions,
             "setpoints_si": dict(action.setpoints_si),
         }
+        data.update(self._action_display_context(action))
+        for key in ("duration_s", "trace", "reference_operation"):
+            if key in action.payload:
+                data[key] = action.payload[key]
         axis_context = self._axis_context_payload(action)
         if axis_context is not None:
             data["axis_context"] = axis_context
@@ -620,7 +693,11 @@ class RecipeRunner:
 
         if not action.semantic_id:
             return None, None
-        requested = action.payload.get("requested_si")
+        requested = (
+            action.payload.get("duration_s")
+            if action.kind == "wait"
+            else action.payload.get("requested_si")
+        )
         if not isinstance(requested, (int, float)) and action.axis_context is not None:
             requested = action.axis_context.value_si
         target = ""

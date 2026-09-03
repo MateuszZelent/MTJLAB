@@ -1953,6 +1953,96 @@ class AdapterAndRunnerTests(unittest.TestCase):
         self.assertEqual(writer.status, "faulted")
         self.assertTrue(any(name == "shutdown_error" for name, _data, _severity in writer.events))
 
+    def test_wait_action_honours_duration_before_confirming_completion(self) -> None:
+        events: list[tuple[str, dict[str, object], float]] = []
+        writer = MemoryWriter()
+        plan = ExecutionPlan(
+            recipe_name="wait-duration",
+            actions=(
+                PlanAction(
+                    "wait-80ms",
+                    "wait",
+                    {"duration_s": 0.08},
+                    {},
+                    semantic_id="wait-80ms",
+                ),
+            ),
+            total_points=0,
+            sha256="wait-duration",
+            recipe_source="schema_version: 1\n",
+        )
+        started = time.monotonic()
+        runner = RecipeRunner(
+            rigol=ShutdownProbe(),
+            keithley=ShutdownProbe(),
+            anritsu=ShutdownProbe(),
+            writer=writer,
+            on_event=lambda name, data: events.append(
+                (name, data, time.monotonic() - started)
+            ),
+        )
+
+        result = runner.run(plan)
+
+        running = next(
+            timestamp
+            for name, data, timestamp in events
+            if name == "semantic_operation_started" and data.get("semantic_id") == "wait-80ms"
+        )
+        applied = next(
+            timestamp
+            for name, data, timestamp in events
+            if name == "semantic_operation_applied" and data.get("semantic_id") == "wait-80ms"
+        )
+        started_data = next(
+            data
+            for name, data, _timestamp in events
+            if name == "semantic_operation_started" and data.get("semantic_id") == "wait-80ms"
+        )
+        applied_data = next(
+            data
+            for name, data, _timestamp in events
+            if name == "semantic_operation_applied" and data.get("semantic_id") == "wait-80ms"
+        )
+        self.assertEqual(result.state, ApplicationState.SAFE)
+        self.assertGreaterEqual(applied - running, 0.07)
+        self.assertEqual(started_data["duration_s"], 0.08)
+        self.assertEqual(started_data["requested_si"], 0.08)
+        self.assertEqual(applied_data["duration_s"], 0.08)
+        self.assertEqual(applied_data["applied_si"], 0.08)
+        self.assertEqual(writer.status, "completed")
+
+    def test_compiled_2000_ms_wait_blocks_runner_for_two_seconds(self) -> None:
+        """Protect the exact recipe spelling reported by an operator."""
+
+        recipe = parse_recipe_text(
+            """\
+schema_version: 1
+name: exact-2000-ms-wait
+root:
+  id: wait-2000ms
+  type: wait
+  duration: 2000 ms
+finally: []
+"""
+        )
+        plan = RecipeCompiler(self.settings).compile(recipe)
+        self.assertEqual(len(plan.actions), 1)
+        self.assertEqual(plan.actions[0].payload["duration_s"], 2.0)
+        started = time.monotonic()
+
+        result = RecipeRunner(
+            rigol=ShutdownProbe(),  # type: ignore[arg-type]
+            keithley=ShutdownProbe(),  # type: ignore[arg-type]
+            anritsu=ShutdownProbe(),  # type: ignore[arg-type]
+            writer=MemoryWriter(),  # type: ignore[arg-type]
+        ).run(plan)
+
+        elapsed = time.monotonic() - started
+        self.assertEqual(result.state, ApplicationState.SAFE)
+        self.assertGreaterEqual(elapsed, 1.95)
+        self.assertLess(elapsed, 3.0)
+
     def test_any_recipe_shutdown_attempts_all_station_outputs(self) -> None:
         keithley = ShutdownProbe()
         rigol = ShutdownProbe()

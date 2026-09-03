@@ -233,8 +233,9 @@ root:
             self.assertFalse(anritsu._sg_output_enabled)
             self.assertEqual(
                 sum(
-                    name == "action_started"
-                    and data.get("node_id") == "keithley-a-current-point"
+                    name == "semantic_operation_started"
+                    and data.get("semantic_id")
+                    == "keithley-a-current-sweep.set-roi-value"
                     for name, data in events
                 ),
                 10,

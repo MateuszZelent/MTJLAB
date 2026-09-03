@@ -6,7 +6,7 @@ from collections.abc import Mapping
 
 from app.contracts.sweep_provider import CompiledAxisSetpoint
 from app.domain.errors import ConfigurationError, SafetyViolation
-from app.domain.quantities import DIMENSION_CURRENT, DIMENSION_TIME, DIMENSION_VOLTAGE, Quantity, parse_quantity
+from app.domain.quantities import DIMENSION_CURRENT, DIMENSION_VOLTAGE, Quantity, parse_quantity
 from app.recipes.models import RecipeNode
 from app.recipes.parameter_registry import parameter_descriptor
 from app.recipes.semantic_tree import SweepAxisBinding, SweepBindingDraft
@@ -16,6 +16,16 @@ from app.settings.models import StationSettings
 
 class KeithleySweepProvider:
     module_key = "keithley"
+
+    @staticmethod
+    def axis_action_kinds(binding: SweepAxisBinding) -> frozenset[str]:
+        """Return authored update nodes represented by one semantic ROI row."""
+
+        if binding.parameter_id == "source.level":
+            return frozenset({"update_keithley_level"})
+        if binding.parameter_id == "source.compliance":
+            return frozenset({"update_keithley_compliance"})
+        return frozenset()
 
     @staticmethod
     def _channel_mode(node: RecipeNode) -> tuple[str, str]:

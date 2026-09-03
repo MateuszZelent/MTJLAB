@@ -454,6 +454,63 @@ root:
             [0.0, 0.0005, 0.001],
         )
 
+    def test_legacy_device_children_preserve_wait_duration_and_roi_context(self) -> None:
+        source = """\
+schema_version: 1
+name: keithley-provider-wait
+root:
+  id: root
+  type: sequence
+  children:
+    - id: keithley-axis
+      type: sequence
+      device_module: keithley
+      operation: configure_selected_parameters
+      channel: B
+      source_mode: current
+      configuration:
+        channel: B
+        source_mode: current
+        source_level: 0 A
+        compliance: 67 mV
+        nplc: 1
+        settling_time: 0 s
+        sense_mode: 2wire
+        source_autorange: true
+        source_range: AUTO
+        measure_voltage_autorange: true
+        measure_voltage_range: AUTO
+        measure_current_autorange: true
+        measure_current_range: AUTO
+      parameter_actions:
+        - parameter_id: source.level
+          mode: sweep
+          value: 1 mA
+          segments:
+            - start: 0 A
+              stop: 1 mA
+              points: 2
+              spacing: linear
+      children:
+        - id: wait-2s
+          type: wait
+          duration: 2000 ms
+        - id: checkpoint
+          type: checkpoint
+          label: point
+finally: []
+"""
+        plan = RecipeCompiler(simulation_settings()).compile(parse_recipe_text(source))
+        waits = [action for action in plan.actions if action.node_id == "wait-2s"]
+
+        self.assertEqual(len(waits), 2)
+        self.assertEqual([action.payload["duration_s"] for action in waits], [2.0, 2.0])
+        self.assertEqual(
+            [action.axis_context.point_index for action in waits if action.axis_context],
+            [0, 1],
+        )
+        self.assertTrue(all(action.semantic_id for action in waits))
+
     def test_keithley_device_provider_requires_full_configuration_snapshot(self) -> None:
         source = """\
 schema_version: 1

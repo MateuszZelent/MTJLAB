@@ -7,13 +7,17 @@ single operation state while a run is active.
 
 from __future__ import annotations
 
+from collections.abc import Iterable
 from enum import IntEnum
 from typing import Any, Mapping
 
-from PySide6.QtCore import QAbstractItemModel, QModelIndex, Qt
+from PySide6.QtCore import QAbstractItemModel, QModelIndex, Qt, Signal
+from PySide6.QtGui import QBrush, QColor, QFont
+from qfluentwidgets import FluentIcon, isDarkTheme
 
 from app.domain.quantities import format_quantity_auto
 from app.recipes.semantic_tree import SemanticMeasurementTree, SemanticNodeKind, SemanticTreeNode
+from app.ui.design_system.tokens import tokens_for
 
 
 class MeasurementTreeRole(IntEnum):
@@ -27,6 +31,8 @@ class MeasurementTreeRole(IntEnum):
     REQUESTED_VALUE = int(Qt.ItemDataRole.UserRole) + 8
     APPLIED_VALUE = int(Qt.ItemDataRole.UserRole) + 9
     READBACK_VALUE = int(Qt.ItemDataRole.UserRole) + 10
+    ACCENT_COLOR = int(Qt.ItemDataRole.UserRole) + 11
+    DROP_TARGET = int(Qt.ItemDataRole.UserRole) + 12
 
 
 class _NodeRef:
@@ -45,8 +51,10 @@ def _state_value(state: object, name: str, default: object = None) -> object:
 
 
 class MeasurementTreeModel(QAbstractItemModel):
+    unknown_semantic_state = Signal(str)
+
     COLUMN_COUNT = 4
-    HEADERS = ("Measurement sequence", "Role / expansion", "Current value", "Status")
+    HEADERS = ("Operation", "Configured / active value", "Progress", "State")
 
     def __init__(
         self,
@@ -60,7 +68,9 @@ class MeasurementTreeModel(QAbstractItemModel):
         self._roots: tuple[_NodeRef, ...] = ()
         self._by_id: dict[str, _NodeRef] = {}
         self._states: dict[str, object] = dict(states or {})
+        self._reported_unknown_ids: set[str] = set()
         self._read_only = False
+        self._icons: dict[tuple[str, str], object] = {}
         self._reindex()
 
     def _reindex(self) -> None:
@@ -121,16 +131,94 @@ class MeasurementTreeModel(QAbstractItemModel):
         state = self._state_for(ref.node.semantic_id)
         if state is not None:
             return state
+        if ref.node.kind is SemanticNodeKind.SWEEP_AXIS:
+            # An outer axis must keep its own value while an inner axis runs.
+            # Looking for an arbitrary descendant would format the inner
+            # setpoint using the outer dimension and mislead the operator.
+            return self._state_for(f"{ref.node.semantic_id}.set-roi-value")
+        candidates: list[object] = []
         for child in ref.node.children:
             child_ref = self._by_id.get(child.semantic_id)
             if child_ref is not None:
                 state = self._descendant_state(child_ref)
                 if state is not None:
-                    return state
-        return None
+                    candidates.append(state)
+        return max(
+            candidates,
+            key=lambda candidate: int(_state_value(candidate, "action_index", -1)),
+            default=None,
+        )
+
+    @staticmethod
+    def _tokens():
+        return tokens_for("dark" if isDarkTheme() else "light")
+
+    def _accent_color(self, node: SemanticTreeNode) -> str:
+        tokens = self._tokens()
+        label = node.label.lower()
+        if node.kind is SemanticNodeKind.ACTION:
+            if "wait" in label:
+                return tokens.caution
+            if any(word in label for word in ("acquire", "measure", "spectrum")):
+                return tokens.success
+            if "output" in label:
+                return tokens.caution
+        return {
+            SemanticNodeKind.DEVICE: tokens.accent,
+            SemanticNodeKind.SWEEP_AXIS: tokens.accent,
+            SemanticNodeKind.LOOP_BODY: tokens.accent,
+            SemanticNodeKind.SET_ROI_VALUE: tokens.accent,
+            SemanticNodeKind.FINALLY: tokens.caution,
+            SemanticNodeKind.GENERATED_SAFETY: tokens.success,
+        }.get(node.kind, tokens.neutral)
+
+    @staticmethod
+    def _icon_name(node: SemanticTreeNode) -> str:
+        if node.kind is SemanticNodeKind.ACTION:
+            label = node.label.lower()
+            if "wait" in label:
+                return "wait"
+            if any(word in label for word in ("acquire", "measure", "spectrum")):
+                return "acquire"
+            if "output" in label:
+                return "output"
+            if "comment" in label:
+                return "comment"
+            return "action"
+        return node.kind.value
+
+    def _icon(self, node: SemanticTreeNode) -> object:
+        theme = "dark" if isDarkTheme() else "light"
+        name = self._icon_name(node)
+        cache_key = (theme, name)
+        icon = self._icons.get(cache_key)
+        if icon is not None:
+            return icon
+        fluent_icon = {
+            "sequence": FluentIcon.FOLDER,
+            "device": FluentIcon.IOT,
+            "sweep_axis": FluentIcon.SYNC,
+            "loop_body": FluentIcon.RETURN,
+            "set_roi_value": FluentIcon.UPDATE,
+            "finally": FluentIcon.ACCEPT,
+            "generated_safety": FluentIcon.POWER_BUTTON,
+            "wait": FluentIcon.STOP_WATCH,
+            "acquire": FluentIcon.PROJECTOR,
+            "output": FluentIcon.POWER_BUTTON,
+            "comment": FluentIcon.QUICK_NOTE,
+            "action": FluentIcon.PLAY,
+        }[name]
+        icon = fluent_icon.icon()
+        self._icons[cache_key] = icon
+        return icon
 
     def _value_text(self, ref: _NodeRef) -> str:
         state = self._descendant_state(ref)
+        if (
+            ref.node.kind is SemanticNodeKind.ACTION
+            and isinstance(ref.node.data.get("duration"), str)
+        ):
+            return str(ref.node.data["duration"])
         if state is None:
             return "—"
         applied = _state_value(state, "applied_si")
@@ -145,7 +233,15 @@ class MeasurementTreeModel(QAbstractItemModel):
             else None
         )
         if applied is not None and dimension:
-            text = format_quantity_auto(float(applied), dimension)
+            applied_text = format_quantity_auto(float(applied), dimension)
+            text = applied_text
+            if requested is not None:
+                requested_text = format_quantity_auto(float(requested), dimension)
+                text = (
+                    applied_text
+                    if requested_text == applied_text
+                    else f"requested {requested_text} · applied {applied_text}"
+                )
             if readback is not None and readback != applied:
                 text += f" · readback {format_quantity_auto(float(readback), dimension)}"
             return text
@@ -175,6 +271,9 @@ class MeasurementTreeModel(QAbstractItemModel):
             if index.column() == 0:
                 return node.label
             if index.column() == 1:
+                value = self._value_text(ref)
+                if value != "—":
+                    return value
                 if node.kind is SemanticNodeKind.SWEEP_AXIS and node.axis is not None:
                     return f"{node.axis.target} · {len(node.axis.points)} point(s)"
                 if node.kind is SemanticNodeKind.LOOP_BODY:
@@ -183,7 +282,14 @@ class MeasurementTreeModel(QAbstractItemModel):
                     return str(node.data.get("target", "Set ROI value"))
                 return str(node.data.get("detail", node.kind.value.replace("_", " ").title()))
             if index.column() == 2:
-                return self._value_text(ref)
+                context = _state_value(state, "axis_context") if state is not None else None
+                point_index = _state_value(context, "point_index") if context is not None else None
+                point_count = _state_value(context, "point_count") if context is not None else None
+                stage_index = _state_value(context, "stage_index") if context is not None else None
+                if isinstance(point_index, int) and isinstance(point_count, int):
+                    stage = f" · ROI {stage_index + 1}" if isinstance(stage_index, int) else ""
+                    return f"{point_index + 1}/{point_count}{stage}"
+                return "—"
             phase = _state_value(state, "phase") if state is not None else None
             if phase:
                 return str(phase).upper()
@@ -197,14 +303,14 @@ class MeasurementTreeModel(QAbstractItemModel):
         if role == int(Qt.ItemDataRole.ToolTipRole):
             target = node.axis.target if node.axis is not None else node.data.get("target", "")
             return f"{node.semantic_id}\n{target}" if target else node.semantic_id
+        if role == int(Qt.ItemDataRole.DecorationRole) and index.column() == 0:
+            return self._icon(node)
         if role == int(Qt.ItemDataRole.ForegroundRole):
             phase = str(_state_value(state, "phase", "")) if state is not None else ""
             if phase == "applied":
-                from PySide6.QtGui import QBrush, QColor
-                return QBrush(QColor("#16a34a"))
+                return QBrush(QColor(self._tokens().success))
             if phase == "failed":
-                from PySide6.QtGui import QBrush, QColor
-                return QBrush(QColor("#dc2626"))
+                return QBrush(QColor(self._tokens().danger))
         if role == int(MeasurementTreeRole.SEMANTIC_ID):
             return node.semantic_id
         if role == int(MeasurementTreeRole.NODE_KIND):
@@ -225,8 +331,19 @@ class MeasurementTreeModel(QAbstractItemModel):
             return _state_value(state, "applied_si") if state is not None else None
         if role == int(MeasurementTreeRole.READBACK_VALUE):
             return _state_value(state, "readback_si") if state is not None else None
+        if role == int(MeasurementTreeRole.ACCENT_COLOR):
+            return self._accent_color(node)
+        if role == int(MeasurementTreeRole.DROP_TARGET):
+            # Recipe containers may be empty and still need to advertise a
+            # valid insertion surface.  Generated rows and the Finally
+            # boundary remain intentionally non-droppable.
+            return node.kind in {
+                SemanticNodeKind.SEQUENCE,
+                SemanticNodeKind.DEVICE,
+                SemanticNodeKind.SWEEP_AXIS,
+                SemanticNodeKind.LOOP_BODY,
+            }
         if role == int(Qt.ItemDataRole.FontRole) and index.column() == 0:
-            from PySide6.QtGui import QFont
             font = QFont()
             if node.kind in {SemanticNodeKind.SWEEP_AXIS, SemanticNodeKind.SET_ROI_VALUE}:
                 font.setWeight(QFont.Weight.DemiBold)
@@ -244,7 +361,16 @@ class MeasurementTreeModel(QAbstractItemModel):
             flags |= Qt.ItemFlag.ItemIsEditable
         if ref.node.draggable and not self._read_only:
             flags |= Qt.ItemFlag.ItemIsDragEnabled
-        if ref.node.children and not self._read_only:
+        if (
+            not self._read_only
+            and ref.node.kind
+            in {
+                SemanticNodeKind.SEQUENCE,
+                SemanticNodeKind.DEVICE,
+                SemanticNodeKind.SWEEP_AXIS,
+                SemanticNodeKind.LOOP_BODY,
+            }
+        ):
             flags |= Qt.ItemFlag.ItemIsDropEnabled
         return flags
 
@@ -265,18 +391,55 @@ class MeasurementTreeModel(QAbstractItemModel):
         self.beginResetModel()
         self.tree = tree
         self._states.clear()
+        self._reported_unknown_ids.clear()
         self._reindex()
         self.endResetModel()
 
     def apply_state(self, state: object) -> bool:
-        semantic_id = _state_value(state, "semantic_id")
-        if not isinstance(semantic_id, str) or semantic_id not in self._by_id:
-            return False
-        self._states[semantic_id] = state
-        index = self.index_for_semantic_id(semantic_id)
-        if index.isValid():
-            self.dataChanged.emit(index, self.index(index.row(), self.COLUMN_COUNT - 1, index.parent()))
-        return True
+        """Apply one runtime state and notify the affected rows."""
+
+        return bool(self.apply_states((state,)))
+
+    def apply_states(self, states: Iterable[object]) -> int:
+        """Apply a presentation batch with one notification per affected row.
+
+        A sweep can deliver several semantic confirmations between GUI turns.
+        Updating the backing map first and emitting the row notifications only
+        once prevents Qt from repainting the same tree for every confirmation.
+        The runner event stream remains lossless; this is only a view-level
+        batching boundary.
+        """
+
+        changed: dict[str, _NodeRef] = {}
+        for state in states:
+            semantic_id = _state_value(state, "semantic_id")
+            if not isinstance(semantic_id, str):
+                continue
+            ref = self._by_id.get(semantic_id)
+            if ref is None:
+                if semantic_id not in self._reported_unknown_ids:
+                    self._reported_unknown_ids.add(semantic_id)
+                    self.unknown_semantic_state.emit(semantic_id)
+                continue
+            self._states[semantic_id] = state
+            changed[semantic_id] = ref
+            if ref.node.kind is SemanticNodeKind.SET_ROI_VALUE:
+                ancestor = ref.parent
+                while ancestor is not None:
+                    if ancestor.node.kind is SemanticNodeKind.SWEEP_AXIS:
+                        changed[ancestor.node.semantic_id] = ancestor
+                        break
+                    ancestor = ancestor.parent
+
+        for ref in changed.values():
+            index = self.index_for_semantic_id(ref.node.semantic_id)
+            if not index.isValid():
+                continue
+            self.dataChanged.emit(
+                index,
+                self.index(index.row(), self.COLUMN_COUNT - 1, index.parent()),
+            )
+        return len(changed)
 
     def state_for(self, semantic_id: str) -> object | None:
         return self._states.get(semantic_id)

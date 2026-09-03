@@ -5,9 +5,8 @@ import pytest
 from app.contracts import DeviceModuleRegistry
 from app.devices.registry import built_in_device_registry
 from app.domain.errors import ConfigurationError, SafetyViolation
-from app.domain.quantities import DIMENSION_CURRENT, DIMENSION_VOLTAGE, Quantity, parse_quantity
+from app.domain.quantities import DIMENSION_CURRENT, DIMENSION_VOLTAGE, parse_quantity
 from app.recipes.models import RecipeNode
-from app.recipes.semantic_tree import SweepAxisBinding, SweepBindingDraft
 from tests.helpers import simulation_settings
 
 

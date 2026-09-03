@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from datetime import datetime, timezone
 from dataclasses import asdict, is_dataclass
+from collections.abc import Mapping
 from importlib.metadata import PackageNotFoundError, version
 from pathlib import Path
 import csv
@@ -16,6 +17,14 @@ from app.domain.errors import ExecutionError
 from app.domain.models import MeasurementPoint
 from app.recipes.models import legacy_dut_limits_policy
 from app.storage.thatec_writer import ThatecHdf5Writer
+
+
+def _spectrum_compression(point_count: int) -> dict[str, object]:
+    """Avoid CPU-bound gzip for full 10k-point production traces."""
+
+    if point_count >= 10_000:
+        return {}
+    return {"compression": "gzip", "compression_opts": 1}
 
 
 class Hdf5RunWriter:
@@ -363,11 +372,38 @@ class Hdf5RunWriter:
     def _serializable(value: object) -> object:
         if is_dataclass(value):
             return Hdf5RunWriter._serializable(asdict(value))
-        if isinstance(value, dict):
+        if isinstance(value, Mapping):
             return {str(key): Hdf5RunWriter._serializable(item) for key, item in value.items()}
         if isinstance(value, (list, tuple, set, frozenset)):
             return [Hdf5RunWriter._serializable(item) for item in value]
         return value
+
+    @staticmethod
+    def _event_payload(name: str, data: dict[str, object]) -> dict[str, object]:
+        """Keep audit events bounded without dropping the durable spectrum.
+
+        Preview events carry the complete trace to the GUI, but the same
+        arrays are already atomically stored under ``/spectra`` by the point
+        writer.  Serialising a 10,001-value trace into the append-only event
+        log would duplicate megabytes of JSON and hold the runner's Python
+        thread during every checkpoint.  Persist a compact, auditable summary
+        for large preview arrays instead; the count and endpoints identify the
+        rendered frame while the canonical values remain in the spectrum
+        datasets.
+        """
+
+        if name not in {"spectrum_preview", "reference_preview"}:
+            return data
+        bounded = dict(data)
+        for key in ("frequency_hz", "power_dbm"):
+            values = bounded.get(key)
+            if not isinstance(values, (list, tuple)) or len(values) <= 1_024:
+                continue
+            bounded.pop(key, None)
+            bounded[f"{key}_count"] = len(values)
+            bounded[f"{key}_first"] = float(values[0])
+            bounded[f"{key}_last"] = float(values[-1])
+        return bounded
 
     @staticmethod
     def _recipe_dut_limits(source: str) -> dict[str, object]:
@@ -415,12 +451,12 @@ class Hdf5RunWriter:
             group.create_dataset(
                 "frequency_hz",
                 data=self._np.asarray(trace.frequencies_hz, dtype="f8"),
-                compression="gzip",
+                **_spectrum_compression(len(trace.frequencies_hz)),
             )
             group.create_dataset(
                 "power_dbm",
                 data=self._np.asarray(trace.powers_dbm, dtype="f8"),
-                compression="gzip",
+                **_spectrum_compression(len(trace.powers_dbm)),
             )
             if index == 0 and "reference" not in self._file:
                 self._file["reference"] = group
@@ -464,7 +500,10 @@ class Hdf5RunWriter:
             group.attrs["status"] = point.status
             group.create_dataset("setpoints_json", data=json.dumps(point.setpoints, sort_keys=True))
             group.create_dataset("measurements_json", data=json.dumps(point.measurements, sort_keys=True))
-            group.create_dataset("metadata_json", data=json.dumps(point.metadata, sort_keys=True))
+            group.create_dataset(
+                "metadata_json",
+                data=json.dumps(self._serializable(point.metadata), sort_keys=True),
+            )
             group.create_dataset(
                 "device_states_json",
                 data=json.dumps(self._serializable(device_states or {}), sort_keys=True),
@@ -482,10 +521,14 @@ class Hdf5RunWriter:
                         )
                     spectrum.attrs["reference_index"] = reference_index
                 spectrum.create_dataset(
-                    "frequency_hz", data=self._np.asarray(trace.frequencies_hz, dtype="f8"), compression="gzip"
+                    "frequency_hz",
+                    data=self._np.asarray(trace.frequencies_hz, dtype="f8"),
+                    **_spectrum_compression(len(trace.frequencies_hz)),
                 )
                 spectrum.create_dataset(
-                    "power_dbm", data=self._np.asarray(trace.powers_dbm, dtype="f8"), compression="gzip"
+                    "power_dbm",
+                    data=self._np.asarray(trace.powers_dbm, dtype="f8"),
+                    **_spectrum_compression(len(trace.powers_dbm)),
                 )
                 if processed_values is not None:
                     spectrum.attrs["processed_unit"] = str(processed_unit)
@@ -493,7 +536,7 @@ class Hdf5RunWriter:
                     spectrum.create_dataset(
                         "processed_values",
                         data=self._np.asarray(processed_values, dtype="f8"),
-                        compression="gzip",
+                        **_spectrum_compression(len(processed_values)),
                     )
             # Flush a self-contained pending checkpoint before exposing it to
             # readers.  Moving one HDF5 link is the commit boundary.
@@ -634,7 +677,10 @@ class Hdf5RunWriter:
         if self._closed:
             raise ExecutionError("Attempted to write an event to a closed HDF5 file.")
         timestamp = str(data.get("timestamp_utc") or datetime.now(timezone.utc).isoformat())
-        message = json.dumps(self._serializable(data), sort_keys=True)
+        message = json.dumps(
+            self._serializable(self._event_payload(name, data)),
+            sort_keys=True,
+        )
         index = len(self._event_names)
         for dataset, value in (
             (self._event_timestamps, timestamp),

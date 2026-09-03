@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import os
 import tempfile
+import textwrap
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
@@ -10,16 +11,13 @@ from unittest.mock import Mock, patch
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 from PySide6.QtWidgets import (
-    QAbstractItemView,
     QApplication,
     QDialog,
     QDialogButtonBox,
     QFileDialog,
-    QHeaderView,
-    QTreeWidgetItem,
 )
-from PySide6.QtCore import QMimeData, QPoint, Qt
-from PySide6.QtGui import QDragEnterEvent, QDragMoveEvent, QPalette
+from PySide6.QtCore import Qt
+from PySide6.QtGui import QPalette
 from PySide6.QtTest import QTest
 from qfluentwidgets import (
     ComboBox, LineEdit, PlainTextEdit, PrimaryPushButton, PushButton,
@@ -29,9 +27,7 @@ from qfluentwidgets import (
 from app.recipes import (
     RecipeNode,
     parse_recipe_text,
-    wrap_recipe_nodes_in_repeat,
 )
-from app.engine.compiler import RecipeCompiler
 from app.devices.anritsu_ms2830a.ui import (
     AnritsuAdvancedSpectrumPanel,
     AnritsuNodeEditorDialog,
@@ -49,8 +45,6 @@ from app.devices.rigol_dg1000z.ui.page import RigolConfigurationSnapshot
 from app.ui.recipes import (
     ActionNodeEditorDialog,
     DeviceParameterDialog,
-    RecipeTreeMoveRequest,
-    RecipeTreeWidget,
     SweepGeneratorDialog,
 )
 from app.ui.recipes.page import (
@@ -62,6 +56,7 @@ from app.ui.recipes.page import (
     set_keithley_shutdown_ramps_in_recipe,
 )
 from app.ui.workers import DeviceController
+from app.ui.dialogs import StationMessageBox as QMessageBox
 from app.ui.design_system import apply_application_theme, tokens_for
 from app.devices.keithley_2600 import KeithleyAdapter
 from app.devices.anritsu_ms2830a import (
@@ -126,7 +121,7 @@ class RecipeBuilderTests(unittest.TestCase):
         page = RecipePage(simulation_settings())
         try:
             self.assertEqual(page.workflow_tabs.currentRouteKey(), "tree")
-            self.assertIs(page.builder_stack.widget(0), page.tree)
+            self.assertIs(page.builder_stack.widget(0), page.measurement_tree)
             self.assertIs(page.builder_stack.widget(1), page.editor)
             self.assertFalse(hasattr(page, "add_node_button"))
             self.assertFalse(hasattr(page, "add_controls_button"))
@@ -140,8 +135,9 @@ class RecipeBuilderTests(unittest.TestCase):
             self.assertEqual(page.move_down_button.text(), "Down")
             self.assertEqual(page.load_recipe_action.text(), "Load recipe")
             self.assertEqual(page.open_hdf5_action.text(), "Open HDF5 result")
-            self.assertEqual(page.tree.topLevelItem(0).text(0), "Measurement sequence")
+            self.assertEqual(page.tree_model.data(page.tree_model.index(0, 0)), "Measurement sequence")
         finally:
+            page._close_discard_confirmed = True
             page.close()
 
     def test_new_action_starts_a_valid_empty_sweep(self) -> None:
@@ -152,8 +148,9 @@ class RecipeBuilderTests(unittest.TestCase):
             self.assertEqual(recipe.name, "Untitled sweep")
             self.assertEqual(recipe.root.children, ())
             self.assertTrue(page.path.text().endswith("untitled_sweep.yml"))
-            self.assertEqual(page.tree.topLevelItem(0).childCount(), 0)
+            self.assertEqual(page.tree_model.rowCount(page.tree_model.index(0, 0)), 0)
         finally:
+            page._close_discard_confirmed = True
             page.close()
 
     def test_load_editor_routes_h5_result_to_reconstructed_sweep(self) -> None:
@@ -173,61 +170,19 @@ class RecipeBuilderTests(unittest.TestCase):
                 page.load_editor(show_error=False)
                 self.assertTrue(page.historical_sweep_active)
                 self.assertFalse(page.library_panel.isEnabled())
-                self.assertIn("Historical THATEC Sweep", page.tree.topLevelItem(0).text(0))
+                root = page.tree_model.index(0, 0)
+                self.assertIn("Historical THATEC Sweep", page.tree_model.data(root))
                 self.assertIn("Historical THATEC Sweep loaded", page.summary.text())
             finally:
+                page._close_discard_confirmed = True
                 page.close()
-
-    def test_tree_builder_can_add_read_only_moke_hall_checkpoint(self) -> None:
-        page = RecipePage(simulation_settings())
-        try:
-            page.new_recipe(confirm=False)
-            self.assertTrue(
-                any(
-                    button.drag_kind == "flow:measure_moke_hall"
-                    for button in page._library_action_buttons
-                )
-            )
-            page._library_add_basic("measure_moke_hall")
-
-            recipe = parse_recipe_text(page.editor.toPlainText())
-            node = recipe.root.children[0]
-            self.assertEqual(node.type, "measure_moke_hall")
-            item = page._find_tree_item(node.id)
-            self.assertIsNotNone(item)
-            self.assertIn("MOKE Hall 1", item.text(0))
-        finally:
-            page.close()
-
-    def test_tree_rebuild_preserves_selected_node_and_expansion_state(self) -> None:
-        page = RecipePage(simulation_settings())
-        try:
-            recipe = parse_recipe_text(page.editor.toPlainText())
-            selected_node = recipe.root.children[0]
-            selected_item = page._find_tree_item(selected_node.id)
-            root_item = page._find_tree_item(recipe.root.id)
-            self.assertIsNotNone(selected_item)
-            self.assertIsNotNone(root_item)
-            page.tree.setCurrentItem(selected_item)
-            root_item.setExpanded(True)
-
-            page._populate_recipe_tree(recipe.root, recipe.finally_nodes, None)
-
-            current = page.tree.currentItem()
-            self.assertEqual(
-                current.data(0, Qt.ItemDataRole.UserRole).id,
-                selected_node.id,
-            )
-            self.assertTrue(page._find_tree_item(recipe.root.id).isExpanded())
-        finally:
-            page.close()
 
     def test_selected_subtree_can_be_disabled_and_enabled_without_deletion(self) -> None:
         page = RecipePage(simulation_settings())
         try:
             recipe = parse_recipe_text(page.editor.toPlainText())
             target = recipe.root.children[0]
-            page.tree.setCurrentItem(page._find_tree_item(target.id))
+            page._select_source_node(target.id)
 
             page._toggle_selected_node_disabled()
             disabled = parse_recipe_text(page.editor.toPlainText())
@@ -235,7 +190,6 @@ class RecipeBuilderTests(unittest.TestCase):
                 node for node in disabled.root.children if node.id == target.id
             )
             self.assertIs(disabled_node.data["disabled"], True)
-            self.assertEqual(page._find_tree_item(target.id).text(2), "DISABLED")
 
             page._toggle_selected_node_disabled()
             enabled = parse_recipe_text(page.editor.toPlainText())
@@ -244,6 +198,7 @@ class RecipeBuilderTests(unittest.TestCase):
             )
             self.assertNotIn("disabled", enabled_node.data)
         finally:
+            page._close_discard_confirmed = True
             page.close()
 
     def test_complete_subtree_can_be_duplicated_with_fresh_node_ids(self) -> None:
@@ -251,7 +206,7 @@ class RecipeBuilderTests(unittest.TestCase):
         try:
             before = parse_recipe_text(page.editor.toPlainText())
             target = next(node for node in before.root.children if node.children)
-            page.tree.setCurrentItem(page._find_tree_item(target.id))
+            page._select_source_node(target.id)
 
             page._duplicate_selected_node()
 
@@ -291,10 +246,13 @@ class RecipeBuilderTests(unittest.TestCase):
             page.path.setText(str(recipe_path))
             page.editor.setPlainText("not the requested recipe")
 
-            with patch.object(
-                QFileDialog,
-                "getOpenFileName",
-                return_value=(str(recipe_path.resolve()), "YAML recipes (*.yml *.yaml)"),
+            with (
+                patch.object(
+                    QFileDialog,
+                    "getOpenFileName",
+                    return_value=(str(recipe_path.resolve()), "YAML recipes (*.yml *.yaml)"),
+                ),
+                patch("app.ui.recipes.page.QMessageBox.question", return_value=QMessageBox.StandardButton.Yes),
             ):
                 page.load_recipe_action.trigger()
 
@@ -307,6 +265,9 @@ class RecipeBuilderTests(unittest.TestCase):
 
             saved = SimpleNamespace(path=recipe_path, backup_path=None)
             page._repository.save = Mock(return_value=saved)
+            page.editor.appendPlainText("\n# command-bar save regression")
+            self.application.processEvents()
+            self.assertTrue(page.save_recipe_action.isEnabled())
             page.save_recipe_action.trigger()
 
             page._repository.save.assert_called_once_with(
@@ -336,6 +297,7 @@ finally: []
             self.assertTrue(page.run_button.isEnabled())
             self.assertIn("Plan:", page.summary.text())
         finally:
+            page._close_discard_confirmed = True
             page.close()
 
     def test_canceling_recipe_explorer_keeps_current_path_and_tree(self) -> None:
@@ -352,6 +314,7 @@ finally: []
             self.assertEqual(page.path.text(), current_path)
             self.assertEqual(page.editor.toPlainText(), current_source)
         finally:
+            page._close_discard_confirmed = True
             page.close()
 
     def test_background_preflight_discards_result_after_source_change(self) -> None:
@@ -365,161 +328,6 @@ finally: []
             self.assertIn("stale result was discarded", page.summary.text())
         finally:
             page._close_discard_confirmed = True
-            page.close()
-
-    def test_native_sweeps_render_their_legacy_ranges_as_clickable_roi_rows(self) -> None:
-        page = RecipePage(simulation_settings())
-        try:
-            page.path.setText(
-                "recipes/keithley_b_rigol_frequency_anritsu_reference_10x100.yml"
-            )
-            page.load_editor()
-
-            keithley = page._find_tree_item("keithley-b-current-sweep")
-            rigol = page._find_tree_item("rigol-ch1-frequency-sweep")
-            self.assertIsNotNone(keithley)
-            self.assertIsNotNone(rigol)
-
-            keithley_roi = keithley.child(0)
-            rigol_roi = rigol.child(0)
-            self.assertEqual(keithley_roi.text(0), "ROI 1")
-            self.assertIn("0 A", keithley_roi.text(1))
-            self.assertIn("150 mA", keithley_roi.text(1))
-            self.assertIn("10 pts", keithley_roi.text(1))
-            self.assertEqual(
-                keithley_roi.data(0, page.operator_row_role)["kind"],
-                "native_sweep_roi",
-            )
-            self.assertEqual(rigol_roi.text(0), "ROI 1")
-            self.assertIn("100 kHz", rigol_roi.text(1))
-            self.assertIn("30 MHz", rigol_roi.text(1))
-            self.assertIn("100 pts", rigol_roi.text(1))
-
-            with patch.object(page, "_edit_selected_generator") as editor:
-                page._operator_row_clicked(keithley_roi, 0)
-
-            editor.assert_called_once()
-            self.assertEqual(
-                editor.call_args.kwargs["node"].id,
-                "keithley-b-current-sweep",
-            )
-            self.assertEqual(editor.call_args.kwargs["stage_index"], 0)
-        finally:
-            page.close()
-
-    def test_editing_native_sweep_converts_roi_without_losing_nested_sequence(self) -> None:
-        page = RecipePage(simulation_settings())
-        try:
-            page.path.setText(
-                "recipes/keithley_b_rigol_frequency_anritsu_reference_10x100.yml"
-            )
-            page.load_editor()
-            before = parse_recipe_text(page.editor.toPlainText())
-            before_sweep = next(
-                node
-                for node in before.root.children
-                if node.id == "keithley-b-current-sweep"
-            )
-            page.tree.setCurrentItem(
-                page._find_tree_item("keithley-b-current-sweep")
-            )
-
-            with (
-                patch.object(
-                    KeithleySweepBuilderDialog,
-                    "exec",
-                    return_value=QDialog.DialogCode.Accepted,
-                ),
-                patch.object(
-                    KeithleySweepBuilderDialog,
-                    "segment_data",
-                    return_value=[
-                        {
-                            "start": "0 A",
-                            "stop": "150 mA",
-                            "points": 10,
-                            "spacing": "linear",
-                        }
-                    ],
-                ),
-                patch("app.ui.recipes.page.QMessageBox.information") as information,
-            ):
-                page._edit_selected_generator()
-
-            information.assert_not_called()
-            after = parse_recipe_text(page.editor.toPlainText())
-            after_sweep = next(
-                node
-                for node in after.root.children
-                if node.id == "keithley-b-current-sweep"
-            )
-            self.assertEqual(
-                tuple(child.id for child in after_sweep.children),
-                tuple(child.id for child in before_sweep.children),
-            )
-            self.assertEqual(
-                after_sweep.data["segments"],
-                [
-                    {
-                        "start": "0 A",
-                        "stop": "150 mA",
-                        "points": 10,
-                        "spacing": "linear",
-                    }
-                ],
-            )
-            nested_rigol = after_sweep.children[1]
-            self.assertEqual(nested_rigol.id, "rigol-ch1-frequency-sweep")
-            self.assertEqual(
-                tuple(child.id for child in nested_rigol.children),
-                (
-                    "rigol-ch1-frequency-point",
-                    "acquire-raw-and-reference-difference",
-                ),
-            )
-        finally:
-            page._close_discard_confirmed = True
-            page.close()
-
-    def test_sweeps_library_contains_devices_and_flow_not_device_parameters(self) -> None:
-        page = RecipePage(simulation_settings())
-        try:
-            labels = [button.text() for button in page._library_action_buttons]
-            self.assertEqual(
-                labels,
-                [
-                    "Keithley 2600",
-                    "Rigol DG1032Z",
-                    "Anritsu configuration",
-                    "Anritsu signal generator",
-                    "Advanced · Keithley A OUTPUT ON",
-                    "Advanced · Keithley B OUTPUT ON",
-                    "Advanced · Rigol CH1 OUTPUT ON",
-                    "Advanced · Rigol CH2 OUTPUT ON",
-                    "Advanced · Anritsu SG RF OUTPUT ON",
-                    "MOKE Hall (V + field)",
-                    "Measure Lake Shore field",
-                    "Acquire reference",
-                    "Acquire spectrum once",
-                    "Keithley A OUTPUT OFF",
-                    "Keithley B OUTPUT OFF",
-                    "Keithley A RAMP TO ZERO + OFF (optional)",
-                    "Keithley B RAMP TO ZERO + OFF (optional)",
-                    "Rigol CH1 OFF",
-                    "Rigol CH2 OFF",
-                    "Anritsu SG OFF",
-                    "Wait",
-                    "Sequence / group",
-                    "Wrap in Repeat...",
-                    "Comment",
-                ],
-            )
-            self.assertNotIn("Sweep current", labels)
-            self.assertNotIn("Set fixed voltage", labels)
-            for broken_marker in ("Â", "â", "Ã", "�"):
-                self.assertNotIn(broken_marker, "\n".join(labels))
-            self.assertEqual(page.tree.headerItem().text(0), "Measurement sequence")
-        finally:
             page.close()
 
     def test_sweep_workspace_distributes_wide_and_narrow_windows_responsively(self) -> None:
@@ -548,6 +356,7 @@ finally: []
             self.assertTrue(page.inspector_panel.isVisible())
             self.assertTrue(page.inspector_visibility_action.isChecked())
         finally:
+            page._close_discard_confirmed = True
             page.close()
 
     def test_node_library_is_the_only_add_surface_above_measurement_tree(self) -> None:
@@ -566,24 +375,7 @@ finally: []
             self.assertTrue(page.selection_title.isVisibleTo(page))
             self.assertTrue(page.selection_context.isVisibleTo(page))
         finally:
-            page.close()
-
-    def test_measurement_tree_stretches_node_name_and_keeps_metadata_readable(self) -> None:
-        page = RecipePage(simulation_settings())
-        try:
-            header = page.tree.header()
-            self.assertEqual(
-                header.sectionResizeMode(0), QHeaderView.ResizeMode.Stretch
-            )
-            self.assertEqual(
-                header.sectionResizeMode(1), QHeaderView.ResizeMode.Interactive
-            )
-            self.assertEqual(
-                header.sectionResizeMode(2), QHeaderView.ResizeMode.Fixed
-            )
-            self.assertGreaterEqual(page.tree.columnWidth(1), 160)
-            self.assertGreaterEqual(page.tree.columnWidth(2), 80)
-        finally:
+            page._close_discard_confirmed = True
             page.close()
 
     def test_comment_editor_round_trips_multiline_text_and_updates_counter(self) -> None:
@@ -597,31 +389,6 @@ finally: []
             self.assertIn("35", dialog.counter.text())
         finally:
             dialog.close()
-
-    def test_comment_node_is_presented_by_content_and_is_editable(self) -> None:
-        page = RecipePage(simulation_settings())
-        try:
-            page._add_basic_node("comment")
-            root = page.tree.topLevelItem(0)
-            item = next(
-                root.child(index)
-                for index in range(root.childCount())
-                if getattr(
-                    root.child(index).data(0, Qt.ItemDataRole.UserRole),
-                    "type",
-                    None,
-                )
-                == "comment"
-            )
-            node = item.data(0, Qt.ItemDataRole.UserRole)
-            self.assertEqual(node.type, "comment")
-            label, detail, _icon = page._tree_presentation(node, 0, False)
-            self.assertEqual(label, "Describe this step")
-            self.assertEqual(detail, "Comment")
-            page._node_selected(item, None)
-            self.assertTrue(page.open_editor_button.isEnabled())
-        finally:
-            page.close()
 
     def test_reference_and_point_update_nodes_are_operator_readable(self) -> None:
         recipe = parse_recipe_text(
@@ -654,6 +421,7 @@ root:
             self.assertIn("OUTPUT unchanged", labels[2][1])
             self.assertIn("raw-reference", labels[3][0])
         finally:
+            page._close_discard_confirmed = True
             page.close()
 
     def test_device_library_block_adds_safe_non_executable_placeholder(self) -> None:
@@ -668,480 +436,8 @@ root:
             self.assertTrue(node.data["configuration_required"])
             self.assertIn("configuration required", page.summary.text().lower())
         finally:
+            page._close_discard_confirmed = True
             page.close()
-
-    def test_drop_anritsu_configuration_under_keithley_preserves_tree(self) -> None:
-        page = RecipePage(simulation_settings())
-        dialog = KeithleyNodeEditorDialog(simulation_settings())
-        try:
-            page._library_add_device("keithley")
-            recipe = parse_recipe_text(page.editor.toPlainText())
-            keithley = recipe.root.children[-1]
-            configured = page._configured_keithley_node(
-                keithley,
-                dialog.configuration_snapshot(),
-                parameter_actions=[
-                    {
-                        "parameter_id": "source.level",
-                        "mode": "sweep",
-                        "value": "1 mA",
-                        "segments": [
-                            {
-                                "start": "0 A",
-                                "stop": "1 mA",
-                                "points": 3,
-                                "spacing": "linear",
-                            }
-                        ],
-                    }
-                ],
-            )
-            from app.recipes import replace_recipe_node
-
-            page._apply_builder_source(
-                replace_recipe_node(
-                    page.editor.toPlainText(), node_id=keithley.id, node=configured
-                ),
-                "Configured nested sweep",
-            )
-            keithley = next(
-                node
-                for node in parse_recipe_text(page.editor.toPlainText()).root.children
-                if node.id == keithley.id
-            )
-            keithley_item = page._find_tree_item(keithley.id)
-            top_level_before = page.tree.topLevelItemCount()
-
-            page._drop_library_block(
-                "device:anritsu",
-                keithley.id,
-                "children",
-                keithley_item.childCount(),
-            )
-
-            updated = parse_recipe_text(page.editor.toPlainText())
-            updated_keithley = next(
-                node for node in updated.root.children if node.id == keithley.id
-            )
-            anritsu = updated_keithley.children[-1]
-            self.assertEqual(anritsu.type, "sequence")
-            self.assertEqual(anritsu.data["device_module"], "anritsu")
-            self.assertEqual(anritsu.children, ())
-            self.assertEqual(page.tree.topLevelItemCount(), top_level_before)
-            anritsu_item = page._find_tree_item(anritsu.id)
-            self.assertIsNotNone(anritsu_item)
-            self.assertIn("Anritsu Spectrum", anritsu_item.text(0))
-        finally:
-            dialog.close()
-            page.close()
-
-    def test_failed_tree_render_keeps_previous_tree_and_yaml_unchanged(self) -> None:
-        page = RecipePage(simulation_settings())
-        events: list[str] = []
-        page.status.connect(events.append)
-        try:
-            source_before = page.editor.toPlainText()
-            labels_before = [
-                page.tree.topLevelItem(index).text(0)
-                for index in range(page.tree.topLevelItemCount())
-            ]
-            original_renderer = page._add_operator_control_rows
-
-            def fail_render(_node: object, _parent: object) -> None:
-                raise RuntimeError("synthetic render failure")
-
-            page._add_operator_control_rows = fail_render  # type: ignore[method-assign]
-            with self.assertRaisesRegex(RuntimeError, "synthetic render failure"):
-                page._apply_builder_source(source_before, "Must not commit")
-
-            self.assertEqual(page.editor.toPlainText(), source_before)
-            self.assertEqual(
-                [
-                    page.tree.topLevelItem(index).text(0)
-                    for index in range(page.tree.topLevelItemCount())
-                ],
-                labels_before,
-            )
-            self.assertTrue(
-                any(
-                    "TREE_RENDER_REJECTED" in event
-                    and "synthetic render failure" in event
-                    for event in events
-                )
-            )
-            page._add_operator_control_rows = original_renderer  # type: ignore[method-assign]
-        finally:
-            page.close()
-
-    def test_invalid_tree_move_is_logged_and_keeps_existing_tree(self) -> None:
-        page = RecipePage(simulation_settings())
-        events: list[str] = []
-        page.status.connect(events.append)
-        try:
-            page._library_add_device("keithley")
-            recipe = parse_recipe_text(page.editor.toPlainText())
-            keithley = recipe.root.children[-1]
-            page._library_add_device(
-                "anritsu",
-                parent_id=keithley.id,
-                branch="children",
-                index=len(keithley.children),
-            )
-            recipe = parse_recipe_text(page.editor.toPlainText())
-            keithley = next(
-                node for node in recipe.root.children if node.id == keithley.id
-            )
-            anritsu = keithley.children[-1]
-            source_before = page.editor.toPlainText()
-            labels_before = [
-                page.tree.topLevelItem(index).text(0)
-                for index in range(page.tree.topLevelItemCount())
-            ]
-            with patch("app.ui.recipes.page.QMessageBox.warning"):
-                accepted = page._move_recipe_node(
-                    keithley.id, anritsu.id, "children", 0
-                )
-            self.assertFalse(accepted)
-            self.assertEqual(page.editor.toPlainText(), source_before)
-            self.assertEqual(
-                [
-                    page.tree.topLevelItem(index).text(0)
-                    for index in range(page.tree.topLevelItemCount())
-                ],
-                labels_before,
-            )
-            self.assertTrue(
-                any(
-                    "TREE_MOVE_REJECTED" in event
-                    and keithley.id in event
-                    and anritsu.id in event
-                    for event in events
-                )
-            )
-        finally:
-            page.close()
-
-    def test_drop_into_repeat_commits_the_source_and_preserves_the_tree(self) -> None:
-        page = RecipePage(simulation_settings())
-        try:
-            page.new_recipe(confirm=False)
-            page._library_add_basic("wait")
-            source = parse_recipe_text(page.editor.toPlainText()).root.children[-1]
-            page.tree.setCurrentItem(page.tree.topLevelItem(0))
-            page._library_add_basic("repeat")
-            before = parse_recipe_text(page.editor.toPlainText())
-            repeat = before.root.children[-1]
-            source_item = page._find_tree_item(source.id)
-            repeat_item = page._find_tree_item(repeat.id)
-            self.assertIsNotNone(source_item)
-            self.assertIsNotNone(repeat_item)
-            page.tree._dragged_node_id = source.id
-            event = Mock()
-            event.mimeData().hasFormat.return_value = False
-            event.source.return_value = page.tree
-
-            with (
-                patch("app.ui.recipes.page.QMessageBox.warning") as warning,
-                patch.object(page.tree, "itemAt", return_value=repeat_item),
-                patch.object(
-                    page.tree,
-                    "_drop_destination",
-                    return_value=(repeat.id, "children", len(repeat.children)),
-                ),
-            ):
-                page.tree.dropEvent(event)
-
-            warning.assert_not_called()
-            event.accept.assert_called_once_with()
-            updated = parse_recipe_text(page.editor.toPlainText())
-            updated_repeat = updated.root.children[-1]
-            self.assertEqual(updated_repeat.id, repeat.id)
-            self.assertIn(source.id, tuple(node.id for node in updated_repeat.children))
-            self.assertEqual(page.tree.topLevelItemCount(), 2)
-            self.assertIsNotNone(page._find_tree_item(repeat.id))
-            self.assertIsNotNone(page._find_tree_item(source.id))
-        finally:
-            page.close()
-
-    def test_rejected_move_that_would_empty_repeat_keeps_tree_and_yaml(self) -> None:
-        page = RecipePage(simulation_settings())
-        try:
-            page.new_recipe(confirm=False)
-            page._library_add_basic("repeat")
-            repeat = parse_recipe_text(page.editor.toPlainText()).root.children[-1]
-            placeholder = repeat.children[0]
-            source_before = page.editor.toPlainText()
-            root_item = page.tree.topLevelItem(0)
-            placeholder_item = page._find_tree_item(placeholder.id)
-            self.assertIsNotNone(placeholder_item)
-            labels_before = [
-                page.tree.topLevelItem(index).text(0)
-                for index in range(page.tree.topLevelItemCount())
-            ]
-            page.tree._dragged_node_id = placeholder.id
-            event = Mock()
-            event.mimeData().hasFormat.return_value = False
-            event.source.return_value = page.tree
-
-            with (
-                patch("app.ui.recipes.page.QMessageBox.warning"),
-                patch.object(page.tree, "itemAt", return_value=root_item),
-                patch.object(
-                    page.tree,
-                    "_drop_destination",
-                    return_value=("sequence-main", "children", 0),
-                ),
-            ):
-                page.tree.dropEvent(event)
-
-            event.ignore.assert_called_once_with()
-            event.accept.assert_not_called()
-            self.assertEqual(page.editor.toPlainText(), source_before)
-            self.assertEqual(
-                [
-                    page.tree.topLevelItem(index).text(0)
-                    for index in range(page.tree.topLevelItemCount())
-                ],
-                labels_before,
-            )
-            self.assertIsNotNone(page._find_tree_item(repeat.id))
-            self.assertIsNotNone(page._find_tree_item(placeholder.id))
-        finally:
-            page.close()
-
-    def test_move_into_collapsed_device_keeps_node_selected_and_visible(self) -> None:
-        page = RecipePage(simulation_settings())
-        try:
-            page.resize(1500, 850)
-            page.show()
-            self.application.processEvents()
-            page.new_recipe(confirm=False)
-            page._library_add_device("keithley")
-            source = parse_recipe_text(page.editor.toPlainText()).root.children[-1]
-            page.tree.setCurrentItem(page.tree.topLevelItem(0))
-            page._library_add_device("rigol")
-            target = parse_recipe_text(page.editor.toPlainText()).root.children[-1]
-            target_item = page._find_tree_item(target.id)
-            source_item = page._find_tree_item(source.id)
-            self.assertIsNotNone(target_item)
-            self.assertIsNotNone(source_item)
-            target_item.setExpanded(False)
-            page.tree.setCurrentItem(source_item)
-
-            with patch("app.ui.recipes.page.QMessageBox.warning") as warning:
-                page._move_recipe_node(
-                    source.id,
-                    target.id,
-                    "children",
-                    len(target.children),
-                )
-            warning.assert_not_called()
-
-            updated = parse_recipe_text(page.editor.toPlainText())
-            updated_target = updated.root.children[-1]
-            self.assertIn(source.id, tuple(node.id for node in updated_target.children))
-            selected = page.tree.currentItem().data(0, Qt.ItemDataRole.UserRole)
-            self.assertIsInstance(selected, RecipeNode)
-            self.assertEqual(selected.id, source.id)
-            self.assertTrue(page._find_tree_item(target.id).isExpanded())
-            self.assertFalse(page.tree.visualItemRect(page.tree.currentItem()).isEmpty())
-
-            page.undo_tree_edit()
-            undone = parse_recipe_text(page.editor.toPlainText())
-            self.assertEqual(
-                tuple(node.id for node in undone.root.children),
-                (source.id, target.id),
-            )
-            page.redo_tree_edit()
-            redone_target = parse_recipe_text(page.editor.toPlainText()).root.children[-1]
-            self.assertIn(source.id, tuple(node.id for node in redone_target.children))
-        finally:
-            page.close()
-
-    def test_drop_uses_node_pinned_at_drag_start_not_hover_selection(self) -> None:
-        tree = RecipeTreeWidget()
-        source_item = QTreeWidgetItem(["Source"])
-        target_item = QTreeWidgetItem(["Target"])
-        source_item.setData(
-            0,
-            Qt.ItemDataRole.UserRole,
-            RecipeNode("source", "comment"),
-        )
-        target_item.setData(
-            0,
-            Qt.ItemDataRole.UserRole,
-            RecipeNode("target", "sequence"),
-        )
-        tree.addTopLevelItems([source_item, target_item])
-        tree._dragged_node_id = "source"
-        tree.setCurrentItem(target_item)
-        moves: list[tuple[str, str, str, int]] = []
-
-        def approve_move(request: RecipeTreeMoveRequest) -> None:
-            moves.append(
-                (
-                    request.node_id,
-                    request.destination_parent_id,
-                    request.destination_branch,
-                    request.destination_index,
-                )
-            )
-            request.accepted = True
-
-        tree.move_requested.connect(approve_move)
-        event = Mock()
-        event.mimeData().hasFormat.return_value = False
-        event.source.return_value = tree
-
-        with (
-            patch.object(tree, "itemAt", return_value=target_item),
-            patch.object(
-                tree,
-                "_drop_destination",
-                return_value=("target", "children", 0),
-            ),
-        ):
-            tree.dropEvent(event)
-
-        self.assertEqual(moves, [("source", "target", "children", 0)])
-        event.accept.assert_called_once_with()
-
-    def test_rejected_drop_keeps_the_existing_qt_tree_unchanged(self) -> None:
-        tree = RecipeTreeWidget()
-        root = QTreeWidgetItem(["Root"])
-        source = QTreeWidgetItem(["Source"])
-        repeat = QTreeWidgetItem(["Repeat"])
-        root.setData(0, Qt.ItemDataRole.UserRole, RecipeNode("root", "sequence"))
-        source.setData(0, Qt.ItemDataRole.UserRole, RecipeNode("source", "comment"))
-        repeat.setData(0, Qt.ItemDataRole.UserRole, RecipeNode("repeat", "repeat"))
-        root.addChildren([source, repeat])
-        tree.addTopLevelItem(root)
-        tree._dragged_node_id = "source"
-        event = Mock()
-        event.mimeData().hasFormat.return_value = False
-        event.source.return_value = tree
-
-        with (
-            patch.object(tree, "itemAt", return_value=repeat),
-            patch.object(
-                tree,
-                "_drop_destination",
-                return_value=("repeat", "children", 0),
-            ),
-        ):
-            tree.dropEvent(event)
-
-        self.assertIs(source.parent(), root)
-        self.assertEqual(root.childCount(), 2)
-        event.ignore.assert_called_once_with()
-        event.accept.assert_not_called()
-
-    def test_real_drag_hover_distinguishes_above_on_and_below_a_leaf(self) -> None:
-        tree = RecipeTreeWidget()
-        try:
-            tree.resize(640, 360)
-            root = QTreeWidgetItem(["Root"])
-            first = QTreeWidgetItem(["First"])
-            second = QTreeWidgetItem(["Second"])
-            root.setData(0, Qt.ItemDataRole.UserRole, RecipeNode("root", "sequence"))
-            first.setData(0, Qt.ItemDataRole.UserRole, RecipeNode("first", "comment"))
-            second.setData(0, Qt.ItemDataRole.UserRole, RecipeNode("second", "comment"))
-            root.addChildren([first, second])
-            tree.addTopLevelItem(root)
-            root.setExpanded(True)
-            tree.show()
-            self.application.processEvents()
-
-            mime = QMimeData()
-            mime.setData(tree.library_mime_type, b"flow:wait")
-            enter = QDragEnterEvent(
-                QPoint(10, 10),
-                Qt.DropAction.CopyAction,
-                mime,
-                Qt.MouseButton.LeftButton,
-                Qt.KeyboardModifier.NoModifier,
-            )
-            tree.dragEnterEvent(enter)
-            rect = tree.visualItemRect(second)
-            destinations: list[tuple[str, str, int] | None] = []
-            indicators = []
-            for y in (rect.top() + 1, rect.center().y(), rect.bottom() - 1):
-                move = QDragMoveEvent(
-                    QPoint(rect.center().x(), y),
-                    Qt.DropAction.CopyAction,
-                    mime,
-                    Qt.MouseButton.LeftButton,
-                    Qt.KeyboardModifier.NoModifier,
-                )
-                tree.dragMoveEvent(move)
-                indicators.append(tree.dropIndicatorPosition())
-                destinations.append(tree._drop_destination_at(move.position().toPoint()))
-
-            self.assertEqual(
-                indicators,
-                [
-                    QAbstractItemView.DropIndicatorPosition.AboveItem,
-                    QAbstractItemView.DropIndicatorPosition.OnItem,
-                    QAbstractItemView.DropIndicatorPosition.BelowItem,
-                ],
-            )
-            self.assertEqual(
-                destinations,
-                [
-                    ("root", "children", 1),
-                    ("root", "children", 2),
-                    ("root", "children", 2),
-                ],
-            )
-        finally:
-            tree.close()
-
-    def test_device_block_accepts_children_only_after_roi_loop_is_defined(self) -> None:
-        fixed = RecipeNode(
-            "device-fixed",
-            "sequence",
-            {"device_module": "keithley", "parameter_actions": []},
-        )
-        swept = RecipeNode(
-            "device-swept",
-            "sequence",
-            {
-                "device_module": "keithley",
-                "parameter_actions": [
-                    {"parameter": "source.level", "mode": "sweep", "segments": [{}]}
-                ],
-            },
-        )
-
-        self.assertFalse(RecipeTreeWidget.node_accepts_children(fixed))
-        self.assertTrue(RecipeTreeWidget.node_accepts_children(swept))
-
-    def test_drop_on_fixed_device_has_no_inside_destination(self) -> None:
-        tree = RecipeTreeWidget()
-        root = QTreeWidgetItem(["Root"])
-        fixed_item = QTreeWidgetItem(["Fixed device"])
-        root.setData(0, Qt.ItemDataRole.UserRole, RecipeNode("root", "sequence"))
-        fixed_item.setData(
-            0,
-            Qt.ItemDataRole.UserRole,
-            RecipeNode(
-                "fixed",
-                "sequence",
-                {"device_module": "keithley", "parameter_actions": []},
-            ),
-        )
-        root.addChild(fixed_item)
-        tree.addTopLevelItem(root)
-        with patch.object(
-            tree,
-            "dropIndicatorPosition",
-            return_value=QAbstractItemView.DropIndicatorPosition.OnItem,
-        ):
-            destination = tree._drop_destination(fixed_item)
-
-        self.assertEqual(destination, ("root", "children", 1))
-        self.assertNotEqual(destination.parent_id, "fixed")
-        tree.close()
 
     def test_library_click_adds_after_selected_container_not_inside_it(self) -> None:
         page = RecipePage(simulation_settings())
@@ -1151,7 +447,7 @@ root:
                 page._library_add_basic("sequence")
             recipe = parse_recipe_text(page.editor.toPlainText())
             group = recipe.root.children[-1]
-            page.tree.setCurrentItem(page._find_tree_item(group.id))
+            page._select_source_node(group.id)
 
             with patch("app.ui.recipes.page.QMessageBox.warning") as second_warning:
                 page._library_add_basic("wait")
@@ -1172,7 +468,7 @@ root:
             page.new_recipe(confirm=False)
             page._library_add_basic("sequence")
             group = parse_recipe_text(page.editor.toPlainText()).root.children[-1]
-            page.tree.setCurrentItem(page._find_tree_item(group.id))
+            page._select_source_node(group.id)
             page._library_force_inside = True
             try:
                 page._library_add_basic("wait")
@@ -1182,36 +478,6 @@ root:
             updated_group = parse_recipe_text(page.editor.toPlainText()).root.children[-1]
             self.assertEqual(updated_group.id, group.id)
             self.assertEqual(updated_group.children[-1].type, "wait")
-        finally:
-            page._close_discard_confirmed = True
-            page.close()
-
-    def test_repeat_children_render_under_explicit_execution_branch(self) -> None:
-        page = RecipePage(simulation_settings())
-        try:
-            page.new_recipe(confirm=False)
-            with patch("app.ui.recipes.page.QMessageBox.warning") as warning:
-                page._library_add_basic("wait")
-            warning.assert_not_called()
-            wait = parse_recipe_text(page.editor.toPlainText()).root.children[-1]
-            page.tree.setCurrentItem(page._find_tree_item(wait.id))
-            source = wrap_recipe_nodes_in_repeat(
-                page.editor.toPlainText(),
-                node_ids=(wait.id,),
-                repeat_id="repeat-visual-contract",
-                count=3,
-            )
-            page._apply_builder_source(source, "Rendered repeat contract")
-            repeat_item = page._find_tree_item("repeat-visual-contract")
-            self.assertIsNotNone(repeat_item)
-            execution = next(
-                repeat_item.child(index)
-                for index in range(repeat_item.childCount())
-                if RecipeTreeWidget.structural_kind(repeat_item.child(index))
-                == RecipeTreeWidget.execution_container
-            )
-            self.assertEqual(execution.text(0), "Repeated steps × 3")
-            self.assertEqual(execution.child(0).data(0, Qt.ItemDataRole.UserRole).id, wait.id)
         finally:
             page._close_discard_confirmed = True
             page.close()
@@ -1229,33 +495,6 @@ root:
         finally:
             page._close_discard_confirmed = True
             page.close()
-
-    def test_logical_drop_index_ignores_projected_parameter_rows(self) -> None:
-        parent = QTreeWidgetItem(["Device"])
-        projected = QTreeWidgetItem(["ROI 1"])
-        first = QTreeWidgetItem(["First"])
-        second = QTreeWidgetItem(["Second"])
-        first.setData(
-            0,
-            Qt.ItemDataRole.UserRole,
-            RecipeNode("first", "comment"),
-        )
-        second.setData(
-            0,
-            Qt.ItemDataRole.UserRole,
-            RecipeNode("second", "comment"),
-        )
-        parent.addChildren([projected, first, second])
-
-        self.assertEqual(RecipeTreeWidget._logical_child_count(parent), 2)
-        self.assertEqual(
-            RecipeTreeWidget._logical_index(parent, second, below=False),
-            1,
-        )
-        self.assertEqual(
-            RecipeTreeWidget._logical_index(parent, second, below=True),
-            2,
-        )
 
     def test_manual_page_and_sweep_editor_share_keithley_configuration_panel(self) -> None:
         settings = simulation_settings()
@@ -1405,6 +644,7 @@ root:
             )
             open_node.assert_called_once_with("anritsu-spectrum-e2abb58f")
         finally:
+            page._close_discard_confirmed = True
             page.close()
 
     def test_anritsu_configuration_accepts_settings_only_without_parameter_rows(self) -> None:
@@ -1691,7 +931,7 @@ root:
                 dialog.segments.viewport(), None, None
             )
             self.assertIsInstance(editor, LineEdit)
-            self.assertIn("background: transparent", editor.styleSheet())
+            self.assertIn("background: palette(base)", editor.styleSheet())
             self.assertIsInstance(dialog.create_button, PrimaryPushButton)
             self.assertIsInstance(dialog.cancel_button, PushButton)
         finally:
@@ -1732,6 +972,7 @@ root:
                 self.assertEqual(dialog.result(), QDialog.DialogCode.Rejected)
         finally:
             dialog.close()
+            page._close_discard_confirmed = True
             page.close()
 
     def test_roi_plot_uses_active_application_theme_not_windows_theme(self) -> None:
@@ -1786,8 +1027,7 @@ root:
                 },
             )
             self.assertEqual(node.children, ())
-            item = page._find_tree_item(node.id)
-            page._node_selected(item, None)
+            page._select_source_node(node.id)
             self.assertTrue(page.open_editor_button.isEnabled())
         finally:
             page._close_discard_confirmed = True
@@ -1860,6 +1100,266 @@ root:
             updated = parse_recipe_text(page.editor.toPlainText()).root.children[-1]
             self.assertEqual(updated.children[-1].type, "acquire_spectrum")
             self.assertEqual(updated.children[-1].data["trace"], "TRAC1")
+        finally:
+            page._close_discard_confirmed = True
+            page.close()
+
+    def test_visible_semantic_sweep_selection_enables_roi_editor(self) -> None:
+        """The Fluent tree, not an invisible legacy projection, owns selection."""
+
+        page = RecipePage(simulation_settings())
+        try:
+            source = """
+schema_version: 1
+name: semantic-editor
+root:
+  id: root
+  type: sequence
+  children:
+    - id: source-sweep
+      type: sweep
+      target: keithley.B.current
+      start: \"0 A\"
+      stop: \"1 mA\"
+      points: 2
+      children:
+        - id: settle
+          type: wait
+          duration: \"10 ms\"
+"""
+            page._apply_builder_source(source, "Loaded semantic editor fixture")
+            index = page.tree_model.index_for_semantic_id("source-sweep")
+            page.measurement_tree.setCurrentIndex(index)
+            self.application.processEvents()
+
+            self.assertEqual(page._selected_source_node_id, "source-sweep")
+            self.assertTrue(page.edit_generator_button.isEnabled())
+            with patch.object(page, "_edit_selected_generator") as editor:
+                page.edit_generator_button.click()
+            editor.assert_called_once()
+        finally:
+            page._close_discard_confirmed = True
+            page.close()
+
+    def test_visible_semantic_tree_move_commits_validated_yaml_transaction(self) -> None:
+        from app.ui.measurement_tree import MeasurementTreeMoveRequest, TreeDropPlacement
+
+        page = RecipePage(simulation_settings())
+        try:
+            source = """
+schema_version: 1
+name: semantic-move
+root:
+  id: root
+  type: sequence
+  children:
+    - id: first
+      type: wait
+      duration: \"10 ms\"
+    - id: second
+      type: wait
+      duration: \"20 ms\"
+"""
+            page._apply_builder_source(source, "Loaded semantic move fixture")
+            request = MeasurementTreeMoveRequest(
+                "first", "second", TreeDropPlacement.AFTER
+            )
+            page._handle_semantic_tree_move_request(request)
+
+            self.assertTrue(request.accepted)
+            recipe = parse_recipe_text(page.editor.toPlainText())
+            self.assertEqual([node.id for node in recipe.root.children], ["second", "first"])
+        finally:
+            page._close_discard_confirmed = True
+            page.close()
+
+    def test_visible_semantic_selection_enables_standard_tree_actions(self) -> None:
+        """Delete, duplicate, sibling moves and Repeat use the selected Fluent row."""
+
+        page = RecipePage(simulation_settings())
+        try:
+            source = """
+schema_version: 1
+name: semantic-actions
+root:
+  id: root
+  type: sequence
+  children:
+    - id: first
+      type: wait
+      duration: "10 ms"
+    - id: second
+      type: wait
+      duration: "20 ms"
+"""
+            page._apply_builder_source(source, "Loaded semantic action fixture")
+            page.measurement_tree.setCurrentIndex(
+                page.tree_model.index_for_semantic_id("second")
+            )
+            self.application.processEvents()
+
+            self.assertTrue(page.delete_node_button.isEnabled())
+            self.assertTrue(page.duplicate_node_button.isEnabled())
+            self.assertTrue(page.move_up_button.isEnabled())
+            self.assertTrue(page.move_down_button.isEnabled())
+            self.assertTrue(page.wrap_repeat_button.isEnabled())
+
+            page.move_up_button.click()
+            moved = parse_recipe_text(page.editor.toPlainText())
+            self.assertEqual([node.id for node in moved.root.children], ["second", "first"])
+
+            page.duplicate_node_button.click()
+            duplicated = parse_recipe_text(page.editor.toPlainText())
+            self.assertEqual(len(duplicated.root.children), 3)
+            clone_id = duplicated.root.children[1].id
+            self.assertNotEqual(clone_id, "second")
+
+            page.delete_node_button.click()
+            deleted = parse_recipe_text(page.editor.toPlainText())
+            self.assertEqual([node.id for node in deleted.root.children], ["second", "first"])
+        finally:
+            page._close_discard_confirmed = True
+            page.close()
+
+    def test_wrap_in_repeat_commits_the_confirmed_selected_subtree(self) -> None:
+        page = RecipePage(simulation_settings())
+        try:
+            source = """
+schema_version: 1
+name: repeat-confirmation
+root:
+  id: root
+  type: sequence
+  children:
+    - id: first
+      type: wait
+      duration: "10 ms"
+    - id: second
+      type: wait
+      duration: "20 ms"
+"""
+            page._apply_builder_source(source, "Loaded repeat confirmation fixture")
+            page.measurement_tree.setCurrentIndex(
+                page.tree_model.index_for_semantic_id("second")
+            )
+            self.application.processEvents()
+
+            dialog = Mock()
+            dialog.exec.return_value = QDialog.DialogCode.Accepted
+            dialog.count.value.return_value = 3
+            with patch("app.ui.recipes.page.RepeatCountDialog", return_value=dialog):
+                page.wrap_repeat_button.click()
+
+            recipe = parse_recipe_text(page.editor.toPlainText())
+            self.assertEqual([node.type for node in recipe.root.children], ["wait", "repeat"])
+            repeat = recipe.root.children[1]
+            self.assertEqual(repeat.data["count"], 3)
+            self.assertEqual([node.id for node in repeat.children], ["second"])
+            dialog.exec.assert_called_once_with()
+        finally:
+            page._close_discard_confirmed = True
+            page.close()
+
+    def test_visible_semantic_roi_editor_is_available_for_each_device_variant(self) -> None:
+        """Keithley, Rigol, Anritsu and Anritsu SG all expose the same ROI action."""
+
+        fixtures = {
+            "keithley": """
+  id: keithley-node
+  type: sequence
+  device_module: keithley
+  channel: B
+  source_mode: current
+  configuration: {channel: B, source_mode: current}
+  parameter_actions:
+    - {parameter_id: source.level, mode: sweep, value: 0 A, segments: [{start: 0 A, stop: 1 mA, points: 2}]}
+""",
+            "rigol": """
+  id: rigol-node
+  type: sequence
+  device_module: rigol
+  configuration: {channel: 1, waveform: SIN, frequency: 1 MHz, high_level: 1 V, low_level: 0 V}
+  parameter_actions:
+    - {parameter_id: carrier.frequency, mode: sweep, value: 1 MHz, segments: [{start: 1 MHz, stop: 2 MHz, points: 2}]}
+""",
+            "anritsu": """
+  id: anritsu-node
+  type: sequence
+  device_module: anritsu
+  configuration: {start_frequency: 1 MHz, stop_frequency: 10 MHz, reference_level: 0 dBm, points: 101}
+  parameter_actions:
+    - {parameter_id: spectrum.start_frequency, mode: sweep, value: 1 MHz, segments: [{start: 1 MHz, stop: 2 MHz, points: 2}]}
+""",
+            "anritsu_sg": """
+  id: anritsu-sg-node
+  type: sequence
+  device_module: anritsu_sg
+  configuration: {frequency: 1 GHz, power: -30 dBm}
+  parameter_actions:
+    - {parameter_id: sg.frequency, mode: sweep, value: 1 GHz, segments: [{start: 1 GHz, stop: 1.1 GHz, points: 2}]}
+""",
+        }
+        page = RecipePage(simulation_settings(approved=True))
+        try:
+            for device, node_yaml in fixtures.items():
+                with self.subTest(device=device):
+                    node_text = textwrap.dedent(node_yaml).strip()
+                    source = (
+                        "schema_version: 1\nname: roi-variant\nroot:\n"
+                        "  id: root\n  type: sequence\n  children:\n    -"
+                        + " "
+                        + node_text.replace("\n", "\n      ")
+                    )
+                    page._apply_builder_source(source, f"Loaded {device} ROI fixture")
+                    source_node_id = node_text.split("id: ", 1)[1].split("\n", 1)[0]
+                    semantic = next(
+                        node
+                        for node in page.tree_model.tree.by_id.values()
+                        if node.kind.value == "sweep_axis"
+                        and node.source_node_id == source_node_id
+                    )
+                    page.measurement_tree.setCurrentIndex(
+                        page.tree_model.index_for_semantic_id(semantic.semantic_id)
+                    )
+                    self.application.processEvents()
+                    self.assertTrue(page.edit_generator_button.isEnabled())
+        finally:
+            page._close_discard_confirmed = True
+            page.close()
+
+    def test_fluent_measurement_tree_renders_expanded_at_desktop_and_narrow_widths(self) -> None:
+        page = RecipePage(simulation_settings())
+        try:
+            source = """
+schema_version: 1
+name: semantic-layout
+root:
+  id: root
+  type: sequence
+  children:
+    - id: source-sweep
+      type: sweep
+      target: keithley.B.current
+      start: "0 A"
+      stop: "1 mA"
+      points: 2
+      children:
+        - id: settle
+          type: wait
+          duration: "10 ms"
+"""
+            page._apply_builder_source(source, "Loaded semantic layout fixture")
+            for width in (1360, 820):
+                page.resize(width, 760)
+                page.show()
+                self.application.processEvents()
+                axis = page.tree_model.index_for_semantic_id("source-sweep")
+                loop = page.tree_model.index_for_semantic_id("source-sweep.loop")
+                self.assertTrue(page.measurement_tree.isVisibleTo(page))
+                self.assertGreater(page.measurement_tree.viewport().width(), 0)
+                self.assertGreater(page.measurement_tree.viewport().height(), 0)
+                self.assertTrue(page.measurement_tree.isExpanded(axis))
+                self.assertTrue(page.measurement_tree.isExpanded(loop))
         finally:
             page._close_discard_confirmed = True
             page.close()
@@ -1954,6 +1454,7 @@ root:
             self.assertEqual(replacement["children"], [])
         finally:
             dialog.close()
+            page._close_discard_confirmed = True
             page.close()
 
     def test_rigol_sweep_editor_matches_basic_device_panel_representations(self) -> None:
@@ -2100,6 +1601,7 @@ root:
             self.assertTrue(replacement["roi_required"])
         finally:
             dialog.close()
+            page._close_discard_confirmed = True
             page.close()
 
     def test_sweeps_reads_unselected_keithley_values_from_manual_module(self) -> None:
@@ -2118,6 +1620,7 @@ root:
             self.assertEqual(snapshot.compliance, "2 mA")
         finally:
             manual_state.close()
+            page._close_discard_confirmed = True
             page.close()
 
     def test_keithley_output_policy_does_not_implicitly_change_source_value(self) -> None:
@@ -2137,6 +1640,7 @@ root:
             self.assertFalse(replacement["roi_required"])
         finally:
             dialog.close()
+            page._close_discard_confirmed = True
             page.close()
 
     def test_keithley_roi_definition_uses_selected_source_dimension(self) -> None:
@@ -2153,6 +1657,7 @@ root:
             self.assertEqual(compliance["dimension"], "voltage")
         finally:
             dialog.close()
+            page._close_discard_confirmed = True
             page.close()
 
     def test_keithley_configuration_has_contextual_go_to_roi_button(self) -> None:
@@ -2238,180 +1743,6 @@ root:
             for dialog in dialogs:
                 dialog.close()
 
-    def test_complete_keithley_roi_is_stored_and_summarized_as_sweep(self) -> None:
-        page = RecipePage(simulation_settings())
-        dialog = KeithleyNodeEditorDialog(simulation_settings())
-        try:
-            page._library_add_device("keithley")
-            original = parse_recipe_text(page.editor.toPlainText()).root.children[-1]
-            actions = [
-                {
-                    "parameter_id": "source.level",
-                    "mode": "sweep",
-                    "value": "1 mA",
-                    "segments": [
-                        {
-                            "start": "0 A",
-                            "stop": "1 mA",
-                            "points": 3,
-                            "spacing": "linear",
-                        },
-                        {
-                            "start": "1 mA",
-                            "stop": "2 mA",
-                            "points": 3,
-                            "spacing": "linear",
-                        },
-                    ],
-                }
-            ]
-            replacement = page._configured_keithley_node(
-                original,
-                dialog.configuration_snapshot(),
-                parameter_actions=actions,
-                output_policy="on",
-            )
-            self.assertFalse(replacement["roi_required"])
-            self.assertFalse(replacement["configuration_required"])
-            from app.recipes import replace_recipe_node
-
-            page._apply_builder_source(
-                replace_recipe_node(
-                    page.editor.toPlainText(),
-                    node_id=original.id,
-                    node=replacement,
-                ),
-                "Configured Keithley ROI",
-            )
-            item = page._find_tree_item(original.id)
-            self.assertIsNotNone(item)
-            self.assertIn("5 pts", item.text(0))
-            self.assertEqual(item.text(1), "Sweep axis")
-            self.assertEqual(item.text(2), "SWEEP")
-        finally:
-            dialog.close()
-            page.close()
-
-    def test_keithley_tree_exposes_each_changed_parameter_and_every_roi_stage(self) -> None:
-        page = RecipePage(simulation_settings())
-        dialog = KeithleyNodeEditorDialog(simulation_settings())
-        try:
-            page._library_add_device("keithley")
-            original = parse_recipe_text(page.editor.toPlainText()).root.children[-1]
-            replacement = page._configured_keithley_node(
-                original,
-                dialog.configuration_snapshot(),
-                parameter_actions=[
-                    {
-                        "parameter_id": "source.level",
-                        "mode": "sweep",
-                        "value": "1 mA",
-                        "segments": [
-                            {"start": "0 A", "stop": "1 mA", "points": 3, "spacing": "linear"},
-                            {"start": "1 mA", "stop": "2 mA", "points": 3, "spacing": "linear"},
-                        ],
-                    },
-                    {"parameter_id": "source.compliance", "mode": "set", "value": "67 mV"},
-                    {"parameter_id": "measurement.nplc", "mode": "set", "value": "1"},
-                ],
-                output_policy="on",
-            )
-            from app.recipes import replace_recipe_node
-
-            page._apply_builder_source(
-                replace_recipe_node(
-                    page.editor.toPlainText(), node_id=original.id, node=replacement
-                ),
-                "Configured operator summary",
-            )
-            item = page._find_tree_item(original.id)
-            rows = {
-                item.child(index).text(0): item.child(index)
-                for index in range(item.childCount())
-            }
-            self.assertIn("Source current", rows)
-            self.assertEqual(rows["Source current"].text(2), "SWEEP")
-            self.assertIn("0 A → 2 mA", rows["Source current"].text(1))
-            self.assertIn("5 pts", rows["Source current"].text(1))
-            self.assertEqual(rows["Source current"].childCount(), 2)
-            self.assertEqual(rows["Source current"].child(0).text(0), "ROI 1")
-            self.assertIn("0 A → 1 mA", rows["Source current"].child(0).text(1))
-            self.assertIn("Voltage compliance", rows)
-            self.assertEqual(rows["Voltage compliance"].text(1), "Set to 67 mV")
-            self.assertEqual(rows["NPLC"].text(2), "SET")
-            self.assertIn("Output", rows)
-            self.assertEqual(rows["Output"].text(2), "ON → OFF")
-            output_metadata = rows["Output"].data(0, page.operator_row_role)
-            self.assertEqual(output_metadata["kind"], "output_policy")
-            with (
-                patch("app.ui.recipes.page.OutputPolicyDialog") as dialog_type,
-                patch.object(page, "_apply_builder_source") as apply_source,
-            ):
-                output_dialog = dialog_type.return_value
-                output_dialog.exec.return_value = QDialog.DialogCode.Accepted
-                output_dialog.selected_policy.return_value = "off"
-                page._operator_row_clicked(rows["Output"], 0)
-            updated = parse_recipe_text(apply_source.call_args.args[0]).root.children[-1]
-            self.assertEqual(updated.data["output_policy"], "off")
-        finally:
-            dialog.close()
-            page._close_discard_confirmed = True
-            page.close()
-
-    def test_clicking_roi_stage_routes_directly_to_roi_editor_metadata(self) -> None:
-        page = RecipePage(simulation_settings())
-        dialog = KeithleyNodeEditorDialog(simulation_settings())
-        try:
-            page._library_add_device("keithley")
-            original = parse_recipe_text(page.editor.toPlainText()).root.children[-1]
-            replacement = page._configured_keithley_node(
-                original,
-                dialog.configuration_snapshot(),
-                parameter_actions=[
-                    {
-                        "parameter_id": "source.level",
-                        "mode": "sweep",
-                        "value": "1 mA",
-                        "segments": [
-                            {"start": "0 A", "stop": "1 mA", "points": 3, "spacing": "linear"},
-                            {"start": "1 mA", "stop": "0 A", "points": 3, "spacing": "linear"},
-                        ],
-                    }
-                ],
-            )
-            from app.recipes import replace_recipe_node
-
-            page._apply_builder_source(
-                replace_recipe_node(
-                    page.editor.toPlainText(), node_id=original.id, node=replacement
-                ),
-                "Configured clickable ROI",
-            )
-            owner = page._find_tree_item(original.id)
-            sweep_row = next(
-                owner.child(index)
-                for index in range(owner.childCount())
-                if owner.child(index).text(0) == "Source current"
-            )
-            roi_two = sweep_row.child(1)
-            metadata = roi_two.data(0, page.operator_row_role)
-            self.assertEqual(metadata["kind"], "roi_stage")
-            self.assertEqual(metadata["owner_node_id"], original.id)
-            self.assertEqual(metadata["parameter_id"], "source.level")
-            self.assertEqual(metadata["stage_index"], 1)
-            self.assertTrue(roi_two.flags() & Qt.ItemFlag.ItemIsSelectable)
-            page._node_selected(roi_two, None)
-            self.assertTrue(page.open_editor_button.isEnabled())
-            self.assertIn("ROI 2", page.inspector_summary.text())
-
-            captured: list[dict[str, object]] = []
-            page._edit_keithley_roi_from_tree = captured.append  # type: ignore[method-assign]
-            page._operator_row_clicked(roi_two, 0)
-            self.assertEqual(captured, [metadata])
-        finally:
-            dialog.close()
-            page.close()
-
     def test_direct_roi_save_changes_only_selected_segments(self) -> None:
         page = RecipePage(simulation_settings())
         dialog = KeithleyNodeEditorDialog(simulation_settings())
@@ -2446,9 +1777,7 @@ root:
                 ),
                 "Configured direct ROI save",
             )
-            node = page._find_tree_item(original.id).data(
-                0, Qt.ItemDataRole.UserRole
-            )
+            node = page._recipe_node_locations()[original.id][0]
             page._apply_keithley_roi_segments(
                 node,
                 "source.level",
@@ -2469,6 +1798,7 @@ root:
             )
         finally:
             dialog.close()
+            page._close_discard_confirmed = True
             page.close()
 
     def test_keithley_node_rejects_more_than_one_sweep_axis(self) -> None:
@@ -2492,43 +1822,7 @@ root:
                 )
         finally:
             dialog.close()
-            page.close()
-
-    def test_configured_keithley_placeholder_gets_modern_tree_summary(self) -> None:
-        page = RecipePage(simulation_settings())
-        dialog = KeithleyNodeEditorDialog(simulation_settings())
-        try:
-            page._library_add_device("keithley")
-            recipe = parse_recipe_text(page.editor.toPlainText())
-            original = recipe.root.children[-1]
-            dialog.channel.setCurrentText("B")
-            dialog.mode.setCurrentText("current")
-            dialog.level.setText("1 mA")
-            replacement = page._configured_keithley_node(
-                original,
-                dialog.configuration_snapshot(),
-                parameter_actions=[
-                    {
-                        "parameter_id": "source.level",
-                        "mode": "set",
-                        "value": "1 mA",
-                    }
-                ],
-                output_policy="unchanged",
-            )
-            from app.recipes import replace_recipe_node
-
-            page._apply_builder_source(
-                replace_recipe_node(page.editor.toPlainText(), node_id=original.id, node=replacement),
-                "Configured Keithley",
-            )
-            item = page._find_tree_item(original.id)
-            self.assertIsNotNone(item)
-            self.assertEqual(item.text(0), "Keithley B · Source current = 1 mA")
-            self.assertEqual(item.text(1), "Fixed configuration")
-            self.assertEqual(item.text(2), "FIXED")
-        finally:
-            dialog.close()
+            page._close_discard_confirmed = True
             page.close()
 
     def test_library_blocks_expose_drag_payload_and_tree_accepts_external_blocks(self) -> None:
@@ -2540,24 +1834,13 @@ root:
                 keithley.drag_mime_data().data("application/x-lab-control-sweep-block").data(),
                 b"device:keithley",
             )
-            self.assertTrue(page.tree.acceptDrops())
-            self.assertEqual(page.tree.library_mime_type, "application/x-lab-control-sweep-block")
+            self.assertTrue(page.measurement_tree.acceptDrops())
+            self.assertEqual(
+                page.measurement_tree._library_mime_type,
+                "application/x-lab-control-sweep-block",
+            )
         finally:
-            page.close()
-
-    def test_tree_builder_exposes_context_menu_and_keyboard_operations(self) -> None:
-        page = RecipePage(simulation_settings())
-        try:
-            self.assertEqual(page.tree.contextMenuPolicy(), Qt.ContextMenuPolicy.CustomContextMenu)
-            shortcuts = {shortcut.key().toString() for shortcut in page._tree_shortcuts}
-            self.assertEqual(len(shortcuts), 7)
-            self.assertTrue(any(value in shortcuts for value in {"Delete", "Del"}))
-            self.assertTrue(any("Ctrl+D" in value for value in shortcuts))
-            self.assertTrue(any("Alt+Up" in value for value in shortcuts))
-            self.assertTrue(any("Alt+Down" in value for value in shortcuts))
-            self.assertIn("Return", shortcuts)
-            self.assertIn("Enter", shortcuts)
-        finally:
+            page._close_discard_confirmed = True
             page.close()
 
     def test_node_library_filters_actions_and_adds_a_tree_node(self) -> None:
@@ -2575,6 +1858,7 @@ root:
             recipe = parse_recipe_text(page.editor.toPlainText())
             self.assertEqual(recipe.root.children[-1].type, "wait")
         finally:
+            page._close_discard_confirmed = True
             page.close()
 
     def test_output_on_library_adds_direct_authoring_actions(self) -> None:
@@ -2593,6 +1877,7 @@ root:
                 ],
             )
         finally:
+            page._close_discard_confirmed = True
             page.close()
 
     def test_action_dialog_edits_ramp_parameters_and_renders_at_two_sizes(self) -> None:
@@ -2642,59 +1927,6 @@ root:
         finally:
             dialog.close()
 
-    def test_legacy_anritsu_advanced_and_sg_nodes_open_scalar_editor(self) -> None:
-        page = RecipePage(simulation_settings())
-        try:
-            with patch.object(page, "_edit_action_node") as edit:
-                for node in (
-                    RecipeNode(
-                        "advanced",
-                        "configure_anritsu_advanced",
-                        {"rbw": "10 kHz", "sweep_time": "10 ms"},
-                    ),
-                    RecipeNode(
-                        "sg",
-                        "configure_anritsu_sg",
-                        {"frequency": "1 GHz", "power": "-20 dBm"},
-                    ),
-                ):
-                    item = QTreeWidgetItem([node.id])
-                    item.setData(0, Qt.ItemDataRole.UserRole, node)
-                    page.tree.clear()
-                    page.tree.addTopLevelItem(item)
-                    page.tree.setCurrentItem(item)
-                    page._edit_selected_device_settings()
-
-            self.assertEqual(
-                [call.args[0].type for call in edit.call_args_list],
-                ["configure_anritsu_advanced", "configure_anritsu_sg"],
-            )
-        finally:
-            page.close()
-
-    def test_double_click_routes_every_recipe_node_to_an_editor(self) -> None:
-        page = RecipePage(simulation_settings())
-        try:
-            recipe = parse_recipe_text(page.editor.toPlainText())
-            items: list[QTreeWidgetItem] = []
-
-            def collect(item: QTreeWidgetItem) -> None:
-                if isinstance(item.data(0, Qt.ItemDataRole.UserRole), RecipeNode):
-                    items.append(item)
-                for child_index in range(item.childCount()):
-                    collect(item.child(child_index))
-
-            for top_index in range(page.tree.topLevelItemCount()):
-                collect(page.tree.topLevelItem(top_index))
-            self.assertTrue(items)
-            with patch.object(page, "_edit_selected_node") as edit:
-                for item in items:
-                    page._open_node_editor(item, 0)
-            self.assertEqual(edit.call_count, len(items))
-            self.assertIsNotNone(recipe.root)
-        finally:
-            page.close()
-
     def test_sweeps_reads_anritsu_sg_values_from_manual_module(self) -> None:
         page = RecipePage(simulation_settings())
         try:
@@ -2711,6 +1943,7 @@ root:
             self.assertEqual(snapshot.power_dbm, -17.5)
             self.assertTrue(snapshot.output_enabled)
         finally:
+            page._close_discard_confirmed = True
             page.close()
 
     def test_anritsu_sg_library_node_has_separate_editor_and_rf_off_contract(self) -> None:
@@ -2768,6 +2001,7 @@ root:
             page.redo_tree_edit()
             self.assertEqual(page.editor.toPlainText(), changed)
         finally:
+            page._close_discard_confirmed = True
             page.close()
 
     def test_generator_creates_a_segmented_sweep_with_device_configuration(self) -> None:
@@ -2796,6 +2030,7 @@ root:
             )
             self.assertEqual(parsed.root.children[-1].data["segments"][1]["points"], 3)
         finally:
+            page._close_discard_confirmed = True
             page.close()
 
     def test_generator_dialog_previews_multiple_intervals(self) -> None:
@@ -3027,6 +2262,7 @@ root:
             self.assertNotIn("segments", node)
         finally:
             dialog.close()
+            page._close_discard_confirmed = True
             page.close()
 
     def test_device_picker_lists_every_supported_sweepable_field_for_selected_device(self) -> None:
@@ -3049,96 +2285,6 @@ root:
             self.assertEqual(dialog.fields.count(), 3)
         finally:
             dialog.close()
-
-    def test_tree_builder_adds_containers_and_safe_nodes_to_finally(self) -> None:
-        page = RecipePage(simulation_settings())
-        try:
-            page._add_basic_node("sequence")
-            parsed = parse_recipe_text(page.editor.toPlainText())
-            self.assertIn("sequence", tuple(node.type for node in parsed.root.children))
-
-            finally_item = next(
-                page.tree.topLevelItem(index)
-                for index in range(page.tree.topLevelItemCount())
-                if page.tree.topLevelItem(index).text(0).startswith("Finally")
-            )
-            page.tree.setCurrentItem(finally_item)
-            page._add_basic_node("set_rigol_output")
-            parsed = parse_recipe_text(page.editor.toPlainText())
-            self.assertEqual(parsed.finally_nodes[-1].type, "set_rigol_output")
-            self.assertFalse(parsed.finally_nodes[-1].data["enabled"])
-        finally:
-            page.close()
-
-    def test_finally_rejects_flow_and_device_blocks_without_changing_yaml(self) -> None:
-        page = RecipePage(simulation_settings())
-        try:
-            finally_item = next(
-                page.tree.topLevelItem(index)
-                for index in range(page.tree.topLevelItemCount())
-                if page.tree.topLevelItem(index).text(0).startswith("Finally")
-            )
-            page.tree.setCurrentItem(finally_item)
-            source = page.editor.toPlainText()
-            with patch("app.ui.recipes.page.QMessageBox.warning") as warning:
-                page._add_basic_node("wait")
-                page._library_add_device("rigol")
-                page._drop_library_block(
-                    "flow:repeat", "__finally__", "children", 0
-                )
-                page._drop_library_block(
-                    "device:anritsu", "__finally__", "children", 0
-                )
-
-            self.assertEqual(page.editor.toPlainText(), source)
-            self.assertEqual(warning.call_count, 4)
-        finally:
-            page.close()
-
-    def test_finally_always_projects_automatic_station_shutdown(self) -> None:
-        page = RecipePage(simulation_settings())
-        try:
-            recipe = parse_recipe_text(
-                """\
-schema_version: 1
-name: empty-finally
-root: {id: root, type: sequence, children: []}
-finally: []
-"""
-            )
-            page._populate_recipe_tree(recipe.root, recipe.finally_nodes, None)
-            page.resize(1600, 900)
-            page.show()
-            self.application.processEvents()
-            finally_item = page.tree.topLevelItem(page.tree.topLevelItemCount() - 1)
-            finally_item.setExpanded(True)
-            self.application.processEvents()
-            self.assertTrue(finally_item.text(0).startswith("Finally"))
-            self.assertIn("Automatic shutdown", finally_item.text(1))
-            self.assertEqual(
-                [
-                    finally_item.child(index).text(0)
-                    for index in range(finally_item.childCount())
-                ],
-                [
-                    "Keithley A + B OUTPUT OFF",
-                    "Rigol CH1 + CH2 OUTPUT OFF",
-                    "Anritsu RF OUTPUT OFF + abort",
-                    "Measurement checkpoint flush",
-                ],
-            )
-            self.assertTrue(
-                all(
-                    finally_item.child(index).text(2) == "AUTO"
-                    for index in range(finally_item.childCount())
-                )
-            )
-            self.assertGreater(page.tree.visualItemRect(finally_item).width(), 0)
-            self.assertGreater(
-                page.tree.visualItemRect(finally_item.child(0)).height(), 0
-            )
-        finally:
-            page.close()
 
     def test_keithley_auto_shutdown_does_not_create_ramp_until_user_selects_it(self) -> None:
         source = """\
@@ -3178,59 +2324,6 @@ finally: []
         self.assertIsNone(selected_id)
         self.assertEqual(parsed.finally_nodes, ())
 
-    def test_double_click_on_auto_keithley_shutdown_opens_shutdown_choice(self) -> None:
-        page = RecipePage(simulation_settings())
-        try:
-            recipe = parse_recipe_text(
-                """\
-schema_version: 1
-name: empty-finally
-root: {id: root, type: sequence, children: []}
-finally: []
-"""
-            )
-            page._populate_recipe_tree(recipe.root, recipe.finally_nodes, None)
-            finally_item = page.tree.topLevelItem(page.tree.topLevelItemCount() - 1)
-            keithley_auto = finally_item.child(0)
-            with patch.object(page, "_edit_automatic_shutdown") as edit_shutdown:
-                page._open_node_editor(keithley_auto, 0)
-            edit_shutdown.assert_called_once_with("keithley.outputs_off")
-            with patch.object(page, "_edit_automatic_shutdown") as edit_shutdown:
-                page._open_node_editor(finally_item, 0)
-            edit_shutdown.assert_called_once_with("keithley.outputs_off")
-        finally:
-            page.close()
-
-    def test_compiled_shutdown_manifest_is_rendered_in_builder_and_execute_snapshot(self) -> None:
-        page = RecipePage(simulation_settings())
-        try:
-            recipe = parse_recipe_text(
-                """\
-schema_version: 1
-name: automatic-finally
-root:
-  id: root
-  type: sequence
-  children:
-    - {id: wait, type: wait, duration: 1 ms}
-finally: []
-"""
-            )
-            plan = RecipeCompiler(simulation_settings()).compile(recipe)
-            snapshot = page.execution_tree_snapshot(recipe.source_text, plan)
-            finally_item = snapshot[-1]
-            self.assertEqual(finally_item.text(0), "Finally — safe shutdown")
-            self.assertEqual(finally_item.childCount(), len(plan.safe_shutdown_actions))
-            self.assertEqual(
-                [
-                    finally_item.child(index).text(2)
-                    for index in range(finally_item.childCount())
-                ],
-                ["AUTO"] * len(plan.safe_shutdown_actions),
-            )
-        finally:
-            page.close()
-
     def test_spectrum_parameter_generator_builds_anritsu_configuration_child(self) -> None:
         page = RecipePage(simulation_settings())
         try:
@@ -3249,6 +2342,7 @@ finally: []
                 node["children"][0]["reference_level"], "${anritsu.spectrum.reference_level}"
             )
         finally:
+            page._close_discard_confirmed = True
             page.close()
 
     def test_semantic_one_axis_projection_has_one_set_roi_operation(self) -> None:
@@ -3266,16 +2360,17 @@ finally: []
                 semantic_labels(page),
                 [
                     "Measurement sequence",
-                    "Keithley B Â· configuration",
-                    "Sweep axis Â· Source current",
+                    "Keithley B · configuration",
+                    "Sweep axis · Source current",
                     "For each source-current point",
-                    "Set ROI value Â· Keithley B Â· source current",
-                    "Acquire spectrum Â· Anritsu",
-                    "Wait Â· 2 s",
-                    "Finally â€” safe shutdown",
+                    "Set ROI value · Keithley B · source current",
+                    "Acquire spectrum · Anritsu",
+                    "Wait · 2 s",
+                    "Finally — safe shutdown",
                 ],
             )
         finally:
+            page._close_discard_confirmed = True
             page.close()
 
     def test_same_device_nested_axes_compile_to_cartesian_points(self) -> None:
@@ -3286,6 +2381,41 @@ finally: []
 
         plan = compile_source(SAME_DEVICE_TWO_AXIS_SOURCE)
         self.assertEqual(plan.total_points, 6)
+
+    def test_sweeps_production_path_contains_no_legacy_item_tree(self) -> None:
+        from qfluentwidgets import TreeView
+        from app.ui.measurement_tree import MeasurementTreeView
+
+        page_source = Path("app/ui/recipes/page.py").read_text(encoding="utf-8")
+        dialogs_source = Path("app/ui/recipes/common_dialogs.py").read_text(
+            encoding="utf-8"
+        )
+        self.assertTrue(issubclass(MeasurementTreeView, TreeView))
+        self.assertNotIn("RecipeTreeWidget", page_source + dialogs_source)
+        self.assertNotIn("QTreeWidgetItem", page_source + dialogs_source)
+        self.assertNotIn("execution_tree_snapshot", page_source)
+
+    def test_semantic_library_drop_appends_to_authored_root(self) -> None:
+        from app.ui.measurement_tree import (
+            MeasurementTreeLibraryDropRequest,
+            TreeDropPlacement,
+        )
+
+        page = RecipePage(simulation_settings())
+        try:
+            page.new_recipe(confirm=False)
+            request = MeasurementTreeLibraryDropRequest(
+                "flow:wait", "sequence-main", TreeDropPlacement.ROOT_END
+            )
+            page._handle_semantic_library_drop_request(request)
+
+            self.assertTrue(request.accepted)
+            recipe = parse_recipe_text(page.editor.toPlainText())
+            self.assertEqual([node.type for node in recipe.root.children], ["wait"])
+            self.assertEqual(page._selected_source_node_id, recipe.root.children[0].id)
+        finally:
+            page._close_discard_confirmed = True
+            page.close()
 
 
 if __name__ == "__main__":

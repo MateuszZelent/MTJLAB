@@ -19,13 +19,16 @@ from qfluentwidgets import (
     PrimaryPushButton,
     PushButton,
     SegmentedWidget,
-    TreeWidget,
 )
 
 from app.ui.shell import MainWindow
 from app.ui.execution import RunMonitorPage
 from app.engine.compiler import RecipeCompiler
 from app.recipes import parse_recipe_text
+from app.recipes.semantic_tree import AxisPointContext, normalize_recipe_tree
+from app.domain.execution_state import SemanticOperationState
+from app.devices.registry import built_in_device_registry
+from app.ui.measurement_tree import MeasurementTreeView
 from app.ui.recipes import SweepGeneratorDialog
 from tests.helpers import simulation_settings
 
@@ -55,6 +58,9 @@ class FluentRecipeAndExecutionPageTests(unittest.TestCase):
             self.assertIsInstance(page.output_directory, LineEdit)
             self.assertIsInstance(page.output_file_stem, LineEdit)
             self.assertIsInstance(page.execution_mode, ComboBox)
+            self.assertTrue(page.save_to_elab_check.isVisibleTo(window))
+            self.assertTrue(page.elab_upload_hint.isVisibleTo(window))
+            self.assertFalse(page.save_to_elab_check.isEnabled())
             self.assertIsInstance(page.summary, BodyLabel)
             self.assertIsInstance(page.run_button, PrimaryPushButton)
             self.assertIsInstance(page.open_editor_button, PrimaryPushButton)
@@ -117,7 +123,7 @@ class FluentRecipeAndExecutionPageTests(unittest.TestCase):
             window.close()
             self.application.processEvents()
 
-    def test_execution_monitor_projects_full_recipe_tree_and_tracks_nested_node(self) -> None:
+    def test_execution_monitor_uses_the_exact_semantic_snapshot(self) -> None:
         window = MainWindow(".config/settings.yml", simulation=True)
         try:
             window.resize(1360, 880)
@@ -148,106 +154,46 @@ finally:
     channel: 1
     enabled: false
 """
-            actions = (
-                SimpleNamespace(
-                    node_id="wait-point", kind="wait", is_finally=False,
-                    setpoints_si={"rigol.1.frequency": 100.0},
-                ),
-                SimpleNamespace(
-                    node_id="rigol-off", kind="set_rigol_output", is_finally=True,
-                    payload={"channel": 1, "enabled": False}, setpoints_si={},
-                ),
-            )
             recipe = parse_recipe_text(source, origin="tree-parity-test")
-            window.recipe_page._populate_recipe_tree(
-                recipe.root, recipe.finally_nodes, SimpleNamespace(actions=actions)
+            snapshot = normalize_recipe_tree(
+                recipe, built_in_device_registry().sweep_providers()
             )
-            snapshot = window.recipe_page.execution_tree_snapshot(
-                source, SimpleNamespace(actions=actions)
-            )
-
-            def tree_text(item):
-                return (
-                    tuple(item.text(column) for column in range(3)),
-                    tuple(tree_text(item.child(index)) for index in range(item.childCount())),
-                )
-
-            self.assertEqual(
-                tuple(
-                    tree_text(window.recipe_page.tree.topLevelItem(index))
-                    for index in range(window.recipe_page.tree.topLevelItemCount())
-                ),
-                tuple(tree_text(item) for item in snapshot),
-            )
+            plan = RecipeCompiler(window._settings).compile(recipe)
             monitor.run_started(
-                3,
+                len(plan.actions),
                 1.0,
-                plan_actions=actions,
+                plan_actions=plan.actions,
                 recipe_source=source,
-                recipe_tree_items=snapshot,
+                semantic_tree=snapshot,
             )
+            self.application.processEvents()
 
-            root = monitor.steps.topLevelItem(0)
-            self.assertTrue(monitor.steps.isVisibleTo(window))
-            self.assertGreater(monitor.steps.geometry().height(), 120)
-            self.assertEqual(root.text(0), "Measurement sequence")
-            sweep = root.child(0)
-            self.assertIn("frequency sweep", sweep.text(0))
-            def find_node(item, node_id):
-                value = item.data(0, Qt.ItemDataRole.UserRole)
-                if getattr(value, "id", None) == node_id:
-                    return item
-                for index in range(item.childCount()):
-                    result = find_node(item.child(index), node_id)
-                    if result is not None:
-                        return result
-                return None
-
-            wait = find_node(root, "wait-point")
-            self.assertIsNotNone(wait)
-            self.assertEqual(
-                wait.data(0, Qt.ItemDataRole.UserRole).id, "wait-point"
-            )
-            finally_item = monitor.steps.topLevelItem(1)
-            self.assertIn("Finally", finally_item.text(0))
-            self.assertEqual(
-                find_node(finally_item, "rigol-off").data(0, Qt.ItemDataRole.UserRole).id,
-                "rigol-off",
+            self.assertIs(monitor.tree_model.tree, snapshot)
+            self.assertIsInstance(monitor.measurement_tree, MeasurementTreeView)
+            self.assertTrue(monitor.measurement_tree.isVisibleTo(window))
+            self.assertFalse(hasattr(monitor, "steps"))
+            wait = monitor.tree_model.index_for_semantic_id("wait-point")
+            self.assertTrue(wait.isValid())
+            self.assertIn(
+                "Finally",
+                monitor.tree_model.tree.require("__finally__").label,
             )
 
             monitor.append_event(
-                "action_started",
+                "semantic_operation_started",
                 {
-                    "node_id": "wait-point",
+                    "semantic_id": "wait-point",
                     "kind": "wait",
-                    "setpoints_si": {"rigol.1.frequency": 100.0},
+                    "duration_s": 0.01,
+                    "action_index": 1,
+                    "total_actions": len(plan.actions),
                 },
             )
-            self.assertEqual(wait.text(2), "FLOW")
-            self.assertIn("RUNNING", wait.toolTip(2))
-            self.assertEqual(monitor.output_states.topLevelItem(0).text(1), "UNKNOWN")
-            self.assertEqual(monitor.active_parameters.topLevelItem(0).text(1), "100 Hz")
-            monitor.append_event(
-                "action_finished",
-                {
-                    "node_id": "wait-point",
-                    "kind": "wait",
-                    "timestamp_utc": "2026-07-21T10:00:00+00:00",
-                    "state_snapshot": {
-                        "output_status": {"rigol.1": "on"},
-                        "device_states": {
-                            "rigol": {
-                                "channel_1": {
-                                    "actual": {"frequency_hz": 100.0}
-                                }
-                            }
-                        },
-                    },
-                },
+            self.assertEqual(
+                monitor.tree_model.data(wait.siblingAtColumn(3)),
+                "RUNNING",
             )
-            self.assertEqual(monitor.output_states.topLevelItem(0).text(1), "ON")
-            self.assertEqual(monitor.active_parameters.topLevelItem(0).text(2), "100 Hz")
-            self.assertEqual(monitor.active_parameters.topLevelItem(0).text(3), "APPLIED")
+            self.assertEqual(monitor.current_operation_phase.text(), "WAITING")
         finally:
             window.close()
             self.application.processEvents()
@@ -269,9 +215,9 @@ finally:
             self.assertGreater(page.builder_container.geometry().height(), 150)
             self.assertFalse(page.inspector_panel.isVisibleTo(window))
 
-            item = page.tree.topLevelItem(0)
-            self.assertIsNotNone(item)
-            page.tree.setCurrentItem(item)
+            item = page.tree_model.index(0, 0)
+            self.assertTrue(item.isValid())
+            page.measurement_tree.setCurrentIndex(item)
             self.application.processEvents()
             self.assertNotEqual(
                 page.selection_context.text(),
@@ -320,7 +266,7 @@ finally:
             self.assertIn("source current", page.current_operation_parameter.text().lower())
             self.assertIn("10 mA", page.current_operation_value.text())
             self.assertIn("0.01 A", page.current_operation_si.text())
-            self.assertGreaterEqual(page.steps.geometry().height(), 220)
+            self.assertGreaterEqual(page.measurement_tree.geometry().height(), 220)
             self.assertGreaterEqual(page.spectrum_preview.geometry().height(), 220)
             self.assertTrue(page._activity_pulse_timer.isActive())
             self.assertFalse(page.warnings.isVisible())
@@ -328,217 +274,113 @@ finally:
             page.close()
             self.application.processEvents()
 
-    def test_execution_tree_fallback_renders_plan_without_recipe_source(self) -> None:
+    def test_execution_without_semantic_snapshot_stays_empty(self) -> None:
         page = RunMonitorPage()
         try:
-            action = SimpleNamespace(
-                node_id="keithley-b-current",
-                kind="update_keithley_level",
-                is_finally=False,
-                setpoints_si={"keithley.B.current": 0.01},
-            )
-            page.run_started(2, 1.0, plan_actions=(action, action))
-            self.assertEqual(page.steps.topLevelItemCount(), 1)
-            item = page.steps.topLevelItem(0)
-            self.assertIn("keithley b current", item.text(0).lower())
-            self.assertIn("update keithley level", item.text(1).lower())
-            self.assertIn("0/2", item.text(2))
+            page.run_started(1, 1.0)
+            self.assertEqual(page.tree_model.rowCount(), 0)
+            self.assertFalse(hasattr(page, "steps"))
         finally:
             page.close()
             self.application.processEvents()
 
-    def test_execution_tree_fallback_keeps_sweep_children_inside_roi_loop(self) -> None:
-        """A source-only fallback must preserve the executable loop boundary."""
-
-        page = RunMonitorPage()
-        try:
-            source = """\
-schema_version: 1
-name: fallback-loop
-root:
-  id: root
-  type: sequence
-  children:
-    - id: current-sweep
-      type: sweep
-      target: keithley.B.current
-      start: "0 A"
-      stop: "1 mA"
-      points: 2
-      children:
-        - id: current-point
-          type: update_keithley_level
-          channel: B
-          mode: current
-          level: "${keithley.B.current}"
-"""
-            configure = SimpleNamespace(
-                node_id="current-sweep.configure",
-                kind="configure_keithley",
-                is_finally=False,
-                setpoints_si={"keithley.B.current": 0.0},
-            )
-            update = SimpleNamespace(
-                node_id="current-sweep.update-level",
-                kind="update_keithley_level",
-                is_finally=False,
-                setpoints_si={"keithley.B.current": 0.0},
-            )
-            page.run_started(
-                2,
-                1.0,
-                plan_actions=(configure, update),
-                recipe_source=source,
-            )
-
-            root = page.steps.topLevelItem(0)
-            sweep = root.child(0)
-            self.assertIn("sweep", sweep.text(0).lower())
-            loop = next(
-                sweep.child(index)
-                for index in range(sweep.childCount())
-                if sweep.child(index).text(0) == "For each ROI point"
-            )
-            self.assertEqual(loop.childCount(), 3)
-            current = loop.child(0)
-            self.assertEqual(current.text(0), "Current ROI point")
-            self.assertEqual(loop.child(1).data(0, Qt.ItemDataRole.UserRole), "current-point")
-            generated = page._step_items["current-sweep.update-level"]
-            self.assertIs(generated.parent(), loop)
-        finally:
-            page.close()
-            self.application.processEvents()
-
-    def test_execution_tree_projects_generated_device_actions_into_their_loop(self) -> None:
-        """Compiler-generated per-point IDs must never become flat top-level rows."""
-
+    def test_execution_tree_never_projects_technical_action_ids(self) -> None:
         window = MainWindow(".config/settings.yml", simulation=True)
         try:
             source = (Path(__file__).parents[1] / "recipes" / "untitled_sweep.yml").read_text(
                 encoding="utf-8"
             )
-            plan = RecipeCompiler(window._settings).compile(parse_recipe_text(source))
-            snapshot = window.recipe_page.execution_tree_snapshot(source, plan)
+            recipe = parse_recipe_text(source)
+            plan = RecipeCompiler(window._settings).compile(recipe)
+            snapshot = normalize_recipe_tree(
+                recipe, built_in_device_registry().sweep_providers()
+            )
             monitor = window.run_monitor
             monitor.run_started(
                 len(plan.actions),
                 1.0,
                 plan_actions=plan.actions,
                 recipe_source=source,
-                recipe_tree_items=snapshot,
+                semantic_tree=snapshot,
             )
 
-            def find_item(item, value):
-                raw = item.data(0, Qt.ItemDataRole.UserRole)
-                if raw == value or getattr(raw, "id", None) == value:
-                    return item
-                for index in range(item.childCount()):
-                    found = find_item(item.child(index), value)
-                    if found is not None:
-                        return found
-                return None
-
-            update = find_item(monitor.steps.topLevelItem(0), "keithley-81c50119.update-level")
-            settle = find_item(monitor.steps.topLevelItem(0), "keithley-81c50119.settle")
-            configure = find_item(monitor.steps.topLevelItem(0), "keithley-81c50119.configure")
-            output_off = find_item(monitor.steps.topLevelItem(0), "keithley-81c50119.output-off")
-            self.assertIsNotNone(update)
-            self.assertIsNotNone(settle)
-            self.assertIsNotNone(configure)
-            self.assertIsNotNone(output_off)
-            self.assertEqual(update.parent().text(0), "For each ROI point")
-            self.assertIs(update.parent(), settle.parent())
-            self.assertIn("Keithley B", configure.parent().text(0))
-            self.assertNotEqual(configure.parent().text(0), "For each ROI point")
-            self.assertIs(output_off.parent(), configure.parent())
-            self.assertEqual(monitor.steps.topLevelItemCount(), 2)
-
-            monitor.append_event(
-                "shutdown_action_started",
-                {"action": "keithley.outputs_off"},
+            semantic_ids = set(monitor.tree_model.tree.by_id)
+            self.assertIn(
+                "keithley-81c50119.axis.source-level.set-roi-value",
+                semantic_ids,
             )
-            shutdown = monitor._step_items["shutdown:keithley.outputs_off"]
-            self.assertEqual(shutdown.parent().text(0), "Finally — safe shutdown")
-            self.assertEqual(monitor.steps.topLevelItemCount(), 2)
-
-            monitor.append_event(
-                "action_started",
-                {
-                    "node_id": "keithley-81c50119.update-level",
-                    "kind": "update_keithley_level",
-                    "setpoints_si": {"keithley.B.current": 0.001},
-                },
+            self.assertFalse(
+                any("update-level" in semantic_id for semantic_id in semantic_ids)
             )
-            self.assertEqual(update.text(2), "RUNNING")
-            monitor.append_event(
-                "action_finished",
-                {
-                    "node_id": "keithley-81c50119.update-level",
-                    "kind": "update_keithley_level",
-                },
-            )
-            monitor._step_visual_timer.stop()
-            monitor._flush_step_visual()
-            self.assertIn("1/9", update.text(2))
+            self.assertFalse(hasattr(monitor, "_step_items"))
+            self.assertFalse(hasattr(monitor, "steps"))
         finally:
             window.close()
             self.application.processEvents()
 
-    def test_execution_tree_shows_current_roi_setpoints_inside_loop(self) -> None:
-        """The active ROI row exposes the current SI setpoint in the loop."""
-
+    def test_execution_tree_shows_current_roi_value_and_progress(self) -> None:
         window = MainWindow(".config/settings.yml", simulation=True)
         try:
-            window.resize(1360, 880)
-            window.show()
-            window._navigate_to("execution")
-            self.application.processEvents()
             source = (Path(__file__).parents[1] / "recipes" / "untitled_sweep.yml").read_text(
                 encoding="utf-8"
             )
-            plan = RecipeCompiler(window._settings).compile(parse_recipe_text(source))
+            recipe = parse_recipe_text(source)
+            plan = RecipeCompiler(window._settings).compile(recipe)
+            snapshot = normalize_recipe_tree(
+                recipe, built_in_device_registry().sweep_providers()
+            )
             monitor = window.run_monitor
             monitor.run_started(
                 len(plan.actions),
                 1.0,
                 plan_actions=plan.actions,
                 recipe_source=source,
-                recipe_tree_items=window.recipe_page.execution_tree_snapshot(source, plan),
+                semantic_tree=snapshot,
             )
+            semantic_id = next(
+                action.semantic_id
+                for action in plan.actions
+                if action.semantic_id and action.kind == "update_keithley_level"
+            )
+            action = next(
+                action
+                for action in plan.actions
+                if action.semantic_id == semantic_id and action.axis_context is not None
+            )
+            context = action.axis_context
+            assert context is not None
+            monitor.queue_semantic_state(
+                SemanticOperationState(
+                    semantic_id,
+                    "running",
+                    0.0033333333333333335,
+                    None,
+                    None,
+                    None,
+                    20,
+                    len(plan.actions),
+                    AxisPointContext(
+                        context.axis_id,
+                        3,
+                        context.point_count,
+                        context.stage_index,
+                        0.0033333333333333335,
+                        {"keithley.B.current": 0.0033333333333333335},
+                        context.loop_path,
+                    ),
+                    action.kind,
+                    "keithley",
+                    "B",
+                )
+            )
+            monitor.flush_semantic_states()
 
-            update = monitor._step_items["keithley-81c50119.update-level"]
-            loop = update.parent()
-            self.assertTrue(monitor.steps.isVisibleTo(window))
-            current = next(
-                loop.child(index)
-                for index in range(loop.childCount())
-                if loop.child(index).text(0) == "Current ROI point"
-            )
-            self.assertIn("Waiting", current.text(1))
-
-            monitor.append_event(
-                "action_started",
-                {
-                    "node_id": "keithley-81c50119.update-level",
-                    "kind": "update_keithley_level",
-                    "action_index": 20,
-                    "setpoints_si": {"keithley.B.current": 0.0033333333333333335},
-                },
-            )
-            self.assertIn("keithley.B.current", current.text(1))
-            self.assertIn("3.333", current.text(1))
-            self.assertIn("ACTIVE", current.text(2))
-            self.assertIn("SI 0.00333333 A", current.toolTip(0))
-
-            monitor.append_event(
-                "point_stored",
-                {
-                    "point_index": 2,
-                    "stored_points": 3,
-                    "setpoints_si": {"keithley.B.current": 0.0033333333333333335},
-                },
-            )
-            self.assertIn("POINT 3", current.text(2))
+            axis_id = semantic_id.removesuffix(".set-roi-value")
+            axis = monitor.tree_model.index_for_semantic_id(axis_id)
+            self.assertIn("3.333", monitor.tree_model.data(axis.siblingAtColumn(1)))
+            self.assertIn("4/", monitor.tree_model.data(axis.siblingAtColumn(2)))
+            self.assertIn("3.333", monitor.current_operation_value.text())
+            self.assertEqual(monitor.current_operation_state.text(), "SETTING")
         finally:
             window.close()
             self.application.processEvents()
@@ -585,6 +427,36 @@ root:
             self.assertEqual(projected.call_args.args[0], "action_finished")
         finally:
             window._run_controller._thread = None
+            window.close()
+            self.application.processEvents()
+
+    def test_unchanged_runner_snapshot_repaints_only_the_active_device_page(self) -> None:
+        """A point update must not relayout every hidden instrument form."""
+
+        window = MainWindow(".config/settings.yml", simulation=True)
+        try:
+            projections: dict[str, Mock] = {}
+            for module_key, page in window._device_pages.items():
+                projection = Mock()
+                page.apply_execution_event = projection  # type: ignore[method-assign]
+                projections[module_key] = projection
+            payload = {
+                "kind": "update_keithley_level",
+                "state_snapshot": {"device_states": {}, "output_status": {}},
+            }
+
+            window._apply_runner_device_readback("action_started", payload)
+            window._apply_runner_device_readback("action_finished", payload)
+
+            self.assertEqual(projections["keithley"].call_count, 2)
+            self.assertTrue(
+                all(
+                    projection.call_count == 1
+                    for module_key, projection in projections.items()
+                    if module_key != "keithley"
+                )
+            )
+        finally:
             window.close()
             self.application.processEvents()
 
@@ -663,7 +535,7 @@ root:
             self.assertFalse(page.path.isEnabled())
             self.assertTrue(page.editor.isReadOnly())
             self.assertTrue(page.library_panel.isEnabled())
-            self.assertTrue(page.tree.isVisibleTo(window))
+            self.assertTrue(page.measurement_tree.isVisibleTo(window))
 
             window._set_run_ui_locked(False)
             self.application.processEvents()
@@ -743,13 +615,13 @@ root:
             window._set_theme_mode("light", persist=False)
             self.application.processEvents()
             light_library = page.library_panel.viewport().grab().toImage().pixelColor(8, 8)
-            light_tree = page.tree.viewport().grab().toImage().pixelColor(8, 8)
+            light_tree = page.measurement_tree.viewport().grab().toImage().pixelColor(8, 8)
             light_dialog = dialog.grab().toImage().pixelColor(8, 8)
 
             window._set_theme_mode("dark", persist=False)
             self.application.processEvents()
             dark_library = page.library_panel.viewport().grab().toImage().pixelColor(8, 8)
-            dark_tree = page.tree.viewport().grab().toImage().pixelColor(8, 8)
+            dark_tree = page.measurement_tree.viewport().grab().toImage().pixelColor(8, 8)
             dark_dialog = dialog.grab().toImage().pixelColor(8, 8)
 
             self.assertNotEqual(light_library.name(), dark_library.name())
@@ -780,10 +652,10 @@ root:
             self.assertIsInstance(page.monitor_card, CardWidget)
             self.assertIsInstance(page.pause_button, PushButton)
             self.assertIsInstance(page.stop_button, PrimaryPushButton)
-            self.assertIsInstance(page.steps, TreeWidget)
+            self.assertIsInstance(page.measurement_tree, MeasurementTreeView)
             self.assertTrue(page.stop_button.isVisibleTo(window))
-            self.assertTrue(page.steps.isVisibleTo(window))
-            self.assertGreater(page.steps.geometry().height(), 120)
+            self.assertTrue(page.measurement_tree.isVisibleTo(window))
+            self.assertGreater(page.measurement_tree.geometry().height(), 120)
             page.run_started(
                 1,
                 1.0,
