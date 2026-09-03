@@ -155,6 +155,19 @@ def test_model_replace_tree_is_explicit_and_flags_generated_row_read_only() -> N
     assert model.data(index, MeasurementTreeRole.EDITABLE) is False
 
 
+def test_authored_rows_keep_modal_edit_capability_without_inline_qt_editing() -> None:
+    from app.ui.measurement_tree import MeasurementTreeModel, MeasurementTreeRole
+
+    model = MeasurementTreeModel(semantic_tree())
+    axis = model.index_for_semantic_id("axis-current")
+
+    # The semantic capability remains available to the recipe page's modal
+    # dispatch, but the presentation model must never advertise a text editor
+    # for derived labels.
+    assert model.data(axis, MeasurementTreeRole.EDITABLE) is True
+    assert not model.flags(axis) & Qt.ItemFlag.ItemIsEditable
+
+
 def test_empty_sequence_advertises_an_insertion_target() -> None:
     from app.ui.measurement_tree import MeasurementTreeModel, MeasurementTreeRole
 
@@ -192,6 +205,7 @@ def test_unknown_runtime_state_emits_one_diagnostic_without_prefix_attachment() 
 def test_measurement_tree_is_fluent_model_view() -> None:
     import qfluentwidgets
     from app.ui.measurement_tree import MeasurementTreeModel, MeasurementTreeView
+    from PySide6.QtWidgets import QAbstractItemView
 
     app = QApplication.instance() or QApplication([])
     view = MeasurementTreeView()
@@ -204,6 +218,7 @@ def test_measurement_tree_is_fluent_model_view() -> None:
     assert view.indentation() == 24
     assert view.iconSize() == QSize(18, 18)
     assert view.sizeHintForRow(0) >= 34
+    assert view.editTriggers() == QAbstractItemView.EditTrigger.NoEditTriggers
     view.close()
     del app
 

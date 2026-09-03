@@ -28,6 +28,7 @@ from app.recipes import (
     RecipeNode,
     parse_recipe_text,
 )
+from app.recipes.semantic_tree import SemanticNodeKind
 from app.devices.anritsu_ms2830a.ui import (
     AnritsuAdvancedSpectrumPanel,
     AnritsuNodeEditorDialog,
@@ -136,6 +137,43 @@ class RecipeBuilderTests(unittest.TestCase):
             self.assertEqual(page.load_recipe_action.text(), "Load recipe")
             self.assertEqual(page.open_hdf5_action.text(), "Open HDF5 result")
             self.assertEqual(page.tree_model.data(page.tree_model.index(0, 0)), "Measurement sequence")
+        finally:
+            page._close_discard_confirmed = True
+            page.close()
+
+    def test_tree_activation_routes_to_modal_editors_and_not_inline_labels(self) -> None:
+        page = RecipePage(simulation_settings())
+        try:
+            from PySide6.QtWidgets import QAbstractItemView
+
+            self.assertEqual(
+                page.measurement_tree.editTriggers(),
+                QAbstractItemView.EditTrigger.NoEditTriggers,
+            )
+
+            axis_id = next(
+                node.semantic_id
+                for node in page.tree_model.tree.by_id.values()
+                if node.kind is SemanticNodeKind.SWEEP_AXIS
+            )
+            wait_id = next(
+                node.semantic_id
+                for node in page.tree_model.tree.by_id.values()
+                if node.kind is SemanticNodeKind.ACTION
+                and node.label.lower().startswith("wait")
+            )
+            axis_index = page.tree_model.index_for_semantic_id(axis_id)
+            self.assertFalse(
+                page.tree_model.flags(axis_index) & Qt.ItemFlag.ItemIsEditable
+            )
+
+            with patch.object(page, "_edit_selected_roi") as edit_roi:
+                page.measurement_tree.semantic_activated.emit(axis_id)
+                edit_roi.assert_called_once_with()
+
+            with patch.object(page, "_edit_selected_node") as edit_node:
+                page.measurement_tree.semantic_activated.emit(wait_id)
+                edit_node.assert_called_once_with()
         finally:
             page._close_discard_confirmed = True
             page.close()

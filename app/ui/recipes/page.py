@@ -666,7 +666,9 @@ class RecipePage(QWidget):
         self.measurement_tree.setModel(self.tree_model)
         self.measurement_tree.set_interaction_mode(TreeInteractionMode.EDITABLE)
         self.measurement_tree.semantic_selected.connect(self._select_semantic_node)
-        self.measurement_tree.semantic_activated.connect(self._select_semantic_node)
+        self.measurement_tree.semantic_activated.connect(
+            self._activate_semantic_node
+        )
         self.measurement_tree.move_requested.connect(
             self._handle_semantic_tree_move_request
         )
@@ -1860,6 +1862,34 @@ class RecipePage(QWidget):
         self._selected_source_node_id = node.source_node_id
         self._node_selected()
 
+    def _activate_semantic_node(self, semantic_id: str) -> None:
+        """Open the modal editor represented by an activated tree row.
+
+        The shared tree contains both authored recipe rows and generated sweep
+        structure.  A sweep axis and its generated ``Set ROI value`` operation
+        both point at the owning recipe node; they must route directly to the
+        ROI editor even when that owner is a device-module node (which would
+        otherwise select the broader device-settings editor).  All other
+        authored rows use the normal type-specific editor dispatch.
+        """
+
+        # Execution and historical views intentionally remain inspect-only;
+        # activation must never bypass that transaction/safety boundary.
+        if not self._tree_editing_allowed():
+            return
+        self._select_semantic_node(semantic_id)
+        try:
+            semantic = self.tree_model.tree.require(semantic_id)
+        except ConfigurationError:
+            return
+        if semantic.kind in {
+            SemanticNodeKind.SWEEP_AXIS,
+            SemanticNodeKind.SET_ROI_VALUE,
+        }:
+            self._edit_selected_roi()
+            return
+        self._edit_selected_node()
+
     def _recipe_node_locations(
         self,
     ) -> dict[str, tuple[RecipeNode, str | None, str, int, bool]]:
@@ -2031,7 +2061,9 @@ class RecipePage(QWidget):
             self.measurement_tree.setToolTip(
                 "Drag a non-root node to reorder it or place it inside Sequence, "
                 "Sweep, Repeat or If. The complete YAML is validated before the "
-                "view changes; nodes cannot cross the Finally boundary."
+                "view changes; nodes cannot cross the Finally boundary. "
+                "Select a row, then double-click or press Enter to open its "
+                "device, ROI, WAIT or action editor; labels are not edited inline."
             )
         elif self._execution_controlled:
             self.measurement_tree.setToolTip(

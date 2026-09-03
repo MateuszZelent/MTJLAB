@@ -357,8 +357,12 @@ class MeasurementTreeModel(QAbstractItemModel):
         if not isinstance(ref, _NodeRef):
             return Qt.ItemFlag.NoItemFlags
         flags = Qt.ItemFlag.ItemIsEnabled | Qt.ItemFlag.ItemIsSelectable
-        if ref.node.editable and not self._read_only:
-            flags |= Qt.ItemFlag.ItemIsEditable
+        # ``editable`` is a semantic capability used by the recipe page to
+        # enable modal editors.  It is deliberately not exposed as
+        # ItemIsEditable: labels are derived presentation text and the model
+        # has no inline ``setData`` transaction.  Advertising the Qt editing
+        # flag would let a platform style open a text editor for a name and
+        # silently bypass the ROI/device/WAIT validation dialogs.
         if ref.node.draggable and not self._read_only:
             flags |= Qt.ItemFlag.ItemIsDragEnabled
         if (

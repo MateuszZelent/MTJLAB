@@ -76,6 +76,14 @@ class MeasurementTreeView(TreeView):
         self.setRootIsDecorated(True)
         self.setItemsExpandable(True)
         self.setExpandsOnDoubleClick(False)
+        # Recipe rows are semantic projections, not an inline text editor.
+        # Their labels are derived from the authored YAML and must only be
+        # changed through the type-specific modal (ROI, device, WAIT, action,
+        # ...).  QTreeView's default edit triggers include a double click and
+        # can also include a selected click depending on the platform style;
+        # leaving them enabled exposes a misleading line editor which cannot
+        # commit a safe recipe transaction.
+        self.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
         self.setSelectionBehavior(self.SelectionBehavior.SelectRows)
         self.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
         self.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
