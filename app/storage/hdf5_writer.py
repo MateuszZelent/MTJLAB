@@ -108,6 +108,8 @@ class Hdf5RunWriter:
             data=json.dumps(self._serializable(operator_context or {}), sort_keys=True),
             dtype=h5py.string_dtype("utf-8"),
         )
+        if operator_context and isinstance(operator_context, dict) and "username" in operator_context:
+            run.attrs["operator"] = str(operator_context["username"])
         run.create_dataset(
             "simulation_json",
             data=json.dumps(self._serializable(simulation_metadata or {"enabled": False}), sort_keys=True),

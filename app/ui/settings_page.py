@@ -232,6 +232,7 @@ class SettingsPage(QWidget):
     def _build(self) -> None:
         self.setProperty("stationSurface", "page")
         self.setObjectName("settingsPage")
+        self.owns_viewport = True
         layout = QVBoxLayout(self)
         layout.setContentsMargins(16, 14, 16, 16)
         layout.setSpacing(12)

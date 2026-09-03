@@ -1239,12 +1239,14 @@ root:
             self.assertTrue(page.delete_node_button.isEnabled())
             self.assertTrue(page.duplicate_node_button.isEnabled())
             self.assertTrue(page.move_up_button.isEnabled())
-            self.assertTrue(page.move_down_button.isEnabled())
+            self.assertFalse(page.move_down_button.isEnabled())
             self.assertTrue(page.wrap_repeat_button.isEnabled())
 
             page.move_up_button.click()
             moved = parse_recipe_text(page.editor.toPlainText())
             self.assertEqual([node.id for node in moved.root.children], ["second", "first"])
+            self.assertFalse(page.move_up_button.isEnabled())
+            self.assertTrue(page.move_down_button.isEnabled())
 
             page.duplicate_node_button.click()
             duplicated = parse_recipe_text(page.editor.toPlainText())
@@ -1884,7 +1886,7 @@ root:
     def test_node_library_filters_actions_and_adds_a_tree_node(self) -> None:
         page = RecipePage(simulation_settings())
         try:
-            self.assertEqual(len(page._library_action_buttons), 24)
+            self.assertEqual(len(page._library_action_buttons), 25)
             page.library_search.setText("spectrum analyzer")
             visible = [button.text() for button in page._library_action_buttons if not button.isHidden()]
             self.assertEqual(
@@ -2405,6 +2407,7 @@ finally: []
                     "Acquire spectrum · Anritsu",
                     "Wait · 2 s",
                     "Finally — safe shutdown",
+                    "Keithley B · OUTPUT OFF",
                 ],
             )
         finally:
@@ -2455,6 +2458,295 @@ finally: []
             page._close_discard_confirmed = True
             page.close()
 
+    def test_dry_run_execution_mode_automatically_switches_outputs_to_disabled_in_sweeps_tree(self) -> None:
+        from app.ui.design_system.tokens import tokens_for
+        from qfluentwidgets import isDarkTheme
+        from PySide6.QtGui import QBrush, QColor
+
+        recipe_yaml = """\
+schema_version: 1
+name: Output Dry Run Test
+root:
+  id: sequence-main
+  type: sequence
+  children:
+  - id: keithley-cfg
+    type: sequence
+    device_module: keithley
+    operation: configure_selected_parameters
+    configuration:
+      channel: B
+      source_mode: current
+      level: 1 mA
+    output_policy: on
+  - id: standalone-rigol-on
+    type: set_rigol_output
+    channel: 1
+    enabled: true
+  - id: standalone-keithley-off
+    type: set_keithley_output
+    channel: B
+    enabled: false
+finally:
+- id: final-rigol-off
+  type: set_rigol_output
+  channel: 1
+  enabled: false
+"""
+        page = RecipePage(simulation_settings())
+        try:
+            page._apply_builder_source(recipe_yaml, "Load test recipe")
+            self.application.processEvents()
+
+            # 1. Default mode: measurement
+            self.assertEqual(page.execution_mode.currentData(), "measurement")
+            self.assertFalse(page.tree_model.outputs_forced_off)
+
+            k_on_idx = page.tree_model.index_for_semantic_id("keithley-cfg.output-on")
+            rg_on_idx = page.tree_model.index_for_semantic_id("standalone-rigol-on")
+            k_off_idx = page.tree_model.index_for_semantic_id("standalone-keithley-off")
+            fin_idx = page.tree_model.index_for_semantic_id("final-rigol-off")
+
+            self.assertTrue(k_on_idx.isValid())
+            self.assertTrue(rg_on_idx.isValid())
+
+            # Measurement mode values
+            self.assertEqual(page.tree_model.data(k_on_idx.siblingAtColumn(1)), "ON")
+            self.assertEqual(page.tree_model.data(k_on_idx.siblingAtColumn(3)), "READY")
+            self.assertEqual(page.tree_model.data(rg_on_idx.siblingAtColumn(1)), "ON")
+            self.assertEqual(page.tree_model.data(rg_on_idx.siblingAtColumn(3)), "READY")
+
+            # 2. Select Dry Run mode
+            page.execution_mode.setCurrentIndex(1)  # dry_run
+            self.application.processEvents()
+            self.assertEqual(page.execution_mode.currentData(), "dry_run")
+            self.assertTrue(page.tree_model.outputs_forced_off)
+
+            # Outputs in tree automatically switch to DISABLED and OFF (dry run)
+            tokens = tokens_for("dark" if isDarkTheme() else "light")
+            muted = QBrush(QColor(tokens.text_muted))
+
+            self.assertEqual(page.tree_model.data(k_on_idx.siblingAtColumn(1)), "OFF (dry run)")
+            self.assertEqual(page.tree_model.data(k_on_idx.siblingAtColumn(3)), "DISABLED")
+            self.assertEqual(page.tree_model.data(k_on_idx, Qt.ItemDataRole.ForegroundRole), muted)
+
+            self.assertEqual(page.tree_model.data(rg_on_idx.siblingAtColumn(1)), "OFF (dry run)")
+            self.assertEqual(page.tree_model.data(rg_on_idx.siblingAtColumn(3)), "DISABLED")
+            self.assertEqual(page.tree_model.data(rg_on_idx, Qt.ItemDataRole.ForegroundRole), muted)
+
+            # Non-energizing output actions and Finally must NOT be disabled
+            self.assertEqual(page.tree_model.data(k_off_idx.siblingAtColumn(1)), "OFF")
+            self.assertEqual(page.tree_model.data(k_off_idx.siblingAtColumn(3)), "READY")
+            self.assertEqual(page.tree_model.data(fin_idx.siblingAtColumn(1)), "OFF")
+
+            # 3. Switch back to measurement mode
+            page.execution_mode.setCurrentIndex(0)  # measurement
+            self.application.processEvents()
+            self.assertEqual(page.execution_mode.currentData(), "measurement")
+            self.assertFalse(page.tree_model.outputs_forced_off)
+
+            self.assertEqual(page.tree_model.data(k_on_idx.siblingAtColumn(1)), "ON")
+            self.assertEqual(page.tree_model.data(k_on_idx.siblingAtColumn(3)), "READY")
+            self.assertEqual(page.tree_model.data(rg_on_idx.siblingAtColumn(1)), "ON")
+            self.assertEqual(page.tree_model.data(rg_on_idx.siblingAtColumn(3)), "READY")
+        finally:
+            page._close_discard_confirmed = True
+            page.close()
+
+    def test_toolbar_buttons_dynamic_safeguarding_for_all_node_types(self) -> None:
+        page = RecipePage(simulation_settings())
+        try:
+            # 1. Selection cleared / empty: all action buttons disabled
+            page._select_semantic_node("")
+            self.assertFalse(page.edit_device_button.isEnabled())
+            self.assertFalse(page.edit_generator_button.isEnabled())
+            self.assertFalse(page.delete_node_button.isEnabled())
+            self.assertFalse(page.duplicate_node_button.isEnabled())
+            self.assertFalse(page.move_up_button.isEnabled())
+            self.assertFalse(page.move_down_button.isEnabled())
+            self.assertFalse(page.wrap_repeat_button.isEnabled())
+
+            # 2. Root sequence node: movable=False, delete=False, dup=False, dev=False, roi=False
+            page._select_semantic_node("sequence-main")
+            self.assertFalse(page.edit_device_button.isEnabled())
+            self.assertFalse(page.edit_generator_button.isEnabled())
+            self.assertFalse(page.delete_node_button.isEnabled())
+            self.assertFalse(page.duplicate_node_button.isEnabled())
+            self.assertFalse(page.move_up_button.isEnabled())
+            self.assertFalse(page.move_down_button.isEnabled())
+            self.assertTrue(page.wrap_repeat_button.isEnabled())
+
+            # 3. Fixed instrument configuration node (anritsu-spectrum-setup)
+            # at top of root children (index 0 of 2): up=False, down=True, dev=True, roi=False
+            page._select_semantic_node("anritsu-spectrum-setup")
+            self.assertTrue(page.edit_device_button.isEnabled())
+            self.assertFalse(page.edit_generator_button.isEnabled())
+            self.assertTrue(page.delete_node_button.isEnabled())
+            self.assertTrue(page.duplicate_node_button.isEnabled())
+            self.assertFalse(page.move_up_button.isEnabled())
+            self.assertTrue(page.move_down_button.isEnabled())
+
+            # 4. Wait node (wait-for-settle): dev=False, roi=False, delete=True, dup=True
+            # middle child (index 1 of 4): up=True, down=True
+            page._select_semantic_node("wait-for-settle")
+            self.assertFalse(page.edit_device_button.isEnabled())
+            self.assertFalse(page.edit_generator_button.isEnabled())
+            self.assertTrue(page.delete_node_button.isEnabled())
+            self.assertTrue(page.duplicate_node_button.isEnabled())
+            self.assertTrue(page.move_up_button.isEnabled())
+            self.assertTrue(page.move_down_button.isEnabled())
+
+            # 5. Sweep node (keithley-current-sweep): roi=True, dev=True (contains configure)
+            # at bottom of root children (index 1 of 2): up=True, down=False
+            page._select_semantic_node("keithley-current-sweep")
+            self.assertTrue(page.edit_device_button.isEnabled())
+            self.assertTrue(page.edit_generator_button.isEnabled())
+            self.assertTrue(page.delete_node_button.isEnabled())
+            self.assertTrue(page.duplicate_node_button.isEnabled())
+            self.assertTrue(page.move_up_button.isEnabled())
+            self.assertFalse(page.move_down_button.isEnabled())
+
+            # 6. Generated SET_ROI_VALUE row: roi=True, dev=False, del=False, dup=False, up=False, down=False
+            page._select_semantic_node("keithley-current-sweep.set-roi-value")
+            self.assertFalse(page.edit_device_button.isEnabled())
+            self.assertTrue(page.edit_generator_button.isEnabled())
+            self.assertFalse(page.delete_node_button.isEnabled())
+            self.assertFalse(page.duplicate_node_button.isEnabled())
+            self.assertFalse(page.move_up_button.isEnabled())
+            self.assertFalse(page.move_down_button.isEnabled())
+            self.assertFalse(page.wrap_repeat_button.isEnabled())
+
+            # 7. Generated LOOP_BODY row: all buttons disabled
+            page._select_semantic_node("keithley-current-sweep.loop")
+            self.assertFalse(page.edit_device_button.isEnabled())
+            self.assertFalse(page.edit_generator_button.isEnabled())
+            self.assertFalse(page.delete_node_button.isEnabled())
+            self.assertFalse(page.duplicate_node_button.isEnabled())
+            self.assertFalse(page.move_up_button.isEnabled())
+            self.assertFalse(page.move_down_button.isEnabled())
+            self.assertFalse(page.wrap_repeat_button.isEnabled())
+
+            # 8. Finally section header (__finally__): all buttons disabled
+            page._select_semantic_node("__finally__")
+            self.assertFalse(page.edit_device_button.isEnabled())
+            self.assertFalse(page.edit_generator_button.isEnabled())
+            self.assertFalse(page.delete_node_button.isEnabled())
+            self.assertFalse(page.duplicate_node_button.isEnabled())
+            self.assertFalse(page.move_up_button.isEnabled())
+            self.assertFalse(page.move_down_button.isEnabled())
+            self.assertFalse(page.wrap_repeat_button.isEnabled())
+
+            # 9. First action in finally (rigol-ch1-off-finally): up=False, down=True
+            page._select_semantic_node("rigol-ch1-off-finally")
+            self.assertFalse(page.edit_device_button.isEnabled())
+            self.assertFalse(page.edit_generator_button.isEnabled())
+            self.assertTrue(page.delete_node_button.isEnabled())
+            self.assertTrue(page.duplicate_node_button.isEnabled())
+            self.assertFalse(page.move_up_button.isEnabled())
+            self.assertTrue(page.move_down_button.isEnabled())
+
+            # 10. Last action in finally (keithley-b-off-finally): up=True, down=False
+            page._select_semantic_node("keithley-b-off-finally")
+            self.assertFalse(page.edit_device_button.isEnabled())
+            self.assertFalse(page.edit_generator_button.isEnabled())
+            self.assertTrue(page.delete_node_button.isEnabled())
+            self.assertTrue(page.duplicate_node_button.isEnabled())
+            self.assertTrue(page.move_up_button.isEnabled())
+            self.assertFalse(page.move_down_button.isEnabled())
+        finally:
+            page._close_discard_confirmed = True
+            page.close()
+
+    def test_up_and_down_buttons_disabled_at_branch_boundaries_and_updated_after_move(self) -> None:
+        recipe_yaml = """\
+schema_version: 1
+name: Boundary Movement Test
+root:
+  id: sequence-main
+  type: sequence
+  children:
+    - id: step-one
+      type: wait
+      duration: 10 ms
+    - id: step-two
+      type: wait
+      duration: 20 ms
+    - id: step-three
+      type: wait
+      duration: 30 ms
+"""
+        page = RecipePage(simulation_settings())
+        try:
+            page.editor.setPlainText(recipe_yaml)
+            page.apply_yaml_to_tree()
+
+            # Sibling at index 0 (step-one): Up=False, Down=True
+            page._select_semantic_node("step-one")
+            self.assertFalse(page.move_up_button.isEnabled())
+            self.assertTrue(page.move_down_button.isEnabled())
+            self.assertIn("already at the top", page.move_up_button.toolTip())
+
+            # Sibling at index 1 (step-two): Up=True, Down=True
+            page._select_semantic_node("step-two")
+            self.assertTrue(page.move_up_button.isEnabled())
+            self.assertTrue(page.move_down_button.isEnabled())
+
+            # Sibling at index 2 (step-three): Up=True, Down=False
+            page._select_semantic_node("step-three")
+            self.assertTrue(page.move_up_button.isEnabled())
+            self.assertFalse(page.move_down_button.isEnabled())
+            self.assertIn("already at the bottom", page.move_down_button.toolTip())
+
+            # Move step-three UP by 1: now at index 1 -> Up=True, Down=True
+            page._move_selected_sibling(-1)
+            self.assertEqual(page._selected_source_node_id, "step-three")
+            idx, count = page._selected_node_sibling_bounds()
+            self.assertEqual(idx, 1)
+            self.assertEqual(count, 3)
+            self.assertTrue(page.move_up_button.isEnabled())
+            self.assertTrue(page.move_down_button.isEnabled())
+
+            # Move step-three UP again: now at index 0 -> Up=False, Down=True
+            page._move_selected_sibling(-1)
+            idx, count = page._selected_node_sibling_bounds()
+            self.assertEqual(idx, 0)
+            self.assertEqual(count, 3)
+            self.assertFalse(page.move_up_button.isEnabled())
+            self.assertTrue(page.move_down_button.isEnabled())
+            self.assertIn("already at the top", page.move_up_button.toolTip())
+
+            # Attempt to move UP beyond index 0: blocked, still index 0
+            page._move_selected_sibling(-1)
+            idx, count = page._selected_node_sibling_bounds()
+            self.assertEqual(idx, 0)
+            self.assertFalse(page.move_up_button.isEnabled())
+            self.assertTrue(page.move_down_button.isEnabled())
+
+            # Single child test: neither Up nor Down is enabled
+            single_child_yaml = """\
+schema_version: 1
+name: Single Child Test
+root:
+  id: sequence-main
+  type: sequence
+  children:
+    - id: only-child
+      type: wait
+      duration: 10 ms
+"""
+            page.editor.setPlainText(single_child_yaml)
+            page.apply_yaml_to_tree()
+            page._select_semantic_node("only-child")
+            idx, count = page._selected_node_sibling_bounds()
+            self.assertEqual(idx, 0)
+            self.assertEqual(count, 1)
+            self.assertFalse(page.move_up_button.isEnabled())
+            self.assertFalse(page.move_down_button.isEnabled())
+        finally:
+            page._close_discard_confirmed = True
+            page.close()
+
 
 if __name__ == "__main__":
     unittest.main()
+

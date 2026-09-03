@@ -44,6 +44,8 @@ ACTION_TYPES: Final[frozenset[str]] = frozenset(
         "acquire_spectrum",
         "wait",
         "comment",
+        "upload_to_elab",
+        "upload_elab",
     }
 )
 
@@ -207,6 +209,42 @@ def _parse_node(value: object, where: str) -> RecipeNode:
             raise ConfigurationError(f"{where}.operator is unsupported.")
     if kind == "connect" and raw.get("device") not in {"rigol", "keithley", "anritsu"}:
         raise ConfigurationError(f"{where}.device must identify rigol, keithley, or anritsu.")
+    if kind in {"upload_to_elab", "upload_elab"}:
+        template_id = raw.get("template_id")
+        if template_id not in (None, "", 0, "0"):
+            try:
+                tid = int(template_id)
+                if tid <= 0:
+                    raise ValueError
+                raw["template_id"] = tid
+            except (TypeError, ValueError) as exc:
+                raise ConfigurationError(
+                    f"{where}.template_id must be a positive integer."
+                ) from exc
+        title_pattern = raw.get("title_pattern")
+        if title_pattern is not None:
+            if not isinstance(title_pattern, str) or not title_pattern.strip():
+                raise ConfigurationError(
+                    f"{where}.title_pattern must be non-empty text when specified."
+                )
+            try:
+                title_pattern.format_map(
+                    {"run_name": "example", "status": "completed", "created_at": "2026-01-01T00:00:00Z"}
+                )
+            except (KeyError, ValueError) as exc:
+                raise ConfigurationError(
+                    f"{where}.title_pattern may use only {{run_name}}, {{status}} and {{created_at}}."
+                ) from exc
+        tags = raw.get("tags")
+        if tags is not None:
+            if isinstance(tags, str):
+                raw["tags"] = [t.strip() for t in tags.split(",") if t.strip()]
+            elif isinstance(tags, (list, tuple)):
+                raw["tags"] = [str(t).strip() for t in tags if str(t).strip()]
+            else:
+                raise ConfigurationError(f"{where}.tags must be a list or comma-separated string.")
+        if raw.get("attach_hdf5") is False and raw.get("attach_csv") is False:
+            raise ConfigurationError(f"{where}: at least one of attach_hdf5 or attach_csv must be enabled.")
     return RecipeNode(
         id=node_id,
         type=kind,

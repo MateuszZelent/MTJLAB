@@ -1427,6 +1427,15 @@ class RecipeRunner:
                 )
         elif action.kind == "wait":
             self._interruptible_wait(payload["duration_s"])
+        elif action.kind in {"upload_to_elab", "upload_elab"}:
+            self._emit(
+                "elab_upload_scheduled",
+                {
+                    "node_id": action.node_id,
+                    "template_id": payload.get("template_id"),
+                    "template_name": payload.get("template_name"),
+                },
+            )
         else:
             raise ExecutionError(f"The runner does not support action {action.kind!r}.")
         return None

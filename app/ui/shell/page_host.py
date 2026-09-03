@@ -6,17 +6,29 @@ from qfluentwidgets import ScrollArea
 
 
 class FluentPageHost(QWidget):
-    def __init__(self, content: QWidget, parent: QWidget | None = None) -> None:
+    def __init__(
+        self,
+        content: QWidget,
+        parent: QWidget | None = None,
+        *,
+        fill_viewport: bool | None = None,
+    ) -> None:
         super().__init__(parent)
         self.setObjectName("fluentPageHost")
         self.content = content
+        owns_viewport = (
+            fill_viewport
+            if fill_viewport is not None
+            else getattr(content, "owns_viewport", False)
+        )
         # Ignore desktop-oriented width hints so every page is laid out at the
-        # actual Fluent viewport width. Height hints remain authoritative for
-        # normal vertical scrolling.
+        # actual Fluent viewport width. Workspace pages expand vertically to fill
+        # the available viewport so internal splitters and trees own scrolling;
+        # document pages retain their preferred height for natural scrolling.
         content.setMinimumWidth(0)
         content.setSizePolicy(
             QSizePolicy.Policy.Ignored,
-            QSizePolicy.Policy.Preferred,
+            QSizePolicy.Policy.Expanding if owns_viewport else QSizePolicy.Policy.Preferred,
         )
         self.scroll_area = ScrollArea(self)
         self.scroll_area.setProperty("stationSurface", "page")

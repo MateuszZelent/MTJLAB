@@ -8,14 +8,14 @@ from pathlib import Path
 import numpy as np
 import pyqtgraph as pg
 from pyqtgraph.exporters import ImageExporter, SVGExporter
-from PySide6.QtCore import Signal
+from PySide6.QtCore import QEvent, Signal
 from PySide6.QtWidgets import (
     QHBoxLayout,
     QSizePolicy,
     QVBoxLayout,
     QWidget,
 )
-from qfluentwidgets import BodyLabel, TransparentPushButton
+from qfluentwidgets import BodyLabel, TransparentPushButton, isDarkTheme
 from app.ui.dialogs import StationFileDialog as QFileDialog
 
 from app.ui.design_system import plot_theme, tokens_for
@@ -42,7 +42,8 @@ class SpectrumPlotWidget(QWidget):
         self._marker_x: float | None = None
         self._x_label = "Frequency"
         self._x_unit = "Hz"
-        self._theme_name = "dark"
+        self._theme_name = "dark" if isDarkTheme() else "light"
+        self._user_curve_visibility: dict[str, bool] = {}
         self.toolbar_buttons: list[TransparentPushButton] = []
 
         root = QVBoxLayout(self)
@@ -206,17 +207,57 @@ class SpectrumPlotWidget(QWidget):
             curve.setSymbolSize(6)
             curve.setSymbolPen(pg.mkPen(color, width=1))
             curve.setSymbolBrush(pg.mkBrush(color))
-        curve.setVisible(visible)
+        effective_visible = self._user_curve_visibility.get(name, visible)
+        curve.setVisible(effective_visible)
+        self._sync_legend(name, curve, effective_visible)
         if primary or self._hold_source is None:
             self._hold_source = name
             self._update_holds(x_values, y_values)
 
+    def _sync_legend(self, name: str, curve: pg.PlotDataItem, visible: bool) -> None:
+        plot_item = self.plot.getPlotItem()
+        legend = plot_item.legend
+        if legend is None:
+            return
+        in_legend = any(label.text == name for _, label in tuple(legend.items))
+        if visible:
+            if not in_legend:
+                legend.addItem(curve, name)
+        else:
+            if in_legend:
+                legend.removeItem(name)
+        if len(legend.items) == 0:
+            legend.hide()
+        else:
+            legend.show()
+
+    def set_trace_visibility(self, name: str, visible: bool) -> None:
+        self._user_curve_visibility[name] = visible
+        curve = self._curves.get(name)
+        if curve is not None:
+            curve.setVisible(visible)
+            self._sync_legend(name, curve, visible)
+
+    def changeEvent(self, event: QEvent) -> None:  # noqa: N802 - Qt override
+        super().changeEvent(event)
+        if event.type() in {
+            QEvent.Type.ApplicationPaletteChange,
+            QEvent.Type.PaletteChange,
+            QEvent.Type.StyleChange,
+        }:
+            target_theme = "dark" if isDarkTheme() else "light"
+            if target_theme != self._theme_name:
+                self.apply_theme(target_theme)
+
     def clear_trace(self, name: str) -> None:
         self._traces.pop(name, None)
         self._token_owned_primary_curves.discard(name)
-        if name in self._curves:
-            self._curves[name].clear()
-            self._curves[name].hide()
+        curve = self._curves.get(name)
+        if curve is not None:
+            self._sync_legend(name, curve, False)
+            curve.clear()
+            curve.hide()
+            self._user_curve_visibility.pop(name, None)
 
     def trace_point_count(self, name: str) -> int:
         """Return the finite point count for GUI tests and status reporting."""
@@ -302,8 +343,11 @@ class SpectrumPlotWidget(QWidget):
             if name in self._curves and self._curves[name].isVisible()
         ]
         if not visible:
-            self.status_changed.emit("Reset unavailable: no visible finite trace data.")
-            return
+            if self._traces:
+                visible = list(self._traces.values())
+            else:
+                self.status_changed.emit("Reset unavailable: no visible finite trace data.")
+                return
         x_values = np.concatenate([data[0] for data in visible])
         y_values = np.concatenate([data[1] for data in visible])
         if not x_values.size or not y_values.size:

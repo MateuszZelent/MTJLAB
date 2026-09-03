@@ -78,6 +78,7 @@ class ExecutionPlan:
     total_spectra: int = 0
     safe_shutdown_actions: tuple[str, ...] = ()
     recipe_dut_limits: dict[str, Any] = field(default_factory=dict)
+    elab_upload_config: dict[str, Any] | None = None
 
 
 def required_devices_for_actions(actions: Iterable[PlanAction]) -> frozenset[str]:
@@ -324,6 +325,11 @@ class RecipeCompiler:
             separators=(",", ":"),
         )
         digest = hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+        elab_action = next(
+            (action for action in actions if action.kind in {"upload_to_elab", "upload_elab"}),
+            None,
+        )
+        elab_upload_config = dict(elab_action.payload) if elab_action is not None else None
         return ExecutionPlan(
             recipe.name,
             tuple(actions),
@@ -334,6 +340,7 @@ class RecipeCompiler:
             total_spectra,
             safe_shutdown_actions,
             dict(recipe.dut_limits),
+            elab_upload_config,
         )
 
     @staticmethod
@@ -2378,6 +2385,16 @@ class RecipeCompiler:
             enabled = self._require_boolean(data, "enabled", node.id)
             self._assert_output_action_allowed("anritsu_sg", enabled)
             payload = {"enabled": enabled}
+        elif node.type in {"upload_to_elab", "upload_elab"}:
+            action_kind = "upload_to_elab"
+            payload = {
+                "template_id": data.get("template_id"),
+                "template_name": str(data.get("template_name", "") or "").strip(),
+                "title_pattern": str(data.get("title_pattern", "") or "").strip(),
+                "tags": list(data.get("tags") or []),
+                "attach_hdf5": bool(data.get("attach_hdf5", True)),
+                "attach_csv": bool(data.get("attach_csv", True)),
+            }
         else:
             raise ConfigurationError(f"{node.id}: unsupported action type {node.type!r}.")
         if is_finally:
@@ -2634,7 +2651,11 @@ class RecipeCompiler:
             level_si=level,
             compliance_si=compliance,
             nplc=float(data.get("nplc", 1.0)),
-            settle_time_s=self._resolve_quantity(data.get("settle_time", "0 s"), DIMENSION_TIME, {}).si_value,
+            settle_time_s=self._resolve_quantity(
+                data.get("settle_time") or data.get("settling_time") or "0 s",
+                DIMENSION_TIME,
+                {},
+            ).si_value,
             sense_mode=str(data.get("sense_mode", "2wire")),  # type: ignore[arg-type]
             source_autorange=self._optional_boolean(data, "source_autorange", True, node_id),
             source_range_si=self._optional_quantity(data, "source_range", dimension),

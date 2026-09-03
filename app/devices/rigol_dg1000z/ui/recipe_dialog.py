@@ -269,9 +269,13 @@ class RigolNodeEditorDialog(FluentRecipeDialog):
             self.low_level.setText(self.offset.text())
 
     @staticmethod
-    def _format_voltage(value_v: float) -> str:
+    def _format_voltage(value_v: float, preferred_unit: str | None = None) -> str:
+        if preferred_unit == "mV" and (abs(value_v) < 1 or value_v == 0.0):
+            return f"{value_v * 1e3:.12g} mV"
         if 0 < abs(value_v) < 1:
             return f"{value_v * 1e3:.12g} mV"
+        if preferred_unit == "mV" and value_v == 0.0:
+            return "0 mV"
         return f"{value_v:.12g} V"
 
     def _sync_vpp_offset_from_levels(self) -> None:
@@ -280,8 +284,17 @@ class RigolNodeEditorDialog(FluentRecipeDialog):
             low = parse_quantity(self.low_level.text(), DIMENSION_VOLTAGE).si_value
         except Exception:
             return
-        self.vpp.setText(self._format_voltage(high - low))
-        self.offset.setText(self._format_voltage((high + low) / 2))
+        preferred = (
+            "mV"
+            if (
+                "mV" in self.high_level.text()
+                or "mV" in self.low_level.text()
+                or "mV" in self.offset.text()
+            )
+            else None
+        )
+        self.vpp.setText(self._format_voltage(high - low, preferred_unit=preferred))
+        self.offset.setText(self._format_voltage((high + low) / 2, preferred_unit=preferred))
 
     def _sync_levels_from_vpp_offset(self) -> None:
         try:
@@ -293,8 +306,17 @@ class RigolNodeEditorDialog(FluentRecipeDialog):
             )
         except Exception:
             return
-        self.high_level.setText(self._format_voltage(offset + amplitude / 2))
-        self.low_level.setText(self._format_voltage(offset - amplitude / 2))
+        preferred = (
+            "mV"
+            if (
+                "mV" in self.offset.text()
+                or "mV" in self.vpp.text()
+                or "mV" in self.high_level.text()
+            )
+            else None
+        )
+        self.high_level.setText(self._format_voltage(offset + amplitude / 2, preferred_unit=preferred))
+        self.low_level.setText(self._format_voltage(offset - amplitude / 2, preferred_unit=preferred))
 
     def _sync_period_from_frequency(self) -> None:
         try:

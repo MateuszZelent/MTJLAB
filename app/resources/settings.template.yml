@@ -36,6 +36,7 @@ application:
     upload_hdf5: true
     upload_csv: true
     recent_templates: []
+    favorite_templates: []
 
 units:
   internal_system: "SI"
@@ -325,7 +326,7 @@ devices:
             # Working limits for the 1 mA ... 10 mA example.
             # These are not the maximum capabilities of the 2602A model.
             source_current:
-              min: "0 A"
+              min: "0 mA"
               max: "10 mA"
               max_abs: "10 mA"
             source_voltage:

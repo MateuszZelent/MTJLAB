@@ -7,7 +7,15 @@ from enum import StrEnum
 import time
 
 from PySide6.QtCore import QMimeData, QSize, QTimer, Signal, Qt
-from PySide6.QtGui import QDrag, QDragMoveEvent, QPainter, QPen
+from PySide6.QtGui import (
+    QDrag,
+    QDragMoveEvent,
+    QPainter,
+    QPen,
+    QResizeEvent,
+    QShowEvent,
+    QWheelEvent,
+)
 from PySide6.QtWidgets import QAbstractItemView, QHeaderView
 from qfluentwidgets import TreeView
 
@@ -101,8 +109,79 @@ class MeasurementTreeView(TreeView):
         self._dragged_semantic_id: str | None = None
         self._drop_target: tuple[str, TreeDropPlacement] | None = None
         self._selection_model = None
+        self._user_resized_columns = False
+        self._user_column_widths: dict[int, int] = {}
+        self._updating_column_widths = False
+        header = self.header()
+        header.setStretchLastSection(False)
+        header.setMinimumSectionSize(50)
+        header.setSectionsMovable(False)
+        header.sectionResized.connect(self._on_section_resized)
+        self.clicked.connect(self._on_item_clicked)
         self.doubleClicked.connect(self._emit_semantic_activation)
         self.customContextMenuRequested.connect(self._emit_semantic_context_menu)
+
+    def _on_section_resized(
+        self, logical_index: int, _old_size: int, new_size: int
+    ) -> None:
+        if self._updating_column_widths:
+            return
+        self._user_resized_columns = True
+        header = self.header()
+        for col in range(header.count()):
+            self._user_column_widths[col] = header.sectionSize(col)
+        self._user_column_widths[logical_index] = new_size
+
+    def wheelEvent(self, event: QWheelEvent) -> None:  # noqa: N802 - Qt override
+        super().wheelEvent(event)
+        # Prevent wheel event bubbling to the global application shell scroll area:
+        event.accept()
+
+    def _apply_column_widths(self) -> None:
+        header = self.header()
+        if header.count() < 4:
+            return
+
+        if self._user_resized_columns:
+            self._updating_column_widths = True
+            try:
+                for col, width in self._user_column_widths.items():
+                    if col < header.count():
+                        header.resizeSection(col, width)
+            finally:
+                self._updating_column_widths = False
+            return
+
+        available = self.viewport().width()
+        if available <= 0:
+            available = self.width()
+        if available <= 0:
+            available = 720
+
+        progress_w = 92
+        state_w = 96
+        remaining = max(200, available - progress_w - state_w)
+        op_w = max(140, int(remaining * 0.55))
+        val_w = max(100, remaining - op_w)
+
+        self._updating_column_widths = True
+        try:
+            header.resizeSection(0, op_w)
+            header.resizeSection(1, val_w)
+            header.resizeSection(2, progress_w)
+            header.resizeSection(3, state_w)
+        finally:
+            self._updating_column_widths = False
+
+    def resizeEvent(self, event: QResizeEvent) -> None:  # noqa: N802 - Qt override
+        super().resizeEvent(event)
+        if not self._user_resized_columns:
+            self._apply_column_widths()
+
+    def showEvent(self, event: QShowEvent) -> None:  # noqa: N802 - Qt override
+        super().showEvent(event)
+        if not self._user_resized_columns:
+            QTimer.singleShot(0, self._apply_column_widths)
 
     def _emit_semantic_activation(self, index) -> None:
         model = self.tree_model
@@ -119,7 +198,11 @@ class MeasurementTreeView(TreeView):
 
     def setModel(self, model) -> None:  # noqa: N802
         if self._selection_model is not None:
-            self._selection_model.currentChanged.disconnect(self._emit_semantic_selection)
+            try:
+                self._selection_model.currentChanged.disconnect(self._emit_semantic_selection)
+                self._selection_model.selectionChanged.disconnect(self._on_selection_changed)
+            except Exception:
+                pass
         super().setModel(model)
         if isinstance(model, MeasurementTreeModel):
             model.set_read_only(self._interaction_mode is TreeInteractionMode.READ_ONLY)
@@ -127,23 +210,14 @@ class MeasurementTreeView(TreeView):
         self._selection_model = self.selectionModel()
         if self._selection_model is not None:
             self._selection_model.currentChanged.connect(self._emit_semantic_selection)
-        # Keep all semantic columns available in the default pane.  Fixed
-        # 420/310 px columns forced the progress and state columns behind a
-        # horizontal scrollbar on ordinary desktop widths, making the active
-        # operation look incomplete.  The Fluent header now gives labels the
-        # remaining space while keeping progress/state compact and readable.
+            self._selection_model.selectionChanged.connect(self._on_selection_changed)
         header = self.header()
         header.setStretchLastSection(False)
-        header.setMinimumSectionSize(58)
-        header.setSectionResizeMode(0, QHeaderView.ResizeMode.Stretch)
-        header.setSectionResizeMode(1, QHeaderView.ResizeMode.Stretch)
-        # Progress and state change at sweep cadence.  ResizeToContents here
-        # would rescan the model on every dataChanged() and was the remaining
-        # source of multi-hundred-millisecond GUI gaps on 1000-point runs.
-        header.setSectionResizeMode(2, QHeaderView.ResizeMode.Fixed)
-        header.setSectionResizeMode(3, QHeaderView.ResizeMode.Fixed)
-        header.resizeSection(2, 92)
-        header.resizeSection(3, 96)
+        header.setMinimumSectionSize(50)
+        header.setSectionsMovable(False)
+        for i in range(4):
+            header.setSectionResizeMode(i, QHeaderView.ResizeMode.Interactive)
+        self._apply_column_widths()
         self.setTextElideMode(Qt.TextElideMode.ElideRight)
         self.expandAll()
         QTimer.singleShot(0, self.expandAll)
@@ -165,13 +239,33 @@ class MeasurementTreeView(TreeView):
         self.setAcceptDrops(editable)
         self.setDropIndicatorShown(editable)
 
-    def _emit_semantic_selection(self, current, _previous) -> None:
+    def _emit_semantic_selection(self, current, _previous=None) -> None:
         model = self.tree_model
-        if model is None or not current.isValid():
+        if model is None:
+            return
+        if not current.isValid():
+            self.semantic_selected.emit("")
             return
         semantic_id = model.data(current, MeasurementTreeRole.SEMANTIC_ID)
         if isinstance(semantic_id, str):
             self.semantic_selected.emit(semantic_id)
+        else:
+            self.semantic_selected.emit("")
+
+    def _on_item_clicked(self, index) -> None:
+        if not index.isValid():
+            self.semantic_selected.emit("")
+            return
+        model = self.tree_model
+        if model is None:
+            return
+        semantic_id = model.data(index, MeasurementTreeRole.SEMANTIC_ID)
+        if isinstance(semantic_id, str):
+            self.semantic_selected.emit(semantic_id)
+
+    def _on_selection_changed(self, _selected=None, _deselected=None) -> None:
+        if self._selection_model is not None and not self._selection_model.hasSelection():
+            self.semantic_selected.emit("")
 
     def _emit_semantic_context_menu(self, position) -> None:
         model = self.tree_model

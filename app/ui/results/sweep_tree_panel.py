@@ -9,23 +9,44 @@ from PySide6.QtCore import Qt, Signal
 from PySide6.QtWidgets import (
     QHBoxLayout,
     QSplitter,
+    QStackedWidget,
     QTreeWidgetItem,
     QVBoxLayout,
     QWidget,
 )
-from qfluentwidgets import BodyLabel, PlainTextEdit, PushButton, SpinBox, TreeWidget
+from qfluentwidgets import (
+    BodyLabel,
+    PlainTextEdit,
+    PushButton,
+    SegmentedWidget,
+    SpinBox,
+    TreeWidget,
+)
 
+from app.recipes.models import parse_recipe_text
+from app.recipes.semantic_tree import (
+    SemanticMeasurementTree,
+    SemanticNodeKind,
+    SemanticTreeNode,
+    normalize_recipe_tree,
+)
 from app.storage import (
+    RunDetail,
+    StoredPoint,
+    StoredReference,
     ThatecDevice,
     ThatecRecord,
     ThatecRow,
     ThatecRun,
     ThatecRunReader,
     ThatecTreeNode,
-    StoredPoint,
-    StoredReference,
 )
 from app.ui.dialogs import StationDialog
+from app.ui.measurement_tree import (
+    MeasurementTreeModel,
+    MeasurementTreeView,
+    TreeInteractionMode,
+)
 
 
 class SweepTreePanel(QWidget):
@@ -51,14 +72,36 @@ class SweepTreePanel(QWidget):
 
         layout = QVBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(6)
+
+        # --- Mode Switcher ---
+        self.view_switch = SegmentedWidget(self)
+        self.view_switch.addItem("tree", "Sweep structure")
+        self.view_switch.addItem("data", "Recorded data & checkpoints")
+        self.view_switch.setCurrentItem("tree")
+        layout.addWidget(self.view_switch)
 
         splitter = QSplitter(Qt.Orientation.Vertical)
 
-        # --- Tree ---
+        # --- Stacked Tree View ---
+        self.tree_stack = QStackedWidget(self)
+
+        # 1. Fluent Measurement Tree (identical to Sweeps & Execution)
+        self.tree_model = MeasurementTreeModel(parent=self)
+        self.measurement_tree = MeasurementTreeView(self)
+        self.measurement_tree.setObjectName("resultsMeasurementTree")
+        self.measurement_tree.setModel(self.tree_model)
+        self.measurement_tree.set_interaction_mode(TreeInteractionMode.READ_ONLY)
+        self.measurement_tree.setMinimumHeight(160)
+        self.tree_stack.addWidget(self.measurement_tree)
+
+        # 2. Storage Checkpoints & Datasets Tree
         self.tree = TreeWidget(self)
         self.tree.setHeaderLabels(["THATEC experiment", "Type"])
         self.tree.setMinimumHeight(160)
-        splitter.addWidget(self.tree)
+        self.tree_stack.addWidget(self.tree)
+
+        splitter.addWidget(self.tree_stack)
 
         # --- Inspector + checkpoint ---
         bottom = QWidget()
@@ -95,6 +138,10 @@ class SweepTreePanel(QWidget):
         layout.addWidget(splitter, 1)
 
         # --- Connections ---
+        self.view_switch.currentItemChanged.connect(
+            lambda route: self.tree_stack.setCurrentIndex(0 if route == "tree" else 1)
+        )
+        self.measurement_tree.semantic_selected.connect(self._on_semantic_selected)
         self.tree.currentItemChanged.connect(self._on_tree_selected)
         self.thatec_checkpoint.valueChanged.connect(
             lambda _value: self._render_selected_row()
@@ -109,6 +156,7 @@ class SweepTreePanel(QWidget):
         *,
         points: tuple[StoredPoint, ...] = (),
         references: tuple[StoredReference, ...] = (),
+        detail: RunDetail | None = None,
     ) -> None:
         """Populate the panel from a loaded THATEC result."""
         self._run = run
@@ -116,11 +164,37 @@ class SweepTreePanel(QWidget):
         self._selected_thatec_row = None
         self._selected_stored_point = None
         self._selected_stored_variant = "raw"
+
+        # 1. Build semantic measurement tree for the Sweeps-compatible view
+        recipe_source = ""
+        if detail is not None and detail.recipe_yaml:
+            recipe_source = detail.recipe_yaml.strip()
+        elif hasattr(run, "recipe_source") and run.recipe_source:
+            recipe_source = run.recipe_source.strip()
+
+        tree_built = False
+        if recipe_source:
+            try:
+                recipe = parse_recipe_text(recipe_source, origin=str(path))
+                snapshot = normalize_recipe_tree(recipe)
+                self.tree_model.replace_tree(snapshot)
+                self.measurement_tree.expandAll()
+                tree_built = True
+            except Exception:
+                tree_built = False
+
+        if not tree_built:
+            snapshot = self._build_historical_semantic_tree(path, run, tree)
+            self.tree_model.replace_tree(snapshot)
+            self.measurement_tree.expandAll()
+
+        # 2. Populate the checkpoints and dataset tree
         self._populate_tree(tree, points=points, references=references)
 
     def clear(self) -> None:
         """Reset the panel to its empty state."""
         self.tree.clear()
+        self.tree_model.replace_tree(SemanticMeasurementTree((), {}, source_text=""))
         self.inspector.clear()
         self.values_tree.clear()
         self._run = None
@@ -130,11 +204,115 @@ class SweepTreePanel(QWidget):
         self._selected_stored_variant = "raw"
         self.show_spectrum_button.setEnabled(False)
 
+    def _build_historical_semantic_tree(
+        self, path: Path, run: ThatecRun, tree: tuple[ThatecTreeNode, ...]
+    ) -> SemanticMeasurementTree:
+        by_id: dict[str, SemanticTreeNode] = {}
+
+        def project_node(node: ThatecTreeNode) -> SemanticTreeNode:
+            row = run.rows.get(node.id)
+            detail = node.kind or (row.function if row is not None else "recorded")
+            semantic_id = f"historical.row.{node.id}"
+            projected = SemanticTreeNode(
+                semantic_id=semantic_id,
+                kind=SemanticNodeKind.ACTION,
+                label=node.label,
+                data={"detail": detail, "status": "RECORDED", "row_id": node.id},
+                children=tuple(project_node(child) for child in node.children),
+                editable=False,
+                draggable=False,
+            )
+            by_id[semantic_id] = projected
+            return projected
+
+        children = [project_node(node) for node in tree]
+        if run.devices:
+            device_children: list[SemanticTreeNode] = []
+            for device in run.devices:
+                semantic_id = f"historical.device.{device.name}"
+                projected = SemanticTreeNode(
+                    semantic_id=semantic_id,
+                    kind=SemanticNodeKind.DEVICE,
+                    label=device.name,
+                    data={"detail": "device settings", "status": "RECORDED"},
+                    editable=False,
+                    draggable=False,
+                )
+                by_id[semantic_id] = projected
+                device_children.append(projected)
+            devices = SemanticTreeNode(
+                semantic_id="historical.devices",
+                kind=SemanticNodeKind.SEQUENCE,
+                label="Recorded device configuration",
+                data={"detail": "THATEC /devices", "status": "RECORDED"},
+                children=tuple(device_children),
+                editable=False,
+                draggable=False,
+            )
+            by_id[devices.semantic_id] = devices
+            children.append(devices)
+        root = SemanticTreeNode(
+            semantic_id="historical.root",
+            kind=SemanticNodeKind.SEQUENCE,
+            label=f"Historical Sweep — {path.name}",
+            data={"detail": "Reconstructed sweep hierarchy", "status": "RECORDED"},
+            children=tuple(children),
+            editable=False,
+            draggable=False,
+        )
+        by_id[root.semantic_id] = root
+        return SemanticMeasurementTree((root,), by_id, source_text="")
+
+    def _on_semantic_selected(self, semantic_id: str) -> None:
+        node = self.tree_model.tree.by_id.get(semantic_id)
+        if node is None:
+            return
+        self.node_selected.emit(node)
+        lines = [
+            f"Operation: {node.label}",
+            f"Kind: {node.kind.value}",
+            f"Semantic ID: {node.semantic_id}",
+        ]
+        if node.data:
+            lines.extend(("", "Parameters / Configuration:", _format_json(dict(node.data))))
+        self.inspector.setPlainText("\n".join(lines))
+        self.values_tree.clear()
+
+        # Check if node corresponds to a THATEC row
+        row_id = str(node.data.get("row_id") or "") if isinstance(node.data, dict) else ""
+        if not row_id and node.semantic_id.startswith("historical.row."):
+            row_id = node.semantic_id.removeprefix("historical.row.")
+
+        if row_id and self._run and row_id in self._run.rows:
+            row = self._run.rows[row_id]
+            self._selected_thatec_row = row
+            if row.shape and len(row.shape) >= 2:
+                self.thatec_checkpoint.setMaximum(max(0, row.shape[0] - 1))
+                self.show_spectrum_button.setEnabled(True)
+            else:
+                self.show_spectrum_button.setEnabled(False)
+        else:
+            self._selected_thatec_row = None
+            self.show_spectrum_button.setEnabled(False)
+
     # ------------------------------------------------------------------
     # Tree population
     # ------------------------------------------------------------------
 
     def _populate_tree(
+        self,
+        tree: tuple[ThatecTreeNode, ...],
+        *,
+        points: tuple[StoredPoint, ...] = (),
+        references: tuple[StoredReference, ...] = (),
+    ) -> None:
+        self.tree.setUpdatesEnabled(False)
+        try:
+            self._populate_tree_content(tree, points=points, references=references)
+        finally:
+            self.tree.setUpdatesEnabled(True)
+
+    def _populate_tree_content(
         self,
         tree: tuple[ThatecTreeNode, ...],
         *,
@@ -188,6 +366,7 @@ class SweepTreePanel(QWidget):
             [f"Checkpoints ({len(points)})", "private /points"]
         )
         results.addChild(checkpoints)
+        point_items: list[QTreeWidgetItem] = []
         for point in points:
             point_item = QTreeWidgetItem(
                 [
@@ -196,16 +375,21 @@ class SweepTreePanel(QWidget):
                 ]
             )
             point_item.setData(0, Qt.ItemDataRole.UserRole, point)
-            checkpoints.addChild(point_item)
+            point_items.append(point_item)
             setpoints = QTreeWidgetItem(["Setpoints", str(len(point.setpoints))])
             measurements = QTreeWidgetItem(
                 ["Measurements", str(len(point.measurements))]
             )
             point_item.addChildren((setpoints, measurements))
-            for key, value in sorted(point.setpoints.items()):
-                setpoints.addChild(QTreeWidgetItem([str(key), str(value)]))
-            for key, value in sorted(point.measurements.items()):
-                measurements.addChild(QTreeWidgetItem([str(key), str(value)]))
+            if point.setpoints:
+                setpoints.addChildren(
+                    [QTreeWidgetItem([str(key), str(value)]) for key, value in sorted(point.setpoints.items())]
+                )
+            if point.measurements:
+                measurements.addChildren(
+                    [QTreeWidgetItem([str(key), str(value)]) for key, value in sorted(point.measurements.items())]
+                )
+            spectrum_items: list[QTreeWidgetItem] = []
             if point.has_spectrum:
                 raw_item = QTreeWidgetItem(["Raw spectrum", "private /spectra"])
                 raw_item.setData(
@@ -213,7 +397,7 @@ class SweepTreePanel(QWidget):
                     Qt.ItemDataRole.UserRole,
                     (point, "raw"),
                 )
-                point_item.addChild(raw_item)
+                spectrum_items.append(raw_item)
                 processed_item = QTreeWidgetItem(
                     ["Processed spectrum", "private /spectra"]
                 )
@@ -222,7 +406,10 @@ class SweepTreePanel(QWidget):
                     Qt.ItemDataRole.UserRole,
                     (point, "processed"),
                 )
-                point_item.addChild(processed_item)
+                spectrum_items.append(processed_item)
+            if spectrum_items:
+                point_item.addChildren(spectrum_items)
+        checkpoints.addChildren(point_items)
 
         if public_checkpoint_count:
             results.addChild(

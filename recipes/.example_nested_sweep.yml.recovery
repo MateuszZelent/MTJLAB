@@ -1,17 +1,13 @@
-
 schema_version: 1
-name: semantic-editor
+name: semantic-move
 root:
   id: root
   type: sequence
   children:
-    - id: source-sweep
-      type: sweep
-      target: keithley.B.current
-      start: "0 A"
-      stop: "1 mA"
-      points: 2
-      children:
-        - id: settle
-          type: wait
-          duration: "10 ms"
+  - id: second
+    type: wait
+    duration: 20 ms
+  - id: first
+    type: wait
+    duration: 10 ms
+finally: []

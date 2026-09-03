@@ -17,6 +17,18 @@ import numpy as np
 
 
 @dataclass(frozen=True, slots=True)
+class SpectrumAnalysisParameters:
+    denoise_window: int = 9
+    emi_threshold_db: float = 10.0
+    emi_max_std_db: float = 0.75
+    emi_min_frames: int = 5
+    peak_min_snr_db: float = 6.0
+    peak_min_prominence_db: float = 3.0
+    peak_max_count: int = 20
+    peak_fit_models: bool = True
+
+
+@dataclass(frozen=True, slots=True)
 class SpectrumPeak:
     index: int
     frequency_hz: float
@@ -186,8 +198,15 @@ def clean_spectrum_dbm(
     *,
     mode: str,
     history_dbm: Sequence[Sequence[float]] = (),
+    parameters: SpectrumAnalysisParameters | None = None,
 ) -> SpectrumCleanupResult:
-    return clean_spectrum_values(values_dbm, unit="dBm", mode=mode, history_dbm=history_dbm)
+    return clean_spectrum_values(
+        values_dbm,
+        unit="dBm",
+        mode=mode,
+        history_dbm=history_dbm,
+        parameters=parameters,
+    )
 
 
 def clean_spectrum_values(
@@ -196,6 +215,7 @@ def clean_spectrum_values(
     unit: str,
     mode: str,
     history_dbm: Sequence[Sequence[float]] = (),
+    parameters: SpectrumAnalysisParameters | None = None,
 ) -> SpectrumCleanupResult:
     """Clean the numeric values of any displayed spectrum unit.
 
@@ -203,20 +223,26 @@ def clean_spectrum_values(
     legacy ``clean_spectrum_dbm`` entry point remains the dBm-specialized API.
     """
 
+    params = parameters or SpectrumAnalysisParameters()
     values = tuple(float(value) for value in values)
     sigma = robust_noise_sigma_db(values)
     mode = mode.lower()
     if mode == "raw":
         return SpectrumCleanupResult(values, sigma, (), "Raw (no processing)", unit)
-    interference = detect_stationary_interference(history_dbm)
+    interference = detect_stationary_interference(
+        history_dbm,
+        min_frames=params.emi_min_frames,
+        threshold_db=params.emi_threshold_db,
+        max_std_db=params.emi_max_std_db,
+    )
     if mode == "denoise":
-        cleaned = bilateral_denoise_dbm(values)
+        cleaned = bilateral_denoise_dbm(values, window=params.denoise_window)
         method = "Edge-preserving bilateral denoise"
     elif mode == "emi_reject":
         cleaned = suppress_stationary_lines_dbm(values, interference)
         method = "Conservative stationary-line rejection (display only)"
     elif mode == "auto_clean":
-        denoised = bilateral_denoise_dbm(values)
+        denoised = bilateral_denoise_dbm(values, window=params.denoise_window)
         cleaned = suppress_stationary_lines_dbm(denoised, interference)
         method = "Bilateral denoise + stationary-line rejection (display only)"
     else:
@@ -319,7 +345,13 @@ def detect_spectrum_peaks(
     max_peaks: int = 20,
     fit: bool = True,
     unit: str = "dBm",
+    parameters: SpectrumAnalysisParameters | None = None,
 ) -> tuple[SpectrumPeak, ...]:
+    if parameters is not None:
+        min_snr_db = parameters.peak_min_snr_db
+        min_prominence_db = parameters.peak_min_prominence_db
+        max_peaks = parameters.peak_max_count
+        fit = parameters.peak_fit_models
     frequencies, values = _finite_vectors(frequencies_hz, values_dbm)
     detection_values = _gaussian_detection_trace(
         np.asarray(bilateral_denoise_dbm(values, window=11), dtype=float)

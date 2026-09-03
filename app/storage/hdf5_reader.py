@@ -26,6 +26,7 @@ class RunSummary:
     spectrum_count: int
     plan_sha256: str | None
     application_version: str | None
+    operator: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -107,10 +108,11 @@ class Hdf5RunReader:
 
                     run = ThatecRunReader.describe(path)
                     shapes = [row.shape[0] for row in run.rows.values() if row.shape]
+                    created_at = Hdf5RunReader._extract_timestamp(path, None)
                     summaries.append(
                         RunSummary(
                             path=path,
-                            created_at_utc=None,
+                            created_at_utc=created_at,
                             status="THATEC",
                             point_count=max(shapes, default=0),
                             spectrum_count=sum(
@@ -118,37 +120,70 @@ class Hdf5RunReader:
                             ),
                             plan_sha256=None,
                             application_version=None,
+                            operator=None,
                         )
                     )
                 except ExecutionError:
                     # Keep a genuinely unreadable result visible to the operator so it can
                     # be recovered externally, rather than silently hiding it.
+                    created_at = Hdf5RunReader._extract_timestamp(path, None)
                     summaries.append(
                         RunSummary(
                             path=path,
-                            created_at_utc=None,
+                            created_at_utc=created_at,
                             status="unreadable",
                             point_count=0,
                             spectrum_count=0,
                             plan_sha256=None,
                             application_version=None,
+                            operator=None,
                         )
                     )
         return tuple(summaries)
 
     @staticmethod
+    def _extract_operator(run: Any) -> str | None:
+        if run is None or not hasattr(run, "attrs"):
+            return None
+        op = Hdf5RunReader._attribute_text(run.attrs.get("operator"))
+        if op:
+            return op
+        if "operator_context_json" in run:
+            try:
+                ctx = Hdf5RunReader._dataset_json(run, "operator_context_json")
+                if isinstance(ctx, dict):
+                    username = ctx.get("username")
+                    if username:
+                        return str(username)
+            except Exception:
+                pass
+        return None
+
+    @staticmethod
+    def _extract_timestamp(path: Path, run: Any | None) -> str | None:
+        if run is not None and hasattr(run, "attrs"):
+            ts = Hdf5RunReader._attribute_text(run.attrs.get("created_at_utc"))
+            if ts:
+                return ts
+        name = path.name
+        if len(name) >= 15 and name[8] == "T":
+            date_part = name[:8]
+            time_part = name[9:15]
+            if date_part.isdigit() and time_part.isdigit():
+                return f"{date_part[:4]}-{date_part[4:6]}-{date_part[6:8]}T{time_part[:2]}:{time_part[2:4]}:{time_part[4:6]}Z"
+        try:
+            from datetime import datetime, timezone
+            mtime = path.stat().st_mtime
+            return datetime.fromtimestamp(mtime, tz=timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+        except Exception:
+            return None
+
+    @staticmethod
     def summary(path: str | Path) -> RunSummary:
-        with Hdf5RunReader._open(path) as file:
+        path_obj = Path(path)
+        with Hdf5RunReader._open(path_obj) as file:
             run = Hdf5RunReader._require_group(file, "run")
-            return RunSummary(
-                path=Path(path),
-                created_at_utc=Hdf5RunReader._attribute_text(run.attrs.get("created_at_utc")),
-                status=Hdf5RunReader._attribute_text(run.attrs.get("status")) or "incomplete",
-                point_count=len(file.get("points", {})),
-                spectrum_count=len(file.get("spectra", {})),
-                plan_sha256=Hdf5RunReader._attribute_text(run.attrs.get("plan_sha256")),
-                application_version=Hdf5RunReader._attribute_text(run.attrs.get("application_version")),
-            )
+            return Hdf5RunReader.summary_from_open_file(path_obj, file, run)
 
     @staticmethod
     def detail(path: str | Path) -> RunDetail:
@@ -170,12 +205,13 @@ class Hdf5RunReader:
     def summary_from_open_file(path: Path, file: Any, run: Any) -> RunSummary:
         return RunSummary(
             path=path,
-            created_at_utc=Hdf5RunReader._attribute_text(run.attrs.get("created_at_utc")),
+            created_at_utc=Hdf5RunReader._extract_timestamp(path, run),
             status=Hdf5RunReader._attribute_text(run.attrs.get("status")) or "incomplete",
             point_count=len(file.get("points", {})),
             spectrum_count=len(file.get("spectra", {})),
             plan_sha256=Hdf5RunReader._attribute_text(run.attrs.get("plan_sha256")),
             application_version=Hdf5RunReader._attribute_text(run.attrs.get("application_version")),
+            operator=Hdf5RunReader._extract_operator(run),
         )
 
     @staticmethod

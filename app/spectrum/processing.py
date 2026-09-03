@@ -5,6 +5,8 @@ from __future__ import annotations
 import math
 from collections.abc import Sequence
 
+import numpy as np
+
 
 class LinearPowerAverager:
     """Streaming dBm averager retaining one accumulator instead of all traces."""
@@ -13,29 +15,30 @@ class LinearPowerAverager:
         self.reset()
 
     def reset(self) -> None:
-        self._sum_mw: list[float] = []
+        self._sum_mw: np.ndarray | None = None
         self.count = 0
 
     def add(self, trace_dbm: Sequence[float]) -> int:
-        if len(trace_dbm) < 2:
+        arr = np.asarray(trace_dbm, dtype=float)
+        if arr.size < 2:
             raise ValueError("A spectrum must contain at least two points.")
-        if not all(math.isfinite(value) for value in trace_dbm):
+        if not np.all(np.isfinite(arr)):
             raise ValueError("A spectrum contains NaN or infinity.")
-        linear = [_dbm_to_mw(value) for value in trace_dbm]
-        if not self._sum_mw:
-            self._sum_mw = linear
-        elif len(linear) != len(self._sum_mw):
+        linear = 10.0 ** (arr / 10.0)
+        if self._sum_mw is None:
+            self._sum_mw = linear.copy()
+        elif linear.size != self._sum_mw.size:
             raise ValueError("All spectra must contain the same number of points.")
         else:
-            for index, value in enumerate(linear):
-                self._sum_mw[index] += value
+            self._sum_mw += linear
         self.count += 1
         return self.count
 
     def result(self) -> tuple[float, ...]:
-        if self.count == 0:
+        if self.count == 0 or self._sum_mw is None:
             raise ValueError("At least one spectrum is required for averaging.")
-        return tuple(_mw_to_dbm(value / self.count) for value in self._sum_mw)
+        dbm = 10.0 * np.log10(np.maximum(self._sum_mw / self.count, 1e-300))
+        return tuple(dbm.tolist())
 
 
 def _dbm_to_mw(value_dbm: float) -> float:
@@ -64,26 +67,28 @@ def apply_reference_operation(
 ) -> tuple[tuple[float, ...], str]:
     """Apply point-wise reference math and return values plus an honest unit."""
 
-    if len(signal_dbm) != len(reference_dbm) or len(signal_dbm) < 2:
+    sig = np.asarray(signal_dbm, dtype=float)
+    ref = np.asarray(reference_dbm, dtype=float)
+    if sig.size != ref.size or sig.size < 2:
         raise ValueError("Signal and reference spectra must have identical point counts.")
-    if not all(math.isfinite(value) for value in (*signal_dbm, *reference_dbm)):
+    if not (np.all(np.isfinite(sig)) and np.all(np.isfinite(ref))):
         raise ValueError("Signal and reference spectra must contain finite values.")
     operation = operation.lower()
     if operation == "difference_db":
-        return tuple(signal - reference for signal, reference in zip(signal_dbm, reference_dbm, strict=True)), "dB"
-    signal_mw = tuple(_dbm_to_mw(value) for value in signal_dbm)
-    reference_mw = tuple(_dbm_to_mw(value) for value in reference_dbm)
+        return tuple((sig - ref).tolist()), "dB"
+    sig_mw = 10.0 ** (sig / 10.0)
+    ref_mw = 10.0 ** (ref / 10.0)
     if operation == "ratio_linear":
-        return tuple(signal / reference for signal, reference in zip(signal_mw, reference_mw, strict=True)), "ratio"
+        return tuple((sig_mw / ref_mw).tolist()), "ratio"
     if operation == "add_power":
-        return tuple(_mw_to_dbm(signal + reference) for signal, reference in zip(signal_mw, reference_mw, strict=True)), "dBm"
+        res = 10.0 * np.log10(np.maximum(sig_mw + ref_mw, 1e-300))
+        return tuple(res.tolist()), "dBm"
     if operation == "subtract_power":
-        return tuple(
-            _mw_to_dbm(signal - reference) if signal > reference else math.nan
-            for signal, reference in zip(signal_mw, reference_mw, strict=True)
-        ), "dBm"
+        diff = sig_mw - ref_mw
+        res = np.where(diff > 0, 10.0 * np.log10(np.maximum(diff, 1e-300)), np.nan)
+        return tuple(res.tolist()), "dBm"
     if operation == "multiply_linear":
-        return tuple(signal * reference for signal, reference in zip(signal_mw, reference_mw, strict=True)), "mW²"
+        return tuple((sig_mw * ref_mw).tolist()), "mW²"
     raise ValueError(f"Unsupported reference operation: {operation}.")
 
 

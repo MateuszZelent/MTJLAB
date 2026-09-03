@@ -8,6 +8,7 @@ from .processing import (
     peak_preserving_indices,
 )
 from .analysis import (
+    SpectrumAnalysisParameters,
     SpectrumCleanupResult,
     SpectrumPeak,
     bilateral_denoise_dbm,
@@ -27,6 +28,7 @@ __all__ = [
     "average_dbm_traces",
     "frequency_grids_match",
     "peak_preserving_indices",
+    "SpectrumAnalysisParameters",
     "SpectrumCleanupResult",
     "SpectrumPeak",
     "bilateral_denoise_dbm",

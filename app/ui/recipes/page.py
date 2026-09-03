@@ -1,6 +1,6 @@
 """Recipe editing workspace and its supporting Qt widgets."""
 
-# ruff: noqa: F401
+# ruff: noqa: F401, E402
 from __future__ import annotations
 
 import json
@@ -12,8 +12,44 @@ from typing import Any, Callable
 from uuid import uuid4
 
 from PySide6.QtCore import QMimeData, QSize, QSettings, QThread, QTimer, Qt, Signal
-from PySide6.QtGui import QAction, QActionGroup, QBrush, QCloseEvent, QColor, QDrag, QIcon, QKeySequence, QPainter, QPixmap, QShortcut
-from PySide6.QtWidgets import QApplication, QComboBox, QCheckBox, QDialog, QDialogButtonBox, QFormLayout, QFrame, QGridLayout, QHBoxLayout, QLabel, QLineEdit, QMenu, QPlainTextEdit, QPushButton, QSizePolicy, QSplitter, QSpinBox, QStackedWidget, QStyle, QToolButton, QVBoxLayout, QWidget
+from PySide6.QtGui import (
+    QAction,
+    QActionGroup,
+    QBrush,
+    QCloseEvent,
+    QColor,
+    QDrag,
+    QIcon,
+    QKeySequence,
+    QPainter,
+    QPixmap,
+    QShortcut,
+    QWheelEvent,
+)
+from PySide6.QtWidgets import (
+    QApplication,
+    QCheckBox,
+    QComboBox,
+    QDialog,
+    QDialogButtonBox,
+    QFormLayout,
+    QFrame,
+    QGridLayout,
+    QHBoxLayout,
+    QLabel,
+    QLineEdit,
+    QMenu,
+    QPlainTextEdit,
+    QPushButton,
+    QSizePolicy,
+    QSpinBox,
+    QSplitter,
+    QStackedWidget,
+    QStyle,
+    QToolButton,
+    QVBoxLayout,
+    QWidget,
+)
 from qfluentwidgets import (
     BodyLabel,
     CaptionLabel,
@@ -33,9 +69,25 @@ from qfluentwidgets import (
     SubtitleLabel,
 )
 
+
+class BoundPlainTextEdit(PlainTextEdit):
+    """PlainTextEdit that confines mouse wheel events to its own viewport."""
+
+    def wheelEvent(self, event: QWheelEvent) -> None:  # noqa: N802 - Qt override
+        super().wheelEvent(event)
+        event.accept()
+
+
+class BoundScrollArea(ScrollArea):
+    """ScrollArea that confines mouse wheel events to its own viewport."""
+
+    def wheelEvent(self, event: QWheelEvent) -> None:  # noqa: N802 - Qt override
+        super().wheelEvent(event)
+        event.accept()
+
+
 from app.audit import AuditLogger
 from app.contracts import DeviceModuleRegistry
-from app.devices.registry import built_in_device_registry
 from app.domain.errors import AuthorizationError, ConfigurationError
 from app.domain.quantities import DIMENSION_CURRENT, DIMENSION_DBM, DIMENSION_FREQUENCY, DIMENSION_TIME, DIMENSION_VOLTAGE, format_quantity_auto, parse_quantity
 from app.engine.compiler import ExecutionPlan, RecipeCompiler
@@ -89,7 +141,10 @@ from app.ui.recipes.device_extensions import (
     RigolPage,
     SignalGeneratorSnapshot,
     _keithley_roi_definition,
+    built_in_device_registry,
 )
+from app.integrations.elab.config import ElabCredentials, ElabIntegrationProfile
+from app.ui.recipes.elab_dialog import ElabUploadEditorDialog
 from app.ui.recipes.sweep_editor import SweepGeneratorDialog
 from app.ui.run_worker import planned_run_paths
 from app.ui.widgets import LimitEditDialog, LimitField, SpectrumPlotWidget
@@ -280,6 +335,11 @@ class RecipePage(QWidget):
         self._rigol_snapshot_provider = None
         self._anritsu_snapshot_provider = None
         self._anritsu_sg_snapshot_provider = None
+        self._elab_profile_provider: Callable[[], ElabIntegrationProfile] | None = None
+        self._elab_credentials_provider: Callable[[], ElabCredentials] | None = None
+        self._elab_available_templates_provider: Callable[[], list[tuple[int, str]]] | None = None
+        self._elab_refresh_templates_callback: Callable[[], None] | None = None
+        self._elab_navigate_callback: Callable[[], None] | None = None
         self._plan = None
         self._preflight_thread: QThread | None = None
         self._preflight_worker: RecipePreflightWorker | None = None
@@ -300,16 +360,17 @@ class RecipePage(QWidget):
         self._autosave_timer.setSingleShot(True)
         self._autosave_timer.setInterval(750)
         self._autosave_timer.timeout.connect(self._autosave)
+        self.owns_viewport = True
         layout = QVBoxLayout(self)
-        layout.setContentsMargins(16, 14, 16, 14)
-        layout.setSpacing(12)
+        layout.setContentsMargins(16, 10, 16, 10)
+        layout.setSpacing(8)
         self.setProperty("stationSurface", "page")
         self.hero_card = CardWidget(self)
         hero = self.hero_card
         hero.setObjectName("recipeHero")
         hero_layout = QHBoxLayout(hero)
-        hero_layout.setContentsMargins(18, 14, 18, 14)
-        hero_layout.setSpacing(16)
+        hero_layout.setContentsMargins(16, 8, 16, 8)
+        hero_layout.setSpacing(12)
         hero_copy = QVBoxLayout()
         hero_copy.setSpacing(3)
         title = SubtitleLabel("Sweep builder", hero)
@@ -654,13 +715,14 @@ class RecipePage(QWidget):
             "library": None,
             "inspector": None,
         }
-        self.editor = PlainTextEdit(self)
+        self.editor = BoundPlainTextEdit(self)
         self.editor.setPlaceholderText("Declarative YAML recipe — no Python code and no raw SCPI.")
         self.editor.setMinimumWidth(320)
         self._selected_semantic_id: str | None = None
         self._selected_source_node_id: str | None = None
         self._historical_objects_by_semantic_id: dict[str, object] = {}
         self.tree_model = MeasurementTreeModel(parent=self)
+        self.tree_model.set_outputs_forced_off(self.execution_mode.currentData() == "dry_run")
         self.measurement_tree = MeasurementTreeView(self)
         self.measurement_tree.setObjectName("semanticMeasurementTree")
         self.measurement_tree.setModel(self.tree_model)
@@ -682,7 +744,7 @@ class RecipePage(QWidget):
         self.builder_container = CardWidget()
         self.builder_container.setObjectName("recipeBuilderPanel")
         self.builder_container.setProperty("stationSurface", "surface")
-        self.builder_container.setMinimumHeight(430)
+        self.builder_container.setMinimumHeight(200)
         builder_layout = QVBoxLayout(self.builder_container)
         builder_layout.setContentsMargins(12, 10, 12, 12)
         builder_layout.setSpacing(8)
@@ -698,7 +760,7 @@ class RecipePage(QWidget):
         self.drag_feedback.setWordWrap(True)
         builder_layout.addWidget(self.drag_feedback)
         self.builder_stack = QStackedWidget()
-        self.builder_stack.setMinimumWidth(390)
+        self.builder_stack.setMinimumWidth(320)
         self.builder_stack.addWidget(self.measurement_tree)
         self.builder_stack.addWidget(self.editor)
         self.workflow_tabs.setCurrentItem("tree")
@@ -710,13 +772,13 @@ class RecipePage(QWidget):
         )
         builder_layout.addWidget(self.builder_stack, 1)
         self.library_panel = self._build_device_library()
-        self.library_panel.setMinimumHeight(430)
+        self.library_panel.setMinimumHeight(200)
         self.workspace_splitter.addWidget(self.library_panel)
         self.workspace_splitter.addWidget(self.builder_container)
         self.inspector_panel = QWidget()
         self.inspector_panel.setObjectName("recipeInspectorPanel")
         self.inspector_panel.setProperty("stationSurface", "surface")
-        self.inspector_panel.setMinimumHeight(430)
+        self.inspector_panel.setMinimumHeight(200)
         self.inspector_panel.setMinimumWidth(280)
         self.inspector_panel.setMaximumWidth(620)
         inspector_layout = QVBoxLayout(self.inspector_panel)
@@ -732,7 +794,7 @@ class RecipePage(QWidget):
         self.inspector_summary.setObjectName("muted")
         self.open_editor_button = PrimaryPushButton("Open parameter editor")
         self.open_editor_button.setEnabled(False)
-        self.inspector = PlainTextEdit(self.inspector_panel)
+        self.inspector = BoundPlainTextEdit(self.inspector_panel)
         self.inspector.setReadOnly(True)
         self.inspector.setPlaceholderText("Select a recipe node to inspect its fields and expansion.")
         inspector_card_layout.addWidget(inspector_title)
@@ -744,13 +806,13 @@ class RecipePage(QWidget):
         self.workspace_splitter.setStretchFactor(0, 1)
         self.workspace_splitter.setStretchFactor(1, 4)
         self.workspace_splitter.setStretchFactor(2, 2)
-        self.workspace_splitter.setMinimumHeight(430)
+        self.workspace_splitter.setMinimumHeight(200)
         self.workspace_splitter.setProperty("stationSurface", "surface")
         self.workspace_splitter.splitterMoved.connect(self._workspace_splitter_moved)
         self.workspace_card = CardWidget(self)
         self.workspace_card.setObjectName("recipeWorkspaceCard")
         self.workspace_card.setProperty("stationSurface", "surface")
-        self.workspace_card.setMinimumHeight(500)
+        self.workspace_card.setMinimumHeight(220)
         workspace_layout = QVBoxLayout(self.workspace_card)
         workspace_layout.setContentsMargins(12, 10, 12, 12)
         workspace_layout.setSpacing(8)
@@ -1020,7 +1082,7 @@ class RecipePage(QWidget):
     def _build_device_library(self) -> QFrame:
         """Build a dense, searchable node library modelled after the operator workspace."""
 
-        scroll = ScrollArea()
+        scroll = BoundScrollArea()
         scroll.setObjectName("recipeLibraryScroll")
         scroll.setWidgetResizable(True)
         scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
@@ -1301,6 +1363,16 @@ class RecipePage(QWidget):
             lambda: self._library_add_basic("comment"),
             drag_kind="flow:comment",
         )
+        integrations = group("Integrations", "1")
+        action(
+            integrations,
+            "Upload to eLab",
+            "Upload finished measurement run to eLabFTW using the selected template",
+            "elab",
+            QStyle.StandardPixmap.SP_DriveNetIcon,
+            self._library_add_elab_upload,
+            drag_kind="integration:upload_to_elab",
+        )
         layout.addStretch(1)
         hint = BodyLabel(
             "Click to add after the selected step, or drag to an exact gap. "
@@ -1413,6 +1485,29 @@ class RecipePage(QWidget):
                     )
                 else:
                     button.setToolTip(str(button.property("libraryDescription")))
+
+    def _library_add_elab_upload(
+        self,
+        *,
+        parent_id: str | None = None,
+        branch: str | None = None,
+        index: int | None = None,
+    ) -> None:
+        if parent_id is None or branch is None:
+            parent_id, branch, index = self._library_default_destination()
+        if parent_id == "__finally__":
+            QMessageBox.warning(
+                self,
+                "Cannot add block",
+                "Finally accepts only ramp-to-zero and OUTPUT OFF safety actions.",
+            )
+            return
+        self._add_basic_node(
+            "upload_to_elab",
+            parent_id=parent_id,
+            branch=branch,
+            insert_index=index,
+        )
 
     def _library_add_basic(
         self,
@@ -1565,7 +1660,13 @@ class RecipePage(QWidget):
             QMessageBox.warning(self, "Add OUTPUT ON", str(exc))
 
     def _library_add_output_off(
-        self, kind: str, *, channel: str | int | None = None
+        self,
+        kind: str,
+        *,
+        channel: str | int | None = None,
+        parent_id: str | None = None,
+        branch: str | None = None,
+        index: int | None = None,
     ) -> None:
         node: dict[str, object] = {
             "id": self._new_node_id("output-off"),
@@ -1574,6 +1675,24 @@ class RecipePage(QWidget):
         }
         if channel is not None:
             node["channel"] = channel
+        if parent_id is not None and parent_id != "__finally__":
+            source = self._builder_source()
+            try:
+                source = add_recipe_node(
+                    source,
+                    parent_id=parent_id,
+                    branch=branch or "children",
+                    index=index,
+                    node=node,
+                )
+                self._apply_builder_source(
+                    source,
+                    f"Added {kind} OFF",
+                    selected_node_id=str(node["id"]),
+                )
+            except Exception as exc:
+                QMessageBox.warning(self, "Add output OFF", str(exc))
+            return
         self._add_finally_nodes([node], "Added output OFF to safe shutdown")
 
     def _add_finally_nodes(
@@ -1728,15 +1847,27 @@ class RecipePage(QWidget):
                     self._library_add_output_off(
                         "set_keithley_output",
                         channel=kind.removesuffix("_off")[-1].upper(),
+                        parent_id=parent_id,
+                        branch=branch,
+                        index=index,
                     )
                 elif kind in {"keithley_a", "keithley_b"}:
                     self._library_add_keithley_shutdown(kind[-1].upper())
                 elif kind in {"rigol_1", "rigol_2"}:
                     self._library_add_output_off(
-                        "set_rigol_output", channel=int(kind[-1])
+                        "set_rigol_output",
+                        channel=int(kind[-1]),
+                        parent_id=parent_id,
+                        branch=branch,
+                        index=index,
                     )
                 elif kind == "anritsu_sg":
-                    self._library_add_output_off("set_anritsu_sg_output")
+                    self._library_add_output_off(
+                        "set_anritsu_sg_output",
+                        parent_id=parent_id,
+                        branch=branch,
+                        index=index,
+                    )
                 else:
                     raise ConfigurationError(f"Unknown safe-shutdown block {kind!r}.")
                 return True
@@ -1766,10 +1897,24 @@ class RecipePage(QWidget):
                     index=index,
                 )
                 return True
+            if category == "integration":
+                if kind in {"upload_to_elab", "upload_elab"}:
+                    self._library_add_elab_upload(
+                        parent_id=parent_id, branch=branch, index=index
+                    )
+                    return True
+                raise ConfigurationError(f"Unknown integration block {kind!r}.")
             if category != "flow":
                 raise ConfigurationError(
                     f"Unknown library block category {category!r}."
                 )
+            if kind in {"upload_to_elab", "upload_elab"}:
+                self._library_add_elab_upload(
+                    parent_id=parent_id,
+                    branch=branch,
+                    index=index,
+                )
+                return True
             self._library_add_basic(
                 kind,
                 parent_id=parent_id,
@@ -1851,12 +1996,42 @@ class RecipePage(QWidget):
 
         self._anritsu_sg_snapshot_provider = provider
 
+    def set_elab_context(
+        self,
+        *,
+        profile_provider: Callable[[], ElabIntegrationProfile] | None = None,
+        credentials_provider: Callable[[], ElabCredentials] | None = None,
+        available_templates_provider: Callable[[], list[tuple[int, str]]] | None = None,
+        refresh_templates_callback: Callable[[], None] | None = None,
+        navigate_to_elab: Callable[[], None] | None = None,
+    ) -> None:
+        """Bind live eLabFTW policy, credentials, templates, and navigation."""
+
+        self._elab_profile_provider = profile_provider
+        self._elab_credentials_provider = credentials_provider
+        self._elab_available_templates_provider = available_templates_provider
+        self._elab_refresh_templates_callback = refresh_templates_callback
+        self._elab_navigate_callback = navigate_to_elab
+
+    def sync_elab_context(self) -> None:
+        """Synchronize the recipe editor when eLabFTW settings or templates change."""
+        self._sync_tree_view(self._tree_source)
+
     def _select_semantic_node(self, semantic_id: str) -> None:
         """Select one immutable semantic row and its authored source node."""
+
+        if not semantic_id:
+            self._selected_semantic_id = None
+            self._selected_source_node_id = None
+            self._node_selected()
+            return
 
         try:
             node = self.tree_model.tree.require(semantic_id)
         except ConfigurationError:
+            self._selected_semantic_id = None
+            self._selected_source_node_id = None
+            self._node_selected()
             return
         self._selected_semantic_id = semantic_id
         self._selected_source_node_id = node.source_node_id
@@ -3558,6 +3733,26 @@ class RecipePage(QWidget):
         painter.end()
         return QIcon(pixmap)
 
+    def _selected_node_sibling_bounds(self) -> tuple[int, int]:
+        """Return (index, count) of the selected node among its siblings.
+
+        Returns (-1, 0) if the node is not movable, is root, or has no parent.
+        """
+        location = self._selected_recipe_location()
+        if location is None or location[1] is None:
+            return -1, 0
+        node, parent_id, branch, index, in_finally = location
+        locations = self._recipe_node_locations()
+        if parent_id == "__finally__":
+            count = sum(1 for loc in locations.values() if loc[1] == "__finally__")
+            return index, count
+        parent_loc = locations.get(parent_id)
+        if parent_loc is None:
+            return -1, 0
+        parent_node = parent_loc[0]
+        siblings = parent_node.else_children if branch == "else" else parent_node.children
+        return index, len(siblings)
+
     def _node_selected(self, *_unused: object) -> None:
         """Refresh editing controls from the selected semantic/source identity."""
 
@@ -3565,49 +3760,170 @@ class RecipePage(QWidget):
         semantic = self._selected_semantic_node()
         location = self._selected_recipe_location()
         node = location[0] if location is not None else None
-        movable = bool(editable and location is not None and location[1] is not None)
+
+        if semantic is None or not editable:
+            for button in (
+                self.delete_node_button,
+                self.duplicate_node_button,
+                self.move_up_button,
+                self.move_down_button,
+                self.wrap_repeat_button,
+                self.edit_device_button,
+                self.edit_generator_button,
+                self.open_editor_button,
+            ):
+                button.setEnabled(False)
+            if semantic is None:
+                self.selection_context.setText("Select a block in the measurement tree")
+                self.inspector_summary.setText(
+                    "Select a node to see its measurement role and configuration."
+                )
+                self.inspector.clear()
+                return
+
+        # Distinguish authored recipe nodes from generated presentation rows
+        is_generated_row = bool(
+            semantic is not None
+            and semantic.kind in {
+                SemanticNodeKind.SET_ROI_VALUE,
+                SemanticNodeKind.LOOP_BODY,
+                SemanticNodeKind.FINALLY,
+                SemanticNodeKind.GENERATED_SAFETY,
+            }
+        )
+        is_authored_node = bool(
+            semantic is not None
+            and not is_generated_row
+            and node is not None
+        )
+
+        index, count = self._selected_node_sibling_bounds()
+        is_movable = bool(
+            editable
+            and is_authored_node
+            and location is not None
+            and location[1] is not None
+        )
+
+        can_move_up = bool(is_movable and index > 0)
+        can_move_down = bool(is_movable and count > 1 and index < count - 1)
+        can_delete = is_movable
+        can_duplicate = is_movable
+
         raw_actions = node.data.get("parameter_actions") if node is not None else None
         actions = raw_actions if isinstance(raw_actions, (list, tuple)) else ()
+
         has_roi = bool(
-            node is not None
+            editable
             and (
-                semantic is not None and semantic.kind is SemanticNodeKind.SWEEP_AXIS
-                or node.type == "sweep"
-                or any(
-                    isinstance(action, dict) and action.get("mode") == "sweep"
-                    for action in actions
+                (
+                    semantic is not None
+                    and semantic.kind in {
+                        SemanticNodeKind.SWEEP_AXIS,
+                        SemanticNodeKind.SET_ROI_VALUE,
+                    }
+                )
+                or (
+                    node is not None
+                    and is_authored_node
+                    and (
+                        node.type == "sweep"
+                        or any(
+                            isinstance(action, dict) and action.get("mode") == "sweep"
+                            for action in actions
+                        )
+                    )
                 )
             )
         )
+
         has_device = bool(
-            node is not None
+            editable
+            and is_authored_node
+            and node is not None
             and (
                 node.data.get("device_module")
                 or self._legacy_device_configuration_node(node) is not None
             )
         )
-        for button in (
-            self.delete_node_button, self.duplicate_node_button,
-            self.move_up_button, self.move_down_button,
-        ):
-            button.setEnabled(movable)
-        self.wrap_repeat_button.setEnabled(
-            bool(
-                editable and node is not None and location is not None
-                and not location[4]
-                and (location[1] is not None or node.children)
-            )
+
+        can_wrap_repeat = bool(
+            editable
+            and is_authored_node
+            and node is not None
+            and location is not None
+            and not location[4]
+            and (location[1] is not None or bool(node.children))
         )
-        if semantic is None:
-            self.selection_context.setText("Select a block in the measurement tree")
-            self.inspector_summary.setText(
-                "Select a node to see its measurement role and configuration."
+
+        self.edit_device_button.setEnabled(has_device)
+        self.edit_generator_button.setEnabled(has_roi)
+        self.delete_node_button.setEnabled(can_delete)
+        self.duplicate_node_button.setEnabled(can_duplicate)
+        self.move_up_button.setEnabled(can_move_up)
+        self.move_down_button.setEnabled(can_move_down)
+        self.wrap_repeat_button.setEnabled(can_wrap_repeat)
+
+        # Dynamic tooltips for clear UI feedback
+        if can_move_up:
+            self.move_up_button.setToolTip("Move the selected node up (Alt+Up)")
+        elif is_movable and index == 0:
+            self.move_up_button.setToolTip("The selected node is already at the top of its branch")
+        else:
+            self.move_up_button.setToolTip("Move the selected node up (Alt+Up)")
+
+        if can_move_down:
+            self.move_down_button.setToolTip("Move the selected node down (Alt+Down)")
+        elif is_movable and count > 0 and index >= count - 1:
+            self.move_down_button.setToolTip("The selected node is already at the bottom of its branch")
+        else:
+            self.move_down_button.setToolTip("Move the selected node down (Alt+Down)")
+
+        if has_device:
+            self.edit_device_button.setToolTip(
+                "Open a separate configuration window for the selected instrument"
             )
-            self.inspector.clear()
-            self.open_editor_button.setEnabled(False)
-            self.edit_device_button.setEnabled(False)
-            self.edit_generator_button.setEnabled(False)
-            return
+        else:
+            self.edit_device_button.setToolTip(
+                "Device settings are only available for instrument configuration nodes"
+            )
+
+        if has_roi:
+            self.edit_generator_button.setToolTip(
+                "Open the point/interval editor for the selected sweep"
+            )
+        else:
+            self.edit_generator_button.setToolTip(
+                "Edit ROI is only available for sweep axes and ROI setpoint rows"
+            )
+
+        if can_delete:
+            self.delete_node_button.setToolTip("Delete the selected node (Delete)")
+        else:
+            self.delete_node_button.setToolTip(
+                "Delete is only available for movable recipe steps"
+            )
+
+        if can_duplicate:
+            self.duplicate_node_button.setToolTip(
+                "Duplicate the selected leaf node (Ctrl+D)"
+            )
+        else:
+            self.duplicate_node_button.setToolTip(
+                "Duplicate is only available for movable recipe steps"
+            )
+
+        if can_wrap_repeat:
+            self.wrap_repeat_button.setToolTip(
+                "Repeat all root steps"
+                if location is not None and location[1] is None
+                else "Wrap the selected block in Repeat..."
+            )
+        else:
+            self.wrap_repeat_button.setToolTip(
+                "Wrap in Repeat is only available for authored recipe blocks"
+            )
+
         self.selection_context.setText(semantic.label or "Selected measurement row")
         historical = self._historical_objects_by_semantic_id.get(semantic.semantic_id)
         if isinstance(historical, ThatecDevice):
@@ -3627,7 +3943,7 @@ class RecipePage(QWidget):
             self.inspector.setPlainText(
                 f"THATEC row: {historical.id}\n"
                 f"Recorded shape: {historical.shape or 'no measurement data'}\n"
-                f"Timestamps: {historical.timestamp_count}\n\n"
+                f"Timestamps: {getattr(historical, 'timestamp_count', '')}\n\n"
                 + "\n".join(f"{key}: {value}" for key, value in historical.metadata)
             )
         elif node is None:
@@ -3653,9 +3969,14 @@ class RecipePage(QWidget):
             else "Edit comment" if node is not None and node.type == "comment"
             else "Action settings"
         )
-        self.open_editor_button.setEnabled(editable and node is not None)
-        self.edit_device_button.setEnabled(editable and has_device)
-        self.edit_generator_button.setEnabled(editable and has_roi)
+        can_open_editor = bool(
+            editable
+            and (
+                (is_authored_node and location is not None and location[1] is not None)
+                or (semantic is not None and semantic.kind is SemanticNodeKind.SET_ROI_VALUE)
+            )
+        )
+        self.open_editor_button.setEnabled(can_open_editor)
 
     def _move_recipe_node(
         self,
@@ -4062,6 +4383,32 @@ class RecipePage(QWidget):
                 "average_count": 1,
             },
             "comment": {"id": node_id, "type": "comment", "text": "Describe this step"},
+            "upload_to_elab": {
+                "id": node_id,
+                "type": "upload_to_elab",
+                "template_id": (
+                    self._elab_profile_provider().template_id
+                    if self._elab_profile_provider is not None
+                    else None
+                ),
+                "template_name": (
+                    self._elab_profile_provider().template_name
+                    if self._elab_profile_provider is not None
+                    else ""
+                ),
+                "title_pattern": (
+                    self._elab_profile_provider().title_pattern
+                    if self._elab_profile_provider is not None
+                    else "PyLab measurement {run_name}"
+                ),
+                "tags": (
+                    list(self._elab_profile_provider().tags)
+                    if self._elab_profile_provider is not None and self._elab_profile_provider().tags
+                    else ["pylab"]
+                ),
+                "attach_hdf5": True,
+                "attach_csv": True,
+            },
             "ramp_keithley_to_zero": {
                 "id": node_id,
                 "type": "ramp_keithley_to_zero",
@@ -4241,6 +4588,9 @@ class RecipePage(QWidget):
         anritsu_role = (
             self._anritsu_node_role(node) if isinstance(node, RecipeNode) else None
         )
+        if isinstance(node, RecipeNode) and node.type in {"upload_to_elab", "upload_elab"}:
+            self._edit_elab_upload_node(node)
+            return
         if isinstance(node, RecipeNode) and node.type == "comment":
             self._edit_comment_node(node)
             return
@@ -5639,6 +5989,34 @@ class RecipePage(QWidget):
         except Exception as exc:
             QMessageBox.warning(self, "Anritsu ROI editor", str(exc))
 
+    def _edit_elab_upload_node(self, node: RecipeNode) -> None:
+        dialog = ElabUploadEditorDialog(
+            node,
+            parent=self,
+            profile_provider=self._elab_profile_provider,
+            credentials_provider=self._elab_credentials_provider,
+            available_templates_provider=self._elab_available_templates_provider,
+            refresh_templates_callback=self._elab_refresh_templates_callback,
+            navigate_to_elab=self._elab_navigate_callback,
+        )
+        if dialog.exec() != QDialog.DialogCode.Accepted:
+            return
+        replacement = self._node_to_mapping(node)
+        for key in tuple(node.data):
+            replacement.pop(key, None)
+        replacement.update(dialog.result_data())
+        try:
+            source = replace_recipe_node(
+                self._builder_source(), node_id=node.id, node=replacement
+            )
+            self._apply_builder_source(
+                source,
+                f"Updated eLabFTW upload step for {node.id}",
+                selected_node_id=node.id,
+            )
+        except Exception as exc:
+            QMessageBox.warning(self, "eLab upload settings", str(exc))
+
     def _edit_comment_node(self, node: RecipeNode) -> None:
         dialog = CommentEditorDialog(str(node.data.get("text", "")), self)
         if dialog.exec() != QDialog.DialogCode.Accepted:
@@ -5945,8 +6323,24 @@ class RecipePage(QWidget):
         move_up = add_action("Move selected node up", lambda: self._move_selected_sibling(-1))
         move_down = add_action("Move selected node down", lambda: self._move_selected_sibling(1))
         editable = self._tree_editing_allowed() and isinstance(node, RecipeNode)
+        semantic = self._selected_semantic_node()
+        is_generated_row = bool(
+            semantic is not None
+            and semantic.kind in {
+                SemanticNodeKind.SET_ROI_VALUE,
+                SemanticNodeKind.LOOP_BODY,
+                SemanticNodeKind.FINALLY,
+                SemanticNodeKind.GENERATED_SAFETY,
+            }
+        )
+        is_authored_node = bool(
+            semantic is not None
+            and not is_generated_row
+            and node is not None
+        )
         has_device_settings = bool(
             editable
+            and is_authored_node
             and (
                 node.data.get("device_module")
                 or self._legacy_device_configuration_node(node) is not None
@@ -5955,16 +6349,29 @@ class RecipePage(QWidget):
         has_roi = bool(
             editable
             and (
-                node.type == "sweep"
+                (
+                    semantic is not None
+                    and semantic.kind in {
+                        SemanticNodeKind.SWEEP_AXIS,
+                        SemanticNodeKind.SET_ROI_VALUE,
+                    }
+                )
                 or (
-                    node.data.get("device_module")
-                    and any(
-                        isinstance(action, dict)
-                        and action.get("mode") == "sweep"
-                        for action in (
-                            node.data.get("parameter_actions")
-                            if isinstance(node.data.get("parameter_actions"), (list, tuple))
-                            else ()
+                    node is not None
+                    and is_authored_node
+                    and (
+                        node.type == "sweep"
+                        or (
+                            node.data.get("device_module")
+                            and any(
+                                isinstance(action, dict)
+                                and action.get("mode") == "sweep"
+                                for action in (
+                                    node.data.get("parameter_actions")
+                                    if isinstance(node.data.get("parameter_actions"), (list, tuple))
+                                    else ()
+                                )
+                            )
                         )
                     )
                 )
@@ -5972,26 +6379,36 @@ class RecipePage(QWidget):
         )
         edit_device.setEnabled(has_device_settings)
         edit_roi.setEnabled(has_roi)
-        edit_comment.setEnabled(editable and node.type == "comment")
+        edit_comment.setEnabled(editable and is_authored_node and node.type == "comment")
         edit_acquisition.setEnabled(
             editable
+            and is_authored_node
             and node.type in {"acquire_reference", "acquire_spectrum"}
         )
         edit_action.setEnabled(
             editable
+            and is_authored_node
             and not has_device_settings
             and not has_roi
             and node.type
             not in {"comment", "acquire_reference", "acquire_spectrum"}
         )
         toggle_enabled.setEnabled(
-            editable and bool(location is not None and not location[4])
+            editable and is_authored_node and bool(location is not None and not location[4])
         )
-        movable = editable and bool(location is not None and location[1] is not None)
-        duplicate.setEnabled(movable)
-        delete.setEnabled(movable)
-        move_up.setEnabled(movable)
-        move_down.setEnabled(movable)
+        index, count = self._selected_node_sibling_bounds()
+        is_movable = bool(
+            editable
+            and is_authored_node
+            and location is not None
+            and location[1] is not None
+        )
+        can_move_up = bool(is_movable and index > 0)
+        can_move_down = bool(is_movable and count > 1 and index < count - 1)
+        duplicate.setEnabled(is_movable)
+        delete.setEnabled(is_movable)
+        move_up.setEnabled(can_move_up)
+        move_down.setEnabled(can_move_down)
         menu.exec(global_position)
 
     def _fixed_node_from_dialog(
@@ -6108,6 +6525,22 @@ class RecipePage(QWidget):
             for child in children:
                 if child["type"] == "configure_keithley":
                     child.update(options)
+            settle_str = str(options.get("settle_time") or options.get("settling_time") or "").strip()
+            if settle_str:
+                wait_child = next((c for c in children if c.get("type") == "wait"), None)
+                if wait_child is not None:
+                    wait_child["duration"] = settle_str
+                else:
+                    try:
+                        qty = parse_quantity(settle_str, DIMENSION_TIME)
+                        if qty.si_value > 0:
+                            children.append({
+                                "id": self._new_node_id("settle-wait"),
+                                "type": "wait",
+                                "duration": settle_str,
+                            })
+                    except Exception:
+                        pass
         replacement = {"id": node.id, "type": "sweep", **node.data}
         for legacy_field in ("start", "stop", "points", "spacing"):
             replacement.pop(legacy_field, None)
@@ -6203,12 +6636,30 @@ class RecipePage(QWidget):
                 "frequency": "${" + target + "}" if field == "frequency" else defaults.get("sg_frequency", "1 GHz"),
                 "power": "${" + target + "}" if field == "power" else defaults.get("sg_power", "-30 dBm"),
             }
+        children: list[dict[str, object]] = [child]
+        if target.startswith("keithley."):
+            settle_str = str(
+                (keithley_options or {}).get("settle_time")
+                or (keithley_options or {}).get("settling_time")
+                or "100 ms"
+            ).strip()
+            if settle_str:
+                try:
+                    qty = parse_quantity(settle_str, DIMENSION_TIME)
+                    if qty.si_value > 0:
+                        children.append({
+                            "id": self._new_node_id("settle-wait"),
+                            "type": "wait",
+                            "duration": settle_str,
+                        })
+                except Exception:
+                    pass
         return {
             "id": node_id,
             "type": "sweep",
             "target": target,
             "segments": segments,
-            "children": [child],
+            "children": children,
         }
 
     def _delete_selected_node(self) -> None:
@@ -6295,22 +6746,31 @@ class RecipePage(QWidget):
         return clone
 
     def _move_selected_sibling(self, delta: int) -> None:
+        if not self._tree_editing_allowed():
+            return
+        semantic = self._selected_semantic_node()
+        if semantic is not None and semantic.kind in {
+            SemanticNodeKind.SET_ROI_VALUE,
+            SemanticNodeKind.LOOP_BODY,
+            SemanticNodeKind.FINALLY,
+            SemanticNodeKind.GENERATED_SAFETY,
+        }:
+            return
         location = self._selected_recipe_location()
         if location is None or location[1] is None:
             return
-        node, parent_id, branch, index, _in_finally = location
+        node, parent_id, branch, _index, _in_finally = location
         assert parent_id is not None
-        if parent_id == "__finally__":
-            count = len(parse_recipe_text(self._tree_source).finally_nodes)
-        else:
-            parent_location = self._recipe_node_locations().get(parent_id)
-            if parent_location is None:
-                return
-            parent_node = parent_location[0]
-            count = len(parent_node.else_children if branch == "else" else parent_node.children)
+        index, count = self._selected_node_sibling_bounds()
+        if index < 0 or count <= 1:
+            return
         if delta < 0:
+            if index <= 0:
+                return
             target = index - 1
         else:
+            if index >= count - 1:
+                return
             target = index + 2
         if target < 0 or target > count:
             return
@@ -6330,6 +6790,8 @@ class RecipePage(QWidget):
         mode = str(self.execution_mode.currentData())
         dry_run = mode == "dry_run"
         manual = mode == "manual_step"
+        self.tree_model.set_outputs_forced_off(dry_run)
+        self.measurement_tree.viewport().update()
         self.run_button.setText(
             "Run dry run" if dry_run else "Start manual stages" if manual else "Run plan"
         )

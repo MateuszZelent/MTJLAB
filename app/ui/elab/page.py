@@ -2,12 +2,13 @@
 
 from __future__ import annotations
 
+from dataclasses import replace
 import os
 from pathlib import Path
 from typing import Any
 
 from PySide6.QtCore import Qt, QUrl, Signal
-from PySide6.QtGui import QDesktopServices, QResizeEvent
+from PySide6.QtGui import QDesktopServices, QIcon, QResizeEvent
 from PySide6.QtWidgets import (
     QAbstractItemView,
     QFormLayout,
@@ -25,12 +26,14 @@ from qfluentwidgets import (
     CaptionLabel,
     CheckBox,
     ComboBox,
+    FluentIcon as FIF,
     LineEdit,
     PrimaryPushButton,
     PushButton,
     StrongBodyLabel,
     SubtitleLabel,
     TableWidget,
+    ToolButton,
 )
 
 from app.integrations.elab import (
@@ -48,6 +51,8 @@ from app.integrations.elab import (
 from app.settings import SettingsRepository
 from app.settings.models import StationSettings
 from app.ui.dialogs import StationFileDialog as QFileDialog
+from app.ui.elab.favorites_dialog import ElabFavoritesDialog
+from app.ui.elab.searchable_combo import SearchableComboBox
 from app.ui.elab.workers import ElabTemplatesWorker, ElabUploadWorker
 
 
@@ -185,10 +190,18 @@ class ElabPage(QWidget):
         policy_form.setRowWrapPolicy(QFormLayout.RowWrapPolicy.DontWrapRows)
         template_row = QHBoxLayout()
         template_row.setSpacing(8)
-        self.template_combo = ComboBox(self.policy_card)
+        self.template_combo = SearchableComboBox(self.policy_card)
         self.template_combo.setPlaceholderText("Load templates from eLab")
         self.template_combo.setAccessibleName("eLab experiment template")
+        self.favorite_toggle_button = ToolButton(FIF.HEART, self.policy_card)
+        self.favorite_toggle_button.setToolTip("Add this template to favorites")
+        self.favorite_toggle_button.setAccessibleName("Toggle favorite template")
+        self.favorites_dialog_button = PushButton(FIF.HEART, "Favorites...", self.policy_card)
+        self.favorites_dialog_button.setToolTip("Choose from favorite templates")
+        self.favorites_dialog_button.setAccessibleName("Choose from favorites")
         template_row.addWidget(self.template_combo, 1)
+        template_row.addWidget(self.favorite_toggle_button)
+        template_row.addWidget(self.favorites_dialog_button)
         template_row.addWidget(self.refresh_templates_button)
         policy_form.addRow("Experiment template", template_row)
         self.recent_template_combo = ComboBox(self.policy_card)
@@ -297,6 +310,8 @@ class ElabPage(QWidget):
         self.refresh_templates_button.clicked.connect(self._refresh_templates)
         self.template_combo.currentIndexChanged.connect(self._template_changed)
         self.recent_template_combo.currentIndexChanged.connect(self._recent_template_changed)
+        self.favorite_toggle_button.clicked.connect(self._toggle_favorite_clicked)
+        self.favorites_dialog_button.clicked.connect(self._open_favorites_dialog)
         self.save_policy_button.clicked.connect(self._save_policy)
         self.browse_result_button.clicked.connect(self._browse_result)
         self.upload_button.clicked.connect(self._upload_selected)
@@ -320,8 +335,10 @@ class ElabPage(QWidget):
         self.recent_template_combo.blockSignals(False)
         if self._profile.template_id is not None:
             template_id = str(self._profile.template_id)
+            is_fav = self._profile.is_favorite(self._profile.template_id)
             self.template_combo.addItem(
                 self._profile.template_name or f"Configured template #{self._profile.template_id}",
+                icon=FIF.HEART if is_fav else None,
                 userData=self._profile.template_id,
             )
             self._template_names_by_id[template_id] = self._profile.template_name
@@ -332,6 +349,7 @@ class ElabPage(QWidget):
                 "No template selected. Refresh templates after saving credentials."
             )
         self._template_changed(self.template_combo.currentIndex())
+        self._update_favorite_controls()
         self._update_upload_button()
 
     def _refresh_credentials_state(self) -> None:
@@ -434,13 +452,19 @@ class ElabPage(QWidget):
         self.template_combo.clear()
         self._template_names_by_id.clear()
         for template in templates:
+            is_fav = self._profile.is_favorite(template.id)
             self.template_combo.addItem(
-                f"{template.title}  ·  #{template.id}", userData=template.id
+                f"{template.title}  ·  #{template.id}",
+                icon=FIF.HEART if is_fav else None,
+                userData=template.id,
             )
             self._template_names_by_id[str(template.id)] = template.title
         if selected_id is not None and self.template_combo.findData(selected_id) < 0:
+            is_fav = self._profile.is_favorite(selected_id)
             self.template_combo.addItem(
-                f"Configured template  ·  #{selected_id}", userData=selected_id
+                f"Configured template  ·  #{selected_id}",
+                icon=FIF.HEART if is_fav else None,
+                userData=selected_id,
             )
             self._template_names_by_id[str(selected_id)] = (
                 self._profile.template_name or f"Template #{selected_id}"
@@ -482,7 +506,12 @@ class ElabPage(QWidget):
         index = self.template_combo.findData(template_id)
         if index < 0:
             display_title = title.strip() or f"Template #{template_id}"
-            self.template_combo.addItem(f"{display_title}  ·  #{template_id}", userData=template_id)
+            is_fav = self._profile.is_favorite(template_id)
+            self.template_combo.addItem(
+                f"{display_title}  ·  #{template_id}",
+                icon=FIF.HEART if is_fav else None,
+                userData=template_id,
+            )
             self._template_names_by_id[str(template_id)] = display_title
             index = self.template_combo.count() - 1
         elif title.strip() and not self._template_names_by_id.get(str(template_id)):
@@ -508,7 +537,88 @@ class ElabPage(QWidget):
             self.recent_template_combo.blockSignals(True)
             self.recent_template_combo.setCurrentIndex(recent_index)
             self.recent_template_combo.blockSignals(False)
+            try:
+                tid = int(template_id)
+                if tid != self._profile.template_id or (name and name != self._profile.template_name):
+                    self._profile = self._profile.with_overrides(
+                        template_id=tid,
+                        template_name=name,
+                    ).remember_template(tid, name)
+                    self._persist_profile_settings()
+                    self.configuration_changed.emit()
+            except (ValueError, TypeError):
+                pass
+        self._update_favorite_controls()
         self._update_upload_button()
+
+    def _persist_profile_settings(self) -> None:
+        def transform(raw: dict[str, Any], _settings: StationSettings) -> dict[str, Any]:
+            application = raw.setdefault("application", {})
+            if not isinstance(application, dict):
+                raise ElabConfigurationError("The application settings section is not a mapping.")
+            application["elab"] = self._profile.to_raw()
+            return raw
+
+        try:
+            settings, _raw = self._repository.update_raw(transform)
+            self._settings = settings
+        except Exception:
+            pass
+
+    def _toggle_favorite_clicked(self) -> None:
+        template_id = self.template_combo.currentData()
+        if template_id in (None, ""):
+            return
+        tid = int(template_id)
+        name = self._template_names_by_id.get(str(tid), f"Template #{tid}")
+        self._profile = self._profile.toggle_favorite(tid, name)
+        self._persist_profile_settings()
+        self._update_favorite_controls()
+        self._refresh_template_icons()
+        self.configuration_changed.emit()
+
+    def _open_favorites_dialog(self) -> None:
+        dialog = ElabFavoritesDialog(
+            self._profile.favorite_templates,
+            selected_template_id=self._profile.template_id,
+            parent=self.window(),
+        )
+        dialog.favorites_changed.connect(self._on_favorites_changed)
+        if dialog.exec():
+            chosen = dialog.selected_template()
+            if chosen is not None:
+                tid, title = chosen
+                self._select_template(tid, title)
+        updated_favs = dialog.updated_favorites()
+        if updated_favs != self._profile.favorite_templates:
+            self._on_favorites_changed(updated_favs)
+
+    def _on_favorites_changed(self, favorites: tuple[Any, ...]) -> None:
+        self._profile = replace(self._profile, favorite_templates=favorites)
+        self._persist_profile_settings()
+        self._update_favorite_controls()
+        self._refresh_template_icons()
+        self.configuration_changed.emit()
+
+    def _update_favorite_controls(self) -> None:
+        template_id = self.template_combo.currentData()
+        if template_id in (None, ""):
+            self.favorite_toggle_button.setEnabled(False)
+            self.favorite_toggle_button.setToolTip("Select a template to mark as favorite")
+            return
+        self.favorite_toggle_button.setEnabled(True)
+        is_fav = self._profile.is_favorite(template_id)
+        if is_fav:
+            self.favorite_toggle_button.setToolTip("Remove this template from favorites")
+        else:
+            self.favorite_toggle_button.setToolTip("Add this template to favorites")
+
+    def _refresh_template_icons(self) -> None:
+        for i in range(self.template_combo.count()):
+            tid = self.template_combo.itemData(i)
+            if tid is not None:
+                is_fav = self._profile.is_favorite(tid)
+                self.template_combo.setItemIcon(i, FIF.HEART if is_fav else QIcon())
 
     def _profile_from_widgets(self) -> ElabIntegrationProfile:
         template_id = self.template_combo.currentData()
@@ -530,6 +640,7 @@ class ElabPage(QWidget):
             upload_hdf5=self.upload_hdf5_check.isChecked(),
             upload_csv=self.upload_csv_check.isChecked(),
             recent_templates=self._profile.recent_templates,
+            favorite_templates=self._profile.favorite_templates,
         )
         profile.validate()
         if profile.enabled and profile.template_id is None:
@@ -602,6 +713,52 @@ class ElabPage(QWidget):
             self._profile.enabled,
             f"Uses {self._profile.template_name or f'Template #{self._profile.template_id}'} from the eLabFTW policy.",
         )
+
+    def current_profile(self) -> ElabIntegrationProfile:
+        return self._profile
+
+    def current_credentials(self) -> ElabCredentials:
+        return self._credentials
+
+    def available_templates(self) -> list[tuple[int, str]]:
+        """Return all known template choices from live cache, history, and profile."""
+
+        templates: list[tuple[int, str]] = []
+        seen_ids: set[int] = set()
+
+        for raw_id, name in self._template_names_by_id.items():
+            try:
+                tid = int(raw_id)
+            except (ValueError, TypeError):
+                continue
+            if tid > 0 and tid not in seen_ids:
+                seen_ids.add(tid)
+                templates.append((tid, name or f"Template #{tid}"))
+
+        for reference in self._profile.favorite_templates:
+            if reference.id > 0 and reference.id not in seen_ids:
+                seen_ids.add(reference.id)
+                templates.append((reference.id, reference.title))
+
+        for reference in self._profile.recent_templates:
+            if reference.id > 0 and reference.id not in seen_ids:
+                seen_ids.add(reference.id)
+                templates.append((reference.id, reference.title))
+
+        if self._profile.template_id is not None and self._profile.template_id not in seen_ids:
+            seen_ids.add(self._profile.template_id)
+            templates.append(
+                (
+                    self._profile.template_id,
+                    self._profile.template_name or f"Template #{self._profile.template_id}",
+                )
+            )
+
+        return templates
+
+    def refresh_templates(self) -> None:
+        """Trigger an asynchronous template refresh."""
+        self._refresh_templates()
 
     def manual_upload_configuration(self) -> tuple[bool, bool, str]:
         """Configuration provider used by individual device save dialogs."""
@@ -699,18 +856,20 @@ class ElabPage(QWidget):
         run_state: str,
         error: object | None = None,
         requested: bool | None = None,
+        profile_override: ElabIntegrationProfile | None = None,
     ) -> None:
         """Queue a successful terminal run without blocking the instrument shell."""
 
         # ``requested=True`` is an explicit per-run opt-in from the sweep
-        # page.  It must be able to override the central default policy;
-        # otherwise the checkbox would appear actionable but silently do
-        # nothing whenever automatic upload is disabled in the eLab tab.
+        # page or recipe tree.  It must be able to override the central default
+        # policy; otherwise the checkbox or recipe block would appear actionable
+        # but silently do nothing whenever automatic upload is disabled in the eLab tab.
+        effective_profile = profile_override or self._profile
         if self._simulation:
             return
         if requested is False:
             return
-        if requested is None and not self._profile.enabled:
+        if requested is None and not effective_profile.enabled:
             return
         if str(run_state).casefold() != "safe" or error:
             return
@@ -720,7 +879,7 @@ class ElabPage(QWidget):
                 self._credentials.host,
                 self._credentials.api_key,
             )
-            profile = self._profile
+            profile = effective_profile
             profile.validate()
             if profile.template_id is None:
                 raise ElabConfigurationError(

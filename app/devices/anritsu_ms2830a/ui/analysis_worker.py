@@ -2,11 +2,12 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 from PySide6.QtCore import QObject, QThread, Qt, Signal, Slot
 
 from app.spectrum import (
+    SpectrumAnalysisParameters,
     SpectrumCleanupResult,
     SpectrumPeak,
     clean_spectrum_dbm,
@@ -27,6 +28,9 @@ class SpectrumAnalysisRequest:
     frame_id: int = 0
     source_unit: str = "dBm"
     provenance: tuple[str, ...] = ()
+    parameters: SpectrumAnalysisParameters = field(
+        default_factory=SpectrumAnalysisParameters
+    )
 
 
 @dataclass(frozen=True, slots=True)
@@ -55,6 +59,7 @@ class _SpectrumAnalysisWorker(QObject):
                     request.powers_dbm,
                     mode=request.mode,
                     history_dbm=request.history_dbm,
+                    parameters=request.parameters,
                 )
             else:
                 cleanup = clean_spectrum_values(
@@ -62,16 +67,15 @@ class _SpectrumAnalysisWorker(QObject):
                     unit=request.source_unit,
                     mode=request.mode,
                     history_dbm=request.history_dbm,
+                    parameters=request.parameters,
                 )
             peaks: tuple[SpectrumPeak, ...] | None = (
                 detect_spectrum_peaks(
                     request.frequencies_hz,
                     cleanup.values_dbm,
-                    min_snr_db=6.0,
-                    min_prominence_db=3.0,
-                    max_peaks=20,
                     fit=request.source_unit == "dBm",
                     unit=request.source_unit,
+                    parameters=request.parameters,
                 )
                 if request.detect_peaks
                 else None

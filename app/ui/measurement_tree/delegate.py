@@ -21,7 +21,7 @@ class MeasurementTreeDelegate(TreeItemDelegate):
         tokens = tokens_for("dark" if isDarkTheme() else "light")
         if phase == "running":
             highlight = QColor(tokens.accent)
-            highlight.setAlpha(24 if isDarkTheme() else 16)
+            highlight.setAlpha(36 if isDarkTheme() else 26)
             painter.fillRect(option.rect, highlight)
         super().paint(painter, option, index)
         if index.column() != 0:

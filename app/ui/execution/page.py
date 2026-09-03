@@ -197,6 +197,7 @@ class RunMonitorPage(QWidget):
             QSizePolicy.Policy.Ignored,
             QSizePolicy.Policy.Preferred,
         )
+        self.owns_viewport = True
         layout = QVBoxLayout(self)
         layout.setContentsMargins(14, 10, 14, 10)
         layout.setSpacing(9)
@@ -925,6 +926,7 @@ class RunMonitorPage(QWidget):
         dry_run = execution_mode == "dry_run"
         manual = execution_mode == "manual_step"
         self._dry_run = dry_run
+        self.tree_model.set_outputs_forced_off(dry_run)
         self._manual_stage_mode = manual
         if manual:
             self.state.setText("MANUAL — PREPARING")
@@ -1328,10 +1330,11 @@ class RunMonitorPage(QWidget):
     def _set_activity_indicator(self, marker: str, pulse: str) -> None:
         self.activity_indicator.setText(marker)
         self.activity_indicator.setProperty("activityPulse", pulse)
-        style = self.activity_indicator.style()
-        style.unpolish(self.activity_indicator)
-        style.polish(self.activity_indicator)
-        self.activity_indicator.update()
+        tokens = tokens_for("dark" if isDarkTheme() else "light")
+        color = tokens.accent if pulse == "on" else tokens.text_muted
+        self.activity_indicator.setStyleSheet(
+            f"color: {color}; font-size: 20px; font-weight: 700;"
+        )
 
     def _pulse_activity_indicator(self) -> None:
         self._activity_pulse_on = not self._activity_pulse_on
@@ -1702,13 +1705,24 @@ class RunMonitorPage(QWidget):
         elif name == "safe_finally_error":
             self._set_current_operation_state("FAILED")
         elif name == "shutdown_action_started":
+            action_id = str(data.get("action", ""))
+            semantic_id = f"__finally__.{action_id.replace('.', '_')}"
+            self.tree_model.apply_state({"semantic_id": semantic_id, "phase": "running"})
+            self.tree_model.apply_state({"semantic_id": "__finally__", "phase": "running"})
+            self.measurement_tree.follow_semantic_id(semantic_id)
             self._update_current_operation(
                 {"kind": str(data.get("action", "shutdown")), "node_id": "shutdown"},
                 state="SAFE SHUTDOWN",
             )
         elif name == "shutdown_action_finished":
+            action_id = str(data.get("action", ""))
+            semantic_id = f"__finally__.{action_id.replace('.', '_')}"
+            self.tree_model.apply_state({"semantic_id": semantic_id, "phase": "applied"})
             self._set_current_operation_state("CONFIRMED")
         elif name == "shutdown_error":
+            action_id = str(data.get("action", ""))
+            semantic_id = f"__finally__.{action_id.replace('.', '_')}"
+            self.tree_model.apply_state({"semantic_id": semantic_id, "phase": "failed"})
             self._set_current_operation_state("FAILED")
         if name == "pause_pending":
             self._begin_pause()
@@ -1728,6 +1742,7 @@ class RunMonitorPage(QWidget):
             self.state.setText("FAULT • WATCHDOG TIMEOUT")
             self._set_current_operation_state("WATCHDOG TIMEOUT")
         elif name == "run_completed":
+            self.tree_model.apply_state({"semantic_id": "__finally__", "phase": "applied"})
             self.progress.setValue(self.progress.maximum())
             self._set_current_operation_state("COMPLETE")
             self._update_eta()

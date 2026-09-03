@@ -552,6 +552,7 @@ class ResultsPage(QWidget):
             payload.tree,
             points=payload.points,
             references=payload.references,
+            detail=payload.detail,
         )
         self.resume_button.setEnabled(
             bool(

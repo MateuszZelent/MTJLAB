@@ -359,3 +359,232 @@ def test_real_qt_library_drag_events_show_and_commit_drop_feedback() -> None:
     assert drop.isAccepted()
     view.close()
     del app
+
+
+def test_measurement_tree_columns_are_interactive_and_resizable() -> None:
+    from PySide6.QtWidgets import QHeaderView
+    from app.ui.measurement_tree import MeasurementTreeModel, MeasurementTreeView
+
+    app = QApplication.instance() or QApplication([])
+    view = MeasurementTreeView()
+    model = MeasurementTreeModel(semantic_tree())
+    view.setModel(model)
+    view.resize(800, 500)
+    view.show()
+    app.processEvents()
+
+    header = view.header()
+    # All 4 columns must be interactive so the user can freely drag dividers
+    for col in range(4):
+        assert header.sectionResizeMode(col) == QHeaderView.ResizeMode.Interactive
+
+    # Columns must have positive default widths
+    assert header.sectionSize(0) >= 140
+    assert header.sectionSize(1) >= 100
+    assert header.sectionSize(2) == 92
+    assert header.sectionSize(3) == 96
+
+    view.close()
+    del app
+
+
+def test_user_resizing_columns_is_preserved_across_set_model() -> None:
+    from app.ui.measurement_tree import MeasurementTreeModel, MeasurementTreeView
+
+    app = QApplication.instance() or QApplication([])
+    view = MeasurementTreeView()
+    model = MeasurementTreeModel(semantic_tree())
+    view.setModel(model)
+    view.resize(800, 500)
+    view.show()
+    app.processEvents()
+
+    header = view.header()
+    assert not view._user_resized_columns
+
+    # User resizes column 0 to 360px
+    header.resizeSection(0, 360)
+    app.processEvents()
+    assert view._user_resized_columns
+    assert view._user_column_widths[0] == 360
+
+    # User resizes column 1 to 240px
+    header.resizeSection(1, 240)
+    app.processEvents()
+    assert view._user_column_widths[1] == 240
+
+    # Model is reset or re-applied (e.g. recipe loaded or compiled)
+    model2 = MeasurementTreeModel(semantic_tree())
+    view.setModel(model2)
+    app.processEvents()
+
+    # User's chosen widths must be preserved!
+    assert header.sectionSize(0) == 360
+    assert header.sectionSize(1) == 240
+
+    view.close()
+    del app
+
+
+def test_resize_event_adapts_columns_when_not_user_resized() -> None:
+    from app.ui.measurement_tree import MeasurementTreeModel, MeasurementTreeView
+
+    app = QApplication.instance() or QApplication([])
+    view = MeasurementTreeView()
+    model = MeasurementTreeModel(semantic_tree())
+    view.setModel(model)
+    view.resize(600, 500)
+    view.show()
+    app.processEvents()
+
+    header = view.header()
+    initial_op = header.sectionSize(0)
+
+    # Make the view wider without user dragging
+    view.resize(1000, 500)
+    app.processEvents()
+
+    # Column 0 should have expanded to fill available space comfortably
+    assert header.sectionSize(0) > initial_op
+
+    view.close()
+    del app
+
+
+def test_dry_run_outputs_automatically_switch_to_disabled_in_tree_model() -> None:
+    from app.ui.measurement_tree import MeasurementTreeModel, MeasurementTreeRole
+    from app.ui.design_system.tokens import tokens_for
+    from qfluentwidgets import isDarkTheme
+    from PySide6.QtGui import QBrush, QColor
+
+    out_on_node = SemanticTreeNode(
+        "dev.output-on",
+        SemanticNodeKind.ACTION,
+        "dev",
+        "Keithley B · OUTPUT ON",
+        {"enabled": True, "device": "keithley", "channel": "B", "is_output": True},
+    )
+    standalone_on = SemanticTreeNode(
+        "rigol-on",
+        SemanticNodeKind.ACTION,
+        "rigol-on",
+        "Rigol CH1 · OUTPUT ON",
+        {"enabled": True, "type": "set_rigol_output", "is_output": True},
+    )
+    standalone_off = SemanticTreeNode(
+        "keithley-off",
+        SemanticNodeKind.ACTION,
+        "keithley-off",
+        "Keithley B · OUTPUT OFF",
+        {"enabled": False, "type": "set_keithley_output", "is_output": True},
+    )
+    finally_off = SemanticTreeNode(
+        "__finally__.keithley_outputs_off",
+        SemanticNodeKind.ACTION,
+        "__finally__",
+        "Keithley A + B · OUTPUT OFF",
+        {"action": "keithley.outputs_off", "enabled": False, "is_output": True, "guaranteed": True},
+    )
+    disabled_node = SemanticTreeNode(
+        "custom-action",
+        SemanticNodeKind.ACTION,
+        "custom-action",
+        "Wait · 100 ms",
+        {"duration": "100 ms", "disabled": True},
+    )
+    root = SemanticTreeNode(
+        "sequence",
+        SemanticNodeKind.SEQUENCE,
+        "sequence",
+        "Measurement sequence",
+        children=(out_on_node, standalone_on, standalone_off, disabled_node),
+    )
+    finally_root = SemanticTreeNode(
+        "__finally__",
+        SemanticNodeKind.FINALLY,
+        None,
+        "Finally — safe shutdown",
+        children=(finally_off,),
+    )
+    tree = SemanticMeasurementTree(
+        roots=(root, finally_root),
+        by_id={
+            n.semantic_id: n
+            for n in (root, finally_root, out_on_node, standalone_on, standalone_off, finally_off, disabled_node)
+        },
+        parent_by_id={
+            out_on_node.semantic_id: root.semantic_id,
+            standalone_on.semantic_id: root.semantic_id,
+            standalone_off.semantic_id: root.semantic_id,
+            disabled_node.semantic_id: root.semantic_id,
+            finally_off.semantic_id: finally_root.semantic_id,
+        },
+        children_by_id={
+            root.semantic_id: (
+                out_on_node.semantic_id,
+                standalone_on.semantic_id,
+                standalone_off.semantic_id,
+                disabled_node.semantic_id,
+            ),
+            finally_root.semantic_id: (finally_off.semantic_id,),
+            out_on_node.semantic_id: (),
+            standalone_on.semantic_id: (),
+            standalone_off.semantic_id: (),
+            disabled_node.semantic_id: (),
+            finally_off.semantic_id: (),
+        },
+    )
+
+    model = MeasurementTreeModel(tree)
+    tokens = tokens_for("dark" if isDarkTheme() else "light")
+
+    # 1. Normal mode (outputs_forced_off = False)
+    assert not model.outputs_forced_off
+    out_idx = model.index_for_semantic_id("dev.output-on")
+    assert model.data(out_idx.siblingAtColumn(1)) == "ON"
+    assert model.data(out_idx.siblingAtColumn(3)) == "READY"
+    assert model.data(out_idx, MeasurementTreeRole.ACCENT_COLOR) == tokens.caution
+
+    rg_idx = model.index_for_semantic_id("rigol-on")
+    assert model.data(rg_idx.siblingAtColumn(1)) == "ON"
+    assert model.data(rg_idx.siblingAtColumn(3)) == "READY"
+
+    # Explicitly disabled node shows DISABLED even in normal mode
+    dis_idx = model.index_for_semantic_id("custom-action")
+    assert model.data(dis_idx.siblingAtColumn(3)) == "DISABLED"
+    assert model.data(dis_idx, Qt.ItemDataRole.ForegroundRole) == QBrush(QColor(tokens.text_muted))
+
+    # 2. Switch to Dry Run (outputs_forced_off = True)
+    model.set_outputs_forced_off(True)
+    assert model.outputs_forced_off
+
+    # Output ON rows automatically switch to DISABLED and OFF (dry run)
+    assert model.data(out_idx.siblingAtColumn(1)) == "OFF (dry run)"
+    assert model.data(out_idx.siblingAtColumn(3)) == "DISABLED"
+    assert model.data(out_idx, MeasurementTreeRole.ACCENT_COLOR) == tokens.neutral
+    assert model.data(out_idx, Qt.ItemDataRole.ForegroundRole) == QBrush(QColor(tokens.text_muted))
+    assert "Dry run" in model.data(out_idx, Qt.ItemDataRole.ToolTipRole)
+
+    assert model.data(rg_idx.siblingAtColumn(1)) == "OFF (dry run)"
+    assert model.data(rg_idx.siblingAtColumn(3)) == "DISABLED"
+    assert model.data(rg_idx, Qt.ItemDataRole.ForegroundRole) == QBrush(QColor(tokens.text_muted))
+
+    # Output OFF action and Finally actions MUST NOT be disabled
+    k_off_idx = model.index_for_semantic_id("keithley-off")
+    assert model.data(k_off_idx.siblingAtColumn(1)) == "OFF"
+    assert model.data(k_off_idx.siblingAtColumn(3)) == "READY"
+
+    fin_idx = model.index_for_semantic_id("__finally__.keithley_outputs_off")
+    assert model.data(fin_idx.siblingAtColumn(1)) == "OFF"
+    assert model.data(fin_idx.siblingAtColumn(3)) == "READY"
+    assert model.data(model.index_for_semantic_id("__finally__").siblingAtColumn(3)) == "SAFE"
+
+    # 3. Switch back to normal measurement
+    model.set_outputs_forced_off(False)
+    assert not model.outputs_forced_off
+    assert model.data(out_idx.siblingAtColumn(1)) == "ON"
+    assert model.data(out_idx.siblingAtColumn(3)) == "READY"
+    assert model.data(out_idx, MeasurementTreeRole.ACCENT_COLOR) == tokens.caution
+    assert model.data(rg_idx.siblingAtColumn(1)) == "ON"
+    assert model.data(rg_idx.siblingAtColumn(3)) == "READY"
+

@@ -10,6 +10,7 @@ from app.ui.recipes.common_dialogs import (
     RepeatCountDialog,
     SweepLibraryButton,
 )
+from app.ui.recipes.elab_dialog import ElabUploadEditorDialog
 from app.ui.recipes.sweep_editor import SeamlessRoiCellDelegate, SweepGeneratorDialog
 
 __all__ = [
@@ -17,6 +18,7 @@ __all__ = [
     "DeviceParameterDialog",
     "AnritsuAcquisitionEditorDialog",
     "CommentEditorDialog",
+    "ElabUploadEditorDialog",
     "FixedValueDialog",
     "KeithleySweepBuilderDialog",
     "RepeatCountDialog",

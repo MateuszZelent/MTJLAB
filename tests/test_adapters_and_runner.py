@@ -1382,6 +1382,52 @@ class AdapterAndRunnerTests(unittest.TestCase):
         self.assertIn("smub.source.output = smub.OUTPUT_OFF", session.writes)
         self.assertEqual(adapter.state, DeviceState.FAULT)
 
+    def test_keithley_stale_identity_syntax_queue_does_not_block_configuration(self) -> None:
+        """A queued ``*IDN?`` parser diagnostic must not fail Apply settings."""
+
+        from app.devices.simulators import SimulatedVisaFactory
+
+        stale_error = (
+            "-2.85000e+02\tTSP Syntax error at line 1: unexpected symbol near `*'\t"
+            "2.00000e+01"
+        )
+        adapter = KeithleyAdapter(
+            self.settings,
+            session_factory=SimulatedVisaFactory(
+                "keithley", keithley_error_queue=(stale_error,)
+            ),
+        )
+
+        adapter.connect()
+        applied = adapter.configure_source(
+            KeithleySourceRequest("B", "current", 0.001, 0.067)
+        )
+
+        self.assertEqual(applied.level_si, 0.001)
+        self.assertEqual(adapter.last_ignored_diagnostic_errors, (stale_error,))
+
+    def test_keithley_other_tsp_syntax_queue_error_still_blocks_configuration(self) -> None:
+        """Only the known identity-probe diagnostic is non-blocking."""
+
+        from app.devices.simulators import SimulatedVisaFactory
+
+        actual_error = (
+            "-2.85000e+02\tTSP Syntax error at line 1: unexpected symbol near ':'\t"
+            "2.00000e+01"
+        )
+        adapter = KeithleyAdapter(
+            self.settings,
+            session_factory=SimulatedVisaFactory(
+                "keithley", keithley_error_queue=(actual_error,)
+            ),
+        )
+
+        adapter.connect()
+        with self.assertRaisesRegex(DeviceError, "Keithley reported an error"):
+            adapter.configure_source(
+                KeithleySourceRequest("B", "current", 0.001, 0.067)
+            )
+
     def test_keithley_measurement_output_transition_trips_both_channels_off(self) -> None:
         session = FakeVisaSession()
 

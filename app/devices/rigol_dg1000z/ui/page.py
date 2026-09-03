@@ -25,7 +25,11 @@ from app.devices.rigol_dg1000z import (
 )
 from app.domain.errors import SafetyViolation
 from app.domain.manual_metadata import ManualMetadataValue
-from app.domain.quick_controls import QuickConfigureCommand, QuickControlCommand
+from app.domain.quick_controls import (
+    QuickConfigureCommand,
+    QuickControlCommand,
+    render_quantity_si_like,
+)
 from app.domain.quantities import (
     DIMENSION_FREQUENCY, DIMENSION_TIME, DIMENSION_VOLTAGE,
     format_quantity_auto, parse_quantity,
@@ -654,7 +658,11 @@ class RigolPage(QWidget):
         self._quick_control_projection = True
         try:
             if field == "frequency":
-                self.frequency.setText(format_quantity_auto(value_si, DIMENSION_FREQUENCY))
+                try:
+                    text = render_quantity_si_like(self.frequency.text(), DIMENSION_FREQUENCY, value_si)
+                except Exception:
+                    text = format_quantity_auto(value_si, DIMENSION_FREQUENCY)
+                self.frequency.setText(text)
                 self._sync_period_from_frequency()
             else:
                 editors = {
@@ -666,7 +674,11 @@ class RigolPage(QWidget):
                 editor = editors.get(field)
                 if editor is None:
                     return
-                editor.setText(format_quantity_auto(value_si, DIMENSION_VOLTAGE))
+                try:
+                    text = render_quantity_si_like(editor.text(), DIMENSION_VOLTAGE, value_si)
+                except Exception:
+                    text = format_quantity_auto(value_si, DIMENSION_VOLTAGE)
+                editor.setText(text)
                 if field in {"high_level", "low_level"}:
                     self._sync_vpp_offset_from_levels()
                 else:
@@ -1326,9 +1338,13 @@ class RigolPage(QWidget):
         return tuple(values)
 
     @staticmethod
-    def _format_voltage(value_v: float) -> str:
+    def _format_voltage(value_v: float, preferred_unit: str | None = None) -> str:
+        if preferred_unit == "mV" and (abs(value_v) < 1 or value_v == 0.0):
+            return f"{value_v * 1e3:.12g} mV"
         if 0 < abs(value_v) < 1:
             return f"{value_v * 1e3:.12g} mV"
+        if preferred_unit == "mV" and value_v == 0.0:
+            return "0 mV"
         return f"{value_v:.12g} V"
 
     def _new_ui_operation(
@@ -1909,8 +1925,17 @@ class RigolPage(QWidget):
             return
         self._level_syncing = True
         try:
-            self.vpp.setText(self._format_voltage(high - low))
-            self.offset.setText(self._format_voltage((high + low) / 2))
+            preferred = (
+                "mV"
+                if (
+                    "mV" in self.high_level.text()
+                    or "mV" in self.low_level.text()
+                    or "mV" in self.offset.text()
+                )
+                else None
+            )
+            self.vpp.setText(self._format_voltage(high - low, preferred_unit=preferred))
+            self.offset.setText(self._format_voltage((high + low) / 2, preferred_unit=preferred))
         finally:
             self._level_syncing = False
         self._update_preview()
@@ -1929,8 +1954,17 @@ class RigolPage(QWidget):
             return
         self._level_syncing = True
         try:
-            self.high_level.setText(self._format_voltage(offset + vpp / 2))
-            self.low_level.setText(self._format_voltage(offset - vpp / 2))
+            preferred = (
+                "mV"
+                if (
+                    "mV" in self.offset.text()
+                    or "mV" in self.vpp.text()
+                    or "mV" in self.high_level.text()
+                )
+                else None
+            )
+            self.high_level.setText(self._format_voltage(offset + vpp / 2, preferred_unit=preferred))
+            self.low_level.setText(self._format_voltage(offset - vpp / 2, preferred_unit=preferred))
         finally:
             self._level_syncing = False
         self._update_preview()

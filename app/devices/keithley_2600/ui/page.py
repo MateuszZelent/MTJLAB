@@ -39,7 +39,11 @@ from app.devices.keithley_2600 import (
 from app.devices.keithley_2600.adapter import KeithleyMeasurement
 from app.domain.errors import ConfigurationError, SafetyViolation
 from app.domain.manual_metadata import ManualMetadataValue
-from app.domain.quick_controls import QuickConfigureCommand, QuickControlCommand
+from app.domain.quick_controls import (
+    QuickConfigureCommand,
+    QuickControlCommand,
+    render_quantity_si_like,
+)
 from app.domain.quantities import (
     DIMENSION_CURRENT, DIMENSION_POWER, DIMENSION_RESISTANCE, DIMENSION_TIME,
     DIMENSION_VOLTAGE,
@@ -1129,7 +1133,7 @@ class _KeithleyFloatingPanelWindow(StationDialog):
     closed = Signal()
 
     def __init__(self, title: str, panel: QWidget, parent: QWidget) -> None:
-        super().__init__(parent)
+        super().__init__(parent, resizable=True)
         self.setWindowTitle(f"Keithley 2600 — {title}")
         self.setObjectName("keithleyFloatingPanelWindow")
         self.setWindowFlag(Qt.WindowType.WindowStaysOnTopHint, True)
@@ -1551,7 +1555,11 @@ class KeithleyPage(QWidget):
         dimension = DIMENSION_CURRENT if mode == "current" else DIMENSION_VOLTAGE
         self._quick_control_projection = True
         try:
-            self.level.setText(format_quantity_auto(value_si, dimension))
+            try:
+                text = render_quantity_si_like(self.level.text(), dimension, value_si)
+            except Exception:
+                text = format_quantity_auto(value_si, dimension)
+            self.level.setText(text)
             self._persist_form_defaults()
         finally:
             self._quick_control_projection = False
@@ -1758,11 +1766,17 @@ class KeithleyPage(QWidget):
             DIMENSION_VOLTAGE if active_mode == "current" else DIMENSION_CURRENT
         )
         if source_level_si is not None:
-            self.level.setText(format_quantity_auto(source_level_si, level_dimension))
+            try:
+                text = render_quantity_si_like(self.level.text(), level_dimension, source_level_si)
+            except Exception:
+                text = format_quantity_auto(source_level_si, level_dimension)
+            self.level.setText(text)
         if compliance_si is not None:
-            self.compliance.setText(
-                format_quantity_auto(compliance_si, compliance_dimension)
-            )
+            try:
+                text = render_quantity_si_like(self.compliance.text(), compliance_dimension, compliance_si)
+            except Exception:
+                text = format_quantity_auto(compliance_si, compliance_dimension)
+            self.compliance.setText(text)
 
     def apply_execution_event(
         self,
@@ -2050,7 +2064,7 @@ class KeithleyPage(QWidget):
             [point[key] for point in history],
             color="#00a67d" if channel == "A" else "#2196f3",
             primary=True,
-            show_points=True,
+            show_points=(len(history) <= 80),
         )
         # The history keeps elapsed seconds from the start of this page.  Move
         # the visible viewport with the rolling retention window; otherwise
@@ -2655,12 +2669,14 @@ class KeithleyPage(QWidget):
                 else "COMPLIANCE: clear"
             )
         )
-        widgets["compliance"].setObjectName("keithleyComplianceActive" if compliance else "keithleyComplianceClear")
-        widgets["compliance"].setProperty(
-            "safetyState", "caution" if compliance else "normal"
-        )
-        widgets["compliance"].style().unpolish(widgets["compliance"])
-        widgets["compliance"].style().polish(widgets["compliance"])
+        current_state = "caution" if compliance else "normal"
+        if widgets["compliance"].property("safetyState") != current_state:
+            widgets["compliance"].setObjectName(
+                "keithleyComplianceActive" if compliance else "keithleyComplianceClear"
+            )
+            widgets["compliance"].setProperty("safetyState", current_state)
+            widgets["compliance"].style().unpolish(widgets["compliance"])
+            widgets["compliance"].style().polish(widgets["compliance"])
         elapsed = time.monotonic() - self._history_started_at
         history = self._measurement_history[channel]
         history.append(

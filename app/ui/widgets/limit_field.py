@@ -35,6 +35,7 @@ from app.domain.quantities import (
     format_quantity_auto,
     parse_quantity,
 )
+from app.domain.quick_controls import render_quantity_si_like
 
 
 class LimitField(QWidget):
@@ -201,14 +202,28 @@ class LimitField(QWidget):
 
         if minimum is not None and value < minimum:
             replacement = str(self._minimum_value)
-            self._set_editor_value(self._minimum_value)
+            if isinstance(self.editor, QLineEdit) and dimension is not None:
+                try:
+                    replacement = render_quantity_si_like(
+                        self.editor.text(), dimension, minimum
+                    )
+                except Exception:
+                    pass
+            self._set_editor_value(replacement)
             self._show_validation_warning(
                 f"Value was below MIN and has been changed to {replacement}."
             )
             return False
         if maximum is not None and value > maximum:
             replacement = str(self._maximum_value)
-            self._set_editor_value(self._maximum_value)
+            if isinstance(self.editor, QLineEdit) and dimension is not None:
+                try:
+                    replacement = render_quantity_si_like(
+                        self.editor.text(), dimension, maximum
+                    )
+                except Exception:
+                    pass
+            self._set_editor_value(replacement)
             self._show_validation_warning(
                 f"Value exceeded MAX and has been changed to {replacement}."
             )
@@ -221,9 +236,20 @@ class LimitField(QWidget):
                 # remain predictable (for example 0.001 mA -> 0.002 mA).
                 self._last_valid = self.editor.text().strip()
             else:
-                normalized = (
-                    f"{value:.12g}" if dimension is None else format_quantity_auto(value, dimension)
-                )
+                try:
+                    normalized = (
+                        f"{value:.12g}"
+                        if dimension is None
+                        else render_quantity_si_like(
+                            self.editor.text(), dimension, value
+                        )
+                    )
+                except Exception:
+                    normalized = (
+                        f"{value:.12g}"
+                        if dimension is None
+                        else format_quantity_auto(value, dimension)
+                    )
                 self.editor.setText(normalized)
                 self._last_valid = normalized
         self._clear_validation_warning()

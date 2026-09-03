@@ -95,6 +95,13 @@ class LakeShore475Adapter(DeviceAdapter):
             raise ConnectionError("Lake Shore Model 475 is not connected.")
         return self._connection
 
+    def _identity_or_raise(self) -> DeviceIdentity:
+        if self._identity is None:
+            raise ConnectionError(
+                "Lake Shore Model 475 has a session without a verified identity."
+            )
+        return self._identity
+
     @staticmethod
     def _is_asrl(resource: str) -> bool:
         return resource.strip().upper().startswith("ASRL")
@@ -133,10 +140,15 @@ class LakeShore475Adapter(DeviceAdapter):
             self._official_model = official_model
             self.read_snapshot()
         except Exception:
-            session.close()
-            self._state = DeviceState.DISCONNECTED
-            self._identity = None
-            self._capabilities = None
+            try:
+                session.close()
+            finally:
+                self._session = None
+                self._connection = None
+                self._official_model = None
+                self._state = DeviceState.DISCONNECTED
+                self._identity = None
+                self._capabilities = None
             raise
         self._identity = identity
         self._capabilities = DeviceCapabilities(device_name="lakeshore_gaussmeter", model="475", firmware=identity.firmware, features=frozenset({"field_reading", "dc", "rms", "peak", "read_only", "official_driver_bridge"}))

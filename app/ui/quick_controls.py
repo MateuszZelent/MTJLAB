@@ -377,7 +377,16 @@ class QuickControlCoordinator(QObject):
         value_si = float(value_si)
         self._confirmed_values[target] = value_si
         if adopt_draft or target not in self._dirty_drafts:
-            text = format_quantity_auto(value_si, descriptor.dimension)
+            existing = self._draft_texts.get(target)
+            if existing:
+                try:
+                    text = render_quantity_si_like(
+                        existing, descriptor.dimension, value_si
+                    )
+                except Exception:
+                    text = format_quantity_auto(value_si, descriptor.dimension)
+            else:
+                text = format_quantity_auto(value_si, descriptor.dimension)
             self._draft_texts[target] = text
             self._dirty_drafts.discard(target)
             self.draft_changed.emit(target, text, "readback")

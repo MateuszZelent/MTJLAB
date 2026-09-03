@@ -70,8 +70,61 @@ class MeasurementTreeModel(QAbstractItemModel):
         self._states: dict[str, object] = dict(states or {})
         self._reported_unknown_ids: set[str] = set()
         self._read_only = False
+        self._outputs_forced_off = False
         self._icons: dict[tuple[str, str], object] = {}
         self._reindex()
+
+    @property
+    def outputs_forced_off(self) -> bool:
+        return self._outputs_forced_off
+
+    def set_outputs_forced_off(self, forced_off: bool) -> None:
+        forced_off = bool(forced_off)
+        if self._outputs_forced_off == forced_off:
+            return
+        self._outputs_forced_off = forced_off
+        for ref in self._by_id.values():
+            if self._is_output_enable_node(ref):
+                index = self.index_for_semantic_id(ref.node.semantic_id)
+                if index.isValid():
+                    self.dataChanged.emit(
+                        index,
+                        self.index(index.row(), self.COLUMN_COUNT - 1, index.parent()),
+                    )
+
+    def _is_output_enable_node(self, ref: _NodeRef) -> bool:
+        node = ref.node
+        if node.kind is not SemanticNodeKind.ACTION:
+            return False
+        if node.source_node_id == "__finally__" or bool(node.data.get("guaranteed")):
+            return False
+        label = node.label.lower()
+        if "output off" in label or "rf off" in label:
+            return False
+        if node.semantic_id.endswith(".output-on"):
+            return True
+        if bool(node.data.get("is_output")):
+            return bool(node.data.get("enabled", False))
+        node_type = str(node.data.get("type", ""))
+        if node_type in {"enable_rigol_output", "enable_anritsu_sg_output"}:
+            return True
+        if node_type in {"set_keithley_output", "set_rigol_output", "set_anritsu_sg_output"}:
+            return bool(node.data.get("enabled", False))
+        source_id = str(node.source_node_id or "")
+        if source_id.startswith("enable_"):
+            return True
+        if "output on" in label or "rf on" in label:
+            return True
+        return False
+
+    def _is_node_disabled(self, ref: _NodeRef) -> bool:
+        if ref.node.data.get("disabled") is True:
+            return True
+        if ref.parent is not None and ref.parent.node.data.get("disabled") is True:
+            return True
+        if self._outputs_forced_off and self._is_output_enable_node(ref):
+            return True
+        return False
 
     def _reindex(self) -> None:
         self._roots = tuple(_NodeRef(node, None, index) for index, node in enumerate(self.tree.roots))
@@ -155,6 +208,9 @@ class MeasurementTreeModel(QAbstractItemModel):
 
     def _accent_color(self, node: SemanticTreeNode) -> str:
         tokens = self._tokens()
+        ref = self._by_id.get(node.semantic_id)
+        if ref is not None and self._is_node_disabled(ref):
+            return tokens.neutral
         label = node.label.lower()
         if node.kind is SemanticNodeKind.ACTION:
             if "wait" in label:
@@ -180,10 +236,14 @@ class MeasurementTreeModel(QAbstractItemModel):
                 return "wait"
             if any(word in label for word in ("acquire", "measure", "spectrum")):
                 return "acquire"
-            if "output" in label:
+            if "output" in label or "ramp" in label or "rf" in label:
                 return "output"
+            if "checkpoint" in label or "flush" in label:
+                return "save"
             if "comment" in label:
                 return "comment"
+            if "elab" in label:
+                return "elab"
             return "action"
         return node.kind.value
 
@@ -205,7 +265,9 @@ class MeasurementTreeModel(QAbstractItemModel):
             "wait": FluentIcon.STOP_WATCH,
             "acquire": FluentIcon.PROJECTOR,
             "output": FluentIcon.POWER_BUTTON,
+            "save": FluentIcon.SAVE,
             "comment": FluentIcon.QUICK_NOTE,
+            "elab": FluentIcon.CLOUD,
             "action": FluentIcon.PLAY,
         }[name]
         icon = fluent_icon.icon()
@@ -216,9 +278,34 @@ class MeasurementTreeModel(QAbstractItemModel):
         state = self._descendant_state(ref)
         if (
             ref.node.kind is SemanticNodeKind.ACTION
+            and ("output" in ref.node.label.lower() or ref.node.data.get("is_output"))
+        ):
+            if self._is_node_disabled(ref) and self._is_output_enable_node(ref):
+                return "OFF (dry run)" if self._outputs_forced_off else "OFF"
+            enabled = ref.node.data.get("enabled")
+            if enabled is None and str(ref.node.source_node_id or "").startswith("enable_"):
+                enabled = True
+            if enabled is None:
+                enabled = "on" in ref.node.label.lower()
+            return "ON" if enabled else "OFF"
+        if (
+            ref.node.kind is SemanticNodeKind.ACTION
             and isinstance(ref.node.data.get("duration"), str)
         ):
             return str(ref.node.data["duration"])
+        if (
+            ref.node.kind is SemanticNodeKind.ACTION
+            and "elab" in ref.node.label.lower()
+        ):
+            template_name = ref.node.data.get("template_name")
+            template_id = ref.node.data.get("template_id")
+            if template_name and template_id:
+                return f"{template_name} (#{template_id})"
+            if template_name:
+                return str(template_name)
+            if template_id:
+                return f"Template #{template_id}"
+            return "From eLabFTW policy"
         if state is None:
             return "—"
         applied = _state_value(state, "applied_si")
@@ -293,6 +380,8 @@ class MeasurementTreeModel(QAbstractItemModel):
             phase = _state_value(state, "phase") if state is not None else None
             if phase:
                 return str(phase).upper()
+            if self._is_node_disabled(ref):
+                return "DISABLED"
             return {
                 SemanticNodeKind.SWEEP_AXIS: "SWEEP",
                 SemanticNodeKind.LOOP_BODY: "FLOW",
@@ -301,16 +390,24 @@ class MeasurementTreeModel(QAbstractItemModel):
                 SemanticNodeKind.GENERATED_SAFETY: "AUTO",
             }.get(node.kind, "READY")
         if role == int(Qt.ItemDataRole.ToolTipRole):
+            if self._outputs_forced_off and self._is_output_enable_node(ref):
+                return f"{node.semantic_id}\nDry run mode active: output forced OFF and disabled."
+            if self._is_node_disabled(ref):
+                return f"{node.semantic_id}\nNode is disabled."
             target = node.axis.target if node.axis is not None else node.data.get("target", "")
             return f"{node.semantic_id}\n{target}" if target else node.semantic_id
         if role == int(Qt.ItemDataRole.DecorationRole) and index.column() == 0:
             return self._icon(node)
         if role == int(Qt.ItemDataRole.ForegroundRole):
             phase = str(_state_value(state, "phase", "")) if state is not None else ""
+            if phase == "running":
+                return QBrush(QColor(self._tokens().accent))
             if phase == "applied":
                 return QBrush(QColor(self._tokens().success))
             if phase == "failed":
                 return QBrush(QColor(self._tokens().danger))
+            if self._is_node_disabled(ref):
+                return QBrush(QColor(self._tokens().text_muted))
         if role == int(MeasurementTreeRole.SEMANTIC_ID):
             return node.semantic_id
         if role == int(MeasurementTreeRole.NODE_KIND):

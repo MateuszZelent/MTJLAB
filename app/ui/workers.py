@@ -6,7 +6,7 @@ QObject/QThread pair.  GUI code only emits queued operation requests.
 
 from __future__ import annotations
 
-from collections.abc import Callable
+from collections.abc import Callable, Iterable
 from dataclasses import dataclass, field
 from threading import Event
 
@@ -399,6 +399,7 @@ class DeviceController(QObject):
             raise request.error
         return request.result
 
+
     def reconfigure(self, adapter: DeviceAdapter) -> None:
         """Safely discard the session before applying a newly saved profile."""
 
@@ -421,3 +422,53 @@ class DeviceController(QObject):
         self._thread.quit()
         self._thread.wait(1_000)
 
+    @classmethod
+    def close_all(cls, controllers: Iterable[DeviceController], timeout_ms: int = 3_000) -> None:
+        """Shut down multiple device controllers concurrently instead of sequentially."""
+        active = [c for c in controllers if c._thread.isRunning()]
+        if not active:
+            for c in controllers:
+                c.close()
+            return
+
+        wait_loop = QEventLoop()
+        remaining = set(active)
+
+        def make_handler(ctrl: DeviceController) -> Callable[[], None]:
+            def _on_shutdown() -> None:
+                remaining.discard(ctrl)
+                if not remaining:
+                    wait_loop.quit()
+            return _on_shutdown
+
+        handlers: dict[DeviceController, Callable[[], None]] = {}
+        for c in active:
+            handler = make_handler(c)
+            handlers[c] = handler
+            c._worker.shutdown_complete.connect(handler)
+            QMetaObject.invokeMethod(
+                c._worker,
+                "shutdown",
+                Qt.ConnectionType.QueuedConnection,
+            )
+
+        QTimer.singleShot(timeout_ms, wait_loop.quit)
+        if remaining:
+            wait_loop.exec()
+
+        for c, handler in handlers.items():
+            try:
+                c._worker.shutdown_complete.disconnect(handler)
+            except (RuntimeError, TypeError):
+                pass
+
+        for c in controllers:
+            try:
+                self_request = getattr(c, "request", None)
+                if self_request is not None:
+                    self_request.disconnect(c._worker.execute)
+            except (RuntimeError, TypeError):
+                pass
+            c._thread.finished.connect(c._worker.deleteLater)
+            c._thread.quit()
+            c._thread.wait(500)

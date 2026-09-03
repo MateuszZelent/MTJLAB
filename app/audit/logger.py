@@ -73,6 +73,7 @@ class AuditLogger:
         # Exclusive creation proves that an existing audit can never be overwritten.
         with self.path.open("x", encoding="utf-8", newline="\n"):
             pass
+        self._stream = self.path.open("a", encoding="utf-8", newline="\n")
         self.record(
             "Application audit session started",
             category="application",
@@ -151,11 +152,10 @@ class AuditLogger:
             "context": _redacted_json_value(dict(context or {})),
         }
         encoded = json.dumps(event, ensure_ascii=False, separators=(",", ":"), sort_keys=True)
-        with self.path.open("a", encoding="utf-8", newline="\n") as stream:
-            stream.write(encoded + "\n")
-            stream.flush()
-            if critical:
-                os.fsync(stream.fileno())
+        self._stream.write(encoded + "\n")
+        self._stream.flush()
+        if critical:
+            os.fsync(self._stream.fileno())
         self._sequence += 1
         return event
 
@@ -163,16 +163,20 @@ class AuditLogger:
         with self._lock:
             if self._closed:
                 return
-            self._append_unlocked(
-                message="Application audit session closed",
-                severity="info",
-                category="application",
-                event_type="session_closed",
-                context=None,
-                correlation_id=None,
-                critical=True,
-            )
-            self._closed = True
+            try:
+                self._append_unlocked(
+                    message="Application audit session closed",
+                    severity="info",
+                    category="application",
+                    event_type="session_closed",
+                    context=None,
+                    correlation_id=None,
+                    critical=True,
+                )
+            finally:
+                self._closed = True
+                if hasattr(self, "_stream") and not self._stream.closed:
+                    self._stream.close()
 
 
 class AuditLogReader:

@@ -17,6 +17,7 @@ from app.integrations.elab.client import ElabApiClient, ElabTemplate
 from app.integrations.elab.config import (
     ElabCredentials,
     ElabIntegrationProfile,
+    ElabTemplateReference,
     load_credentials,
     resolve_env_path,
     save_credentials,
@@ -24,7 +25,7 @@ from app.integrations.elab.config import (
 from app.integrations.elab.ledger import ElabUploadLedger
 from app.integrations.elab.service import ElabUploadRequest, upload_result
 from app.storage.hdf5_reader import RunSummary
-from app.ui.elab import ElabPage
+from app.ui.elab import ElabFavoritesDialog, ElabPage, SearchableComboBox
 from app.settings import SettingsRepository
 
 
@@ -100,6 +101,27 @@ class ElabConfigurationTests(unittest.TestCase):
             [(item.id, item.title) for item in restored.recent_templates],
             [(99, "Cryostat sweep"), (42, "MTJ setup")],
         )
+
+    def test_favorite_templates_round_trip_and_helpers(self) -> None:
+        profile = ElabIntegrationProfile()
+        self.assertFalse(profile.is_favorite(42))
+        profile = profile.with_favorite_template(42, "MTJ setup")
+        profile = profile.with_favorite_template(99, "Cryostat sweep")
+        self.assertTrue(profile.is_favorite(42))
+        self.assertTrue(profile.is_favorite(99))
+        self.assertFalse(profile.is_favorite(7))
+
+        restored = ElabIntegrationProfile.from_application({"elab": profile.to_raw()})
+        self.assertEqual(
+            [(item.id, item.title) for item in restored.favorite_templates],
+            [(42, "MTJ setup"), (99, "Cryostat sweep")],
+        )
+
+        toggled = restored.toggle_favorite(42, "MTJ setup")
+        self.assertFalse(toggled.is_favorite(42))
+        self.assertTrue(toggled.is_favorite(99))
+        retoggled = toggled.toggle_favorite(42, "MTJ setup")
+        self.assertTrue(retoggled.is_favorite(42))
 
 
 class ElabClientTests(unittest.TestCase):
@@ -332,6 +354,164 @@ class ElabPageRenderingTests(unittest.TestCase):
         finally:
             dialog.close()
 
+    def test_page_template_selection_persists_default_and_toggles_favorites(self) -> None:
+        with TemporaryDirectory() as temporary:
+            repository = SettingsRepository(Path(temporary) / "settings.yml")
+            repository.ensure_exists()
+            env_path = Path(temporary) / ".env"
+            env_path.write_text(
+                "ELAB_HOST=https://elab.example.org\nELAB_API=first-key\n",
+                encoding="utf-8",
+            )
+            page = ElabPage(repository, env_path=env_path, simulation=True)
+            try:
+                page.show()
+                self.application.processEvents()
+                self.assertFalse(page.favorite_toggle_button.isEnabled())
+
+                # Load templates
+                page._templates_loaded(
+                    (
+                        ElabTemplate(42, "MTJ setup"),
+                        ElabTemplate(99, "Cryostat sweep"),
+                        ElabTemplate(105, "Anritsu RF test"),
+                    )
+                )
+                self.assertEqual(page.template_combo.count(), 3)
+
+                # Select template 99
+                page.template_combo.setCurrentIndex(1)
+                self.assertEqual(page.template_combo.currentData(), 99)
+                self.assertTrue(page.favorite_toggle_button.isEnabled())
+
+                # Verify that template 99 was automatically persisted as default/last option
+                stored_elab = repository.load().settings.application["elab"]
+                self.assertEqual(stored_elab["template_id"], 99)
+                self.assertEqual(stored_elab["template_name"], "Cryostat sweep")
+
+                # Toggle favorite on template 99
+                self.assertFalse(page._profile.is_favorite(99))
+                page.favorite_toggle_button.click()
+                self.assertTrue(page._profile.is_favorite(99))
+                stored_elab = repository.load().settings.application["elab"]
+                self.assertEqual(len(stored_elab["favorite_templates"]), 1)
+                self.assertEqual(stored_elab["favorite_templates"][0]["id"], 99)
+
+                # Check available_templates includes favorites
+                templates = page.available_templates()
+                self.assertIn((99, "Cryostat sweep"), templates)
+
+                # Re-toggle favorite to remove
+                page.favorite_toggle_button.click()
+                self.assertFalse(page._profile.is_favorite(99))
+                stored_elab = repository.load().settings.application["elab"]
+                self.assertEqual(len(stored_elab["favorite_templates"]), 0)
+            finally:
+                page.close()
+
+
+class SearchableComboBoxTests(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls) -> None:
+        cls.application = QApplication.instance() or QApplication([])
+
+    def test_searchable_combo_menu_filters_items_live(self) -> None:
+        cb = SearchableComboBox()
+        cb.addItem("42: MTJ Setup", userData=42)
+        cb.addItem("99: Cryostat Sweep", userData=99)
+        cb.addItem("105: Room Temp RF", userData=105)
+        try:
+            cb.show()
+            cb._showComboMenu()
+            menu = cb.dropMenu
+            self.assertIsNotNone(menu)
+            self.assertEqual(menu.view.count(), 3)
+
+            # Type 'cryo' into search
+            menu.search_edit.setText("cryo")
+            self.assertTrue(menu.view.item(0).isHidden())
+            self.assertFalse(menu.view.item(1).isHidden())
+            self.assertTrue(menu.view.item(2).isHidden())
+
+            # Press return to pick the filtered item
+            menu._on_return_pressed()
+            self.assertEqual(cb.currentData(), 99)
+            self.assertEqual(cb.currentText(), "99: Cryostat Sweep")
+
+            # Re-open and clear filter
+            cb._showComboMenu()
+            menu = cb.dropMenu
+            menu.search_edit.setText("")
+            self.assertFalse(menu.view.item(0).isHidden())
+            self.assertFalse(menu.view.item(1).isHidden())
+            self.assertFalse(menu.view.item(2).isHidden())
+            cb._closeComboMenu()
+        finally:
+            cb.close()
+
+
+class ElabFavoritesDialogTests(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls) -> None:
+        cls.application = QApplication.instance() or QApplication([])
+
+    def test_favorites_dialog_preselects_current_and_allows_selection(self) -> None:
+        favorites = (
+            ElabTemplateReference(42, "MTJ setup"),
+            ElabTemplateReference(99, "Cryostat sweep"),
+        )
+        dialog = ElabFavoritesDialog(favorites, selected_template_id=99)
+        try:
+            dialog.show()
+            self.application.processEvents()
+            self.assertEqual(dialog.table.rowCount(), 2)
+            self.assertEqual(dialog.table.currentRow(), 1)
+            self.assertEqual(dialog._current_selection(), (99, "Cryostat sweep"))
+
+            dialog.select_button.click()
+            self.assertEqual(dialog.selected_template(), (99, "Cryostat sweep"))
+        finally:
+            dialog.close()
+
+    def test_favorites_dialog_filters_and_removes(self) -> None:
+        favorites = (
+            ElabTemplateReference(42, "MTJ setup"),
+            ElabTemplateReference(99, "Cryostat sweep"),
+            ElabTemplateReference(105, "Anritsu RF"),
+        )
+        dialog = ElabFavoritesDialog(favorites, selected_template_id=42)
+        changed_emits: list[tuple[ElabTemplateReference, ...]] = []
+        dialog.favorites_changed.connect(changed_emits.append)
+        try:
+            dialog.show()
+            self.application.processEvents()
+
+            # Filter for 'anritsu'
+            dialog.search_edit.setText("anritsu")
+            self.assertTrue(dialog.table.isRowHidden(0))
+            self.assertTrue(dialog.table.isRowHidden(1))
+            self.assertFalse(dialog.table.isRowHidden(2))
+
+            # Remove item 105
+            dialog.remove_button.click()
+            self.assertEqual(len(changed_emits), 1)
+            self.assertEqual([ref.id for ref in changed_emits[0]], [42, 99])
+        finally:
+            dialog.close()
+
+    def test_favorites_dialog_empty_state(self) -> None:
+        dialog = ElabFavoritesDialog(())
+        try:
+            dialog.show()
+            self.application.processEvents()
+            self.assertTrue(dialog.empty_label.isVisible())
+            self.assertFalse(dialog.table.isVisible())
+            self.assertFalse(dialog.select_button.isEnabled())
+            self.assertFalse(dialog.remove_button.isEnabled())
+        finally:
+            dialog.close()
+
 
 if __name__ == "__main__":
     unittest.main()
+

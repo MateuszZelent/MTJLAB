@@ -113,6 +113,7 @@ from app.ui.widgets import (
     SpectrumPlotWidget,
 )
 from app.ui.quick_controls import QuickControlCoordinator, QuickControlsWindow
+from app.ui.workers import DeviceController
 
 
 class MainWindow(FluentWindow):
@@ -132,6 +133,7 @@ class MainWindow(FluentWindow):
         self._repository = SettingsRepository(settings_path)
         self._simulation = simulation
         self._run_upload_to_elab_requested = False
+        self._run_elab_upload_config: dict[str, Any] | None = None
         persisted = self._repository.load().settings
         self._settings = simulated_station_settings(persisted) if simulation else persisted
         # Establish the global Fluent theme before constructing the large page
@@ -450,6 +452,14 @@ class MainWindow(FluentWindow):
             env_path=Path(".env"),
             simulation=self._simulation,
         )
+        self.recipe_page.set_elab_context(
+            profile_provider=self.elab_page.current_profile,
+            credentials_provider=self.elab_page.current_credentials,
+            available_templates_provider=self.elab_page.available_templates,
+            refresh_templates_callback=self.elab_page.refresh_templates,
+            navigate_to_elab=lambda: self._navigate_to("elab"),
+        )
+        self.elab_page.configuration_changed.connect(self.recipe_page.sync_elab_context)
         self.anritsu_page.set_manual_elab_context(
             configuration_provider=self.elab_page.manual_upload_configuration,
             upload_callback=self.elab_page.queue_manual_upload,
@@ -621,7 +631,11 @@ class MainWindow(FluentWindow):
         self.log.setReadOnly(True)
         self.log.setMaximumBlockCount(500)
         self.log.setMinimumHeight(50)
-        self._event_log_entries: list[str] = []
+        self._event_log_entries: deque[str] = deque(maxlen=2000)
+        self._pending_log_ui_entries: list[str] = []
+        self._log_ui_flush_timer = QTimer(self)
+        self._log_ui_flush_timer.setInterval(50)
+        self._log_ui_flush_timer.timeout.connect(self._flush_pending_log_ui)
         self.event_log_panel = SimpleCardWidget(self.fluent_content)
         self.event_log_panel.setObjectName("eventLogPanel")
         self.event_log_panel.setProperty("stationSurface", "surface")
@@ -1084,12 +1098,13 @@ class MainWindow(FluentWindow):
             self._apply_navigation_surface(applied_theme.tokens.surface)
             application.setProperty("activeTheme", theme)
         # Plot canvases maintain their own brushes and may be hidden when a
-        # global theme is selected. Reapply them even when the application
-        # property already names this theme.
-        for plot in self.findChildren(SpectrumPlotWidget):
-            plot.apply_theme(theme)
-        for heatmap in self.findChildren(HeatmapResultsTab):
-            heatmap.apply_theme(theme)
+        # global theme is selected. Reapply them across all top-level surfaces
+        # even when the application property already names this theme.
+        for top_level in QApplication.topLevelWidgets():
+            for plot in top_level.findChildren(SpectrumPlotWidget):
+                plot.apply_theme(theme)
+            for heatmap in top_level.findChildren(HeatmapResultsTab):
+                heatmap.apply_theme(theme)
         if changed:
             self.theme_changed.emit(theme)
         self._configured_theme_mode = mode
@@ -1494,7 +1509,11 @@ class MainWindow(FluentWindow):
         except (AuthorizationError, ConfigurationError) as exc:
             QMessageBox.critical(self, "Run not started", str(exc))
             return
-        self._run_upload_to_elab_requested = self.recipe_page.save_to_elab_check.isChecked()
+        has_recipe_elab = getattr(plan, "elab_upload_config", None) is not None
+        self._run_upload_to_elab_requested = (
+            has_recipe_elab or self.recipe_page.save_to_elab_check.isChecked()
+        )
+        self._run_elab_upload_config = getattr(plan, "elab_upload_config", None)
         self._open_sweep_readiness(
             plan,
             outputs_forced_off=outputs_forced_off,
@@ -2168,13 +2187,28 @@ class MainWindow(FluentWindow):
         state = str(getattr(getattr(run_result, "state", None), "value", "unknown"))
         error = getattr(run_result, "error", None)
         if result_path is not None:
+            profile_override = None
+            if self._run_elab_upload_config is not None:
+                base_profile = self.elab_page.current_profile()
+                cfg = self._run_elab_upload_config
+                profile_override = base_profile.with_overrides(
+                    enabled=True,
+                    template_id=cfg.get("template_id"),
+                    template_name=cfg.get("template_name") or None,
+                    title_pattern=cfg.get("title_pattern") or None,
+                    tags=cfg.get("tags") or None,
+                    upload_hdf5=cfg.get("attach_hdf5"),
+                    upload_csv=cfg.get("attach_csv"),
+                )
             self.elab_page.queue_automatic_upload(
                 result_path,
                 run_state=state,
                 error=error,
                 requested=self._run_upload_to_elab_requested,
+                profile_override=profile_override,
             )
         self._run_upload_to_elab_requested = False
+        self._run_elab_upload_config = None
         if state == "fault":
             message = str(error or "The measurement finished in a fault state.")
             self._log(f"Run Engine finished in FAULT: {message}")
@@ -2196,6 +2230,7 @@ class MainWindow(FluentWindow):
         self._set_run_ui_locked(False)
         self.run_monitor.failed(error)
         self._run_upload_to_elab_requested = False
+        self._run_elab_upload_config = None
         self._log(f"Run Engine: {error}")
         QMessageBox.critical(self, "Run Engine", error)
 
@@ -3221,6 +3256,16 @@ class MainWindow(FluentWindow):
             return "run", "info", False
         return "ui", "info", False
 
+    def _flush_pending_log_ui(self) -> None:
+        if not self._pending_log_ui_entries:
+            if hasattr(self, "_log_ui_flush_timer"):
+                self._log_ui_flush_timer.stop()
+            return
+        batch, self._pending_log_ui_entries = self._pending_log_ui_entries, []
+        if hasattr(self, "_log_ui_flush_timer"):
+            self._log_ui_flush_timer.stop()
+        self.log.appendPlainText("\n".join(batch))
+
     def _log(self, message: str) -> None:
         category, severity, critical = self._log_classification(message)
         self._audit_record(
@@ -3232,7 +3277,13 @@ class MainWindow(FluentWindow):
         )
         self._event_log_entries.append(message)
         if not self.traffic_only_button.isChecked() or self._is_transport_log(message):
-            self.log.appendPlainText(message)
+            if critical or severity in {"error", "critical"}:
+                self._flush_pending_log_ui()
+                self.log.appendPlainText(message)
+            else:
+                self._pending_log_ui_entries.append(message)
+                if hasattr(self, "_log_ui_flush_timer") and not self._log_ui_flush_timer.isActive():
+                    self._log_ui_flush_timer.start()
 
     @staticmethod
     def _is_transport_log(message: str) -> bool:
@@ -3252,10 +3303,11 @@ class MainWindow(FluentWindow):
         )
 
     def _refresh_event_log_view(self, _checked: bool = False) -> None:
-        entries = self._event_log_entries
+        self._flush_pending_log_ui()
+        entries = list(self._event_log_entries)
         if self.traffic_only_button.isChecked():
             entries = [message for message in entries if self._is_transport_log(message)]
-        self.log.setPlainText("\n".join(entries))
+        self.log.setPlainText("\n".join(entries[-500:]))
         scrollbar = self.log.verticalScrollBar()
         scrollbar.setValue(scrollbar.maximum())
 
@@ -3266,6 +3318,9 @@ class MainWindow(FluentWindow):
         QApplication.clipboard().setText("\n".join(traffic))
 
     def _clear_event_log(self) -> None:
+        self._pending_log_ui_entries.clear()
+        if hasattr(self, "_log_ui_flush_timer"):
+            self._log_ui_flush_timer.stop()
         self._event_log_entries.clear()
         self.log.clear()
 
@@ -3427,8 +3482,7 @@ class MainWindow(FluentWindow):
         except Exception as exc:
             self._log(f"Manual spectrum archive close warning: {exc}")
         self.anritsu_page._analysis_controller.close()
-        for controller in self._controllers.values():
-            controller.close()
+        DeviceController.close_all(self._controllers.values())
         try:
             self._audit.close()
         except (OSError, RuntimeError):

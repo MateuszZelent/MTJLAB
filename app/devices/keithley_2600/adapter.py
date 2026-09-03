@@ -168,6 +168,12 @@ class KeithleyAdapter(DeviceAdapter):
             "B": bool(self._settings.safety.stop_on_compliance),
         }
         self._output_states: dict[Literal["A", "B"], bool] = {"A": False, "B": False}
+        # A Keithley error queue is persistent across VISA sessions.  Keep a
+        # small diagnostic breadcrumb for the one benign compatibility error
+        # that can be left by a SCPI identity probe (``*IDN?``) while the
+        # instrument is parsing TSP.  It must never be confused with a
+        # configuration fault; the queue is still drained on every check.
+        self._last_ignored_diagnostic_errors: tuple[str, ...] = ()
 
     def _require_session(self) -> InstrumentSession:
         if self._session is None:
@@ -211,6 +217,7 @@ class KeithleyAdapter(DeviceAdapter):
             self._compliance_block_levels.clear()
             self._compliance_block_modes.clear()
             self._last_safe_request.clear()
+            self._last_ignored_diagnostic_errors = ()
             default_stop = bool(self._settings.safety.stop_on_compliance)
             self._stop_on_compliance.update({"A": default_stop, "B": default_stop})
             self._capabilities = DeviceCapabilities(
@@ -263,6 +270,7 @@ class KeithleyAdapter(DeviceAdapter):
                 self._compliance_warnings.clear()
                 self._compliance_block_levels.clear()
                 self._compliance_block_modes.clear()
+                self._last_ignored_diagnostic_errors = ()
                 self._output_states = {"A": False, "B": False}
                 self._state = DeviceState.DISCONNECTED
 
@@ -443,6 +451,44 @@ class KeithleyAdapter(DeviceAdapter):
     def _clear_errors(self) -> None:
         self._require_session().write("errorqueue.clear()")
 
+    @property
+    def last_ignored_diagnostic_errors(self) -> tuple[str, ...]:
+        """Return compatibility diagnostics ignored at the last queue check.
+
+        Keithley keeps its TSP error queue across sessions.  Some firmware or
+        interface modes report ``-285`` for a previous ``*IDN?`` probe even
+        though the identity response itself is usable.  That stale diagnostic
+        must not be attributed to a later source configuration.  It remains
+        available to UI/audit code instead of being silently lost.
+        """
+
+        return self._last_ignored_diagnostic_errors
+
+    @staticmethod
+    def _is_identity_probe_syntax_error(error: str) -> bool:
+        """Recognise only the known stale ``*IDN?`` TSP parser diagnostic.
+
+        Configuration and measurement commands are generated from a strict
+        TSP whitelist and never contain ``*``.  Therefore this very narrow
+        match can safely distinguish the compatibility error from an actual
+        operation error; every other queue entry remains fatal.
+        """
+
+        normalized = str(error).strip().lower()
+        fields = re.split(r"\s+", normalized, maxsplit=1)
+        if not fields:
+            return False
+        try:
+            code = float(fields[0])
+        except ValueError:
+            return False
+        return (
+            math.isclose(code, -285.0, rel_tol=0.0, abs_tol=1e-9)
+            and "tsp syntax error" in normalized
+            and re.search(r"unexpected\s+symbol\s+near\s+\\?[`'\"]?\s*\*", normalized)
+            is not None
+        )
+
     def read_errors(self, limit: int = 20) -> list[str]:
         session = self._require_session()
         errors: list[str] = []
@@ -457,9 +503,29 @@ class KeithleyAdapter(DeviceAdapter):
         errors.append("Keithley error queue did not drain.")
         return errors
 
-    def _check_errors(self) -> None:
+    def _check_errors(self, *, ignore_identity_probe_error: bool = False) -> None:
+        """Drain the TSP queue and fail on operation errors.
+
+        The configuration transaction may encounter a stale ``-285`` left by
+        a previous ``*IDN?`` probe.  It opts into ignoring only that exact
+        compatibility diagnostic; all other operations remain fail-closed.
+        """
+
         errors = self.read_errors()
-        if errors:
+        ignored = (
+            tuple(
+                error
+                for error in errors
+                if self._is_identity_probe_syntax_error(error)
+            )
+            if ignore_identity_probe_error
+            else ()
+        )
+        actionable = tuple(error for error in errors if error not in ignored)
+        self._last_ignored_diagnostic_errors = ignored
+        if actionable:
+            # Preserve the complete queue in the failure text when a real
+            # fault is present alongside a stale identity diagnostic.
             raise DeviceError("Keithley reported an error: " + "; ".join(errors))
 
     @staticmethod
@@ -622,7 +688,7 @@ class KeithleyAdapter(DeviceAdapter):
         if request.mode == "measure_only":
             self._configure_measurement_ranges_and_sense(session, smu, request)
             session.write(f"{smu}.measure.nplc = {request.nplc:.12g}")
-            self._check_errors()
+            self._check_errors(ignore_identity_probe_error=True)
             self._verify_applied_configuration(request)
             self._last_request[request.channel] = request
             self._update_aggregate_output_state()
@@ -638,7 +704,7 @@ class KeithleyAdapter(DeviceAdapter):
             self._configure_ranges_and_sense(session, smu, request)
             session.write(f"{smu}.source.levelv = {request.level_si:.12g}")
         session.write(f"{smu}.measure.nplc = {request.nplc:.12g}")
-        self._check_errors()
+        self._check_errors(ignore_identity_probe_error=True)
         self._verify_applied_configuration(request)
         self._last_request[request.channel] = request
         self._update_aggregate_output_state()

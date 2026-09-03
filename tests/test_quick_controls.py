@@ -691,6 +691,55 @@ class QuickControlTests(unittest.TestCase):
         finally:
             window.close()
 
+    def test_confirmed_snapshot_preserves_prefixed_units_at_zero(self) -> None:
+        parent = QWidget()
+        coordinator = QuickControlCoordinator(
+            {"rigol": _FakeController(), "keithley": _FakeController()},
+            parent,
+        )
+        target_current = "keithley.B.current"
+        coordinator.publish_draft(target_current, "0 mA")
+        coordinator.confirmed_snapshot(target_current, 0.0, adopt_draft=True)
+        self.assertEqual(coordinator.draft_text(target_current), "0 mA")
+
+        target_voltage = "rigol.1.offset"
+        coordinator.publish_draft(target_voltage, "0 mV")
+        coordinator.confirmed_snapshot(target_voltage, 0.0, adopt_draft=True)
+        self.assertEqual(coordinator.draft_text(target_voltage), "0 mV")
+
+    def test_keithley_arrow_stepping_preserves_unit_at_zero_and_on_clamp(self) -> None:
+        from PySide6.QtCore import QEvent
+        from PySide6.QtGui import QKeyEvent
+        from app.devices.keithley_2600.ui.page import KeithleyConfigurationPanel
+        from app.ui.common.precision_stepper import install_precision_arrow_stepper
+
+        install_precision_arrow_stepper(self.application)
+        panel = KeithleyConfigurationPanel(simulation_settings())
+        panel.channel.setCurrentText("B")
+        panel.mode.setCurrentText("current")
+        panel.level.setText("10 mA")
+
+        down = QKeyEvent(QEvent.Type.KeyPress, Qt.Key.Key_Down, Qt.KeyboardModifier.NoModifier)
+        up = QKeyEvent(QEvent.Type.KeyPress, Qt.Key.Key_Up, Qt.KeyboardModifier.NoModifier)
+
+        for _ in range(10):
+            self.application.sendEvent(panel.level, down)
+        self.assertEqual(panel.level.text(), "0 mA")
+
+        # Stepping down past 0 mA hits the minimum limit (0 A / 0 mA) and must clamp to 0 mA, NOT 0 A
+        self.application.sendEvent(panel.level, down)
+        self.assertEqual(panel.level.text(), "0 mA")
+
+        # Stepping up from 0 mA must step to 1 mA, NOT 1 A
+        self.application.sendEvent(panel.level, up)
+        self.assertEqual(panel.level.text(), "1 mA")
+
+        # Step back down to 0 mA and verify editingFinished preserves 0 mA on focus loss
+        self.application.sendEvent(panel.level, down)
+        self.assertEqual(panel.level.text(), "0 mA")
+        panel.level.editingFinished.emit()
+        self.assertEqual(panel.level.text(), "0 mA")
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -134,8 +134,17 @@ class StationModalShell(QWidget):
 class StationDialog(FramelessDialog):
     """Theme-aware host for every station-owned popup or floating window."""
 
-    def __init__(self, parent: QWidget | None = None) -> None:
+    def __init__(
+        self,
+        parent: QWidget | None = None,
+        *,
+        resizable: bool = False,
+        modal_shell_outer_margins: tuple[int, int, int, int] | None = None,
+        modal_shell_backdrop_margins: tuple[int, int, int, int] | None = None,
+        modal_shell_surface_margins: tuple[int, int, int, int] | None = None,
+    ) -> None:
         super().__init__(parent)
+        self._is_resizable = False
         self.setTitleBar(FluentTitleBar(self))
         self.titleBar.minBtn.hide()
         self.titleBar.maxBtn.hide()
@@ -144,9 +153,56 @@ class StationDialog(FramelessDialog):
         self.titleBar.closeBtn.clicked.connect(self.close)
         self.setProperty("stationSurface", "page")
         self.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
-        self.modal_shell = StationModalShell(self)
+        modal_shell_kwargs: dict[str, tuple[int, int, int, int]] = {}
+        if modal_shell_outer_margins is not None:
+            modal_shell_kwargs["outer_margins"] = modal_shell_outer_margins
+        if modal_shell_backdrop_margins is not None:
+            modal_shell_kwargs["backdrop_margins"] = modal_shell_backdrop_margins
+        if modal_shell_surface_margins is not None:
+            modal_shell_kwargs["surface_margins"] = modal_shell_surface_margins
+        self.modal_shell = StationModalShell(self, **modal_shell_kwargs)
         self._modal_shell_is_content = False
         self._position_modal_shell()
+        if resizable:
+            self.set_resizable(True)
+
+    def set_resizable(self, resizable: bool = True) -> None:
+        """Enable or disable window controls, double-click maximization, and resize borders."""
+
+        self._is_resizable = resizable
+        if resizable:
+            self.titleBar.minBtn.show()
+            self.titleBar.maxBtn.show()
+            self.titleBar.setDoubleClickEnabled(True)
+            self.setResizeEnabled(True)
+            self._enable_platform_window_controls()
+        else:
+            self.titleBar.minBtn.hide()
+            self.titleBar.maxBtn.hide()
+            self.titleBar.setDoubleClickEnabled(False)
+            self.setResizeEnabled(False)
+
+    def _enable_platform_window_controls(self) -> None:
+        import sys
+
+        if sys.platform == "win32":
+            try:
+                import win32con
+                import win32gui
+
+                hwnd = int(self.winId())
+                if hwnd:
+                    style = win32gui.GetWindowLong(hwnd, win32con.GWL_STYLE)
+                    win32gui.SetWindowLong(
+                        hwnd,
+                        win32con.GWL_STYLE,
+                        style
+                        | win32con.WS_MAXIMIZEBOX
+                        | win32con.WS_MINIMIZEBOX
+                        | win32con.WS_THICKFRAME,
+                    )
+            except Exception:
+                pass
 
     def use_modal_shell_content(self) -> StationModalShell:
         """Raise the shared shell so a migrated dialog can own its content."""
@@ -181,6 +237,8 @@ class StationDialog(FramelessDialog):
 
     def showEvent(self, event) -> None:  # noqa: N802 - Qt override
         super().showEvent(event)
+        if getattr(self, "_is_resizable", False):
+            self._enable_platform_window_controls()
         self._position_modal_shell()
 
     def resizeEvent(self, event: QResizeEvent) -> None:  # noqa: N802 - Qt override
@@ -194,6 +252,12 @@ class StationDialog(FramelessDialog):
             QEvent.Type.PaletteChange,
             QEvent.Type.StyleChange,
         }:
+            from qfluentwidgets import isDarkTheme
+            from app.ui.widgets.spectrum_plot import SpectrumPlotWidget
+
+            theme = "dark" if isDarkTheme() else "light"
+            for plot in self.findChildren(SpectrumPlotWidget):
+                plot.apply_theme(theme)
             self.update()
             for child in self.findChildren(QWidget):
                 child.update()

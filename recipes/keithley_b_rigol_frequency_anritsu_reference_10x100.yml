@@ -108,6 +108,10 @@ root:
               channel: 1
               frequency: "${rigol.1.frequency}"
 
+            - id: rigol-frequency-settle
+              type: wait
+              duration: "10 ms"
+
             - id: acquire-raw-and-reference-difference
               type: acquire_spectrum
               trace: TRAC1

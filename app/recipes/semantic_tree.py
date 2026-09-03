@@ -421,16 +421,19 @@ def _label(node: RecipeNode) -> str:
         channel = str(node.data.get("channel", "")).upper()
         enabled = bool(node.data.get("enabled", False))
         return f"Keithley {channel or 'output'} · OUTPUT {'ON' if enabled else 'OFF'}"
-    if node.type == "set_rigol_output":
+    if node.type in {"set_rigol_output", "enable_rigol_output"}:
         channel = str(node.data.get("channel", ""))
-        enabled = bool(node.data.get("enabled", False))
+        enabled = True if node.type == "enable_rigol_output" else bool(node.data.get("enabled", False))
         return f"Rigol CH{channel or '?'} · OUTPUT {'ON' if enabled else 'OFF'}"
-    if node.type == "set_anritsu_sg_output":
-        enabled = bool(node.data.get("enabled", False))
+    if node.type in {"set_anritsu_sg_output", "enable_anritsu_sg_output"}:
+        enabled = True if node.type == "enable_anritsu_sg_output" else bool(node.data.get("enabled", False))
         return f"Anritsu SG · OUTPUT {'ON' if enabled else 'OFF'}"
     if node.type == "update_keithley_level":
         channel = str(node.data.get("channel", "")).upper()
         return f"Set Keithley {channel} · source level"
+    if node.type == "ramp_keithley_to_zero":
+        channel = str(node.data.get("channel", "")).upper()
+        return f"Ramp Keithley {channel or 'output'} to zero"
     if node.type == "update_keithley_compliance":
         channel = str(node.data.get("channel", "")).upper()
         return f"Set Keithley {channel} · compliance"
@@ -448,6 +451,14 @@ def _label(node: RecipeNode) -> str:
         return f"Connect · {node.data.get('device', node.id)}"
     if node.type == "comment":
         return f"Comment · {node.data.get('text', node.data.get('comment', ''))}".rstrip(" ·")
+    if node.type in {"upload_to_elab", "upload_elab"}:
+        template_name = str(node.data.get("template_name") or "").strip()
+        template_id = node.data.get("template_id")
+        if template_name:
+            return f"Upload to eLab · {template_name}"
+        if template_id not in (None, "", 0, "0"):
+            return f"Upload to eLab · Template #{template_id}"
+        return "Upload to eLab · Active eLabFTW template"
     if operation:
         return str(operation)
     return str(node.data.get("label") or node.type or node.id)
@@ -572,28 +583,127 @@ def normalize_recipe_tree(
                 if node.type in {"sequence", "repeat", "if"}
                 else SemanticNodeKind.ACTION
             )
+        output_nodes: list[SemanticTreeNode] = []
+        if data.get("device_module"):
+            output_policy = str(data.get("output_policy", "")).lower()
+            device_module = str(data.get("device_module", "")).lower()
+            channel = data.get("channel", "")
+            if output_policy in {"on", "on_keep"}:
+                output_id = f"{node.id}.output-on"
+                if device_module == "keithley":
+                    chan_str = str(channel).upper() if channel else "B"
+                    out_label = f"Keithley {chan_str} · OUTPUT ON"
+                elif device_module == "rigol":
+                    out_label = f"Rigol CH{channel or 1} · OUTPUT ON"
+                elif device_module == "anritsu_sg":
+                    out_label = "Anritsu SG · OUTPUT ON"
+                else:
+                    out_label = f"{_label(node)} · OUTPUT ON"
+                add_id(output_id)
+                output_nodes.append(
+                    SemanticTreeNode(
+                        output_id,
+                        SemanticNodeKind.ACTION,
+                        node.id,
+                        out_label,
+                        _mapping({
+                            "enabled": True,
+                            "device": device_module,
+                            "channel": channel,
+                            "is_output": True,
+                        }),
+                        None,
+                        (),
+                        False,
+                        False,
+                    )
+                )
+            elif output_policy == "off":
+                output_id = f"{node.id}.output-off"
+                if device_module == "keithley":
+                    chan_str = str(channel).upper() if channel else "B"
+                    out_label = f"Keithley {chan_str} · OUTPUT OFF"
+                elif device_module == "rigol":
+                    out_label = f"Rigol CH{channel or 1} · OUTPUT OFF"
+                elif device_module == "anritsu_sg":
+                    out_label = "Anritsu SG · OUTPUT OFF"
+                else:
+                    out_label = f"{_label(node)} · OUTPUT OFF"
+                add_id(output_id)
+                output_nodes.append(
+                    SemanticTreeNode(
+                        output_id,
+                        SemanticNodeKind.ACTION,
+                        node.id,
+                        out_label,
+                        _mapping({
+                            "enabled": False,
+                            "device": device_module,
+                            "channel": channel,
+                            "is_output": True,
+                        }),
+                        None,
+                        (),
+                        False,
+                        False,
+                    )
+                )
+
         if legacy_sweeps:
             draft = _binding_for_legacy(node, legacy_sweeps[0], resolvers)
             axis = make_axis(node, draft)
-            children = (axis,)
+            children = (*output_nodes, axis)
         else:
-            children = tuple(convert(child) for child in node.children)
+            children = tuple(output_nodes)
+            children += tuple(convert(child) for child in node.children)
             children += tuple(convert(child) for child in node.else_children)
         add_id(node.id)
-        return SemanticTreeNode(node.id, kind, node.id, _label(node), _mapping(data), None, children)
+        node_data = dict(data)
+        node_data.setdefault("type", node.type)
+        if node.type in {"set_keithley_output", "set_rigol_output", "set_anritsu_sg_output"}:
+            node_data["is_output"] = True
+            node_data.setdefault("enabled", bool(node.data.get("enabled", False)))
+        elif node.type in {"enable_rigol_output", "enable_anritsu_sg_output"}:
+            node_data["is_output"] = True
+            node_data["enabled"] = True
+        return SemanticTreeNode(node.id, kind, node.id, _label(node), _mapping(node_data), None, children)
 
     # Finally is a first-class semantic branch shared by Builder and Execution.
     # Its generated safety actions are immutable presentation rows; the
     # concrete Run Engine shutdown manifest remains authoritative at runtime.
     generated_shutdown = (
-        ("keithley.outputs_off", "Keithley A + B OUTPUT OFF"),
-        ("rigol.outputs_off", "Rigol CH1 + CH2 OUTPUT OFF"),
-        ("anritsu.rf_off_and_abort", "Anritsu RF OUTPUT OFF + abort"),
-        ("storage.flush_checkpoint", "Measurement checkpoint flush"),
+        ("keithley.outputs_off", "Keithley A + B · OUTPUT OFF"),
+        ("rigol.outputs_off", "Rigol CH1 + CH2 · OUTPUT OFF"),
+        ("anritsu.rf_off_and_abort", "Anritsu RF · OUTPUT OFF + abort"),
+        ("storage.flush_checkpoint", "Flush measurement checkpoints"),
     )
-    # The cleanup manifest is kept as metadata on the single final row. It is
-    # deliberately not expanded into technical action rows in the operator
-    # tree; the detailed, durable shutdown trace remains in the event log.
+    finally_children: list[SemanticTreeNode] = []
+    if recipe.finally_nodes:
+        finally_children.extend(convert(child) for child in recipe.finally_nodes)
+    else:
+        for action_id, label_text in generated_shutdown:
+            node_id = f"__finally__.{action_id.replace('.', '_')}"
+            add_id(node_id)
+            is_output = "output" in label_text.lower() or "rf" in label_text.lower()
+            finally_children.append(
+                SemanticTreeNode(
+                    node_id,
+                    SemanticNodeKind.ACTION,
+                    "__finally__",
+                    label_text,
+                    _mapping({
+                        "action": action_id,
+                        "enabled": False if is_output else None,
+                        "is_output": is_output,
+                        "guaranteed": True,
+                    }),
+                    None,
+                    (),
+                    False,
+                    False,
+                )
+            )
+
     cleanup_ids = tuple(str(node.id) for node in recipe.finally_nodes)
     generated_ids = tuple(action_id for action_id, _label_text in generated_shutdown)
     finally_root = SemanticTreeNode(
@@ -607,7 +717,7 @@ def normalize_recipe_tree(
             "generated_actions": generated_ids,
         }),
         None,
-        (),
+        tuple(finally_children),
         False,
         False,
     )

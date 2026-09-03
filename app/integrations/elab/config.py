@@ -227,6 +227,7 @@ class ElabIntegrationProfile:
     upload_hdf5: bool = True
     upload_csv: bool = True
     recent_templates: tuple[ElabTemplateReference, ...] = ()
+    favorite_templates: tuple[ElabTemplateReference, ...] = ()
 
     @classmethod
     def from_application(cls, application: Mapping[str, Any] | None) -> "ElabIntegrationProfile":
@@ -271,6 +272,26 @@ class ElabIntegrationProfile:
                         ).strip(),
                     )
                 )
+        raw_favorites = raw.get("favorite_templates", ())
+        favorites: list[ElabTemplateReference] = []
+        if isinstance(raw_favorites, (list, tuple)):
+            for item in raw_favorites:
+                if not isinstance(item, Mapping):
+                    continue
+                try:
+                    fav_id = int(item.get("id"))
+                except (TypeError, ValueError):
+                    continue
+                if fav_id <= 0 or any(reference.id == fav_id for reference in favorites):
+                    continue
+                favorites.append(
+                    ElabTemplateReference(
+                        fav_id,
+                        str(
+                            item.get("title") or item.get("name") or f"Template #{fav_id}"
+                        ).strip(),
+                    )
+                )
         profile = cls(
             enabled=bool(raw.get("enabled", False)),
             template_id=template_id,
@@ -280,6 +301,7 @@ class ElabIntegrationProfile:
             upload_hdf5=bool(raw.get("upload_hdf5", True)),
             upload_csv=bool(raw.get("upload_csv", True)),
             recent_templates=tuple(recent[:8]),
+            favorite_templates=tuple(favorites[:64]),
         )
         profile.validate()
         return profile
@@ -311,6 +333,16 @@ class ElabIntegrationProfile:
             raise ElabConfigurationError(
                 "A recent eLab template title must contain 1-255 characters."
             )
+        if len(self.favorite_templates) > 64:
+            raise ElabConfigurationError("Keep at most 64 favorite eLab templates.")
+        if any(reference.id <= 0 for reference in self.favorite_templates):
+            raise ElabConfigurationError("A favorite eLab template ID must be positive.")
+        if any(
+            not reference.title or len(reference.title) > 255 for reference in self.favorite_templates
+        ):
+            raise ElabConfigurationError(
+                "A favorite eLab template title must contain 1-255 characters."
+            )
 
     def render_title(self, *, run_name: str, status: str, created_at: str) -> str:
         self.validate()
@@ -334,6 +366,10 @@ class ElabIntegrationProfile:
                 {"id": reference.id, "title": reference.title}
                 for reference in self.recent_templates
             ],
+            "favorite_templates": [
+                {"id": reference.id, "title": reference.title}
+                for reference in self.favorite_templates
+            ],
         }
 
     def remember_template(self, template_id: int, title: str) -> "ElabIntegrationProfile":
@@ -346,3 +382,86 @@ class ElabIntegrationProfile:
             item for item in self.recent_templates if item.id != reference.id
         )
         return replace(self, recent_templates=recent[:8])
+
+    def is_favorite(self, template_id: int | None) -> bool:
+        """Return True if the template ID is currently in the favorites list."""
+        if template_id is None:
+            return False
+        try:
+            tid = int(template_id)
+        except (ValueError, TypeError):
+            return False
+        return any(reference.id == tid for reference in self.favorite_templates)
+
+    def with_favorite_template(self, template_id: int, title: str) -> "ElabIntegrationProfile":
+        """Return a profile with the specified template added to favorites."""
+        try:
+            tid = int(template_id)
+        except (ValueError, TypeError) as exc:
+            raise ElabConfigurationError("A favorite template ID must be an integer.") from exc
+        if self.is_favorite(tid):
+            return self
+        reference = ElabTemplateReference(
+            tid, str(title).strip() or f"Template #{tid}"
+        )
+        updated = self.favorite_templates + (reference,)
+        new_profile = replace(self, favorite_templates=updated[:64])
+        new_profile.validate()
+        return new_profile
+
+    def without_favorite_template(self, template_id: int) -> "ElabIntegrationProfile":
+        """Return a profile with the specified template removed from favorites."""
+        try:
+            tid = int(template_id)
+        except (ValueError, TypeError) as exc:
+            raise ElabConfigurationError("A favorite template ID must be an integer.") from exc
+        updated = tuple(ref for ref in self.favorite_templates if ref.id != tid)
+        return replace(self, favorite_templates=updated)
+
+    def toggle_favorite(self, template_id: int, title: str) -> "ElabIntegrationProfile":
+        """Add or remove a template from favorites."""
+        if self.is_favorite(template_id):
+            return self.without_favorite_template(template_id)
+        return self.with_favorite_template(template_id, title)
+
+    def with_overrides(
+        self,
+        *,
+        enabled: bool | None = None,
+        template_id: int | None = None,
+        template_name: str | None = None,
+        title_pattern: str | None = None,
+        tags: Any | None = None,
+        upload_hdf5: bool | None = None,
+        upload_csv: bool | None = None,
+    ) -> "ElabIntegrationProfile":
+        """Return a copy of this profile with the specified per-run or per-node overrides."""
+
+        effective_template_id = self.template_id if template_id is None else template_id
+        effective_template_name = (
+            self.template_name if template_name is None else str(template_name)
+        )
+        effective_title_pattern = (
+            self.title_pattern if title_pattern is None else str(title_pattern)
+        )
+        effective_tags = (
+            self.tags
+            if tags is None
+            else tuple(dict.fromkeys(str(t).strip() for t in tags if str(t).strip()))
+        )
+        effective_hdf5 = self.upload_hdf5 if upload_hdf5 is None else bool(upload_hdf5)
+        effective_csv = self.upload_csv if upload_csv is None else bool(upload_csv)
+        effective_enabled = self.enabled if enabled is None else bool(enabled)
+        new_profile = replace(
+            self,
+            enabled=effective_enabled,
+            template_id=effective_template_id,
+            template_name=effective_template_name,
+            title_pattern=effective_title_pattern,
+            tags=effective_tags,
+            upload_hdf5=effective_hdf5,
+            upload_csv=effective_csv,
+        )
+        new_profile.validate()
+        return new_profile
+

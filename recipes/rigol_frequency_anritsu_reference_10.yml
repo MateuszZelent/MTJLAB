@@ -46,6 +46,7 @@ root:
           frequency: "${rigol.1.frequency}"
         - {id: anritsu-reference-per-point, type: acquire_reference, trace: TRAC1}
         - {id: rigol-on-per-point, type: set_rigol_output, channel: 1, enabled: true}
+        - {id: rigol-point-settle, type: wait, duration: "10 ms"}
         - id: acquire-raw-and-reference-difference
           type: acquire_spectrum
           trace: TRAC1

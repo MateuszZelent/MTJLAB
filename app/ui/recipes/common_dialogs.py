@@ -148,6 +148,7 @@ class ActionNodeEditorDialog(FluentRecipeDialog):
         "deadline",
         "sync_delay",
         "settle_time",
+        "settling_time",
         "sweep_time",
     }
     _FREQUENCY_FIELDS = {

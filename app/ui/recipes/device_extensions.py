@@ -28,8 +28,10 @@ from app.devices.rigol_dg1000z.ui.recipe_extension import (
     RigolNodeEditorDialog,
     RigolPage,
 )
+from app.devices.registry import built_in_device_registry
 
 __all__ = [
+    "built_in_device_registry",
     "AnritsuAdvancedSpectrumPanel",
     "AnritsuConfigurationSnapshot",
     "AnritsuNodeEditorDialog",

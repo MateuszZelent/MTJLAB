@@ -426,6 +426,7 @@ class SpectrumResultsTab(QWidget):
     ) -> None:
         self.points.clear()
         self._clear_spectrum()
+        items: list[QTreeWidgetItem] = []
         for point in points:
             if isinstance(point, StoredPoint):
                 fields = {**point.setpoints, **point.measurements}
@@ -449,7 +450,13 @@ class SpectrumResultsTab(QWidget):
             )
             item.setData(0, Qt.ItemDataRole.UserRole, point)
             item.setToolTip(3, self._point_tooltip(point))
-            self.points.addTopLevelItem(item)
+            items.append(item)
+
+        self.points.setUpdatesEnabled(False)
+        try:
+            self.points.addTopLevelItems(items)
+        finally:
+            self.points.setUpdatesEnabled(True)
 
         self._update_nav_buttons()
         if points:

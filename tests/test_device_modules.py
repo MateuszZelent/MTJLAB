@@ -46,6 +46,16 @@ class _OfficialModel425Bridge:
         self.idn = connection.query("*IDN?")  # type: ignore[attr-defined]
 
 
+class _SequentialVisaSessionFactory:
+    def __init__(self, *sessions: FakeVisaSession) -> None:
+        self.sessions = list(sessions)
+        self.opened_resources: list[tuple[str, str, int]] = []
+
+    def open(self, resource: str, backend: str, timeout_ms: int) -> FakeVisaSession:
+        self.opened_resources.append((resource, backend, timeout_ms))
+        return self.sessions.pop(0)
+
+
 class DeviceModuleTests(unittest.TestCase):
     def test_anritsu_production_dispatch_passively_reads_single_and_live_frames(self) -> None:
         frame = 0
@@ -252,6 +262,42 @@ class DeviceModuleTests(unittest.TestCase):
         self.assertTrue(set(session.writes) <= {
             "*IDN?", "UNIT?", "RDGMODE?", "RANGE?", "AUTO?", "TYPE?", "RDGFIELD?",
         })
+
+    def test_lakeshore_connect_is_idempotent_after_identity_verification(self) -> None:
+        session = simulated_475_session()
+        factory = FakeVisaSessionFactory(session)
+        adapter = LakeShore475Adapter(
+            GaussmeterConfig(resource="SIM::LAKESHORE::INSTR"),
+            session_factory=factory,
+            official_model_factory=lambda connection: connection,
+        )
+
+        first = adapter.connect()
+        second = adapter.connect()
+
+        self.assertIs(second, first)
+        self.assertEqual(len(factory.opened_resources), 1)
+
+    def test_lakeshore_failed_connect_clears_session_before_retry(self) -> None:
+        failed_session = FakeVisaSession(
+            responses={"*IDN?": "LSCI,MODEL475,SIM475,sim-1.0"}
+        )
+        working_session = simulated_475_session()
+        factory = _SequentialVisaSessionFactory(failed_session, working_session)
+        adapter = LakeShore475Adapter(
+            GaussmeterConfig(resource="SIM::LAKESHORE::INSTR"),
+            session_factory=factory,
+            official_model_factory=lambda connection: connection,
+        )
+
+        with self.assertRaises(DeviceError):
+            adapter.connect()
+
+        identity = adapter.connect()
+
+        self.assertEqual(identity.model, "MODEL475")
+        self.assertTrue(failed_session.closed)
+        self.assertEqual(len(factory.opened_resources), 2)
 
     def test_lakeshore_475_uses_installed_official_model425_connection_api(self) -> None:
         session = simulated_475_session(field=0.01)
