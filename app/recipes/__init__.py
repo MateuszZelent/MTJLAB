@@ -10,7 +10,9 @@ from app.recipes.models import (
 from app.recipes.editing import (
     add_recipe_node,
     delete_recipe_node,
+    delete_recipe_nodes,
     move_recipe_node,
+    move_recipe_nodes,
     replace_recipe_node,
     wrap_recipe_nodes_in_repeat,
 )
@@ -41,7 +43,9 @@ __all__ = [
     "load_recipe",
     "add_recipe_node",
     "delete_recipe_node",
+    "delete_recipe_nodes",
     "move_recipe_node",
+    "move_recipe_nodes",
     "parse_recipe_text",
     "replace_recipe_node",
     "wrap_recipe_nodes_in_repeat",

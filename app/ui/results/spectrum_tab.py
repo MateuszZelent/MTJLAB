@@ -14,13 +14,24 @@ from PySide6.QtGui import QResizeEvent
 from PySide6.QtWidgets import (
     QBoxLayout,
     QHBoxLayout,
+    QSizePolicy,
     QSplitter,
     QStackedWidget,
     QTreeWidgetItem,
     QVBoxLayout,
     QWidget,
 )
-from qfluentwidgets import BodyLabel, ComboBox, PushButton, SpinBox, TreeWidget
+from qfluentwidgets import (
+    BodyLabel,
+    CaptionLabel,
+    CardWidget,
+    ComboBox,
+    FluentIcon,
+    InfoBadge,
+    PushButton,
+    SpinBox,
+    TreeWidget,
+)
 
 from app.domain.quantities import (
     DIMENSION_CURRENT,
@@ -67,6 +78,27 @@ _ALL_VALUES = "__all_values__"
 _ALL_PARAMETER_SETS = "__all_parameter_sets__"
 
 
+class CheckpointItem(QTreeWidgetItem):
+    """Table item for an individual measurement point or checkpoint."""
+
+    def __lt__(self, other: QTreeWidgetItem) -> bool:
+        if not isinstance(other, CheckpointItem):
+            return super().__lt__(other)
+        tree = self.treeWidget()
+        col = tree.sortColumn() if tree is not None else 0
+        if col == 0:
+            try:
+                return int(self.text(0)) < int(other.text(0))
+            except (ValueError, TypeError):
+                pass
+        elif col == 2:
+            raw_self = self.data(2, Qt.ItemDataRole.UserRole) or self.text(2)
+            raw_other = other.data(2, Qt.ItemDataRole.UserRole) or other.text(2)
+            return str(raw_self) < str(raw_other)
+        return self.text(col).casefold() < other.text(col).casefold()
+
+
+
 class SpectrumResultsTab(QWidget):
     """Browse private Lab Control and public THATEC/PyThat spectra.
 
@@ -100,124 +132,200 @@ class SpectrumResultsTab(QWidget):
         layout.setContentsMargins(0, 0, 0, 0)
         layout.setSpacing(8)
 
+        # --- Fluent Controls Card (Sweeps style) ---
+        self.controls_card = CardWidget(self)
+        controls_layout = QVBoxLayout(self.controls_card)
+        controls_layout.setContentsMargins(12, 10, 12, 10)
+        controls_layout.setSpacing(8)
+
+        # Row 1: Checkpoint Filters & Stored View
         self.filter_selector = QHBoxLayout()
-        filter_selector = self.filter_selector
-        filter_selector.addWidget(BodyLabel("Parameter filter:", self))
-        self.filter_parameter_combo = ComboBox(self)
-        self.filter_parameter_combo.setMinimumWidth(220)
+        filter_row = self.filter_selector
+        filter_row.setContentsMargins(0, 0, 0, 0)
+        filter_row.setSpacing(10)
+
+        param_layout = QVBoxLayout()
+        param_layout.setSpacing(2)
+        param_label = CaptionLabel("Parameter", self.controls_card)
+        param_label.setObjectName("muted")
+        param_layout.addWidget(param_label)
+        self.filter_parameter_combo = ComboBox(self.controls_card)
+        self.filter_parameter_combo.setMinimumWidth(150)
         self.filter_parameter_combo.setAccessibleName("Result parameter filter")
         self.filter_parameter_combo.setToolTip(
             "Limit the checkpoint browser to one exact setpoint or result value."
         )
-        filter_selector.addWidget(self.filter_parameter_combo, 1)
-        self.filter_value_combo = ComboBox(self)
-        self.filter_value_combo.setMinimumWidth(180)
+        param_layout.addWidget(self.filter_parameter_combo)
+        filter_row.addLayout(param_layout, 2)
+
+        val_layout = QVBoxLayout()
+        val_layout.setSpacing(2)
+        val_label = CaptionLabel("Value", self.controls_card)
+        val_label.setObjectName("muted")
+        val_layout.addWidget(val_label)
+        self.filter_value_combo = ComboBox(self.controls_card)
+        self.filter_value_combo.setMinimumWidth(110)
         self.filter_value_combo.setAccessibleName("Result parameter value filter")
-        filter_selector.addWidget(self.filter_value_combo, 1)
-        self.parameter_set_combo = ComboBox(self)
-        self.parameter_set_combo.setMinimumWidth(240)
+        val_layout.addWidget(self.filter_value_combo)
+        filter_row.addLayout(val_layout, 1)
+
+        set_layout = QVBoxLayout()
+        set_layout.setSpacing(2)
+        set_label = CaptionLabel("Parameter set", self.controls_card)
+        set_label.setObjectName("muted")
+        set_layout.addWidget(set_label)
+        self.parameter_set_combo = ComboBox(self.controls_card)
+        self.parameter_set_combo.setMinimumWidth(160)
         self.parameter_set_combo.setAccessibleName("Result parameter set filter")
         self.parameter_set_combo.setToolTip(
             "Choose one exact combination of checkpoint parameters."
         )
-        filter_selector.addWidget(self.parameter_set_combo, 1)
-        self.clear_filter_button = PushButton("Clear filter", self)
-        self.clear_filter_button.setEnabled(False)
-        filter_selector.addWidget(self.clear_filter_button)
-        self.filter_summary = BodyLabel("All checkpoints", self)
-        self.filter_summary.setObjectName("muted")
-        self.filter_summary.setWordWrap(True)
-        filter_selector.addWidget(self.filter_summary)
-        layout.addLayout(filter_selector)
+        set_layout.addWidget(self.parameter_set_combo)
+        filter_row.addLayout(set_layout, 2)
 
-        # Public THATEC/PyThat files can contain spectra without the private
-        # Lab Control /points group. Browse published rows directly.
-        public_selector = QVBoxLayout()
-        public_selector.setContentsMargins(0, 0, 0, 0)
-        public_selector.setSpacing(4)
-        row_selector = QHBoxLayout()
-        row_selector.addWidget(BodyLabel("Public spectrum row:", self))
-        self.thatec_row_combo = ComboBox(self)
-        self.thatec_row_combo.setMinimumWidth(280)
+        variant_layout = QVBoxLayout()
+        variant_layout.setSpacing(2)
+        variant_label = CaptionLabel("Spectrum view", self.controls_card)
+        variant_label.setObjectName("muted")
+        variant_layout.addWidget(variant_label)
+        self.spectrum_variant_combo = ComboBox(self.controls_card)
+        self.spectrum_variant_combo.setMinimumWidth(150)
+        self.spectrum_variant_combo.setAccessibleName("Stored spectrum view")
+        self.spectrum_variant_combo.setToolTip(
+            "Choose raw, processed, or reference data for the selected checkpoint."
+        )
+        variant_layout.addWidget(self.spectrum_variant_combo)
+        filter_row.addLayout(variant_layout, 2)
+
+        btn_layout = QVBoxLayout()
+        btn_layout.setSpacing(2)
+        self.filter_summary = CaptionLabel("All checkpoints", self.controls_card)
+        self.filter_summary.setObjectName("muted")
+        btn_layout.addWidget(self.filter_summary)
+        self.clear_filter_button = PushButton("Clear filter", self.controls_card)
+        self.clear_filter_button.setIcon(FluentIcon.CLEAR_SELECTION)
+        self.clear_filter_button.setEnabled(False)
+        self.clear_filter_button.setToolTip("Reset parameter filters")
+        btn_layout.addWidget(self.clear_filter_button)
+        filter_row.addLayout(btn_layout, 1)
+
+        controls_layout.addLayout(filter_row)
+
+        # Row 2: Public THATEC/PyThat spectral rows (collapsible / only shown when rows exist)
+        self.public_row_container = QWidget(self.controls_card)
+        public_row = QHBoxLayout(self.public_row_container)
+        public_row.setContentsMargins(0, 4, 0, 0)
+        public_row.setSpacing(10)
+
+        pub_row_layout = QVBoxLayout()
+        pub_row_layout.setSpacing(2)
+        pub_row_label = CaptionLabel("Public spectrum row", self.public_row_container)
+        pub_row_label.setObjectName("muted")
+        pub_row_layout.addWidget(pub_row_label)
+        self.thatec_row_combo = ComboBox(self.public_row_container)
+        self.thatec_row_combo.setMinimumWidth(220)
         self.thatec_row_combo.setAccessibleName("Public spectrum row")
         self.thatec_row_combo.setToolTip(
             "Choose a spectral row stored in the public THATEC/PyThat result."
         )
-        row_selector.addWidget(self.thatec_row_combo, 1)
-        row_selector.addWidget(BodyLabel("Checkpoint:", self))
-        self.thatec_checkpoint = SpinBox(self)
+        pub_row_layout.addWidget(self.thatec_row_combo)
+        public_row.addLayout(pub_row_layout, 3)
+
+        pub_cp_layout = QVBoxLayout()
+        pub_cp_layout.setSpacing(2)
+        pub_cp_label = CaptionLabel("Checkpoint", self.public_row_container)
+        pub_cp_label.setObjectName("muted")
+        pub_cp_layout.addWidget(pub_cp_label)
+        self.thatec_checkpoint = SpinBox(self.public_row_container)
         self.thatec_checkpoint.setRange(0, 0)
         self.thatec_checkpoint.setAccessibleName("Spectrum checkpoint")
-        row_selector.addWidget(self.thatec_checkpoint)
-        self.show_thatec_button = PushButton("Show spectrum", self)
-        self.show_thatec_button.setEnabled(False)
-        self.show_thatec_button.setToolTip(
-            "Read the selected public spectrum without contacting an instrument."
-        )
-        row_selector.addWidget(self.show_thatec_button)
-        public_selector.addLayout(row_selector)
+        pub_cp_layout.addWidget(self.thatec_checkpoint)
+        public_row.addLayout(pub_cp_layout, 1)
 
-        trace_selector = QHBoxLayout()
-        trace_selector.addWidget(BodyLabel("Trace component:", self))
-        self.thatec_trace_combo = ComboBox(self)
+        pub_tr_layout = QVBoxLayout()
+        pub_tr_layout.setSpacing(2)
+        pub_tr_label = CaptionLabel("Trace component", self.public_row_container)
+        pub_tr_label.setObjectName("muted")
+        pub_tr_layout.addWidget(pub_tr_label)
+        self.thatec_trace_combo = ComboBox(self.public_row_container)
         self.thatec_trace_combo.setEnabled(False)
         self.thatec_trace_combo.setAccessibleName("Spectrum trace component")
         self.thatec_trace_combo.setToolTip(
             "Choose a channel from a multi-trace public spectrum."
         )
-        trace_selector.addWidget(self.thatec_trace_combo, 1)
-        public_selector.addLayout(trace_selector)
-        layout.addLayout(public_selector)
+        pub_tr_layout.addWidget(self.thatec_trace_combo)
+        public_row.addLayout(pub_tr_layout, 2)
 
-        display_selector = QHBoxLayout()
-        display_selector.addWidget(BodyLabel("Stored spectrum view:", self))
-        self.spectrum_variant_combo = ComboBox(self)
-        self.spectrum_variant_combo.setAccessibleName("Stored spectrum view")
-        self.spectrum_variant_combo.setToolTip(
-            "Choose raw, processed, or reference data for the selected checkpoint."
+        pub_btn_layout = QVBoxLayout()
+        pub_btn_layout.setSpacing(2)
+        pub_btn_spacer = CaptionLabel(" ", self.public_row_container)
+        pub_btn_layout.addWidget(pub_btn_spacer)
+        self.show_thatec_button = PushButton("Show spectrum", self.public_row_container)
+        self.show_thatec_button.setIcon(FluentIcon.VIEW)
+        self.show_thatec_button.setEnabled(False)
+        self.show_thatec_button.setToolTip(
+            "Read the selected public spectrum without contacting an instrument."
         )
-        display_selector.addWidget(self.spectrum_variant_combo, 1)
-        display_selector.addStretch(1)
-        layout.addLayout(display_selector)
+        pub_btn_layout.addWidget(self.show_thatec_button)
+        public_row.addLayout(pub_btn_layout, 1)
 
+        controls_layout.addWidget(self.public_row_container)
+        self.public_row_container.hide()
+
+        layout.addWidget(self.controls_card)
+
+        # --- Splitter (Points Table + Navigation + Spectrum Plot) ---
         splitter = QSplitter(Qt.Orientation.Vertical)
 
         self.points = TreeWidget(self)
         self.points.setHeaderLabels(["Point", "State", "UTC time", "Data"])
-        self.points.setMinimumHeight(120)
-        self.points.setColumnWidth(0, 70)
-        self.points.setColumnWidth(1, 80)
-        self.points.setColumnWidth(2, 210)
+        self.points.setUniformRowHeights(True)
+        self.points.setAlternatingRowColors(True)
+        self.points.setMinimumHeight(80)
+        header = self.points.header()
+        header.setMinimumSectionSize(60)
+        header.setStretchLastSection(True)
+        self.points.setColumnWidth(0, 65)
+        self.points.setColumnWidth(1, 90)
+        self.points.setColumnWidth(2, 175)
         splitter.addWidget(self.points)
 
-        navigation = QHBoxLayout()
-        self.prev_button = PushButton("← Previous spectrum", self)
-        self.next_button = PushButton("Next spectrum →", self)
+        navigation_card = CardWidget(self)
+        navigation = QHBoxLayout(navigation_card)
+        navigation.setContentsMargins(12, 6, 12, 6)
+        navigation.setSpacing(10)
+        self.prev_button = PushButton("Previous spectrum", navigation_card)
+        self.prev_button.setIcon(FluentIcon.LEFT_ARROW)
+        self.next_button = PushButton("Next spectrum", navigation_card)
+        self.next_button.setIcon(FluentIcon.RIGHT_ARROW)
+        self.next_button.setLayoutDirection(Qt.LayoutDirection.RightToLeft)
         self.prev_button.setEnabled(False)
         self.next_button.setEnabled(False)
         navigation.addWidget(self.prev_button)
         navigation.addWidget(self.next_button)
-        self.position_label = BodyLabel("No spectrum selected", self)
+        self.position_label = CaptionLabel("No spectrum selected", navigation_card)
         self.position_label.setObjectName("muted")
         navigation.addWidget(self.position_label)
         navigation.addStretch(1)
-        navigation_widget = QWidget()
-        navigation_widget.setLayout(navigation)
-        splitter.addWidget(navigation_widget)
+        splitter.addWidget(navigation_card)
 
         self.spectrum_plot = SpectrumPlotWidget(legend=False)
         self.spectrum_plot.set_title("Select a stored or public spectrum")
-        self.spectrum_plot.setMinimumHeight(280)
+        self.spectrum_plot.setMinimumHeight(150)
+        self.spectrum_plot.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
         self.spectrum_state = ResultsStateCard(self)
         self.spectrum_view = QStackedWidget(self)
+        self.spectrum_view.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
         self.spectrum_view.addWidget(self.spectrum_state)
         self.spectrum_view.addWidget(self.spectrum_plot)
         splitter.addWidget(self.spectrum_view)
 
-        splitter.setStretchFactor(0, 0)
+        splitter.setStretchFactor(0, 1)
         splitter.setStretchFactor(1, 0)
-        splitter.setStretchFactor(2, 1)
+        splitter.setStretchFactor(2, 4)
+        splitter.setSizes([140, 36, 500])
         layout.addWidget(splitter, 1)
+        self.setMinimumHeight(240)
 
         self.spectrum_info = BodyLabel(
             "Spectra are read from HDF5 without contacting instruments."
@@ -255,7 +363,7 @@ class SpectrumResultsTab(QWidget):
 
     def resizeEvent(self, event: QResizeEvent) -> None:
         super().resizeEvent(event)
-        compact = event.size().width() < 980
+        compact = event.size().width() < 720
         if compact == self._filter_compact:
             return
         self._filter_compact = compact
@@ -416,6 +524,7 @@ class SpectrumResultsTab(QWidget):
         self.thatec_trace_combo.blockSignals(False)
         self.thatec_trace_combo.setEnabled(False)
         self.show_thatec_button.setEnabled(False)
+        self.public_row_container.setVisible(False)
         self._reset_parameter_filters()
         self._reset_variant_selector()
         self.position_label.setText("No spectrum selected")
@@ -432,23 +541,48 @@ class SpectrumResultsTab(QWidget):
                 fields = {**point.setpoints, **point.measurements}
                 suffix = " · spectrum" if point.has_spectrum else ""
                 state = point.status
-                timestamp = point.timestamp_utc or "-"
+                raw_time = point.timestamp_utc or "-"
                 label = str(point.index)
             else:
                 fields = point.values
                 suffix = " · public spectrum"
                 state = "public"
-                timestamp = point.timestamp_utc or "-"
+                raw_time = point.timestamp_utc or "-"
                 label = str(point.index)
-            item = QTreeWidgetItem(
+
+            # Format UTC time cleanly: "YYYY-MM-DD HH:MM:SS"
+            if raw_time and raw_time != "-":
+                try:
+                    clean_time = raw_time.replace("T", " ")
+                    if "." in clean_time:
+                        clean_time = clean_time.split(".")[0]
+                    elif "+" in clean_time:
+                        clean_time = clean_time.split("+")[0]
+                except Exception:
+                    clean_time = raw_time
+            else:
+                clean_time = "-"
+
+            item = CheckpointItem(
                 [
                     label,
                     state,
-                    timestamp,
+                    clean_time,
                     f"{len(fields)} parameters{suffix}",
                 ]
             )
+            if state == "ok":
+                item.setIcon(1, FluentIcon.ACCEPT.icon())
+            elif state in {"faulted", "aborted", "error"}:
+                item.setIcon(1, FluentIcon.CANCEL.icon())
+            elif state == "public":
+                item.setIcon(1, FluentIcon.INFO.icon())
+
             item.setData(0, Qt.ItemDataRole.UserRole, point)
+            item.setData(2, Qt.ItemDataRole.UserRole, raw_time)
+            item.setTextAlignment(0, Qt.AlignmentFlag.AlignCenter)
+            item.setTextAlignment(1, Qt.AlignmentFlag.AlignCenter)
+            item.setToolTip(2, f"Exact recorded UTC time:\n{raw_time}")
             item.setToolTip(3, self._point_tooltip(point))
             items.append(item)
 
@@ -779,6 +913,7 @@ class SpectrumResultsTab(QWidget):
                     userData=row.id,
                 )
         self.thatec_row_combo.blockSignals(False)
+        self.public_row_container.setVisible(self.thatec_row_combo.count() > 0)
         self._thatec_row_changed()
 
     def _thatec_row_changed(self, *_args: object) -> None:

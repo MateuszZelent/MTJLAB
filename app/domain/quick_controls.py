@@ -102,7 +102,11 @@ def render_quantity_si_like(text: str, dimension: str, value_si: float) -> str:
         raise ValueError("Enter a number followed by an explicit unit.")
     unit = match.group("unit").strip()
     scale = Decimal(str(parse_quantity(f"1 {unit}", dimension).si_value))
-    value_in_unit = Decimal(str(value_si)) / scale
+    numeric_si = float(value_si)
+    if abs(numeric_si) < 1e-15:
+        value_in_unit = Decimal("0")
+    else:
+        value_in_unit = Decimal(f"{numeric_si:.12g}") / scale
     # A safety boundary may be finer than the operator's current display
     # precision (for example 0.15 A while the field shows 0.1 A).  Add only
     # the digits required to represent that boundary exactly; rounding it

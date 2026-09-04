@@ -807,13 +807,17 @@ class MainWindow(FluentWindow):
             if action.isChecked() != desired:
                 with QSignalBlocker(action):
                     action.setChecked(desired)
+        current_sizes = self.shell_splitter.sizes()
         if show_log:
             total = max(0, self.shell_splitter.height())
-            self.shell_splitter.setSizes([max(0, total - 125), 125])
+            target_sizes = [max(0, total - 125), 125]
+            if len(current_sizes) < 2 or current_sizes[1] != 125:
+                self.shell_splitter.setSizes(target_sizes)
         else:
             # Hidden QSplitter children do not consume space, but setting an
             # explicit size makes the expansion deterministic after resize.
-            self.shell_splitter.setSizes([max(0, self.shell_splitter.height()), 0])
+            if len(current_sizes) < 2 or current_sizes[1] != 0:
+                self.shell_splitter.setSizes([max(0, self.shell_splitter.height()), 0])
 
     def _open_settings_issue(self, issue: SettingsIssue) -> None:
         """Navigate only; correcting a safety profile never changes live outputs."""
@@ -3406,6 +3410,28 @@ class MainWindow(FluentWindow):
     def _close_owned_floating_windows(self) -> None:
         for widget in self._owned_floating_windows():
             widget.close()
+
+    def nativeEvent(self, event_type, message) -> tuple[bool, int]:  # noqa: N802 - Qt override
+        import sys
+        if sys.platform == "win32":
+            try:
+                import win32con
+                from qframelesswindow.windows import MSG, LPNCCALCSIZE_PARAMS, cast
+                msg = MSG.from_address(message.__int__())
+                if msg.message == win32con.WM_NCCALCSIZE:
+                    handled, result = super().nativeEvent(event_type, message)
+                    if msg.wParam and handled:
+                        params = cast(msg.lParam, LPNCCALCSIZE_PARAMS).contents
+                        new_w = params.rgrc[0].right - params.rgrc[0].left
+                        new_h = params.rgrc[0].bottom - params.rgrc[0].top
+                        old_w = params.rgrc[1].right - params.rgrc[1].left
+                        old_h = params.rgrc[1].bottom - params.rgrc[1].top
+                        if new_w == old_w and new_h == old_h:
+                            return True, 0
+                    return handled, result
+            except Exception:
+                pass
+        return super().nativeEvent(event_type, message)
 
     def closeEvent(self, event: QCloseEvent) -> None:
         # RecipePage is hosted inside the Fluent stack, so its own closeEvent

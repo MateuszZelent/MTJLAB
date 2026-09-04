@@ -740,6 +740,26 @@ class QuickControlTests(unittest.TestCase):
         panel.level.editingFinished.emit()
         self.assertEqual(panel.level.text(), "0 mA")
 
+    def test_render_quantity_si_like_cleans_binary_float_noise(self) -> None:
+        # Binary float noise like 0.8 + 0.1 = 0.9000000000000001
+        self.assertEqual(
+            render_quantity_si_like("0.8 V", DIMENSION_VOLTAGE, 0.8 + 0.1),
+            "0.9 V",
+        )
+        # 0.015 - 0.005 = 0.009999999999999998
+        self.assertEqual(
+            render_quantity_si_like("15 mV", DIMENSION_VOLTAGE, 0.015 - 0.005),
+            "10 mV",
+        )
+        self.assertEqual(
+            render_quantity_si_like("0.015 V", DIMENSION_VOLTAGE, 0.015 - 0.005),
+            "0.010 V",
+        )
+        self.assertEqual(
+            render_quantity_si_like("0.02 V", DIMENSION_VOLTAGE, 0.015 - 0.005),
+            "0.01 V",
+        )
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -475,6 +475,12 @@ class MeasurementTreeModel(QAbstractItemModel):
             flags |= Qt.ItemFlag.ItemIsDropEnabled
         return flags
 
+    def supportedDragActions(self) -> Qt.DropAction:
+        return Qt.DropAction.MoveAction | Qt.DropAction.CopyAction
+
+    def supportedDropActions(self) -> Qt.DropAction:
+        return Qt.DropAction.MoveAction
+
     def headerData(self, section: int, orientation: Qt.Orientation, role: int = int(Qt.ItemDataRole.DisplayRole)) -> Any:
         if orientation == Qt.Orientation.Horizontal and role == int(Qt.ItemDataRole.DisplayRole):
             return self.HEADERS[section] if 0 <= section < len(self.HEADERS) else None

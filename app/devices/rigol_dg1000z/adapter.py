@@ -568,7 +568,7 @@ class RigolAdapter(DeviceAdapter):
         self._last_burst_config.pop(config.channel, None)
         session.write(f":OUTP{config.channel}:LOAD {self._format_load(config.output_load)}")
         if waveform == "DC":
-            session.write(f"{prefix}:APPL:DC DEF,DEF,{self._format_wire_number(config.high_level_v)}")
+            session.write(f"{prefix}:APPL:DC DEF,DEF,{self._format_wire_voltage(config.high_level_v)}")
         else:
             session.write(f"{prefix}:FUNC {waveform}")
             if waveform == "USER":
@@ -583,10 +583,10 @@ class RigolAdapter(DeviceAdapter):
             # offset on the DG1000Z.  Program the canonical pair while OUTPUT
             # is OFF instead of walking through two conflicting endpoint
             # states that the instrument may clamp.
-            amplitude_vpp = config.high_level_v - config.low_level_v
-            offset_v = (config.high_level_v + config.low_level_v) / 2.0
-            session.write(f"{prefix}:VOLT {self._format_wire_number(amplitude_vpp)}")
-            session.write(f"{prefix}:VOLT:OFFS {self._format_wire_number(offset_v)}")
+            amplitude_vpp = quantize_rigol_voltage(config.high_level_v - config.low_level_v)
+            offset_v = quantize_rigol_voltage((config.high_level_v + config.low_level_v) / 2.0)
+            session.write(f"{prefix}:VOLT {self._format_wire_voltage(amplitude_vpp)}")
+            session.write(f"{prefix}:VOLT:OFFS {self._format_wire_voltage(offset_v)}")
             if waveform != "NOIS":
                 session.write(f"{prefix}:PHAS {config.phase_deg:.12g}")
             self._write_shape_parameters(prefix, waveform, config)
@@ -773,10 +773,10 @@ class RigolAdapter(DeviceAdapter):
             )
         self._last_config.pop(channel, None)
         try:
-            amplitude_vpp = updated.high_level_v - updated.low_level_v
-            offset_v = (updated.high_level_v + updated.low_level_v) / 2.0
-            session.write(f"{prefix}:VOLT {self._format_wire_number(amplitude_vpp)}")
-            session.write(f"{prefix}:VOLT:OFFS {self._format_wire_number(offset_v)}")
+            amplitude_vpp = quantize_rigol_voltage(updated.high_level_v - updated.low_level_v)
+            offset_v = quantize_rigol_voltage((updated.high_level_v + updated.low_level_v) / 2.0)
+            session.write(f"{prefix}:VOLT {self._format_wire_voltage(amplitude_vpp)}")
+            session.write(f"{prefix}:VOLT:OFFS {self._format_wire_voltage(offset_v)}")
             self._check_errors()
             try:
                 actual_high = float(session.query(f"{prefix}:VOLT:HIGH?"))
@@ -800,8 +800,8 @@ class RigolAdapter(DeviceAdapter):
             self._fail_live_setpoint_update(output_was_on=output_before, cause=exc)
         self._last_config[channel] = replace(
             updated,
-            high_level_v=actual_high,
-            low_level_v=actual_low,
+            high_level_v=quantize_rigol_voltage(actual_high),
+            low_level_v=quantize_rigol_voltage(actual_low),
         )
         self._output_states[channel] = output_after
         self._update_aggregate_output_state()
@@ -815,11 +815,12 @@ class RigolAdapter(DeviceAdapter):
             raise SafetyViolation("Configure the Rigol channel before quick amplitude control.")
         if not math.isfinite(amplitude_vpp_v) or amplitude_vpp_v < 0:
             raise SafetyViolation("Rigol amplitude Vpp must be finite and non-negative.")
-        offset_v = (config.high_level_v + config.low_level_v) / 2.0
+        offset_v = quantize_rigol_voltage((config.high_level_v + config.low_level_v) / 2.0)
+        amplitude_vpp_v = quantize_rigol_voltage(amplitude_vpp_v)
         updated = replace(
             config,
-            high_level_v=offset_v + amplitude_vpp_v / 2.0,
-            low_level_v=offset_v - amplitude_vpp_v / 2.0,
+            high_level_v=quantize_rigol_voltage(offset_v + amplitude_vpp_v / 2.0),
+            low_level_v=quantize_rigol_voltage(offset_v - amplitude_vpp_v / 2.0),
         )
         return self._update_voltage_representation(
             channel, updated, command_suffix="VOLT", requested=amplitude_vpp_v
@@ -862,7 +863,7 @@ class RigolAdapter(DeviceAdapter):
             # dedicated offset command changes only the active DC level.
             try:
                 session.write(
-                    f"{prefix}:VOLT:OFFS {self._format_wire_number(updated.high_level_v)}"
+                    f"{prefix}:VOLT:OFFS {self._format_wire_voltage(updated.high_level_v)}"
                 )
                 self._check_errors()
                 try:
@@ -884,17 +885,18 @@ class RigolAdapter(DeviceAdapter):
                 self._fail_live_setpoint_update(output_was_on=output_before, cause=exc)
             self._last_config[channel] = replace(
                 updated,
-                high_level_v=actual_offset,
-                low_level_v=actual_offset,
+                high_level_v=quantize_rigol_voltage(actual_offset),
+                low_level_v=quantize_rigol_voltage(actual_offset),
             )
             self._output_states[channel] = output_after
             self._update_aggregate_output_state()
-            return actual_offset
-        amplitude_vpp_v = config.high_level_v - config.low_level_v
+            return quantize_rigol_voltage(actual_offset)
+        offset_v = quantize_rigol_voltage(offset_v)
+        amplitude_vpp_v = quantize_rigol_voltage(config.high_level_v - config.low_level_v)
         updated = replace(
             config,
-            high_level_v=offset_v + amplitude_vpp_v / 2.0,
-            low_level_v=offset_v - amplitude_vpp_v / 2.0,
+            high_level_v=quantize_rigol_voltage(offset_v + amplitude_vpp_v / 2.0),
+            low_level_v=quantize_rigol_voltage(offset_v - amplitude_vpp_v / 2.0),
         )
         return self._update_voltage_representation(
             channel, updated, command_suffix="VOLT:OFFS", requested=offset_v
@@ -902,16 +904,18 @@ class RigolAdapter(DeviceAdapter):
 
     def update_high_level(self, channel: int, high_level_v: float) -> float:
         config = self.last_channel_config(channel)
-        updated = replace(config, high_level_v=float(high_level_v))
+        quantized = quantize_rigol_voltage(float(high_level_v))
+        updated = replace(config, high_level_v=quantized)
         return self._update_voltage_representation(
-            channel, updated, command_suffix="VOLT:HIGH", requested=high_level_v
+            channel, updated, command_suffix="VOLT:HIGH", requested=quantized
         )
 
     def update_low_level(self, channel: int, low_level_v: float) -> float:
         config = self.last_channel_config(channel)
-        updated = replace(config, low_level_v=float(low_level_v))
+        quantized = quantize_rigol_voltage(float(low_level_v))
+        updated = replace(config, low_level_v=quantized)
         return self._update_voltage_representation(
-            channel, updated, command_suffix="VOLT:LOW", requested=low_level_v
+            channel, updated, command_suffix="VOLT:LOW", requested=quantized
         )
 
     def _update_voltage_representation(
@@ -933,18 +937,18 @@ class RigolAdapter(DeviceAdapter):
         self._validate_waveform_config(updated)
         normalized_requested = quantize_rigol_voltage(float(requested))
         if command_suffix == "VOLT":
-            offset = (config.high_level_v + config.low_level_v) / 2.0
+            offset = quantize_rigol_voltage((config.high_level_v + config.low_level_v) / 2.0)
             normalized_updated = replace(
                 config,
-                high_level_v=offset + normalized_requested / 2.0,
-                low_level_v=offset - normalized_requested / 2.0,
+                high_level_v=quantize_rigol_voltage(offset + normalized_requested / 2.0),
+                low_level_v=quantize_rigol_voltage(offset - normalized_requested / 2.0),
             )
         elif command_suffix == "VOLT:OFFS":
-            amplitude = config.high_level_v - config.low_level_v
+            amplitude = quantize_rigol_voltage(config.high_level_v - config.low_level_v)
             normalized_updated = replace(
                 config,
-                high_level_v=normalized_requested + amplitude / 2.0,
-                low_level_v=normalized_requested - amplitude / 2.0,
+                high_level_v=quantize_rigol_voltage(normalized_requested + amplitude / 2.0),
+                low_level_v=quantize_rigol_voltage(normalized_requested - amplitude / 2.0),
             )
         elif command_suffix == "VOLT:HIGH":
             normalized_updated = replace(
@@ -975,7 +979,7 @@ class RigolAdapter(DeviceAdapter):
         self._last_config.pop(channel, None)
         try:
             session.write(
-                f"{prefix}:{command_suffix} {self._format_wire_number(normalized_requested)}"
+                f"{prefix}:{command_suffix} {self._format_wire_voltage(normalized_requested)}"
             )
             self._check_errors()
             actual_amplitude = float(session.query(f"{prefix}:VOLT?"))
@@ -985,8 +989,8 @@ class RigolAdapter(DeviceAdapter):
             output_after = self._parse_output_state(
                 session.query(f":OUTP{channel}?"), channel=channel
             )
-            expected_amplitude = updated.high_level_v - updated.low_level_v
-            expected_offset = (updated.high_level_v + updated.low_level_v) / 2.0
+            expected_amplitude = quantize_rigol_voltage(updated.high_level_v - updated.low_level_v)
+            expected_offset = quantize_rigol_voltage((updated.high_level_v + updated.low_level_v) / 2.0)
             values_match = all(
                 self._same_number(actual, expected, absolute=1e-4)
                 for actual, expected in (
@@ -1012,16 +1016,16 @@ class RigolAdapter(DeviceAdapter):
             self._fail_live_setpoint_update(output_was_on=output_before, cause=exc)
         self._last_config[channel] = replace(
             updated,
-            high_level_v=actual_high,
-            low_level_v=actual_low,
+            high_level_v=quantize_rigol_voltage(actual_high),
+            low_level_v=quantize_rigol_voltage(actual_low),
         )
         self._output_states[channel] = output_after
         self._update_aggregate_output_state()
         if command_suffix == "VOLT":
-            return actual_amplitude
+            return quantize_rigol_voltage(actual_amplitude)
         if command_suffix == "VOLT:OFFS":
-            return actual_offset
-        return actual_high if command_suffix == "VOLT:HIGH" else actual_low
+            return quantize_rigol_voltage(actual_offset)
+        return quantize_rigol_voltage(actual_high if command_suffix == "VOLT:HIGH" else actual_low)
 
     def _fail_live_setpoint_update(
         self, *, output_was_on: bool, cause: Exception
@@ -1124,12 +1128,12 @@ class RigolAdapter(DeviceAdapter):
             snapshot[f"rigol.{channel}.frequency"] = config.frequency_hz
             snapshot[f"rigol.{channel}.high_level"] = config.high_level_v
             snapshot[f"rigol.{channel}.low_level"] = config.low_level_v
-            snapshot[f"rigol.{channel}.amplitude"] = (
+            snapshot[f"rigol.{channel}.amplitude"] = quantize_rigol_voltage(
                 config.high_level_v - config.low_level_v
             )
-            snapshot[f"rigol.{channel}.offset"] = (
-                config.high_level_v + config.low_level_v
-            ) / 2.0
+            snapshot[f"rigol.{channel}.offset"] = quantize_rigol_voltage(
+                (config.high_level_v + config.low_level_v) / 2.0
+            )
         return snapshot
 
     @staticmethod
@@ -1300,8 +1304,8 @@ class RigolAdapter(DeviceAdapter):
         return replace(
             expected,
             frequency_hz=actual_frequency,
-            high_level_v=actual_high,
-            low_level_v=actual_low,
+            high_level_v=quantize_rigol_voltage(actual_high),
+            low_level_v=quantize_rigol_voltage(actual_low),
             phase_deg=actual_phase,
         )
 
@@ -1335,6 +1339,15 @@ class RigolAdapter(DeviceAdapter):
         """Keep documented sub-microvolt/sub-microhertz digits on the wire."""
 
         return f"{value:.16g}"
+
+    @staticmethod
+    def _format_wire_voltage(value_v: float) -> str:
+        """Format a voltage setpoint quantized to Rigol's hardware step."""
+
+        quantized = quantize_rigol_voltage(float(value_v))
+        if abs(quantized) < 1e-12:
+            return "0"
+        return f"{quantized:.12g}"
 
     @staticmethod
     def _assert_finite(name: str, value: float) -> None:

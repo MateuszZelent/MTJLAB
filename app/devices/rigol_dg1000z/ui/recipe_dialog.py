@@ -22,7 +22,7 @@ from app.devices.rigol_dg1000z import RigolChannelConfig
 from app.domain.errors import ConfigurationError
 from app.domain.quantities import DIMENSION_FREQUENCY, DIMENSION_RESISTANCE, DIMENSION_TIME, DIMENSION_VOLTAGE, parse_quantity
 from app.recipes import RecipeNode
-from app.safety.rigol_current import validate_rigol_waveform
+from app.safety.rigol_current import quantize_rigol_voltage, validate_rigol_waveform
 from app.settings.models import StationSettings
 from app.ui.common import line_edit as _line
 from app.ui.recipes import SweepGeneratorDialog
@@ -270,12 +270,20 @@ class RigolNodeEditorDialog(FluentRecipeDialog):
 
     @staticmethod
     def _format_voltage(value_v: float, preferred_unit: str | None = None) -> str:
-        if preferred_unit == "mV" and (abs(value_v) < 1 or value_v == 0.0):
+        value_v = quantize_rigol_voltage(value_v)
+        if abs(value_v) < 1e-12:
+            value_v = 0.0
+            if preferred_unit == "mV":
+                return "0 mV"
+            if preferred_unit == "V":
+                return "0 V"
+            return "0 V"
+        if preferred_unit == "mV":
             return f"{value_v * 1e3:.12g} mV"
+        if preferred_unit == "V":
+            return f"{value_v:.12g} V"
         if 0 < abs(value_v) < 1:
             return f"{value_v * 1e3:.12g} mV"
-        if preferred_unit == "mV" and value_v == 0.0:
-            return "0 mV"
         return f"{value_v:.12g} V"
 
     def _sync_vpp_offset_from_levels(self) -> None:
@@ -284,14 +292,26 @@ class RigolNodeEditorDialog(FluentRecipeDialog):
             low = parse_quantity(self.low_level.text(), DIMENSION_VOLTAGE).si_value
         except Exception:
             return
+        high = quantize_rigol_voltage(high)
+        low = quantize_rigol_voltage(low)
         preferred = (
             "mV"
             if (
                 "mV" in self.high_level.text()
                 or "mV" in self.low_level.text()
-                or "mV" in self.offset.text()
             )
-            else None
+            else (
+                "V"
+                if (
+                    "V" in self.high_level.text()
+                    or "V" in self.low_level.text()
+                )
+                else (
+                    "mV"
+                    if "mV" in self.offset.text()
+                    else ("V" if "V" in self.offset.text() else None)
+                )
+            )
         )
         self.vpp.setText(self._format_voltage(high - low, preferred_unit=preferred))
         self.offset.setText(self._format_voltage((high + low) / 2, preferred_unit=preferred))
@@ -306,14 +326,26 @@ class RigolNodeEditorDialog(FluentRecipeDialog):
             )
         except Exception:
             return
+        offset = quantize_rigol_voltage(offset)
+        amplitude = quantize_rigol_voltage(amplitude)
         preferred = (
             "mV"
             if (
                 "mV" in self.offset.text()
                 or "mV" in self.vpp.text()
-                or "mV" in self.high_level.text()
             )
-            else None
+            else (
+                "V"
+                if (
+                    "V" in self.offset.text()
+                    or "V" in self.vpp.text()
+                )
+                else (
+                    "mV"
+                    if "mV" in self.high_level.text()
+                    else ("V" if "V" in self.high_level.text() else None)
+                )
+            )
         )
         self.high_level.setText(self._format_voltage(offset + amplitude / 2, preferred_unit=preferred))
         self.low_level.setText(self._format_voltage(offset - amplitude / 2, preferred_unit=preferred))

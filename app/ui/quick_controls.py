@@ -182,15 +182,8 @@ class _QuickResizeHandle(QWidget):
 
 
 def _add_quick_shadow(widget: QWidget, *, blur: float = 28, y: float = 5) -> None:
-    """Give the main panel a restrained elevation without flattening Fluent cards."""
-
-    shadow = QGraphicsDropShadowEffect(widget)
-    shadow.setBlurRadius(blur)
-    shadow.setOffset(0, y)
-    color = widget.palette().color(QPalette.ColorRole.Shadow)
-    color.setAlpha(58)
-    shadow.setColor(color)
-    widget.setGraphicsEffect(shadow)
+    """Retained for API compatibility; hardware DWM provides native frameless shadow."""
+    del widget, blur, y
 
 
 class QuickControlCoordinator(QObject):
@@ -1483,7 +1476,7 @@ class QuickControlsWindow(FluentWidget):
         for row in self._rows.values():
             row.refresh_limits()
 
-    def _position_resize_handles(self) -> None:
+    def _position_resize_handles(self, *, raise_handles: bool = False) -> None:
         if not hasattr(self, "_resize_handles") or not self._resize_handles:
             return
         width = self.width()
@@ -1508,18 +1501,44 @@ class QuickControlsWindow(FluentWidget):
             ),
         }
         for name, handle in self._resize_handles.items():
-            handle.setGeometry(geometries[name])
-            handle.setVisible(resizable)
-            handle.raise_()
+            geom = geometries[name]
+            if handle.geometry() != geom:
+                handle.setGeometry(geom)
+            if handle.isVisible() != resizable:
+                handle.setVisible(resizable)
+            if raise_handles:
+                handle.raise_()
 
     def resizeEvent(self, event) -> None:  # noqa: N802 - Qt override
         super().resizeEvent(event)
-        self._position_resize_handles()
+        self._position_resize_handles(raise_handles=False)
 
     def changeEvent(self, event) -> None:  # noqa: N802 - Qt override
         super().changeEvent(event)
         if event.type() == QEvent.Type.WindowStateChange:
-            self._position_resize_handles()
+            self._position_resize_handles(raise_handles=True)
+
+    def nativeEvent(self, event_type, message) -> tuple[bool, int]:  # noqa: N802 - Qt override
+        import sys
+        if sys.platform == "win32":
+            try:
+                import win32con
+                from qframelesswindow.windows import MSG, LPNCCALCSIZE_PARAMS, cast
+                msg = MSG.from_address(message.__int__())
+                if msg.message == win32con.WM_NCCALCSIZE:
+                    handled, result = super().nativeEvent(event_type, message)
+                    if msg.wParam and handled:
+                        params = cast(msg.lParam, LPNCCALCSIZE_PARAMS).contents
+                        new_w = params.rgrc[0].right - params.rgrc[0].left
+                        new_h = params.rgrc[0].bottom - params.rgrc[0].top
+                        old_w = params.rgrc[1].right - params.rgrc[1].left
+                        old_h = params.rgrc[1].bottom - params.rgrc[1].top
+                        if new_w == old_w and new_h == old_h:
+                            return True, 0
+                    return handled, result
+            except Exception:
+                pass
+        return super().nativeEvent(event_type, message)
 
     def closeEvent(self, event: QCloseEvent) -> None:
         self._height_fit_timer.stop()

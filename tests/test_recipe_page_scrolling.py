@@ -15,6 +15,7 @@ from app.ui.recipes.page import (
     RecipePage,
 )
 from app.ui.execution.page import RunMonitorPage
+from app.ui.results.page import ResultsPage
 from app.ui.settings_page import SettingsPage
 from app.ui.shell.page_host import FluentPageHost
 from tests.helpers import SETTINGS_TEMPLATE
@@ -45,6 +46,12 @@ class RecipePageScrollingTests(unittest.TestCase):
             self.assertTrue(getattr(settings_page, "owns_viewport", False))
         finally:
             settings_page.close()
+
+        results_page = ResultsPage(".")
+        try:
+            self.assertTrue(getattr(results_page, "owns_viewport", False))
+        finally:
+            results_page.close()
 
     def test_fluent_page_host_sets_expanding_for_viewport_owning_pages(self) -> None:
         standard_content = QWidget()
@@ -136,5 +143,16 @@ class RecipePageScrollingTests(unittest.TestCase):
             self.assertIsInstance(page.editor, BoundPlainTextEdit)
             self.assertIsInstance(page.inspector, BoundPlainTextEdit)
             self.assertIsInstance(page.library_panel, BoundScrollArea)
+        finally:
+            page.close()
+
+    def test_results_page_minimum_height_fits_normal_viewport(self) -> None:
+        page = ResultsPage(".")
+        try:
+            self.assertLessEqual(page.results_splitter.minimumHeight(), 250)
+            self.assertLessEqual(page.heatmap_tab.minimumHeight(), 250)
+            self.assertLessEqual(page.spectrum_tab.minimumHeight(), 250)
+            self.assertLessEqual(page.sweep_tree.minimumHeight(), 250)
+            self.assertLessEqual(page.minimumSizeHint().height(), 400)
         finally:
             page.close()

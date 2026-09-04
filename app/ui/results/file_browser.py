@@ -7,10 +7,11 @@ from datetime import datetime, timezone
 import math
 from pathlib import Path
 
-from PySide6.QtCore import QThreadPool, Qt, Signal
+from PySide6.QtCore import QSize, QThreadPool, Qt, Signal
 from PySide6.QtWidgets import (
     QHBoxLayout,
     QHeaderView,
+    QSizePolicy,
     QStackedWidget,
     QTreeWidgetItem,
     QVBoxLayout,
@@ -228,12 +229,22 @@ class FileBrowserPanel(QWidget):
         self.clear_filter_btn.setEnabled(False)
         filter_bar.addWidget(self.clear_filter_btn)
 
+        for combo in (
+            self.state_filter,
+            self.operator_filter,
+            self.date_filter,
+            self.view_mode_combo,
+        ):
+            combo.setMinimumWidth(75)
+            combo.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Fixed)
+
         layout.addLayout(filter_bar)
 
         # --- Results table ---
         self.runs = TreeWidget(self)
         self.runs.setHeaderLabels(["File", "Date", "State", "Operator", "Spectra", "Points"])
-        self.runs.setMinimumWidth(280)
+        self.runs.setMinimumWidth(260)
+        self.runs.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
         self.runs.setUniformRowHeights(True)
         self.runs.setAccessibleName("Recorded HDF5 results")
         self.runs.setSortingEnabled(True)
@@ -292,10 +303,11 @@ class FileBrowserPanel(QWidget):
         pag_layout.addWidget(self.last_page_btn)
         pag_layout.addStretch(1)
 
-        pag_layout.addWidget(CaptionLabel("Rows per page:", self.pagination_bar))
+        pag_layout.addWidget(CaptionLabel("Rows:", self.pagination_bar))
         self.page_size_combo = ComboBox(self.pagination_bar)
-        self.page_size_combo.addItems(["15", "25", "50", "100", "All"])
-        self.page_size_combo.setCurrentIndex(1)  # default 25
+        self.page_size_combo.setFixedWidth(70)
+        self.page_size_combo.addItems(["5", "15", "25", "50", "100", "All"])
+        self.page_size_combo.setCurrentIndex(2)  # default 25
         pag_layout.addWidget(self.page_size_combo)
 
         layout.addWidget(self.pagination_bar)
@@ -318,6 +330,9 @@ class FileBrowserPanel(QWidget):
         self.next_page_btn.clicked.connect(lambda: self._set_page(self._current_page + 1))
         self.last_page_btn.clicked.connect(lambda: self._set_page(self._total_pages()))
         self.page_size_combo.currentTextChanged.connect(self._on_page_size_changed)
+
+    def minimumSizeHint(self) -> QSize:
+        return QSize(280, 200)
 
     @property
     def selected_path(self) -> Path | None:

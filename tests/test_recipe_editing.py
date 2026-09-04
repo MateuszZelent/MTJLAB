@@ -3,7 +3,14 @@ from __future__ import annotations
 import unittest
 
 from app.domain.errors import ConfigurationError
-from app.recipes import add_recipe_node, delete_recipe_node, move_recipe_node, parse_recipe_text
+from app.recipes import (
+    add_recipe_node,
+    delete_recipe_node,
+    delete_recipe_nodes,
+    move_recipe_node,
+    move_recipe_nodes,
+    parse_recipe_text,
+)
 
 
 SOURCE = """\
@@ -37,6 +44,42 @@ class RecipeEditingTests(unittest.TestCase):
         self.assertIn("new-wait", tuple(node.id for node in parse_recipe_text(added).root.children))
         deleted = delete_recipe_node(added, node_id="new-wait")
         self.assertNotIn("new-wait", tuple(node.id for node in parse_recipe_text(deleted).root.children))
+
+    def test_delete_recipe_nodes_deletes_multiple(self) -> None:
+        deleted = delete_recipe_nodes(SOURCE, node_ids=["first", "last"])
+        children = tuple(node.id for node in parse_recipe_text(deleted).root.children)
+        self.assertEqual(children, ("condition",))
+
+    def test_move_recipe_nodes_moves_multiple_in_order(self) -> None:
+        # Move both 'condition' and 'last' before 'first'
+        moved = move_recipe_nodes(
+            SOURCE,
+            node_ids=("condition", "last"),
+            destination_parent_id="root",
+            destination_branch="children",
+            destination_index=0,
+        )
+        recipe = parse_recipe_text(moved)
+        self.assertEqual(
+            tuple(node.id for node in recipe.root.children),
+            ("condition", "last", "first"),
+        )
+
+    def test_move_recipe_nodes_moves_into_container(self) -> None:
+        # Move 'first' and 'last' inside condition's 'else' branch
+        moved = move_recipe_nodes(
+            SOURCE,
+            node_ids=("first", "last"),
+            destination_parent_id="condition",
+            destination_branch="else",
+            destination_index=1,
+        )
+        recipe = parse_recipe_text(moved)
+        condition = recipe.root.children[0]
+        self.assertEqual(
+            tuple(node.id for node in condition.else_children),
+            ("else-node", "first", "last"),
+        )
 
     def test_builder_can_delete_the_last_root_child_and_leave_an_empty_plan(self) -> None:
         source = """\

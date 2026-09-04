@@ -1,4 +1,4 @@
-"""Metadata inspection panel with tabbed detail views."""
+"""Metadata inspection panel with modern tabbed detail views and code highlighting."""
 
 from __future__ import annotations
 
@@ -13,22 +13,22 @@ from PySide6.QtWidgets import (
     QVBoxLayout,
     QWidget,
 )
-from qfluentwidgets import ComboBox, Pivot, PlainTextEdit
+from qfluentwidgets import ComboBox, FluentIcon, Pivot, SegmentedWidget
 
 from app.storage import RunDetail, ThatecRun
 from app.storage.pythat_reader import PyThatRunData
+from app.ui.widgets.fluent_code_viewer import FluentCodeViewer
 
 
 class _FluentMetadataSections(QWidget):
-    """Compact Fluent navigation for the immutable run-detail documents."""
+    """Compact Fluent segmented navigation for the immutable run-detail documents."""
 
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
         layout = QVBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
         layout.setSpacing(8)
-        self.navigation = Pivot(self)
-        self.navigation.setItemFontSize(14)
+        self.navigation = SegmentedWidget(self)
         self.compact_navigation = ComboBox(self)
         self.compact_navigation.setAccessibleName("Result detail section")
         self.compact_navigation.hide()
@@ -46,7 +46,7 @@ class _FluentMetadataSections(QWidget):
         self._compact_layout: bool | None = None
         self._navigation_sync_pending = False
 
-    def addTab(self, page: QWidget, label: str) -> int:
+    def addTab(self, page: QWidget, label: str, icon: FluentIcon | None = None) -> int:
         index = self.stack.addWidget(page)
         route = f"metadata-section-{index}"
         self._routes.append(route)
@@ -56,6 +56,7 @@ class _FluentMetadataSections(QWidget):
             route,
             label,
             onClick=lambda _checked=False, index=index: self.setCurrentIndex(index),
+            icon=icon,
         )
         if index == 0:
             self.setCurrentIndex(index)
@@ -88,7 +89,12 @@ class _FluentMetadataSections(QWidget):
 
     def _sync_navigation_mode(self) -> None:
         self._navigation_sync_pending = False
-        required_width = max(1_000, self.navigation.sizeHint().width() + 8)
+        items_width = sum(
+            self.navigation.widget(r).sizeHint().width()
+            for r in self._routes
+            if self.navigation.widget(r) is not None
+        )
+        required_width = max(710, items_width + 16)
         compact = self.width() < required_width
         visibility_matches = (
             self.navigation.isHidden() == compact
@@ -114,11 +120,12 @@ class MetadataPanel(QWidget):
 
         self.tabs = _FluentMetadataSections(self)
         self.section_navigation = self.tabs.navigation
-        self.metadata = PlainTextEdit(self)
-        self.recipe_snapshot = PlainTextEdit(self)
-        self.settings_snapshot = PlainTextEdit(self)
-        self.pythat_data = PlainTextEdit(self)
-        self.device_state = PlainTextEdit(self)
+
+        self.metadata = FluentCodeViewer(language="yaml", parent=self)
+        self.recipe_snapshot = FluentCodeViewer(language="yaml", parent=self)
+        self.settings_snapshot = FluentCodeViewer(language="yaml", parent=self)
+        self.pythat_data = FluentCodeViewer(language="yaml", parent=self)
+        self.device_state = FluentCodeViewer(language="json", parent=self)
 
         for widget in (
             self.metadata,
@@ -140,35 +147,49 @@ class MetadataPanel(QWidget):
         """Populate all tabs from a private HDF5 run detail."""
         summary = detail.summary
         lines = [
+            "# --- Run Summary ---",
             f"File: {summary.path}",
             f"State: {summary.status}",
             f"Created (UTC): {summary.created_at_utc or 'missing'}",
             f"Application version: {summary.application_version or 'missing'}",
             f"Plan hash: {summary.plan_sha256 or 'missing'}",
-            f"Checkpoints: {summary.point_count}; stored spectra: {summary.spectrum_count}",
+            f"Checkpoints: {summary.point_count}",
+            f"Stored spectra: {summary.spectrum_count}",
             "",
+            "# --- Connected Instruments ---",
             "Instrument identities:",
         ]
         lines.extend(
             f"  {name}: {idn}" for name, idn in sorted(detail.device_idn.items())
         )
         lines.extend(
-            ("", "Authenticated operator:", _format_json(detail.operator_context))
-        )
-        lines.extend(
-            ("", "Capabilities (snapshot):", _format_json(detail.capabilities))
+            (
+                "",
+                "# --- Operator Context ---",
+                "Authenticated operator:",
+                _format_json(detail.operator_context),
+            )
         )
         lines.extend(
             (
                 "",
+                "# --- Hardware Capabilities ---",
+                "Capabilities (snapshot):",
+                _format_json(detail.capabilities),
+            )
+        )
+        lines.extend(
+            (
+                "",
+                "# --- Execution Provenance ---",
                 "Execution provenance:",
                 _format_json(detail.simulation_metadata),
             )
         )
         if detail.events:
-            lines.extend(("", f"Recent events ({len(detail.events)}):"))
+            lines.extend(("", f"# --- Recent Events ({len(detail.events)}) ---", "Recent events:"))
             lines.extend(
-                f"  {event.timestamp_utc} [{event.severity}] {event.name}"
+                f"  - [{event.timestamp_utc}] ({event.severity}) {event.name}"
                 for event in detail.events[-20:]
             )
         self.metadata.setPlainText("\n".join(lines))
@@ -178,7 +199,7 @@ class MetadataPanel(QWidget):
     def show_thatec_summary(self, path: Path, run: ThatecRun) -> None:
         """Show minimal metadata for a public THATEC file without private groups."""
         self.metadata.setPlainText(
-            f"Public THATEC file: {path}\nRows: {len(run.rows)}\n"
+            f"# Public THATEC file\nFile: {path}\nRows: {len(run.rows)}\n"
             f"Devices: {len(run.devices)}"
         )
         self.recipe_snapshot.clear()
@@ -188,15 +209,15 @@ class MetadataPanel(QWidget):
         """Populate the PyThat tab."""
         if data is not None:
             self.pythat_data.setPlainText(
-                "Dimensions:\n"
+                "# Dimensions\n"
                 + _format_json(data.dimensions)
-                + "\n\nVariables:\n"
-                + "\n".join(data.variables)
+                + "\n\n# Variables\n"
+                + "\n".join(f"  - {v}" for v in data.variables)
             )
         else:
             self.pythat_data.setPlainText(
-                "Public THATEC tree loaded directly; "
-                "no private application metadata required."
+                "# Public THATEC file\n"
+                "message: Public THATEC tree loaded directly; no private application metadata required."
             )
 
     def show_device_state(self, device_states: dict) -> None:

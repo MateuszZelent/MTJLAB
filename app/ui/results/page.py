@@ -5,7 +5,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from pathlib import Path
 
-from PySide6.QtCore import QEvent, QThreadPool, QTimer, Qt, Signal
+from PySide6.QtCore import QEvent, QSize, QThreadPool, QTimer, Qt, Signal
 from PySide6.QtGui import QResizeEvent, QShowEvent
 from PySide6.QtWidgets import (
     QBoxLayout,
@@ -16,7 +16,18 @@ from PySide6.QtWidgets import (
     QVBoxLayout,
     QWidget,
 )
-from qfluentwidgets import BodyLabel, CardWidget, ComboBox, Pivot, PrimaryPushButton, PushButton, SubtitleLabel
+from qfluentwidgets import (
+    BodyLabel,
+    CaptionLabel,
+    CardWidget,
+    ComboBox,
+    FluentIcon,
+    Pivot,
+    PrimaryPushButton,
+    PushButton,
+    SegmentedWidget,
+    SubtitleLabel,
+)
 
 from app.storage import (
     Hdf5RunReader,
@@ -86,8 +97,30 @@ def _read_result_payload(path: Path) -> _ResultPayload:
     )
 
 
+def _make_payload(
+    path: Path,
+    thatec_run: object,
+    tree: tuple[object, ...],
+    tree_available: bool,
+    detail: object | None,
+    points: tuple[object, ...],
+    references: tuple[object, ...],
+    pythat_data: object | None,
+) -> _ResultPayload:
+    return _ResultPayload(
+        path=path,
+        thatec_run=thatec_run,
+        tree=tuple(tree),
+        tree_available=tree_available,
+        detail=detail,
+        points=tuple(points),
+        references=tuple(references),
+        pythat_data=pythat_data,
+    )
+
+
 class _FluentResultSections(QWidget):
-    """Fluent Pivot navigation backed by a real page stack.
+    """Fluent Segmented navigation backed by a real page stack.
 
     It deliberately provides the operator-facing Results navigation. The
     small semantic page-management API stays local to this Fluent widget.
@@ -98,7 +131,7 @@ class _FluentResultSections(QWidget):
         layout = QVBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
         layout.setSpacing(8)
-        self.navigation = Pivot(self)
+        self.navigation = SegmentedWidget(self)
         self.compact_navigation = ComboBox(self)
         self.compact_navigation.setAccessibleName("Results section")
         self.compact_navigation.hide()
@@ -116,7 +149,7 @@ class _FluentResultSections(QWidget):
         self._compact_layout: bool | None = None
         self._navigation_sync_pending = False
 
-    def addTab(self, page: QWidget, label: str) -> int:
+    def addTab(self, page: QWidget, label: str, icon: FluentIcon | None = None) -> int:
         index = self.stack.addWidget(page)
         route = f"result-section-{index}"
         self._routes.append(route)
@@ -126,6 +159,7 @@ class _FluentResultSections(QWidget):
             route,
             label,
             onClick=lambda _checked=False, index=index: self.setCurrentIndex(index),
+            icon=icon,
         )
         if index == 0:
             self.setCurrentIndex(index)
@@ -138,6 +172,14 @@ class _FluentResultSections(QWidget):
             self.compact_navigation.blockSignals(True)
             self.compact_navigation.setCurrentIndex(index)
             self.compact_navigation.blockSignals(False)
+
+    def minimumSizeHint(self) -> QSize:
+        cur = self.stack.currentWidget()
+        nav_hint = self.navigation.minimumSizeHint()
+        if cur is not None:
+            c_hint = cur.minimumSizeHint()
+            return QSize(max(c_hint.width(), nav_hint.width()), c_hint.height() + nav_hint.height() + 8)
+        return super().minimumSizeHint()
 
     def resizeEvent(self, event: QResizeEvent) -> None:
         super().resizeEvent(event)
@@ -158,12 +200,12 @@ class _FluentResultSections(QWidget):
 
     def _sync_navigation_mode(self) -> None:
         self._navigation_sync_pending = False
-        # Pivot item widths can be recalculated after a theme or shell
-        # navigation transition.  A fixed 620 px threshold allowed a cached
-        # 900+ px Pivot to be shown in a narrower Results pane, clipping its
-        # final route without producing a scrollbar.  Use both a comfortable
-        # baseline and the navigation's current natural width.
-        required_width = max(1_000, self.navigation.sizeHint().width() + 8)
+        items_width = sum(
+            self.navigation.widget(r).sizeHint().width()
+            for r in self._routes
+            if self.navigation.widget(r) is not None
+        )
+        required_width = max(420, items_width + 16)
         visible_width = self.visibleRegion().boundingRect().width()
         available_width = self.width()
         if visible_width > 0:
@@ -223,6 +265,7 @@ class ResultsPage(QWidget):
 
     def __init__(self, output_dir: str, parent: QWidget | None = None) -> None:
         super().__init__(parent)
+        self.owns_viewport = True
         self._selected_path: Path | None = None
         self._thatec_run = None
         self._thatec_tree_available = False
@@ -230,33 +273,36 @@ class ResultsPage(QWidget):
         self._result_task: ResultReadTask | None = None
 
         layout = QVBoxLayout(self)
+        layout.setContentsMargins(16, 8, 16, 8)
+        layout.setSpacing(6)
 
         # --- Title ---
         title = SubtitleLabel("Results", self)
         title.setObjectName("pageTitle")
         layout.addWidget(title)
-        subtitle = BodyLabel(
+        subtitle = CaptionLabel(
             "Open HDF5 results, inspect the complete measurement tree, filter checkpoint "
             "parameter sets, and browse raw or processed spectra.",
             self,
         )
+        subtitle.setObjectName("muted")
         subtitle.setWordWrap(True)
         layout.addWidget(subtitle)
 
         # --- Deliberate operational actions ---
         self.action_card = CardWidget(self)
+        self.action_card.setFixedHeight(38)
         self.actions_layout = QHBoxLayout(self.action_card)
         actions = self.actions_layout
-        actions.setContentsMargins(16, 12, 16, 12)
-        action_copy = QVBoxLayout()
-        action_copy.addWidget(BodyLabel("Run actions", self.action_card))
-        action_note = BodyLabel(
-            "Actions are enabled only when the selected result proves they are safe.",
+        actions.setContentsMargins(12, 4, 12, 4)
+        actions.setSpacing(8)
+        action_note = CaptionLabel(
+            "Actions are enabled only when the selected result proves safe.",
             self.action_card,
         )
+        action_note.setObjectName("muted")
         action_note.setWordWrap(True)
-        action_copy.addWidget(action_note)
-        actions.addLayout(action_copy, 1)
+        actions.addWidget(action_note, 1)
         self.open_sweep_button = PrimaryPushButton("Open reconstructed Sweep", self.action_card)
         self.open_sweep_button.setEnabled(False)
         self.open_sweep_button.setToolTip(
@@ -269,11 +315,11 @@ class ResultsPage(QWidget):
         )
         actions.addWidget(self.open_sweep_button)
         actions.addWidget(self.resume_button)
-        actions.addStretch(1)
         layout.addWidget(self.action_card)
 
         # --- Main splitter ---
         self.results_splitter = QSplitter(Qt.Orientation.Horizontal)
+        self.results_splitter.setMinimumHeight(240)
         splitter = self.results_splitter
 
         # Left: file browser
@@ -288,39 +334,42 @@ class ResultsPage(QWidget):
         # Tab: Overview (metadata)
         self.metadata_panel = MetadataPanel()
         self._overview_index = self.result_tabs.addTab(
-            self.metadata_panel, "Overview"
+            self.metadata_panel, "Overview", icon=FluentIcon.INFO
         )
 
         # Tab: Sweep Tree
         self.sweep_tree = SweepTreePanel()
         self._tree_index = self.result_tabs.addTab(
-            self.sweep_tree, "Sweep Tree"
+            self.sweep_tree, "Sweep tree", icon=FluentIcon.LEAF
         )
 
         # Tab: Spectrum
         self.spectrum_tab = SpectrumResultsTab()
         self._spectrum_index = self.result_tabs.addTab(
-            self.spectrum_tab, "Spectrum"
+            self.spectrum_tab, "Spectrum", icon=FluentIcon.VIEW
         )
 
         # Tab: Heatmaps
         self.heatmap_tab = HeatmapResultsTab()
         self._heatmap_index = self.result_tabs.addTab(
-            self.heatmap_tab, "Heatmaps"
+            self.heatmap_tab, "Heatmaps", icon=FluentIcon.TILES
         )
 
         result_card = CardWidget(self)
+        result_card.setMinimumHeight(240)
         result_layout = QVBoxLayout(result_card)
-        result_layout.setContentsMargins(16, 12, 16, 16)
+        result_layout.setContentsMargins(12, 8, 12, 8)
+        result_layout.setSpacing(6)
         self.result_state = ResultsStateCard(result_card)
         self.result_state.set_compact(True)
         result_layout.addWidget(self.result_state)
         result_layout.addWidget(self.result_tabs)
         splitter.addWidget(result_card)
-        splitter.setStretchFactor(0, 0)
-        splitter.setStretchFactor(1, 1)
+        splitter.setStretchFactor(0, 1)
+        splitter.setStretchFactor(1, 3)
         layout.addWidget(splitter, 1)
         self._compact_layout: bool | None = None
+        self.setMinimumHeight(320)
 
         # --- Connections ---
         self.file_browser.file_selected.connect(self._on_file_selected)
@@ -370,6 +419,9 @@ class ResultsPage(QWidget):
                 action_text="Open result file...",
             )
 
+    def sizeHint(self) -> QSize:
+        return QSize(800, 500)
+
     def resizeEvent(self, event: QResizeEvent) -> None:
         super().resizeEvent(event)
         self.result_tabs._sync_navigation_mode()
@@ -377,20 +429,24 @@ class ResultsPage(QWidget):
         # The expanded Fluent navigation leaves roughly 1000 px of content at
         # a 1280 px station window.  Switch before action labels and the file
         # browser start imposing a horizontal minimum on the page host.
-        compact = event.size().width() < 1100
+        compact = event.size().width() < 850
+        actions_compact = event.size().width() < 600
+        self.action_card.setFixedHeight(68 if actions_compact else 38)
+        self.actions_layout.setDirection(
+            QBoxLayout.Direction.TopToBottom
+            if actions_compact
+            else QBoxLayout.Direction.LeftToRight
+        )
         if self._compact_layout == compact:
             return
         self._compact_layout = compact
         self.results_splitter.setOrientation(
             Qt.Orientation.Vertical if compact else Qt.Orientation.Horizontal
         )
-        self.actions_layout.setDirection(
-            QBoxLayout.Direction.TopToBottom
-            if compact
-            else QBoxLayout.Direction.LeftToRight
-        )
+        browser_width = min(380, max(260, int(event.size().width() * 0.32)))
+        results_width = max(500, event.size().width() - browser_width)
         self.results_splitter.setSizes(
-            [260, 760] if compact else [280, 900]
+            [160, 760] if compact else [browser_width, results_width]
         )
 
     def showEvent(self, event: QShowEvent) -> None:

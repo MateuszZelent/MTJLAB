@@ -359,6 +359,79 @@ class ResultsPageTests(unittest.TestCase):
         finally:
             window.close()
 
+    def test_fluent_code_viewer_syntax_highlighting_and_actions(self) -> None:
+        from app.ui.widgets.fluent_code_viewer import FluentCodeViewer
+        from PySide6.QtGui import QGuiApplication
+
+        viewer = FluentCodeViewer(language="yaml")
+        try:
+            sample_yaml = (
+                "# Recipe configuration\n"
+                "name: dynamic_sweep\n"
+                "schema_version: 1\n"
+                "active: true\n"
+                "frequency: 2.4 GHz\n"
+                "current: 100 mA\n"
+                "steps:\n"
+                "  - action: measure\n"
+            )
+            viewer.setPlainText(sample_yaml)
+            self.application.processEvents()
+
+            self.assertEqual(viewer.toPlainText(), sample_yaml)
+            self.assertIn("8 lines", viewer.stats_label.text())
+
+            # Verify line number area width is non-zero
+            self.assertGreater(viewer.editor.line_number_area_width(), 0)
+
+            # Verify copy to clipboard
+            viewer.copy_to_clipboard()
+            self.application.processEvents()
+            self.assertEqual(QGuiApplication.clipboard().text(), sample_yaml)
+
+            # Switch language to JSON
+            viewer.set_language("json")
+            sample_json = '{\n  "status": "completed",\n  "count": 42\n}'
+            viewer.setPlainText(sample_json)
+            self.application.processEvents()
+            self.assertEqual(viewer.badge.text(), "JSON")
+            self.assertIn("4 lines", viewer.stats_label.text())
+
+            # Clear
+            viewer.clear()
+            self.assertEqual(viewer.toPlainText(), "")
+            self.assertIn("0 lines", viewer.stats_label.text())
+        finally:
+            viewer.close()
+
+    def test_metadata_panel_segmented_tabs_and_code_viewers(self) -> None:
+        from app.ui.widgets.fluent_code_viewer import FluentCodeViewer
+        from qfluentwidgets import SegmentedWidget
+
+        page = ResultsPage(".")
+        try:
+            # Check results main navigation is a SegmentedWidget
+            self.assertIsInstance(page.result_tabs.navigation, SegmentedWidget)
+            self.assertEqual(page.result_tabs.stack.currentIndex(), 0)
+            self.assertEqual(page.result_tabs.navigation.currentItem().text(), "Overview")
+
+            # Check metadata panel navigation is a SegmentedWidget
+            self.assertIsInstance(page.metadata_panel.tabs.navigation, SegmentedWidget)
+            self.assertEqual(page.metadata_panel.tabs.stack.currentIndex(), 0)
+            self.assertEqual(page.metadata_panel.tabs.navigation.currentItem().text(), "Metadata")
+
+            # Check code viewers in metadata panel
+            self.assertIsInstance(page.metadata_panel.metadata, FluentCodeViewer)
+            self.assertIsInstance(page.metadata_panel.recipe_snapshot, FluentCodeViewer)
+            self.assertIsInstance(page.metadata_panel.settings_snapshot, FluentCodeViewer)
+            self.assertIsInstance(page.metadata_panel.pythat_data, FluentCodeViewer)
+            self.assertIsInstance(page.metadata_panel.device_state, FluentCodeViewer)
+
+            # Check sweep tree inspector is a FluentCodeViewer
+            self.assertIsInstance(page.sweep_tree.inspector, FluentCodeViewer)
+        finally:
+            page.close()
+
 
 if __name__ == "__main__":
     unittest.main()

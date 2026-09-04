@@ -100,6 +100,9 @@ class FluentDevicePageTests(unittest.TestCase):
             window._navigate_to("rigol")
             self.application.processEvents()
             rigol = window.rigol_page
+            self.assertTrue(rigol.live_control_switch.isVisibleTo(window))
+            self.assertFalse(rigol.live_control_switch.isChecked())
+            self.assertEqual(rigol.live_control_switch.text, "Live control")
             self.assertTrue(rigol.waveform_apply_button.isVisibleTo(window))
             self.assertGreater(rigol.waveform_apply_button.width(), 80)
             for control in (rigol.output_on, rigol.output_off):
@@ -266,3 +269,87 @@ class FluentDevicePageTests(unittest.TestCase):
             window._set_theme_mode("system", persist=False)
             window.close()
             self.application.processEvents()
+
+    def test_rigol_form_editing_does_not_send_when_disconnected_or_output_off(self) -> None:
+        window = MainWindow(".config/settings.yml", simulation=True)
+        try:
+            window.resize(1360, 880)
+            window.show()
+            window._navigate_to("rigol")
+            self.application.processEvents()
+
+            rigol = window.rigol_page
+            # Initially Rigol is disconnected and live control switch is off
+            self.assertFalse(rigol._is_device_connected())
+            self.assertFalse(rigol.live_control_enabled)
+            self.assertFalse(rigol.live_control_switch.isChecked())
+
+            emitted_signals: list[tuple[str, str]] = []
+            rigol.quick_setpoint_requested.connect(
+                lambda target, text: emitted_signals.append((target, text))
+            )
+
+            # Editing frequency and voltages while disconnected (live control off)
+            rigol.frequency.setText("2.5 kHz")
+            rigol.frequency.editingFinished.emit()
+            rigol.vpp.setText("10 mV")
+            rigol.vpp.editingFinished.emit()
+            rigol.offset.setText("5 mV")
+            rigol.offset.editingFinished.emit()
+            self.application.processEvents()
+
+            # No quick setpoints emitted and no configure operations dispatched
+            self.assertEqual(emitted_signals, [])
+            self.assertEqual(len(rigol._queued_ui_operations["configure"]), 0)
+
+            # Even if user toggles live control ON while disconnected, offline edits do not send or crash
+            rigol.set_live_control_enabled(True)
+            self.assertTrue(rigol.live_control_enabled)
+            rigol.frequency.setText("3.0 kHz")
+            rigol.frequency.editingFinished.emit()
+            self.application.processEvents()
+            self.assertEqual(emitted_signals, [])
+
+            # Reset live control to OFF
+            rigol.set_live_control_enabled(False)
+            self.assertFalse(rigol.live_control_enabled)
+
+            # Clicking Validate while disconnected validates locally and shows info banner, not popup error
+            rigol.waveform_apply_button.click()
+            self.application.processEvents()
+            self.assertIn("disconnected", rigol.banner.last_message.lower())
+
+            # Now simulate connected with output OFF
+            rigol._device_state_changed("output_off")
+            self.assertTrue(rigol._is_device_connected())
+            self.assertFalse(rigol._active_output_selected())
+
+            # With live control OFF, edits do not send
+            rigol.vpp.setText("15 mV")
+            rigol.vpp.editingFinished.emit()
+            self.application.processEvents()
+            self.assertEqual(emitted_signals, [])
+
+            # Now simulate output ON
+            rigol._device_state_changed("output_on")
+            rigol._set_rigol_channel_output(1, True)
+            rigol._record_visible_quick_readback(1)
+            self.assertTrue(rigol._active_output_selected())
+
+            # With output ON but live control OFF, edits still do not send immediately
+            rigol.vpp.setText("18 mV")
+            rigol.vpp.editingFinished.emit()
+            self.application.processEvents()
+            self.assertEqual(emitted_signals, [])
+
+            # Once live control is toggled ON, edits are immediately sent
+            rigol.set_live_control_enabled(True)
+            self.assertTrue(rigol.live_control_enabled)
+            rigol.vpp.setText("20 mV")
+            rigol.vpp.editingFinished.emit()
+            self.application.processEvents()
+            self.assertEqual(emitted_signals, [("rigol.1.amplitude", "20 mV")])
+        finally:
+            window.close()
+            self.application.processEvents()
+

@@ -3,8 +3,8 @@ from __future__ import annotations
 import os
 from dataclasses import replace
 
-from PySide6.QtCore import QMimeData, QPointF, QSize, Qt
-from PySide6.QtGui import QDragMoveEvent, QDropEvent
+from PySide6.QtCore import QMimeData, QPoint, QPointF, QRect, QSize, Qt
+from PySide6.QtGui import QDragMoveEvent, QDropEvent, QMouseEvent, QPixmap
 from PySide6.QtWidgets import QApplication
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
@@ -587,4 +587,80 @@ def test_dry_run_outputs_automatically_switch_to_disabled_in_tree_model() -> Non
     assert model.data(out_idx, MeasurementTreeRole.ACCENT_COLOR) == tokens.caution
     assert model.data(rg_idx.siblingAtColumn(1)) == "ON"
     assert model.data(rg_idx.siblingAtColumn(3)) == "READY"
+
+
+def test_branch_indicators_do_not_overlap_accent_bar_and_expand_cleanly() -> None:
+    from app.ui.measurement_tree import MeasurementTreeModel
+    from app.ui.measurement_tree.view import MeasurementTreeView
+
+    app = QApplication.instance() or QApplication([])
+    tree_data = semantic_tree()
+    model = MeasurementTreeModel(tree_data)
+    view = MeasurementTreeView()
+    view.setModel(model)
+    view.resize(600, 400)
+    view.show()
+    view.expandAll()
+    app.processEvents()
+
+    axis_idx = model.index_for_semantic_id("axis-current")
+    assert axis_idx.isValid()
+    vrect = view.visualRect(axis_idx)
+    assert vrect.isValid()
+
+    # 1. Branch painting test: verify branch_rect right edge <= visualRect.left()
+    # so the branch arrow never spills into the cell where accent bar is drawn at visualRect.left() + 4
+    intercepted_rects: list[tuple[str, QRect]] = []
+    original_draw_branches = view.drawBranches
+
+    def recording_draw_branches(painter, rect, index):
+        intercepted_rects.append((str(index.data()), QRect(rect)))
+        return original_draw_branches(painter, rect, index)
+
+    view.drawBranches = recording_draw_branches
+    pixmap = QPixmap(view.size())
+    view.render(pixmap)
+
+    for label, rect in intercepted_rects:
+        idx = model.index_for_semantic_id("axis-current")
+        if label == str(model.data(idx)):
+            # Branch right edge must not exceed visualRect.left()
+            assert rect.right() <= view.visualRect(idx).left(), (
+                f"Branch rect {rect} spilled into visualRect {view.visualRect(idx)}"
+            )
+
+    # 2. Test expand/collapse clicking on the branch gutter
+    level = 1  # axis-current is at level 1 (child of sequence)
+    branch_x = int((level + 0.5) * view.indentation())
+    branch_pos = QPoint(branch_x, vrect.center().y())
+
+    assert view.isExpanded(axis_idx)
+    # Click branch to collapse
+    press_event = QMouseEvent(
+        QMouseEvent.Type.MouseButtonPress,
+        branch_pos,
+        branch_pos,
+        Qt.MouseButton.LeftButton,
+        Qt.MouseButton.LeftButton,
+        Qt.KeyboardModifier.NoModifier,
+    )
+    view.viewportEvent(press_event)
+    assert not view.isExpanded(axis_idx)
+
+    # Click branch to expand again
+    view.viewportEvent(press_event)
+    assert view.isExpanded(axis_idx)
+
+    # 3. Clicking inside item cell (x >= visualRect.left()) does NOT trigger expand/collapse
+    cell_pos = QPoint(vrect.left() + 10, vrect.center().y())
+    cell_press = QMouseEvent(
+        QMouseEvent.Type.MouseButtonPress,
+        cell_pos,
+        cell_pos,
+        Qt.MouseButton.LeftButton,
+        Qt.MouseButton.LeftButton,
+        Qt.KeyboardModifier.NoModifier,
+    )
+    view.viewportEvent(cell_press)
+    assert view.isExpanded(axis_idx)
 

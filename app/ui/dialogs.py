@@ -71,13 +71,8 @@ class StationCardWidget(SimpleCardWidget):
 
 
 def _add_station_modal_shadow(widget: QWidget, *, blur: float = 32, y: float = 6) -> None:
-    shadow = QGraphicsDropShadowEffect(widget)
-    shadow.setBlurRadius(blur)
-    shadow.setOffset(0, y)
-    color = widget.palette().color(QPalette.ColorRole.Shadow)
-    color.setAlpha(58)
-    shadow.setColor(color)
-    widget.setGraphicsEffect(shadow)
+    """Retained for API compatibility; hardware DWM provides native frameless shadow."""
+    del widget, blur, y
 
 
 class StationModalShell(QWidget):
@@ -220,13 +215,15 @@ class StationDialog(FramelessDialog):
             layout.setSpacing(spacing)
         return layout
 
-    def _position_modal_shell(self) -> None:
+    def _update_modal_shell_geometry(self) -> None:
         inset = 8
         title_bar_height = self.titleBar.height() if hasattr(self, "titleBar") else 0
         top_inset = max(inset, title_bar_height + 6)
         self.modal_shell.setGeometry(
             self.rect().adjusted(inset, top_inset, -inset, -inset)
         )
+
+    def _update_modal_shell_stacking(self) -> None:
         if self._modal_shell_is_content:
             self.modal_shell.raise_()
         else:
@@ -234,6 +231,10 @@ class StationDialog(FramelessDialog):
                 Qt.WidgetAttribute.WA_TransparentForMouseEvents, True
             )
             self.modal_shell.lower()
+
+    def _position_modal_shell(self) -> None:
+        self._update_modal_shell_geometry()
+        self._update_modal_shell_stacking()
 
     def showEvent(self, event) -> None:  # noqa: N802 - Qt override
         super().showEvent(event)
@@ -243,7 +244,7 @@ class StationDialog(FramelessDialog):
 
     def resizeEvent(self, event: QResizeEvent) -> None:  # noqa: N802 - Qt override
         super().resizeEvent(event)
-        self._position_modal_shell()
+        self._update_modal_shell_geometry()
 
     def changeEvent(self, event: QEvent) -> None:
         super().changeEvent(event)
@@ -261,6 +262,28 @@ class StationDialog(FramelessDialog):
             self.update()
             for child in self.findChildren(QWidget):
                 child.update()
+
+    def nativeEvent(self, event_type, message) -> tuple[bool, int]:  # noqa: N802 - Qt override
+        import sys
+        if sys.platform == "win32":
+            try:
+                import win32con
+                from qframelesswindow.windows import MSG, LPNCCALCSIZE_PARAMS, cast
+                msg = MSG.from_address(message.__int__())
+                if msg.message == win32con.WM_NCCALCSIZE:
+                    handled, result = super().nativeEvent(event_type, message)
+                    if msg.wParam and handled:
+                        params = cast(msg.lParam, LPNCCALCSIZE_PARAMS).contents
+                        new_w = params.rgrc[0].right - params.rgrc[0].left
+                        new_h = params.rgrc[0].bottom - params.rgrc[0].top
+                        old_w = params.rgrc[1].right - params.rgrc[1].left
+                        old_h = params.rgrc[1].bottom - params.rgrc[1].top
+                        if new_w == old_w and new_h == old_h:
+                            return True, 0
+                    return handled, result
+            except Exception:
+                pass
+        return super().nativeEvent(event_type, message)
 
 
 class StationAlertDialog(StationDialog):

@@ -350,6 +350,151 @@ class ResultsBrowserTests(unittest.TestCase):
             finally:
                 page.close()
 
+    def test_file_browser_sorting_and_filtering_by_operator_and_date(self) -> None:
+        from PySide6.QtCore import Qt
+        from app.ui.results.file_browser import FileBrowserPanel, COL_OPERATOR, COL_POINTS
+
+        with tempfile.TemporaryDirectory() as temporary:
+            p1 = Path(temporary) / "run_alice.h5"
+            w1 = Hdf5RunWriter(
+                p1, recipe_source="name: r1\n", settings_source="schema_version: 1\n",
+                plan_hash="h1", device_idn={}, operator_context={"username": "alice"},
+            )
+            w1.close("completed")
+
+            p2 = Path(temporary) / "run_bob.h5"
+            w2 = Hdf5RunWriter(
+                p2, recipe_source="name: r2\n", settings_source="schema_version: 1\n",
+                plan_hash="h2", device_idn={}, operator_context={"username": "bob"},
+            )
+            w2.close("completed")
+
+            browser = FileBrowserPanel(temporary)
+            browser.refresh()
+            try:
+                self.application.processEvents()
+                self.assertEqual(browser.runs.topLevelItemCount(), 2)
+
+                # Column headers check
+                headers = [browser.runs.headerItem().text(i) for i in range(6)]
+                self.assertEqual(headers, ["File", "Date", "State", "Operator", "Spectra", "Points"])
+
+                # Operator choices check
+                operators = [browser.operator_filter.itemText(i) for i in range(browser.operator_filter.count())]
+                self.assertIn("All operators", operators)
+                self.assertIn("alice", operators)
+                self.assertIn("bob", operators)
+
+                # Filter by operator 'alice'
+                browser.operator_filter.setCurrentText("alice")
+                self.application.processEvents()
+                self.assertEqual(browser.runs.topLevelItemCount(), 1)
+                self.assertEqual(browser.runs.topLevelItem(0).text(COL_OPERATOR), "alice")
+
+                # Clear filters
+                browser.clear_filters()
+                self.application.processEvents()
+                self.assertEqual(browser.runs.topLevelItemCount(), 2)
+
+                # Typed points sorting
+                browser.runs.sortByColumn(COL_POINTS, Qt.SortOrder.AscendingOrder)
+                self.application.processEvents()
+                self.assertEqual(browser.runs.topLevelItemCount(), 2)
+            finally:
+                browser.close()
+
+    def test_file_browser_date_grouping_and_pagination(self) -> None:
+        from app.ui.results.file_browser import FileBrowserPanel, DateGroupItem
+
+        with tempfile.TemporaryDirectory() as temporary:
+            for i in range(6):
+                p = Path(temporary) / f"test_{i}.h5"
+                w = Hdf5RunWriter(
+                    p, recipe_source="name: r\n", settings_source="schema_version: 1\n",
+                    plan_hash=f"h{i}", device_idn={},
+                )
+                w.close("completed")
+
+            browser = FileBrowserPanel(temporary)
+            browser.refresh()
+            try:
+                self.application.processEvents()
+                self.assertEqual(browser.runs.topLevelItemCount(), 6)
+
+                # Date grouping mode
+                browser.view_mode_combo.setCurrentIndex(1)  # "Group by date"
+                self.application.processEvents()
+                self.assertGreater(browser.runs.topLevelItemCount(), 0)
+                first_top = browser.runs.topLevelItem(0)
+                self.assertIsInstance(first_top, DateGroupItem)
+                self.assertGreater(first_top.childCount(), 0)
+
+                # Switch back to flat view with pagination
+                browser.view_mode_combo.setCurrentIndex(0)  # "Flat list"
+                browser.page_size_combo.setCurrentText("5")  # 5 rows per page
+                self.application.processEvents()
+                self.assertEqual(browser.runs.topLevelItemCount(), 5)
+                self.assertIn("Page 1 of 2", browser.page_label.text())
+                self.assertTrue(browser.next_page_btn.isEnabled())
+                self.assertFalse(browser.prev_page_btn.isEnabled())
+
+                # Go to next page
+                browser.next_page_btn.click()
+                self.application.processEvents()
+                self.assertEqual(browser.runs.topLevelItemCount(), 1)
+                self.assertIn("Page 2 of 2", browser.page_label.text())
+                self.assertTrue(browser.prev_page_btn.isEnabled())
+            finally:
+                browser.close()
+
+    def test_sweep_tree_panel_sweeps_compatibility(self) -> None:
+        from app.ui.measurement_tree import MeasurementTreeView, MeasurementTreeModel
+        from app.ui.results.sweep_tree_panel import SweepTreePanel
+
+        with tempfile.TemporaryDirectory() as temporary:
+            path = Path(temporary) / "sweep_compat.h5"
+            source = (
+                "schema_version: 1\n"
+                "name: sweep_test\n"
+                "root:\n"
+                "  id: seq-main\n"
+                "  type: sequence\n"
+                "  children:\n"
+                "    - id: meas-point\n"
+                "      type: action\n"
+                "      name: measure\n"
+                "finally: []\n"
+            )
+            w = Hdf5RunWriter(
+                path, recipe_source=source, settings_source="schema_version: 1\n",
+                plan_hash="swp1", device_idn={},
+            )
+            w.close("completed")
+
+            panel = SweepTreePanel()
+            try:
+                self.assertIsInstance(panel.measurement_tree, MeasurementTreeView)
+                self.assertIsInstance(panel.tree_model, MeasurementTreeModel)
+
+                run = ThatecRunReader.describe(path)
+                detail = Hdf5RunReader.detail(path)
+                panel.load(path, run, (), detail=detail)
+                self.application.processEvents()
+
+                # Tree model has roots
+                self.assertGreater(len(panel.tree_model.tree.roots), 0)
+
+                # Segmented switcher toggles between views
+                self.assertEqual(panel.view_switch.items["tree"].text(), "Sweep structure")
+                self.assertEqual(panel.view_switch.items["data"].text(), "Recorded data & checkpoints")
+                self.assertEqual(panel.tree_stack.currentIndex(), 0)
+
+                panel.view_switch.setCurrentItem("data")
+                self.application.processEvents()
+                self.assertEqual(panel.tree_stack.currentIndex(), 1)
+            finally:
+                panel.close()
+
 
 def _write_public_fixture(path: Path) -> None:
     text = h5py.string_dtype("utf-8")

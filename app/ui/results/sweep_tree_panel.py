@@ -16,6 +16,8 @@ from PySide6.QtWidgets import (
 )
 from qfluentwidgets import (
     BodyLabel,
+    CaptionLabel,
+    FluentIcon,
     PlainTextEdit,
     PushButton,
     SegmentedWidget,
@@ -23,6 +25,7 @@ from qfluentwidgets import (
     TreeWidget,
 )
 
+from app.ui.widgets.fluent_code_viewer import FluentCodeViewer
 from app.recipes.models import parse_recipe_text
 from app.recipes.semantic_tree import (
     SemanticMeasurementTree,
@@ -92,13 +95,13 @@ class SweepTreePanel(QWidget):
         self.measurement_tree.setObjectName("resultsMeasurementTree")
         self.measurement_tree.setModel(self.tree_model)
         self.measurement_tree.set_interaction_mode(TreeInteractionMode.READ_ONLY)
-        self.measurement_tree.setMinimumHeight(160)
+        self.measurement_tree.setMinimumHeight(80)
         self.tree_stack.addWidget(self.measurement_tree)
 
         # 2. Storage Checkpoints & Datasets Tree
         self.tree = TreeWidget(self)
         self.tree.setHeaderLabels(["THATEC experiment", "Type"])
-        self.tree.setMinimumHeight(160)
+        self.tree.setMinimumHeight(80)
         self.tree_stack.addWidget(self.tree)
 
         splitter.addWidget(self.tree_stack)
@@ -108,17 +111,20 @@ class SweepTreePanel(QWidget):
         bottom_layout = QVBoxLayout(bottom)
         bottom_layout.setContentsMargins(0, 0, 0, 0)
 
-        self.inspector = PlainTextEdit(self)
+        self.inspector = FluentCodeViewer(language="yaml", parent=self)
         self.inspector.setReadOnly(True)
-        self.inspector.setMinimumHeight(100)
+        self.inspector.setMinimumHeight(80)
         bottom_layout.addWidget(self.inspector)
 
         checkpoint_bar = QHBoxLayout()
-        checkpoint_bar.addWidget(BodyLabel("THATEC checkpoint:", self))
+        checkpoint_label = CaptionLabel("THATEC checkpoint:", self)
+        checkpoint_label.setObjectName("muted")
+        checkpoint_bar.addWidget(checkpoint_label)
         self.thatec_checkpoint = SpinBox(self)
         self.thatec_checkpoint.setMinimum(0)
         checkpoint_bar.addWidget(self.thatec_checkpoint)
         self.show_spectrum_button = PushButton("Show spectrum", self)
+        self.show_spectrum_button.setIcon(FluentIcon.VIEW)
         self.show_spectrum_button.setEnabled(False)
         self.show_spectrum_button.setToolTip(
             "Open the selected immutable result in the Spectrum viewer."
@@ -129,6 +135,8 @@ class SweepTreePanel(QWidget):
 
         self.values_tree = TreeWidget(self)
         self.values_tree.setHeaderLabels(["Checkpoint", "Value", "Timestamp UTC"])
+        self.values_tree.setUniformRowHeights(True)
+        self.values_tree.setAlternatingRowColors(True)
         self.values_tree.setMaximumHeight(150)
         bottom_layout.addWidget(self.values_tree)
 
@@ -136,6 +144,7 @@ class SweepTreePanel(QWidget):
         splitter.setStretchFactor(0, 2)
         splitter.setStretchFactor(1, 1)
         layout.addWidget(splitter, 1)
+        self.setMinimumHeight(240)
 
         # --- Connections ---
         self.view_switch.currentItemChanged.connect(

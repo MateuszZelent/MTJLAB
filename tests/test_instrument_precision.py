@@ -137,6 +137,52 @@ class InstrumentPrecisionTests(unittest.TestCase):
             session.commands.count("smub.source.levelv = 0.01"), initial_writes
         )
 
+    def test_rigol_configure_channel_writes_clean_scpi_voltages(self) -> None:
+        session = RigolSimulator()
+        adapter = RigolAdapter(
+            simulation_settings(),
+            session_factory=FakeVisaSessionFactory(session),
+        )
+        adapter.connect()
+        # 0.015 - 0.005 in Python float arithmetic is 0.009999999999999998
+        adapter.configure_channel(
+            RigolChannelConfig(
+                channel=1,
+                waveform="SIN",
+                frequency_hz=13_000.0,
+                high_level_v=0.015,
+                low_level_v=0.005,
+            )
+        )
+
+        self.assertIn(":SOUR1:VOLT 0.01", session.commands)
+        self.assertIn(":SOUR1:VOLT:OFFS 0.01", session.commands)
+        self.assertNotIn(":SOUR1:VOLT 0.009999999999999998", session.commands)
+
+    def test_rigol_voltage_formatting_preserves_units_and_quantizes(self) -> None:
+        from app.devices.rigol_dg1000z.ui.page import RigolPage
+        from app.devices.rigol_dg1000z.ui.recipe_dialog import RigolNodeEditorDialog
+
+        for fmt in (RigolPage._format_voltage, RigolNodeEditorDialog._format_voltage):
+            # Unit preservation when 0
+            self.assertEqual(fmt(0.0, preferred_unit="mV"), "0 mV")
+            self.assertEqual(fmt(0.0, preferred_unit="V"), "0 V")
+            self.assertEqual(fmt(-0.0, preferred_unit="mV"), "0 mV")
+            self.assertEqual(fmt(-0.0, preferred_unit="V"), "0 V")
+
+            # Preserves V even when < 1 V
+            self.assertEqual(fmt(0.005, preferred_unit="V"), "0.005 V")
+            self.assertEqual(fmt(0.01, preferred_unit="V"), "0.01 V")
+
+            # Quantizes float noise
+            self.assertEqual(fmt(0.015 - 0.005, preferred_unit="V"), "0.01 V")
+            self.assertEqual(fmt(0.015 - 0.005, preferred_unit="mV"), "10 mV")
+
+            # Default heuristic when preferred_unit is None
+            self.assertEqual(fmt(0.005), "5 mV")
+            self.assertEqual(fmt(1.5), "1.5 V")
+            self.assertEqual(fmt(0.0), "0 V")
+
 
 if __name__ == "__main__":
     unittest.main()

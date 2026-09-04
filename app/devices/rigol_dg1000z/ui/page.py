@@ -16,7 +16,7 @@ from PySide6.QtWidgets import (
 from qfluentwidgets import (
     BodyLabel,
     CaptionLabel, CardWidget, CheckBox, ComboBox, PrimaryPushButton,
-    PushButton, ScrollArea, SpinBox, StrongBodyLabel, TitleLabel,
+    PushButton, ScrollArea, SpinBox, StrongBodyLabel, SwitchButton, TitleLabel,
 )
 
 from app.devices.rigol_dg1000z import (
@@ -34,7 +34,11 @@ from app.domain.quantities import (
     DIMENSION_FREQUENCY, DIMENSION_TIME, DIMENSION_VOLTAGE,
     format_quantity_auto, parse_quantity,
 )
-from app.safety.rigol_current import validate_rigol_frequency_sweep, validate_rigol_waveform
+from app.safety.rigol_current import (
+    quantize_rigol_voltage,
+    validate_rigol_frequency_sweep,
+    validate_rigol_waveform,
+)
 from app.safety.quick_controls import quick_control_safety_bounds
 from app.settings.models import StationSettings
 from app.ui.common import line_edit as _line
@@ -140,6 +144,18 @@ class RigolPage(QWidget):
         self.execution_badge.setProperty("deviceState", "verified")
         self.execution_badge.hide()
         header_layout.addWidget(self.execution_badge)
+
+        self.live_control_switch = SwitchButton(self.hero_card)
+        self.live_control_switch.setObjectName("rigolLiveControlSwitch")
+        self.live_control_switch.setOnText("Live control")
+        self.live_control_switch.setOffText("Live control")
+        self.live_control_switch.setChecked(False)
+        self.live_control_switch.setToolTip(
+            "When enabled, parameter changes in the form are immediately sent to the connected Rigol."
+        )
+        self.live_control_switch.checkedChanged.connect(self._live_control_toggled)
+        header_layout.addWidget(self.live_control_switch)
+
         self.quick_controls_button = PushButton("Quick controls...", self.hero_card)
         self.quick_controls_button.clicked.connect(self.quick_controls_requested)
         header_layout.addWidget(self.quick_controls_button)
@@ -417,6 +433,31 @@ class RigolPage(QWidget):
         channel = int(self.channel.currentText())
         return self._output_state_known[channel] and self._output_states[channel]
 
+    def _is_device_connected(self) -> bool:
+        return self._device_state_value in {
+            "connected",
+            "verified",
+            "output_off",
+            "output_on",
+            "compliance",
+        }
+
+    @property
+    def live_control_enabled(self) -> bool:
+        return self.live_control_switch.isChecked()
+
+    def set_live_control_enabled(self, enabled: bool) -> None:
+        self.live_control_switch.setChecked(enabled)
+
+    def _live_control_toggled(self, enabled: bool) -> None:
+        if enabled:
+            if not self._is_device_connected():
+                self.status.emit("Rigol live control enabled (instrument offline).")
+            else:
+                self.status.emit("Rigol live control active: parameter changes are applied immediately.")
+        else:
+            self.status.emit("Rigol live control disabled: parameter changes apply on command.")
+
     def quick_control_draft_snapshot(self) -> dict[str, str]:
         """Return all visible/basic channel drafts with explicit units."""
 
@@ -582,7 +623,9 @@ class RigolPage(QWidget):
         high = parse_quantity(snapshot.high_level, DIMENSION_VOLTAGE).si_value
         low = parse_quantity(snapshot.low_level, DIMENSION_VOLTAGE).si_value
         value = parse_quantity(text, DIMENSION_VOLTAGE).si_value
-        if field == "high_level":
+        if snapshot.waveform == "DC":
+            high, low = value, value
+        elif field == "high_level":
             high = value
         elif field == "low_level":
             low = value
@@ -592,16 +635,27 @@ class RigolPage(QWidget):
         elif field == "offset":
             amplitude = high - low
             high, low = value + amplitude / 2.0, value - amplitude / 2.0
+        high = quantize_rigol_voltage(high)
+        low = quantize_rigol_voltage(low)
+        preferred = (
+            "mV"
+            if ("mV" in text or "mV" in snapshot.high_level or "mV" in snapshot.low_level)
+            else ("V" if ("V" in text or "V" in snapshot.high_level) else None)
+        )
         return replace(
             snapshot,
-            high_level=self._format_voltage(high),
-            low_level=self._format_voltage(low),
+            high_level=self._format_voltage(high, preferred_unit=preferred),
+            low_level=self._format_voltage(low, preferred_unit=preferred),
         )
 
     def _submit_active_frequency(self) -> None:
+        if not self.live_control_switch.isChecked():
+            return
         if self.waveform.currentText() in {"DC", "NOIS"}:
             return
-        channel = self.channel.currentText()
+        if not self._is_device_connected():
+            return
+        channel = int(self.channel.currentText())
         try:
             parse_quantity(self.frequency.text(), DIMENSION_FREQUENCY)
         except Exception as exc:
@@ -611,7 +665,7 @@ class RigolPage(QWidget):
                 timeout_ms=12_000,
             )
             return
-        if self._confirmed_carrier_configs[int(channel)] is None:
+        if self._confirmed_carrier_configs[channel] is None:
             self.configure()
             return
         self.quick_setpoint_requested.emit(
@@ -620,7 +674,11 @@ class RigolPage(QWidget):
         )
 
     def _submit_active_voltage(self, field: str, editor: QWidget) -> None:
-        channel = self.channel.currentText()
+        if not self.live_control_switch.isChecked():
+            return
+        if not self._is_device_connected():
+            return
+        channel = int(self.channel.currentText())
         try:
             parse_quantity(editor.text(), DIMENSION_VOLTAGE)  # type: ignore[attr-defined]
         except Exception as exc:
@@ -630,7 +688,7 @@ class RigolPage(QWidget):
                 timeout_ms=12_000,
             )
             return
-        if self._confirmed_carrier_configs[int(channel)] is None:
+        if self._confirmed_carrier_configs[channel] is None:
             self.configure()
             return
         self.quick_setpoint_requested.emit(
@@ -674,6 +732,7 @@ class RigolPage(QWidget):
                 editor = editors.get(field)
                 if editor is None:
                     return
+                value_si = quantize_rigol_voltage(value_si)
                 try:
                     text = render_quantity_si_like(editor.text(), DIMENSION_VOLTAGE, value_si)
                 except Exception:
@@ -721,11 +780,11 @@ class RigolPage(QWidget):
             self._sync_period_from_frequency()
         if high_level_v is not None:
             self.high_level.setText(
-                format_quantity_auto(high_level_v, DIMENSION_VOLTAGE)
+                format_quantity_auto(quantize_rigol_voltage(high_level_v), DIMENSION_VOLTAGE)
             )
         if low_level_v is not None:
             self.low_level.setText(
-                format_quantity_auto(low_level_v, DIMENSION_VOLTAGE)
+                format_quantity_auto(quantize_rigol_voltage(low_level_v), DIMENSION_VOLTAGE)
             )
         if high_level_v is not None or low_level_v is not None:
             self._sync_vpp_offset_from_levels()
@@ -811,6 +870,10 @@ class RigolPage(QWidget):
         output_off: QPushButton,
     ) -> None:
         help_items = {
+            self.live_control_switch: (
+                "Live control",
+                "When enabled, parameter changes (frequency, voltage, offset) are immediately sent to the connected generator. When disabled, parameters can be edited safely offline without sending commands or raising connection errors.",
+            ),
             self.channel: ("Channel", "Selects physical output CH1 or CH2. Each channel has independent settings and safety limits."),
             self.waveform: ("Waveform", "SIN is sine, SQU square, RAMP triangular/ramp, PULS pulse, NOIS noise, USER selects the arbitrary waveform already stored in the generator, and DC is a constant voltage. USER is deliberately programmed in Frequency mode; sample-rate playback and sample upload are not represented by this form."),
             self.time_mode: ("Time representation", "Choose whether the same repetition rate is entered as frequency or period. The application converts one into the other."),
@@ -1147,6 +1210,25 @@ class RigolPage(QWidget):
         """Return the visible carrier state without communicating with hardware."""
 
         high, low = self._effective_levels()
+        preferred = (
+            "mV"
+            if (
+                "mV" in self.high_level.text()
+                or "mV" in self.low_level.text()
+                or "mV" in self.offset.text()
+                or "mV" in self.vpp.text()
+            )
+            else (
+                "V"
+                if (
+                    "V" in self.high_level.text()
+                    or "V" in self.low_level.text()
+                    or "V" in self.offset.text()
+                    or "V" in self.vpp.text()
+                )
+                else None
+            )
+        )
         return RigolConfigurationSnapshot(
             channel=int(self.channel.currentText()),
             waveform=self.waveform.currentText(),
@@ -1157,8 +1239,8 @@ class RigolPage(QWidget):
                 if self.level_mode.currentText() == self.LEVEL_MODE_HIGH_LOW
                 else "Amplitude / Offset"
             ),
-            high_level=self._format_voltage(high),
-            low_level=self._format_voltage(low),
+            high_level=self._format_voltage(high, preferred_unit=preferred),
+            low_level=self._format_voltage(low, preferred_unit=preferred),
             output_load=self.load.text().strip(),
             phase_deg=self.phase.text().strip(),
             square_duty_percent=self.duty.text().strip(),
@@ -1189,6 +1271,11 @@ class RigolPage(QWidget):
         if carrier is None:
             return replace(self.configuration_snapshot(), channel=channel)
         visible = self.configuration_snapshot()
+        preferred = (
+            "mV"
+            if ("mV" in visible.high_level or "mV" in visible.low_level)
+            else ("V" if ("V" in visible.high_level or "V" in visible.low_level) else None)
+        )
         return RigolConfigurationSnapshot(
             channel=channel,
             waveform=carrier.waveform,
@@ -1197,8 +1284,8 @@ class RigolPage(QWidget):
                 carrier.frequency_hz, DIMENSION_FREQUENCY
             ),
             level_mode=visible.level_mode,
-            high_level=self._format_voltage(carrier.high_level_v),
-            low_level=self._format_voltage(carrier.low_level_v),
+            high_level=self._format_voltage(carrier.high_level_v, preferred_unit=preferred),
+            low_level=self._format_voltage(carrier.low_level_v, preferred_unit=preferred),
             output_load=str(carrier.output_load),
             phase_deg=f"{carrier.phase_deg:.12g}",
             square_duty_percent=f"{carrier.square_duty_percent or 50:.12g}",
@@ -1339,12 +1426,20 @@ class RigolPage(QWidget):
 
     @staticmethod
     def _format_voltage(value_v: float, preferred_unit: str | None = None) -> str:
-        if preferred_unit == "mV" and (abs(value_v) < 1 or value_v == 0.0):
+        value_v = quantize_rigol_voltage(value_v)
+        if abs(value_v) < 1e-12:
+            value_v = 0.0
+            if preferred_unit == "mV":
+                return "0 mV"
+            if preferred_unit == "V":
+                return "0 V"
+            return "0 V"
+        if preferred_unit == "mV":
             return f"{value_v * 1e3:.12g} mV"
+        if preferred_unit == "V":
+            return f"{value_v:.12g} V"
         if 0 < abs(value_v) < 1:
             return f"{value_v * 1e3:.12g} mV"
-        if preferred_unit == "mV" and value_v == 0.0:
-            return "0 mV"
         return f"{value_v:.12g} V"
 
     def _new_ui_operation(
@@ -1574,6 +1669,13 @@ class RigolPage(QWidget):
         mode: str,
         config: object,
     ) -> None:
+        if not self._is_device_connected():
+            self.banner.show_message(
+                f"Rigol is disconnected. {mode.capitalize()} settings validated locally.",
+                severity="info",
+                timeout_ms=5_000,
+            )
+            return
         channel = int(getattr(config, "channel"))
         key = (channel, mode)
         if key in self._pending_advanced_requests:
@@ -1756,13 +1858,7 @@ class RigolPage(QWidget):
         channel = int(self.channel.currentText())
         known = self._output_state_known[channel]
         enabled = self._output_states[channel] if known else False
-        connected = self._device_state_value in {
-            "connected",
-            "verified",
-            "output_off",
-            "output_on",
-            "compliance",
-        }
+        connected = self._is_device_connected()
         can_send_off = connected or self._device_state_value in {"fault", "unknown"}
         pending = self._pending_output_channel is not None
         pending_enable = pending and self._pending_output_enable
@@ -1842,15 +1938,15 @@ class RigolPage(QWidget):
 
     def _effective_levels(self) -> tuple[float, float]:
         if self.waveform.currentText() == "DC":
-            value = parse_quantity(self.offset.text(), DIMENSION_VOLTAGE).si_value
+            value = quantize_rigol_voltage(parse_quantity(self.offset.text(), DIMENSION_VOLTAGE).si_value)
             return value, value
         if self.level_mode.currentText() == self.LEVEL_MODE_AMPLITUDE_OFFSET:
-            vpp = parse_quantity(self.vpp.text(), DIMENSION_VOLTAGE).si_value
-            offset = parse_quantity(self.offset.text(), DIMENSION_VOLTAGE).si_value
-            return offset + vpp / 2, offset - vpp / 2
+            vpp = quantize_rigol_voltage(parse_quantity(self.vpp.text(), DIMENSION_VOLTAGE).si_value)
+            offset = quantize_rigol_voltage(parse_quantity(self.offset.text(), DIMENSION_VOLTAGE).si_value)
+            return quantize_rigol_voltage(offset + vpp / 2), quantize_rigol_voltage(offset - vpp / 2)
         return (
-            parse_quantity(self.high_level.text(), DIMENSION_VOLTAGE).si_value,
-            parse_quantity(self.low_level.text(), DIMENSION_VOLTAGE).si_value,
+            quantize_rigol_voltage(parse_quantity(self.high_level.text(), DIMENSION_VOLTAGE).si_value),
+            quantize_rigol_voltage(parse_quantity(self.low_level.text(), DIMENSION_VOLTAGE).si_value),
         )
 
     def _update_preview(self, *_args: object) -> None:
@@ -1925,14 +2021,26 @@ class RigolPage(QWidget):
             return
         self._level_syncing = True
         try:
+            high = quantize_rigol_voltage(high)
+            low = quantize_rigol_voltage(low)
             preferred = (
                 "mV"
                 if (
                     "mV" in self.high_level.text()
                     or "mV" in self.low_level.text()
-                    or "mV" in self.offset.text()
                 )
-                else None
+                else (
+                    "V"
+                    if (
+                        "V" in self.high_level.text()
+                        or "V" in self.low_level.text()
+                    )
+                    else (
+                        "mV"
+                        if "mV" in self.offset.text()
+                        else ("V" if "V" in self.offset.text() else None)
+                    )
+                )
             )
             self.vpp.setText(self._format_voltage(high - low, preferred_unit=preferred))
             self.offset.setText(self._format_voltage((high + low) / 2, preferred_unit=preferred))
@@ -1954,14 +2062,26 @@ class RigolPage(QWidget):
             return
         self._level_syncing = True
         try:
+            offset = quantize_rigol_voltage(offset)
+            vpp = quantize_rigol_voltage(vpp)
             preferred = (
                 "mV"
                 if (
                     "mV" in self.offset.text()
                     or "mV" in self.vpp.text()
-                    or "mV" in self.high_level.text()
                 )
-                else None
+                else (
+                    "V"
+                    if (
+                        "V" in self.offset.text()
+                        or "V" in self.vpp.text()
+                    )
+                    else (
+                        "mV"
+                        if "mV" in self.high_level.text()
+                        else ("V" if "V" in self.high_level.text() else None)
+                    )
+                )
             )
             self.high_level.setText(self._format_voltage(offset + vpp / 2, preferred_unit=preferred))
             self.low_level.setText(self._format_voltage(offset - vpp / 2, preferred_unit=preferred))
@@ -2266,8 +2386,12 @@ class RigolPage(QWidget):
         self, snapshot: RigolConfigurationSnapshot
     ) -> RigolChannelConfig:
         waveform = snapshot.waveform
-        high_level = parse_quantity(snapshot.high_level, DIMENSION_VOLTAGE).si_value
-        low_level = parse_quantity(snapshot.low_level, DIMENSION_VOLTAGE).si_value
+        high_level = quantize_rigol_voltage(
+            parse_quantity(snapshot.high_level, DIMENSION_VOLTAGE).si_value
+        )
+        low_level = quantize_rigol_voltage(
+            parse_quantity(snapshot.low_level, DIMENSION_VOLTAGE).si_value
+        )
         frequency_hz = (
             1.0
             if waveform in {"DC", "NOIS"}
@@ -2325,6 +2449,13 @@ class RigolPage(QWidget):
         except Exception as exc:
             self.banner.show_message(f"Invalid waveform settings: {exc}")
             return
+        if not self._is_device_connected():
+            self.banner.show_message(
+                "Rigol is disconnected. Waveform parameters validated locally.",
+                severity="info",
+                timeout_ms=5_000,
+            )
+            return
         self._dispatch_ui_operation(
             "configure", config, purpose="manual_configure"
         )
@@ -2334,6 +2465,13 @@ class RigolPage(QWidget):
             config = self._visible_output_config()
         except Exception as exc:
             QMessageBox.warning(self, "Output Rigol", str(exc))
+            return
+        if not self._is_device_connected():
+            self.banner.show_message(
+                "Rigol is disconnected. Output settings validated locally.",
+                severity="info",
+                timeout_ms=5_000,
+            )
             return
         self._dispatch_ui_operation(
             "configure_output", config, purpose="configure_output_path"
@@ -2499,6 +2637,13 @@ class RigolPage(QWidget):
             )
             self._set_pending_output(request, enable=False, stage="set_output")
             self._issue_ui_operation(request)
+            return
+        if not self._is_device_connected():
+            self.banner.show_message(
+                "Rigol is disconnected. Connect instrument before enabling output.",
+                severity="warning",
+                timeout_ms=5_000,
+            )
             return
         if self._pending_output_request_id is not None:
             return

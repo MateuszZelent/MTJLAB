@@ -4,9 +4,19 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from enum import StrEnum
+import json
 import time
 
-from PySide6.QtCore import QMimeData, QSize, QTimer, Signal, Qt
+from PySide6.QtCore import (
+    QEvent,
+    QMimeData,
+    QModelIndex,
+    QRect,
+    QSize,
+    QTimer,
+    Signal,
+    Qt,
+)
 from PySide6.QtGui import (
     QDrag,
     QDragMoveEvent,
@@ -16,7 +26,7 @@ from PySide6.QtGui import (
     QShowEvent,
     QWheelEvent,
 )
-from PySide6.QtWidgets import QAbstractItemView, QHeaderView
+from PySide6.QtWidgets import QAbstractItemView, QHeaderView, QTreeView
 from qfluentwidgets import TreeView
 
 from app.ui.measurement_tree.model import MeasurementTreeModel, MeasurementTreeRole
@@ -51,7 +61,12 @@ class MeasurementTreeMoveRequest:
     source_semantic_id: str
     destination_semantic_id: str
     placement: TreeDropPlacement
+    source_semantic_ids: tuple[str, ...] = ()
     accepted: bool = False
+
+    def __post_init__(self) -> None:
+        if not self.source_semantic_ids and self.source_semantic_id:
+            object.__setattr__(self, "source_semantic_ids", (self.source_semantic_id,))
 
 
 @dataclass(slots=True)
@@ -93,12 +108,15 @@ class MeasurementTreeView(TreeView):
         # commit a safe recipe transaction.
         self.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
         self.setSelectionBehavior(self.SelectionBehavior.SelectRows)
+        self.setSelectionMode(QAbstractItemView.SelectionMode.ExtendedSelection)
         self.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
         self.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
         self.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
         self.setDragDropMode(QAbstractItemView.DragDropMode.DragDrop)
         self.setDefaultDropAction(Qt.DropAction.MoveAction)
         self.setDropIndicatorShown(True)
+        self.setDragEnabled(True)
+        self.setAcceptDrops(True)
         self._interaction_mode = TreeInteractionMode.EDITABLE
         self._last_follow_s = 0.0
         self._pending_follow_semantic_id: str | None = None
@@ -106,6 +124,7 @@ class MeasurementTreeView(TreeView):
         self._follow_timer.setSingleShot(True)
         self._follow_timer.setInterval(0)
         self._follow_timer.timeout.connect(self._flush_pending_follow)
+        self._dragged_semantic_ids: tuple[str, ...] = ()
         self._dragged_semantic_id: str | None = None
         self._drop_target: tuple[str, TreeDropPlacement] | None = None
         self._selection_model = None
@@ -182,6 +201,51 @@ class MeasurementTreeView(TreeView):
         super().showEvent(event)
         if not self._user_resized_columns:
             QTimer.singleShot(0, self._apply_column_widths)
+
+    def drawBranches(
+        self, painter: QPainter, rect: QRect, index: QModelIndex
+    ) -> None:  # noqa: N802 - Qt override
+        branch_rect = QRect(rect)
+        vrect_left = self.visualRect(index).left()
+        if vrect_left > 0:
+            # Keep branch drawing strictly in the branch gutter to the left of the cell,
+            # so it never collides with the semantic accent bar at vrect.left() + 4.
+            branch_rect.setRight(vrect_left)
+            if branch_rect.left() == 0 and vrect_left - branch_rect.left() >= 20:
+                branch_rect.setLeft(2)
+        return QTreeView.drawBranches(self, painter, branch_rect, index)
+
+    def viewportEvent(self, event: QEvent) -> bool:  # noqa: N802 - Qt override
+        """Handle branch expand/collapse clicks in their true layout gutter without colliding with the item cell."""
+        if (
+            event.type() == QEvent.Type.MouseButtonPress
+            and event.button() == Qt.MouseButton.LeftButton
+        ):
+            pos = (
+                event.position().toPoint()
+                if hasattr(event, "position")
+                else event.pos()
+            )
+            index = self.indexAt(pos)
+            if (
+                index.isValid()
+                and self.model() is not None
+                and self.model().hasChildren(index)
+            ):
+                level = 0
+                parent = index.parent()
+                while parent.isValid():
+                    level += 1
+                    parent = parent.parent()
+                branch_left = level * self.indentation()
+                branch_right = (level + 1) * self.indentation()
+                if branch_left <= pos.x() < branch_right:
+                    if self.isExpanded(index):
+                        self.collapse(index)
+                    else:
+                        self.expand(index)
+                    return True
+        return QTreeView.viewportEvent(self, event)
 
     def _emit_semantic_activation(self, index) -> None:
         model = self.tree_model
@@ -266,6 +330,16 @@ class MeasurementTreeView(TreeView):
     def _on_selection_changed(self, _selected=None, _deselected=None) -> None:
         if self._selection_model is not None and not self._selection_model.hasSelection():
             self.semantic_selected.emit("")
+        else:
+            selected_ids = self.selected_semantic_ids()
+            if selected_ids:
+                curr = self.currentIndex()
+                if curr.isValid() and self.tree_model is not None:
+                    sid = self.tree_model.data(curr, MeasurementTreeRole.SEMANTIC_ID)
+                    if isinstance(sid, str) and sid in selected_ids:
+                        self.semantic_selected.emit(sid)
+                        return
+                self.semantic_selected.emit(selected_ids[0])
 
     def _emit_semantic_context_menu(self, position) -> None:
         model = self.tree_model
@@ -279,27 +353,67 @@ class MeasurementTreeView(TreeView):
                 semantic_id, self.viewport().mapToGlobal(position)
             )
 
+    def selected_semantic_ids(self) -> list[str]:
+        """Return distinct selected semantic IDs in visual row order."""
+        model = self.tree_model
+        if model is None or self._selection_model is None:
+            return []
+        ids: list[str] = []
+        seen: set[tuple[int, int]] = set()
+        for index in self._selection_model.selectedIndexes():
+            row_key = (index.row(), index.internalId() if hasattr(index, "internalId") else id(index.internalPointer()))
+            if row_key in seen:
+                continue
+            seen.add(row_key)
+            col0 = index.siblingAtColumn(0)
+            sid = model.data(col0, MeasurementTreeRole.SEMANTIC_ID)
+            if isinstance(sid, str) and sid and sid not in ids:
+                ids.append(sid)
+        return ids
+
     def startDrag(self, supported_actions) -> None:  # noqa: N802
         if self._interaction_mode is TreeInteractionMode.READ_ONLY:
             return
         model = self.tree_model
-        index = self.currentIndex()
-        if model is None or not index.isValid() or not index.parent().isValid():
+        if model is None:
             return
-        semantic_id = model.data(index, MeasurementTreeRole.SEMANTIC_ID)
-        draggable = model.data(index, MeasurementTreeRole.DRAGGABLE)
-        if not isinstance(semantic_id, str) or not draggable:
+        selected_indexes: list[QModelIndex] = []
+        if self._selection_model is not None:
+            seen: set[tuple[int, int]] = set()
+            for idx in self._selection_model.selectedIndexes():
+                row_key = (idx.row(), idx.internalId() if hasattr(idx, "internalId") else id(idx.internalPointer()))
+                if row_key not in seen:
+                    seen.add(row_key)
+                    selected_indexes.append(idx.siblingAtColumn(0))
+        if not selected_indexes:
+            curr = self.currentIndex()
+            if curr.isValid():
+                selected_indexes = [curr.siblingAtColumn(0)]
+
+        valid_semantic_ids: list[str] = []
+        for index in selected_indexes:
+            if not index.isValid() or not index.parent().isValid():
+                continue
+            semantic_id = model.data(index, MeasurementTreeRole.SEMANTIC_ID)
+            draggable = model.data(index, MeasurementTreeRole.DRAGGABLE)
+            if isinstance(semantic_id, str) and draggable and semantic_id not in valid_semantic_ids:
+                valid_semantic_ids.append(semantic_id)
+
+        if not valid_semantic_ids:
             return
+
         mime = QMimeData()
-        mime.setData(self._semantic_mime_type, semantic_id.encode("utf-8"))
+        payload = json.dumps(valid_semantic_ids)
+        mime.setData(self._semantic_mime_type, payload.encode("utf-8"))
         drag = QDrag(self)
         drag.setMimeData(mime)
-        self._dragged_semantic_id = semantic_id
+        self._dragged_semantic_ids = tuple(valid_semantic_ids)
+        self._dragged_semantic_id = valid_semantic_ids[0]
         try:
-            actions = supported_actions & Qt.DropAction.MoveAction
-            if actions:
-                drag.exec(actions)
+            actions = (supported_actions & Qt.DropAction.MoveAction) or Qt.DropAction.MoveAction
+            drag.exec(actions)
         finally:
+            self._dragged_semantic_ids = ()
             self._dragged_semantic_id = None
             self._drop_target = None
             self.drag_status_changed.emit("", True)
@@ -327,11 +441,28 @@ class MeasurementTreeView(TreeView):
             event.ignore()
             return
         library_drag = event.mimeData().hasFormat(self._library_mime_type)
-        if not library_drag and (event.source() is not self or self._dragged_semantic_id is None):
-            self._drop_target = None
-            self.viewport().update()
-            event.ignore()
-            return
+        if not library_drag:
+            if event.source() is not self:
+                self._drop_target = None
+                self.viewport().update()
+                event.ignore()
+                return
+            if not self._dragged_semantic_ids and self._dragged_semantic_id:
+                self._dragged_semantic_ids = (self._dragged_semantic_id,)
+            elif not self._dragged_semantic_ids and event.mimeData().hasFormat(self._semantic_mime_type):
+                try:
+                    raw_data = bytes(event.mimeData().data(self._semantic_mime_type)).decode("utf-8").strip()
+                    if raw_data.startswith("["):
+                        self._dragged_semantic_ids = tuple(json.loads(raw_data))
+                    elif raw_data:
+                        self._dragged_semantic_ids = (raw_data,)
+                except Exception:
+                    self._dragged_semantic_ids = ()
+            if not self._dragged_semantic_ids:
+                self._drop_target = None
+                self.viewport().update()
+                event.ignore()
+                return
         destination = self._drop_destination(event.position().toPoint())
         if destination is None:
             self._drop_target = None
@@ -342,7 +473,10 @@ class MeasurementTreeView(TreeView):
             event.ignore()
             return
         target_id, placement = destination
-        verb = "Insert block" if library_drag else "Move block"
+        count = len(self._dragged_semantic_ids)
+        verb = "Insert block" if library_drag else (
+            f"Move {count} blocks" if count > 1 else "Move block"
+        )
         self.drag_status_changed.emit(
             f"{verb} {placement.value.replace('_', ' ')} {target_id}.", True
         )
@@ -397,9 +531,23 @@ class MeasurementTreeView(TreeView):
             else:
                 event.ignore()
             return
+
+        source_ids = self._dragged_semantic_ids
+        if not source_ids and self._dragged_semantic_id:
+            source_ids = (self._dragged_semantic_id,)
+        elif not source_ids and event.mimeData().hasFormat(self._semantic_mime_type):
+            try:
+                raw_data = bytes(event.mimeData().data(self._semantic_mime_type)).decode("utf-8").strip()
+                if raw_data.startswith("["):
+                    source_ids = tuple(json.loads(raw_data))
+                elif raw_data:
+                    source_ids = (raw_data,)
+            except Exception:
+                source_ids = ()
+
         if (
             event.source() is not self
-            or self._dragged_semantic_id is None
+            or not source_ids
             or destination is None
         ):
             self._drop_target = None
@@ -409,7 +557,10 @@ class MeasurementTreeView(TreeView):
             return
         target_id, placement = destination
         request = MeasurementTreeMoveRequest(
-            self._dragged_semantic_id, target_id, placement
+            source_ids[0],
+            target_id,
+            placement,
+            source_semantic_ids=source_ids,
         )
         self.move_requested.emit(request)
         self.drag_status_changed.emit("", True)

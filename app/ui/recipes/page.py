@@ -97,9 +97,11 @@ from app.recipes import (
     RecipeRepository,
     add_recipe_node,
     delete_recipe_node,
+    delete_recipe_nodes,
     generate_sweep_points,
     generate_sweep_stage_points,
     move_recipe_node,
+    move_recipe_nodes,
     parse_recipe_text,
     replace_recipe_node,
     wrap_recipe_nodes_in_repeat,
@@ -1038,42 +1040,36 @@ class RecipePage(QWidget):
                 show_inspector,
             ),
         ):
-            action.blockSignals(True)
-            action.setChecked(visible)
-            action.blockSignals(False)
-            widget.setVisible(visible)
+            if action.isChecked() != visible:
+                action.blockSignals(True)
+                action.setChecked(visible)
+                action.blockSignals(False)
+            if widget.isVisible() != visible:
+                widget.setVisible(visible)
         if not show_library:
             sizes = [0, available, 0]
-            self._workspace_layout_updating = True
-            try:
-                self.workspace_splitter.setSizes(sizes)
-            finally:
-                self._workspace_layout_updating = False
-            return
-        if not show_inspector:
+        elif not show_inspector:
             library = max(210, min(260, round(available * 0.24)))
             sizes = [library, max(390, available - library), 0]
-            self._workspace_layout_updating = True
-            try:
-                self.workspace_splitter.setSizes(sizes)
-            finally:
-                self._workspace_layout_updating = False
-            return
-        if available >= 1600:
+        elif available >= 1600:
             library = max(270, min(340, round(available * 0.17)))
             inspector = max(420, min(560, round(available * 0.25)))
+            sizes = [library, max(390, available - library - inspector), inspector]
         elif available >= 1250:
             library = max(235, min(300, round(available * 0.19)))
             inspector = max(340, min(450, round(available * 0.27)))
+            sizes = [library, max(390, available - library - inspector), inspector]
         else:
             library = max(210, min(245, round(available * 0.21)))
             inspector = max(280, min(330, round(available * 0.28)))
-        tree = max(390, available - library - inspector)
-        self._workspace_layout_updating = True
-        try:
-            self.workspace_splitter.setSizes([library, tree, inspector])
-        finally:
-            self._workspace_layout_updating = False
+            sizes = [library, max(390, available - library - inspector), inspector]
+
+        if self.workspace_splitter.sizes() != sizes:
+            self._workspace_layout_updating = True
+            try:
+                self.workspace_splitter.setSizes(sizes)
+            finally:
+                self._workspace_layout_updating = False
 
     def resizeEvent(self, event: object) -> None:
         super().resizeEvent(event)  # type: ignore[arg-type]
@@ -1103,6 +1099,7 @@ class RecipePage(QWidget):
         layout.addWidget(self.library_search)
         self._library_action_buttons: list[QWidget] = []
         self._library_force_inside = False
+        self._library_force_after = False
 
         def group(title: str, badge: str) -> QVBoxLayout:
             group_frame = CardWidget(panel)
@@ -1400,7 +1397,7 @@ class RecipePage(QWidget):
             and self._node_accepts_children(current_node)
         )
         add_after.triggered.connect(
-            lambda: self._invoke_library_action(label, callback)
+            lambda: self._invoke_library_action_after(label, callback)
         )
         add_inside.triggered.connect(
             lambda: self._invoke_library_action_inside(label, callback)
@@ -1415,6 +1412,13 @@ class RecipePage(QWidget):
             self._invoke_library_action(label, callback)
         finally:
             self._library_force_inside = False
+
+    def _invoke_library_action_after(self, label: str, callback: object) -> None:
+        self._library_force_after = True
+        try:
+            self._invoke_library_action(label, callback)
+        finally:
+            self._library_force_after = False
 
     def _invoke_library_action(self, label: str, callback: object) -> None:
         """Keep every library click inside a controlled UI error boundary."""
@@ -3757,11 +3761,20 @@ class RecipePage(QWidget):
         """Refresh editing controls from the selected semantic/source identity."""
 
         editable = self._tree_editing_allowed()
+        selected_sids = self.measurement_tree.selected_semantic_ids()
+        multi_selected = len(selected_sids) > 1
+
         semantic = self._selected_semantic_node()
+        if semantic is None and selected_sids:
+            semantic = self.tree_model.tree.by_id.get(selected_sids[0])
+            if semantic is not None:
+                self._selected_semantic_id = semantic.semantic_id
+                self._selected_source_node_id = semantic.source_node_id
+
         location = self._selected_recipe_location()
         node = location[0] if location is not None else None
 
-        if semantic is None or not editable:
+        if (semantic is None and not multi_selected) or not editable:
             for button in (
                 self.delete_node_button,
                 self.duplicate_node_button,
@@ -3773,7 +3786,7 @@ class RecipePage(QWidget):
                 self.open_editor_button,
             ):
                 button.setEnabled(False)
-            if semantic is None:
+            if semantic is None and not multi_selected:
                 self.selection_context.setText("Select a block in the measurement tree")
                 self.inspector_summary.setText(
                     "Select a node to see its measurement role and configuration."
@@ -3805,16 +3818,32 @@ class RecipePage(QWidget):
             and location[1] is not None
         )
 
-        can_move_up = bool(is_movable and index > 0)
-        can_move_down = bool(is_movable and count > 1 and index < count - 1)
-        can_delete = is_movable
-        can_duplicate = is_movable
+        can_move_up = bool(is_movable and index > 0 and not multi_selected)
+        can_move_down = bool(is_movable and count > 1 and index < count - 1 and not multi_selected)
+        can_delete = bool(
+            editable
+            and (
+                (is_movable and not multi_selected)
+                or (
+                    multi_selected
+                    and any(
+                        self._recipe_node_locations().get(
+                            self.tree_model.tree.by_id[sid].source_node_id, (None, None)
+                        )[1] is not None
+                        for sid in selected_sids
+                        if sid in self.tree_model.tree.by_id and self.tree_model.tree.by_id[sid].source_node_id
+                    )
+                )
+            )
+        )
+        can_duplicate = bool(is_movable and not multi_selected)
 
         raw_actions = node.data.get("parameter_actions") if node is not None else None
         actions = raw_actions if isinstance(raw_actions, (list, tuple)) else ()
 
         has_roi = bool(
             editable
+            and not multi_selected
             and (
                 (
                     semantic is not None
@@ -3839,6 +3868,7 @@ class RecipePage(QWidget):
 
         has_device = bool(
             editable
+            and not multi_selected
             and is_authored_node
             and node is not None
             and (
@@ -3849,6 +3879,7 @@ class RecipePage(QWidget):
 
         can_wrap_repeat = bool(
             editable
+            and not multi_selected
             and is_authored_node
             and node is not None
             and location is not None
@@ -3898,7 +3929,12 @@ class RecipePage(QWidget):
             )
 
         if can_delete:
-            self.delete_node_button.setToolTip("Delete the selected node (Delete)")
+            if multi_selected:
+                self.delete_node_button.setToolTip(
+                    f"Delete the {len(selected_sids)} selected nodes (Delete)"
+                )
+            else:
+                self.delete_node_button.setToolTip("Delete the selected node (Delete)")
         else:
             self.delete_node_button.setToolTip(
                 "Delete is only available for movable recipe steps"
@@ -3978,38 +4014,40 @@ class RecipePage(QWidget):
         )
         self.open_editor_button.setEnabled(can_open_editor)
 
-    def _move_recipe_node(
+    def _move_recipe_nodes(
         self,
-        node_id: str,
+        node_ids: list[str] | tuple[str, ...],
         destination_parent_id: str,
         destination_branch: str,
         destination_index: int,
     ) -> bool:
         self._emit_tree_diagnostic(
             "TREE_MOVE_REQUESTED",
-            node_id=node_id,
+            node_ids=list(node_ids),
             destination_parent_id=destination_parent_id,
             destination_branch=destination_branch,
             destination_index=destination_index,
         )
         try:
-            moved_source = move_recipe_node(
+            moved_source = move_recipe_nodes(
                 self._builder_source(),
-                node_id=node_id,
+                node_ids=node_ids,
                 destination_parent_id=destination_parent_id,
                 destination_branch=destination_branch,
                 destination_index=destination_index,
             )
             parse_recipe_text(moved_source, origin=self.path.text())
+            first_id = node_ids[0] if node_ids else None
             self._apply_builder_source(
                 moved_source,
-                f"Recipe node {node_id} moved to {destination_parent_id}.{destination_branch}",
-                selected_node_id=node_id,
+                f"Recipe node(s) {', '.join(node_ids)} moved to {destination_parent_id}.{destination_branch}",
+                selected_node_id=first_id,
             )
+            return True
         except Exception as exc:
             self._emit_tree_diagnostic(
                 "TREE_MOVE_REJECTED",
-                node_id=node_id,
+                node_ids=list(node_ids),
                 destination_parent_id=destination_parent_id,
                 destination_branch=destination_branch,
                 destination_index=destination_index,
@@ -4018,7 +4056,66 @@ class RecipePage(QWidget):
             )
             QMessageBox.warning(self, "Recipe move rejected", str(exc))
             return False
-        return True
+
+    def _move_recipe_node(
+        self,
+        node_id: str,
+        destination_parent_id: str,
+        destination_branch: str,
+        destination_index: int,
+    ) -> bool:
+        return self._move_recipe_nodes(
+            (node_id,), destination_parent_id, destination_branch, destination_index
+        )
+
+    def _resolve_drop_destination(
+        self,
+        target_semantic_id: str,
+        placement: TreeDropPlacement,
+    ) -> tuple[str, str, int, bool]:
+        """Resolve a drop target and placement into (parent_id, branch, index, in_finally)."""
+        locations = self._recipe_node_locations()
+        if placement is TreeDropPlacement.ROOT_END:
+            root_location = next(
+                (location for location in locations.values() if location[1] is None),
+                None,
+            )
+            if root_location is None:
+                raise ConfigurationError("The recipe root is unavailable.")
+            root_node = root_location[0]
+            return root_node.id, "children", len(root_node.children), False
+
+        target_semantic = self.tree_model.tree.require(target_semantic_id)
+        if target_semantic.kind is SemanticNodeKind.FINALLY:
+            recipe = parse_recipe_text(self._tree_source, origin="tree drop")
+            return "__finally__", "children", len(recipe.finally_nodes), True
+
+        target_id = target_semantic.source_node_id
+        if not target_id:
+            raise ConfigurationError("Drop onto an authored recipe block.")
+        target_location = locations.get(target_id)
+        if target_location is None:
+            raise ConfigurationError("The selected drop target is no longer available.")
+        target_node, parent_id, branch, target_index, target_in_finally = target_location
+
+        if target_semantic.kind is SemanticNodeKind.LOOP_BODY:
+            # Dropping on "For each ... point" targets the sweep loop children
+            if placement is TreeDropPlacement.BEFORE and target_node.children:
+                return target_node.id, "children", 0, target_in_finally
+            return target_node.id, "children", len(target_node.children), target_in_finally
+
+        if target_semantic.kind is SemanticNodeKind.SET_ROI_VALUE:
+            # Dropping on "Set ROI value" targets immediately after ROI inside the loop
+            return target_node.id, "children", 0, target_in_finally
+
+        if placement is TreeDropPlacement.INSIDE and self._node_accepts_children(target_node):
+            return target_node.id, "children", len(target_node.children), target_in_finally
+
+        if parent_id is None:
+            raise ConfigurationError("Drop beside a non-root recipe block.")
+
+        destination_index = target_index + (0 if placement is TreeDropPlacement.BEFORE else 1)
+        return parent_id, branch, destination_index, target_in_finally
 
     def _handle_semantic_tree_move_request(
         self, request: MeasurementTreeMoveRequest
@@ -4026,71 +4123,49 @@ class RecipePage(QWidget):
         """Translate a Fluent drop directly through the authored recipe graph."""
 
         try:
-            source_semantic = self.tree_model.tree.require(request.source_semantic_id)
-            target_semantic = self.tree_model.tree.require(request.destination_semantic_id)
-            source_id = source_semantic.source_node_id
-            target_id = target_semantic.source_node_id
-            if not source_id:
-                raise ConfigurationError("This generated measurement row cannot be moved.")
+            source_semantic_ids = request.source_semantic_ids or (request.source_semantic_id,)
             locations = self._recipe_node_locations()
-            source_location = locations.get(source_id)
-            if source_location is None or source_location[1] is None:
-                raise ConfigurationError("The measurement-sequence root cannot be moved.")
-            if request.placement is TreeDropPlacement.ROOT_END:
-                root_location = next(
-                    (location for location in locations.values() if location[1] is None),
-                    None,
+
+            source_ids: list[str] = []
+            source_locations = []
+            for sid in source_semantic_ids:
+                source_semantic = self.tree_model.tree.require(sid)
+                src_id = source_semantic.source_node_id
+                if not src_id:
+                    raise ConfigurationError("This generated measurement row cannot be moved.")
+                loc = locations.get(src_id)
+                if loc is None or loc[1] is None:
+                    raise ConfigurationError("The measurement-sequence root cannot be moved.")
+                if src_id not in source_ids:
+                    source_ids.append(src_id)
+                    source_locations.append(loc)
+
+            if not source_ids:
+                request.accepted = False
+                return
+
+            dest_parent_id, dest_branch, dest_index, dest_in_finally = (
+                self._resolve_drop_destination(
+                    request.destination_semantic_id, request.placement
                 )
-                if root_location is None:
-                    raise ConfigurationError("The recipe root is unavailable.")
-                root_node = root_location[0]
-                destination_parent_id = root_node.id
-                destination_branch = "children"
-                destination_index = len(root_node.children)
-                destination_in_finally = False
-            elif target_semantic.kind is SemanticNodeKind.FINALLY:
-                recipe = parse_recipe_text(self._tree_source, origin="tree move")
-                destination_parent_id = "__finally__"
-                destination_branch = "children"
-                destination_index = len(recipe.finally_nodes)
-                destination_in_finally = True
-            else:
-                if not target_id:
-                    raise ConfigurationError("Drop onto an authored recipe block.")
-                target_location = locations.get(target_id)
-                if target_location is None:
-                    raise ConfigurationError("The selected drop target is no longer available.")
-                target_node, parent_id, branch, target_index, target_in_finally = target_location
-                if (
-                    request.placement is TreeDropPlacement.INSIDE
-                    and self._node_accepts_children(target_node)
-                ):
-                    destination_parent_id = target_node.id
-                    destination_branch = "children"
-                    destination_index = len(target_node.children)
-                    destination_in_finally = target_in_finally
-                else:
-                    if parent_id is None:
-                        raise ConfigurationError("Drop beside a non-root recipe block.")
-                    destination_parent_id = parent_id
-                    destination_branch = branch
-                    destination_index = target_index + (
-                        0 if request.placement is TreeDropPlacement.BEFORE else 1
-                    )
-                    destination_in_finally = target_in_finally
-            if source_location[4] != destination_in_finally:
-                raise ConfigurationError("Blocks cannot cross the Finally safety boundary.")
-            ancestor_id: str | None = destination_parent_id
+            )
+
+            for loc in source_locations:
+                if loc[4] != dest_in_finally:
+                    raise ConfigurationError("Blocks cannot cross the Finally safety boundary.")
+
+            ancestor_id: str | None = dest_parent_id
             while ancestor_id and ancestor_id != "__finally__":
-                if ancestor_id == source_id:
+                if ancestor_id in source_ids:
                     raise ConfigurationError("A block cannot be moved into itself or its own child.")
                 ancestor = locations.get(ancestor_id)
                 ancestor_id = ancestor[1] if ancestor is not None else None
-            request.accepted = self._move_recipe_node(
-                source_id,
-                destination_parent_id,
-                destination_branch,
-                destination_index,
+
+            request.accepted = self._move_recipe_nodes(
+                source_ids,
+                dest_parent_id,
+                dest_branch,
+                dest_index,
             )
         except Exception as exc:
             self._tree_drop_rejected(str(exc))
@@ -4102,41 +4177,13 @@ class RecipePage(QWidget):
         """Resolve an external library drop against semantic/source identities."""
 
         try:
-            target = self.tree_model.tree.require(request.destination_semantic_id)
-            locations = self._recipe_node_locations()
-            if request.placement is TreeDropPlacement.ROOT_END:
-                root = next(
-                    (entry[0] for entry in locations.values() if entry[1] is None),
-                    None,
+            dest_parent_id, dest_branch, dest_index, _ = (
+                self._resolve_drop_destination(
+                    request.destination_semantic_id, request.placement
                 )
-                if root is None:
-                    raise ConfigurationError("The recipe root is unavailable.")
-                parent_id, branch, index = root.id, "children", len(root.children)
-            elif target.kind is SemanticNodeKind.FINALLY:
-                recipe = parse_recipe_text(self._tree_source, origin="library drop")
-                parent_id, branch, index = (
-                    "__finally__", "children", len(recipe.finally_nodes)
-                )
-            else:
-                source_id = target.source_node_id
-                location = locations.get(source_id) if source_id else None
-                if location is None:
-                    raise ConfigurationError("Drop onto an authored recipe block.")
-                node, owner_id, owner_branch, owner_index, _in_finally = location
-                if (
-                    request.placement is TreeDropPlacement.INSIDE
-                    and self._node_accepts_children(node)
-                ):
-                    parent_id, branch, index = node.id, "children", len(node.children)
-                elif owner_id is not None:
-                    parent_id, branch = owner_id, owner_branch
-                    index = owner_index + (
-                        0 if request.placement is TreeDropPlacement.BEFORE else 1
-                    )
-                else:
-                    raise ConfigurationError("Drop beside a non-root recipe block.")
+            )
             request.accepted = self._drop_library_block(
-                request.drag_kind, parent_id, branch, index
+                request.drag_kind, dest_parent_id, dest_branch, dest_index
             )
         except Exception as exc:
             self._tree_drop_rejected(str(exc))
@@ -4189,12 +4236,35 @@ class RecipePage(QWidget):
         if location is None:
             return root.id, "children", len(root.children)
         node, parent_id, branch, index, _in_finally = location
+
+        if semantic is not None:
+            if semantic.kind is SemanticNodeKind.LOOP_BODY:
+                return node.id, "children", len(node.children)
+            if semantic.kind is SemanticNodeKind.SET_ROI_VALUE:
+                return node.id, "children", 0
+            if semantic.kind is SemanticNodeKind.SWEEP_AXIS:
+                if self._library_force_inside:
+                    return node.id, "children", len(node.children)
+                if parent_id is None:
+                    return root.id, "children", len(root.children)
+                return parent_id, branch, index + 1
+
+        if self._library_force_after:
+            if parent_id is None:
+                return root.id, "children", len(root.children)
+            return parent_id, branch, index + 1
+
         if self._library_force_inside:
             if not self._node_accepts_children(node):
                 raise ConfigurationError(
                     "Select Sequence, Repeat, Sweep, If, or a device ROI loop before adding inside."
                 )
             return node.id, "children", len(node.children)
+
+        # Normal left-click: a highlighted container inserts inside it; a step inserts after it.
+        if self._node_accepts_children(node):
+            return node.id, "children", len(node.children)
+
         if parent_id is None:
             return root.id, "children", len(root.children)
         return parent_id, branch, index + 1
@@ -6663,13 +6733,29 @@ class RecipePage(QWidget):
         }
 
     def _delete_selected_node(self) -> None:
-        node = self._selected_recipe_node()
-        if not isinstance(node, RecipeNode):
+        selected_semantic_ids = self.measurement_tree.selected_semantic_ids()
+        locations = self._recipe_node_locations()
+        node_ids_to_delete: list[str] = []
+        if selected_semantic_ids:
+            for sid in selected_semantic_ids:
+                s_node = self.tree_model.tree.by_id.get(sid)
+                if s_node and s_node.source_node_id:
+                    loc = locations.get(s_node.source_node_id)
+                    if loc and loc[1] is not None and s_node.source_node_id not in node_ids_to_delete:
+                        node_ids_to_delete.append(s_node.source_node_id)
+        if not node_ids_to_delete:
+            node = self._selected_recipe_node()
+            if isinstance(node, RecipeNode):
+                loc = locations.get(node.id)
+                if loc and loc[1] is not None:
+                    node_ids_to_delete.append(node.id)
+
+        if not node_ids_to_delete:
             QMessageBox.information(self, "Delete node", "Select a recipe node first.")
             return
         try:
-            source = delete_recipe_node(self._builder_source(), node_id=node.id)
-            self._apply_builder_source(source, f"Deleted {node.id}")
+            source = delete_recipe_nodes(self._builder_source(), node_ids=node_ids_to_delete)
+            self._apply_builder_source(source, f"Deleted {', '.join(node_ids_to_delete)}")
         except Exception as exc:
             QMessageBox.warning(self, "Delete node", str(exc))
 

@@ -11,17 +11,18 @@ from typing import Any
 import numpy as np
 import pyqtgraph as pg
 from pyqtgraph.exporters import ImageExporter, SVGExporter
-from PySide6.QtCore import QThreadPool, Signal
+from PySide6.QtCore import QSize, QThreadPool, Signal
 from PySide6.QtGui import QResizeEvent, QShowEvent
 from PySide6.QtWidgets import (
     QBoxLayout,
     QHBoxLayout,
     QLayout,
+    QSizePolicy,
     QStackedWidget,
     QVBoxLayout,
     QWidget,
 )
-from qfluentwidgets import BodyLabel, ComboBox, PushButton
+from qfluentwidgets import BodyLabel, CaptionLabel, CardWidget, ComboBox, FluentIcon, PushButton
 from app.ui.dialogs import StationFileDialog as QFileDialog
 
 from app.domain.quantities import DIMENSION_FREQUENCY, format_quantity_auto
@@ -121,14 +122,17 @@ class HeatmapPlotWidget(QWidget):
 
         # --- Toolbar ---
         toolbar = QHBoxLayout()
-        toolbar.setSpacing(4)
+        toolbar.setContentsMargins(0, 0, 0, 0)
+        toolbar.setSpacing(6)
 
+        palette_label = CaptionLabel("Palette:", self)
+        palette_label.setObjectName("muted")
+        toolbar.addWidget(palette_label)
         self.colormap_combo = ComboBox(self)
         self.colormap_combo.addItems(
             ["viridis", "inferno", "plasma", "magma", "cividis", "turbo", "hot"]
         )
         self.colormap_combo.setToolTip("Select color palette")
-        toolbar.addWidget(BodyLabel("Palette:"))
         toolbar.addWidget(self.colormap_combo)
 
         auto_range_btn = PushButton(parent=self)
@@ -146,7 +150,7 @@ class HeatmapPlotWidget(QWidget):
         toolbar.addWidget(export_btn)
 
         toolbar.addStretch(1)
-        self.readout = BodyLabel("X: —   Y: —   Z: —")
+        self.readout = CaptionLabel("X: —   Y: —   Z: —", self)
         self.readout.setObjectName("plotReadout")
         toolbar.addWidget(self.readout)
         layout.addLayout(toolbar)
@@ -159,6 +163,12 @@ class HeatmapPlotWidget(QWidget):
         self.plot.setLabel("left", "Checkpoint")
         self.plot.setMenuEnabled(True)
         self.plot.setMouseEnabled(x=True, y=True)
+
+        self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
+        self.plot.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
+        self.plot.setMinimumHeight(150)
+        self.setMinimumHeight(190)
+        self.plot.sizeHint = lambda: QSize(600, 220)
 
         self.image_item = pg.PColorMeshItem()
         self.plot.addItem(self.image_item)
@@ -190,6 +200,9 @@ class HeatmapPlotWidget(QWidget):
         self.colormap_combo.currentTextChanged.connect(self._apply_colormap)
         self.apply_theme(self._theme_name)
 
+    def sizeHint(self) -> QSize:
+        return QSize(600, 260)
+
     # ------------------------------------------------------------------
     # Public API
     # ------------------------------------------------------------------
@@ -213,7 +226,7 @@ class HeatmapPlotWidget(QWidget):
         Parameters
         ----------
         data : ndarray, shape (rows, cols)
-            The 2-D heatmap matrix (e.g. checkpoints × frequency bins).
+            The 2-D heatmap matrix (e.g. checkpoints x frequency bins).
         x_values, y_values : optional axis value arrays
             Physical values for the horizontal and vertical axes.
         """
@@ -489,52 +502,80 @@ class HeatmapResultsTab(QWidget):
         layout = QVBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
 
-        # --- Row selector ---
-        # Start compact so a hidden page never acquires a wide minimum size
-        # from the desktop toolbar before its real viewport is known.
+        # --- Row selector & filters in a CardWidget ---
+        self.controls_card = CardWidget(self)
+        controls_layout = QVBoxLayout(self.controls_card)
+        controls_layout.setContentsMargins(10, 8, 10, 8)
+        controls_layout.setSpacing(6)
+
         self.selector_layout = QBoxLayout(QBoxLayout.Direction.TopToBottom)
         selector = self.selector_layout
-        selector.addWidget(BodyLabel("Data:"))
-        self.variant_combo = ComboBox(self)
+        selector.setSpacing(6)
+
+        row1 = QHBoxLayout()
+        row1.setSpacing(6)
+        lbl_data = CaptionLabel("Data:", self.controls_card)
+        lbl_data.setObjectName("muted")
+        row1.addWidget(lbl_data)
+        self.variant_combo = ComboBox(self.controls_card)
         self.variant_combo.setToolTip(
             "Choose raw power or the stored processed spectrum (raw minus reference)."
         )
-        selector.addWidget(self.variant_combo)
-        selector.addWidget(BodyLabel("X axis:"))
-        self.x_axis_combo = ComboBox(self)
-        self.x_axis_combo.setMinimumWidth(170)
-        selector.addWidget(self.x_axis_combo)
-        selector.addWidget(BodyLabel("Y axis:"))
-        self.y_axis_combo = ComboBox(self)
-        self.y_axis_combo.setMinimumWidth(170)
-        selector.addWidget(self.y_axis_combo)
-        selector.addWidget(BodyLabel("Spectrum row:"))
-        self.row_combo = ComboBox(self)
-        self.row_combo.setMinimumWidth(300)
-        self.row_combo.setToolTip("Select a THATEC row with 2-D spectral data")
-        selector.addWidget(self.row_combo, 1)
+        row1.addWidget(self.variant_combo)
 
-        self.load_button = PushButton(parent=self)
+        lbl_x = CaptionLabel("X axis:", self.controls_card)
+        lbl_x.setObjectName("muted")
+        row1.addWidget(lbl_x)
+        self.x_axis_combo = ComboBox(self.controls_card)
+        self.x_axis_combo.setMinimumWidth(130)
+        row1.addWidget(self.x_axis_combo)
+
+        lbl_y = CaptionLabel("Y axis:", self.controls_card)
+        lbl_y.setObjectName("muted")
+        row1.addWidget(lbl_y)
+        self.y_axis_combo = ComboBox(self.controls_card)
+        self.y_axis_combo.setMinimumWidth(130)
+        row1.addWidget(self.y_axis_combo)
+
+        self.load_button = PushButton(parent=self.controls_card)
         self.load_button.setText("Load heatmap")
+        self.load_button.setIcon(FluentIcon.TILES)
         self.load_button.setToolTip("Read all checkpoints and render the heatmap")
         self.load_button.setObjectName("plotToolButton")
         self.load_button.setEnabled(False)
-        selector.addWidget(self.load_button)
-        selector.addStretch(1)
-        layout.addLayout(selector)
+        row1.addWidget(self.load_button)
+        row1.addStretch(1)
 
-        self.filter_host = QWidget(self)
+        row2 = QHBoxLayout()
+        row2.setSpacing(6)
+        lbl_row = CaptionLabel("Spectrum row:", self.controls_card)
+        lbl_row.setObjectName("muted")
+        row2.addWidget(lbl_row)
+        self.row_combo = ComboBox(self.controls_card)
+        self.row_combo.setMinimumWidth(240)
+        self.row_combo.setToolTip("Select a THATEC row with 2-D spectral data")
+        row2.addWidget(self.row_combo, 1)
+
+        selector.addLayout(row1)
+        selector.addLayout(row2)
+        controls_layout.addLayout(selector)
+
+        self.filter_host = QWidget(self.controls_card)
         self.filter_layout = QVBoxLayout(self.filter_host)
         self.filter_layout.setContentsMargins(0, 0, 0, 0)
         self.filter_layout.setSpacing(4)
         self._range_combos: dict[str, tuple[ComboBox, ComboBox]] = {}
         self._filter_combos: dict[str, ComboBox] = {}
-        layout.addWidget(self.filter_host)
+        controls_layout.addWidget(self.filter_host)
+        layout.addWidget(self.controls_card)
+        self.setMinimumHeight(220)
 
         # --- Heatmap ---
         self.heatmap = HeatmapPlotWidget()
+        self.heatmap.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
         self.heatmap_state = ResultsStateCard(self)
         self.heatmap_view = QStackedWidget(self)
+        self.heatmap_view.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
         self.heatmap_view.addWidget(self.heatmap_state)
         self.heatmap_view.addWidget(self.heatmap)
         layout.addWidget(self.heatmap_view, 1)
@@ -559,6 +600,9 @@ class HeatmapResultsTab(QWidget):
         )
         self._selector_compact: bool | None = True
 
+    def sizeHint(self) -> QSize:
+        return QSize(600, 300)
+
     def resizeEvent(self, event: QResizeEvent) -> None:
         super().resizeEvent(event)
         self._sync_selector_layout(event.size().width())
@@ -568,7 +612,7 @@ class HeatmapResultsTab(QWidget):
         self._sync_selector_layout(self.width())
 
     def _sync_selector_layout(self, width: int) -> None:
-        compact = width < 980
+        compact = width < 1100
         if compact == self._selector_compact:
             return
         self._selector_compact = compact
@@ -829,9 +873,9 @@ class HeatmapResultsTab(QWidget):
             if not dimension.is_frequency
         ]
         if physical_dimensions:
-            self.filter_layout.addWidget(
-                BodyLabel("Parameter ranges (inclusive):", self.filter_host)
-            )
+            range_hdr = CaptionLabel("Parameter ranges (inclusive):", self.filter_host)
+            range_hdr.setObjectName("muted")
+            self.filter_layout.addWidget(range_hdr)
         for dimension in physical_dimensions:
             values = sorted(set(float(value) for value in dimension.values))
             self._add_range_row(dimension, values, full_range=dimension.id in axes)
@@ -840,7 +884,9 @@ class HeatmapResultsTab(QWidget):
             row_layout = QHBoxLayout(row)
             row_layout.setContentsMargins(0, 0, 0, 0)
             row_layout.setSpacing(6)
-            row_layout.addWidget(BodyLabel("Frequency:", row))
+            freq_lbl = CaptionLabel("Frequency:", row)
+            freq_lbl.setObjectName("muted")
+            row_layout.addWidget(freq_lbl)
             combo = ComboBox(row)
             combo.setMinimumWidth(150)
             combo.setAccessibleName("Heatmap frequency slice")
@@ -879,18 +925,22 @@ class HeatmapResultsTab(QWidget):
         row_layout = QHBoxLayout(row)
         row_layout.setContentsMargins(0, 0, 0, 0)
         row_layout.setSpacing(6)
-        label = BodyLabel(f"{dimension.label}:", row)
-        label.setMinimumWidth(220)
+        label = CaptionLabel(f"{dimension.label}:", row)
+        label.setMinimumWidth(180)
         row_layout.addWidget(label)
-        row_layout.addWidget(BodyLabel("from", row))
+        from_lbl = CaptionLabel("from", row)
+        from_lbl.setObjectName("muted")
+        row_layout.addWidget(from_lbl)
         minimum = ComboBox(row)
-        minimum.setMinimumWidth(140)
+        minimum.setMinimumWidth(120)
         minimum.setAccessibleName(f"{dimension.label} minimum")
         minimum.setObjectName("heatmapRangeMinimum")
         row_layout.addWidget(minimum)
-        row_layout.addWidget(BodyLabel("to", row))
+        to_lbl = CaptionLabel("to", row)
+        to_lbl.setObjectName("muted")
+        row_layout.addWidget(to_lbl)
         maximum = ComboBox(row)
-        maximum.setMinimumWidth(140)
+        maximum.setMinimumWidth(120)
         maximum.setAccessibleName(f"{dimension.label} maximum")
         maximum.setObjectName("heatmapRangeMaximum")
         row_layout.addWidget(maximum)
