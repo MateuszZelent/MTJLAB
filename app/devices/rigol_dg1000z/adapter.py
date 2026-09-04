@@ -568,7 +568,8 @@ class RigolAdapter(DeviceAdapter):
         self._last_burst_config.pop(config.channel, None)
         session.write(f":OUTP{config.channel}:LOAD {self._format_load(config.output_load)}")
         if waveform == "DC":
-            session.write(f"{prefix}:APPL:DC DEF,DEF,{self._format_wire_voltage(config.high_level_v)}")
+            session.write(f"{prefix}:APPL:DC {self._format_wire_voltage(config.high_level_v)}")
+            session.write(f"{prefix}:VOLT:OFFS {self._format_wire_voltage(config.high_level_v)}")
         else:
             session.write(f"{prefix}:FUNC {waveform}")
             if waveform == "USER":

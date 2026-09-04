@@ -35,7 +35,7 @@ from app.domain.quantities import (
     format_quantity_auto,
     parse_quantity,
 )
-from app.domain.quick_controls import render_quantity_si_like
+from app.domain.quick_controls import _QUANTITY, render_quantity_si_like
 
 
 class LimitField(QWidget):
@@ -122,6 +122,32 @@ class LimitField(QWidget):
         style.polish(self.editor)
         self.editor.update()
 
+    def _current_unit(self, dimension: str | None = None) -> str | None:
+        """Extract the field's active unit from text, previous value, or limits."""
+
+        candidates: list[object] = []
+        if isinstance(self.editor, QLineEdit):
+            candidates.append(self.editor.text())
+        if self._last_valid is not None:
+            candidates.append(self._last_valid)
+        candidates.extend([self._minimum_value, self._maximum_value])
+
+        for candidate in candidates:
+            if not isinstance(candidate, str):
+                continue
+            text = candidate.strip()
+            match = _QUANTITY.fullmatch(text)
+            if match is not None:
+                unit = match.group("unit").strip()
+                if dimension is None:
+                    return unit
+                try:
+                    parse_quantity(f"1 {unit}", dimension)
+                    return unit
+                except Exception:
+                    pass
+        return None
+
     def _quantity_values(
         self,
     ) -> tuple[float, float | None, float | None, str | None] | None:
@@ -157,7 +183,15 @@ class LimitField(QWidget):
         for dimension in dimensions:
             try:
                 parsed_bounds = [parse_quantity(value, dimension).si_value for value in boundaries]
-                current = parse_quantity(self.editor.text(), dimension, require_unit=False).si_value
+                preferred_unit = self._current_unit(dimension)
+                text = self.editor.text().strip()
+                if preferred_unit and _QUANTITY.fullmatch(text) is None:
+                    try:
+                        current = parse_quantity(f"{text} {preferred_unit}", dimension).si_value
+                    except Exception:
+                        current = parse_quantity(text, dimension, require_unit=False).si_value
+                else:
+                    current = parse_quantity(text, dimension, require_unit=False).si_value
             except Exception:
                 continue
             minimum = parsed_bounds[0] if self._minimum_value is not None else None
@@ -205,7 +239,10 @@ class LimitField(QWidget):
             if isinstance(self.editor, QLineEdit) and dimension is not None:
                 try:
                     replacement = render_quantity_si_like(
-                        self.editor.text(), dimension, minimum
+                        self.editor.text(),
+                        dimension,
+                        minimum,
+                        preferred_unit=self._current_unit(dimension),
                     )
                 except Exception:
                     pass
@@ -219,7 +256,10 @@ class LimitField(QWidget):
             if isinstance(self.editor, QLineEdit) and dimension is not None:
                 try:
                     replacement = render_quantity_si_like(
-                        self.editor.text(), dimension, maximum
+                        self.editor.text(),
+                        dimension,
+                        maximum,
+                        preferred_unit=self._current_unit(dimension),
                     )
                 except Exception:
                     pass
@@ -236,19 +276,27 @@ class LimitField(QWidget):
                 # remain predictable (for example 0.001 mA -> 0.002 mA).
                 self._last_valid = self.editor.text().strip()
             else:
+                preferred_unit = self._current_unit(dimension)
                 try:
                     normalized = (
                         f"{value:.12g}"
                         if dimension is None
                         else render_quantity_si_like(
-                            self.editor.text(), dimension, value
+                            self.editor.text(),
+                            dimension,
+                            value,
+                            preferred_unit=preferred_unit,
                         )
                     )
                 except Exception:
                     normalized = (
                         f"{value:.12g}"
                         if dimension is None
-                        else format_quantity_auto(value, dimension)
+                        else format_quantity_auto(
+                            value,
+                            dimension,
+                            preferred_unit=preferred_unit,
+                        )
                     )
                 self.editor.setText(normalized)
                 self._last_valid = normalized

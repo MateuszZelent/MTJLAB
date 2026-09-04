@@ -21,6 +21,7 @@ from app.domain.quantities import DIMENSION_TIME, parse_quantity
 from app.safety.anritsu import (
     ANRITSU_SWEEP_POINT_COUNTS,
     assert_anritsu_acquisition_allowed,
+    normalize_anritsu_detector,
     validate_anritsu_advanced_spectrum,
     validate_anritsu_spectrum,
     validate_anritsu_signal_generator,
@@ -36,6 +37,11 @@ class SpectrumConfig:
     reference_level_dbm: float
     points: int
     trace: str = "TRAC1"
+    rbw_auto: bool = True
+    rbw_hz: float | None = None
+    vbw_auto: bool = True
+    vbw_mode: str = "VID"
+    vbw_hz: float | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -46,6 +52,29 @@ class AnritsuConfigurationSnapshot:
     stop_hz: float
     reference_level_dbm: float
     points: int
+    instrument_mode: str = ""
+
+
+@dataclass(frozen=True, slots=True)
+class AnritsuFullConfigurationReadback:
+    start_hz: float
+    stop_hz: float
+    center_hz: float
+    span_hz: float
+    reference_level_dbm: float
+    points: int
+    rbw_auto: bool
+    rbw_hz: float
+    vbw_auto: bool
+    vbw_mode: str  # "VID" or "POW"
+    vbw_hz: float | None
+    sweep_time_auto: bool
+    sweep_time_s: float
+    attenuation_auto: bool
+    attenuation_db: float
+    detector: str
+    continuous_sweep: bool
+    average_count: int
     instrument_mode: str = ""
 
 
@@ -201,6 +230,7 @@ class AnritsuAdapter(DeviceAdapter):
         self._live = False
         self._last_sg_config: SignalGeneratorConfig | None = None
         self._sg_output_enabled = False
+        self._cached_grid: tuple[float, float, int, tuple[float, ...]] | None = None
 
     @staticmethod
     def _read_hardware_options(session: InstrumentSession) -> tuple[str, ...]:
@@ -656,6 +686,73 @@ class AnritsuAdapter(DeviceAdapter):
             start_hz, stop_hz, reference_level_dbm, points, instrument_mode
         )
 
+    def read_full_configuration(self) -> AnritsuFullConfigurationReadback:
+        """Query complete front-panel parameters in a fast burst for reconciliation."""
+
+        session = self._require_session()
+        try:
+            mode = session.query("INST?").strip()
+            start_hz = float(session.query("FREQ:STAR?"))
+            stop_hz = float(session.query("FREQ:STOP?"))
+            try:
+                center_hz = float(session.query("FREQ:CENT?"))
+            except Exception:
+                center_hz = (start_hz + stop_hz) / 2.0
+            try:
+                span_hz = float(session.query("FREQ:SPAN?"))
+            except Exception:
+                span_hz = stop_hz - start_hz
+            reference_level_dbm = float(session.query("DISP:WIND:TRAC:Y:RLEV?"))
+            points = int(float(session.query("SWE:POIN?")))
+            rbw_auto = self._parse_switch(session.query("BAND:AUTO?"), "RBW auto")
+            rbw_hz = float(session.query("BAND?"))
+            vbw_auto = self._parse_switch(session.query("BAND:VID:AUTO?"), "VBW auto")
+            try:
+                vbw_mode = session.query("BAND:VID:MODE?").strip().upper()
+            except Exception:
+                vbw_mode = "VID"
+            vbw_response = session.query("BAND:VID?").strip().upper()
+            vbw_hz = None if vbw_response == "OFF" else float(vbw_response)
+            sweep_time_auto = self._parse_switch(
+                session.query("SWE:TIME:AUTO?"), "sweep-time auto"
+            )
+            sweep_time_s = float(session.query("SWE:TIME?"))
+            attenuation_auto = self._parse_switch(
+                session.query("POW:ATT:AUTO?"), "attenuation auto"
+            )
+            attenuation_db = float(session.query("POW:ATT?"))
+            detector = normalize_anritsu_detector(session.query("DET?"))
+            cont_resp = session.query("INIT:CONT?").strip().upper()
+            continuous_sweep = cont_resp in {"1", "+1", "ON"}
+            try:
+                average_count = int(float(session.query("AVER:COUN?")))
+            except Exception:
+                average_count = 1
+        except (TypeError, ValueError) as exc:
+            raise DeviceError("Anritsu returned invalid full configuration data.") from exc
+
+        return AnritsuFullConfigurationReadback(
+            start_hz=start_hz,
+            stop_hz=stop_hz,
+            center_hz=center_hz,
+            span_hz=span_hz,
+            reference_level_dbm=reference_level_dbm,
+            points=points,
+            rbw_auto=rbw_auto,
+            rbw_hz=rbw_hz,
+            vbw_auto=vbw_auto,
+            vbw_mode=vbw_mode,
+            vbw_hz=vbw_hz,
+            sweep_time_auto=sweep_time_auto,
+            sweep_time_s=sweep_time_s,
+            attenuation_auto=attenuation_auto,
+            attenuation_db=attenuation_db,
+            detector=detector,
+            continuous_sweep=continuous_sweep,
+            average_count=average_count,
+            instrument_mode=mode,
+        )
+
     @staticmethod
     def _parse_switch(response: str, parameter: str) -> bool:
         normalized = response.strip().upper()
@@ -680,7 +777,7 @@ class AnritsuAdapter(DeviceAdapter):
             vbw_auto = self._parse_switch(session.query("BAND:VID:AUTO?"), "VBW auto")
             vbw_response = session.query("BAND:VID?").strip().upper()
             vbw_hz = None if vbw_response == "OFF" else float(vbw_response)
-            detector = session.query("DET?").strip().upper()
+            detector = normalize_anritsu_detector(session.query("DET?"))
             attenuation_auto = self._parse_switch(
                 session.query("POW:ATT:AUTO?"), "attenuation auto"
             )
@@ -704,15 +801,6 @@ class AnritsuAdapter(DeviceAdapter):
             numeric += (vbw_hz,)
         if not all(math.isfinite(value) for value in numeric):
             raise DeviceError("Anritsu returned non-finite advanced Spectrum data.")
-        detector_aliases = {
-            "NORMAL": "NORM",
-            "POSITIVE": "POS",
-            "SAMPLE": "SAMP",
-            "NEGATIVE": "NEG",
-            "QPEAK": "QPE",
-            "CAVERAGE": "CAV",
-        }
-        detector = detector_aliases.get(detector, detector)
         vbw_mode = "auto" if vbw_auto else ("off" if vbw_hz is None else "manual")
         return AdvancedSpectrumSnapshot(
             rbw_auto=rbw_auto,
@@ -763,7 +851,7 @@ class AnritsuAdapter(DeviceAdapter):
         self._assert_advanced_firmware_qualified()
         session = self._require_session()
         has_preamp = bool(ANRITSU_PREAMPLIFIER_OPTIONS.intersection(options))
-        detector = config.detector.strip().upper()
+        detector = normalize_anritsu_detector(config.detector)
         vbw_mode = config.vbw_mode.strip().lower()
         try:
             self._enter_spectrum_mode_with_rf_off()
@@ -832,7 +920,7 @@ class AnritsuAdapter(DeviceAdapter):
                 abs_tol=1.0,
             ):
                 mismatches.append("VBW")
-        if actual.detector != requested.detector.strip().upper():
+        if normalize_anritsu_detector(actual.detector) != normalize_anritsu_detector(requested.detector):
             mismatches.append("detector")
         if actual.attenuation_auto != requested.attenuation_auto:
             mismatches.append("attenuation auto state")
@@ -874,6 +962,19 @@ class AnritsuAdapter(DeviceAdapter):
         session.write(f"FREQ:STOP {config.stop_hz:.12g}HZ")
         session.write(f"DISP:WIND:TRAC:Y:RLEV {config.reference_level_dbm:.12g}")
         session.write(f"SWE:POIN {config.points}")
+        if config.rbw_auto:
+            session.write("BAND:AUTO ON")
+        elif config.rbw_hz is not None:
+            session.write("BAND:AUTO OFF")
+            session.write(f"BAND {config.rbw_hz:.12g}HZ")
+        if config.vbw_mode in {"VID", "POW"}:
+            session.write(f"BAND:VID:MODE {config.vbw_mode}")
+        if config.vbw_auto:
+            session.write("BAND:VID:AUTO ON")
+        elif config.vbw_hz is not None:
+            session.write("BAND:VID:AUTO OFF")
+            session.write(f"BAND:VID {config.vbw_hz:.12g}HZ")
+        self._cached_grid = None
         # TRAC? TRAC1 reads Trace A.  In VIEW mode that buffer is documented
         # to remain unchanged even while the analyser continues measuring.
         # An explicit Apply action therefore restores Trace A to WRITE so the
@@ -1042,6 +1143,114 @@ class AnritsuAdapter(DeviceAdapter):
         trace = validate_anritsu_trace_name(trace)
         session = self._require_session()
         return self._read_ascii_trace(session, trace, prepare_ascii=True)
+
+    def fetch_current_trace_fast(self, trace: str = "TRAC1") -> SpectrumTrace:
+        """Read the currently displayed trace at maximum speed using binary transfer and cached axis."""
+
+        trace = validate_anritsu_trace_name(trace)
+        self._assert_acquisition_allowed()
+        session = self._require_session()
+        if (
+            self._cached_grid is not None
+            and self._cached_grid[0] > 0
+            and self._cached_grid[1] > self._cached_grid[0]
+            and self._cached_grid[2] >= 2
+        ):
+            start_hz, stop_hz, points, _ = self._cached_grid
+        else:
+            points = int(float(session.query("SWE:POIN?")))
+            start_hz = float(session.query("FREQ:STAR?"))
+            stop_hz = float(session.query("FREQ:STOP?"))
+        return self._read_binary_trace(
+            session, trace, points=points, start_hz=start_hz, stop_hz=stop_hz
+        )
+
+    def _read_binary_trace(
+        self,
+        session: InstrumentSession,
+        trace: str,
+        *,
+        points: int,
+        start_hz: float,
+        stop_hz: float,
+    ) -> SpectrumTrace:
+        session.write("FORM REAL,32")
+        session.write("FORM:BORD SWAP")
+        raw_values = session.query_binary_values(
+            f"TRAC? {trace}", datatype="f", is_big_endian=False
+        )
+        values = tuple(float(v) for v in raw_values)
+        if len(values) != points:
+            raise DeviceError(
+                f"Anritsu returned {len(values)} binary trace points; expected {points}."
+            )
+        if points < 2:
+            raise DeviceError("Anritsu returned fewer than two trace points.")
+        invalid_points = sum(value <= -998.0 for value in values)
+        if invalid_points:
+            raise DeviceError(
+                "Anritsu returned the unmeasured/error sentinel "
+                f"for {invalid_points} of {points} trace points."
+            )
+        if (
+            self._cached_grid is not None
+            and self._cached_grid[0] == start_hz
+            and self._cached_grid[1] == stop_hz
+            and self._cached_grid[2] == points
+        ):
+            frequencies = self._cached_grid[3]
+        else:
+            step = (stop_hz - start_hz) / (points - 1)
+            frequencies = tuple(start_hz + index * step for index in range(points))
+            self._cached_grid = (start_hz, stop_hz, points, frequencies)
+
+        return SpectrumTrace(
+            frequencies_hz=frequencies,
+            powers_dbm=values,
+            acquired_at_utc=datetime.now(timezone.utc),
+            trace_name=trace,
+        )
+
+    def acquire_fresh_trace(
+        self,
+        trace: str = "TRAC1",
+        *,
+        timeout_s: float = 5.0,
+    ) -> SpectrumTrace:
+        """Acquire a newly completed spectrum frame from the continuous pipeline at high speed."""
+
+        trace = validate_anritsu_trace_name(trace)
+        self._assert_acquisition_allowed()
+        session = self._require_session()
+        self._enter_spectrum_mode_with_rf_off()
+
+        session.write("TRAC1:TYPE WRIT")
+        continuous_resp = session.query("INIT:CONT?").strip().upper()
+        if continuous_resp not in {"1", "+1", "ON"}:
+            session.write("INIT:MODE:CONT")
+            time.sleep(0.05)
+
+        points = int(float(session.query("SWE:POIN?")))
+        start_hz = float(session.query("FREQ:STAR?"))
+        stop_hz = float(session.query("FREQ:STOP?"))
+
+        try:
+            first = self._read_binary_trace(
+                session, trace, points=points, start_hz=start_hz, stop_hz=stop_hz
+            )
+            deadline = time.monotonic() + timeout_s
+            first_sig = (first.powers_dbm[0], first.powers_dbm[-1], first.powers_dbm[points // 2])
+            while time.monotonic() < deadline:
+                time.sleep(0.03)
+                candidate = self._read_binary_trace(
+                    session, trace, points=points, start_hz=start_hz, stop_hz=stop_hz
+                )
+                cand_sig = (candidate.powers_dbm[0], candidate.powers_dbm[-1], candidate.powers_dbm[points // 2])
+                if cand_sig != first_sig or candidate.powers_dbm != first.powers_dbm:
+                    return candidate
+            return first
+        except Exception:
+            return self.fetch_current_trace(trace)
 
     @staticmethod
     def _read_ascii_trace(

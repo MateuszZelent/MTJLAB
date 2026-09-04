@@ -23,12 +23,10 @@ from PySide6.QtGui import (
     QGuiApplication,
     QKeyEvent,
     QMouseEvent,
-    QPalette,
 )
 from PySide6.QtWidgets import (
     QDialog,
     QFrame,
-    QGraphicsDropShadowEffect,
     QGridLayout,
     QHBoxLayout,
     QSizePolicy,
@@ -55,6 +53,7 @@ from qfluentwidgets import (
 )
 
 from app.domain.quick_controls import (
+    _QUANTITY,
     QuickControlCommand,
     QuickSetpoint,
     render_quantity_si_like,
@@ -371,15 +370,35 @@ class QuickControlCoordinator(QObject):
         self._confirmed_values[target] = value_si
         if adopt_draft or target not in self._dirty_drafts:
             existing = self._draft_texts.get(target)
+            preferred_unit: str | None = None
+            if existing:
+                match = _QUANTITY.fullmatch(existing)
+                if match is not None:
+                    preferred_unit = match.group("unit").strip()
+            if not preferred_unit:
+                default_match = _QUANTITY.fullmatch(descriptor.default_text)
+                if default_match is not None:
+                    preferred_unit = default_match.group("unit").strip()
             if existing:
                 try:
                     text = render_quantity_si_like(
-                        existing, descriptor.dimension, value_si
+                        existing,
+                        descriptor.dimension,
+                        value_si,
+                        preferred_unit=preferred_unit,
                     )
                 except Exception:
-                    text = format_quantity_auto(value_si, descriptor.dimension)
+                    text = format_quantity_auto(
+                        value_si,
+                        descriptor.dimension,
+                        preferred_unit=preferred_unit,
+                    )
             else:
-                text = format_quantity_auto(value_si, descriptor.dimension)
+                text = format_quantity_auto(
+                    value_si,
+                    descriptor.dimension,
+                    preferred_unit=preferred_unit,
+                )
             self._draft_texts[target] = text
             self._dirty_drafts.discard(target)
             self.draft_changed.emit(target, text, "readback")
@@ -533,16 +552,20 @@ class QuickControlCoordinator(QObject):
     def _device_state(self, device: str, state: str) -> None:
         normalized = str(state).strip().lower()
         self._device_states[device] = normalized
-        if normalized in {"disconnected", "fault", "unknown", "compliance"}:
+        if normalized in {"disconnected", "fault", "unknown"}:
             pending = self._pending[device]
             for target in tuple(pending):
                 self.state_changed.emit(target, "draft", f"Device {state}")
             pending.clear()
 
     def _device_can_apply(self, device: str) -> bool:
-        """Allow hardware traffic only for an authoritative OFF or ON state."""
+        """Allow hardware traffic for confirmed OFF, ON, or COMPLIANCE states."""
 
-        return self._device_states.get(device) in {"output_off", "output_on"}
+        return self._device_states.get(device) in {
+            "output_off",
+            "output_on",
+            "compliance",
+        }
 
 
 class QuantityStepEdit(LineEdit):

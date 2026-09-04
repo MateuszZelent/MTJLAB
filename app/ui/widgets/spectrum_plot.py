@@ -8,7 +8,7 @@ from pathlib import Path
 import numpy as np
 import pyqtgraph as pg
 from pyqtgraph.exporters import ImageExporter, SVGExporter
-from PySide6.QtCore import QEvent, Signal
+from PySide6.QtCore import QEvent, QSize, Signal
 from PySide6.QtWidgets import (
     QHBoxLayout,
     QSizePolicy,
@@ -28,11 +28,22 @@ class SpectrumPlotWidget(QWidget):
     peak_selected = Signal(int)
 
     def __init__(
-        self, parent: QWidget | None = None, *, legend: bool = True, compact_toolbar: bool = False
+        self,
+        parent: QWidget | None = None,
+        *,
+        legend: bool = True,
+        compact_toolbar: bool = False,
+        preferred_height: int | None = None,
     ) -> None:
         super().__init__(parent)
         self.setObjectName("spectrumPlot")
         self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
+        self._compact_toolbar = compact_toolbar
+        self._preferred_height = (
+            preferred_height
+            if preferred_height is not None
+            else (180 if compact_toolbar else None)
+        )
         self._traces: dict[str, tuple[np.ndarray, np.ndarray]] = {}
         self._curves: dict[str, pg.PlotDataItem] = {}
         self._token_owned_primary_curves: set[str] = set()
@@ -114,6 +125,13 @@ class SpectrumPlotWidget(QWidget):
         )
         self.plot.addItem(self.peak_markers)
         self.peak_markers.sigClicked.connect(self._peak_marker_clicked)
+        self.compliance_markers = pg.ScatterPlotItem(
+            size=10,
+            symbol="d",
+            pxMode=True,
+            hoverable=False,
+        )
+        self.plot.addItem(self.compliance_markers)
         self._selected_peak_index: int | None = None
         self._last_mouse_x: float | None = None
         self._last_readout_position: tuple[float, float] | None = None
@@ -141,6 +159,21 @@ class SpectrumPlotWidget(QWidget):
     def set_title(self, title: str) -> None:
         self.plot.setTitle(title)
 
+    def set_preferred_height(self, height: int | None) -> None:
+        self._preferred_height = height
+        self.updateGeometry()
+
+    def sizeHint(self) -> QSize:  # noqa: N802 - Qt override
+        default = super().sizeHint()
+        if self._preferred_height is not None:
+            return QSize(default.width(), self._preferred_height)
+        return default
+
+    def minimumSizeHint(self) -> QSize:  # noqa: N802 - Qt override
+        default = super().minimumSizeHint()
+        min_h = 100 if self._compact_toolbar else 120
+        return QSize(min(default.width(), 200), min_h)
+
     def apply_theme(self, theme: str) -> None:
         self._theme_name = theme
         palette = plot_theme(tokens_for(theme))
@@ -154,6 +187,10 @@ class SpectrumPlotWidget(QWidget):
         self.marker.setPen(pg.mkPen(palette.reference, width=2))
         self.delta_marker.setPen(pg.mkPen(palette.reference, width=2))
         self._style_peak_markers()
+        tokens = tokens_for(theme)
+        danger_color = tokens.danger
+        self.compliance_markers.setPen(pg.mkPen(danger_color, width=1.5))
+        self.compliance_markers.setBrush(pg.mkBrush(danger_color))
         for name in self._token_owned_primary_curves:
             curve = self._curves.get(name)
             if curve is not None:
@@ -272,9 +309,37 @@ class SpectrumPlotWidget(QWidget):
         self.marker.hide()
         self.delta_marker.hide()
         self.clear_peak_markers()
+        self.clear_compliance_points()
         self._last_mouse_x = None
         self._last_readout_position = None
         self.readout.setText("X: -   Y: -")
+
+    def set_compliance_points(self, x: object, y: object) -> None:
+        """Render distinct red diamond markers on points that reached compliance."""
+        x_vals = np.asarray(x, dtype=float)
+        y_vals = np.asarray(y, dtype=float)
+        if x_vals.size == 0 or y_vals.size == 0:
+            self.compliance_markers.clear()
+            return
+        finite = np.isfinite(x_vals) & np.isfinite(y_vals)
+        x_clean = x_vals[finite]
+        y_clean = y_vals[finite]
+        if x_clean.size == 0:
+            self.compliance_markers.clear()
+            return
+        tokens = tokens_for(self._theme_name)
+        danger_color = tokens.danger
+        self.compliance_markers.setData(
+            x=x_clean,
+            y=y_clean,
+            pen=pg.mkPen(danger_color, width=1.5),
+            brush=pg.mkBrush(danger_color),
+            size=10,
+            symbol="d",
+        )
+
+    def clear_compliance_points(self) -> None:
+        self.compliance_markers.clear()
 
     def set_peak_markers(
         self,

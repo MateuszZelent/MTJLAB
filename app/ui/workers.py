@@ -291,7 +291,7 @@ class InstrumentWorker(QObject):
             if operation == "set_compliance_policy":
                 channel, stop_on_compliance = payload  # type: ignore[misc]
                 return self._adapter.set_compliance_policy(
-                    channel, bool(stop_on_compliance)
+                    channel, stop_on_compliance
                 )
             if operation == "ramp_to_zero":
                 return self._adapter.ramp_to_zero(payload)  # type: ignore[arg-type]

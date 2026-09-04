@@ -200,6 +200,34 @@ class QuickControlTests(unittest.TestCase):
             ],
         )
 
+    def test_compliance_state_allows_live_quick_setpoint_dispatch(self) -> None:
+        parent = QWidget()
+        keithley = _FakeController("compliance")
+        coordinator = QuickControlCoordinator(  # type: ignore[arg-type]
+            {"rigol": _FakeController("disconnected"), "keithley": keithley},
+            parent,
+        )
+
+        coordinator.set_hardware_request_builder(
+            "keithley",
+            lambda request, _state: (
+                "quick_setpoint",
+                QuickControlCommand(request.target, request.text),
+            ),
+        )
+        self.assertTrue(coordinator._device_can_apply("keithley"))
+        coordinator.submit("keithley.B.current", "10.0 mA")
+
+        self.assertEqual(
+            keithley.calls,
+            [
+                (
+                    "quick_setpoint",
+                    QuickControlCommand("keithley.B.current", "10.0 mA"),
+                )
+            ],
+        )
+
     def test_arrows_stop_at_every_user_limit_for_rigol_and_keithley(self) -> None:
         parent = QWidget()
         controllers = {"rigol": _FakeController(), "keithley": _FakeController()}
@@ -759,6 +787,76 @@ class QuickControlTests(unittest.TestCase):
             render_quantity_si_like("0.02 V", DIMENSION_VOLTAGE, 0.015 - 0.005),
             "0.01 V",
         )
+
+    def test_format_quantity_auto_preserves_preferred_unit_at_zero(self) -> None:
+        self.assertEqual(format_quantity_auto(0.0, DIMENSION_CURRENT, preferred_unit="mA"), "0 mA")
+        self.assertEqual(format_quantity_auto(0.0, DIMENSION_CURRENT, preferred_unit="uA"), "0 uA")
+        self.assertEqual(format_quantity_auto(0.0, DIMENSION_VOLTAGE, preferred_unit="mV"), "0 mV")
+        self.assertEqual(format_quantity_auto(0.0, DIMENSION_CURRENT), "0 A")
+
+    def test_render_quantity_si_like_with_bare_number_and_preferred_unit(self) -> None:
+        self.assertEqual(
+            render_quantity_si_like("0", DIMENSION_CURRENT, 0.0, preferred_unit="mA"),
+            "0 mA",
+        )
+        self.assertEqual(
+            render_quantity_si_like("0.0", DIMENSION_CURRENT, 0.0, preferred_unit="mA"),
+            "0.0 mA",
+        )
+        self.assertEqual(
+            render_quantity_si_like("-5", DIMENSION_CURRENT, -0.005, preferred_unit="mA"),
+            "-5 mA",
+        )
+
+    def test_keithley_arrow_stepping_crosses_zero_into_negative_without_losing_unit(self) -> None:
+        from PySide6.QtCore import QEvent
+        from PySide6.QtGui import QKeyEvent
+        from app.devices.keithley_2600.ui.page import KeithleyConfigurationPanel
+        from app.ui.common.precision_stepper import install_precision_arrow_stepper
+
+        install_precision_arrow_stepper(self.application)
+        panel = KeithleyConfigurationPanel(simulation_settings())
+        panel.channel.setCurrentText("A")
+        panel.mode.setCurrentText("current")
+        panel.level.setText("1 mA")
+
+        down = QKeyEvent(QEvent.Type.KeyPress, Qt.Key.Key_Down, Qt.KeyboardModifier.NoModifier)
+        up = QKeyEvent(QEvent.Type.KeyPress, Qt.Key.Key_Up, Qt.KeyboardModifier.NoModifier)
+
+        # Step down to 0 mA
+        self.application.sendEvent(panel.level, down)
+        self.assertEqual(panel.level.text(), "0 mA")
+
+        # Step down past zero into negative: must become -1 mA, NEVER -1 A or 0 A
+        self.application.sendEvent(panel.level, down)
+        self.assertEqual(panel.level.text(), "-1 mA")
+
+        # Step back up to 0 mA
+        self.application.sendEvent(panel.level, up)
+        self.assertEqual(panel.level.text(), "0 mA")
+
+        # Step back up to 1 mA
+        self.application.sendEvent(panel.level, up)
+        self.assertEqual(panel.level.text(), "1 mA")
+
+    def test_limit_field_bare_zero_entry_preserves_active_unit(self) -> None:
+        from PySide6.QtWidgets import QLineEdit
+        from app.ui.widgets.limit_field import LimitField
+
+        editor = QLineEdit("5 mA")
+        field = LimitField(editor, minimum="-10 mA", maximum="10 mA")
+        field.validate_and_clamp()
+        self.assertEqual(field.editor.text(), "5 mA")
+
+        # User types bare '0'
+        field.editor.setText("0")
+        field.validate_and_clamp()
+        self.assertEqual(field.editor.text(), "0 mA")
+
+        # User types bare '0.0'
+        field.editor.setText("0.0")
+        field.validate_and_clamp()
+        self.assertEqual(field.editor.text(), "0.0 mA")
 
 
 if __name__ == "__main__":

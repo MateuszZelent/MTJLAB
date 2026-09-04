@@ -232,7 +232,8 @@ class DG1032Z:
 
         if waveform == "DC":
             dc_level = _number(settings["dc_level"], "Poziom DC")
-            commands.append(f"{source}:APPL:DC DEF,DEF,{dc_level:.12g}")
+            commands.append(f"{source}:APPL:DC {dc_level:.12g}")
+            commands.append(f"{source}:VOLT:OFFS {dc_level:.12g}")
         else:
             high = _number(settings["high_level"], "HighLevel")
             low = _number(settings["low_level"], "LowLevel")

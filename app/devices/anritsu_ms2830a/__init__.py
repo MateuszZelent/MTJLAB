@@ -15,6 +15,7 @@ __all__ = [
     "AnritsuAdapter",
     "AnritsuConfigurationSnapshot",
     "AnritsuFrequencyOption",
+    "AnritsuFullConfigurationReadback",
     "ReferenceSpectrum",
     "SignalGeneratorConfig",
     "SignalGeneratorSnapshot",

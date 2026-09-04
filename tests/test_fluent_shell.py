@@ -390,7 +390,7 @@ class MainWindowFluentShellTests(unittest.TestCase):
                 all(first[2] < second[1] for first, second in zip(compact_rows, compact_rows[1:]))
             )
 
-            window.resize(900, 720)
+            window.resize(900, 800)
             self.application.processEvents()
             self.application.processEvents()
             self.assertTrue(window.apparatus_navigation_item.isExpanded)
@@ -398,6 +398,75 @@ class MainWindowFluentShellTests(unittest.TestCase):
             self.assertTrue(
                 all(first[2] < second[1] for first, second in zip(expanded_rows, expanded_rows[1:]))
             )
+        finally:
+            window.close()
+            self.application.processEvents()
+
+    def test_event_log_navigation_toggle_above_theme_controls_visibility_and_state(self) -> None:
+        """The sidebar must host an Event Log toggle button above Theme that toggles footer visibility."""
+
+        window = MainWindow(".config/settings.yml", simulation=True)
+        try:
+            window.resize(1360, 880)
+            window.show()
+            self.application.processEvents()
+
+            log_nav_item = window.navigationInterface.widget("eventLogToggle")
+            self.assertIsNotNone(log_nav_item)
+            theme_item = window.navigationInterface.widget("themeMenu")
+            settings_item = window.navigationInterface.widget(
+                window.navigation_routes["settings"].objectName()
+            )
+            bottom = window.navigationInterface.panel.bottomLayout
+            log_index = bottom.indexOf(log_nav_item)
+            theme_index = bottom.indexOf(theme_item)
+            settings_index = bottom.indexOf(settings_item)
+
+            self.assertGreaterEqual(log_index, 0)
+            self.assertEqual(theme_index, log_index + 1)
+            self.assertEqual(settings_index, theme_index + 1)
+
+            # Default launch state: event log is hidden, freeing vertical space
+            self.assertFalse(window._event_log_requested_visible)
+            self.assertFalse(window.event_log_panel.isVisible())
+            self.assertFalse(window.event_log_action.isChecked())
+            self.assertFalse(log_nav_item.isSelected)
+            self.assertFalse(log_nav_item.itemWidget.isSelected)
+            self.assertEqual(log_nav_item.toolTip(), "Show event log")
+            self.assertEqual(window.shell_splitter.sizes()[1], 0)
+
+            # Toggle ON via navigation button click
+            log_nav_item.clicked.emit(True)
+            self.application.processEvents()
+
+            self.assertTrue(window._event_log_requested_visible)
+            self.assertTrue(window.event_log_panel.isVisible())
+            self.assertTrue(window.event_log_action.isChecked())
+            self.assertTrue(log_nav_item.isSelected)
+            self.assertTrue(log_nav_item.itemWidget.isSelected)
+            self.assertEqual(log_nav_item.toolTip(), "Hide event log")
+            self.assertEqual(window.shell_splitter.sizes()[1], 125)
+
+            # Toggle OFF via navigation button click
+            log_nav_item.clicked.emit(True)
+            self.application.processEvents()
+
+            self.assertFalse(window._event_log_requested_visible)
+            self.assertFalse(window.event_log_panel.isVisible())
+            self.assertFalse(window.event_log_action.isChecked())
+            self.assertFalse(log_nav_item.isSelected)
+            self.assertFalse(log_nav_item.itemWidget.isSelected)
+            self.assertEqual(log_nav_item.toolTip(), "Show event log")
+            self.assertEqual(window.shell_splitter.sizes()[1], 0)
+
+            # Sync from application menu action
+            window.event_log_action.setChecked(True)
+            self.application.processEvents()
+
+            self.assertTrue(window.event_log_panel.isVisible())
+            self.assertTrue(log_nav_item.isSelected)
+            self.assertTrue(log_nav_item.itemWidget.isSelected)
+            self.assertEqual(log_nav_item.toolTip(), "Hide event log")
         finally:
             window.close()
             self.application.processEvents()

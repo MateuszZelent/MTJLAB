@@ -38,6 +38,7 @@ from app.settings.models import KeithleyChannelSettings, KeithleySettings, Stati
 
 
 KeithleyDutOffMode = Literal["normal", "high_impedance"]
+KeithleyCompliancePolicy = Literal["stop", "warn_clamp", "skip"]
 
 
 @dataclass(frozen=True, slots=True)
@@ -163,9 +164,17 @@ class KeithleyAdapter(DeviceAdapter):
         self._compliance_block_modes: dict[
             Literal["A", "B"], Literal["current", "voltage"]
         ] = {}
+        default_policy: KeithleyCompliancePolicy = (
+            getattr(self._settings.safety, "compliance_policy", None)
+            or ("stop" if bool(self._settings.safety.stop_on_compliance) else "warn_clamp")
+        )
+        self._compliance_policies: dict[Literal["A", "B"], KeithleyCompliancePolicy] = {
+            "A": default_policy,
+            "B": default_policy,
+        }
         self._stop_on_compliance: dict[Literal["A", "B"], bool] = {
-            "A": bool(self._settings.safety.stop_on_compliance),
-            "B": bool(self._settings.safety.stop_on_compliance),
+            "A": (default_policy == "stop"),
+            "B": (default_policy == "stop"),
         }
         self._output_states: dict[Literal["A", "B"], bool] = {"A": False, "B": False}
         # A Keithley error queue is persistent across VISA sessions.  Keep a
@@ -218,7 +227,12 @@ class KeithleyAdapter(DeviceAdapter):
             self._compliance_block_modes.clear()
             self._last_safe_request.clear()
             self._last_ignored_diagnostic_errors = ()
-            default_stop = bool(self._settings.safety.stop_on_compliance)
+            default_policy: KeithleyCompliancePolicy = (
+                getattr(self._settings.safety, "compliance_policy", None)
+                or ("stop" if bool(self._settings.safety.stop_on_compliance) else "warn_clamp")
+            )
+            default_stop = (default_policy == "stop")
+            self._compliance_policies.update({"A": default_policy, "B": default_policy})
             self._stop_on_compliance.update({"A": default_stop, "B": default_stop})
             self._capabilities = DeviceCapabilities(
                 device_name="keithley",
@@ -434,7 +448,12 @@ class KeithleyAdapter(DeviceAdapter):
                 )
         self._station = station
         self._settings = station.keithley
-        default_stop = bool(self._settings.safety.stop_on_compliance)
+        default_policy: KeithleyCompliancePolicy = (
+            getattr(self._settings.safety, "compliance_policy", None)
+            or ("stop" if bool(self._settings.safety.stop_on_compliance) else "warn_clamp")
+        )
+        default_stop = (default_policy == "stop")
+        self._compliance_policies.update({"A": default_policy, "B": default_policy})
         self._stop_on_compliance.update({"A": default_stop, "B": default_stop})
         if default_stop:
             self._compliance_channels.update(self._compliance_warnings)
@@ -445,7 +464,12 @@ class KeithleyAdapter(DeviceAdapter):
             raise TypeError("Keithley context refresh requires StationSettings.")
         self._station = station
         self._settings = station.keithley
-        default_stop = bool(self._settings.safety.stop_on_compliance)
+        default_policy: KeithleyCompliancePolicy = (
+            getattr(self._settings.safety, "compliance_policy", None)
+            or ("stop" if bool(self._settings.safety.stop_on_compliance) else "warn_clamp")
+        )
+        default_stop = (default_policy == "stop")
+        self._compliance_policies.update({"A": default_policy, "B": default_policy})
         self._stop_on_compliance.update({"A": default_stop, "B": default_stop})
 
     def _clear_errors(self) -> None:
@@ -677,9 +701,9 @@ class KeithleyAdapter(DeviceAdapter):
         request = self._quantize_source_request(request)
         validate_keithley_source(channel, request)
         self._validate_model_hardware_request(request)
-        self._assert_compliance_increase_allowed(
-            request.channel, request.level_si, mode=request.mode
-        )
+        self._compliance_block_levels.pop(request.channel, None)
+        self._compliance_block_modes.pop(request.channel, None)
+        self._compliance_warnings.discard(request.channel)
         smu = self._smu(request.channel)
         session = self._require_session()
         session.write(f"{smu}.source.output = {smu}.OUTPUT_OFF")
@@ -1182,23 +1206,40 @@ class KeithleyAdapter(DeviceAdapter):
     def set_compliance_policy(
         self,
         channel: Literal["A", "B"],
-        stop_on_compliance: bool,
-    ) -> bool:
+        stop_on_compliance: KeithleyCompliancePolicy | bool,
+    ) -> KeithleyCompliancePolicy | bool:
         """Set one channel's runtime compliance response without changing limits."""
 
         if channel not in {"A", "B"}:
             raise SafetyViolation("Keithley channel must be A or B.")
-        self._stop_on_compliance[channel] = bool(stop_on_compliance)
-        if self._stop_on_compliance[channel] and channel in self._compliance_warnings:
+        is_bool = isinstance(stop_on_compliance, bool)
+        if is_bool:
+            policy: KeithleyCompliancePolicy = (
+                "stop" if stop_on_compliance else "warn_clamp"
+            )
+        elif stop_on_compliance in {"stop", "warn_clamp", "skip"}:
+            policy = stop_on_compliance
+        else:
+            raise SafetyViolation(f"Invalid compliance policy: {stop_on_compliance}")
+
+        self._compliance_policies[channel] = policy
+        self._stop_on_compliance[channel] = (policy == "stop")
+        if policy == "stop" and channel in self._compliance_warnings:
             self._disable_channel_and_verify(channel)
             self._compliance_channels.add(channel)
+        elif policy == "skip":
+            self._compliance_block_levels.pop(channel, None)
+            self._compliance_block_modes.pop(channel, None)
         self._update_aggregate_output_state()
-        return self._stop_on_compliance[channel]
+        return (policy == "stop") if is_bool else policy
 
-    def compliance_policy(self, channel: Literal["A", "B"]) -> bool:
+    def compliance_policy(self, channel: Literal["A", "B"]) -> KeithleyCompliancePolicy:
         if channel not in {"A", "B"}:
             raise SafetyViolation("Keithley channel must be A or B.")
-        return self._stop_on_compliance[channel]
+        return self._compliance_policies.get(
+            channel,
+            "stop" if self._stop_on_compliance.get(channel, False) else "warn_clamp",
+        )
 
     def _assert_compliance_increase_allowed(
         self,
@@ -1207,10 +1248,19 @@ class KeithleyAdapter(DeviceAdapter):
         *,
         mode: Literal["current", "voltage"] | None = None,
     ) -> None:
+        policy = self._compliance_policies.get(
+            channel,
+            "stop" if self._stop_on_compliance.get(channel, False) else "warn_clamp",
+        )
+        if policy == "skip":
+            return
         blocked = self._compliance_block_levels.get(channel)
         blocked_mode = self._compliance_block_modes.get(channel)
-        if blocked is None or (
-            mode is not None and blocked_mode is not None and mode != blocked_mode
+        if (
+            blocked is None
+            or blocked_mode is None
+            or (mode is not None and mode != blocked_mode)
+            or abs(blocked) < 1e-9
         ):
             return
         tolerance = max(abs(blocked), 1.0) * 1e-12
@@ -1447,13 +1497,23 @@ class KeithleyAdapter(DeviceAdapter):
             request, voltage=voltage, current=current
         )
         compliance_latched = channel in self._compliance_channels
-        stop_required = compliance_detected and self._stop_on_compliance[channel]
+        policy = self._compliance_policies.get(
+            channel,
+            "stop" if self._stop_on_compliance.get(channel, False) else "warn_clamp",
+        )
+        stop_required = compliance_detected and (policy == "stop")
         if compliance_detected:
             self._compliance_warnings.add(channel)
-            if request is not None:
-                self._compliance_block_levels[channel] = request.level_si
-                if request.mode in {"current", "voltage"}:
-                    self._compliance_block_modes[channel] = request.mode
+            if (
+                request is not None
+                and policy != "skip"
+                and request.mode in {"current", "voltage"}
+                and abs(request.level_si) >= 1e-9
+            ):
+                current_blocked = self._compliance_block_levels.get(channel)
+                if current_blocked is None or abs(request.level_si) > abs(current_blocked):
+                    self._compliance_block_levels[channel] = request.level_si
+                self._compliance_block_modes[channel] = request.mode
         elif not compliance_latched:
             self._compliance_warnings.discard(channel)
             self._compliance_block_levels.pop(channel, None)

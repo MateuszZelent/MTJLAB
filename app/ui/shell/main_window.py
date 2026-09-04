@@ -592,6 +592,15 @@ class MainWindow(FluentWindow):
         }
         for widget, route, display_name in route_specs:
             if route == "settings":
+                self.event_log_navigation_item = self.navigationInterface.addItem(
+                    routeKey="eventLogToggle",
+                    icon=FluentIcon.COMMAND_PROMPT,
+                    text="Event log",
+                    onClick=self._toggle_event_log_requested,
+                    selectable=False,
+                    position=NavigationItemPosition.BOTTOM,
+                    tooltip="Show event log",
+                )
                 self.theme_navigation_item = self.navigationInterface.addItem(
                     routeKey="themeMenu",
                     icon=FluentIcon.BRUSH,
@@ -640,10 +649,9 @@ class MainWindow(FluentWindow):
         self.event_log_panel.setObjectName("eventLogPanel")
         self.event_log_panel.setProperty("stationSurface", "surface")
         # The global log is a useful cross-page diagnostic surface, but it is
-        # a duplicate of the bounded Execution log during a compact run.  In
-        # that layout the procedure tree is the primary operator surface, so
-        # the log is auto-collapsed while retaining an explicit menu override.
-        self._event_log_requested_visible = True
+        # normally hidden by default so workspace pages have full vertical space.
+        # It can be toggled on demand via the sidebar button or application menu.
+        self._event_log_requested_visible = False
         self._event_log_compact_override = False
         event_log_layout = QVBoxLayout(self.event_log_panel)
         event_log_layout.setContentsMargins(12, 8, 12, 8)
@@ -675,7 +683,8 @@ class MainWindow(FluentWindow):
         self.shell_splitter.addWidget(self.event_log_panel)
         self.shell_splitter.setStretchFactor(0, 1)
         self.shell_splitter.setStretchFactor(1, 0)
-        self.shell_splitter.setSizes([700, 120])
+        self.event_log_panel.setVisible(False)
+        self.shell_splitter.setSizes([800, 0])
         self.dashboard.emergency_requested.connect(self._emergency_off_all)
         self.dashboard.readiness_changed.connect(lambda _ready: self._refresh_safety_strip())
         self.dashboard.assignments_requested.connect(self._save_discovered_assignments)
@@ -736,7 +745,7 @@ class MainWindow(FluentWindow):
         self.theme_navigation_menu.addActions(tuple(self.theme_actions.values()))
         self.event_log_action = QAction("Event log", self)
         self.event_log_action.setCheckable(True)
-        self.event_log_action.setChecked(True)
+        self.event_log_action.setChecked(False)
         self.event_log_action.toggled.connect(self._set_event_log_requested_visible)
         self.addAction(self.event_log_action)
         quit_action = QAction("Safe shutdown", self)
@@ -766,10 +775,53 @@ class MainWindow(FluentWindow):
         self.safety_strip.estop_requested.connect(self._emergency_off_all)
         self.safety_strip.save_settings_requested.connect(self._save_all_settings)
         self._refresh_safety_strip()
+        self._sync_event_log_navigation_state(False)
 
     def _navigate_to(self, route: str) -> None:
         self.switchTo(self.navigation_routes[route])
         self._sync_shell_splitter_layout()
+
+    def _toggle_event_log_requested(self) -> None:
+        """Toggle global event log panel visibility from the navigation bar."""
+
+        self._set_event_log_requested_visible(not self._event_log_requested_visible)
+
+    def _sync_event_log_navigation_state(self, show_log: bool | None = None) -> None:
+        """Synchronize the sidebar navigation button appearance with the event log state."""
+
+        nav_item = getattr(self, "event_log_navigation_item", None)
+        if nav_item is None:
+            return
+        if show_log is None:
+            compact_execution = (
+                hasattr(self, "navigation_routes")
+                and self._current_route() == "execution"
+                and self.width() < 1_200
+                and not getattr(self, "_event_log_compact_override", False)
+            )
+            show_log = (
+                getattr(self, "_event_log_requested_visible", False) and not compact_execution
+            )
+
+        nav_item.isSelected = show_log
+        if hasattr(nav_item, "itemWidget"):
+            nav_item.itemWidget.isSelected = show_log
+            if show_log:
+                nav_item.setIcon(FluentIcon.COMMAND_PROMPT)
+                nav_item.itemWidget.setIcon(FluentIcon.COMMAND_PROMPT)
+                nav_item.itemWidget.setLightTextColor(QColor(0, 0, 0))
+                nav_item.itemWidget.setDarkTextColor(QColor(255, 255, 255))
+            else:
+                muted_icon = FluentIcon.COMMAND_PROMPT.colored(
+                    QColor(140, 140, 140), QColor(140, 140, 140)
+                )
+                nav_item.setIcon(muted_icon)
+                nav_item.itemWidget.setIcon(muted_icon)
+                nav_item.itemWidget.setLightTextColor(QColor(140, 140, 140))
+                nav_item.itemWidget.setDarkTextColor(QColor(140, 140, 140))
+            nav_item.itemWidget.update()
+        nav_item.setToolTip("Hide event log" if show_log else "Show event log")
+        nav_item.update()
 
     def _set_event_log_requested_visible(self, visible: bool) -> None:
         """Apply the operator's log preference to the responsive shell."""
@@ -807,6 +859,7 @@ class MainWindow(FluentWindow):
             if action.isChecked() != desired:
                 with QSignalBlocker(action):
                     action.setChecked(desired)
+        self._sync_event_log_navigation_state(show_log)
         current_sizes = self.shell_splitter.sizes()
         if show_log:
             total = max(0, self.shell_splitter.height())
@@ -1112,6 +1165,7 @@ class MainWindow(FluentWindow):
         if changed:
             self.theme_changed.emit(theme)
         self._configured_theme_mode = mode
+        self._sync_event_log_navigation_state()
         if persist:
             self._persist_theme(mode)
         self._log(f"Theme changed to {mode} ({theme})" + (" and saved" if persist else ""))
@@ -1159,6 +1213,13 @@ class MainWindow(FluentWindow):
             self.shell_splitter.restoreState(content_splitter)
         if splitter is not None:
             self.anritsu_page.workspace_splitter.restoreState(splitter)
+        recipe_splitter = settings.value("recipes/workspace_splitter")
+        if (
+            recipe_splitter is not None
+            and hasattr(self, "recipe_page")
+            and hasattr(self.recipe_page, "workspace_splitter")
+        ):
+            self.recipe_page.workspace_splitter.restoreState(recipe_splitter)
         route = str(settings.value("main_window/current_route", "overview"))
         if route not in self.navigation_routes:
             route = "overview"
@@ -1174,6 +1235,11 @@ class MainWindow(FluentWindow):
         settings.remove("main_window/navigation_expanded")
         settings.setValue("main_window/current_route", self._current_route())
         settings.setValue("anritsu/splitter", self.anritsu_page.workspace_splitter.saveState())
+        if hasattr(self, "recipe_page") and hasattr(self.recipe_page, "workspace_splitter"):
+            settings.setValue(
+                "recipes/workspace_splitter",
+                self.recipe_page.workspace_splitter.saveState(),
+            )
 
     def _connect_controllers(self) -> None:
         for name, controller in self._controllers.items():
@@ -3281,7 +3347,7 @@ class MainWindow(FluentWindow):
         )
         self._event_log_entries.append(message)
         if not self.traffic_only_button.isChecked() or self._is_transport_log(message):
-            if critical or severity in {"error", "critical"}:
+            if getattr(self, "_simulation", False) or critical or severity in {"error", "critical"}:
                 self._flush_pending_log_ui()
                 self.log.appendPlainText(message)
             else:

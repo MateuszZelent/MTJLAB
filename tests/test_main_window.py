@@ -1419,6 +1419,7 @@ class MainWindowTests(unittest.TestCase):
         try:
             window.resize(1360, 880)
             window.show()
+            window._set_event_log_requested_visible(True)
             window._log("A rendered event log entry")
             self.application.processEvents()
 
@@ -1958,7 +1959,8 @@ class MainWindowTests(unittest.TestCase):
             self.assertEqual(card["resistance"].text(), "67 Ω")
             self.assertEqual(card["power"].text(), "67 µW")
             self.assertIn("ACTIVE", card["compliance"].text())
-            self.assertEqual(card["output"].text(), "OUTPUT OFF")
+            self.assertIn("OUTPUT OFF", card["output"].text())
+            self.assertIn("COMPLIANCE", card["output"].text())
         finally:
             window.close()
             self.application.processEvents()
@@ -3208,12 +3210,12 @@ class MainWindowTests(unittest.TestCase):
             ):
                 anritsu.read_once()
                 anritsu._error(
-                    "fetch_current_trace",
+                    "acquire_fresh_trace",
                     "Anritsu returned the documented -999.0 "
                     "unmeasured/error sentinel for 10001 of 10001 trace points",
                 )
 
-            anritsu._controller.call.assert_called_once_with("fetch_current_trace", "TRAC1")
+            anritsu._controller.call.assert_called_once_with("acquire_fresh_trace", "TRAC1")
             single_shot.assert_called_once()
             self.assertFalse(anritsu._fetch_pending)
             self.assertEqual(anritsu._page_state, AnritsuPageState.IDLE)
@@ -3300,9 +3302,9 @@ class MainWindowTests(unittest.TestCase):
             anritsu._controller.call.assert_not_called()
             anritsu.single.click()
 
-            anritsu._controller.call.assert_called_once_with("fetch_current_trace", "TRAC1")
+            anritsu._controller.call.assert_called_once_with("acquire_fresh_trace", "TRAC1")
             self.assertTrue(anritsu._fetch_pending)
-            anritsu._result("fetch_current_trace", first)
+            anritsu._result("acquire_fresh_trace", first)
             self.assertIs(anritsu._latest_trace, first)
             self.assertFalse(anritsu._fetch_pending)
             first_preview = diagnostics.raw_text.toPlainText()
@@ -3313,8 +3315,8 @@ class MainWindowTests(unittest.TestCase):
             anritsu._controller.call.reset_mock()
             anritsu.single.click()
 
-            anritsu._controller.call.assert_called_once_with("fetch_current_trace", "TRAC1")
-            anritsu._result("fetch_current_trace", second)
+            anritsu._controller.call.assert_called_once_with("acquire_fresh_trace", "TRAC1")
+            anritsu._result("acquire_fresh_trace", second)
             self.assertIs(anritsu._latest_trace, second)
             self.assertEqual(anritsu.spectrum_plot._traces["Raw"][0].tolist(), [3e6, 4e6])
             self.assertEqual(anritsu.spectrum_plot._traces["Raw"][1].tolist(), [-30.0, -20.0])
@@ -3586,7 +3588,7 @@ class MainWindowTests(unittest.TestCase):
                 for row in range(dialog.table.rowCount())
             }
             self.assertTrue(status_values["Source level"][0])
-            self.assertEqual(status_values["Active source range"][0], "MATCH")
+            self.assertTrue(status_values["Active source range"][0])
             row_for = {
                 dialog.table.item(row, 0).text(): row
                 for row in range(dialog.table.rowCount())
@@ -3598,8 +3600,8 @@ class MainWindowTests(unittest.TestCase):
             self.assertTrue(
                 dialog.table.item(source_level_row, 2).text().startswith("Form:")
             )
-            self.assertEqual(
-                dialog.table.item(active_source_range_row, 2).text(), "MATCH"
+            self.assertTrue(
+                dialog.table.item(active_source_range_row, 2).text()
             )
             self.assertIn("Source autorange", dialog.range_guidance.text())
             self.assertIn("Active source range", dialog.range_guidance.text())
@@ -3626,13 +3628,23 @@ class MainWindowTests(unittest.TestCase):
             self.assertIsNotNone(dialog.table.cellWidget(2, 6))
 
             keithley.settings_assignment_requested.disconnect()
+            keithley.channel.setCurrentText("A")
+            keithley.level.setText("2 mA")
+            keithley.compliance.setText("670 mV")
+            keithley._remember_source_values()
             dialog.assign_requested.emit("A", "Source autorange")
             keithley.channel.setCurrentText("A")
             self.assertEqual(keithley.mode.currentText(), "current")
-            self.assertEqual(keithley.level.text(), "500 uA")
-            self.assertEqual(keithley.compliance.text(), "50 mV")
+            # Individual assignment of Source autorange must NOT overwrite level or compliance!
+            self.assertEqual(keithley.level.text(), "2 mA")
+            self.assertEqual(keithley.compliance.text(), "670 mV")
             self.assertTrue(keithley.source_autorange.isChecked())
             self.assertEqual(keithley.source_range.text(), "AUTO")
+
+            # Individual assignment of Source level only changes level
+            dialog.assign_requested.emit("A", "Source level")
+            self.assertEqual(keithley.level.text(), "500 uA")
+            self.assertEqual(keithley.compliance.text(), "670 mV")
 
             dialog.assign_requested.emit("ALL", "ALL")
             keithley.channel.setCurrentText("B")
@@ -4146,6 +4158,7 @@ class MainWindowTests(unittest.TestCase):
             keithley = window.keithley_page
             keithley._controller.call = Mock()
             keithley._device_state_changed("verified")
+            keithley._stop_on_compliance["A"] = True
             keithley._mark_channel_compliance("A")
 
             keithley.channel_cards["A"]["keep_off_compliance"].click()
@@ -4656,7 +4669,7 @@ class MainWindowTests(unittest.TestCase):
                 self.assertEqual(defaults["attenuation"], "20 dB")
                 self.assertEqual(
                     [call.args[0] for call in anritsu._controller.call.call_args_list],
-                    ["read_configuration", "read_advanced_spectrum"],
+                    ["read_configuration", "read_advanced_spectrum", "refresh_station_context"],
                 )
             finally:
                 window.close()

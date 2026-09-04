@@ -44,7 +44,12 @@ def _dispatch(adapter: DeviceAdapter, operation: str, payload: object) -> object
         return adapter.recover_from_compliance(channel, choice)
     if operation == "set_compliance_policy":
         channel, stop_on_compliance = payload  # type: ignore[misc]
-        return adapter.set_compliance_policy(channel, bool(stop_on_compliance))
+        return adapter.set_compliance_policy(channel, stop_on_compliance)
+    if operation == "update_source_compliance":
+        channel, mode, compliance_si = payload  # type: ignore[misc]
+        return adapter.update_source_compliance(
+            channel, mode=mode, compliance_si=float(compliance_si)
+        )
     if operation == "quick_setpoint":
         if not isinstance(payload, QuickControlCommand):
             raise ValueError("Keithley quick_setpoint requires an explicit-unit command.")

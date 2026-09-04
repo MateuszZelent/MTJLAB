@@ -305,9 +305,25 @@ class KeithleySafety(StrictModel):
     outputs_off_on_connect: bool = True
     outputs_off_on_disconnect: bool = True
     output_off_mode: Literal["normal", "high_impedance", "zero"] = "normal"
-    stop_on_compliance: bool = True
+    stop_on_compliance: bool = False
+    compliance_policy: Literal["stop", "warn_clamp", "skip"] = "warn_clamp"
     stop_on_overpower: bool = True
     channels: dict[Literal["A", "B"], KeithleyChannelSettings]
+
+    @model_validator(mode="before")
+    @classmethod
+    def _reconcile_compliance_defaults(cls, data: Any) -> Any:
+        if isinstance(data, dict):
+            data = dict(data)
+            if "compliance_policy" in data:
+                if "stop_on_compliance" not in data:
+                    data["stop_on_compliance"] = (data["compliance_policy"] == "stop")
+            elif "stop_on_compliance" in data:
+                data["compliance_policy"] = "stop" if data["stop_on_compliance"] else "warn_clamp"
+            else:
+                data["compliance_policy"] = "warn_clamp"
+                data["stop_on_compliance"] = False
+        return data
 
 
 class KeithleySettings(StrictModel):
@@ -392,7 +408,7 @@ class AnritsuAcquisitionSettings(StrictModel):
     single_sweep_mode: Literal["unverified", "standard_scpi_opc"] = "unverified"
     operation_complete_timeout: str = "30 s"
     application_average_count: int = 200
-    live_refresh_interval: str = "500 ms"
+    live_refresh_interval: str = "50 ms"
 
     @model_validator(mode="after")
     def validate_timeout(self) -> "AnritsuAcquisitionSettings":

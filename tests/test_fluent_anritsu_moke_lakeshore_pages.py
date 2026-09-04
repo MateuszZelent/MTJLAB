@@ -606,6 +606,67 @@ class FluentAnritsuAndMokePageTests(unittest.TestCase):
             tracking.rect().right(),
         )
 
+    def test_anritsu_clear_all_spectra_removes_traces_and_resets_buffers_and_controls(self) -> None:
+        self.window._navigate_to("anritsu")
+        self.application.processEvents()
+        page = self.window.anritsu_page
+
+        self.assertFalse(page.clear_all_spectra_button.isEnabled())
+        self.assertFalse(page.clear_spectra_plot_button.isEnabled())
+
+        trace = synthetic_anritsu_peaks()
+        page._show_trace(trace)
+        self.application.processEvents()
+        ref = page._build_reference(trace, kind="single", count=1)
+        page._set_reference(ref)
+        self.application.processEvents()
+
+        self.assertIsNotNone(page._latest_trace)
+        self.assertIsNotNone(page._reference_spectrum)
+        self.assertGreater(page._spectrogram_buffer.row_count, 0)
+        self.assertGreater(page.spectrum_plot.trace_point_count("Raw"), 0)
+        self.assertGreater(page.spectrum_plot.trace_point_count("Reference"), 0)
+        self.assertTrue(page.clear_all_spectra_button.isEnabled())
+        self.assertTrue(page.clear_spectra_plot_button.isEnabled())
+        self.assertTrue(page.clear_reference.isEnabled())
+
+        page.clear_all_spectra(confirm=False)
+        self.application.processEvents()
+
+        self.assertIsNone(page._latest_trace)
+        self.assertIsNone(page._averaged_trace)
+        self.assertIsNone(page._reference_trace)
+        self.assertIsNone(page._reference_spectrum)
+        self.assertEqual(page._spectrogram_buffer.row_count, 0)
+        self.assertEqual(page.spectrum_plot.trace_point_count("Raw"), 0)
+        self.assertEqual(page.spectrum_plot.trace_point_count("Reference"), 0)
+        self.assertFalse(page.clear_all_spectra_button.isEnabled())
+        self.assertFalse(page.clear_spectra_plot_button.isEnabled())
+        self.assertFalse(page.clear_reference.isEnabled())
+        self.assertEqual(page.reference_status.text(), "No reference")
+        self.assertIn("cleared", page.info.text().lower())
+        self.assertIn("Waiting", page.analysis_status.text())
+
+    def test_anritsu_clear_all_spectra_confirmation_dialog(self) -> None:
+        self.window._navigate_to("anritsu")
+        self.application.processEvents()
+        page = self.window.anritsu_page
+
+        trace = synthetic_anritsu_peaks()
+        page._show_trace(trace)
+        self.application.processEvents()
+        self.assertIsNotNone(page._latest_trace)
+
+        with patch.object(QMessageBox, "question", return_value=QMessageBox.StandardButton.No):
+            page.clear_all_spectra_button.click()
+            self.application.processEvents()
+            self.assertIsNotNone(page._latest_trace)
+
+        with patch.object(QMessageBox, "question", return_value=QMessageBox.StandardButton.Yes):
+            page.clear_all_spectra_button.click()
+            self.application.processEvents()
+            self.assertIsNone(page._latest_trace)
+
     def test_anritsu_light_theme_uses_tokenized_surfaces_and_readable_connection_text(self) -> None:
         self.window._navigate_to("anritsu")
         self.window._set_theme_mode("light", persist=False)

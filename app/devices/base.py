@@ -23,6 +23,14 @@ class InstrumentSession(Protocol):
 
     def query(self, command: str) -> str: ...
 
+    def query_binary_values(
+        self,
+        command: str,
+        datatype: str = "f",
+        is_big_endian: bool = False,
+        container: type = list,
+    ) -> list[float]: ...
+
     def close(self) -> object: ...
 
 

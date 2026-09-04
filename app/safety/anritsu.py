@@ -22,6 +22,32 @@ ANRITSU_BASIC_DETECTORS = frozenset({"NORM", "POS", "SAMP", "NEG", "RMS"})
 ANRITSU_CISPR_DETECTORS = frozenset({"QPE", "CAV", "CRMS"})
 ANRITSU_CISPR_OPTIONS = frozenset({"016", "116"})
 
+ANRITSU_DETECTOR_ALIASES: dict[str, str] = {
+    "NRM": "NORM",
+    "NORMAL": "NORM",
+    "NORM": "NORM",
+    "POS": "POS",
+    "POSITIVE": "POS",
+    "SAMP": "SAMP",
+    "SAMPLE": "SAMP",
+    "NEG": "NEG",
+    "NEGATIVE": "NEG",
+    "RMS": "RMS",
+    "QPE": "QPE",
+    "QPEAK": "QPE",
+    "CAV": "CAV",
+    "CAVERAGE": "CAV",
+    "CRMS": "CRMS",
+    "AVP": "AVPOW",
+    "AVPOW": "AVPOW",
+}
+
+
+def normalize_anritsu_detector(detector: str) -> str:
+    """Map instrument detector response (e.g. NRM) or alias to canonical form (NORM)."""
+    cleaned = detector.strip().upper()
+    return ANRITSU_DETECTOR_ALIASES.get(cleaned, cleaned)
+
 
 def validate_anritsu_trace_name(trace: str) -> str:
     """Accept only the explicitly qualified spectrum trace identifier."""
@@ -154,7 +180,7 @@ def validate_anritsu_advanced_spectrum(
             "Anritsu advanced Spectrum Analyzer control is unverified for this firmware."
         )
 
-    normalized_detector = detector.strip().upper()
+    normalized_detector = normalize_anritsu_detector(detector)
     allowed_detectors = set(ANRITSU_BASIC_DETECTORS)
     if ANRITSU_CISPR_OPTIONS.intersection(hardware_options):
         allowed_detectors.update(ANRITSU_CISPR_DETECTORS)

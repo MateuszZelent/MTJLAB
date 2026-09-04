@@ -173,6 +173,35 @@ class _ManagedVisaSession:
         self._emit(f"RX {command!r} after {elapsed_ms:.1f} ms: {displayed}")
         return response
 
+    def query_binary_values(
+        self,
+        command: str,
+        datatype: str = "f",
+        is_big_endian: bool = False,
+        container: type = list,
+    ) -> list[float]:
+        started = time.perf_counter()
+        self._emit(f"TX QUERY_BINARY {command!r}")
+        try:
+            method = getattr(self._session, "query_binary_values", None)
+            if method is not None:
+                result = method(
+                    command,
+                    datatype=datatype,
+                    is_big_endian=is_big_endian,
+                    container=container,
+                )
+            else:
+                raw = self._session.query(command)
+                result = [float(item) for item in raw.split(",") if item.strip()]
+        except Exception as exc:
+            elapsed_ms = (time.perf_counter() - started) * 1000
+            self._emit(f"RX BINARY ERROR {command!r} after {elapsed_ms:.1f} ms: {exc}")
+            raise DeviceError(f"VISA query_binary_values {command!r} failed: {exc}") from exc
+        elapsed_ms = (time.perf_counter() - started) * 1000
+        self._emit(f"RX BINARY {command!r} after {elapsed_ms:.1f} ms: <{len(result)} values>")
+        return result
+
     def close(self) -> None:
         errors: list[Exception] = []
         try:
@@ -310,6 +339,18 @@ class FakeVisaSession:
                         return match.group(1)
             raise DeviceError(f"No fake VISA response is configured for {command!r}.")
         return response(command) if callable(response) else response
+
+    def query_binary_values(
+        self,
+        command: str,
+        datatype: str = "f",
+        is_big_endian: bool = False,
+        container: type = list,
+    ) -> list[float]:
+        if self.closed:
+            raise DeviceError("The fake VISA session is closed.")
+        raw = self.query(command)
+        return [float(item) for item in raw.split(",") if item.strip()]
 
     def close(self) -> None:
         self.closed = True

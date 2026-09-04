@@ -94,10 +94,25 @@ def step_quantity_text(
     return rendered, parse_quantity(rendered, dimension).si_value
 
 
-def render_quantity_si_like(text: str, dimension: str, value_si: float) -> str:
+def render_quantity_si_like(
+    text: str,
+    dimension: str,
+    value_si: float,
+    *,
+    preferred_unit: str | None = None,
+) -> str:
     """Render an SI boundary in the user's current unit and written precision."""
 
     match = _QUANTITY.fullmatch(text)
+    if match is not None:
+        unit = match.group("unit").strip()
+        try:
+            parse_quantity(f"1 {unit}", dimension)
+        except Exception:
+            match = None
+    if match is None and preferred_unit:
+        candidate = f"{text.strip()} {preferred_unit}"
+        match = _QUANTITY.fullmatch(candidate)
     if match is None:
         raise ValueError("Enter a number followed by an explicit unit.")
     unit = match.group("unit").strip()

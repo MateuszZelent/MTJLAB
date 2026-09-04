@@ -131,11 +131,18 @@ class StationSafetyStrip(QWidget):
             self._layout.setColumnStretch(2, 2)
             self._layout.setColumnStretch(3, 2)
         else:
-            for column, widget in enumerate(widgets[:-2]):
-                self._layout.addWidget(widget, 0, column)
-                self._layout.setColumnStretch(column, 1 if column < 4 else 2)
+            self._layout.addWidget(self.readiness, 0, 0)
+            self._layout.addWidget(self.outputs, 0, 1)
+            self._layout.addWidget(self.mode, 0, 2)
+            self._layout.addWidget(self.actor, 0, 3)
             self._layout.addWidget(self.save_settings, 0, 4)
             self._layout.addWidget(self.estop, 0, 5)
+            self._layout.setColumnStretch(0, 1)
+            self._layout.setColumnStretch(1, 1)
+            self._layout.setColumnStretch(2, 1)
+            self._layout.setColumnStretch(3, 3)
+            self._layout.setColumnStretch(4, 0)
+            self._layout.setColumnStretch(5, 1)
 
     def update_snapshot(self, snapshot: StationSafetySnapshot) -> None:
         """Synchronously render ``snapshot`` without performing station actions."""
@@ -155,7 +162,9 @@ class StationSafetyStrip(QWidget):
         )
         self.mode.setText("SIMULATION" if snapshot.simulation else "HARDWARE")
         roles = ", ".join(snapshot.roles) or "no role"
-        self.actor.setText(f"{snapshot.actor} · {roles}")
+        actor_text = f"{snapshot.actor} · {roles}"
+        self.actor.setText(actor_text)
+        self.actor.setToolTip(actor_text)
 
         for widget in (self.readiness, self.outputs):
             widget.style().unpolish(widget)

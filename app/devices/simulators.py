@@ -84,6 +84,27 @@ class _FaultInjectingSession:
             return "MALFORMED_RESPONSE"
         return self._session.query(command)
 
+    def query_binary_values(
+        self,
+        command: str,
+        datatype: str = "f",
+        is_big_endian: bool = False,
+        container: type = list,
+    ) -> list[float]:
+        self._inject(command)
+        if self._matches(command, self._fault.malformed_response_prefixes):
+            return []
+        method = getattr(self._session, "query_binary_values", None)
+        if method is not None:
+            return method(
+                command,
+                datatype=datatype,
+                is_big_endian=is_big_endian,
+                container=container,
+            )
+        raw = self.query(command)
+        return [float(item) for item in raw.split(",") if item.strip()]
+
     def close(self) -> object:
         return self._session.close()
 
@@ -123,6 +144,17 @@ class _BaseSimulator:
         if normalized.upper().lstrip(":") == "SYST:ERR?":
             return self.error_queue.pop(0) if self.error_queue else "0,No error"
         return self._query(normalized)
+
+    def query_binary_values(
+        self,
+        command: str,
+        datatype: str = "f",
+        is_big_endian: bool = False,
+        container: type = list,
+    ) -> list[float]:
+        self._assert_open()
+        raw = self.query(command)
+        return [float(item) for item in raw.split(",") if item.strip()]
 
     def close(self) -> None:
         self.closed = True
@@ -623,6 +655,8 @@ class AnritsuSimulator(_BaseSimulator):
         self.rbw_hz = 1e3
         self.vbw_auto = True
         self.vbw_hz: float | None = 1e3
+        self.vbw_mode = "VID"
+        self.average_count = 10
         self.detector = "NORM"
         self.attenuation_auto = True
         self.attenuation_db = 10.0
@@ -695,13 +729,26 @@ class AnritsuSimulator(_BaseSimulator):
             self.vbw_auto = False
             self.vbw_hz = None
             return
+        vbw_mode = re.match(r"^BAND:VID:MODE\s+(VID|POW)$", command, re.IGNORECASE)
+        if vbw_mode:
+            self.vbw_mode = vbw_mode.group(1).upper()
+            return
+        avg_count = re.match(r"^AVER:COUN\s+(\d+)$", command, re.IGNORECASE)
+        if avg_count:
+            self.average_count = int(avg_count.group(1))
+            return
+        if re.match(r"^(?:TRAC\d*:TYPE|TRAC:TYPE\s+\d+,)\s*(?:WRIT|VIEW)$", command, re.IGNORECASE):
+            return
+        if re.match(r"^FORM(?::BORD)?\s+", command, re.IGNORECASE):
+            return
         detector = re.match(
-            r"^DET\s+(NORM|POS|SAMP|NEG|RMS|QPE|CAV|CRMS)$",
+            r"^DET\s+(NORM|POS|SAMP|NEG|RMS|QPE|CAV|CRMS|NRM)$",
             command,
             re.IGNORECASE,
         )
         if detector:
-            self.detector = detector.group(1).upper()
+            raw_detector = detector.group(1).upper()
+            self.detector = "NORM" if raw_detector == "NRM" else raw_detector
             return
         attenuation = re.match(
             rf"^POW:ATT\s+({_SCPI_NUMBER})(?:DB)?$", command, re.IGNORECASE
@@ -792,6 +839,16 @@ class AnritsuSimulator(_BaseSimulator):
             return f"{self.rbw_hz:.12g}"
         if command == "BAND:VID?":
             return "OFF" if self.vbw_hz is None else f"{self.vbw_hz:.12g}"
+        if command == "BAND:VID:MODE?":
+            return self.vbw_mode
+        if command == "AVER:COUN?":
+            return str(self.average_count)
+        if command == "FREQ:CENT?":
+            return f"{(self.start_hz + self.stop_hz) / 2:.12g}"
+        if command == "FREQ:SPAN?":
+            return f"{self.stop_hz - self.start_hz:.12g}"
+        if re.match(r"^TRAC:TYPE\?", command, re.IGNORECASE):
+            return "WRIT"
         if command == "DET?":
             return self.detector
         if command == "POW:ATT?":

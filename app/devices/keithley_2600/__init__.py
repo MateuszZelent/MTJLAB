@@ -5,6 +5,7 @@ from typing import Any
 from app.devices.keithley_2600.adapter import (
     KeithleyAdapter,
     KeithleyChannelConfigurationReadback,
+    KeithleyCompliancePolicy,
     KeithleyConfigurationReadback,
     KeithleyOutputOffModeResult,
     KeithleyRampRequest,
@@ -17,6 +18,7 @@ __all__ = [
     "MODULE",
     "KeithleyAdapter",
     "KeithleyChannelConfigurationReadback",
+    "KeithleyCompliancePolicy",
     "KeithleyConfigurationReadback",
     "KeithleyOutputOffModeResult",
     "KeithleyRampRequest",

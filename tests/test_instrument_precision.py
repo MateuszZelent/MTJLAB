@@ -183,6 +183,27 @@ class InstrumentPrecisionTests(unittest.TestCase):
             self.assertEqual(fmt(1.5), "1.5 V")
             self.assertEqual(fmt(0.0), "0 V")
 
+    def test_rigol_configure_dc_waveform_sets_offset(self) -> None:
+        session = RigolSimulator()
+        adapter = RigolAdapter(
+            simulation_settings(),
+            session_factory=FakeVisaSessionFactory(session),
+        )
+        adapter.connect()
+        adapter.configure_channel(
+            RigolChannelConfig(
+                channel=1,
+                waveform="DC",
+                frequency_hz=1.0,
+                high_level_v=0.007,
+                low_level_v=0.007,
+            )
+        )
+        self.assertIn(":SOUR1:APPL:DC 0.007", session.commands)
+        self.assertIn(":SOUR1:VOLT:OFFS 0.007", session.commands)
+        self.assertNotIn(":SOUR1:APPL:DC DEF,DEF,0.007", session.commands)
+        self.assertEqual(session.query(":SOUR1:VOLT:OFFS?"), "0.007")
+
 
 if __name__ == "__main__":
     unittest.main()

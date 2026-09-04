@@ -11,6 +11,7 @@ from PySide6.QtWidgets import QHBoxLayout, QVBoxLayout, QWidget
 from qfluentwidgets import CaptionLabel, LineEdit, Slider, StrongBodyLabel
 
 from app.domain.quick_controls import (
+    _QUANTITY,
     quantity_step_si,
     render_quantity_si_like,
 )
@@ -227,12 +228,27 @@ class QuickQuantitySlider(QWidget):
             self._syncing = False
 
     def set_value_si(self, value_si: float) -> None:
+        preferred_unit: str | None = None
+        match = _QUANTITY.fullmatch(self.value.text())
+        if match is not None:
+            preferred_unit = match.group("unit").strip()
+        if not preferred_unit:
+            default_match = _QUANTITY.fullmatch(self.descriptor.default_text)
+            if default_match is not None:
+                preferred_unit = default_match.group("unit").strip()
         try:
             text = render_quantity_si_like(
-                self.value.text(), self.descriptor.dimension, value_si
+                self.value.text(),
+                self.descriptor.dimension,
+                value_si,
+                preferred_unit=preferred_unit,
             )
         except ValueError:
-            text = format_quantity_auto(value_si, self.descriptor.dimension)
+            text = format_quantity_auto(
+                value_si,
+                self.descriptor.dimension,
+                preferred_unit=preferred_unit,
+            )
         self.set_value_text(text)
 
     def value_si(self) -> float:

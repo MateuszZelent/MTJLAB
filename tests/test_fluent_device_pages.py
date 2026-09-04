@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import os
 import unittest
+from unittest.mock import Mock
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
@@ -352,4 +353,165 @@ class FluentDevicePageTests(unittest.TestCase):
         finally:
             window.close()
             self.application.processEvents()
+
+    def test_keithley_form_editing_live_control_channel_a_and_b(self) -> None:
+        window = MainWindow(".config/settings.yml", simulation=True)
+        try:
+            window.resize(1360, 880)
+            window.show()
+            window._navigate_to("keithley")
+            self.application.processEvents()
+
+            keithley = window.keithley_page
+            self.assertTrue(keithley.live_control_switch.isVisibleTo(window))
+            self.assertFalse(keithley.live_control_switch.isChecked())
+            self.assertEqual(keithley.live_control_switch.text, "Live control")
+            self.assertFalse(keithley.live_control_enabled)
+            self.assertFalse(keithley._is_device_connected())
+
+            emitted_signals: list[tuple[str, str]] = []
+            keithley.quick_setpoint_requested.connect(
+                lambda target, text: emitted_signals.append((target, text))
+            )
+
+            # Disconnected: edits with live control OFF do not emit
+            keithley.level.setText("2 mA")
+            keithley.level.editingFinished.emit()
+            self.application.processEvents()
+            self.assertEqual(emitted_signals, [])
+
+            # Disconnected: edits with live control ON do not emit or crash
+            keithley.set_live_control_enabled(True)
+            self.assertTrue(keithley.live_control_enabled)
+            keithley.level.setText("3 mA")
+            keithley.level.editingFinished.emit()
+            self.application.processEvents()
+            self.assertEqual(emitted_signals, [])
+
+            # Reset live control to OFF
+            keithley.set_live_control_enabled(False)
+            self.assertFalse(keithley.live_control_enabled)
+
+            # Simulate connected with OUTPUT OFF
+            keithley._device_state_changed("OUTPUT_OFF")
+            self.assertTrue(keithley._is_device_connected())
+
+            # With live control OFF and OUTPUT OFF, edits do not send
+            keithley.level.setText("1.2 mA")
+            keithley.level.editingFinished.emit()
+            self.application.processEvents()
+            self.assertEqual(emitted_signals, [])
+
+            # Turn live control ON with OUTPUT OFF: Channel B edit immediately dispatches
+            keithley.set_live_control_enabled(True)
+            self.assertTrue(keithley.live_control_enabled)
+            keithley.level.setText("1.5 mA")
+            keithley.level.editingFinished.emit()
+            self.application.processEvents()
+            self.assertEqual(emitted_signals[-1], ("keithley.B.current", "1.5 mA"))
+
+            # Simulate OUTPUT ON on Channel B: live control edit dispatches live setpoint
+            keithley._device_state_changed("OUTPUT_ON")
+            keithley._set_channel_output("B", True)
+            keithley.level.setText("2.2 mA")
+            keithley.level.editingFinished.emit()
+            self.application.processEvents()
+            self.assertEqual(emitted_signals[-1], ("keithley.B.current", "2.2 mA"))
+
+            # Switch to Channel A: OUTPUT is OFF
+            keithley.channel.setCurrentText("A")
+            self.application.processEvents()
+            self.assertEqual(keithley.channel.currentText(), "A")
+
+            # Channel A edit with OUTPUT OFF immediately dispatches
+            keithley.level.setText("800 uA")
+            keithley.level.editingFinished.emit()
+            self.application.processEvents()
+            self.assertEqual(emitted_signals[-1], ("keithley.A.current", "800 uA"))
+
+            # Simulate Channel A OUTPUT ON: Channel A edit dispatches live setpoint
+            keithley._set_channel_output("A", True)
+            keithley.level.setText("950 uA")
+            keithley.level.editingFinished.emit()
+            self.application.processEvents()
+            self.assertEqual(emitted_signals[-1], ("keithley.A.current", "950 uA"))
+
+            # Compliance edit with OUTPUT ON: dispatches update_source_compliance
+            original_call = keithley._controller.call
+            keithley._controller.call = Mock()
+            try:
+                keithley.compliance.setText("60 mV")
+                keithley.compliance.editingFinished.emit()
+                self.application.processEvents()
+                keithley._controller.call.assert_called_with(
+                    "update_source_compliance", ("A", "current", 0.06)
+                )
+                self.assertIn("update_source_compliance", keithley._pending_channels)
+            finally:
+                keithley._controller.call = original_call
+
+            # Switch back to Channel B with OUTPUT OFF: compliance edit dispatches configure
+            keithley.channel.setCurrentText("B")
+            keithley._set_channel_output("B", False)
+            self.application.processEvents()
+            before_count = len(emitted_signals)
+            keithley.compliance.setText("45 mV")
+            keithley.compliance.editingFinished.emit()
+            self.application.processEvents()
+            self.assertGreater(len(emitted_signals), before_count)
+            self.assertEqual(emitted_signals[-1][0], "keithley.B.current")
+        finally:
+            window.close()
+            self.application.processEvents()
+
+    def test_keithley_read_configuration_button_remains_stable_and_does_not_blink(self) -> None:
+        """Read configuration button must stay enabled and never flicker during live measurements."""
+
+        window = MainWindow(".config/settings.yml", simulation=True)
+        try:
+            window.resize(1360, 880)
+            window.show()
+            window._navigate_to("keithley")
+            self.application.processEvents()
+
+            keithley = window.keithley_page
+            keithley._device_state_changed("OUTPUT_OFF")
+            self.application.processEvents()
+            self.assertTrue(keithley.read_configuration_button.isEnabled())
+
+            # Track calls to setEnabled on read_configuration_button
+            disabled_calls = []
+            orig_set_enabled = keithley.read_configuration_button.setEnabled
+
+            def tracking_set_enabled(val: bool) -> None:
+                if not val:
+                    disabled_calls.append(val)
+                orig_set_enabled(val)
+
+            keithley.read_configuration_button.setEnabled = tracking_set_enabled
+
+            # Simulate live measurement running: _measure_pending becomes True
+            keithley._measure_pending = True
+            keithley._update_output_readiness()
+            self.assertTrue(keithley.read_configuration_button.isEnabled())
+            self.assertEqual(len(disabled_calls), 0, "Button was disabled when measure was pending!")
+
+            # Simulate arrow stepping while measurement is pending
+            from PySide6.QtCore import QEvent
+            from PySide6.QtGui import QKeyEvent
+            from app.ui.common.precision_stepper import install_precision_arrow_stepper
+
+            install_precision_arrow_stepper(self.application)
+            keithley.level.setText("1 mA")
+            down = QKeyEvent(QEvent.Type.KeyPress, Qt.Key.Key_Down, Qt.KeyboardModifier.NoModifier)
+            self.application.sendEvent(keithley.level, down)
+            self.application.processEvents()
+
+            # Verify button never disabled or flickered
+            self.assertEqual(len(disabled_calls), 0, "Button flickered during arrow stepping!")
+            self.assertTrue(keithley.read_configuration_button.isEnabled())
+        finally:
+            window.close()
+            self.application.processEvents()
+
 

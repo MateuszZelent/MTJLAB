@@ -251,7 +251,7 @@ QUICK_CONTROL_DESCRIPTORS: Final[tuple[QuickControlDescriptor, ...]] = (
             "keithley",
             f"Keithley {channel} · {mode.title()}",
             DIMENSION_CURRENT if mode == "current" else DIMENSION_VOLTAGE,
-            "0.000 A" if mode == "current" else "0.000 V",
+            "0.000 mA" if mode == "current" else "0.000 mV",
             f"keithley.{channel}.source",
         )
         for channel in ("A", "B")

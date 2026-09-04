@@ -925,3 +925,46 @@ finally:
             window._set_device_pages_execution_read_only(False)
             window.close()
             self.application.processEvents()
+
+    def test_workspace_command_bar_actions_synchronize_with_panels_and_buttons(self) -> None:
+        window = MainWindow(".config/settings.yml", simulation=True)
+        try:
+            window.resize(1100, 800)
+            window.show()
+            window._navigate_to("sweeps")
+            self.application.processEvents()
+
+            page = window.recipe_page
+            cb = page.recipe_command_bar
+
+            def command_bar_buttons() -> dict[str, object]:
+                buttons = {}
+                for btn in cb.findChildren(object):
+                    if hasattr(btn, "text") and btn.text() in ("Library", "Inspector"):
+                        buttons[btn.text()] = btn
+                return buttons
+
+            buttons = command_bar_buttons()
+            self.assertIn("Library", buttons)
+            self.assertIn("Inspector", buttons)
+
+            # At width 1100, library is visible (>= 760) but inspector is hidden (< 1200)
+            self.assertTrue(page.library_panel.isVisible())
+            self.assertFalse(page.inspector_panel.isVisible())
+            self.assertTrue(page.library_visibility_action.isChecked())
+            self.assertFalse(page.inspector_visibility_action.isChecked())
+            self.assertTrue(buttons["Library"].isChecked())
+            self.assertFalse(buttons["Inspector"].isChecked())
+
+            # Resize to 1600: both panels should become visible and buttons checked
+            window.resize(1600, 950)
+            self.application.processEvents()
+            self.assertTrue(page.library_panel.isVisible())
+            self.assertTrue(page.inspector_panel.isVisible())
+            self.assertTrue(page.library_visibility_action.isChecked())
+            self.assertTrue(page.inspector_visibility_action.isChecked())
+            self.assertTrue(buttons["Library"].isChecked())
+            self.assertTrue(buttons["Inspector"].isChecked())
+        finally:
+            window.close()
+            self.application.processEvents()

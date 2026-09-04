@@ -196,7 +196,12 @@ _AUTO_DISPLAY_UNITS: Final[dict[str, tuple[str, ...]]] = {
 }
 
 
-def format_quantity_auto(value_si: float, dimension: str, precision: int = 9) -> str:
+def format_quantity_auto(
+    value_si: float,
+    dimension: str,
+    precision: int = 9,
+    preferred_unit: str | None = None,
+) -> str:
     """Format an SI value using a readable engineering unit for its dimension."""
 
     if not math.isfinite(value_si):
@@ -210,6 +215,13 @@ def format_quantity_auto(value_si: float, dimension: str, precision: int = 9) ->
         return quantity.format(units[0], precision)
     magnitude = abs(value_si)
     if magnitude == 0:
+        if preferred_unit is not None:
+            try:
+                definition = _unit_definition(preferred_unit)
+                if definition.dimension == dimension:
+                    return quantity.format(preferred_unit, precision)
+            except (KeyError, QuantityError):
+                pass
         base_unit = next((unit for unit in units if _unit_definition(unit).scale == 1.0), units[-1])
         return quantity.format(base_unit, precision)
     selected = units[-1]
