@@ -245,7 +245,7 @@ class KeithleyConfigurationPanel(CardWidget):
         field = LimitField(editor, *self.limit_values(key))
         field.setProperty("limitKey", key)
         for badge in (field.minimum, field.maximum):
-            badge.setMinimumWidth(56)
+            badge.setMinimumWidth(88)
             badge.setProperty("keithleyCompact", True)
         field.edit_button.setFixedSize(44, 28)
         field.edit_button.setText("Edit")
@@ -1673,7 +1673,7 @@ class KeithleyPage(QWidget):
         )
         self.source_scroll = source_scroll
         source_scroll.setObjectName("keithleyControlPanel")
-        source_scroll.setMinimumWidth(390)
+        source_scroll.setMinimumWidth(430)
         history_tab = QWidget()
         self.history_layout = QHBoxLayout(history_tab)
         self.history_layout.setContentsMargins(6, 0, 0, 0)
@@ -1692,7 +1692,7 @@ class KeithleyPage(QWidget):
         self.workspace_splitter.addWidget(history_tab)
         self.workspace_splitter.setStretchFactor(0, 3)
         self.workspace_splitter.setStretchFactor(1, 7)
-        self.workspace_splitter.setSizes([420, 980])
+        self.workspace_splitter.setSizes([450, 910])
         self.workspace_splitter.setChildrenCollapsible(False)
         self._workspace_compact: bool | None = None
         layout.addWidget(self.workspace_splitter, 1)
@@ -2291,11 +2291,11 @@ class KeithleyPage(QWidget):
 
     def resizeEvent(self, event: QResizeEvent) -> None:
         super().resizeEvent(event)
-        compact = event.size().width() < 1120
+        compact = event.size().width() < 1000
         if self._workspace_compact == compact:
             return
         self._workspace_compact = compact
-        self.source_scroll.setMinimumWidth(0 if compact else 390)
+        self.source_scroll.setMinimumWidth(0 if compact else 430)
         self.keithley_form.setRowWrapPolicy(
             QFormLayout.RowWrapPolicy.WrapAllRows
             if compact
@@ -2310,7 +2310,7 @@ class KeithleyPage(QWidget):
             else QBoxLayout.Direction.LeftToRight
         )
         self.workspace_splitter.setSizes(
-            [380, 420] if compact else [420, 980]
+            [380, 420] if compact else [450, 910]
         )
 
     def _register_detachable_panel(
@@ -4142,9 +4142,9 @@ class KeithleyPage(QWidget):
         field = LimitField(editor, *self._keithley_limit_values(key))
         field.setProperty("limitKey", key)
         for badge in (field.minimum, field.maximum):
-            badge.setMinimumWidth(68)
+            badge.setMinimumWidth(88)
             badge.setProperty("keithleyCompact", True)
-        field.edit_button.setFixedSize(48, 28)
+        field.edit_button.setFixedSize(44, 28)
         field.edit_button.setText("Edit")
         if key in {"source_range", "measure_voltage_range", "measure_current_range"}:
             field.edit_button.hide()

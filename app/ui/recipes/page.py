@@ -24,7 +24,6 @@ from PySide6.QtGui import (
     QPainter,
     QPixmap,
     QShortcut,
-    QShowEvent,
     QWheelEvent,
 )
 from PySide6.QtWidgets import (
@@ -714,7 +713,6 @@ class RecipePage(QWidget):
         self._workspace_layout_updating = False
         self._workspace_user_resized = False
         self._last_workspace_layout_width = -1
-        self._syncing_workspace_actions = False
         self._workspace_visibility_override: dict[str, bool | None] = {
             "library": None,
             "inspector": None,
@@ -997,8 +995,6 @@ class RecipePage(QWidget):
             self._workspace_user_resized = True
 
     def _set_workspace_panel_visible(self, panel: str, visible: bool) -> None:
-        if getattr(self, "_syncing_workspace_actions", False):
-            return
         self._workspace_visibility_override[panel] = visible
         widget = (
             getattr(self, "library_panel", None)
@@ -1032,26 +1028,6 @@ class RecipePage(QWidget):
         show_library = (
             available >= 760 if library_override is None else library_override
         )
-        self._syncing_workspace_actions = True
-        try:
-            for action, widget, visible in (
-                (
-                    self.library_visibility_action,
-                    self.library_panel,
-                    show_library,
-                ),
-                (
-                    self.inspector_visibility_action,
-                    self.inspector_panel,
-                    show_inspector,
-                ),
-            ):
-                if action.isChecked() != visible:
-                    action.setChecked(visible)
-                if widget.isVisible() != visible:
-                    widget.setVisible(visible)
-        finally:
-            self._syncing_workspace_actions = False
         if not show_library:
             sizes = [0, available, 0]
         elif not show_inspector:
@@ -1076,10 +1052,6 @@ class RecipePage(QWidget):
                 self.workspace_splitter.setSizes(sizes)
             finally:
                 self._workspace_layout_updating = False
-
-    def showEvent(self, event: QShowEvent) -> None:
-        super().showEvent(event)
-        self._update_workspace_layout(force=True)
 
     def resizeEvent(self, event: object) -> None:
         super().resizeEvent(event)  # type: ignore[arg-type]

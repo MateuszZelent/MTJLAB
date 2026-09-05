@@ -1067,7 +1067,7 @@ class MainWindow(FluentWindow):
                 replacement["min"] = self._coerce_limit_value(dialog.minimum.text(), minimum)
                 if maximum_enabled:
                     replacement["max"] = self._coerce_limit_value(dialog.maximum.text(), maximum)
-                if device != "keithley" and "max_abs" in replacement and maximum_enabled:
+                if "max_abs" in replacement and maximum_enabled:
                     replacement["max_abs"] = self._synchronised_max_abs(
                         replacement["min"],
                         replacement["max"],
@@ -1213,13 +1213,6 @@ class MainWindow(FluentWindow):
             self.shell_splitter.restoreState(content_splitter)
         if splitter is not None:
             self.anritsu_page.workspace_splitter.restoreState(splitter)
-        recipe_splitter = settings.value("recipes/workspace_splitter")
-        if (
-            recipe_splitter is not None
-            and hasattr(self, "recipe_page")
-            and hasattr(self.recipe_page, "workspace_splitter")
-        ):
-            self.recipe_page.workspace_splitter.restoreState(recipe_splitter)
         route = str(settings.value("main_window/current_route", "overview"))
         if route not in self.navigation_routes:
             route = "overview"
@@ -1235,11 +1228,6 @@ class MainWindow(FluentWindow):
         settings.remove("main_window/navigation_expanded")
         settings.setValue("main_window/current_route", self._current_route())
         settings.setValue("anritsu/splitter", self.anritsu_page.workspace_splitter.saveState())
-        if hasattr(self, "recipe_page") and hasattr(self.recipe_page, "workspace_splitter"):
-            settings.setValue(
-                "recipes/workspace_splitter",
-                self.recipe_page.workspace_splitter.saveState(),
-            )
 
     def _connect_controllers(self) -> None:
         for name, controller in self._controllers.items():

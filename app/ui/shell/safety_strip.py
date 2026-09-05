@@ -162,9 +162,6 @@ class StationSafetyStrip(QWidget):
         )
         self.mode.setText("SIMULATION" if snapshot.simulation else "HARDWARE")
         roles = ", ".join(snapshot.roles) or "no role"
-        actor_text = f"{snapshot.actor} · {roles}"
-        self.actor.setText(actor_text)
-        self.actor.setToolTip(actor_text)
 
         for widget in (self.readiness, self.outputs):
             widget.style().unpolish(widget)

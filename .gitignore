@@ -25,3 +25,4 @@ recipes/*
 .tmp-characterization/20260903T115022.922794Z_responsiveness.csv
 *.csv
 *.h5
+docs/

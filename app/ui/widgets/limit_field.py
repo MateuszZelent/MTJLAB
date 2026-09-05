@@ -53,7 +53,9 @@ class LimitField(QWidget):
         layout.setContentsMargins(0, 0, 0, 0)
         layout.setSpacing(3)
         row = QHBoxLayout()
-        row.setSpacing(8)
+        row.setSpacing(6)
+        if isinstance(editor, QLineEdit):
+            editor.setMinimumWidth(65)
         row.addWidget(editor, 1)
         self.minimum = BodyLabel()
         self.maximum = BodyLabel()
