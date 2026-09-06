@@ -5,6 +5,7 @@ from __future__ import annotations
 import math
 
 from PySide6.QtCore import Qt, Signal
+from PySide6.QtGui import QBrush, QColor, QFont, QMouseEvent, QPainter, QPen
 from PySide6.QtWidgets import (
     QFormLayout,
     QHBoxLayout,
@@ -15,11 +16,13 @@ from PySide6.QtWidgets import (
 )
 from qfluentwidgets import (
     BodyLabel,
+    FluentIcon,
     LineEdit,
     PlainTextEdit,
     PrimaryPushButton,
     PushButton,
     StrongBodyLabel,
+    isDarkTheme,
 )
 from app.safety.keithley_limit_reconciliation import KeithleyLimitProposal
 from app.ui.dialogs import StationDialog
@@ -38,16 +41,208 @@ from app.domain.quantities import (
 from app.domain.quick_controls import _QUANTITY, render_quantity_si_like
 
 
+class SafetyRangePill(QWidget):
+    """Compact graphical safety-range pill displaying interval [min … max] and live setpoint gauge."""
+
+    clicked = Signal()
+
+    def __init__(self, field: LimitField, parent: QWidget | None = None) -> None:
+        super().__init__(parent)
+        self._field = field
+        self._minimum_value = field._minimum_value
+        self._maximum_value = field._maximum_value
+        self._is_hovered = False
+        self.setMinimumWidth(165)
+        self.setFixedHeight(30)
+        self.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.setObjectName("safetyRangePill")
+
+        if isinstance(field.editor, QLineEdit):
+            field.editor.textChanged.connect(self._on_editor_changed)
+
+    def set_limits(self, minimum: object, maximum: object) -> None:
+        self._minimum_value = minimum
+        self._maximum_value = maximum
+        self._update_tooltip()
+        self.update()
+
+    def _on_editor_changed(self, _text: str) -> None:
+        self._update_tooltip()
+        self.update()
+
+    def enterEvent(self, event) -> None:
+        self._is_hovered = True
+        self.update()
+        super().enterEvent(event)
+
+    def leaveEvent(self, event) -> None:
+        self._is_hovered = False
+        self.update()
+        super().leaveEvent(event)
+
+    def mousePressEvent(self, event: QMouseEvent) -> None:
+        if event.button() == Qt.MouseButton.LeftButton:
+            self.clicked.emit()
+        super().mousePressEvent(event)
+
+    def _interval_text(self) -> str:
+        min_val = self._minimum_value
+        max_val = self._maximum_value
+        if min_val is None or max_val is None:
+            return "[Not Set]"
+        min_str = str(min_val).strip()
+        max_str = str(max_val).strip()
+        if min_str.upper() in {"DISABLED", "N/A"}:
+            return f"[{min_str}]"
+        return f"[{min_str} … {max_str}]"
+
+    def _update_tooltip(self) -> None:
+        min_str = "NOT SET" if self._minimum_value is None else str(self._minimum_value)
+        max_str = "NOT SET" if self._maximum_value is None else str(self._maximum_value)
+        parsed = self._field._quantity_values()
+        if parsed is not None and parsed[1] is not None and parsed[2] is not None:
+            cur, mn, mx, _ = parsed
+            if mx > mn:
+                pct = (cur - mn) / (mx - mn) * 100
+                if cur < mn:
+                    status = f"⚠️ Value below MIN ({mn:.4g})"
+                elif cur > mx:
+                    status = f"⚠️ Value exceeds MAX ({mx:.4g})"
+                else:
+                    status = f"✓ Safe setpoint ({pct:.0f}% of range)"
+                self.setToolTip(
+                    f"Configured Safety Envelope:\n"
+                    f"  Range: [{min_str} … {max_str}]\n"
+                    f"  Status: {status}\n\n"
+                    f"Click to edit laboratory safety limits…"
+                )
+                return
+        self.setToolTip(
+            f"Configured Safety Envelope: [{min_str} … {max_str}]\n"
+            f"Click to edit laboratory safety limits…"
+        )
+
+    def paintEvent(self, event) -> None:
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+
+        w = self.width()
+        h = self.height()
+        dark = isDarkTheme()
+
+        parsed = self._field._quantity_values()
+        has_gauge = (
+            parsed is not None
+            and parsed[1] is not None
+            and parsed[2] is not None
+            and parsed[2] > parsed[1]
+        )
+
+        fraction: float | None = None
+        is_violation = False
+        if has_gauge and parsed is not None:
+            cur, mn, mx, _ = parsed
+            if mx is not None and mn is not None and mx > mn:
+                fraction = (cur - mn) / (mx - mn)
+                is_violation = cur < mn or cur > mx
+
+        # Color scheme
+        if dark:
+            bg_color = QColor(48, 20, 20) if is_violation else (QColor(48, 48, 54) if self._is_hovered else QColor(36, 36, 40))
+            border_color = QColor(239, 68, 68) if is_violation else (QColor(0, 153, 255) if self._is_hovered else QColor(58, 58, 64))
+            text_color = QColor(248, 113, 113) if is_violation else QColor(230, 230, 235)
+            track_color = QColor(255, 255, 255, 28)
+            zero_color = QColor(255, 255, 255, 75)
+        else:
+            bg_color = QColor(254, 242, 242) if is_violation else (QColor(241, 245, 249) if self._is_hovered else QColor(248, 250, 252))
+            border_color = QColor(239, 68, 68) if is_violation else (QColor(0, 120, 212) if self._is_hovered else QColor(218, 224, 233))
+            text_color = QColor(220, 38, 38) if is_violation else QColor(30, 41, 59)
+            track_color = QColor(0, 0, 0, 25)
+            zero_color = QColor(0, 0, 0, 60)
+
+        # Draw rounded pill container
+        pen = QPen(border_color, 1.2 if (self._is_hovered or is_violation) else 1.0)
+        painter.setPen(pen)
+        painter.setBrush(QBrush(bg_color))
+        painter.drawRoundedRect(1, 1, w - 2, h - 2, 6.0, 6.0)
+
+        # Draw interval text
+        text_rect = self.rect().adjusted(6, 0 if not has_gauge else -2, -6, 0 if not has_gauge else -8)
+        font = painter.font()
+        font.setPointSize(9)
+        font.setWeight(QFont.Weight.DemiBold if is_violation else QFont.Weight.Medium)
+        painter.setFont(font)
+        painter.setPen(text_color)
+        painter.drawText(text_rect, Qt.AlignmentFlag.AlignCenter, self._interval_text())
+
+        # Draw micro range gauge
+        if has_gauge and parsed is not None and fraction is not None:
+            _, mn, mx, _ = parsed
+            if mn is not None and mx is not None:
+                track_x = 14
+                track_w = w - 28
+                track_y = h - 6
+                track_h = 3
+
+                # Background track
+                painter.setPen(Qt.PenStyle.NoPen)
+                painter.setBrush(QBrush(track_color))
+                painter.drawRoundedRect(track_x, track_y, track_w, track_h, 1.5, 1.5)
+
+                # Zero tick (if bipolar range crosses zero)
+                if mn < 0 < mx:
+                    zero_frac = -mn / (mx - mn)
+                    zero_x = int(track_x + zero_frac * track_w)
+                    painter.setPen(QPen(zero_color, 1))
+                    painter.drawLine(zero_x, track_y - 1, zero_x, track_y + track_h + 1)
+
+                # Marker position
+                clamped_frac = max(0.0, min(1.0, fraction))
+                marker_x = track_x + clamped_frac * track_w
+
+                # Fill segment
+                ref_frac = max(0.0, min(1.0, -mn / (mx - mn))) if (mn < 0 < mx) else 0.0
+                ref_x = track_x + ref_frac * track_w
+                fill_x = min(ref_x, marker_x)
+                fill_w = max(abs(marker_x - ref_x), 1.0)
+
+                fill_color = QColor(239, 68, 68, 160) if is_violation else (
+                    QColor(2, 132, 199, 140) if dark else QColor(0, 120, 212, 120)
+                )
+                painter.setPen(Qt.PenStyle.NoPen)
+                painter.setBrush(QBrush(fill_color))
+                painter.drawRoundedRect(fill_x, track_y, fill_w, track_h, 1.0, 1.0)
+
+                # Setpoint marker dot
+                dot_color = QColor(239, 68, 68) if is_violation else (
+                    QColor(245, 158, 11) if (clamped_frac in {0.0, 1.0}) else (
+                        QColor(14, 165, 233) if dark else QColor(2, 132, 199)
+                    )
+                )
+                painter.setBrush(QBrush(dot_color))
+                dot_border = QColor(255, 255, 255, 200) if dark else QColor(255, 255, 255, 220)
+                painter.setPen(QPen(dot_border, 1))
+                painter.drawEllipse(int(marker_x - 3), int(track_y - 1.5), 6, 6)
+
+
 class LimitField(QWidget):
     """A value editor with an always-visible configured MIN/MAX range."""
 
     edit_requested = Signal()
 
-    def __init__(self, editor: QWidget, minimum: object = None, maximum: object = None) -> None:
+    def __init__(
+        self,
+        editor: QWidget,
+        minimum: object = None,
+        maximum: object = None,
+        *,
+        range_mode: bool = False,
+    ) -> None:
         super().__init__()
         self.editor = editor
         self._minimum_value = minimum
         self._maximum_value = maximum
+        self._range_mode = range_mode
         self._last_valid = editor.text() if isinstance(editor, QLineEdit) else None
         layout = QVBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
@@ -65,8 +260,16 @@ class LimitField(QWidget):
             label.setAlignment(Qt.AlignmentFlag.AlignCenter)
         row.addWidget(self.minimum)
         row.addWidget(self.maximum)
-        self.edit_button = PushButton("Edit…", self)
+
+        self.range_pill = SafetyRangePill(self)
+        self.range_pill.clicked.connect(self.edit_requested)
+        row.addWidget(self.range_pill)
+
+        self.edit_button = PushButton("Edit", self)
         self.edit_button.setObjectName("limitEditButton")
+        self.edit_button.setIcon(FluentIcon.EDIT)
+        self.edit_button.setFixedWidth(78)
+        self.edit_button.setFixedHeight(30)
         self.edit_button.setToolTip(
             "Edit this safety range in a popup window. Values are validated before saving."
         )
@@ -79,10 +282,22 @@ class LimitField(QWidget):
         self.validation_warning.hide()
         layout.addWidget(self.validation_warning)
         apply_validation_style(self.editor, self.validation_warning)
+        self.set_range_mode(range_mode)
         self.set_limits(minimum, maximum)
         editing_finished = getattr(editor, "editingFinished", None)
         if editing_finished is not None:
             editing_finished.connect(self.validate_and_clamp)
+
+    def set_range_mode(self, enabled: bool) -> None:
+        self._range_mode = bool(enabled)
+        if self._range_mode:
+            self.minimum.hide()
+            self.maximum.hide()
+            self.range_pill.show()
+        else:
+            self.range_pill.hide()
+            self.minimum.show()
+            self.maximum.show()
 
     def set_limits(self, minimum: object, maximum: object) -> None:
         self._minimum_value = minimum
@@ -91,6 +306,7 @@ class LimitField(QWidget):
         maximum_text = "NOT SET" if maximum is None else str(maximum)
         self.minimum.setText(f"MIN  {minimum_text}")
         self.maximum.setText(f"MAX  {maximum_text}")
+        self.range_pill.set_limits(minimum, maximum)
         incomplete = minimum is None or maximum is None
         state = "undefined" if incomplete else "defined"
         self.setProperty("limitState", state)

@@ -75,9 +75,8 @@ from app.engine.compiler import RecipeCompiler
 from app.engine.estimation import PlanEstimator
 from app.engine.recovery import RunRecoveryManager
 from app.engine.runner import ExecutionMode
-from app.recipes import (
-    parse_recipe_text,
-)
+from app.recipes import parse_recipe_text
+from app.inventory import ActiveSampleTarget, InventoryStore, SampleRunRecord
 from app.settings import SettingsRepository
 from app.settings.models import StationSettings
 from app.settings.validation import format_settings_validation_error
@@ -93,6 +92,7 @@ from app.ui.settings_workers import KeithleyDefaultsSaveWorker
 from app.ui.run_worker import RunController, serialize_settings_snapshot
 from app.ui.dashboard import DashboardPage, DeviceConnectionPanel
 from app.ui.elab import ElabPage
+from app.ui.inventory import SampleInventoryPage
 from app.ui.execution import RunMonitorPage
 from app.ui.results import HeatmapResultsTab, ResultsPage
 from app.ui.design_system import apply_application_theme, effective_theme
@@ -137,6 +137,8 @@ class MainWindow(FluentWindow):
         self._run_elab_upload_config: dict[str, Any] | None = None
         persisted = self._repository.load().settings
         self._settings = simulated_station_settings(persisted) if simulation else persisted
+        output_dir = Path(self._settings.storage.get("output_directory", "./measurements"))
+        self.inventory_store = InventoryStore(output_dir / "inventory.db")
         # Establish the global Fluent theme before constructing the large page
         # tree.  QFluent's synchronous stylesheet refresh walks every existing
         # widget; doing it after ``_build()`` made the first ``show()`` block
@@ -283,6 +285,10 @@ class MainWindow(FluentWindow):
         }
         self.rigol_page = self._device_pages["rigol"]
         self.keithley_page = self._device_pages["keithley"]
+        self.keithley_characterization_page = self.keithley_page.characterization_card
+        self.keithley_page.characterization_requested.connect(
+            lambda: self._navigate_to("keithley_characterization")
+        )
         self.anritsu_page = self._device_pages["anritsu"]
         self.moke_box_page = self._device_pages["moke_box"]
         self.lakeshore_gaussmeter_page = self._device_pages["lakeshore_gaussmeter"]
@@ -453,6 +459,25 @@ class MainWindow(FluentWindow):
             env_path=Path(".env"),
             simulation=self._simulation,
         )
+        self.inventory_page = SampleInventoryPage(self.inventory_store, self)
+        self.inventory_page.active_target_changed.connect(self._on_active_sample_target_changed)
+        self.inventory_page.open_result_requested.connect(self._open_inventory_result)
+        self.recipe_page.change_target_requested.connect(lambda: self._navigate_to("inventory"))
+        self.recipe_page.set_active_sample_target(self.inventory_store.get_active_target())
+        self.keithley_characterization_page.set_inventory_store(self.inventory_store)
+        self.inventory_page.active_target_changed.connect(
+            self.keithley_characterization_page.set_active_sample_target
+        )
+        self.inventory_page.samples_updated.connect(
+            self.keithley_characterization_page.refresh_samples_list
+        )
+        self.keithley_characterization_page.active_target_changed.connect(
+            self._on_active_sample_target_changed
+        )
+        self.keithley_characterization_page.browse_samples_requested.connect(
+            lambda: self._navigate_to("inventory")
+        )
+        self.elab_page.upload_completed_record.connect(self._on_elab_upload_completed)
         self.recipe_page.set_elab_context(
             profile_provider=self.elab_page.current_profile,
             credentials_provider=self.elab_page.current_credentials,
@@ -512,7 +537,10 @@ class MainWindow(FluentWindow):
             field.edit_requested.connect(
                 lambda field=field: self._edit_device_limit("rigol", field)
             )
-        for field in self.keithley_page.findChildren(LimitField):
+        keithley_fields = set(self.keithley_page.findChildren(LimitField))
+        if hasattr(self, "keithley_characterization_page") and self.keithley_characterization_page is not None:
+            keithley_fields.update(self.keithley_characterization_page.findChildren(LimitField))
+        for field in keithley_fields:
             editable = configure_limit_button(
                 field,
                 device="Keithley",
@@ -532,12 +560,14 @@ class MainWindow(FluentWindow):
             "discovery": FluentIcon.SEARCH,
             "rigol": FluentIcon.MEDIA,
             "keithley": FluentIcon.POWER_BUTTON,
+            "keithley_characterization": FluentIcon.DOCUMENT,
             "anritsu": FluentIcon.PROJECTOR,
             "moke_box": FluentIcon.IOT,
             "lakeshore_gaussmeter": FluentIcon.PIN,
             "sweeps": FluentIcon.DOCUMENT,
             "execution": FluentIcon.PLAY,
             "results": FluentIcon.FOLDER,
+            "inventory": FluentIcon.TILES,
             "elab": FluentIcon.GLOBE,
             "settings": FluentIcon.SETTING,
         }
@@ -553,6 +583,11 @@ class MainWindow(FluentWindow):
                 self.keithley_page,
                 "keithley",
                 registry.get("keithley").display_name,
+            ),
+            (
+                self.keithley_characterization_page,
+                "keithley_characterization",
+                "Keithley Characterization",
             ),
             (
                 self.anritsu_page,
@@ -572,6 +607,7 @@ class MainWindow(FluentWindow):
             (self.recipe_page, "sweeps", "Sweeps"),
             (self.run_monitor, "execution", "Execution"),
             (self.results_page, "results", "Results"),
+            (self.inventory_page, "inventory", "Samples"),
             (self.elab_page, "elab", "eLabFTW"),
             (self.settings_page, "settings", "Settings"),
         )
@@ -587,6 +623,7 @@ class MainWindow(FluentWindow):
         apparatus_routes = {
             "rigol",
             "keithley",
+            "keithley_characterization",
             "anritsu",
             "moke_box",
             "lakeshore_gaussmeter",
@@ -617,12 +654,13 @@ class MainWindow(FluentWindow):
             position = (
                 NavigationItemPosition.BOTTOM if route == "settings" else NavigationItemPosition.TOP
             )
+            parent_key = "apparatusMenu" if route in apparatus_routes else None
             self.addSubInterface(
                 host,
                 route_icons[route],
                 display_name,
                 position=position,
-                parent="apparatusMenu" if route in apparatus_routes else None,
+                parent=parent_key,
             )
             widget._scroll_area = host.scroll_area
         # Keep the equipment group open on launch: device controls remain a
@@ -700,8 +738,13 @@ class MainWindow(FluentWindow):
         )
         self.keithley_page.settings_defaults_requested.connect(self._stage_keithley_defaults)
         self.recipe_page.run_requested.connect(self._start_run)
+        self.recipe_page.change_target_requested.connect(lambda: self._navigate_to("inventory"))
         self.recipe_page.settings_issue_requested.connect(self._open_settings_issue)
         self.recipe_page.plan_preflight_changed.connect(self.dashboard.update_plan_preflight)
+        self.inventory_page.active_target_changed.connect(self._on_active_sample_target_changed)
+        self.inventory_page.open_result_requested.connect(self._open_inventory_result)
+        self.elab_page.upload_completed_record.connect(self._on_elab_upload_completed)
+        self.recipe_page.set_active_sample_target(self.inventory_store.get_active_target())
         self.results_page.resume_requested.connect(self._resume_run)
         self.results_page.open_sweep_requested.connect(self._open_historical_thatec_sweep)
         self.results_page.result_selected.connect(self.elab_page.set_selected_result)
@@ -720,6 +763,7 @@ class MainWindow(FluentWindow):
             self.moke_box_page,
             self.lakeshore_gaussmeter_page,
             self.recipe_page,
+            self.inventory_page,
             self.elab_page,
             self.settings_page,
         ):
@@ -779,7 +823,15 @@ class MainWindow(FluentWindow):
         self._sync_event_log_navigation_state(False)
 
     def _navigate_to(self, route: str) -> None:
-        self.switchTo(self.navigation_routes[route])
+        target = self.navigation_routes[route]
+        nav_item = self.navigationInterface.widget(target.objectName())
+        if nav_item is not None and getattr(nav_item, "treeParent", None) is not None:
+            p = nav_item.treeParent
+            while p:
+                if hasattr(p, "setExpanded") and not p.isExpanded:
+                    p.setExpanded(True, ani=False)
+                p = getattr(p, "treeParent", None)
+        self.switchTo(target)
         self._sync_shell_splitter_layout()
 
     def _toggle_event_log_requested(self) -> None:
@@ -998,8 +1050,16 @@ class MainWindow(FluentWindow):
             path = ("devices", "anritsu", "safety", key)
             return f"Anritsu — {key.replace('_', ' ')}", path, True
 
-        channel = self.keithley_page.channel.currentText()
-        mode = self.keithley_page.mode.currentText()
+        if (
+            field.property("characterizationField")
+            and hasattr(self, "keithley_characterization_page")
+            and self.keithley_characterization_page is not None
+        ):
+            channel = self.keithley_characterization_page._selected_channel()
+            mode = "current" if self.keithley_characterization_page._is_current_mode() else "voltage"
+        else:
+            channel = self.keithley_page.channel.currentText()
+            mode = self.keithley_page.mode.currentText()
         if mode == "measure_only" and key in {"level", "compliance", "source_range"}:
             raise ConfigurationError(
                 "Source limits are not applicable while Keithley is in measure-only mode."
@@ -1138,6 +1198,8 @@ class MainWindow(FluentWindow):
                 candidate.set_limits(replacement["min"], replacement.get("max", "N/A"))
         if device == "keithley":
             self.keithley_page.set_settings(settings)
+            if hasattr(self, "keithley_characterization_page") and self.keithley_characterization_page is not None:
+                self.keithley_characterization_page.set_settings(settings)
         if device == "anritsu":
             self.anritsu_page.banner.show_message(
                 "Anritsu safety limits are staged. Press SAVE SETTINGS before "
@@ -1756,6 +1818,7 @@ class MainWindow(FluentWindow):
                 output_dir_override=output_dir_override,
                 file_stem_override=file_stem_override,
                 device_controllers=active_controllers,
+                sample_target=self.inventory_store.get_active_target(),
             )
         except Exception as exc:
             issue = settings_issue_for_error(exc)
@@ -2293,6 +2356,34 @@ class MainWindow(FluentWindow):
             )
         self._run_upload_to_elab_requested = False
         self._run_elab_upload_config = None
+        sample_target = result.get("sample_target") if isinstance(result, dict) else None
+        if result_path is not None and sample_target is not None:
+            if hasattr(sample_target, "is_active") and sample_target.is_active:
+                point_count = len(getattr(run_result, "points", ())) if hasattr(run_result, "points") else getattr(run_result, "committed_points", 0)
+                spectrum_count = len(getattr(run_result, "spectra", ())) if hasattr(run_result, "spectra") else 0
+                recipe_name = ""
+                if hasattr(self._run_controller, "_plan") and self._run_controller._plan is not None:
+                    recipe_name = getattr(self._run_controller._plan, "recipe_name", "")
+                self.inventory_store.record_run(
+                    SampleRunRecord(
+                        sample_id=sample_target.sample_id,
+                        sample_name=sample_target.sample_name or sample_target.sample_id,
+                        row=str(sample_target.row or ""),
+                        col=str(sample_target.col or ""),
+                        device_label=str(sample_target.device_label or ""),
+                        run_path=str(result_path),
+                        run_sha256="",
+                        created_at_utc="",
+                        status=state,
+                        point_count=point_count,
+                        spectrum_count=spectrum_count,
+                        recipe_name=recipe_name,
+                    )
+                )
+                self.inventory_page.refresh_samples()
+                self._log(
+                    f"Sample inventory recorded sweep {result_path.name} under {sample_target.display_text()}"
+                )
         if state == "fault":
             message = str(error or "The measurement finished in a fault state.")
             self._log(f"Run Engine finished in FAULT: {message}")
@@ -2301,6 +2392,30 @@ class MainWindow(FluentWindow):
             self._log(f"Run Engine stopped safely: {error}")
         else:
             self._log("Run Engine completed the measurement")
+
+    def _on_active_sample_target_changed(self, target: ActiveSampleTarget) -> None:
+        self.recipe_page.set_active_sample_target(target)
+        self.keithley_characterization_page.set_active_sample_target(target)
+        self._refresh_safety_strip()
+
+    def _open_inventory_result(self, run_path: str) -> None:
+        path = Path(run_path)
+        if path.is_file():
+            self.results_page.set_output_directory(path.parent)
+            self.results_page.select_result_path(path)
+            self._navigate_to("results")
+        else:
+            self._log(f"Measurement file not found: {run_path}")
+
+    def _on_elab_upload_completed(self, record: object) -> None:
+        if hasattr(record, "run_path") and hasattr(record, "experiment_id"):
+            self.inventory_store.update_run_elab_status(
+                str(record.run_path),
+                elab_experiment_id=record.experiment_id,
+                elab_url=getattr(record, "experiment_url", None),
+                elab_status="uploaded",
+            )
+            self.inventory_page.refresh_samples()
 
     def _run_failed(self, error: str) -> None:
         self._execution_event_timer.stop()
@@ -2459,6 +2574,9 @@ class MainWindow(FluentWindow):
         for name, page in pages.items():
             if changed_devices is None or name in changed_devices:
                 page.set_settings(self._settings)
+        if hasattr(self, "keithley_characterization_page") and self.keithley_characterization_page is not None:
+            if changed_devices is None or "keithley" in changed_devices:
+                self.keithley_characterization_page.set_settings(self._settings)
         for name, panel in self.connection_panels.items():
             if changed_devices is not None and name not in changed_devices:
                 continue
@@ -3242,7 +3360,10 @@ class MainWindow(FluentWindow):
         if locked:
             if self._run_read_only_controls:
                 return
-            for page in self._device_pages.values():
+            pages_to_lock = list(self._device_pages.values())
+            if hasattr(self, "keithley_characterization_page") and self.keithley_characterization_page is not None:
+                pages_to_lock.append(self.keithley_characterization_page)
+            for page in pages_to_lock:
                 if isinstance(page, ExecutionTelemetryView):
                     page.set_execution_controlled(True)
                 controls: set[QWidget] = set()

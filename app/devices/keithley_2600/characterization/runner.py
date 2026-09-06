@@ -17,7 +17,12 @@ from app.devices.keithley_2600.characterization.models import (
     CharacterizationSweepConfig,
 )
 from app.domain.errors import SafetyViolation
-from app.domain.quantities import DIMENSION_POWER, parse_quantity
+from app.domain.quantities import (
+    DIMENSION_CURRENT,
+    DIMENSION_POWER,
+    DIMENSION_VOLTAGE,
+    parse_quantity,
+)
 from app.safety.keithley import validate_keithley_source
 from app.settings.models import StationSettings
 
@@ -40,21 +45,35 @@ class KeithleyCharacterizationRunner:
         lab_limits = channel_settings.lab_limits
 
         if config.points_count < 2:
-            raise SafetyViolation("Liczba punktów charakterystyki musi wynosić co najmniej 2.")
+            raise SafetyViolation("Characterization points count must be at least 2.")
         if config.points_count > lab_limits.sweep_points_max:
             raise SafetyViolation(
-                f"Liczba punktów charakterystyki ({config.points_count}) przekracza "
-                f"maksymalny dopuszczalny limit stacji ({lab_limits.sweep_points_max})."
+                f"Characterization points count ({config.points_count}) exceeds "
+                f"station lab limit ({lab_limits.sweep_points_max})."
             )
 
         if config.compliance_si <= 0:
-            raise SafetyViolation("Wartość limitu compliance musi być ściśle dodatnia.")
+            raise SafetyViolation("Compliance limit must be strictly positive.")
 
         if abs(config.stop_level_si - config.start_level_si) < 1e-15:
-            raise SafetyViolation("Poziom początkowy i końcowy przemiatania nie mogą być identyczne.")
+            raise SafetyViolation("Start and stop sweep levels cannot be identical.")
 
-        # Verify start level, stop level, and zero level
-        for level in (config.start_level_si, config.stop_level_si, 0.0):
+        # Verify start level, stop level, and zero level (only if 0.0 is within allowed channel range)
+        dim_sweep = DIMENSION_CURRENT if config.mode == "current" else DIMENSION_VOLTAGE
+        min_source_si = parse_quantity(
+            lab_limits.source_current.min if config.mode == "current" else lab_limits.source_voltage.min,
+            dim_sweep,
+        ).si_value
+        max_source_si = parse_quantity(
+            lab_limits.source_current.max if config.mode == "current" else lab_limits.source_voltage.max,
+            dim_sweep,
+        ).si_value
+
+        levels_to_check = [config.start_level_si, config.stop_level_si]
+        if min_source_si <= 0.0 <= max_source_si:
+            levels_to_check.append(0.0)
+
+        for level in levels_to_check:
             req = KeithleySourceRequest(
                 channel=channel_name,
                 mode=config.mode,
@@ -95,21 +114,20 @@ class KeithleyCharacterizationRunner:
         started_at = datetime.now(timezone.utc).isoformat()
         points: list[CharacterizationPoint] = []
 
-        # 1. Temporarily configure compliance policy to warn_clamp during characterization
-        # to prevent premature stop when testing high-resistance samples in compliance.
-        original_policy_stop: bool | None = None
+        # 1. Temporarily configure compliance policy to "skip" during characterization
+        # to allow acquiring the complete clamped curve without blocking subsequent setpoints.
+        original_policy: str | bool | None = None
         if hasattr(device, "compliance_policy"):
             try:
-                current_policy = device.compliance_policy(channel)
-                original_policy_stop = (current_policy == "stop")
+                original_policy = device.compliance_policy(channel)
             except Exception:
                 pass
         try:
-            device.set_compliance_policy(channel, False)
+            device.set_compliance_policy(channel, "skip")
         except Exception:
             pass
 
-        # 2. Configure initial safe state (OUTPUT OFF, initial 0 level)
+        # 2. Configure initial safe state (OUTPUT OFF, initial 0 or start level)
         init_req = KeithleySourceRequest(
             channel=channel,
             mode=config.mode,
@@ -119,7 +137,19 @@ class KeithleyCharacterizationRunner:
             settle_time_s=config.dwell_time_s,
             sense_mode=config.sense_mode,
         )
-        device.configure_source(init_req)
+        try:
+            device.configure_source(init_req)
+        except SafetyViolation:
+            init_req = KeithleySourceRequest(
+                channel=channel,
+                mode=config.mode,
+                level_si=config.start_level_si,
+                compliance_si=config.compliance_si,
+                nplc=1.0,
+                settle_time_s=config.dwell_time_s,
+                sense_mode=config.sense_mode,
+            )
+            device.configure_source(init_req)
 
         # 3. Enable output
         device.set_output(channel, True)
@@ -129,8 +159,12 @@ class KeithleyCharacterizationRunner:
                 if cancel_event is not None and cancel_event.is_set():
                     break
 
-                # Apply setpoint
-                device.update_source_level(channel, float(demanded))
+                # Apply setpoint with keyword arguments for real adapter and positional fallback
+                try:
+                    device.update_source_level(channel, mode=config.mode, level_si=float(demanded))
+                except TypeError:
+                    device.update_source_level(channel, float(demanded))
+
                 if config.dwell_time_s > 0:
                     time.sleep(config.dwell_time_s)
 
@@ -191,9 +225,9 @@ class KeithleyCharacterizationRunner:
                 device.set_output(channel, False)
             except Exception:
                 pass
-            if original_policy_stop is not None:
+            if original_policy is not None:
                 try:
-                    device.set_compliance_policy(channel, original_policy_stop)
+                    device.set_compliance_policy(channel, original_policy)
                 except Exception:
                     pass
 

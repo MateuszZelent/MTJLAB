@@ -45,24 +45,28 @@ class KeithleyPdfReportGenerator:
         if cls._FONTS_REGISTERED:
             return
 
-        regular_path = "C:/Windows/Fonts/segoeui.ttf"
-        bold_path = "C:/Windows/Fonts/segoeuib.ttf"
+        font_candidates = [
+            ("C:/Windows/Fonts/segoeui.ttf", "C:/Windows/Fonts/segoeuib.ttf"),
+            ("C:/Windows/Fonts/arial.ttf", "C:/Windows/Fonts/arialbd.ttf"),
+            ("/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf", "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf"),
+            ("/usr/share/fonts/truetype/liberation/LiberationSans-Regular.ttf", "/usr/share/fonts/truetype/liberation/LiberationSans-Bold.ttf"),
+            ("/usr/share/fonts/truetype/freefont/FreeSans.ttf", "/usr/share/fonts/truetype/freefont/FreeSansBold.ttf"),
+            ("/System/Library/Fonts/Supplemental/Arial.ttf", "/System/Library/Fonts/Supplemental/Arial Bold.ttf"),
+            ("/Library/Fonts/Arial.ttf", "/Library/Fonts/Arial Bold.ttf"),
+        ]
 
-        if not os.path.exists(regular_path):
-            regular_path = "C:/Windows/Fonts/arial.ttf"
-            bold_path = "C:/Windows/Fonts/arialbd.ttf"
-
-        if os.path.exists(regular_path):
-            try:
-                pdfmetrics.registerFont(TTFont(cls._FONT_NAME, regular_path))
-                if os.path.exists(bold_path):
-                    pdfmetrics.registerFont(TTFont(cls._FONT_BOLD, bold_path))
-                else:
-                    pdfmetrics.registerFont(TTFont(cls._FONT_BOLD, regular_path))
-                cls._FONTS_REGISTERED = True
-                return
-            except Exception:
-                pass
+        for reg_path, bld_path in font_candidates:
+            if os.path.exists(reg_path):
+                try:
+                    pdfmetrics.registerFont(TTFont(cls._FONT_NAME, reg_path))
+                    if os.path.exists(bld_path):
+                        pdfmetrics.registerFont(TTFont(cls._FONT_BOLD, bld_path))
+                    else:
+                        pdfmetrics.registerFont(TTFont(cls._FONT_BOLD, reg_path))
+                    cls._FONTS_REGISTERED = True
+                    return
+                except Exception:
+                    pass
 
         # Fallback to standard PDF fonts (diacritics limited)
         cls._FONT_NAME = "Helvetica"
@@ -137,10 +141,10 @@ class KeithleyPdfReportGenerator:
         story = []
 
         # 1. Header
-        story.append(Paragraph("MTJLAB &mdash; Raport Charakterystyki Próbki (I-V & R)", title_style))
+        story.append(Paragraph("MTJLAB &mdash; Sample Characterization Report (I-V & R)", title_style))
         story.append(
             Paragraph(
-                "Laboratorium Spintroniki i Nanostruktur &bull; Miernik źródłowy Keithley 2600 &bull; Moduł analityczny",
+                "Spintronics and Nanostructures Laboratory &bull; Keithley 2600 SourceMeter &bull; Analysis Module",
                 subtitle_style,
             )
         )
@@ -153,38 +157,49 @@ class KeithleyPdfReportGenerator:
 
         meta_data = [
             [
-                Paragraph("<b>Identyfikator próbki:</b>", body_style),
+                Paragraph("<b>Sample ID:</b>", body_style),
                 Paragraph(meta.sample_id, body_style),
-                Paragraph("<b>Kanał Keithley:</b>", body_style),
-                Paragraph(f"Kanał {cfg.channel}", body_style),
+                Paragraph("<b>Keithley Channel:</b>", body_style),
+                Paragraph(f"Channel {cfg.channel}", body_style),
             ],
             [
-                Paragraph("<b>Struktura / Chip:</b>", body_style),
+                Paragraph("<b>Structure / Chip:</b>", body_style),
                 Paragraph(meta.structure_name or "&mdash;", body_style),
-                Paragraph("<b>Tryb przemiatania:</b>", body_style),
-                Paragraph(f"{'Prądowy (I &rarr; V)' if cfg.mode == 'current' else 'Napięciowy (V &rarr; I)'}", body_style),
+                Paragraph("<b>Sweep Mode:</b>", body_style),
+                Paragraph(
+                    f"{'Current Sweep (I &rarr; V)' if cfg.mode == 'current' else 'Voltage Sweep (V &rarr; I)'}",
+                    body_style,
+                ),
             ],
             [
-                Paragraph("<b>Powierzchnia złącza:</b>", body_style),
-                Paragraph(f"{meta.junction_area_um2:.2f} &mu;m&sup2;" if meta.junction_area_um2 else "Nie podano", body_style),
-                Paragraph("<b>Zakres przemiatania:</b>", body_style),
+                Paragraph("<b>Junction Area:</b>", body_style),
                 Paragraph(
-                    f"{cfg.start_level_si * 1e3:.2f} mA do {cfg.stop_level_si * 1e3:.2f} mA ({cfg.points_count} pkt)"
+                    f"{meta.junction_area_um2:.2f} &mu;m&sup2;" if meta.junction_area_um2 else "Not specified",
+                    body_style,
+                ),
+                Paragraph("<b>Sweep Range:</b>", body_style),
+                Paragraph(
+                    f"{cfg.start_level_si * 1e3:.2f} mA to {cfg.stop_level_si * 1e3:.2f} mA ({cfg.points_count} pts)"
                     if cfg.mode == "current"
-                    else f"{cfg.start_level_si * 1e3:.1f} mV do {cfg.stop_level_si * 1e3:.1f} mV ({cfg.points_count} pkt)",
+                    else f"{cfg.start_level_si * 1e3:.1f} mV to {cfg.stop_level_si * 1e3:.1f} mV ({cfg.points_count} pts)",
                     body_style,
                 ),
             ],
             [
                 Paragraph("<b>Operator:</b>", body_style),
                 Paragraph(meta.operator or "&mdash;", body_style),
-                Paragraph("<b>Limit compliance:</b>", body_style),
-                Paragraph(f"{cfg.compliance_si * 1e3:.1f} mV" if cfg.mode == "current" else f"{cfg.compliance_si * 1e3:.2f} mA", body_style),
+                Paragraph("<b>Compliance Limit:</b>", body_style),
+                Paragraph(
+                    f"{cfg.compliance_si * 1e3:.1f} mV"
+                    if cfg.mode == "current"
+                    else f"{cfg.compliance_si * 1e3:.2f} mA",
+                    body_style,
+                ),
             ],
             [
-                Paragraph("<b>Czas pomiaru:</b>", body_style),
+                Paragraph("<b>Acquisition Time:</b>", body_style),
                 Paragraph(f"{dataset.started_at_iso[:19]} UTC", body_style),
-                Paragraph("<b>Tryb pomiaru sondy:</b>", body_style),
+                Paragraph("<b>Sense Mode:</b>", body_style),
                 Paragraph(f"{cfg.sense_mode.upper()} (Kelvin)", body_style),
             ],
         ]
@@ -203,57 +218,60 @@ class KeithleyPdfReportGenerator:
         story.append(Spacer(1, 8))
 
         # 3. Scientific Parameters Table
-        story.append(Paragraph("Parametry naukowe i fizyczne złącza", h2_style))
+        story.append(Paragraph("Scientific and Physical Junction Parameters", h2_style))
 
         r0_str = f"{params.zero_bias_resistance_ohm:.2f} &Omega;" if math.isfinite(params.zero_bias_resistance_ohm) else "&mdash;"
         g0_str = f"{params.zero_bias_conductance_s * 1e3:.3f} mS" if math.isfinite(params.zero_bias_conductance_s) else "&mdash;"
-        ra_str = f"{params.ra_product_ohm_um2:.1f} &Omega;&bull;&mu;m&sup2;" if params.ra_product_ohm_um2 is not None else "Brak danych pow."
+        ra_str = f"{params.ra_product_ohm_um2:.1f} &Omega;&bull;&mu;m&sup2;" if params.ra_product_ohm_um2 is not None else "No area specified"
         pmax_str = f"{params.max_power_dissipated_w * 1e3:.2f} mW"
         r2_str = f"{params.linearity_r2:.4f}"
 
         if params.compliance_detected and params.compliance_onset_point:
             ci, cv = params.compliance_onset_point
-            comp_status_str = f"Aktywny przy |I| &ge; {abs(ci) * 1e3:.2f} mA (V = {abs(cv) * 1e3:.1f} mV)"
+            if cfg.mode == "current":
+                comp_status_str = f"Active at |I| &ge; {abs(ci) * 1e3:.2f} mA (V = {abs(cv) * 1e3:.1f} mV)"
+            else:
+                comp_status_str = f"Active at |V| &ge; {abs(cv) * 1e3:.1f} mV (I = {abs(ci) * 1e3:.2f} mA)"
         else:
-            comp_status_str = "Nie wystąpił (w pełnym zakresie liniowym)"
+            comp_status_str = "Not reached (linear ohmic range)"
 
-        clamped_pct_str = f"{params.clamped_points_fraction * 100:.1f}% punktów"
+        clamped_pct_str = f"{params.clamped_points_fraction * 100:.1f}% points"
         rect_str = f"{params.rectification_ratio:.3f}" if params.rectification_ratio is not None else "&mdash;"
 
         if params.tunnel_barrier_height_ev is not None:
             bdr_str = f"&Phi; = {params.tunnel_barrier_height_ev:.2f} eV, &Delta;&Phi; = {params.tunnel_barrier_asymmetry_ev:+.2f} eV (s = {params.tunnel_barrier_thickness_nm:.1f} nm)"
         else:
-            bdr_str = "Dopasowanie BDR niedostępne (złącze omowe/symetryczne)"
+            bdr_str = "BDR fit unavailable (ohmic/symmetric junction)"
 
         param_rows = [
             [
-                Paragraph("<b>Rezystancja zeroprądowa (R<sub>0</sub>):</b>", body_style),
+                Paragraph("<b>Zero-bias Resistance (R<sub>0</sub>):</b>", body_style),
                 Paragraph(r0_str, body_style),
-                Paragraph("<b>Przewodność (G<sub>0</sub>):</b>", body_style),
+                Paragraph("<b>Conductance (G<sub>0</sub>):</b>", body_style),
                 Paragraph(g0_str, body_style),
             ],
             [
-                Paragraph("<b>Iloczyn R&bull;A (Junction RA):</b>", body_style),
+                Paragraph("<b>RA Product (Junction RA):</b>", body_style),
                 Paragraph(ra_str, body_style),
-                Paragraph("<b>Maks. moc wydzielana:</b>", body_style),
+                Paragraph("<b>Peak Power Dissipation:</b>", body_style),
                 Paragraph(pmax_str, body_style),
             ],
             [
-                Paragraph("<b>Stan compliance (nasycenie):</b>", body_style),
+                Paragraph("<b>Compliance Status (Saturation):</b>", body_style),
                 Paragraph(comp_status_str, body_style),
-                Paragraph("<b>Ułamek w compliance:</b>", body_style),
+                Paragraph("<b>Clamped Fraction:</b>", body_style),
                 Paragraph(clamped_pct_str, body_style),
             ],
             [
-                Paragraph("<b>Współczynnik prostowania (RR):</b>", body_style),
+                Paragraph("<b>Rectification Ratio (RR):</b>", body_style),
                 Paragraph(rect_str, body_style),
-                Paragraph("<b>Liniowość (R&sup2; do Ohma):</b>", body_style),
+                Paragraph("<b>Linearity (Ohmic R&sup2;):</b>", body_style),
                 Paragraph(r2_str, body_style),
             ],
             [
-                Paragraph("<b>Model bariery tunelowej (BDR):</b>", body_style),
+                Paragraph("<b>Tunnel Barrier Model (BDR):</b>", body_style),
                 Paragraph(bdr_str, body_style),
-                Paragraph("<b>Integralność danych:</b>", body_style),
+                Paragraph("<b>Data Integrity:</b>", body_style),
                 Paragraph(f"SHA-256: {dataset.checksum_sha256[:12]}...", body_style),
             ],
         ]
@@ -272,7 +290,7 @@ class KeithleyPdfReportGenerator:
         story.append(Spacer(1, 8))
 
         # 4. Interpretive Scientific Commentary
-        story.append(Paragraph("Komentarz fizyczno-diagnostyczny", h2_style))
+        story.append(Paragraph("Physical and Diagnostic Commentary", h2_style))
         comment_text = cls._generate_commentary(dataset, params)
         comment_table = Table([[Paragraph(comment_text, comment_style)]], colWidths=[520])
         comment_table.setStyle(
@@ -295,8 +313,8 @@ class KeithleyPdfReportGenerator:
 
         # 6. Footer note
         footer_text = (
-            f"Raport wygenerowano automatycznie w środowisku MTJLAB. Suma kontrolna próbki SHA-256: "
-            f"{dataset.checksum_sha256}. Wyniki zapisano zgodnie ze standardem bezpieczeństwa aparatury."
+            f"Report generated automatically by MTJLAB station environment. Sample dataset checksum SHA-256: "
+            f"{dataset.checksum_sha256}. Physical data recorded according to laboratory safety protocols."
         )
         story.append(Paragraph(footer_text, subtitle_style))
 
@@ -309,12 +327,12 @@ class KeithleyPdfReportGenerator:
         dataset: CharacterizationDataset,
         params: ExtractedScientificParameters,
     ) -> str:
-        """Generate detailed physical diagnosis in Polish."""
+        """Generate detailed physical diagnosis in English."""
         cfg = dataset.config
         r0 = params.zero_bias_resistance_ohm
 
         if not math.isfinite(r0):
-            return "Błąd interpretacji: nie udało się wyznaczyć rezystancji spoczynkowej próbki."
+            return "Diagnostic error: Unable to determine zero-bias device resistance."
 
         if cfg.mode == "current":
             v_comp_mv = cfg.compliance_si * 1e3
@@ -323,24 +341,26 @@ class KeithleyPdfReportGenerator:
                 v_clamp_mv = abs(params.compliance_onset_point[1]) * 1e3
                 max_demanded_ma = max(abs(cfg.start_level_si), abs(cfg.stop_level_si)) * 1e3
                 hypothetical_v = (max_demanded_ma * 1e-3) * abs(r0) * 1e3
+                is_bipolar = (cfg.start_level_si * cfg.stop_level_si < 0)
+                sign_str = "&plusmn;" if is_bipolar else ("+" if cfg.stop_level_si >= 0 else "-")
 
                 return (
-                    f"Dla próbki o rezystancji zeroprądowej R<sub>0</sub> = {r0:.1f} &Omega;, wymuszenie zadanego "
-                    f"prądu maksymalnego I<sub>max</sub> = &plusmn;{max_demanded_ma:.1f} mA wymagałoby przyłożenia do złącza "
-                    f"napięcia &plusmn;{hypothetical_v:.1f} mV. Zgodnie z nastawami stacji laboratoryjnej, kanał {cfg.channel} "
-                    f"posiadał aktywny limit bezpieczeństwa compliance V<sub>comp</sub> = {v_comp_mv:.1f} mV. "
-                    f"W punkcie |I| &approx; {i_clamp_ma:.2f} mA napięcie osiągnęło poziom nasycenia ({v_clamp_mv:.1f} mV), "
-                    f"wskutek czego Keithley ograniczył dalszy wzrost prądu. Pomiędzy prądem zadanym a zmierzonym "
-                    f"powstało nasycenie aparaturowe ({params.clamped_points_fraction * 100:.0f}% punktów w compliance). "
-                    f"Bariera próbki została skutecznie ochroniona przed przebiciem dielektrycznym."
+                    f"For a sample with zero-bias resistance R<sub>0</sub> = {r0:.1f} &Omega;, forcing the demanded "
+                    f"peak current I<sub>max</sub> = {sign_str}{max_demanded_ma:.1f} mA would require a junction bias voltage of "
+                    f"{sign_str}{hypothetical_v:.1f} mV. According to laboratory safety settings, channel {cfg.channel} "
+                    f"had an active compliance limit of V<sub>comp</sub> = {v_comp_mv:.1f} mV. "
+                    f"At |I| &approx; {i_clamp_ma:.2f} mA, the terminal voltage reached the saturation threshold ({v_clamp_mv:.1f} mV), "
+                    f"prompting the Keithley SMU to clamp further current delivery. An instrument saturation regime occurred "
+                    f"between demanded and acquired current ({params.clamped_points_fraction * 100:.0f}% clamped points). "
+                    f"The sample barrier was successfully protected against dielectric breakdown."
                 )
             else:
                 max_v_mv = params.max_voltage_v * 1e3
                 return (
-                    f"Próbka o rezystancji zeroprądowej R<sub>0</sub> = {r0:.1f} &Omega; w całym zadanym zakresie "
-                    f"prądowym pracowała poniżej limitu compliance V<sub>comp</sub> = {v_comp_mv:.1f} mV. Maksymalne napięcie "
-                    f"przyłożone do próbki wyniosło {max_v_mv:.1f} mV. "
-                    f"Charakterystyka wykazuje wysoką liniowość (R&sup2; = {params.linearity_r2:.4f}) bez wystąpienia clamping-u."
+                    f"The sample with zero-bias resistance R<sub>0</sub> = {r0:.1f} &Omega; operated strictly within the "
+                    f"compliance limit V<sub>comp</sub> = {v_comp_mv:.1f} mV throughout the entire current sweep range. "
+                    f"The peak voltage applied across the junction was {max_v_mv:.1f} mV. "
+                    f"The I-V response exhibits high ohmic linearity (R&sup2; = {params.linearity_r2:.4f}) with zero compliance clamping."
                 )
         else:
             i_comp_ma = cfg.compliance_si * 1e3
@@ -349,23 +369,25 @@ class KeithleyPdfReportGenerator:
                 v_clamp_mv = abs(params.compliance_onset_point[1]) * 1e3
                 max_demanded_mv = max(abs(cfg.start_level_si), abs(cfg.stop_level_si)) * 1e3
                 hypothetical_i_ma = (max_demanded_mv * 1e-3) / abs(r0) * 1e3
+                is_bipolar = (cfg.start_level_si * cfg.stop_level_si < 0)
+                sign_str = "&plusmn;" if is_bipolar else ("+" if cfg.stop_level_si >= 0 else "-")
 
                 return (
-                    f"Dla próbki o rezystancji zeroprądowej R<sub>0</sub> = {r0:.1f} &Omega;, przyłożenie zadanego "
-                    f"napięcia maksymalnego V<sub>max</sub> = &plusmn;{max_demanded_mv:.1f} mV wywołałoby prąd rzędu "
-                    f"&plusmn;{hypothetical_i_ma:.2f} mA. Zgodnie z nastawami stacji laboratoryjnej, kanał {cfg.channel} "
-                    f"posiadał aktywny limit prądowy compliance I<sub>comp</sub> = {i_comp_ma:.2f} mA. "
-                    f"W punkcie |V| &approx; {v_clamp_mv:.1f} mV prąd osiągnął limit ({i_clamp_ma:.2f} mA), "
-                    f"wskutek czego Keithley ograniczył dalszy wzrost prądu ({params.clamped_points_fraction * 100:.0f}% punktów w compliance). "
-                    f"Złącze zostało skutecznie ochronione przed uszkodzeniem termicznym i elektromigracją."
+                    f"For a sample with zero-bias resistance R<sub>0</sub> = {r0:.1f} &Omega;, applying the demanded "
+                    f"peak voltage V<sub>max</sub> = {sign_str}{max_demanded_mv:.1f} mV would induce an expected current of "
+                    f"{sign_str}{hypothetical_i_ma:.2f} mA. According to laboratory safety settings, channel {cfg.channel} "
+                    f"had an active compliance limit of I<sub>comp</sub> = {i_comp_ma:.2f} mA. "
+                    f"At |V| &approx; {v_clamp_mv:.1f} mV, the current reached the compliance threshold ({i_clamp_ma:.2f} mA), "
+                    f"prompting the Keithley SMU to limit further current flow ({params.clamped_points_fraction * 100:.0f}% clamped points). "
+                    f"The junction was successfully protected against thermal degradation and electromigration."
                 )
             else:
                 max_i_ma = params.max_current_a * 1e3
                 return (
-                    f"Próbka o rezystancji zeroprądowej R<sub>0</sub> = {r0:.1f} &Omega; w całym zadanym zakresie "
-                    f"napięciowym pracowała poniżej limitu compliance I<sub>comp</sub> = {i_comp_ma:.2f} mA. Maksymalny prąd "
-                    f"płynący przez próbkę wyniósł {max_i_ma:.2f} mA. "
-                    f"Charakterystyka wykazuje wysoką liniowość (R&sup2; = {params.linearity_r2:.4f}) bez wystąpienia clamping-u."
+                    f"The sample with zero-bias resistance R<sub>0</sub> = {r0:.1f} &Omega; operated strictly within the "
+                    f"compliance limit I<sub>comp</sub> = {i_comp_ma:.2f} mA throughout the entire voltage sweep range. "
+                    f"The peak current conducted through the junction was {max_i_ma:.2f} mA. "
+                    f"The I-V response exhibits high ohmic linearity (R&sup2; = {params.linearity_r2:.4f}) with zero compliance clamping."
                 )
 
     @classmethod
@@ -388,31 +410,38 @@ class KeithleyPdfReportGenerator:
         # Independent sweep axis (x):
         # Current mode -> I_demanded [mA]; Voltage mode -> V_demanded [mV]
         x_dem = np.array([p.demanded_si * 1e3 for p in points])
-        x_label = "Zadany prąd $I_{dem}$ [mA]" if is_current else "Zadane napięcie $V_{dem}$ [mV]"
+        x_label = "Demanded Current $I_{dem}$ [mA]" if is_current else "Demanded Voltage $V_{dem}$ [mV]"
 
         fig, axs = plt.subplots(2, 2, figsize=(7.6, 4.8), dpi=250)
         plt.subplots_adjust(hspace=0.35, wspace=0.32, top=0.94, bottom=0.10, left=0.09, right=0.96)
 
         # Plot 1: Response vs Demanded Level
         ax1 = axs[0, 0]
+        has_negative = (np.any(x_dem < -1e-6) or np.any(v_meas < -1e-3)) if is_current else (np.any(x_dem < -1e-6) or np.any(i_meas < -1e-3))
+        has_positive = (np.any(x_dem > 1e-6) or np.any(v_meas > 1e-3)) if is_current else (np.any(x_dem > 1e-6) or np.any(i_meas > 1e-3))
+
         if is_current:
             v_comp_mv = dataset.config.compliance_si * 1e3
             ax1.plot(x_dem, v_meas, color="#0284c7", lw=1.8, label=r"$V(I_{dem})$")
             if np.any(comp):
                 ax1.scatter(x_dem[comp], v_meas[comp], color="#ef4444", s=18, zorder=5, label="Compliance clamp")
-            ax1.axhline(v_comp_mv, color="#dc2626", ls="--", lw=1.0, alpha=0.8, label=rf"+$V_{{comp}}$ ({v_comp_mv:.0f} mV)")
-            ax1.axhline(-v_comp_mv, color="#dc2626", ls="--", lw=1.0, alpha=0.8, label=r"-$V_{comp}$")
-            ax1.set_ylabel("Napięcie próbki $V$ [mV]", fontsize=8.5)
-            ax1.set_title(r"1. Krzywa napięciowa $V(I)$ i limit clamping", fontsize=9, fontweight="bold", color="#0f2d59")
+            if has_positive:
+                ax1.axhline(v_comp_mv, color="#dc2626", ls="--", lw=1.0, alpha=0.8, label=rf"+$V_{{comp}}$ ({v_comp_mv:.0f} mV)")
+            if has_negative:
+                ax1.axhline(-v_comp_mv, color="#dc2626", ls="--", lw=1.0, alpha=0.8, label=r"-$V_{comp}$")
+            ax1.set_ylabel("Sample Voltage $V$ [mV]", fontsize=8.5)
+            ax1.set_title(r"1. Voltage Response $V(I)$ & Clamping Limit", fontsize=9, fontweight="bold", color="#0f2d59")
         else:
             i_comp_ma = dataset.config.compliance_si * 1e3
             ax1.plot(x_dem, i_meas, color="#0284c7", lw=1.8, label=r"$I(V_{dem})$")
             if np.any(comp):
                 ax1.scatter(x_dem[comp], i_meas[comp], color="#ef4444", s=18, zorder=5, label="Compliance clamp")
-            ax1.axhline(i_comp_ma, color="#dc2626", ls="--", lw=1.0, alpha=0.8, label=rf"+$I_{{comp}}$ ({i_comp_ma:.2f} mA)")
-            ax1.axhline(-i_comp_ma, color="#dc2626", ls="--", lw=1.0, alpha=0.8, label=r"-$I_{comp}$")
-            ax1.set_ylabel("Prąd próbki $I$ [mA]", fontsize=8.5)
-            ax1.set_title(r"1. Krzywa prądowa $I(V)$ i limit clamping", fontsize=9, fontweight="bold", color="#0f2d59")
+            if has_positive:
+                ax1.axhline(i_comp_ma, color="#dc2626", ls="--", lw=1.0, alpha=0.8, label=rf"+$I_{{comp}}$ ({i_comp_ma:.2f} mA)")
+            if has_negative:
+                ax1.axhline(-i_comp_ma, color="#dc2626", ls="--", lw=1.0, alpha=0.8, label=r"-$I_{comp}$")
+            ax1.set_ylabel("Sample Current $I$ [mA]", fontsize=8.5)
+            ax1.set_title(r"1. Current Response $I(V)$ & Clamping Limit", fontsize=9, fontweight="bold", color="#0f2d59")
 
         ax1.set_xlabel(x_label, fontsize=8.5)
         ax1.grid(True, linestyle=":", alpha=0.6)
@@ -425,17 +454,18 @@ class KeithleyPdfReportGenerator:
             app_label = r"$R_{app} = V / I_{dem}$" if is_current else r"$R_{app} = V_{dem} / I$"
             ax2.plot(x_dem, r_app, color="#f59e0b", lw=1.4, ls="--", label=app_label)
         r_all = np.concatenate([r_true[np.isfinite(r_true)], r_app[np.isfinite(r_app)]])
-        if len(r_all) > 0:
-            r_median = float(np.median(r_all))
-            if r_median > 0:
-                p95 = float(np.percentile(r_all, 95))
-                y_max = min(float(np.max(r_all)), max(r_median * 3.5, p95 * 1.5))
-                y_min = max(0.0, float(np.min(r_all)))
-                if y_max > y_min:
-                    ax2.set_ylim(y_min * 0.9, y_max * 1.1)
+        r_pos = r_all[(r_all > 0) & np.isfinite(r_all)]
+        if len(r_pos) > 0:
+            r_median = float(np.median(r_pos))
+            p05 = float(np.percentile(r_pos, 5))
+            p95 = float(np.percentile(r_pos, 95))
+            y_min = max(0.0, min(float(np.min(r_pos)), p05 * 0.8))
+            y_max = max(p95 * 1.3, min(float(np.max(r_pos)), max(r_median * 3.5, p95 * 1.5)))
+            if y_max > y_min:
+                ax2.set_ylim(y_min * 0.9, y_max * 1.05)
         ax2.set_xlabel(x_label, fontsize=8.5)
-        ax2.set_ylabel(r"Rezystancja $R$ [$\Omega$]", fontsize=8.5)
-        ax2.set_title(r"2. Rezystancja rzeczywista vs pozorna", fontsize=9, fontweight="bold", color="#0f2d59")
+        ax2.set_ylabel(r"Resistance $R$ [$\Omega$]", fontsize=8.5)
+        ax2.set_title(r"2. True vs Apparent Resistance", fontsize=9, fontweight="bold", color="#0f2d59")
         ax2.grid(True, linestyle=":", alpha=0.6)
         ax2.legend(fontsize=7, loc="best")
 
@@ -444,24 +474,24 @@ class KeithleyPdfReportGenerator:
         if params.differential_conductance_curve:
             v_diff = [pt[0] for pt in params.differential_conductance_curve]
             g_diff = [pt[1] * 1e3 for pt in params.differential_conductance_curve]  # mS
-            ax3.plot(v_diff, g_diff, color="#7c3aed", lw=1.5, label="dI/dV numeryczne")
-            if params.bdr_coefficients:
+            ax3.plot(v_diff, g_diff, color="#7c3aed", lw=1.5, label="Numerical dI/dV")
+            if params.bdr_coefficients and params.tunnel_barrier_height_ev is not None:
                 c0, c1, c2 = params.bdr_coefficients
                 v_fit = np.linspace(min(v_diff), max(v_diff), 100)
                 g_fit = (c0 + c1 * v_fit + c2 * (v_fit ** 2)) * 1e3
-                ax3.plot(v_fit, g_fit, color="#db2777", lw=1.2, ls="--", label="Model BDR")
+                ax3.plot(v_fit, g_fit, color="#db2777", lw=1.2, ls="--", label="BDR model fit")
             ax3.legend(fontsize=7, loc="lower center")
-        ax3.set_xlabel("Napięcie próbki $V$ [V]", fontsize=8.5)
-        ax3.set_ylabel("Przewodność $dI/dV$ [mS]", fontsize=8.5)
-        ax3.set_title("3. Przewodność różniczkowa $dI/dV(V)$", fontsize=9, fontweight="bold", color="#0f2d59")
+        ax3.set_xlabel("Sample Voltage $V$ [V]", fontsize=8.5)
+        ax3.set_ylabel("Differential Conductance $dI/dV$ [mS]", fontsize=8.5)
+        ax3.set_title(r"3. Differential Conductance $dI/dV(V)$", fontsize=9, fontweight="bold", color="#0f2d59")
         ax3.grid(True, linestyle=":", alpha=0.6)
 
         # Plot 4: Power dissipation
         ax4 = axs[1, 1]
-        ax4.plot(x_dem, p_mw, color="#d97706", lw=1.8, label="Moc próbki $P$")
+        ax4.plot(x_dem, p_mw, color="#d97706", lw=1.8, label=r"Power $P$")
         ax4.set_xlabel(x_label, fontsize=8.5)
-        ax4.set_ylabel("Moc tracona $P$ [mW]", fontsize=8.5)
-        ax4.set_title("4. Moc wydzielana na próbce $P$", fontsize=9, fontweight="bold", color="#0f2d59")
+        ax4.set_ylabel("Power Dissipation $P$ [mW]", fontsize=8.5)
+        ax4.set_title(r"4. Junction Power Dissipation $P$", fontsize=9, fontweight="bold", color="#0f2d59")
         ax4.grid(True, linestyle=":", alpha=0.6)
         ax4.legend(fontsize=7, loc="upper center")
 

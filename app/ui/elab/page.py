@@ -62,6 +62,7 @@ class ElabPage(QWidget):
     settings_saved = Signal(object)
     configuration_changed = Signal()
     status = Signal(str)
+    upload_completed_record = Signal(object)
 
     def __init__(
         self,
@@ -945,6 +946,7 @@ class ElabPage(QWidget):
             message += " " + " ".join(record.warnings)
         self._set_status(self.upload_status, message, "success")
         self._refresh_history()
+        self.upload_completed_record.emit(record)
         self.status.emit(f"ELAB upload completed: {record.run_path} -> #{record.experiment_id}")
 
     def _upload_failed(self, message: str) -> None:

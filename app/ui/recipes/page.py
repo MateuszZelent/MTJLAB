@@ -297,6 +297,7 @@ def set_keithley_shutdown_ramps_in_recipe(
 class RecipePage(QWidget):
     status = Signal(str)
     run_requested = Signal(object, bool, str, str, str)
+    change_target_requested = Signal()
     plan_preflight_changed = Signal(object)
     settings_issue_requested = Signal(object)
     operator_row_role = int(Qt.ItemDataRole.UserRole) + 17
@@ -636,6 +637,18 @@ class RecipePage(QWidget):
         execution_line.addWidget(self.run_button, 0, 2)
         execution_line.addWidget(self.save_to_elab_check, 2, 0)
         execution_line.addWidget(self.elab_upload_hint, 2, 1, 1, 2)
+        target_box = QHBoxLayout()
+        target_box.setContentsMargins(0, 0, 0, 0)
+        target_box.setSpacing(8)
+        self.sample_target_label = CaptionLabel("DUT Target: No active sample target", self.document_card)
+        self.sample_target_label.setStyleSheet("font-weight: 500;")
+        self.change_sample_target_button = PushButton("Set Target...", self.document_card)
+        self.change_sample_target_button.setFixedHeight(26)
+        self.change_sample_target_button.clicked.connect(self.change_target_requested.emit)
+        target_box.addWidget(self.sample_target_label)
+        target_box.addWidget(self.change_sample_target_button)
+        target_box.addStretch(1)
+        execution_line.addLayout(target_box, 3, 0, 1, 3)
         execution_line.setColumnStretch(1, 1)
         document_layout.addLayout(execution_line)
         layout.addWidget(self.document_card)
@@ -931,6 +944,15 @@ class RecipePage(QWidget):
         self.save_to_elab_check.setChecked(bool(available and default_enabled))
         self.elab_upload_hint.setText(str(hint))
         self.save_to_elab_check.setToolTip(str(hint))
+
+    def set_active_sample_target(self, target: object) -> None:
+        """Update the active DUT sample and device target displayed on the sweeps page."""
+        if hasattr(target, "is_active") and getattr(target, "is_active", False):
+            self.sample_target_label.setText(f"DUT Target: {target.display_text()}")
+            self.sample_target_label.setToolTip(f"Active DUT: {target.display_text()}")
+        else:
+            self.sample_target_label.setText("DUT Target: No active sample target (unassigned)")
+            self.sample_target_label.setToolTip("Click Set Target... to choose a sample and device coordinate.")
 
     def _default_output_directory(self) -> str:
         return str(self._settings.storage.get("output_directory", "./measurements"))

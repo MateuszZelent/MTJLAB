@@ -89,6 +89,9 @@ class FluentDevicePageTests(unittest.TestCase):
                 self.assertEqual(card["output_off_action"].text(), "OUTPUT OFF")
                 self.assertFalse(card["output_on_action"].isEnabled())
                 self.assertFalse(card["output_off_action"].isEnabled())
+            self.assertIsInstance(keithley.characterization_button, PushButton)
+            self.assertTrue(keithley.characterization_button.isVisibleTo(window))
+            self.assertEqual(keithley.characterization_button.text(), "Characterization…")
         finally:
             window.close()
             self.application.processEvents()

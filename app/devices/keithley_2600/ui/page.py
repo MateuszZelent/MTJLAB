@@ -249,7 +249,9 @@ class KeithleyConfigurationPanel(CardWidget):
         for badge in (field.minimum, field.maximum):
             badge.setMinimumWidth(88)
             badge.setProperty("keithleyCompact", True)
-        field.edit_button.setFixedSize(44, 28)
+        field.edit_button.setFixedWidth(78)
+        field.edit_button.setFixedHeight(30)
+        field.edit_button.setIcon(FluentIcon.EDIT)
         field.edit_button.setText("Edit")
         if key in {"source_range", "measure_voltage_range", "measure_current_range"}:
             field.edit_button.hide()
@@ -1383,6 +1385,7 @@ class KeithleyPage(QWidget):
     quick_control_draft_changed = Signal(str, str)
     settings_assignment_requested = Signal(object)
     settings_defaults_requested = Signal(object)
+    characterization_requested = Signal()
     _MANUAL_RAMP_ENABLED = False
 
     def __init__(self, controller: DeviceController, settings: StationSettings, parent: QWidget | None = None) -> None:
@@ -1536,6 +1539,15 @@ class KeithleyPage(QWidget):
         )
         self.plot_settings_button.clicked.connect(self._open_plot_settings_dialog)
         hero_layout.addWidget(self.plot_settings_button)
+        self.characterization_button = PushButton("Characterization…", self.hero_card)
+        self.characterization_button.setIcon(FluentIcon.DOCUMENT)
+        self.characterization_button.setObjectName("keithleyCharacterizationButton")
+        self.characterization_button.setToolTip(
+            "Open Keithley sample IV characterization workspace and report generator."
+        )
+        self.characterization_button.clicked.connect(self.characterization_requested)
+        hero_layout.addWidget(self.characterization_button)
+        self.open_characterization_button = self.characterization_button
         hero.setMaximumHeight(60)
         layout.addWidget(hero)
         channel_grid = QGridLayout()
@@ -1551,6 +1563,7 @@ class KeithleyPage(QWidget):
                 column,
             )
         self.channel_grid = channel_grid
+        layout.addLayout(channel_grid)
         source_tab = QWidget()
         source_layout = QVBoxLayout(source_tab)
         source_layout.setContentsMargins(8, 6, 8, 6)
@@ -1697,26 +1710,33 @@ class KeithleyPage(QWidget):
         self.workspace_splitter.setSizes([450, 910])
         self.workspace_splitter.setChildrenCollapsible(False)
         self._workspace_compact: bool | None = None
-        control_page = QWidget()
-        control_page.setObjectName("keithleyControlTabPage")
-        control_layout = QVBoxLayout(control_page)
-        control_layout.setContentsMargins(0, 0, 0, 0)
-        control_layout.setSpacing(4)
-        control_layout.addLayout(self.channel_grid)
-        control_layout.addWidget(self.workspace_splitter, 1)
-
-        self.tab_view = FluentTabView(self)
-        self.tab_view.setObjectName("keithleyTabView")
-        self.tab_view.layout().setSpacing(4)
-        self.tab_view.addTab(control_page, "Sterowanie i monitorowanie")
+        layout.addWidget(self.workspace_splitter, 1)
 
         self.characterization_card = KeithleyCharacterizationCard(
             controller=self._controller,
             settings=self._station_settings,
             parent=self,
         )
-        self.tab_view.addTab(self.characterization_card, "Charakterystyka próbki i raport")
-        layout.addWidget(self.tab_view, 1)
+
+        def _sync_card_channel(ch_text: str) -> None:
+            target = f"Channel {ch_text}"
+            if self.characterization_card.channel_combo.currentText() != target:
+                self.characterization_card.channel_combo.blockSignals(True)
+                self.characterization_card.channel_combo.setCurrentText(target)
+                self.characterization_card.channel_combo.blockSignals(False)
+                self.characterization_card.refresh_limits()
+                self.characterization_card._update_limits_from_settings()
+
+        def _sync_page_channel(card_text: str) -> None:
+            target = "B" if "B" in card_text else "A"
+            if self.channel.currentText() != target:
+                self.channel.setCurrentText(target)
+
+        self.channel.currentTextChanged.connect(_sync_card_channel)
+        self.characterization_card.channel_combo.currentTextChanged.connect(_sync_page_channel)
+        _sync_card_channel(self.channel.currentText())
+
+        self.tab_view = None
         self.apply_configuration_button.clicked.connect(self.configure)
         self.read_configuration_button.clicked.connect(
             self.read_configuration_from_device
@@ -1793,6 +1813,10 @@ class KeithleyPage(QWidget):
 
     def set_live_control_enabled(self, enabled: bool) -> None:
         self.live_control_switch.setChecked(enabled)
+
+    def set_inventory_store(self, store: object) -> None:
+        if hasattr(self.characterization_card, "set_inventory_store"):
+            self.characterization_card.set_inventory_store(store)
 
     def _live_control_toggled(self, enabled: bool) -> None:
         if enabled:
@@ -1965,6 +1989,10 @@ class KeithleyPage(QWidget):
             self._persist_form_defaults()
         finally:
             self._quick_control_projection = False
+
+    def jump_to_characterization(self) -> None:
+        """Emit signal to jump to the Keithley characterization workspace."""
+        self.characterization_requested.emit()
 
     def quick_control_draft_snapshot(self) -> dict[str, str]:
         """Return current and cached source drafts with explicit units."""

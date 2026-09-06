@@ -125,9 +125,9 @@ class MainWindowFluentShellTests(unittest.TestCase):
         try:
             self.assertIsInstance(window, FluentWindow)
             self.assertEqual(tuple(window.navigation_routes), (
-                "overview", "discovery", "rigol", "keithley", "anritsu",
-                "moke_box", "lakeshore_gaussmeter", "sweeps", "execution",
-                "results", "elab", "settings",
+                "overview", "discovery", "rigol", "keithley", "keithley_characterization",
+                "anritsu", "moke_box", "lakeshore_gaussmeter", "sweeps", "execution",
+                "results", "inventory", "elab", "settings",
             ))
             self.assertIsNotNone(window.safety_strip)
             self.assertEqual(
@@ -378,8 +378,9 @@ class MainWindowFluentShellTests(unittest.TestCase):
                 for route, host in window.navigation_routes.items():
                     item = window.navigationInterface.widget(host.objectName())
                     if item.isVisibleTo(window):
-                        top = item.mapTo(panel, QPoint()).y()
-                        rows.append((route, top, top + item.height() - 1))
+                        row_widget = getattr(item, "itemWidget", item)
+                        top = row_widget.mapTo(panel, QPoint()).y()
+                        rows.append((route, top, top + row_widget.height() - 1))
                 return sorted(rows, key=lambda row: row[1])
 
             window.resize(900, 600)
@@ -392,7 +393,7 @@ class MainWindowFluentShellTests(unittest.TestCase):
                 all(first[2] < second[1] for first, second in zip(compact_rows, compact_rows[1:]))
             )
 
-            window.resize(900, 820)
+            window.resize(900, 880)
             self.application.processEvents()
             self.application.processEvents()
             self.assertTrue(window.apparatus_navigation_item.isExpanded)

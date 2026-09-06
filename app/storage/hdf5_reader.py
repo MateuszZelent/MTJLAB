@@ -27,6 +27,11 @@ class RunSummary:
     plan_sha256: str | None
     application_version: str | None
     operator: str | None = None
+    sample_id: str | None = None
+    sample_name: str | None = None
+    sample_row: str | None = None
+    sample_col: str | None = None
+    sample_coordinate_label: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -212,6 +217,11 @@ class Hdf5RunReader:
             plan_sha256=Hdf5RunReader._attribute_text(run.attrs.get("plan_sha256")),
             application_version=Hdf5RunReader._attribute_text(run.attrs.get("application_version")),
             operator=Hdf5RunReader._extract_operator(run),
+            sample_id=Hdf5RunReader._attribute_text(run.attrs.get("sample_id")),
+            sample_name=Hdf5RunReader._attribute_text(run.attrs.get("sample_name")),
+            sample_row=Hdf5RunReader._attribute_text(run.attrs.get("sample_row")),
+            sample_col=Hdf5RunReader._attribute_text(run.attrs.get("sample_col")),
+            sample_coordinate_label=Hdf5RunReader._attribute_text(run.attrs.get("sample_coordinate_label")),
         )
 
     @staticmethod

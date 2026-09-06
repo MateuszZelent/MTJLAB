@@ -1244,6 +1244,7 @@ class MainWindowTests(unittest.TestCase):
             for route in (
                 "rigol",
                 "keithley",
+                "keithley_characterization",
                 "anritsu",
                 "moke_box",
                 "lakeshore_gaussmeter",
@@ -1254,10 +1255,15 @@ class MainWindowTests(unittest.TestCase):
                 self.assertIsNotNone(item)
                 self.assertTrue(item.isVisible())
                 self.assertIs(item.parent(), apparatus)
-                self.assertGreater(item.geometry().height(), 0)
-                item_top = item.mapTo(window, QPoint()).y()
-                self.assertGreaterEqual(item_top, previous_bottom)
-                previous_bottom = item_top + item.geometry().height()
+                self.assertIs(item.treeParent, apparatus)
+                self.assertEqual(item.nodeDepth, 1)
+                if route == "keithley_characterization":
+                    self.assertEqual(item.text(), "Keithley Characterization")
+                row_widget = getattr(item, "itemWidget", item)
+                self.assertGreater(row_widget.geometry().height(), 0)
+                row_top = row_widget.mapTo(window, QPoint()).y()
+                self.assertGreaterEqual(row_top, previous_bottom)
+                previous_bottom = row_top + row_widget.geometry().height()
         finally:
             window.close()
             self.application.processEvents()

@@ -34,10 +34,23 @@ def _experiment_body(summary: RunSummary, path: Path, file_sha256: str) -> str:
     """Keep the eLab entry readable while the attached HDF5 remains authoritative."""
 
     created = summary.created_at_utc or "unknown"
+    sample_section = ""
+    if summary.sample_id:
+        sample_section = (
+            "<h2>Sample &amp; Coordinate Inventory</h2>"
+            "<table>"
+            f"<tr><th>Sample ID</th><td><code>{escape(summary.sample_id)}</code></td></tr>"
+            f"<tr><th>Sample Name</th><td>{escape(summary.sample_name or summary.sample_id)}</td></tr>"
+            f"<tr><th>Row</th><td>{escape(summary.sample_row or '-')}</td></tr>"
+            f"<tr><th>Column</th><td>{escape(summary.sample_col or '-')}</td></tr>"
+            f"<tr><th>Device Label</th><td><strong>{escape(summary.sample_coordinate_label or '-')}</strong></td></tr>"
+            "</table>"
+        )
     return (
         "<h1>PyLab measurement result</h1>"
         "<p>The attached HDF5 file is the immutable station result and contains the "
         "recipe, settings snapshot, device identity, checkpoints and audit events.</p>"
+        f"{sample_section}"
         "<table>"
         f"<tr><th>Local file</th><td><code>{escape(path.name)}</code></td></tr>"
         f"<tr><th>Run status</th><td>{escape(summary.status)}</td></tr>"
@@ -157,7 +170,14 @@ def upload_result(
                 experiment_url=experiment_url,
             )
             ledger.save(record)
-            for tag in request.profile.tags:
+            tags_to_add = list(request.profile.tags)
+            if summary.sample_id:
+                tags_to_add.append(f"sample:{summary.sample_id}")
+                if summary.sample_coordinate_label:
+                    tags_to_add.append(f"device:{summary.sample_coordinate_label}")
+                elif summary.sample_row and summary.sample_col:
+                    tags_to_add.append(f"coord:R{summary.sample_row}C{summary.sample_col}")
+            for tag in tags_to_add:
                 try:
                     client.add_tag(experiment_id=experiment_id, tag=tag)
                 except ElabApiError as exc:
@@ -169,6 +189,13 @@ def upload_result(
                     ledger.save(record)
 
         uploaded = set(record.uploaded_files)
+        sample_info = ""
+        if summary.sample_id:
+            coord_desc = f"R{summary.sample_row or '?'}C{summary.sample_col or '?'}"
+            if summary.sample_coordinate_label:
+                coord_desc += f" ({summary.sample_coordinate_label})"
+            sample_info = f"; Sample: {summary.sample_id} [{coord_desc}]"
+
         for attachment in attachments:
             attachment_name = attachment.name
             if attachment_name in uploaded:
@@ -178,7 +205,7 @@ def upload_result(
                 experiment_id=int(record.experiment_id),
                 path=attachment,
                 comment=(
-                    f"Uploaded by PyLab; local SHA-256 {file_sha256}; source run {target.name}."
+                    f"Uploaded by PyLab; local SHA-256 {file_sha256}; source run {target.name}{sample_info}."
                 ),
             )
             uploaded.add(attachment_name)

@@ -168,6 +168,18 @@ class KeithleyCharacterizationAnalyzer:
         if len(v_val) < 3 or not math.isfinite(r0):
             return 1.0 if len(v_val) >= 1 else 0.0
 
+        # Pearson correlation squared r^2 measures strict linearity between I and V
+        if np.ptp(i_val) < 1e-15 or np.ptp(v_val) < 1e-15:
+            return 1.0
+
+        try:
+            corr_mat = np.corrcoef(i_val, v_val)
+            corr = float(corr_mat[0, 1])
+            if math.isfinite(corr):
+                return float(np.clip(corr ** 2, 0.0, 1.0))
+        except Exception:
+            pass
+
         v_pred = r0 * i_val
         ss_res = np.sum((v_val - v_pred) ** 2)
         v_mean = np.mean(v_val)

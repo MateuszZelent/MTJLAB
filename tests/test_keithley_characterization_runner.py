@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import math
 import threading
+from typing import Any
 import pytest
 
 from app.devices.keithley_2600.adapter import KeithleyMeasurement
@@ -40,8 +41,11 @@ class _MockKeithleyDevice:
     def compliance_policy(self, channel: str) -> str:
         return self.compliance_policy_state
 
-    def set_compliance_policy(self, channel: str, stop_on_compliance: bool) -> None:
-        self.compliance_policy_state = "stop" if stop_on_compliance else "warn_clamp"
+    def set_compliance_policy(self, channel: str, stop_on_compliance: Any) -> None:
+        if isinstance(stop_on_compliance, bool):
+            self.compliance_policy_state = "stop" if stop_on_compliance else "warn_clamp"
+        else:
+            self.compliance_policy_state = str(stop_on_compliance)
         self.calls.append(f"set_compliance_policy:{self.compliance_policy_state}")
 
     def configure_source(self, request) -> None:
@@ -56,9 +60,12 @@ class _MockKeithleyDevice:
         self.output_enabled = enabled
         self.calls.append(f"set_output:{channel}:{enabled}")
 
-    def update_source_level(self, channel: str, level_si: float) -> None:
-        self.current_level = level_si
-        self.calls.append(f"update_source_level:{channel}:{level_si:.6e}")
+    def update_source_level(self, channel: str, level_si: float | None = None, *, mode: str = "current", **kwargs) -> None:
+        lvl = kwargs.get("level_si", level_si)
+        if lvl is None:
+            lvl = 0.0
+        self.current_level = float(lvl)
+        self.calls.append(f"update_source_level:{channel}:{self.current_level:.6e}")
 
     def measure(self, channel: str) -> KeithleyMeasurement:
         if self.mode == "current":
@@ -160,7 +167,7 @@ def test_runner_preflight_limits(station_settings):
         points_count=1,
         compliance_si=0.050,
     )
-    with pytest.raises(SafetyViolation, match="co najmniej 2"):
+    with pytest.raises(SafetyViolation, match="at least 2"):
         KeithleyCharacterizationRunner.validate_preflight(too_few_pts, station_settings)
 
     # Points count > sweep_points_max (e.g. 1500 > 1000)
@@ -172,7 +179,7 @@ def test_runner_preflight_limits(station_settings):
         points_count=1500,
         compliance_si=0.050,
     )
-    with pytest.raises(SafetyViolation, match="maksymalny dopuszczalny limit"):
+    with pytest.raises(SafetyViolation, match="exceeds station lab limit"):
         KeithleyCharacterizationRunner.validate_preflight(too_many_pts, station_settings)
 
     # Non-positive compliance
@@ -184,7 +191,7 @@ def test_runner_preflight_limits(station_settings):
         points_count=21,
         compliance_si=0.0,
     )
-    with pytest.raises(SafetyViolation, match="ściśle dodatnia"):
+    with pytest.raises(SafetyViolation, match="strictly positive"):
         KeithleyCharacterizationRunner.validate_preflight(zero_comp, station_settings)
 
     # Zero span (start == stop)
@@ -196,7 +203,7 @@ def test_runner_preflight_limits(station_settings):
         points_count=21,
         compliance_si=0.050,
     )
-    with pytest.raises(SafetyViolation, match="identyczne"):
+    with pytest.raises(SafetyViolation, match="cannot be identical"):
         KeithleyCharacterizationRunner.validate_preflight(zero_span, station_settings)
 
 
@@ -282,3 +289,45 @@ def test_runner_voltage_mode_execution():
     assert pt_last.compliance_active is True
     assert math.isclose(pt_last.true_resistance_ohm, 50.0, rel_tol=0.01)
     assert math.isclose(pt_last.apparent_resistance_ohm, 100.0, rel_tol=0.01)
+
+
+def test_runner_compliance_skip_policy_and_restoration():
+    """Verify that during the sweep policy is switched to skip and then original is restored."""
+    device = _MockKeithleyDevice(mode="current")
+    device.compliance_policy_state = "warn_clamp"
+    config = CharacterizationSweepConfig(
+        channel="A",
+        mode="current",
+        start_level_si=0.001,
+        stop_level_si=0.003,
+        points_count=3,
+        compliance_si=0.670,
+        dwell_time_s=0.001,
+    )
+    dataset = KeithleyCharacterizationRunner.run_sweep(device, config)
+    assert len(dataset.points) == 3
+    # Check call history
+    assert "set_compliance_policy:skip" in device.calls
+    assert "set_compliance_policy:warn_clamp" in device.calls
+    assert device.compliance_policy_state == "warn_clamp"
+
+
+def test_runner_positive_only_limits(station_settings):
+    """Verify that a channel with positive min (e.g. 1 mA to 10 mA) does not falsely fail on 0.0."""
+    from copy import deepcopy
+    from app.settings.models import StationSettings
+    raw = deepcopy(station_settings.model_dump(mode="python"))
+    raw["devices"]["keithley"]["safety"]["channels"]["B"]["lab_limits"]["source_current"]["min"] = "1 mA"
+    raw["devices"]["keithley"]["safety"]["channels"]["B"]["lab_limits"]["source_current"]["max"] = "10 mA"
+    mod_settings = StationSettings.model_validate(raw)
+
+    valid_pos_cfg = CharacterizationSweepConfig(
+        channel="B",
+        mode="current",
+        start_level_si=0.002,
+        stop_level_si=0.008,
+        points_count=11,
+        compliance_si=0.050,
+    )
+    # Must not raise SafetyViolation even though 0.0 < 1 mA
+    KeithleyCharacterizationRunner.validate_preflight(valid_pos_cfg, mod_settings)

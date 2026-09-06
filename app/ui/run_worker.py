@@ -10,7 +10,7 @@ import re
 import secrets
 import threading
 import time
-from typing import Callable, Mapping
+from typing import Any, Callable, Mapping
 
 from PySide6.QtCore import QObject, QThread, Signal, Slot
 from ruamel.yaml import YAML
@@ -244,6 +244,7 @@ class RunWorker(QObject):
         output_dir_override: str | None = None,
         file_stem_override: str | None = None,
         device_controllers: Mapping[str, DeviceController] | None = None,
+        sample_target: Any | None = None,
         parent: QObject | None = None,
     ) -> None:
         super().__init__(parent)
@@ -258,6 +259,7 @@ class RunWorker(QObject):
         self._output_dir_override = output_dir_override
         self._file_stem_override = file_stem_override
         self._device_controllers = dict(device_controllers or {})
+        self._sample_target = sample_target
         if outputs_forced_off:
             self._execution_mode = ExecutionMode.DRY_RUN
         self._outputs_forced_off = self._execution_mode is ExecutionMode.DRY_RUN
@@ -396,6 +398,25 @@ class RunWorker(QObject):
             if self._early_stop_requested.is_set():
                 raise RuntimeError("Run was stopped by operator before storage initialization.")
             settings_source = self._settings_snapshot()
+            sample_attrs: dict[str, object] = {}
+            if self._sample_target is not None:
+                if hasattr(self._sample_target, "is_active") and self._sample_target.is_active:
+                    sample_attrs = {
+                        "sample_id": str(self._sample_target.sample_id),
+                        "sample_name": str(self._sample_target.sample_name or self._sample_target.sample_id),
+                        "sample_row": str(self._sample_target.row or ""),
+                        "sample_col": str(self._sample_target.col or ""),
+                        "sample_coordinate_label": str(self._sample_target.device_label or ""),
+                    }
+                elif isinstance(self._sample_target, Mapping) and self._sample_target.get("sample_id"):
+                    sample_attrs = {
+                        "sample_id": str(self._sample_target.get("sample_id")),
+                        "sample_name": str(self._sample_target.get("sample_name") or self._sample_target.get("sample_id")),
+                        "sample_row": str(self._sample_target.get("row") or ""),
+                        "sample_col": str(self._sample_target.get("col") or ""),
+                        "sample_coordinate_label": str(self._sample_target.get("device_label") or ""),
+                    }
+
             if self._recovery is None:
                 result_path, csv_summary_path = planned_run_paths(
                     self._settings,
@@ -418,6 +439,7 @@ class RunWorker(QObject):
                         simulation_context, required
                     ),
                     csv_summary_path=csv_summary_path,
+                    run_attributes=sample_attrs or None,
                 )
             else:
                 writer = Hdf5RunWriter.resume(
@@ -460,7 +482,11 @@ class RunWorker(QObject):
                     self._recovery.prelude_actions if self._recovery is not None else ()
                 ),
             )
-            completion = {"result": result, "path": str(writer.path)}
+            completion = {
+                "result": result,
+                "path": str(writer.path),
+                "sample_target": self._sample_target,
+            }
         except Exception as exc:
             failure = str(exc)
             if writer is not None:
@@ -691,6 +717,7 @@ class RunController(QObject):
         output_dir_override: str | None = None,
         file_stem_override: str | None = None,
         device_controllers: Mapping[str, DeviceController] | None = None,
+        sample_target: Any | None = None,
     ) -> None:
         if self.running:
             raise RuntimeError("A measurement is already running.")
@@ -723,6 +750,7 @@ class RunController(QObject):
             output_dir_override=output_dir_override,
             file_stem_override=file_stem_override,
             device_controllers=device_controllers,
+            sample_target=sample_target,
         )
         self._worker.moveToThread(self._thread)
         self._thread.started.connect(self._worker.run)

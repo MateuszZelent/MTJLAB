@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections import defaultdict
 from collections.abc import Callable
 from datetime import datetime, timezone
 import math
@@ -136,6 +137,18 @@ class DateGroupItem(QTreeWidgetItem):
         return order.get(g1, 99) < order.get(g2, 99)
 
 
+class SampleGroupItem(QTreeWidgetItem):
+    """Collapsible category grouping runs by sample name and ID."""
+
+    def __init__(self, title: str, count: int) -> None:
+        super().__init__([f"{title} ({count})", "", "", "", "", ""])
+        font = self.font(0)
+        font.setBold(True)
+        self.setFont(0, font)
+        self.setFlags(self.flags() & ~Qt.ItemFlag.ItemIsSelectable)
+        self.group_title = title
+
+
 class FileBrowserPanel(QWidget):
     """List station and public THATEC/PyThat HDF5 results."""
 
@@ -221,7 +234,8 @@ class FileBrowserPanel(QWidget):
         self.view_mode_combo.setAccessibleName("View mode")
         self.view_mode_combo.addItem("Flat list", userData="flat")
         self.view_mode_combo.addItem("Group by date", userData="grouped")
-        self.view_mode_combo.setToolTip("Switch between flat table and date-grouped view")
+        self.view_mode_combo.addItem("Group by Sample & DUT", userData="sample")
+        self.view_mode_combo.setToolTip("Switch between flat table, date-grouped, and sample-grouped view")
         filter_bar.addWidget(self.view_mode_combo, 1)
 
         self.clear_filter_btn = PushButton("Clear", self)
@@ -493,7 +507,11 @@ class FileBrowserPanel(QWidget):
             formatted_date = format_timestamp(s.created_at_utc)
             # Text filter
             if query:
-                searchable = f"{s.path.name} {s.status} {s.operator or ''} {formatted_date}".casefold()
+                searchable = (
+                    f"{s.path.name} {s.status} {s.operator or ''} {formatted_date} "
+                    f"{s.sample_id or ''} {s.sample_name or ''} {s.sample_row or ''} "
+                    f"{s.sample_col or ''} {s.sample_coordinate_label or ''}"
+                ).casefold()
                 if query not in searchable:
                     continue
 
@@ -588,6 +606,29 @@ class FileBrowserPanel(QWidget):
                 for s in items:
                     date_text = format_timestamp(s.created_at_utc)
                     child = ResultFileItem(s, date_text)
+                    group_item.addChild(child)
+            self.runs.expandAll()
+        elif self._view_mode == "sample":
+            sample_groups: dict[str, list[RunSummary]] = defaultdict(list)
+            for s in self._filtered_summaries:
+                if s.sample_name or s.sample_id:
+                    s_label = s.sample_name or s.sample_id
+                    sample_groups[f"Sample: {s_label}"].append(s)
+                else:
+                    sample_groups["Unassigned Sample"].append(s)
+
+            for title in sorted(sample_groups.keys()):
+                items = sample_groups[title]
+                group_item = SampleGroupItem(title, len(items))
+                self.runs.addTopLevelItem(group_item)
+                for s in items:
+                    date_text = format_timestamp(s.created_at_utc)
+                    child = ResultFileItem(s, date_text)
+                    if s.sample_row and s.sample_col:
+                        coord_lbl = f"R{s.sample_row}:C{s.sample_col}"
+                        if s.sample_coordinate_label:
+                            coord_lbl += f" ({s.sample_coordinate_label})"
+                        child.setText(COL_OPERATOR, f"{coord_lbl} · {s.operator or '—'}")
                     group_item.addChild(child)
             self.runs.expandAll()
         else:
