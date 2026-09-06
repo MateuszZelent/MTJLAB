@@ -260,6 +260,58 @@ class InventoryStoreTests(unittest.TestCase):
         self.assertEqual(s11.cell_state("1", "1"), "completed")
         self.assertEqual(s11.cell_state("2", "1"), "completed")
 
+    def test_row_renumbering_and_remapping(self) -> None:
+        # Sample with rows 1..10 and measurement data
+        sample = Sample(
+            sample_id="SAMPLE-RENUMBER",
+            name="Wedge 1..10",
+            rows=tuple(str(i) for i in range(1, 11)),
+            row_labels={str(i): f"l{i}" for i in range(1, 11)},
+            cols=("1", "2", "3"),
+            col_labels={"1": "100 nm", "2": "200 nm", "3": "300 nm"},
+            device_states={"1,1": "completed", "4,2": "good", "10,3": "burned"},
+            device_notes={"4,2": "R = 1.2 kOhm"},
+        )
+        self.store.save_sample(sample)
+
+        # Record a run on row 4, col 2
+        run = SampleRunRecord(
+            sample_id="SAMPLE-RENUMBER",
+            row="4",
+            col="2",
+            device_label="200 nm",
+            run_path="measurements/run_test.h5",
+            run_sha256="abc12345",
+            created_at_utc="2026-09-06T12:00:00Z",
+            status="completed",
+            point_count=50,
+            spectrum_count=0,
+            recipe_name="IV_Sweep",
+        )
+        self.store.record_run(run)
+
+        # Renumber rows 1..10 to 20..30 (11 rows)
+        renumbered = sample.with_row_renumbering(start_row=20, count=11, row_prefix="l")
+        self.assertEqual(len(renumbered.rows), 11)
+        self.assertEqual(renumbered.rows[0], "20")
+        self.assertEqual(renumbered.rows[-1], "30")
+        self.assertEqual(renumbered.rows, tuple(str(i) for i in range(20, 31)))
+
+        # Verify device states and notes were mapped from old row 1->20, 4->23, 10->29
+        self.assertEqual(renumbered.cell_state("20", "1"), "completed")
+        self.assertEqual(renumbered.cell_state("23", "2"), "good")
+        self.assertEqual(renumbered.cell_notes("23", "2"), "R = 1.2 kOhm")
+        self.assertEqual(renumbered.cell_state("29", "3"), "burned")
+        self.assertNotIn("1,1", renumbered.device_states)
+        self.assertNotIn("4,2", renumbered.device_states)
+
+        # Test store.remap_sample_rows also updates SQLite sample_runs
+        row_mapping = {str(i): str(20 + i - 1) for i in range(1, 11)}
+        self.store.remap_sample_rows("SAMPLE-RENUMBER", row_mapping)
+        stored_runs = self.store.list_runs_for_sample("SAMPLE-RENUMBER")
+        self.assertEqual(len(stored_runs), 1)
+        self.assertEqual(stored_runs[0].row, "23")  # old row 4 -> new row 23!
+
 
 if __name__ == "__main__":
     unittest.main()

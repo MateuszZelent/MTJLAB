@@ -328,9 +328,16 @@ class MainWindowFluentShellTests(unittest.TestCase):
             self.assertTrue(
                 all(
                     second.navigationInterface.widget(host.objectName()).isVisible()
-                    for host in second.navigation_routes.values()
+                    for route, host in second.navigation_routes.items()
+                    if route != "keithley_characterization"
                 )
             )
+            keithley_item = second.navigationInterface.widget("keithleyPageHost")
+            char_item = second.navigationInterface.widget("keithley_characterizationPageHost")
+            self.assertFalse(char_item.isVisible())
+            keithley_item.setExpanded(True, ani=False)
+            self.application.processEvents()
+            self.assertTrue(char_item.isVisible())
         finally:
             if first is not None:
                 first.close()

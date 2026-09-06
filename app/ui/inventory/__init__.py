@@ -8,7 +8,7 @@ from app.ui.inventory.measurement_card import MeasurementAnalyticsCard
 from app.ui.inventory.measurement_plot import MeasurementPlotWidget
 from app.ui.inventory.measurement_tree import MeasurementTreeWidget
 from app.ui.inventory.page import SampleInventoryPage
-from app.ui.inventory.programming_dialog import SampleProgrammingDialog
+from app.ui.inventory.programming_dialog import RenumberRowsDialog, SampleProgrammingDialog
 
 __all__ = [
     "AttachmentCard",
@@ -17,6 +17,7 @@ __all__ = [
     "MeasurementBrowserView",
     "MeasurementPlotWidget",
     "MeasurementTreeWidget",
+    "RenumberRowsDialog",
     "SampleInventoryPage",
     "SampleMatrixWidget",
     "SampleProgrammingDialog",

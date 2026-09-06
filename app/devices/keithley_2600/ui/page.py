@@ -244,7 +244,7 @@ class KeithleyConfigurationPanel(CardWidget):
         self.set_advanced_ranges_expanded(False)
 
     def _bounded(self, key: str, editor: QWidget) -> LimitField:
-        field = LimitField(editor, *self.limit_values(key))
+        field = LimitField(editor, *self.limit_values(key), range_mode=True)
         field.setProperty("limitKey", key)
         for badge in (field.minimum, field.maximum):
             badge.setMinimumWidth(88)
@@ -258,6 +258,10 @@ class KeithleyConfigurationPanel(CardWidget):
             field.setToolTip(
                 "Disable autorange and enter the requested instrument range directly. "
                 "The displayed maximum is the immutable 2602A hardware ceiling."
+            )
+            field.range_pill.setCursor(Qt.CursorShape.ArrowCursor)
+            field.range_pill.setToolTip(
+                "Immutable instrument range ceiling (AUTO selects range automatically up to this hardware limit)."
             )
         self.limit_fields[key] = field
         return field
@@ -4188,18 +4192,24 @@ class KeithleyPage(QWidget):
         return "NOT SET", "NOT SET"
 
     def _keithley_bounded(self, key: str, editor: QWidget) -> LimitField:
-        field = LimitField(editor, *self._keithley_limit_values(key))
+        field = LimitField(editor, *self._keithley_limit_values(key), range_mode=True)
         field.setProperty("limitKey", key)
         for badge in (field.minimum, field.maximum):
             badge.setMinimumWidth(88)
             badge.setProperty("keithleyCompact", True)
-        field.edit_button.setFixedSize(44, 28)
+        field.edit_button.setFixedWidth(78)
+        field.edit_button.setFixedHeight(30)
+        field.edit_button.setIcon(FluentIcon.EDIT)
         field.edit_button.setText("Edit")
         if key in {"source_range", "measure_voltage_range", "measure_current_range"}:
             field.edit_button.hide()
             field.setToolTip(
                 "Disable autorange and enter the requested instrument range directly. "
                 "The displayed maximum is the immutable 2602A hardware ceiling."
+            )
+            field.range_pill.setCursor(Qt.CursorShape.ArrowCursor)
+            field.range_pill.setToolTip(
+                "Immutable instrument range ceiling (AUTO selects range automatically up to this hardware limit)."
             )
         self._limit_fields[key] = field
         return field

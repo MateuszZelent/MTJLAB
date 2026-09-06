@@ -4,11 +4,12 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from PySide6.QtCore import Qt, Signal
+from PySide6.QtCore import QSize, Qt, Signal
 from PySide6.QtGui import QPixmap
 from PySide6.QtWidgets import (
     QHBoxLayout,
     QLabel,
+    QSizePolicy,
     QVBoxLayout,
     QWidget,
 )
@@ -39,6 +40,9 @@ class AttachmentCard(SimpleCardWidget):
     open_requested = Signal(object)    # SampleAttachment
     delete_requested = Signal(object)  # SampleAttachment
 
+    def minimumSizeHint(self) -> QSize:
+        return QSize(120, 50)
+
     def __init__(
         self,
         attachment: SampleAttachment,
@@ -46,6 +50,7 @@ class AttachmentCard(SimpleCardWidget):
         parent: QWidget | None = None,
     ) -> None:
         super().__init__(parent)
+        self.setMinimumWidth(0)
         self.attachment = attachment
         self.file_path = file_path
 
@@ -78,19 +83,27 @@ class AttachmentCard(SimpleCardWidget):
 
         # Details
         details_layout = QVBoxLayout()
-        details_layout.setSpacing(2)
+        details_layout.setSpacing(3)
 
         self.name_label = BodyLabel(attachment.filename, self)
         self.name_label.setStyleSheet("font-weight: 600;")
+        self.name_label.setWordWrap(True)
+        self.name_label.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred)
         details_layout.addWidget(self.name_label)
 
         sub_info = f"{attachment.file_type.upper()} · {_format_size(attachment.size_bytes)}"
         if attachment.uploaded_at_utc:
             sub_info += f" · {attachment.uploaded_at_utc[:10]}"
-        details_layout.addWidget(CaptionLabel(sub_info, self))
+        sub_info_label = CaptionLabel(sub_info, self)
+        sub_info_label.setWordWrap(True)
+        sub_info_label.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred)
+        details_layout.addWidget(sub_info_label)
 
         if attachment.caption:
-            details_layout.addWidget(CaptionLabel(f"Note: {attachment.caption}", self))
+            caption_label = CaptionLabel(f"Note: {attachment.caption}", self)
+            caption_label.setWordWrap(True)
+            caption_label.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred)
+            details_layout.addWidget(caption_label)
 
         layout.addLayout(details_layout, 1)
 

@@ -55,7 +55,7 @@ root:
         type: acquire_spectrum
         trace: TRAC1
 
-  - id: sweep-601ceaf0
+  - id: sweep-a84d0e66
     type: sweep
     target: keithley.B.current
     segments:
@@ -64,27 +64,27 @@ root:
       points: 5
       spacing: linear
     children:
-    - id: keithley-output-on-703b1722
+    - id: keithley-output-on-0f471398
       type: set_keithley_output
       channel: B
       enabled: true
-    - id: output-off-e0328f5b
+    - id: output-off-bd1c5b2b
       type: set_keithley_output
       enabled: false
       channel: B
-    - id: rigol-output-on-49eb32cb
+    - id: rigol-output-on-c4ed735f
       type: enable_rigol_output
       channel: 1
-    - id: output-off-d07dd180
+    - id: output-off-b9f32145
       type: set_rigol_output
       enabled: false
       channel: 1
-    - id: anritsu-sg-output-on-f249547d
+    - id: anritsu-sg-output-on-17843e11
       type: enable_anritsu_sg_output
-    - id: output-off-8b3c3706
+    - id: output-off-b9565472
       type: set_anritsu_sg_output
       enabled: false
-    - id: configure-keithley-01cda43c
+    - id: configure-keithley-50527dd2
       type: configure_keithley
       channel: B
       mode: current
@@ -93,7 +93,7 @@ root:
       nplc: 1.0
       settle_time: 100 ms
       sense_mode: 2wire
-    - id: settle-wait-39c634ba
+    - id: settle-wait-4003b8fb
       type: wait
       duration: 100 ms
 finally:

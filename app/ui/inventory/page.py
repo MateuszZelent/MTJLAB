@@ -5,7 +5,7 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Sequence
 
-from PySide6.QtCore import Qt, Signal
+from PySide6.QtCore import QSize, Qt, Signal
 from PySide6.QtWidgets import (
     QDialog,
     QFileDialog,
@@ -15,6 +15,7 @@ from PySide6.QtWidgets import (
     QListWidget,
     QListWidgetItem,
     QScrollArea,
+    QSizePolicy,
     QSplitter,
     QStackedWidget,
     QTableWidget,
@@ -34,6 +35,7 @@ from qfluentwidgets import (
     PlainTextEdit,
     PrimaryPushButton,
     PushButton,
+    ScrollArea,
     SearchLineEdit,
     SegmentedWidget,
     SimpleCardWidget,
@@ -53,7 +55,7 @@ from app.ui.inventory.attachment_card import AttachmentCard
 from app.ui.inventory.attachment_viewer import open_attachment
 from app.ui.inventory.matrix_widget import SampleMatrixWidget
 from app.ui.inventory.measurement_browser_view import MeasurementBrowserView
-from app.ui.inventory.programming_dialog import SampleProgrammingDialog
+from app.ui.inventory.programming_dialog import RenumberRowsDialog, SampleProgrammingDialog
 
 
 class RenameHeaderDialog(QDialog):
@@ -168,6 +170,7 @@ class SampleInventoryPage(QWidget):
         parent: QWidget | None = None,
     ) -> None:
         super().__init__(parent)
+        self.owns_viewport = True
         self.store = store
         self._current_sample: Sample | None = None
         self._selected_cell: tuple[str, str] | None = None
@@ -175,10 +178,14 @@ class SampleInventoryPage(QWidget):
         self._build_ui()
         self.refresh_samples()
 
+    def minimumSizeHint(self) -> QSize:
+        """Allow the inventory page to fit any viewport size without forced horizontal overflow."""
+        return QSize(0, 0)
+
     def _build_ui(self) -> None:
         main_layout = QVBoxLayout(self)
-        main_layout.setContentsMargins(16, 12, 16, 12)
-        main_layout.setSpacing(10)
+        main_layout.setContentsMargins(12, 10, 12, 10)
+        main_layout.setSpacing(8)
 
         # ---------------------------------------------------------------------
         # Top Header Bar: Title, Active Target Pill, Global Actions
@@ -202,6 +209,7 @@ class SampleInventoryPage(QWidget):
 
         # Active target pill / banner
         self.active_target_card = SimpleCardWidget(header_card)
+        self.active_target_card.setSizePolicy(QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Preferred)
         self.active_target_card.setStyleSheet(
             "SimpleCardWidget { border: 1.5px solid palette(highlight); border-radius: 6px; padding: 4px; }"
         )
@@ -215,6 +223,7 @@ class SampleInventoryPage(QWidget):
 
         self.active_target_label = BodyLabel("No active target", self.active_target_card)
         self.active_target_label.setStyleSheet("font-weight: 600;")
+        self.active_target_label.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred)
         pill_layout.addWidget(self.active_target_label)
 
         self.next_device_btn = ToolButton(FluentIcon.RIGHT_ARROW, self.active_target_card)
@@ -245,6 +254,8 @@ class SampleInventoryPage(QWidget):
 
         # === Left Panel: Sample Catalog ===
         left_panel = SimpleCardWidget(self.splitter)
+        left_panel.setMinimumWidth(180)
+        left_panel.setMaximumWidth(380)
         left_layout = QVBoxLayout(left_panel)
         left_layout.setContentsMargins(10, 10, 10, 10)
         left_layout.setSpacing(8)
@@ -257,6 +268,9 @@ class SampleInventoryPage(QWidget):
         left_layout.addWidget(self.search_input)
 
         self.sample_list = QListWidget(left_panel)
+        self.sample_list.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        self.sample_list.setWordWrap(True)
+        self.sample_list.setTextElideMode(Qt.TextElideMode.ElideRight)
         self.sample_list.setStyleSheet(
             "QListWidget {"
             "border: 1px solid palette(mid);"
@@ -276,7 +290,8 @@ class SampleInventoryPage(QWidget):
         left_layout.addWidget(self.sample_list, 1)
 
         left_actions = QHBoxLayout()
-        self.edit_grid_btn = PushButton("Edit Sample", left_panel, FluentIcon.EDIT)
+        left_actions.setSpacing(6)
+        self.edit_grid_btn = PushButton("Edit", left_panel, FluentIcon.EDIT)
         self.edit_grid_btn.setToolTip("Edit metadata, dimensions, and rename rows/columns")
         self.edit_grid_btn.clicked.connect(self._edit_current_sample)
         self.delete_sample_btn = PushButton("Delete", left_panel, FluentIcon.DELETE)
@@ -290,49 +305,30 @@ class SampleInventoryPage(QWidget):
 
         # === Right Panel: Sample Detail & Tabs ===
         right_panel = QWidget(self.splitter)
+        right_panel.setMinimumWidth(260)
         right_layout = QVBoxLayout(right_panel)
         right_layout.setContentsMargins(0, 0, 0, 0)
         right_layout.setSpacing(8)
 
-        # Header Info Card
+        # Header Info Card - 2 Row Responsive Layout
         self.sample_header_card = SimpleCardWidget(right_panel)
-        header_info_layout = QHBoxLayout(self.sample_header_card)
+        self.sample_header_card.setMinimumWidth(260)
+        header_info_layout = QVBoxLayout(self.sample_header_card)
         header_info_layout.setContentsMargins(14, 10, 14, 10)
-        header_info_layout.setSpacing(12)
+        header_info_layout.setSpacing(6)
 
+        # Row 1: Sample Title & Actions
+        header_row1 = QHBoxLayout()
+        header_row1.setSpacing(10)
         sample_name_box = QVBoxLayout()
         sample_name_box.setSpacing(2)
         self.current_sample_title = SubtitleLabel("Select a sample", self.sample_header_card)
+        self.current_sample_title.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred)
         self.current_sample_desc = CaptionLabel("No sample selected", self.sample_header_card)
+        self.current_sample_desc.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred)
         sample_name_box.addWidget(self.current_sample_title)
         sample_name_box.addWidget(self.current_sample_desc)
-        header_info_layout.addLayout(sample_name_box)
-        header_info_layout.addStretch(1)
-
-        # Stats badges
-        self.stats_devices_label = CaptionLabel("Devices: -", self.sample_header_card)
-        self.stats_tested_label = CaptionLabel("Tested: -", self.sample_header_card)
-        self.stats_completed_label = CaptionLabel("Completed: -", self.sample_header_card)
-        self.stats_completed_label.setStyleSheet(
-            "background: rgba(34, 197, 94, 0.18); color: #15803d; padding: 4px 8px; border-radius: 4px; font-weight: 600;"
-        )
-        self.stats_burned_label = CaptionLabel("Burned: -", self.sample_header_card)
-        self.stats_burned_label.setStyleSheet(
-            "background: rgba(220, 38, 38, 0.18); color: #b91c1c; padding: 4px 8px; border-radius: 4px; font-weight: 600;"
-        )
-        self.stats_runs_label = CaptionLabel("Sweeps: -", self.sample_header_card)
-        for label in (self.stats_devices_label, self.stats_tested_label, self.stats_runs_label):
-            label.setStyleSheet(
-                "background: palette(midlight); padding: 4px 8px; border-radius: 4px; font-weight: 500;"
-            )
-        for label in (
-            self.stats_devices_label,
-            self.stats_tested_label,
-            self.stats_completed_label,
-            self.stats_burned_label,
-            self.stats_runs_label,
-        ):
-            header_info_layout.addWidget(label)
+        header_row1.addLayout(sample_name_box, 1)
 
         self.edit_structure_header_btn = PushButton(
             "Edit Structure...", self.sample_header_card, FluentIcon.EDIT
@@ -341,7 +337,16 @@ class SampleInventoryPage(QWidget):
             "Edit matrix dimensions, rename rows and columns, change structure"
         )
         self.edit_structure_header_btn.clicked.connect(self._edit_current_sample)
-        header_info_layout.addWidget(self.edit_structure_header_btn)
+        header_row1.addWidget(self.edit_structure_header_btn)
+
+        self.renumber_rows_header_btn = PushButton(
+            "Renumber Rows...", self.sample_header_card, FluentIcon.SYNC
+        )
+        self.renumber_rows_header_btn.setToolTip(
+            "Quickly shift or renumber rows (e.g. from 1..10 to 20..30) while preserving measurements"
+        )
+        self.renumber_rows_header_btn.clicked.connect(self._on_renumber_rows_requested)
+        header_row1.addWidget(self.renumber_rows_header_btn)
 
         self.view_measurements_header_btn = PushButton(
             "Measurements Tree", self.sample_header_card, FluentIcon.VIEW
@@ -350,7 +355,38 @@ class SampleInventoryPage(QWidget):
             "Switch to hierarchical measurement tree, inspection plot, and figures of merit"
         )
         self.view_measurements_header_btn.clicked.connect(self._switch_to_measurements_tab)
-        header_info_layout.addWidget(self.view_measurements_header_btn)
+        header_row1.addWidget(self.view_measurements_header_btn)
+
+        header_info_layout.addLayout(header_row1)
+
+        # Row 2: Stats badges
+        header_row2 = QHBoxLayout()
+        header_row2.setSpacing(8)
+        self.stats_devices_label = CaptionLabel("Devices: -", self.sample_header_card)
+        self.stats_tested_label = CaptionLabel("Tested: -", self.sample_header_card)
+        self.stats_completed_label = CaptionLabel("Completed: -", self.sample_header_card)
+        self.stats_completed_label.setStyleSheet(
+            "background: rgba(34, 197, 94, 0.18); color: #15803d; padding: 3px 8px; border-radius: 4px; font-weight: 600;"
+        )
+        self.stats_burned_label = CaptionLabel("Burned: -", self.sample_header_card)
+        self.stats_burned_label.setStyleSheet(
+            "background: rgba(220, 38, 38, 0.18); color: #b91c1c; padding: 3px 8px; border-radius: 4px; font-weight: 600;"
+        )
+        self.stats_runs_label = CaptionLabel("Sweeps: -", self.sample_header_card)
+        for label in (self.stats_devices_label, self.stats_tested_label, self.stats_runs_label):
+            label.setStyleSheet(
+                "background: palette(midlight); padding: 3px 8px; border-radius: 4px; font-weight: 500;"
+            )
+        for label in (
+            self.stats_devices_label,
+            self.stats_tested_label,
+            self.stats_completed_label,
+            self.stats_burned_label,
+            self.stats_runs_label,
+        ):
+            header_row2.addWidget(label)
+        header_row2.addStretch(1)
+        header_info_layout.addLayout(header_row2)
 
         right_layout.addWidget(self.sample_header_card)
 
@@ -364,12 +400,17 @@ class SampleInventoryPage(QWidget):
         # Tab 1: Device Matrix (Siatka) + Cell Inspector
         # ---------------------------------------------------------------------
         matrix_page = QWidget(self.stack)
-        matrix_layout = QHBoxLayout(matrix_page)
+        matrix_layout = QVBoxLayout(matrix_page)
         matrix_layout.setContentsMargins(0, 0, 0, 0)
-        matrix_layout.setSpacing(10)
+        matrix_layout.setSpacing(0)
+
+        self.matrix_splitter = QSplitter(Qt.Orientation.Horizontal, matrix_page)
+        self.matrix_splitter.setChildrenCollapsible(False)
+        self.matrix_splitter.setHandleWidth(6)
 
         # Left: Interactive Matrix
-        self.matrix_widget = SampleMatrixWidget(matrix_page)
+        self.matrix_widget = SampleMatrixWidget(self.matrix_splitter)
+        self.matrix_widget.setMinimumWidth(240)
         self.matrix_widget.cell_selected.connect(self._on_cell_selected)
         self.matrix_widget.cell_activated.connect(self._on_cell_activated)
         self.matrix_widget.col_rename_requested.connect(self._on_rename_column_requested)
@@ -383,36 +424,48 @@ class SampleInventoryPage(QWidget):
         self.matrix_widget.row_state_change_requested.connect(self._on_row_state_change_requested)
         self.matrix_widget.col_state_change_requested.connect(self._on_col_state_change_requested)
         self.matrix_widget.explore_runs_requested.connect(self._explore_cell_in_tree)
-        matrix_layout.addWidget(self.matrix_widget, 2)
+        self.matrix_widget.renumber_rows_requested.connect(self._on_renumber_rows_requested)
+        self.matrix_splitter.addWidget(self.matrix_widget)
 
-        # Right: Cell Inspector
-        self.inspector_card = SimpleCardWidget(matrix_page)
-        self.inspector_card.setMinimumWidth(260)
-        self.inspector_card.setMaximumWidth(360)
-        inspector_layout = QVBoxLayout(self.inspector_card)
-        inspector_layout.setContentsMargins(12, 12, 12, 12)
-        inspector_layout.setSpacing(10)
+        # Right: Cell Inspector with scroll area to prevent overlap on compact heights
+        self.inspector_card = SimpleCardWidget(self.matrix_splitter)
+        self.inspector_card.setMinimumWidth(230)
+        self.inspector_card.setMaximumWidth(380)
+        inspector_card_layout = QVBoxLayout(self.inspector_card)
+        inspector_card_layout.setContentsMargins(10, 10, 10, 10)
+        inspector_card_layout.setSpacing(8)
 
-        inspector_layout.addWidget(SubtitleLabel("Device Inspector", self.inspector_card))
+        inspector_card_layout.addWidget(SubtitleLabel("Device Inspector", self.inspector_card))
         self.inspector_coord_label = BodyLabel("Select a cell in the grid", self.inspector_card)
         self.inspector_coord_label.setStyleSheet("font-weight: 600;")
-        inspector_layout.addWidget(self.inspector_coord_label)
+        self.inspector_coord_label.setWordWrap(True)
+        inspector_card_layout.addWidget(self.inspector_coord_label)
+
+        # Scrollable container for inspector controls
+        inspector_scroll = ScrollArea(self.inspector_card)
+        inspector_scroll.setWidgetResizable(True)
+        inspector_scroll.setFrameShape(ScrollArea.Shape.NoFrame)
+        inspector_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        inspector_scroll_content = QWidget(inspector_scroll)
+        inspector_layout = QVBoxLayout(inspector_scroll_content)
+        inspector_layout.setContentsMargins(0, 0, 4, 0)
+        inspector_layout.setSpacing(8)
 
         form = QFormLayout()
-        form.setSpacing(8)
-        self.cell_label_input = LineEdit(self.inspector_card)
+        form.setSpacing(6)
+        self.cell_label_input = LineEdit(inspector_scroll_content)
         self.cell_label_input.setPlaceholderText("e.g. 200 nm Pillar A")
         form.addRow("Device Label:", self.cell_label_input)
 
-        self.row_label_input = LineEdit(self.inspector_card)
+        self.row_label_input = LineEdit(inspector_scroll_content)
         self.row_label_input.setPlaceholderText("e.g. Row 1, Strip Alpha")
         form.addRow("Row Label:", self.row_label_input)
 
-        self.col_label_input = LineEdit(self.inspector_card)
+        self.col_label_input = LineEdit(inspector_scroll_content)
         self.col_label_input.setPlaceholderText("e.g. 200 nm")
         form.addRow("Col Label:", self.col_label_input)
 
-        self.cell_state_combo = ComboBox(self.inspector_card)
+        self.cell_state_combo = ComboBox(inspector_scroll_content)
         self.cell_state_combo.addItems([
             "untested", "completed", "good", "measured", "burned", "shorted", "open", "degraded"
         ])
@@ -421,11 +474,11 @@ class SampleInventoryPage(QWidget):
 
         # Quick State Action buttons
         quick_state_layout = QHBoxLayout()
-        self.quick_completed_btn = PushButton("✔ Completed", self.inspector_card, FluentIcon.ACCEPT)
+        self.quick_completed_btn = PushButton("✔ Completed", inspector_scroll_content, FluentIcon.ACCEPT)
         self.quick_completed_btn.setToolTip("Quickly mark cell as Completed (Green) and save immediately")
         self.quick_completed_btn.clicked.connect(lambda: self._quick_mark_state("completed"))
 
-        self.quick_burned_btn = PushButton("🔥 Burned", self.inspector_card, FluentIcon.CANCEL)
+        self.quick_burned_btn = PushButton("🔥 Burned", inspector_scroll_content, FluentIcon.CANCEL)
         self.quick_burned_btn.setToolTip("Quickly mark cell as Burned / Damaged (Red) and save immediately")
         self.quick_burned_btn.clicked.connect(lambda: self._quick_mark_state("burned"))
 
@@ -433,30 +486,30 @@ class SampleInventoryPage(QWidget):
         quick_state_layout.addWidget(self.quick_burned_btn)
         inspector_layout.addLayout(quick_state_layout)
 
-        inspector_layout.addWidget(CaptionLabel("Device Notes / Resistance:", self.inspector_card))
-        self.cell_notes_input = PlainTextEdit(self.inspector_card)
-        self.cell_notes_input.setMaximumHeight(70)
+        inspector_layout.addWidget(CaptionLabel("Device Notes / Resistance:", inspector_scroll_content))
+        self.cell_notes_input = PlainTextEdit(inspector_scroll_content)
+        self.cell_notes_input.setMaximumHeight(60)
         inspector_layout.addWidget(self.cell_notes_input)
 
         cell_btns = QHBoxLayout()
-        self.save_cell_btn = PushButton("Save Cell", self.inspector_card, FluentIcon.SAVE)
+        self.save_cell_btn = PushButton("Save Cell", inspector_scroll_content, FluentIcon.SAVE)
         self.save_cell_btn.clicked.connect(self._save_cell_changes)
-        self.set_target_btn = PrimaryPushButton("★ Set Target", self.inspector_card, FluentIcon.TAG)
+        self.set_target_btn = PrimaryPushButton("★ Set Target", inspector_scroll_content, FluentIcon.TAG)
         self.set_target_btn.clicked.connect(self._set_selected_as_active_target)
         cell_btns.addWidget(self.save_cell_btn)
         cell_btns.addWidget(self.set_target_btn)
         inspector_layout.addLayout(cell_btns)
 
         runs_hdr_layout = QHBoxLayout()
-        runs_hdr_layout.addWidget(CaptionLabel("Cell Measurement Sweeps:", self.inspector_card))
+        runs_hdr_layout.addWidget(CaptionLabel("Cell Measurement Sweeps:", inspector_scroll_content))
         runs_hdr_layout.addStretch(1)
-        self.explore_cell_runs_btn = ToolButton(FluentIcon.VIEW, self.inspector_card)
+        self.explore_cell_runs_btn = ToolButton(FluentIcon.VIEW, inspector_scroll_content)
         self.explore_cell_runs_btn.setToolTip("Explore Cell Sweeps in Measurement Tree")
         self.explore_cell_runs_btn.clicked.connect(self._explore_current_cell_in_tree)
         runs_hdr_layout.addWidget(self.explore_cell_runs_btn)
         inspector_layout.addLayout(runs_hdr_layout)
 
-        self.cell_runs_table = QTableWidget(self.inspector_card)
+        self.cell_runs_table = QTableWidget(inspector_scroll_content)
         self.cell_runs_table.setColumnCount(3)
         self.cell_runs_table.setHorizontalHeaderLabels(["Run / Recipe", "Pts", "Status"])
         self.cell_runs_table.horizontalHeader().setSectionResizeMode(0, QHeaderView.ResizeMode.Stretch)
@@ -464,10 +517,18 @@ class SampleInventoryPage(QWidget):
         self.cell_runs_table.horizontalHeader().setSectionResizeMode(2, QHeaderView.ResizeMode.ResizeToContents)
         self.cell_runs_table.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
         self.cell_runs_table.itemDoubleClicked.connect(self._on_cell_run_double_clicked)
+        self.cell_runs_table.setMinimumHeight(80)
         inspector_layout.addWidget(self.cell_runs_table, 1)
 
-        matrix_layout.addWidget(self.inspector_card, 1)
+        inspector_scroll.setWidget(inspector_scroll_content)
+        inspector_card_layout.addWidget(inspector_scroll, 1)
 
+        self.matrix_splitter.addWidget(self.inspector_card)
+        self.matrix_splitter.setStretchFactor(0, 1)
+        self.matrix_splitter.setStretchFactor(1, 0)
+        self.matrix_splitter.setSizes([800, 270])
+
+        matrix_layout.addWidget(self.matrix_splitter, 1)
         self._add_tab(matrix_page, "matrixTab", "Device Grid", FluentIcon.TILES)
 
         # ---------------------------------------------------------------------
@@ -484,12 +545,17 @@ class SampleInventoryPage(QWidget):
         # Tab 3: Attachments & Notes (Microscope images, PDFs, fabrication notes)
         # ---------------------------------------------------------------------
         att_page = QWidget(self.stack)
-        att_layout = QHBoxLayout(att_page)
-        att_layout.setContentsMargins(0, 0, 0, 0)
-        att_layout.setSpacing(10)
+        att_page_layout = QVBoxLayout(att_page)
+        att_page_layout.setContentsMargins(0, 0, 0, 0)
+        att_page_layout.setSpacing(0)
+
+        self.att_splitter = QSplitter(Qt.Orientation.Horizontal, att_page)
+        self.att_splitter.setChildrenCollapsible(False)
+        self.att_splitter.setHandleWidth(6)
 
         # Left: Rich Sample Notes
-        notes_card = SimpleCardWidget(att_page)
+        notes_card = SimpleCardWidget(self.att_splitter)
+        notes_card.setMinimumWidth(240)
         notes_layout = QVBoxLayout(notes_card)
         notes_layout.setContentsMargins(12, 12, 12, 12)
         notes_layout.setSpacing(8)
@@ -508,10 +574,11 @@ class SampleInventoryPage(QWidget):
             "annealing temperatures, optical microscope observations, wire bonding pinouts..."
         )
         notes_layout.addWidget(self.sample_notes_edit, 1)
-        att_layout.addWidget(notes_card, 1)
+        self.att_splitter.addWidget(notes_card)
 
         # Right: Attachments Gallery (Images, PDFs)
-        gallery_card = SimpleCardWidget(att_page)
+        gallery_card = SimpleCardWidget(self.att_splitter)
+        gallery_card.setMinimumWidth(260)
         gallery_layout = QVBoxLayout(gallery_card)
         gallery_layout.setContentsMargins(12, 12, 12, 12)
         gallery_layout.setSpacing(8)
@@ -529,6 +596,7 @@ class SampleInventoryPage(QWidget):
         # Scrollable area for attachment cards
         self.attachments_scroll = QScrollArea(gallery_card)
         self.attachments_scroll.setWidgetResizable(True)
+        self.attachments_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
         self.attachments_scroll.setStyleSheet("QScrollArea { border: none; background: transparent; }")
         self.attachments_container = QWidget(self.attachments_scroll)
         self.attachments_container_layout = QVBoxLayout(self.attachments_container)
@@ -538,12 +606,19 @@ class SampleInventoryPage(QWidget):
         self.attachments_scroll.setWidget(self.attachments_container)
         gallery_layout.addWidget(self.attachments_scroll, 1)
 
-        att_layout.addWidget(gallery_card, 1)
+        self.att_splitter.addWidget(gallery_card)
+        self.att_splitter.setStretchFactor(0, 1)
+        self.att_splitter.setStretchFactor(1, 1)
+        self.att_splitter.setSizes([500, 500])
+
+        att_page_layout.addWidget(self.att_splitter, 1)
 
         self._add_tab(att_page, "attachmentsTab", "Photos, PDFs & Notes", FluentIcon.DOCUMENT)
 
         self.splitter.addWidget(right_panel)
-        self.splitter.setSizes([240, 860])
+        self.splitter.setStretchFactor(0, 0)
+        self.splitter.setStretchFactor(1, 1)
+        self.splitter.setSizes([220, 950])
         main_layout.addWidget(self.splitter, 1)
 
         self._sync_active_target_display()
@@ -693,6 +768,35 @@ class SampleInventoryPage(QWidget):
             self.store.save_sample(updated)
             self.status.emit(f"Sample {updated.sample_id} updated.")
             self.refresh_samples()
+
+    def _on_renumber_rows_requested(self) -> None:
+        if self._current_sample is None:
+            return
+        dialog = RenumberRowsDialog(sample=self._current_sample, parent=self)
+        if dialog.exec():
+            old_rows = list(self._current_sample.rows)
+            updated = dialog.get_renumbered_sample()
+            new_rows = list(updated.rows)
+            row_mapping = {old: new_rows[i] for i, old in enumerate(old_rows) if i < len(new_rows)}
+            self.store.remap_sample_rows(self._current_sample.sample_id, row_mapping)
+            self.store.save_sample(updated)
+            self.status.emit(
+                f"Renumbered rows for {updated.name} to {updated.rows[0]}..{updated.rows[-1]}."
+            )
+            self.refresh_samples()
+            self._set_current_sample(updated)
+            InfoBar.success(
+                title="Rows Renumbered",
+                content=(
+                    f"Sample '{updated.name}' rows renumbered to "
+                    f"{updated.rows[0]}..{updated.rows[-1]} ({len(updated.rows)} rows total)."
+                ),
+                orient=Qt.Orientation.Horizontal,
+                isClosable=True,
+                position=InfoBarPosition.TOP,
+                duration=3500,
+                parent=self,
+            )
 
     def _delete_current_sample(self) -> None:
         if self._current_sample is None:
@@ -1009,10 +1113,14 @@ class SampleInventoryPage(QWidget):
     def _sync_active_target_display(self) -> None:
         active = self.store.get_active_target()
         if active.is_active:
-            self.active_target_label.setText(f"Target: {active.display_text()}")
+            dev = f"[{active.device_label}]" if active.device_label else f"[R{active.row}:C{active.col}]"
+            short_text = f"Target: {active.sample_id} · R{active.row}:C{active.col} {dev}"
+            self.active_target_label.setText(short_text)
+            self.active_target_card.setToolTip(f"Active DUT: {active.display_text()}")
             self.active_target_card.show()
         else:
             self.active_target_label.setText("No active sample target")
+            self.active_target_card.setToolTip("Select a sample cell and click '★ Set Target' to activate a measurement target.")
 
     # -------------------------------------------------------------------------
     # Attachments & Notes

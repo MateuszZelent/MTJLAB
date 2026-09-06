@@ -443,29 +443,134 @@ class Sample:
             updated_at_utc=datetime.now(timezone.utc).isoformat(),
         )
 
+    def remap_rows(self, row_mapping: Mapping[str, str]) -> Sample:
+        """Remap row keys (e.g. {'1': '20', '2': '21', ...}), updating all cell data and labels."""
+        new_rows = tuple(row_mapping.get(r, r) for r in self.rows)
+
+        # Remap row labels
+        new_row_labels: dict[str, str] = {}
+        for r in self.rows:
+            target_r = row_mapping.get(r, r)
+            old_label = self.row_labels.get(r, f"Row {r}")
+            if old_label in (r, f"Row {r}"):
+                new_row_labels[target_r] = f"Row {target_r}"
+            else:
+                new_row_labels[target_r] = old_label
+
+        # Remap device labels, states, notes
+        new_device_labels: dict[str, str] = {}
+        for (r, c), v in self._split_coord_dict(self.device_labels).items():
+            new_r = row_mapping.get(r, r)
+            new_device_labels[f"{new_r},{c}"] = v
+
+        new_device_states: dict[str, str] = {}
+        for (r, c), v in self._split_coord_dict(self.device_states).items():
+            new_r = row_mapping.get(r, r)
+            new_device_states[f"{new_r},{c}"] = v
+
+        new_device_notes: dict[str, str] = {}
+        for (r, c), v in self._split_coord_dict(self.device_notes).items():
+            new_r = row_mapping.get(r, r)
+            new_device_notes[f"{new_r},{c}"] = v
+
+        return replace(
+            self,
+            rows=new_rows,
+            row_labels=new_row_labels,
+            device_labels=new_device_labels,
+            device_states=new_device_states,
+            device_notes=new_device_notes,
+            updated_at_utc=datetime.now(timezone.utc).isoformat(),
+        )
+
+    def with_row_renumbering(
+        self,
+        start_row: int,
+        count: int | None = None,
+        row_prefix: str = "",
+    ) -> Sample:
+        """Renumber numeric rows sequentially starting from start_row (e.g. 20 to 30)."""
+        if count is None:
+            count = len(self.rows)
+        new_row_keys = [str(start_row + i) for i in range(count)]
+
+        # Map existing rows to new row keys positionally
+        row_mapping: dict[str, str] = {}
+        for idx, old_r in enumerate(self.rows):
+            if idx < len(new_row_keys):
+                row_mapping[old_r] = new_row_keys[idx]
+
+        remapped = self.remap_rows(row_mapping)
+
+        # Handle row count changes (extension or reduction)
+        all_rows = tuple(new_row_keys)
+        all_labels: dict[str, str] = {}
+        for idx, r in enumerate(all_rows):
+            if r in remapped.row_labels:
+                all_labels[r] = remapped.row_labels[r]
+            elif row_prefix:
+                all_labels[r] = f"{row_prefix} {r}".strip()
+            else:
+                all_labels[r] = f"Row {r}"
+
+        # Retain cell data for valid rows only
+        valid_rows = set(all_rows)
+        cleaned_labels = {
+            k: v for k, v in remapped.device_labels.items()
+            if k.split(",", 1)[0] in valid_rows
+        }
+        cleaned_states = {
+            k: v for k, v in remapped.device_states.items()
+            if k.split(",", 1)[0] in valid_rows
+        }
+        cleaned_notes = {
+            k: v for k, v in remapped.device_notes.items()
+            if k.split(",", 1)[0] in valid_rows
+        }
+
+        return replace(
+            remapped,
+            rows=all_rows,
+            row_labels=all_labels,
+            device_labels=cleaned_labels,
+            device_states=cleaned_states,
+            device_notes=cleaned_notes,
+            updated_at_utc=datetime.now(timezone.utc).isoformat(),
+        )
+
     def with_structure(
         self,
         rows: Sequence[str],
         row_labels: Mapping[str, str],
         cols: Sequence[str],
         col_labels: Mapping[str, str],
+        row_mapping: Mapping[str, str] | None = None,
     ) -> Sample:
         """Update rows, cols and labels while retaining existing cell data for remaining keys."""
+        current = self
+        if row_mapping:
+            current = current.remap_rows(row_mapping)
+        elif len(rows) == len(self.rows) and set(rows) != set(self.rows):
+            # Positional renumbering auto-detection
+            auto_map = {old: new for old, new in zip(self.rows, rows, strict=False) if old != new}
+            if auto_map:
+                current = current.remap_rows(auto_map)
+
         valid_rows = set(rows)
         valid_cols = set(cols)
 
         retained_labels = {}
-        for (r, c), v in self._split_coord_dict(self.device_labels).items():
+        for (r, c), v in current._split_coord_dict(current.device_labels).items():
             if r in valid_rows and c in valid_cols:
                 retained_labels[f"{r},{c}"] = v
 
         retained_states = {}
-        for (r, c), v in self._split_coord_dict(self.device_states).items():
+        for (r, c), v in current._split_coord_dict(current.device_states).items():
             if r in valid_rows and c in valid_cols:
                 retained_states[f"{r},{c}"] = v
 
         retained_notes = {}
-        for (r, c), v in self._split_coord_dict(self.device_notes).items():
+        for (r, c), v in current._split_coord_dict(current.device_notes).items():
             if r in valid_rows and c in valid_cols:
                 retained_notes[f"{r},{c}"] = v
 

@@ -1244,7 +1244,6 @@ class MainWindowTests(unittest.TestCase):
             for route in (
                 "rigol",
                 "keithley",
-                "keithley_characterization",
                 "anritsu",
                 "moke_box",
                 "lakeshore_gaussmeter",
@@ -1257,13 +1256,21 @@ class MainWindowTests(unittest.TestCase):
                 self.assertIs(item.parent(), apparatus)
                 self.assertIs(item.treeParent, apparatus)
                 self.assertEqual(item.nodeDepth, 1)
-                if route == "keithley_characterization":
-                    self.assertEqual(item.text(), "Keithley Characterization")
                 row_widget = getattr(item, "itemWidget", item)
                 self.assertGreater(row_widget.geometry().height(), 0)
                 row_top = row_widget.mapTo(window, QPoint()).y()
                 self.assertGreaterEqual(row_top, previous_bottom)
                 previous_bottom = row_top + row_widget.geometry().height()
+
+            keithley_item = window.navigationInterface.widget("keithleyPageHost")
+            char_item = window.navigationInterface.widget(
+                window.navigation_routes["keithley_characterization"].objectName()
+            )
+            self.assertIsNotNone(char_item)
+            self.assertIs(char_item.parent(), keithley_item)
+            self.assertIs(char_item.treeParent, keithley_item)
+            self.assertEqual(char_item.nodeDepth, 2)
+            self.assertEqual(char_item.text(), "Characterization")
         finally:
             window.close()
             self.application.processEvents()

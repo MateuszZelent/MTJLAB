@@ -530,6 +530,15 @@ class MainWindow(FluentWindow):
             field.edit_button.setToolTip(reason)
             field.edit_button.setAccessibleName(f"Edit {device} safety limits")
             field.edit_button.setAccessibleDescription(reason)
+            if hasattr(field, "range_pill"):
+                if not enabled or not field.edit_button.isVisible():
+                    field.range_pill.setCursor(Qt.CursorShape.ArrowCursor)
+                    field.range_pill.setToolTip(reason)
+                else:
+                    field.range_pill.setCursor(Qt.CursorShape.PointingHandCursor)
+                    field.range_pill.setToolTip(
+                        f"Configured {device} safety envelope. Click to edit laboratory safety limits."
+                    )
             return enabled
 
         for field in self.rigol_page.findChildren(LimitField):
@@ -560,7 +569,7 @@ class MainWindow(FluentWindow):
             "discovery": FluentIcon.SEARCH,
             "rigol": FluentIcon.MEDIA,
             "keithley": FluentIcon.POWER_BUTTON,
-            "keithley_characterization": FluentIcon.DOCUMENT,
+            "keithley_characterization": FluentIcon.SPEED_HIGH,
             "anritsu": FluentIcon.PROJECTOR,
             "moke_box": FluentIcon.IOT,
             "lakeshore_gaussmeter": FluentIcon.PIN,
@@ -587,7 +596,7 @@ class MainWindow(FluentWindow):
             (
                 self.keithley_characterization_page,
                 "keithley_characterization",
-                "Keithley Characterization",
+                "Characterization",
             ),
             (
                 self.anritsu_page,
@@ -623,7 +632,6 @@ class MainWindow(FluentWindow):
         apparatus_routes = {
             "rigol",
             "keithley",
-            "keithley_characterization",
             "anritsu",
             "moke_box",
             "lakeshore_gaussmeter",
@@ -654,7 +662,12 @@ class MainWindow(FluentWindow):
             position = (
                 NavigationItemPosition.BOTTOM if route == "settings" else NavigationItemPosition.TOP
             )
-            parent_key = "apparatusMenu" if route in apparatus_routes else None
+            if route == "keithley_characterization":
+                parent_key = "keithleyPageHost"
+            elif route in apparatus_routes:
+                parent_key = "apparatusMenu"
+            else:
+                parent_key = None
             self.addSubInterface(
                 host,
                 route_icons[route],
@@ -666,6 +679,16 @@ class MainWindow(FluentWindow):
         # Keep the equipment group open on launch: device controls remain a
         # single click away while the navigation still communicates hierarchy.
         self.apparatus_navigation_item.setExpanded(True, ani=False)
+        keithley_nav_item = self.navigationInterface.widget("keithleyPageHost")
+        if keithley_nav_item is not None:
+            if hasattr(keithley_nav_item, "expanded"):
+                keithley_nav_item.expanded.connect(
+                    lambda: QTimer.singleShot(0, self._sync_apparatus_navigation_height)
+                )
+            if hasattr(keithley_nav_item, "clicked"):
+                keithley_nav_item.clicked.connect(
+                    lambda: QTimer.singleShot(0, self._sync_apparatus_navigation_height)
+                )
         self._apparatus_auto_collapsed = False
         self._apparatus_required_height = (
             self.navigationInterface.panel.vBoxLayout.minimumSize().height() + 1

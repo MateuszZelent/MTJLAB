@@ -172,9 +172,21 @@ class KeithleyPdfReportGenerator:
                 ),
             ],
             [
-                Paragraph("<b>Junction Area:</b>", body_style),
+                Paragraph("<b>Pillar / Area:</b>", body_style),
                 Paragraph(
-                    f"{meta.junction_area_um2:.2f} &mu;m&sup2;" if meta.junction_area_um2 else "Not specified",
+                    (
+                        f"d = {meta.diameter_nm:g} nm (A = {meta.junction_area_um2:.4g} &mu;m&sup2;)"
+                        if (meta.diameter_nm and meta.junction_area_um2)
+                        else (
+                            f"{meta.junction_area_um2:.4g} &mu;m&sup2;"
+                            if meta.junction_area_um2
+                            else (
+                                f"d = {meta.diameter_nm:g} nm"
+                                if meta.diameter_nm
+                                else "Not specified"
+                            )
+                        )
+                    ),
                     body_style,
                 ),
                 Paragraph("<b>Sweep Range:</b>", body_style),

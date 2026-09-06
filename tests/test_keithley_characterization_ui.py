@@ -9,6 +9,7 @@ from unittest.mock import Mock
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
+from PySide6.QtCore import Qt
 from PySide6.QtWidgets import QApplication
 
 from app.devices.keithley_2600.ui.page import KeithleyPage
@@ -210,12 +211,14 @@ class KeithleyCharacterizationUiTests(unittest.TestCase):
             self.assertIs(host.content, window.keithley_page.characterization_card)
 
             char_nav_item = window.navigationInterface.widget(host.objectName())
+            keithley_nav_item = window.navigationInterface.widget("keithleyPageHost")
             devices_nav_item = window.navigationInterface.widget("apparatusMenu")
-            self.assertIs(char_nav_item.parent(), devices_nav_item)
-            self.assertIs(char_nav_item.treeParent, devices_nav_item)
-            self.assertEqual(char_nav_item.nodeDepth, 1)
+            self.assertIs(char_nav_item.parent(), keithley_nav_item)
+            self.assertIs(char_nav_item.treeParent, keithley_nav_item)
+            self.assertEqual(char_nav_item.nodeDepth, 2)
+            self.assertEqual(keithley_nav_item.nodeDepth, 1)
             self.assertEqual(devices_nav_item.nodeDepth, 0)
-            self.assertEqual(char_nav_item.text(), "Keithley Characterization")
+            self.assertEqual(char_nav_item.text(), "Characterization")
 
             # Request jump from Keithley dashboard
             window._navigate_to("keithley")
@@ -624,3 +627,116 @@ class KeithleyCharacterizationUiTests(unittest.TestCase):
                 self.assertIn("[measured]", dev_text)
             finally:
                 store.close()
+
+    def test_keithley_page_configuration_panel_range_mode(self) -> None:
+        """Verify KeithleyPage configuration panel fields use SafetyRangePill with widened Edit buttons."""
+        panel = self.page.configuration_panel
+        self.assertTrue(panel.level_field._range_mode)
+        self.assertTrue(panel.compliance_field._range_mode)
+        self.assertTrue(panel.nplc_field._range_mode)
+        self.assertTrue(panel.source_range_field._range_mode)
+        self.assertTrue(panel.measure_voltage_range_field._range_mode)
+        self.assertTrue(panel.measure_current_range_field._range_mode)
+
+        # Range pills are shown, legacy text badges are hidden
+        self.assertFalse(panel.level_field.range_pill.isHidden())
+        self.assertTrue(panel.level_field.minimum.isHidden())
+        self.assertTrue(panel.level_field.maximum.isHidden())
+
+        # Formatted intervals
+        self.assertEqual(panel.level_field.range_pill._interval_text(), "[0 mA … 10 mA]")
+        self.assertEqual(panel.compliance_field.range_pill._interval_text(), "[10 mV … 67 mV]")
+        self.assertEqual(panel.nplc_field.range_pill._interval_text(), "[0.001 … 25]")
+        self.assertEqual(panel.source_range_field.range_pill._interval_text(), "[> 0 … 3 A]")
+
+        # Widened Edit buttons
+        self.assertEqual(panel.level_field.edit_button.width(), 78)
+        self.assertEqual(panel.level_field.edit_button.height(), 30)
+        self.assertEqual(panel.level_field.edit_button.text(), "Edit")
+
+        # Hardware fixed ranges have hidden edit buttons and arrow cursors
+        self.assertTrue(panel.source_range_field.edit_button.isHidden())
+        self.assertEqual(panel.source_range_field.range_pill.cursor().shape(), Qt.CursorShape.ArrowCursor)
+
+    def test_keithley_page_max_abs_power_range_mode(self) -> None:
+        """Verify Maximum source x compliance power uses SafetyRangePill and computes power gauge."""
+        power_field = self.page.max_abs_power_field
+        self.assertTrue(power_field._range_mode)
+        self.assertFalse(power_field.range_pill.isHidden())
+        self.assertTrue(power_field.minimum.isHidden())
+        self.assertTrue(power_field.maximum.isHidden())
+        self.assertEqual(power_field.edit_button.width(), 78)
+        self.assertEqual(power_field.edit_button.height(), 30)
+
+        # Interval text shows inequality min and power max
+        self.assertEqual(power_field.range_pill._interval_text(), "[> 0 … 670 uW]")
+
+        # Micro gauge value calculation with DIMENSION_POWER
+        parsed = power_field._quantity_values()
+        self.assertIsNotNone(parsed)
+        cur, mn, mx, dim = parsed
+        self.assertEqual(dim, "power")
+        self.assertEqual(mn, 0.0)
+        self.assertAlmostEqual(mx, 0.00067)
+
+    def test_diameter_to_area_bidirectional_calculation(self) -> None:
+        """Verify entering diameter recalculates area and expected resistance, and vice versa."""
+        card = self.page.characterization_card
+
+        # 1. Enter 1000 nm -> Area should become ~0.7854 um2
+        card.diameter_edit.setText("1000 nm")
+        self.app.processEvents()
+        self.assertIn("0.7854", card.area_edit.text())
+        # Expected resistance: RA = 8 / 0.7854 = 10.19 Ω (+ 25 Ω line -> 35.2 Ω)
+        self.assertIn("10.2 Ω", card.expected_resistance_label.text())
+        self.assertIn("35.2 Ω", card.expected_resistance_label.text())
+        self.assertIn("1000 nm", card.diameter_preset_combo.currentText())
+
+        # 2. Enter 600 nm -> Area should become ~0.2827 um2
+        card.diameter_edit.setText("600 nm")
+        self.app.processEvents()
+        self.assertIn("0.2827", card.area_edit.text())
+        self.assertIn("28.3 Ω", card.expected_resistance_label.text())
+        self.assertIn("600 nm", card.diameter_preset_combo.currentText())
+
+        # 3. Enter 0.2 um (micrometers unit) -> Diameter should be 200 nm, Area ~0.0314 um2
+        card.diameter_edit.setText("0.2 um")
+        self.app.processEvents()
+        self.assertIn("0.0314", card.area_edit.text())
+        self.assertIn("200 nm", card.diameter_preset_combo.currentText())
+
+        # 4. Reverse: enter area 0.1257 um2 -> Diameter should become ~400 nm (P7)
+        card.area_edit.setText("0.1257")
+        self.app.processEvents()
+        self.assertIn("400 nm", card.diameter_edit.text())
+        self.assertIn("400 nm", card.diameter_preset_combo.currentText())
+
+        # 5. Selecting preset from combo updates diameter and area
+        # Find 800 nm (P9) in combo
+        idx_p9 = -1
+        for i in range(card.diameter_preset_combo.count()):
+            if "800 nm" in card.diameter_preset_combo.itemText(i):
+                idx_p9 = i
+                break
+        self.assertGreater(idx_p9, 0)
+        card.diameter_preset_combo.setCurrentIndex(idx_p9)
+        self.app.processEvents()
+        self.assertIn("800 nm", card.diameter_edit.text())
+        self.assertIn("0.5027", card.area_edit.text())
+
+    def test_diameter_cell_hint_and_metadata_export(self) -> None:
+        """Verify cell hints detect P1-P10 pillar designs and pass diameter to sweep config."""
+        card = self.page.characterization_card
+
+        # Cell notes mentioning "P8" (600 nm pillar)
+        card._try_parse_and_fill_cell_hints(notes="Tested structure P8 with MgO barrier", label="R3C2")
+        self.app.processEvents()
+        self.assertEqual(card.diameter_edit.text(), "600 nm")
+        self.assertIn("0.2827", card.area_edit.text())
+
+        # Verify _build_config contains diameter_nm
+        cfg = card._build_config()
+        self.assertEqual(cfg.metadata.diameter_nm, 600.0)
+        self.assertAlmostEqual(cfg.metadata.junction_area_um2 or 0.0, 0.2827, places=3)
+
+

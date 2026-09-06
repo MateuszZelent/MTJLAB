@@ -32,6 +32,7 @@ from app.domain.quantities import (
     DIMENSION_CURRENT,
     DIMENSION_DBM,
     DIMENSION_FREQUENCY,
+    DIMENSION_POWER,
     DIMENSION_RESISTANCE,
     DIMENSION_TIME,
     DIMENSION_VOLTAGE,
@@ -82,6 +83,9 @@ class SafetyRangePill(QWidget):
 
     def mousePressEvent(self, event: QMouseEvent) -> None:
         if event.button() == Qt.MouseButton.LeftButton:
+            if hasattr(self._field, "edit_button"):
+                if not self._field.edit_button.isVisible() or not self._field.edit_button.isEnabled():
+                    return
             self.clicked.emit()
         super().mousePressEvent(event)
 
@@ -92,18 +96,31 @@ class SafetyRangePill(QWidget):
             return "[Not Set]"
         min_str = str(min_val).strip()
         max_str = str(max_val).strip()
-        if min_str.upper() in {"DISABLED", "N/A"}:
+        if min_str.upper() == max_str.upper():
             return f"[{min_str}]"
         return f"[{min_str} … {max_str}]"
 
     def _update_tooltip(self) -> None:
         min_str = "NOT SET" if self._minimum_value is None else str(self._minimum_value)
         max_str = "NOT SET" if self._maximum_value is None else str(self._maximum_value)
+        is_editable = True
+        if hasattr(self._field, "edit_button"):
+            is_editable = self._field.edit_button.isVisible() and self._field.edit_button.isEnabled()
+        edit_hint = "\n\nClick to edit laboratory safety limits…" if is_editable else ""
+
         parsed = self._field._quantity_values()
         if parsed is not None and parsed[1] is not None and parsed[2] is not None:
-            cur, mn, mx, _ = parsed
+            cur, mn, mx, dim = parsed
             if mx > mn:
-                pct = (cur - mn) / (mx - mn) * 100
+                if (
+                    dim in {DIMENSION_FREQUENCY, DIMENSION_TIME}
+                    and mn > 0
+                    and cur > 0
+                    and (mx / mn) >= 100
+                ):
+                    pct = (math.log10(cur) - math.log10(mn)) / (math.log10(mx) - math.log10(mn)) * 100
+                else:
+                    pct = (cur - mn) / (mx - mn) * 100
                 if cur < mn:
                     status = f"⚠️ Value below MIN ({mn:.4g})"
                 elif cur > mx:
@@ -113,13 +130,11 @@ class SafetyRangePill(QWidget):
                 self.setToolTip(
                     f"Configured Safety Envelope:\n"
                     f"  Range: [{min_str} … {max_str}]\n"
-                    f"  Status: {status}\n\n"
-                    f"Click to edit laboratory safety limits…"
+                    f"  Status: {status}{edit_hint}"
                 )
                 return
         self.setToolTip(
-            f"Configured Safety Envelope: [{min_str} … {max_str}]\n"
-            f"Click to edit laboratory safety limits…"
+            f"Configured Safety Envelope: [{min_str} … {max_str}]{edit_hint}"
         )
 
     def paintEvent(self, event) -> None:
@@ -141,9 +156,19 @@ class SafetyRangePill(QWidget):
         fraction: float | None = None
         is_violation = False
         if has_gauge and parsed is not None:
-            cur, mn, mx, _ = parsed
+            cur, mn, mx, dim = parsed
             if mx is not None and mn is not None and mx > mn:
-                fraction = (cur - mn) / (mx - mn)
+                if (
+                    dim in {DIMENSION_FREQUENCY, DIMENSION_TIME}
+                    and mn > 0
+                    and cur > 0
+                    and (mx / mn) >= 100
+                ):
+                    fraction = (math.log10(cur) - math.log10(mn)) / (
+                        math.log10(mx) - math.log10(mn)
+                    )
+                else:
+                    fraction = (cur - mn) / (mx - mn)
                 is_violation = cur < mn or cur > mx
 
         # Color scheme
@@ -236,7 +261,7 @@ class LimitField(QWidget):
         minimum: object = None,
         maximum: object = None,
         *,
-        range_mode: bool = False,
+        range_mode: bool = True,
     ) -> None:
         super().__init__()
         self.editor = editor
@@ -396,11 +421,21 @@ class LimitField(QWidget):
             DIMENSION_FREQUENCY,
             DIMENSION_RESISTANCE,
             DIMENSION_TIME,
+            DIMENSION_POWER,
             DIMENSION_DBM,
         )
         for dimension in dimensions:
             try:
-                parsed_bounds = [parse_quantity(value, dimension).si_value for value in boundaries]
+                parsed_bounds = []
+                for val in boundaries:
+                    val_str = str(val).strip()
+                    require_unit = True
+                    if val_str.startswith(">") or val_str.startswith("<"):
+                        val_str = val_str[1:].strip()
+                        require_unit = False
+                    parsed_bounds.append(
+                        parse_quantity(val_str, dimension, require_unit=require_unit).si_value
+                    )
                 preferred_unit = self._current_unit(dimension)
                 text = self.editor.text().strip()
                 if preferred_unit and _QUANTITY.fullmatch(text) is None:

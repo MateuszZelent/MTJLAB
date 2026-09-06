@@ -28,6 +28,8 @@ class KeithleyDataExporter:
                 f.write(f"# Structure: {meta.structure_name}\n")
             if meta.operator:
                 f.write(f"# Operator: {meta.operator}\n")
+            if meta.diameter_nm is not None:
+                f.write(f"# Pillar Diameter [nm]: {meta.diameter_nm}\n")
             if meta.junction_area_um2 is not None:
                 f.write(f"# Junction Area [um^2]: {meta.junction_area_um2}\n")
             f.write(f"# Channel: {config.channel}\n")

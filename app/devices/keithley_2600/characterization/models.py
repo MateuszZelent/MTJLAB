@@ -16,6 +16,7 @@ class SampleMetadata:
     operator: str = ""
     junction_area_um2: float | None = None
     nominal_barrier_thickness_nm: float = 1.0
+    diameter_nm: float | None = None
     temperature_k: float | None = None
     notes: str = ""
 

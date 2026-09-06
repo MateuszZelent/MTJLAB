@@ -197,7 +197,7 @@ class AnritsuSpectrumConfigurationPanel(CardWidget):
         return value.min, value.max
 
     def _bounded(self, key: str, editor: QWidget) -> LimitField:
-        field = LimitField(editor, *self._limit_values(key))
+        field = LimitField(editor, *self._limit_values(key), range_mode=True)
         field.setProperty("limitKey", key)
         if self.plan_mode:
             field.edit_button.setVisible(False)
@@ -1941,7 +1941,7 @@ class AnritsuPage(QWidget):
         self.points.setCurrentIndex(index if index >= 0 else 0)
 
     def _anritsu_bounded(self, key: str, editor: QWidget) -> LimitField:
-        field = LimitField(editor, *self._anritsu_limit_values(key))
+        field = LimitField(editor, *self._anritsu_limit_values(key), range_mode=True)
         self._limit_fields[key + str(len(self._limit_fields))] = field
         field.setProperty("limitKey", key)
         return field

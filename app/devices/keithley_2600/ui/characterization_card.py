@@ -45,7 +45,6 @@ from app.devices.keithley_2600.characterization.models import (
     ExtractedScientificParameters,
     SampleMetadata,
 )
-from app.devices.keithley_2600.characterization.report_pdf import KeithleyPdfReportGenerator
 from app.devices.keithley_2600.characterization.runner import CharacterizationWorker
 from app.domain.errors import SafetyViolation
 from app.domain.quantities import (
@@ -68,9 +67,27 @@ KEY_LAST_SAMPLE_ID = "keithley_characterization/last_sample_id"
 KEY_LAST_ROW = "keithley_characterization/last_row"
 KEY_LAST_COL = "keithley_characterization/last_col"
 KEY_LAST_DEVICE_LABEL = "keithley_characterization/last_device_label"
+KEY_LAST_DIAMETER = "keithley_characterization/last_diameter"
 KEY_LAST_AREA = "keithley_characterization/last_area"
 KEY_LAST_THICKNESS = "keithley_characterization/last_thickness"
 KEY_LAST_OPERATOR = "keithley_characterization/last_operator"
+
+INL_PILLAR_PRESETS: list[tuple[str, float]] = [
+    ("Custom / manual", 0.0),
+    ("1000 nm (P10 · 1.0 µm)", 1000.0),
+    ("800 nm (P9 · 0.8 µm)", 800.0),
+    ("600 nm (P8 · 0.6 µm)", 600.0),
+    ("400 nm (P7 · 0.4 µm)", 400.0),
+    ("350 nm (P6 · 0.35 µm)", 350.0),
+    ("300 nm (P5 / P4 · 0.3 µm)", 300.0),
+    ("250 nm (P3 · 0.25 µm)", 250.0),
+    ("200 nm (P2 · 0.2 µm)", 200.0),
+    ("100 nm (P1 · 0.1 µm)", 100.0),
+]
+
+TARGET_RA_PRODUCT_OHM_UM2 = 8.0  # From INL sample specifications: RA = 8 Ω·µm²
+ESTIMATED_LEAD_RESISTANCE_OHM = 25.0  # Series / lead resistance typical for bottom/top contacts
+
 
 
 class KeithleyCharacterizationCard(QWidget):
@@ -102,6 +119,7 @@ class KeithleyCharacterizationCard(QWidget):
         self._live_comp_x: list[float] = []
         self._live_comp_y: list[float] = []
         self._active_plot_view: int = 0
+        self._syncing_geometry: bool = False
 
         self._init_ui()
         self._update_limits_from_settings()
@@ -219,15 +237,50 @@ class KeithleyCharacterizationCard(QWidget):
         self.structure_edit.textChanged.connect(self._on_metadata_field_changed)
         meta_form.addRow("Structure / chip:", self.structure_edit)
 
+        # Diameter row with LineEdit and Preset ComboBox
+        diameter_row = QHBoxLayout()
+        diameter_row.setContentsMargins(0, 0, 0, 0)
+        diameter_row.setSpacing(6)
+
+        self.diameter_edit = LineEdit()
+        self.diameter_edit.setText("1000 nm")
+        self.diameter_edit.setPlaceholderText("e.g. 600 nm or 0.6 um")
+        self.diameter_edit.textChanged.connect(self._on_diameter_changed)
+        self.diameter_edit.textChanged.connect(self._on_metadata_field_changed)
+        diameter_row.addWidget(self.diameter_edit, 1)
+
+        self.diameter_preset_combo = ComboBox(self)
+        for label, d_val in INL_PILLAR_PRESETS:
+            self.diameter_preset_combo.addItem(label, userData=d_val)
+        self.diameter_preset_combo.currentIndexChanged.connect(self._on_diameter_preset_changed)
+        diameter_row.addWidget(self.diameter_preset_combo, 1)
+        meta_form.addRow("Pillar diameter:", diameter_row)
+
+        # Junction area with live expected resistance calculation
+        area_layout = QVBoxLayout()
+        area_layout.setContentsMargins(0, 0, 0, 0)
+        area_layout.setSpacing(2)
+
         self.area_edit = LineEdit()
-        self.area_edit.setText("2.0")
+        self.area_edit.setText("0.7854")
         self.area_edit.setPlaceholderText("Area in µm²")
+        self.area_edit.textChanged.connect(self._on_area_changed)
         self.area_edit.textChanged.connect(self._on_metadata_field_changed)
-        meta_form.addRow("Junction area [µm²]:", self.area_edit)
+        area_layout.addWidget(self.area_edit)
+
+        self.expected_resistance_label = CaptionLabel(self)
+        self.expected_resistance_label.setWordWrap(True)
+        self.expected_resistance_label.setStyleSheet("color: #0284c7; font-weight: 500;")
+        area_layout.addWidget(self.expected_resistance_label)
+        meta_form.addRow("Junction area [µm²]:", area_layout)
+
+        self._update_expected_resistance(0.7854)
+        self._sync_preset_combo_to_diameter(1000.0)
 
         self.thickness_edit = LineEdit()
-        self.thickness_edit.setText("1.0")
-        self.thickness_edit.setPlaceholderText("Barrier in nm")
+        self.thickness_edit.setText("0.85")
+        self.thickness_edit.setPlaceholderText("Barrier in nm (MgO)")
+        self.thickness_edit.setToolTip("Target RA = 8 Ω·µm² corresponds to ~0.80 - 0.85 nm MgO tunnel barrier")
         self.thickness_edit.textChanged.connect(self._on_metadata_field_changed)
         meta_form.addRow("Barrier thickness [nm]:", self.thickness_edit)
 
@@ -575,8 +628,138 @@ class KeithleyCharacterizationCard(QWidget):
         # Save to QSettings and sync active target
         self._persist_selection_to_settings(sample_id, row, col, label)
 
+    def _parse_diameter_to_nm(self, text: str) -> float | None:
+        """Parse diameter text string to float in nanometers."""
+        raw = text.strip().replace(",", ".")
+        if not raw:
+            return None
+        um_match = re.search(
+            r"^([0-9]*\.?[0-9]+(?:[eE][-+]?[0-9]+)?)\s*(?:um|µm|microns?)$",
+            raw,
+            re.IGNORECASE,
+        )
+        if um_match:
+            try:
+                return float(um_match.group(1)) * 1000.0
+            except ValueError:
+                return None
+        nm_match = re.search(
+            r"^([0-9]*\.?[0-9]+(?:[eE][-+]?[0-9]+)?)\s*(?:nm)?$",
+            raw,
+            re.IGNORECASE,
+        )
+        if nm_match:
+            try:
+                return float(nm_match.group(1))
+            except ValueError:
+                return None
+        return None
+
+    def _parse_area_to_um2(self, text: str) -> float | None:
+        """Parse junction area text string to float in um^2."""
+        raw = text.strip().replace(",", ".")
+        if not raw:
+            return None
+        match = re.search(r"^([0-9]*\.?[0-9]+(?:[eE][-+]?[0-9]+)?)", raw)
+        if match:
+            try:
+                val = float(match.group(1))
+                return val if val > 0 else None
+            except ValueError:
+                return None
+        return None
+
+    def _update_expected_resistance(self, area_um2: float | None) -> None:
+        """Calculate and display expected MTJ resistance for nominal RA = 8 Ω·µm²."""
+        if not area_um2 or area_um2 <= 0:
+            self.expected_resistance_label.setText(
+                "💡 Enter diameter or area to calculate expected R (RA = 8 Ω·µm²)"
+            )
+            return
+
+        r_barrier = TARGET_RA_PRODUCT_OHM_UM2 / area_um2
+        r_total = r_barrier + ESTIMATED_LEAD_RESISTANCE_OHM
+
+        def _fmt_r(val: float) -> str:
+            if val < 1000.0:
+                return f"{val:.1f} Ω" if val >= 10 else f"{val:.2f} Ω"
+            elif val < 1e6:
+                return f"{val / 1e3:.2f} kΩ"
+            else:
+                return f"{val / 1e6:.2f} MΩ"
+
+        self.expected_resistance_label.setText(
+            f"💡 RA = 8 Ω·µm²: R_MTJ ≈ {_fmt_r(r_barrier)} · total ~{_fmt_r(r_total)}"
+        )
+
+    def _sync_preset_combo_to_diameter(self, d_nm: float) -> None:
+        matched_idx = 0
+        for idx in range(1, self.diameter_preset_combo.count()):
+            preset_val = self.diameter_preset_combo.itemData(idx)
+            if preset_val and abs(float(preset_val) - d_nm) < 0.5:
+                matched_idx = idx
+                break
+        self.diameter_preset_combo.blockSignals(True)
+        self.diameter_preset_combo.setCurrentIndex(matched_idx)
+        self.diameter_preset_combo.blockSignals(False)
+
+    def _on_diameter_changed(self) -> None:
+        if self._syncing_geometry:
+            return
+        self._syncing_geometry = True
+        try:
+            d_nm = self._parse_diameter_to_nm(self.diameter_edit.text())
+            if d_nm is not None and d_nm > 0:
+                d_um = d_nm / 1000.0
+                area = math.pi * ((d_um / 2.0) ** 2)
+                if area >= 1.0:
+                    area_str = f"{area:.4f}".rstrip("0").rstrip(".")
+                elif area >= 0.01:
+                    area_str = f"{area:.4f}"
+                else:
+                    area_str = f"{area:.6f}".rstrip("0").rstrip(".")
+                self.area_edit.setText(area_str)
+                self._update_expected_resistance(area)
+                self._sync_preset_combo_to_diameter(d_nm)
+            else:
+                self._update_expected_resistance(None)
+        finally:
+            self._syncing_geometry = False
+
+    def _on_area_changed(self) -> None:
+        if self._syncing_geometry:
+            return
+        self._syncing_geometry = True
+        try:
+            area_um2 = self._parse_area_to_um2(self.area_edit.text())
+            if area_um2 is not None and area_um2 > 0:
+                d_um = 2.0 * math.sqrt(area_um2 / math.pi)
+                d_nm = d_um * 1000.0
+                if abs(d_nm - round(d_nm)) < 0.2:
+                    d_nm = float(round(d_nm))
+                if d_nm >= 100:
+                    d_str = f"{d_nm:.1f}".rstrip("0").rstrip(".")
+                else:
+                    d_str = f"{d_nm:.2f}".rstrip("0").rstrip(".")
+                self.diameter_edit.setText(f"{d_str} nm")
+                self._update_expected_resistance(area_um2)
+                self._sync_preset_combo_to_diameter(d_nm)
+            else:
+                self._update_expected_resistance(None)
+        finally:
+            self._syncing_geometry = False
+
+    def _on_diameter_preset_changed(self, index: int) -> None:
+        if index <= 0 or self._syncing_geometry:
+            return
+        preset_val = self.diameter_preset_combo.itemData(index)
+        if preset_val and isinstance(preset_val, (int, float)) and preset_val > 0:
+            self.diameter_edit.setText(f"{int(preset_val)} nm")
+
     def _try_parse_and_fill_cell_hints(self, notes: str, label: str) -> None:
         combined = f"{label} {notes}"
+
+        # 1. Look for explicit area first (e.g. "area: 3.14 um2", "powierzchnia: 0.28")
         area_match = re.search(r"(?i)(?:area|powierzchnia)[:=\s]+([0-9.]+)", combined)
         if area_match:
             try:
@@ -585,6 +768,57 @@ class KeithleyCharacterizationCard(QWidget):
                     self.area_edit.setText(str(val))
             except ValueError:
                 pass
+
+        # 2. Look for Pillar code P1-P10 (from INL wafer designs: P1=100nm .. P10=1000nm)
+        pillar_match = re.search(r"\bP(10|[1-9])\b", combined, re.IGNORECASE)
+        pillar_diameters = {
+            "10": 1000.0,
+            "9": 800.0,
+            "8": 600.0,
+            "7": 400.0,
+            "6": 350.0,
+            "5": 300.0,
+            "4": 300.0,
+            "3": 250.0,
+            "2": 200.0,
+            "1": 100.0,
+        }
+        if not area_match and pillar_match and pillar_match.group(1) in pillar_diameters:
+            code = pillar_match.group(1)
+            self.diameter_edit.setText(f"{int(pillar_diameters[code])} nm")
+        elif not area_match:
+            # 3. Look for diameter explicit specifications e.g. "d=600nm", "diam: 200", "diameter: 1 um"
+            diam_match = re.search(
+                r"(?i)(?:diameter|średnica|diam|fi|Ø|\bd\b)\s*[:=]?\s*([0-9.]+)\s*(nm|um|µm)?",
+                combined,
+            )
+            if diam_match:
+                try:
+                    val = float(diam_match.group(1))
+                    unit = (diam_match.group(2) or "nm").lower()
+                    if "um" in unit or "µm" in unit:
+                        val *= 1000.0
+                    if val > 0:
+                        self.diameter_edit.setText(f"{val:g} nm")
+                except ValueError:
+                    pass
+            else:
+                # 4. Look for pillar size e.g. "600 nm pillar", "200nm pillar"
+                pillar_size_match = re.search(
+                    r"\b([0-9.]+)\s*(nm|um|µm)\s*(?:pillar|nanopillar|filon|słup)\b",
+                    combined,
+                    re.IGNORECASE,
+                )
+                if pillar_size_match:
+                    try:
+                        val = float(pillar_size_match.group(1))
+                        unit = (pillar_size_match.group(2) or "nm").lower()
+                        if "um" in unit or "µm" in unit:
+                            val *= 1000.0
+                        if val > 0:
+                            self.diameter_edit.setText(f"{val:g} nm")
+                    except ValueError:
+                        pass
 
         thick_match = re.search(r"(?i)(?:thickness|grubość|barrier|bariera)[:=\s]+([0-9.]+)", combined)
         if thick_match:
@@ -597,6 +831,7 @@ class KeithleyCharacterizationCard(QWidget):
 
     def _on_metadata_field_changed(self) -> None:
         settings = QSettings(SETTINGS_SECTION, SETTINGS_SECTION)
+        settings.setValue(KEY_LAST_DIAMETER, self.diameter_edit.text().strip())
         settings.setValue(KEY_LAST_AREA, self.area_edit.text().strip())
         settings.setValue(KEY_LAST_THICKNESS, self.thickness_edit.text().strip())
         settings.setValue(KEY_LAST_OPERATOR, self.operator_edit.text().strip())
@@ -609,6 +844,7 @@ class KeithleyCharacterizationCard(QWidget):
         settings.setValue(KEY_LAST_ROW, row)
         settings.setValue(KEY_LAST_COL, col)
         settings.setValue(KEY_LAST_DEVICE_LABEL, device_label)
+        settings.setValue(KEY_LAST_DIAMETER, self.diameter_edit.text().strip())
         settings.setValue(KEY_LAST_AREA, self.area_edit.text().strip())
         settings.setValue(KEY_LAST_THICKNESS, self.thickness_edit.text().strip())
         settings.setValue(KEY_LAST_OPERATOR, self.operator_edit.text().strip())
@@ -632,14 +868,22 @@ class KeithleyCharacterizationCard(QWidget):
         """Restore last chosen sample, device, operator, and specs from QSettings or active target."""
         settings = QSettings(SETTINGS_SECTION, SETTINGS_SECTION)
 
-        # 1. Restore operator, area, thickness
+        # 1. Restore operator, diameter, area, thickness
         saved_operator = str(settings.value(KEY_LAST_OPERATOR, "") or "")
         if saved_operator:
             self.operator_edit.setText(saved_operator)
 
-        saved_area = str(settings.value(KEY_LAST_AREA, "") or "")
-        if saved_area:
-            self.area_edit.setText(saved_area)
+        self._syncing_geometry = True
+        try:
+            saved_diameter = str(settings.value(KEY_LAST_DIAMETER, "") or "")
+            if saved_diameter:
+                self.diameter_edit.setText(saved_diameter)
+            saved_area = str(settings.value(KEY_LAST_AREA, "") or "")
+            if saved_area:
+                self.area_edit.setText(saved_area)
+                self._update_expected_resistance(self._parse_area_to_um2(saved_area))
+        finally:
+            self._syncing_geometry = False
 
         saved_thickness = str(settings.value(KEY_LAST_THICKNESS, "") or "")
         if saved_thickness:
@@ -839,6 +1083,8 @@ class KeithleyCharacterizationCard(QWidget):
         if abs(stop_si - start_si) < 1e-15:
             raise ValueError("Start and stop levels cannot be identical.")
 
+        diameter_val = self._parse_diameter_to_nm(self.diameter_edit.text())
+
         area_val: float | None = None
         area_text = self.area_edit.text().strip()
         if area_text:
@@ -861,6 +1107,7 @@ class KeithleyCharacterizationCard(QWidget):
             sample_id=self.sample_id_edit.text().strip() or "Sample-1",
             structure_name=self.structure_edit.text().strip(),
             operator=self.operator_edit.text().strip(),
+            diameter_nm=diameter_val,
             junction_area_um2=area_val,
             nominal_barrier_thickness_nm=thick_val,
         )
@@ -1084,6 +1331,10 @@ class KeithleyCharacterizationCard(QWidget):
             return
 
         try:
+            from app.devices.keithley_2600.characterization.report_pdf import (
+                KeithleyPdfReportGenerator,
+            )
+
             res_path = KeithleyPdfReportGenerator.generate(
                 self._current_dataset,
                 self._current_parameters,

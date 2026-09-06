@@ -22,6 +22,7 @@ from app.devices.rigol_dg1000z import RigolChannelConfig
 from app.domain.errors import SafetyViolation
 from app.domain.quick_controls import QuickConfigureCommand
 from app.ui.shell import MainWindow
+from app.ui.widgets import LimitField
 from app.ui.design_system import tokens_for
 from app.domain.models import DeviceCapabilities
 
@@ -516,5 +517,58 @@ class FluentDevicePageTests(unittest.TestCase):
         finally:
             window.close()
             self.application.processEvents()
+
+    def test_all_device_limit_fields_use_safety_range_pills(self) -> None:
+        """Verify Rigol, Keithley, and Anritsu all use SafetyRangePill with widened Edit buttons."""
+        window = MainWindow(".config/settings.yml", simulation=True)
+        try:
+            window.resize(1360, 880)
+            window.show()
+            self.application.processEvents()
+
+            # Rigol
+            window._navigate_to("rigol")
+            self.application.processEvents()
+            rigol = window.rigol_page
+            self.assertTrue(len(rigol._limit_fields) > 0)
+            for field in rigol._limit_fields.values():
+                self.assertTrue(field._range_mode)
+                self.assertFalse(field.range_pill.isHidden())
+                self.assertTrue(field.minimum.isHidden())
+                self.assertTrue(field.maximum.isHidden())
+                self.assertEqual(field.edit_button.width(), 78)
+                self.assertEqual(field.edit_button.height(), 30)
+
+            # Anritsu
+            window._navigate_to("anritsu")
+            self.application.processEvents()
+            anritsu = window.anritsu_page
+            anritsu_fields = anritsu.findChildren(LimitField)
+            self.assertTrue(len(anritsu_fields) > 0)
+            for field in anritsu_fields:
+                self.assertTrue(field._range_mode)
+                self.assertFalse(field.range_pill.isHidden())
+                self.assertTrue(field.minimum.isHidden())
+                self.assertTrue(field.maximum.isHidden())
+                self.assertEqual(field.edit_button.width(), 78)
+                self.assertEqual(field.edit_button.height(), 30)
+
+            # Keithley
+            window._navigate_to("keithley")
+            self.application.processEvents()
+            keithley = window.keithley_page
+            keithley_fields = keithley.findChildren(LimitField)
+            self.assertTrue(len(keithley_fields) > 0)
+            for field in keithley_fields:
+                self.assertTrue(field._range_mode)
+                self.assertFalse(field.range_pill.isHidden())
+                self.assertTrue(field.minimum.isHidden())
+                self.assertTrue(field.maximum.isHidden())
+                self.assertEqual(field.edit_button.width(), 78)
+                self.assertEqual(field.edit_button.height(), 30)
+        finally:
+            window.close()
+            self.application.processEvents()
+
 
 

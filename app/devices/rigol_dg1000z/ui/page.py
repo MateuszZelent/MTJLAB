@@ -1011,7 +1011,7 @@ class RigolPage(QWidget):
 
     def _bounded(self, editor: QWidget, limit_key: str) -> LimitField:
         minimum, maximum = self._rigol_limit_values(limit_key)
-        field = LimitField(editor, minimum, maximum)
+        field = LimitField(editor, minimum, maximum, range_mode=True)
         field.setProperty("limitKey", limit_key)
         self._limit_fields[editor] = field
         return field

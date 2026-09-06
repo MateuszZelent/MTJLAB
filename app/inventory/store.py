@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from datetime import datetime, timezone
 import json
 from pathlib import Path
@@ -209,6 +210,38 @@ class InventoryStore:
                 ),
             )
         return updated_sample
+
+    def remap_sample_rows(self, sample_id: str, row_mapping: Mapping[str, str]) -> Sample:
+        """Remap row numbers for a sample in SQLite and update historical measurement links."""
+        with self._lock:
+            sample = self.get_sample(sample_id)
+            if sample is None:
+                raise KeyError(f"Sample not found: {sample_id}")
+
+            updated = sample.remap_rows(row_mapping)
+            self.save_sample(updated)
+
+            # Update historical runs
+            cursor = self._connection.cursor()
+            for old_r, new_r in row_mapping.items():
+                if old_r != new_r:
+                    cursor.execute(
+                        "UPDATE sample_runs SET row = ? WHERE sample_id = ? AND row = ?",
+                        (new_r, sample_id, old_r),
+                    )
+
+            # Update active target if it pointed to this sample and remapped row
+            active = self.get_active_target()
+            if active.is_active and active.sample_id == sample_id and active.row in row_mapping:
+                new_row = row_mapping[active.row]
+                self.set_active_target(
+                    sample_id=sample_id,
+                    row=new_row,
+                    col=active.col,
+                    device_label=active.device_label,
+                    notes=active.notes,
+                )
+            return updated
 
     def get_sample(self, sample_id: str) -> Sample | None:
         """Fetch sample by ID, including its attachments."""

@@ -35,6 +35,7 @@ class SampleMatrixWidget(SimpleCardWidget):
     row_state_change_requested = Signal(str, str)  # row_key, new_state
     col_state_change_requested = Signal(str, str)  # col_key, new_state
     explore_runs_requested = Signal(str, str)  # row_key, col_key
+    renumber_rows_requested = Signal()  # request renumbering dialog for all rows
 
     # State colors (semi-transparent backgrounds for light/dark compatibility)
     _STATE_COLORS = {
@@ -63,23 +64,29 @@ class SampleMatrixWidget(SimpleCardWidget):
         self.table = QTableWidget(self)
         self.table.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
         self.table.setSelectionMode(QTableWidget.SelectionMode.ExtendedSelection)
-        self.table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Interactive)
-        self.table.verticalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Interactive)
-        self.table.horizontalHeader().setDefaultSectionSize(115)
-        self.table.verticalHeader().setDefaultSectionSize(68)
+        self.table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Stretch)
+        self.table.horizontalHeader().setMinimumSectionSize(38)
+        self.table.verticalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Stretch)
+        self.table.verticalHeader().setMinimumSectionSize(28)
         self.table.setStyleSheet(
             "QTableWidget {"
             "border: none;"
             "background: transparent;"
             "gridline-color: palette(mid);"
+            "font-size: 11px;"
             "}"
             "QTableWidget::item {"
-            "padding: 4px;"
-            "border-radius: 4px;"
+            "padding: 2px 3px;"
+            "border-radius: 3px;"
             "}"
             "QTableWidget::item:selected {"
             "background-color: rgba(30, 102, 245, 0.25);"
             "outline: none;"
+            "}"
+            "QHeaderView::section {"
+            "font-size: 11px;"
+            "padding: 2px 4px;"
+            "font-weight: 500;"
             "}"
         )
 
@@ -191,6 +198,7 @@ class SampleMatrixWidget(SimpleCardWidget):
                 item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
 
                 font = item.font()
+                font.setPointSize(8)
                 if is_active or state in {"burned", "completed"}:
                     font.setBold(True)
                 item.setFont(font)
@@ -332,6 +340,13 @@ class SampleMatrixWidget(SimpleCardWidget):
                 FluentIcon.EDIT,
                 f"Rename Row {row_key} ('{current_label or row_key}')...",
                 triggered=lambda: self.row_rename_requested.emit(row_key, current_label),
+            )
+        )
+        menu.addAction(
+            Action(
+                FluentIcon.SYNC,
+                "Renumber All Rows (Change Start Index)...",
+                triggered=self.renumber_rows_requested.emit,
             )
         )
         menu.addSeparator()
