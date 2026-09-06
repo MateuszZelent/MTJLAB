@@ -84,6 +84,11 @@ class MokeBoxAdapter(DeviceAdapter):
         )
         self._lock = threading.RLock()
 
+    def _identity_or_raise(self) -> DeviceIdentity:
+        if self._identity is None:
+            raise ConnectionError("MOKE Box is connected without a verified identity.")
+        return self._identity
+
     def connect(self) -> DeviceIdentity:
         if self._connected:
             return self._identity_or_raise()

@@ -808,7 +808,7 @@ class RecipePage(QWidget):
         self.workspace_splitter.setStretchFactor(0, 1)
         self.workspace_splitter.setStretchFactor(1, 4)
         self.workspace_splitter.setStretchFactor(2, 2)
-        self.workspace_splitter.setMinimumHeight(200)
+        self.workspace_splitter.setMinimumHeight(430)
         self.workspace_splitter.setProperty("stationSurface", "surface")
         self.workspace_splitter.splitterMoved.connect(self._workspace_splitter_moved)
         self.workspace_card = CardWidget(self)
@@ -1028,6 +1028,10 @@ class RecipePage(QWidget):
         show_library = (
             available >= 760 if library_override is None else library_override
         )
+        if hasattr(self, "library_panel") and self.library_panel.isVisible() != show_library:
+            self.library_panel.setVisible(show_library)
+        if hasattr(self, "inspector_panel") and self.inspector_panel.isVisible() != show_inspector:
+            self.inspector_panel.setVisible(show_inspector)
         if not show_library:
             sizes = [0, available, 0]
         elif not show_inspector:
@@ -1052,6 +1056,10 @@ class RecipePage(QWidget):
                 self.workspace_splitter.setSizes(sizes)
             finally:
                 self._workspace_layout_updating = False
+
+    def showEvent(self, event: object) -> None:
+        super().showEvent(event)  # type: ignore[arg-type]
+        self._update_workspace_layout(force=True)
 
     def resizeEvent(self, event: object) -> None:
         super().resizeEvent(event)  # type: ignore[arg-type]
@@ -2001,7 +2009,7 @@ class RecipePage(QWidget):
 
     def sync_elab_context(self) -> None:
         """Synchronize the recipe editor when eLabFTW settings or templates change."""
-        self._sync_tree_view(self._tree_source)
+        self._refresh_semantic_tree(self._tree_source)
 
     def _select_semantic_node(self, semantic_id: str) -> None:
         """Select one immutable semantic row and its authored source node."""

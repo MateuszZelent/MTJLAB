@@ -69,6 +69,7 @@ class ThatecHdf5Writer:
         self._last_checkpoint_incremented = False
         self._last_checkpoint_axis_appended = False
         self._last_created: list[tuple[str, tuple[str, str] | None]] = []
+        self._pending_rollback = False
 
         file.attrs["measurement running"] = np.uint8(1)
         file.attrs["lab_control_dynamic_checkpoint_axis"] = np.uint8(
@@ -214,6 +215,7 @@ class ThatecHdf5Writer:
         self._last_checkpoint_incremented = False
         self._last_checkpoint_axis_appended = False
         self._last_created = []
+        self._pending_rollback = False
         file.attrs["measurement running"] = np.uint8(1)
         file.attrs["lab_control_dynamic_checkpoint_axis"] = np.uint8(
             self._dynamic_checkpoint_axis
@@ -238,6 +240,7 @@ class ThatecHdf5Writer:
         self._last_checkpoint_incremented = False
         self._last_checkpoint_axis_appended = False
         self._last_created = []
+        self._pending_rollback = True
         self._append_checkpoint_axis(point)
         values = {
             **{
@@ -279,9 +282,20 @@ class ThatecHdf5Writer:
         suffix = " with spectrum" if trace is not None else ""
         self._append_log(f"Checkpoint {point.index}{suffix}: {point.status}.")
 
-    def rollback_last(self, had_trace: bool) -> None:
-        """Undo the last public append after the private commit failed."""
+    def commit_point(self) -> None:
+        """Commit the active append, clearing rollback journal."""
+        self._pending_rollback = False
+        self._last_scalar_rows = []
+        self._last_spectrum_appended = False
+        self._last_processed_spectrum_appended = False
+        self._last_checkpoint_incremented = False
+        self._last_checkpoint_axis_appended = False
+        self._last_created = []
 
+    def rollback_last(self, had_trace: bool) -> None:
+        """Undo the active public append after the private commit failed."""
+        if not self._pending_rollback:
+            return
         del had_trace  # The transaction record is more precise than the caller hint.
         for row_name in self._last_scalar_rows:
             row = self._file[f"measurement/{row_name}"]
@@ -339,6 +353,7 @@ class ThatecHdf5Writer:
         self._last_checkpoint_incremented = False
         self._last_checkpoint_axis_appended = False
         self._last_created = []
+        self._pending_rollback = False
 
     def close(self, status: str) -> None:
         self._append_log(f"Process closed with status: {status}.")
@@ -430,6 +445,7 @@ class ThatecHdf5Writer:
         scale = row.create_dataset(
             "scale", shape=(self._checkpoint_count * 4,), maxshape=(None,), dtype="f8"
         )
+        self._validate_uniform_grid(trace)
         if self._checkpoint_count:
             scale_values = (
                 trace.frequencies_hz[0],
@@ -470,6 +486,7 @@ class ThatecHdf5Writer:
             row["timestamp"][index] = self._np.nan
             row["scale"][index * 4 : (index + 1) * 4] = (0.0, 1.0, 0.0, 1.0)
             return
+        self._validate_uniform_grid(trace)
         if len(trace.powers_dbm) != self._trace_points:
             raise ValueError("thaTEC spectrum point count changed during one run")
         row["data"][index, :] = self._np.asarray(trace.powers_dbm, dtype="f8")
@@ -539,6 +556,7 @@ class ThatecHdf5Writer:
             maxshape=(None,),
             dtype="f8",
         )
+        self._validate_uniform_grid(trace)
         if self._checkpoint_count:
             scale_values = (
                 trace.frequencies_hz[0],
@@ -583,6 +601,7 @@ class ThatecHdf5Writer:
             row["timestamp"][index] = self._np.nan
             row["scale"][index * 4 : (index + 1) * 4] = (0.0, 1.0, 0.0, 1.0)
             return
+        self._validate_uniform_grid(trace)
         if len(values) != self._processed_trace_points:
             raise ValueError("thaTEC processed spectrum point count changed during one run")
         row["data"][index, :] = self._np.asarray(values, dtype="f8")
@@ -697,6 +716,20 @@ class ThatecHdf5Writer:
         row_name = f"row_{self._next_row:02d}"
         self._next_row += 1
         return row_name
+
+    def _validate_uniform_grid(self, trace: SpectrumTrace) -> None:
+        grid_id = id(trace.frequencies_hz)
+        if getattr(self, "_last_validated_grid_id", None) == grid_id:
+            return
+        if len(trace.frequencies_hz) > 1:
+            diffs = self._np.diff(trace.frequencies_hz)
+            step = self._frequency_step(trace)
+            if not self._np.allclose(diffs, step, rtol=1e-4, atol=1e-3):
+                raise ValueError(
+                    "thaTEC format requires uniform frequency grid; "
+                    "non-uniform spectrum axis cannot be represented as affine (f0, df)."
+                )
+        self._last_validated_grid_id = grid_id
 
     @staticmethod
     def _frequency_step(trace: SpectrumTrace) -> float:

@@ -42,7 +42,7 @@ def _adapter(settings: StationSettings, simulation: bool) -> DeviceAdapter:
 
 
 def _dispatch(adapter: DeviceAdapter, operation: str, _payload: object) -> object:
-    if operation not in {"read_snapshot", "read_measurement"}:
+    if operation not in {"read_snapshot", "read_measurement", "read_field"}:
         raise ValueError(f"Unsupported Lake Shore operation {operation!r}.")
     method = getattr(adapter, operation, None)
     if not callable(method):

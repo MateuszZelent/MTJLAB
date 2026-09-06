@@ -113,7 +113,7 @@ class SpectrumAnalysisTests(unittest.TestCase):
         self.assertNotEqual(res_default.values, res_wide.values)
 
     def test_detect_stationary_interference_with_custom_parameters(self) -> None:
-        frequencies = tuple(np.linspace(1e9, 1.01e9, 101))
+        _frequencies = tuple(np.linspace(1e9, 1.01e9, 101))
         current = np.full(101, -100.0)
         current[50] = -30.0  # Stable carrier 70 dB above noise
         history = [current.copy() for _ in range(4)]  # Only 4 history frames

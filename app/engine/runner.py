@@ -1870,15 +1870,15 @@ class RecipeRunner:
                 )
             else:
                 self._emit("dry_run_output_guard_confirmed", {"device": name})
+        if errors:
+            raise ExecutionError(
+                "Dry run could not confirm all outputs OFF: " + "; ".join(errors)
+            )
         self._rigol_output_active = {1: False, 2: False}
         self._keithley_output_active = {"A": False, "B": False}
         self._anritsu_sg_output_active = False
         for device in self._output_guard_devices():
             self._confirm_device_outputs_off(device)
-        if errors:
-            raise ExecutionError(
-                "Dry run could not confirm all outputs OFF: " + "; ".join(errors)
-            )
 
     def _emit_dry_run_suppression(
         self, action: PlanAction, requested_enabled: bool, actual_enabled: bool
@@ -1911,7 +1911,10 @@ class RecipeRunner:
             return
         rigol_safe = not any(self._rigol_output_active.values())
         keithley_safe = not any(self._keithley_output_active.values())
-        if not (rigol_safe and keithley_safe):
+        anritsu_safe = not self._anritsu_sg_output_active
+        if not (rigol_safe and keithley_safe and anritsu_safe):
+            return
+        if any(status == "unknown" for status in self._output_status.values()):
             return
         self._emit(
             "safe_resume_boundary",
@@ -1922,6 +1925,8 @@ class RecipeRunner:
                 "rigol_outputs": dict(self._rigol_output_active),
                 "keithley_outputs": dict(self._keithley_output_active),
                 "keithley_zeroed": dict(self._keithley_zeroed),
+                "anritsu_sg_output": self._anritsu_sg_output_active,
+                "output_status": dict(self._output_status),
             },
         )
         self._last_safe_boundary_points = stored_points

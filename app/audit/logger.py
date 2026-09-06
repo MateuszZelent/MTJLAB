@@ -8,12 +8,14 @@ import json
 import math
 import os
 from pathlib import Path
+import queue
 import threading
 import time
 from typing import Any
 from uuid import uuid4
 
 from app.domain.errors import ConfigurationError
+from app.version import get_full_version
 
 
 _SEVERITIES = frozenset({"debug", "info", "warning", "error", "critical"})
@@ -53,14 +55,14 @@ class AuditLogger:
         *,
         profile_id: str,
         simulation: bool,
-        application_version: str = "0.1.0",
+        application_version: str | None = None,
         actor: str = "",
         actor_roles: tuple[str, ...] = (),
     ) -> None:
         self.directory = Path(directory)
         self.profile_id = profile_id
         self.simulation = simulation
-        self.application_version = application_version
+        self.application_version = application_version or get_full_version()
         self.actor = actor
         self.actor_roles = tuple(actor_roles)
         self.session_id = uuid4().hex
@@ -74,6 +76,15 @@ class AuditLogger:
         with self.path.open("x", encoding="utf-8", newline="\n"):
             pass
         self._stream = self.path.open("a", encoding="utf-8", newline="\n")
+
+        self._queue: queue.Queue[tuple[str, bool, threading.Event | None] | None] = queue.Queue(maxsize=10000)
+        self._worker = threading.Thread(
+            target=self._writer_loop,
+            name=f"AuditWriter-{self.session_id[:8]}",
+            daemon=True,
+        )
+        self._worker.start()
+
         self.record(
             "Application audit session started",
             category="application",
@@ -86,7 +97,28 @@ class AuditLogger:
                 "actor_roles": self.actor_roles,
             },
             critical=True,
+            wait_durable=True,
         )
+
+    def _writer_loop(self) -> None:
+        """Background thread performing non-blocking sequential disk writes and fsync (GUI-01)."""
+        while True:
+            item = self._queue.get()
+            if item is None:
+                self._queue.task_done()
+                break
+            encoded, critical, ack = item
+            try:
+                self._stream.write(encoded + "\n")
+                self._stream.flush()
+                if critical:
+                    os.fsync(self._stream.fileno())
+            except Exception:
+                pass
+            finally:
+                if ack is not None:
+                    ack.set()
+                self._queue.task_done()
 
     def record(
         self,
@@ -98,11 +130,13 @@ class AuditLogger:
         context: Mapping[str, object] | None = None,
         correlation_id: str | None = None,
         critical: bool = False,
+        wait_durable: bool = False,
     ) -> dict[str, object]:
         """Append and return one schema-versioned event.
 
-        Critical events are flushed through the operating-system page cache with
-        ``fsync`` before this method returns.
+        Disk writes and flushes are executed asynchronously on a dedicated
+        background worker thread so the Qt main thread is never blocked (GUI-01).
+        If wait_durable is True, this call waits until the event has been flushed to disk.
         """
 
         normalized_severity = severity.casefold()
@@ -113,70 +147,80 @@ class AuditLogger:
         with self._lock:
             if self._closed:
                 raise RuntimeError("Audit logger is closed.")
-            return self._append_unlocked(
-                message=message,
-                severity=normalized_severity,
-                category=category,
-                event_type=event_type,
-                context=context,
-                correlation_id=correlation_id,
-                critical=critical,
-            )
+            event: dict[str, object] = {
+                "schema_version": self.schema_version,
+                "session_id": self.session_id,
+                "sequence": self._sequence,
+                "timestamp_utc": datetime.now(timezone.utc).isoformat(),
+                "monotonic_ns": time.monotonic_ns(),
+                "severity": normalized_severity,
+                "category": category,
+                "event_type": event_type,
+                "message": message,
+                "profile_id": self.profile_id,
+                "simulation": self.simulation,
+                "actor": self.actor,
+                "actor_roles": self.actor_roles,
+                "correlation_id": correlation_id,
+                "context": _redacted_json_value(dict(context or {})),
+            }
+            encoded = json.dumps(event, ensure_ascii=False, separators=(",", ":"), sort_keys=True)
+            self._sequence += 1
 
-    def _append_unlocked(
-        self,
-        *,
-        message: str,
-        severity: str,
-        category: str,
-        event_type: str,
-        context: Mapping[str, object] | None,
-        correlation_id: str | None,
-        critical: bool,
-    ) -> dict[str, object]:
-        event: dict[str, object] = {
-            "schema_version": self.schema_version,
-            "session_id": self.session_id,
-            "sequence": self._sequence,
-            "timestamp_utc": datetime.now(timezone.utc).isoformat(),
-            "monotonic_ns": time.monotonic_ns(),
-            "severity": severity,
-            "category": category,
-            "event_type": event_type,
-            "message": message,
-            "profile_id": self.profile_id,
-            "simulation": self.simulation,
-            "actor": self.actor,
-            "actor_roles": self.actor_roles,
-            "correlation_id": correlation_id,
-            "context": _redacted_json_value(dict(context or {})),
-        }
-        encoded = json.dumps(event, ensure_ascii=False, separators=(",", ":"), sort_keys=True)
-        self._stream.write(encoded + "\n")
-        self._stream.flush()
-        if critical:
-            os.fsync(self._stream.fileno())
-        self._sequence += 1
+        ack = threading.Event() if wait_durable else None
+        try:
+            self._queue.put((encoded, critical, ack))
+        except Exception:
+            pass
+
+        if ack is not None:
+            ack.wait(timeout=5.0)
+
         return event
+
+    def flush(self) -> None:
+        """Wait for all currently queued audit records to be written to disk."""
+        self._queue.join()
 
     def close(self) -> None:
         with self._lock:
             if self._closed:
                 return
-            try:
-                self._append_unlocked(
-                    message="Application audit session closed",
-                    severity="info",
-                    category="application",
-                    event_type="session_closed",
-                    context=None,
-                    correlation_id=None,
-                    critical=True,
-                )
-            finally:
-                self._closed = True
-                if hasattr(self, "_stream") and not self._stream.closed:
-                    self._stream.close()
+            self._closed = True
+
+        try:
+            event: dict[str, object] = {
+                "schema_version": self.schema_version,
+                "session_id": self.session_id,
+                "sequence": self._sequence,
+                "timestamp_utc": datetime.now(timezone.utc).isoformat(),
+                "monotonic_ns": time.monotonic_ns(),
+                "severity": "info",
+                "category": "application",
+                "event_type": "session_closed",
+                "message": "Application audit session closed",
+                "profile_id": self.profile_id,
+                "simulation": self.simulation,
+                "actor": self.actor,
+                "actor_roles": self.actor_roles,
+                "correlation_id": None,
+                "context": {},
+            }
+            encoded = json.dumps(event, ensure_ascii=False, separators=(",", ":"), sort_keys=True)
+            self._sequence += 1
+            ack = threading.Event()
+            self._queue.put((encoded, True, ack))
+            ack.wait(timeout=5.0)
+        finally:
+            self._queue.put(None)
+            self._worker.join(timeout=5.0)
+            if hasattr(self, "_stream") and not self._stream.closed:
+                try:
+                    self._stream.flush()
+                    os.fsync(self._stream.fileno())
+                except Exception:
+                    pass
+                self._stream.close()
 
 
 class AuditLogReader:

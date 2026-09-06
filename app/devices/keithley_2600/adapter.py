@@ -5,6 +5,7 @@ from __future__ import annotations
 from dataclasses import dataclass, replace
 import math
 import re
+import threading
 import time
 from typing import Literal
 
@@ -138,7 +139,10 @@ def build_keithley_ramp_levels(
             f"Keithley ramp requires {steps} points; configured maximum is {max_points}."
         )
     delta = target_si - start_si
-    return tuple(target_si if index == steps else start_si + delta * index / steps for index in range(1, steps + 1))
+    return tuple(
+        target_si if index == steps else round(start_si + delta * index / steps, 12)
+        for index in range(1, steps + 1)
+    )
 
 
 class KeithleyAdapter(DeviceAdapter):
@@ -196,7 +200,7 @@ class KeithleyAdapter(DeviceAdapter):
     def _channel_settings(self, channel: Literal["A", "B"]) -> KeithleyChannelSettings:
         return self._settings.safety.channels[channel]
 
-    def connect(self) -> DeviceIdentity:
+    def connect(self, *, force_outputs_off: bool | None = None) -> DeviceIdentity:
         if self._session is not None:
             return self._identity_or_raise()
         if not self._settings.enabled:
@@ -243,10 +247,19 @@ class KeithleyAdapter(DeviceAdapter):
                 ),
             )
             self._state = DeviceState.VERIFIED
-            # Connection establishes identity and observes the existing output
-            # state only. It must not alter a front-panel or another client's
-            # configuration, relay state, source state, or diagnostic queue.
-            self._read_output_states()
+            should_turn_off = (
+                force_outputs_off
+                if force_outputs_off is not None
+                else getattr(self._settings.safety, "outputs_off_on_connect", False)
+            )
+            if should_turn_off:
+                self._write_all_outputs_off()
+                states = self._read_output_states()
+                if any(states.values()):
+                    self._state = DeviceState.UNKNOWN
+                    raise DeviceError("Keithley did not confirm both outputs OFF during connection.")
+            else:
+                self._read_output_states()
             self._update_aggregate_output_state()
             return identity
         except Exception:
@@ -266,13 +279,17 @@ class KeithleyAdapter(DeviceAdapter):
 
     def disconnect(self) -> None:
         session, self._session = self._session, None
+        off_errors: list[Exception] = []
         if session is not None:
             if self._settings.safety.outputs_off_on_disconnect:
                 try:
                     session.write("smua.source.output = smua.OUTPUT_OFF")
+                except Exception as exc:
+                    off_errors.append(exc)
+                try:
                     session.write("smub.source.output = smub.OUTPUT_OFF")
-                except Exception:
-                    pass
+                except Exception as exc:
+                    off_errors.append(exc)
             try:
                 session.close()
             finally:
@@ -285,13 +302,25 @@ class KeithleyAdapter(DeviceAdapter):
                 self._compliance_block_levels.clear()
                 self._compliance_block_modes.clear()
                 self._last_ignored_diagnostic_errors = ()
-                self._output_states = {"A": False, "B": False}
+                if off_errors:
+                    self._output_states = {"A": True, "B": True}
+                else:
+                    self._output_states = {"A": False, "B": False}
                 self._state = DeviceState.DISCONNECTED
 
     def _write_all_outputs_off(self) -> None:
         session = self._require_session()
-        session.write("smua.source.output = smua.OUTPUT_OFF")
-        session.write("smub.source.output = smub.OUTPUT_OFF")
+        errors: list[str] = []
+        try:
+            session.write("smua.source.output = smua.OUTPUT_OFF")
+        except Exception as exc:
+            errors.append(f"smua: {exc}")
+        try:
+            session.write("smub.source.output = smub.OUTPUT_OFF")
+        except Exception as exc:
+            errors.append(f"smub: {exc}")
+        if errors:
+            raise DeviceError("Keithley failed to command all outputs OFF: " + "; ".join(errors))
 
     def set_dut_output_off_mode(
         self,
@@ -862,6 +891,10 @@ class KeithleyAdapter(DeviceAdapter):
                     else self._MODEL_2602A_VOLTAGE_RANGES,
                 )
         if mismatches:
+            if actual_output or expected_output or any(self._output_states.values()):
+                self.emergency_off()
+                if self._state is not DeviceState.UNKNOWN:
+                    self._state = DeviceState.FAULT
             raise DeviceError(
                 "Keithley configuration readback mismatch: "
                 + "; ".join(mismatches)
@@ -1364,9 +1397,12 @@ class KeithleyAdapter(DeviceAdapter):
             self.emergency_off()
             raise
         if active != enabled:
-            if enabled:
-                self.emergency_off()
-            raise DeviceError("Keithley did not confirm the requested output state.")
+            self.emergency_off()
+            if self._state is not DeviceState.UNKNOWN:
+                self._state = DeviceState.FAULT
+            raise DeviceError(
+                f"Keithley channel {channel} did not confirm output {enabled}: observed {active}."
+            )
         self._output_states[channel] = active
         self._update_aggregate_output_state()
         return active
@@ -1480,6 +1516,11 @@ class KeithleyAdapter(DeviceAdapter):
             if self._state is not DeviceState.UNKNOWN:
                 self._state = DeviceState.FAULT
             raise DeviceError("Keithley returned an invalid I/V measurement.") from exc
+        except Exception:
+            self.emergency_off()
+            if self._state is not DeviceState.UNKNOWN:
+                self._state = DeviceState.FAULT
+            raise
         observed_after = self._read_output_states()
         if observed_after != observed_before:
             self._fail_measurement_output_invariant(
@@ -1590,7 +1631,13 @@ class KeithleyAdapter(DeviceAdapter):
         tolerance = max(abs(request.compliance_si) * 1e-4, 1e-9)
         return abs(limiting_value) >= abs(request.compliance_si) - tolerance
 
-    def ramp_to_zero(self, channel: Literal["A", "B"], *, deadline_s: float = 10.0) -> None:
+    def ramp_to_zero(
+        self,
+        channel: Literal["A", "B"],
+        *,
+        deadline_s: float = 10.0,
+        cancellation_token: threading.Event | None = None,
+    ) -> None:
         request = self._last_request.get(channel)
         if request is None or request.mode == "measure_only":
             self.set_output(channel, False)
@@ -1605,19 +1652,28 @@ class KeithleyAdapter(DeviceAdapter):
         started = time.monotonic()
         try:
             while abs(level) > step:
+                if cancellation_token is not None and cancellation_token.is_set():
+                    raise SafetyViolation("Keithley ramp-to-zero cancelled.")
                 if time.monotonic() - started > deadline_s:
                     raise DeviceError("Keithley ramp-to-zero timed out.")
                 level -= step if level > 0 else -step
+                level = round(level, 12)
                 self.update_source_level(channel, mode=request.mode, level_si=level)
                 if request.settle_time_s:
                     time.sleep(request.settle_time_s)
+            if cancellation_token is not None and cancellation_token.is_set():
+                raise SafetyViolation("Keithley ramp-to-zero cancelled.")
             self.update_source_level(channel, mode=request.mode, level_si=0.0)
             self.set_output(channel, False)
         except Exception:
             self.emergency_off()
             raise
 
-    def ramp_to_level(self, request: KeithleyRampRequest) -> KeithleyRampResult:
+    def ramp_to_level(
+        self,
+        request: KeithleyRampRequest,
+        cancellation_token: threading.Event | None = None,
+    ) -> KeithleyRampResult:
         """Ramp an already active source without ever enabling an output.
 
         The actual starting level is queried from the instrument. Every point
@@ -1701,6 +1757,8 @@ class KeithleyAdapter(DeviceAdapter):
         final_measurement: KeithleyMeasurement | None = None
         try:
             for level in levels:
+                if cancellation_token is not None and cancellation_token.is_set():
+                    raise SafetyViolation("Keithley manual ramp cancelled.")
                 if time.monotonic() - started > request.deadline_s:
                     raise DeviceError("Keithley manual ramp exceeded its deadline.")
                 step_request = replace(current_request, level_si=level)
@@ -1710,6 +1768,8 @@ class KeithleyAdapter(DeviceAdapter):
                 )
                 if request.settle_time_s:
                     time.sleep(request.settle_time_s)
+                if cancellation_token is not None and cancellation_token.is_set():
+                    raise SafetyViolation("Keithley manual ramp cancelled.")
                 if time.monotonic() - started > request.deadline_s:
                     raise DeviceError("Keithley manual ramp exceeded its deadline.")
                 final_measurement = self.measure(channel)

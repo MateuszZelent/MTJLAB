@@ -638,12 +638,12 @@ class RigolAdapter(DeviceAdapter):
             self._verify_applied_configuration(
                 config, expected_output=output_before
             )
+            if output_before:
+                self._validate_active_quick_update(channel, updated)
         except Exception as exc:
             self._fail_live_setpoint_update(
                 output_was_on=output_before, cause=exc
             )
-        if output_before:
-            self._validate_active_quick_update(channel, updated)
         if self._same_frequency_readback(config.frequency_hz, updated.frequency_hz):
             self._last_config[channel] = config
             self._output_states[channel] = output_before
@@ -854,11 +854,14 @@ class RigolAdapter(DeviceAdapter):
             output_before = self._parse_output_state(
                 session.query(f":OUTP{channel}?"), channel=channel
             )
-            self._verify_applied_configuration(
-                config, expected_output=output_before
-            )
-            if output_before:
-                self._validate_active_quick_update(channel, updated)
+            try:
+                self._verify_applied_configuration(
+                    config, expected_output=output_before
+                )
+                if output_before:
+                    self._validate_active_quick_update(channel, updated)
+            except Exception as exc:
+                self._fail_live_setpoint_update(output_was_on=output_before, cause=exc)
             self._last_config.pop(channel, None)
             # Do not re-apply the whole DC function while energised.  The
             # dedicated offset command changes only the active DC level.
@@ -973,10 +976,10 @@ class RigolAdapter(DeviceAdapter):
         )
         try:
             self._verify_applied_configuration(config, expected_output=output_before)
+            if output_before:
+                self._validate_active_quick_update(channel, updated)
         except Exception as exc:
             self._fail_live_setpoint_update(output_was_on=output_before, cause=exc)
-        if output_before:
-            self._validate_active_quick_update(channel, updated)
         self._last_config.pop(channel, None)
         try:
             session.write(
@@ -1105,7 +1108,7 @@ class RigolAdapter(DeviceAdapter):
             if expected_enabled:
                 output_config = self._last_output_config.get(channel)
                 if output_config is not None:
-                    self._verify_output_configuration(output_config)
+                    self._verify_output_configuration(output_config, expected_output=True)
         except Exception:
             if any(observed_states.values()):
                 self.emergency_off()
@@ -1666,6 +1669,7 @@ class RigolAdapter(DeviceAdapter):
         self._state = DeviceState.UNKNOWN
         session.write(f"{prefix} OFF")
         self._verify_output_off(config.channel)
+        self._output_states[config.channel] = False
         for command in (
             f"{prefix}:LOAD {expected_load}",
             f"{prefix}:POL {config.polarity}",
@@ -1679,7 +1683,7 @@ class RigolAdapter(DeviceAdapter):
         self._check_errors()
         self._verify_output_configuration(config)
         self._last_output_config[config.channel] = config
-        self._state = DeviceState.OUTPUT_OFF
+        self._update_aggregate_output_state()
 
     def configure_modulation(self, config: RigolModulationConfig) -> None:
         """Configure modulation with the carrier output forced OFF."""
@@ -2011,6 +2015,12 @@ class RigolAdapter(DeviceAdapter):
     def trigger_frequency_sweep(self, channel: int) -> None:
         self._assert_feature("frequency_sweep")
         self._channel_settings(channel)
+        carrier = self.last_channel_config(channel)
+        sweep = self._last_sweep_config.get(channel)
+        if sweep is None:
+            raise SafetyViolation(f"Rigol CH{channel} frequency sweep was not configured.")
+        self._validate_waveform_config(carrier)
+        self._validate_sweep_envelope(carrier, sweep)
         session = self._require_session()
         source = f":SOUR{channel}:SWE"
         if not self._parse_on_off(
@@ -2232,6 +2242,12 @@ class RigolAdapter(DeviceAdapter):
     def trigger_burst(self, channel: int) -> None:
         self._assert_feature("burst")
         self._channel_settings(channel)
+        carrier = self.last_channel_config(channel)
+        burst = self._last_burst_config.get(channel)
+        if burst is None:
+            raise SafetyViolation(f"Rigol CH{channel} burst was not configured.")
+        self._validate_waveform_config(carrier)
+        self._validate_burst_envelope(carrier, burst)
         session = self._require_session()
         source = f":SOUR{channel}:BURS"
         if not self._parse_on_off(
@@ -2434,7 +2450,9 @@ class RigolAdapter(DeviceAdapter):
                 + "; ".join(mismatches)
             )
 
-    def _verify_output_configuration(self, expected: RigolOutputConfig) -> None:
+    def _verify_output_configuration(
+        self, expected: RigolOutputConfig, *, expected_output: bool = False
+    ) -> None:
         session = self._require_session()
         prefix = f":OUTP{expected.channel}"
         try:
@@ -2460,8 +2478,10 @@ class RigolAdapter(DeviceAdapter):
                 f"configuration for CH{expected.channel}."
             ) from exc
         mismatches: list[str] = []
-        if state:
-            mismatches.append("OUTPUT is ON")
+        if state != expected_output:
+            mismatches.append(
+                f"OUTPUT is {'ON' if state else 'OFF'} (expected {'ON' if expected_output else 'OFF'})"
+            )
         if not self._load_response_matches(load, expected.output_load):
             mismatches.append(f"LOAD {load}")
         if polarity != expected.polarity:
@@ -2477,7 +2497,10 @@ class RigolAdapter(DeviceAdapter):
         if not self._same_number(sync_delay, expected.sync_delay_s, absolute=1e-9):
             mismatches.append(f"SYNC:DEL {sync_delay:.9g}")
         if mismatches:
-            raise DeviceError("Rigol output configuration readback failed (output remains OFF): " + "; ".join(mismatches))
+            raise DeviceError(
+                f"Rigol output configuration readback failed (output expected {'ON' if expected_output else 'OFF'}): "
+                + "; ".join(mismatches)
+            )
 
     def _load_response_matches(self, response: str, expected: str | float) -> bool:
         target = self._format_load(expected)

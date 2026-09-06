@@ -7,6 +7,7 @@ from enum import StrEnum
 import getpass
 import os
 import platform
+import sys
 
 from app.domain.errors import AuthorizationError
 from app.settings.models import StationSettings
@@ -150,6 +151,41 @@ class AccessPolicy:
 
     @staticmethod
     def _operating_system_username() -> str:
+        """Resolve the authenticated OS account directly from platform security tokens.
+
+        Avoids relying solely on environment variables (LOGNAME, USERNAME, USERDOMAIN)
+        which can be spoofed in subprocesses or controlled launch environments.
+        """
+        if sys.platform == "win32":
+            try:
+                import ctypes
+                import ctypes.wintypes
+
+                size = ctypes.wintypes.DWORD(256)
+                buf = ctypes.create_unicode_buffer(size.value)
+                # NameSamCompatible = 2 returns DOMAIN\username directly from SAM/LSA
+                if ctypes.windll.secur32.GetUserNameExW(2, buf, ctypes.byref(size)) and buf.value:
+                    return buf.value.strip()
+            except Exception:
+                pass
+
+            try:
+                import ctypes
+                import ctypes.wintypes
+
+                size = ctypes.wintypes.DWORD(256)
+                buf = ctypes.create_unicode_buffer(size.value)
+                if ctypes.windll.advapi32.GetUserNameW(buf, ctypes.byref(size)) and buf.value:
+                    return buf.value.strip()
+            except Exception:
+                pass
+
+        try:
+            import pwd
+            return pwd.getpwuid(os.getuid()).pw_name
+        except Exception:
+            pass
+
         domain = os.environ.get("USERDOMAIN", "").strip()
         username = getpass.getuser().strip()
         return f"{domain}\\{username}" if domain and "\\" not in username else username

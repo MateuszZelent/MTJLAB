@@ -141,3 +141,37 @@ class ArchitectureTests(unittest.TestCase):
             encoding="utf-8"
         )
         self.assertNotRegex(source, r"#[0-9A-Fa-f]{3,8}")
+
+    def test_quarantined_scripts_are_not_in_root(self) -> None:
+        """Historical scripts must not linger in the root directory (ARCH-01)."""
+        for filename in ("dg1032z.py", "test.py", "tmp_ms2830.txt"):
+            self.assertFalse(
+                (ROOT / filename).exists(),
+                f"{filename} must be quarantined in tools/legacy, not in root",
+            )
+        self.assertTrue((ROOT / "tools" / "legacy" / "README.md").is_file())
+
+    def test_ui_modules_do_not_import_pyvisa_directly(self) -> None:
+        """UI packages must not import pyvisa directly (ARCH-01)."""
+        ui_roots = [ROOT / "app" / "ui"]
+        for device_dir in (ROOT / "app" / "devices").iterdir():
+            ui_dir = device_dir / "ui"
+            if ui_dir.is_dir():
+                ui_roots.append(ui_dir)
+
+        for ui_root in ui_roots:
+            for py_file in ui_root.rglob("*.py"):
+                imports = _imports(py_file)
+                self.assertNotIn(
+                    "pyvisa",
+                    imports,
+                    f"{py_file.relative_to(ROOT).as_posix()} must not import pyvisa",
+                )
+
+    def test_entry_points_are_importable_and_callable(self) -> None:
+        """Declared console scripts must point to valid callables (ARCH-01)."""
+        from app.main import main as app_main
+        from app.qualification.__main__ import main as qualify_main
+
+        self.assertTrue(callable(app_main))
+        self.assertTrue(callable(qualify_main))

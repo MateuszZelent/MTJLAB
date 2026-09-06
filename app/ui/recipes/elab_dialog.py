@@ -4,9 +4,8 @@ from __future__ import annotations
 
 from typing import Any, Callable
 
-from PySide6.QtWidgets import QFormLayout, QHBoxLayout, QVBoxLayout, QWidget
+from PySide6.QtWidgets import QHBoxLayout, QVBoxLayout, QWidget
 from qfluentwidgets import (
-    BodyLabel,
     CaptionLabel,
     CardWidget,
     CheckBox,

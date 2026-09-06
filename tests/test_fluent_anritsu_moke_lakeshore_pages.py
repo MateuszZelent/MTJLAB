@@ -305,6 +305,8 @@ class FluentLakeShorePageTests(unittest.TestCase):
             self.assertEqual(saved.baud_rate, 9_600)
             self.assertIn(resource, self.window.lakeshore_gaussmeter_page.resource.text())
             self.assertTrue(self.window.lakeshore_gaussmeter_page.read_now.isEnabled())
+            self.window.close()
+            self.application.processEvents()
 
 
 class FluentAnritsuAndMokePageTests(unittest.TestCase):
@@ -657,12 +659,12 @@ class FluentAnritsuAndMokePageTests(unittest.TestCase):
         self.application.processEvents()
         self.assertIsNotNone(page._latest_trace)
 
-        with patch.object(QMessageBox, "question", return_value=QMessageBox.StandardButton.No):
+        with patch("app.devices.anritsu_ms2830a.ui.page.QMessageBox.question", return_value=QMessageBox.StandardButton.No):
             page.clear_all_spectra_button.click()
             self.application.processEvents()
             self.assertIsNotNone(page._latest_trace)
 
-        with patch.object(QMessageBox, "question", return_value=QMessageBox.StandardButton.Yes):
+        with patch("app.devices.anritsu_ms2830a.ui.page.QMessageBox.question", return_value=QMessageBox.StandardButton.Yes):
             page.clear_all_spectra_button.click()
             self.application.processEvents()
             self.assertIsNone(page._latest_trace)

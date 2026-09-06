@@ -17,12 +17,10 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 from qfluentwidgets import (
-    BodyLabel,
     CaptionLabel,
     CardWidget,
     ComboBox,
     FluentIcon,
-    Pivot,
     PrimaryPushButton,
     PushButton,
     SegmentedWidget,

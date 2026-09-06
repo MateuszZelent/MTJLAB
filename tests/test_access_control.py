@@ -63,6 +63,15 @@ class AccessControlTests(unittest.TestCase):
         operator = AccessPolicy.from_settings(self._settings(), username="operator")
         self.assertTrue(operator.allows(Permission.EMERGENCY_STOP))
 
+    def test_operating_system_username_ignores_spoofed_env_vars(self) -> None:
+        from unittest.mock import patch
+        import sys
+        if sys.platform == "win32":
+            with patch.dict("os.environ", {"LOGNAME": "SPOOFED_ADMIN", "USERNAME": "SPOOFED_ADMIN", "USERDOMAIN": "SPOOFED_DOMAIN"}):
+                resolved = AccessPolicy._operating_system_username()
+                self.assertNotIn("SPOOFED_ADMIN", resolved)
+                self.assertNotIn("SPOOFED_DOMAIN", resolved)
+
 
 if __name__ == "__main__":
     unittest.main()

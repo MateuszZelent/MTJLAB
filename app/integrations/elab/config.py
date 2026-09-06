@@ -20,20 +20,11 @@ class ElabConfigurationError(ValueError):
 def resolve_env_path(path: str | Path = ".env") -> Path:
     """Resolve the local credential file consistently for the app and tests.
 
-    A relative path is first resolved against the current working directory,
-    which keeps packaged/local launches intuitive.  When that file is absent,
-    fall back to the repository root so launching the station from an IDE,
-    shortcut, or another working directory still finds the project ``.env``.
+    Uses platform-standard resolution (app configuration dir, CWD, repo fallback).
     """
+    from app.platform.paths import resolve_platform_env_path
 
-    target = Path(path).expanduser()
-    if target.is_absolute():
-        return target
-    working_directory_target = (Path.cwd() / target).resolve()
-    if working_directory_target.exists():
-        return working_directory_target
-    repository_target = (Path(__file__).resolve().parents[3] / target).resolve()
-    return repository_target
+    return resolve_platform_env_path(path)
 
 
 def _read_dotenv(path: Path) -> dict[str, str]:
@@ -153,6 +144,23 @@ def normalize_api_base_url(host: str) -> str:
         raise ElabConfigurationError(
             "ELAB_HOST must not contain credentials, query parameters or fragments."
         )
+
+    # NET-01: Disallow unencrypted HTTP for remote hosts to protect API token in transit.
+    # Allow only loopback addresses (localhost, 127.0.0.1, ::1) or explicit test override flag.
+    if parsed.scheme.lower() == "http":
+        hostname = (parsed.hostname or "").lower()
+        is_loopback = hostname in {"localhost", "127.0.0.1", "::1"}
+        allow_insecure = os.environ.get("MTJLAB_ALLOW_INSECURE_HTTP", "").strip().lower() in {
+            "1",
+            "true",
+            "yes",
+        }
+        if not (is_loopback or allow_insecure):
+            raise ElabConfigurationError(
+                f"Insecure HTTP connection to remote host '{parsed.netloc}' is rejected. "
+                "HTTPS is required to protect laboratory credentials in transit."
+            )
+
     path = parsed.path.rstrip("/")
     if path.endswith("/api/v2"):
         api_path = path

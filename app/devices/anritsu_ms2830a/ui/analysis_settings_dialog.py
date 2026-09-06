@@ -29,11 +29,9 @@ from app.spectrum import SpectrumAnalysisParameters
 from app.ui.dialogs import StationDialog
 
 
-def _create_separator(parent: QWidget) -> QFrame:
+def _create_separator(parent: QWidget) -> QWidget:
     """Subtle horizontal separator matching theme borders."""
-    sep = QFrame(parent)
-    sep.setFrameShape(QFrame.Shape.HLine)
-    sep.setFrameShadow(QFrame.Shadow.Plain)
+    sep = QWidget(parent)
     sep.setFixedHeight(1)
     color = "rgba(255, 255, 255, 0.08)" if isDarkTheme() else "rgba(0, 0, 0, 0.07)"
     sep.setStyleSheet(f"background-color: {color}; border: none;")

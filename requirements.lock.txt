@@ -39,6 +39,7 @@ PyThat==0.2.14
 python-dateutil==2.9.0.post0
 PyVISA==1.16.2
 PyVISA-py==0.8.1
+pywin32==312
 PyYAML==6.0.3
 ruamel.yaml==0.18.16
 scipy==1.18.0

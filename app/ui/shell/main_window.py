@@ -37,6 +37,7 @@ from qfluentwidgets import (
     CaptionLabel,
     FluentIcon,
     FluentWindow,
+    MessageBox,
     NavigationItemPosition,
     PlainTextEdit,
     PushButton,
@@ -1557,6 +1558,14 @@ class MainWindow(FluentWindow):
         if outputs_forced_off:
             selected_execution_mode = ExecutionMode.DRY_RUN
         outputs_forced_off = selected_execution_mode is ExecutionMode.DRY_RUN
+        if getattr(self, "_emergency_inhibit", False):
+            QMessageBox.warning(
+                self,
+                "E-STOP Latched",
+                "Emergency stop has been triggered and outputs are inhibited. "
+                "Clear the emergency stop before starting a measurement.",
+            )
+            return
         try:
             self._require_permission(
                 Permission.RUN_RECIPE,
@@ -1617,24 +1626,27 @@ class MainWindow(FluentWindow):
             additional_safety_devices=additional_safety_devices,
         )
         self._sweep_readiness_dialog = dialog
+        cleanup_slots: list[tuple[object, object]] = []
         for device in required:
             self._update_sweep_readiness_device(dialog, device)
+            def slot_state(_state: object, dev: str = device, cur: object = dialog) -> None:
+                self._update_sweep_readiness_device(cur, dev)
+
+            def slot_res(_operation: object, _result: object, dev: str = device, cur: object = dialog) -> None:
+                self._update_sweep_readiness_device(cur, dev)
+
+            def slot_err(_operation: object, error: object, dev: str = device, cur: object = dialog) -> None:
+                self._update_sweep_readiness_device(cur, dev, error)
+
             controller = self._controllers[device]
-            controller.state_changed.connect(
-                lambda _state, device=device, current=dialog: self._update_sweep_readiness_device(
-                    current, device
-                )
-            )
-            controller.result.connect(
-                lambda _operation, _result, device=device, current=dialog: (
-                    self._update_sweep_readiness_device(current, device)
-                )
-            )
-            controller.error.connect(
-                lambda _operation, error, device=device, current=dialog: (
-                    self._update_sweep_readiness_device(current, device, error)
-                )
-            )
+            controller.state_changed.connect(slot_state)
+            controller.result.connect(slot_res)
+            controller.error.connect(slot_err)
+            cleanup_slots.extend([
+                (controller.state_changed, slot_state),
+                (controller.result, slot_res),
+                (controller.error, slot_err),
+            ])
         dialog.connect_missing_requested.connect(self._connect_sweep_devices)
         if on_start is not None:
             dialog.start_requested.connect(lambda current=dialog: on_start(current))
@@ -1649,9 +1661,14 @@ class MainWindow(FluentWindow):
                     file_stem_override=file_stem_override,
                 )
             )
-        dialog.finished.connect(
-            lambda _result, current=dialog: self._clear_sweep_readiness_dialog(current)
-        )
+        def _on_dialog_finished(_result: int = 0, current: SweepDeviceReadinessDialog = dialog) -> None:
+            for sig, slot in cleanup_slots:
+                try:
+                    sig.disconnect(slot)
+                except (RuntimeError, TypeError):
+                    pass
+            self._clear_sweep_readiness_dialog(current)
+        dialog.finished.connect(_on_dialog_finished)
         dialog.show()
         dialog.raise_()
         dialog.activateWindow()
@@ -1702,6 +1719,14 @@ class MainWindow(FluentWindow):
         file_stem_override: str,
     ) -> None:
         if dialog.missing_devices:
+            return
+        if getattr(self, "_emergency_inhibit", False):
+            QMessageBox.warning(
+                self,
+                "E-STOP Latched",
+                "Emergency stop has been triggered and outputs are inhibited. "
+                "Clear the emergency stop before starting a measurement.",
+            )
             return
         selected_execution_mode = ExecutionMode.coerce(execution_mode)
         if outputs_forced_off:
@@ -1821,24 +1846,25 @@ class MainWindow(FluentWindow):
             ):
                 raise ConfigurationError("The selected run has no remaining actions.")
         except Exception as exc:
-            QMessageBox.warning(self, "Resume unavailable", str(exc))
+            box = MessageBox("Resume unavailable", str(exc), self)
+            box.cancelButton.hide()
+            box.exec()
             self._log(f"RUN RECOVERY REJECTED: {exc}")
             return
         discarded = checkpoint.committed_points_found - checkpoint.stored_points
-        answer = QMessageBox.question(
-            self,
-            "Resume measurement",
+        msg = (
             "Resume only from the last confirmed safe boundary?\n\n"
             f"Preserved checkpoints: {checkpoint.stored_points}\n"
             f"Unsafe tail to discard and remeasure: {discarded}\n"
             f"Remaining action index: {checkpoint.next_action_index}/{len(plan.actions)}\n"
             f"Configuration prelude actions: {len(checkpoint.prelude_actions)}\n\n"
             "All required instruments will connect with outputs OFF. The stored recipe, "
-            "plan hash and exact settings snapshot have been verified.",
-            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.Cancel,
-            QMessageBox.StandardButton.Cancel,
+            "plan hash and exact settings snapshot have been verified."
         )
-        if answer != QMessageBox.StandardButton.Yes:
+        box = MessageBox("Resume measurement", msg, self)
+        box.yesButton.setText("Resume")
+        box.cancelButton.setText("Cancel")
+        if not box.exec():
             return
         self._open_sweep_readiness(
             plan,
@@ -2299,28 +2325,36 @@ class MainWindow(FluentWindow):
             self._log("E-STOP Run Engine: OFF/ABORT sent through emergency sessions")
 
     def _emergency_off_all(self) -> None:
-        answer = QMessageBox.warning(
-            self,
-            "E-STOP",
-            "Disable every instrument output and abort acquisition?",
-            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.Cancel,
-            QMessageBox.StandardButton.Cancel,
+        self._emergency_inhibit = True
+        self.quick_control_coordinator.cancel_all("E-STOP requested")
+        # Always use independent short-lived VISA sessions. A manual
+        # instrument worker can be blocked just as a recipe worker can;
+        # queueing OFF behind that operation is not an emergency path.
+        self._run_controller.request_emergency_stop(
+            self._settings,
+            simulation=self._simulation,
         )
-        if answer == QMessageBox.StandardButton.Yes:
-            self.quick_control_coordinator.cancel_all("E-STOP requested")
-            # Always use independent short-lived VISA sessions. A manual
-            # instrument worker can be blocked just as a recipe worker can;
-            # queueing OFF behind that operation is not an emergency path.
-            self._run_controller.request_emergency_stop(
-                self._settings,
-                simulation=self._simulation,
-            )
-            for controller in self._controllers.values():
-                controller.call("emergency_off")
-            self._log(
-                "E-STOP sent through independent emergency sessions and "
-                "queued on all instrument workers"
-            )
+        for controller in self._controllers.values():
+            controller.call("emergency_off")
+        self._audit_record(
+            "E-STOP executed: emergency shutdown sent to all instruments",
+            severity="critical",
+            category="safety",
+            event_type="emergency_stop",
+            critical=True,
+        )
+        self._log(
+            "E-STOP executed: shutdown sent through independent emergency sessions and "
+            "queued on all instrument workers"
+        )
+        self._refresh_safety_strip()
+
+    def reset_emergency_inhibit(self) -> None:
+        """Clear the latched E-STOP inhibit after verified safe state."""
+        self._emergency_inhibit = False
+        self._run_controller.reset_emergency_latch()
+        self._log("E-STOP latch cleared by operator")
+        self._refresh_safety_strip()
 
     def _settings_saved(self, settings: StationSettings) -> None:
         previous_settings = self._settings
@@ -3562,7 +3596,22 @@ class MainWindow(FluentWindow):
         except Exception as exc:
             self._log(f"Manual spectrum archive close warning: {exc}")
         self.anritsu_page._analysis_controller.close()
-        DeviceController.close_all(self._controllers.values())
+        if not DeviceController.close_all(self._controllers.values()):
+            self._audit_record(
+                "Application close delayed: background device threads did not terminate cleanly within timeout",
+                severity="error",
+                category="application",
+                event_type="shutdown_blocked",
+                critical=True,
+            )
+            QMessageBox.warning(
+                self,
+                "Device worker still stopping",
+                "One or more instrument controller threads did not terminate within the safe timeout. "
+                "Wait a moment and try closing the application again.",
+            )
+            event.ignore()
+            return
         try:
             self._audit.close()
         except (OSError, RuntimeError):

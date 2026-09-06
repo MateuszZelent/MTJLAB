@@ -833,11 +833,18 @@ class MainWindowTests(unittest.TestCase):
                 page._populate()
                 page._dirty = True
 
+                # CFG-01: saving draft with acquisition allowed but required RF limit missing must fail
+                self.assertFalse(page.save_draft(silent=True))
+
+                # When acquisition is disabled, saving succeeds and requirement remains True
+                safety["acquisition_allowed"] = False
+                page._populate()
+                page._dirty = True
                 self.assertTrue(page.save_draft(silent=True))
 
                 persisted = SettingsRepository(path).load().raw["devices"]["anritsu"]["safety"]
-                self.assertTrue(persisted["acquisition_allowed"])
-                self.assertFalse(persisted["require_rf_input_limit_definition"])
+                self.assertFalse(persisted["acquisition_allowed"])
+                self.assertTrue(persisted["require_rf_input_limit_definition"])
                 self.assertIsNone(persisted["rf_input"]["max_expected_power_at_connector"])
             finally:
                 window.close()

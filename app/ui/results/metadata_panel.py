@@ -13,7 +13,7 @@ from PySide6.QtWidgets import (
     QVBoxLayout,
     QWidget,
 )
-from qfluentwidgets import ComboBox, FluentIcon, Pivot, SegmentedWidget
+from qfluentwidgets import ComboBox, FluentIcon, SegmentedWidget
 
 from app.storage import RunDetail, ThatecRun
 from app.storage.pythat_reader import PyThatRunData

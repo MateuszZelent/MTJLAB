@@ -230,11 +230,15 @@ class AnritsuAdapter(DeviceAdapter):
         self._live = False
         self._last_sg_config: SignalGeneratorConfig | None = None
         self._sg_output_enabled = False
+        self._options_query_failed = False
         self._cached_grid: tuple[float, float, int, tuple[float, ...]] | None = None
 
-    @staticmethod
-    def _read_hardware_options(session: InstrumentSession) -> tuple[str, ...]:
-        """Best-effort read of installed options without making connection depend on it."""
+    @classmethod
+    def _read_hardware_options(cls, session: InstrumentSession) -> tuple[bool, tuple[str, ...]]:
+        """Best-effort read of installed options without making connection depend on it.
+
+        Returns (success: bool, options: tuple[str, ...]).
+        """
 
         original_timeout = session.timeout
         try:
@@ -242,9 +246,9 @@ class AnritsuAdapter(DeviceAdapter):
             # otherwise valid instrument unusable, and do not wait for the
             # normal 30-second acquisition timeout for this optional probe.
             session.timeout = max(1, min(original_timeout, 2000))
-            return parse_anritsu_option_response(session.query("*OPT?"))
-        except DeviceError:
-            return ()
+            return True, parse_anritsu_option_response(session.query("*OPT?"))
+        except Exception:
+            return False, ()
         finally:
             session.timeout = original_timeout
 
@@ -280,7 +284,8 @@ class AnritsuAdapter(DeviceAdapter):
                 expected_serial=self._settings.identity.expected_serial,
                 require_serial_match=self._settings.identity.require_serial_match,
             )
-            hardware_options = self._read_hardware_options(session)
+            success, hardware_options = self._read_hardware_options(session)
+            self._options_query_failed = not success
             missing_options = set(self._settings.identity.required_options) - set(
                 hardware_options
             )
@@ -291,6 +296,9 @@ class AnritsuAdapter(DeviceAdapter):
                 )
             self._session = session
             self._identity = identity
+            has_sg = bool(
+                ANRITSU_SIGNAL_GENERATOR_OPTIONS.intersection(hardware_options)
+            )
             self._capabilities = DeviceCapabilities(
                 device_name="anritsu",
                 model=identity.model or "MS2830A",
@@ -300,7 +308,7 @@ class AnritsuAdapter(DeviceAdapter):
                     | ({"synchronized_single_sweep"} if self._single_sweep_supported else set())
                     | (
                         {"signal_generator"}
-                        if ANRITSU_SIGNAL_GENERATOR_OPTIONS.intersection(hardware_options)
+                        if has_sg
                         else set()
                     )
                 ),
@@ -310,7 +318,11 @@ class AnritsuAdapter(DeviceAdapter):
                 # A pre-existing front-panel/remote SG state is not trusted.
                 # Connection succeeds only after RF OFF has been commanded and
                 # read back, then the analyser is returned to Spectrum mode.
-                self._enter_spectrum_mode_with_rf_off()
+                try:
+                    self._enter_spectrum_mode_with_rf_off()
+                except Exception:
+                    if not self._options_query_failed:
+                        raise
             self._state = DeviceState.VERIFIED
             return identity
         except Exception:
@@ -328,8 +340,11 @@ class AnritsuAdapter(DeviceAdapter):
         if (
             session is not None
             and self._settings.safety.outputs_off_on_disconnect
-            and self._capabilities is not None
-            and self._capabilities.supports("signal_generator")
+            and (
+                (self._capabilities is not None and self._capabilities.supports("signal_generator"))
+                or self._sg_output_enabled
+                or (self._last_sg_config is not None)
+            )
         ):
             self.emergency_off()
             if self._state == DeviceState.UNKNOWN:
@@ -362,8 +377,9 @@ class AnritsuAdapter(DeviceAdapter):
         session = self._session
         errors: list[Exception] = []
         has_generator = bool(
-            self._capabilities is not None
-            and self._capabilities.supports("signal_generator")
+            (self._capabilities is not None and self._capabilities.supports("signal_generator"))
+            or self._sg_output_enabled
+            or (self._last_sg_config is not None)
         )
         if has_generator:
             try:
@@ -649,11 +665,35 @@ class AnritsuAdapter(DeviceAdapter):
                 "Anritsu SG readback changed after configuration; apply and verify "
                 "the visible frequency and power again before RF OUTPUT ON."
             )
+        self._state = DeviceState.UNKNOWN
+        self._sg_output_enabled = True
         session.write("OUTP 1")
-        active = self._parse_output_state(session.query("OUTP?"))
+        try:
+            active = self._parse_output_state(session.query("OUTP?"))
+        except Exception as exc:
+            self._sg_output_enabled = True
+            self._state = DeviceState.UNKNOWN
+            try:
+                session.write("OUTP 0")
+                readback = self._parse_output_state(session.query("OUTP?"))
+                if not readback:
+                    self._sg_output_enabled = False
+                    self._state = DeviceState.OUTPUT_OFF
+            except Exception:
+                pass
+            raise DeviceError(
+                "Anritsu SG readback failed after commanding RF OUTPUT ON; "
+                "attempted shutdown and marked state UNKNOWN."
+            ) from exc
+
         self._sg_output_enabled = active
         self._state = DeviceState.OUTPUT_ON if active else DeviceState.OUTPUT_OFF
         if not active:
+            try:
+                session.write("OUTP 0")
+            except Exception:
+                pass
+            self._state = DeviceState.UNKNOWN
             raise DeviceError("Anritsu SG did not confirm RF OUTPUT ON.")
         return True
 
@@ -1260,6 +1300,8 @@ class AnritsuAdapter(DeviceAdapter):
         prepare_ascii: bool = False,
     ) -> SpectrumTrace:
         try:
+            start_before = float(session.query("FREQ:STAR?"))
+            stop_before = float(session.query("FREQ:STOP?"))
             points = int(float(session.query("SWE:POIN?")))
             # Match the working external MS2830A library exactly: request the
             # current point count, select ASCII transfer, then immediately read
@@ -1269,12 +1311,22 @@ class AnritsuAdapter(DeviceAdapter):
                 session.write("FORM ASC")
             raw = session.query(f"TRAC? {trace}")
             values = tuple(float(item) for item in raw.split(",") if item.strip())
-            # Read the axis only after the trace transfer so no unrelated query
-            # is inserted between FORM ASC and TRAC?.
-            start = float(session.query("FREQ:STAR?"))
-            stop = float(session.query("FREQ:STOP?"))
+            # Read the axis again after the trace transfer to guarantee temporal coherence
+            start_after = float(session.query("FREQ:STAR?"))
+            stop_after = float(session.query("FREQ:STOP?"))
+            points_after = int(float(session.query("SWE:POIN?")))
         except (TypeError, ValueError) as exc:
             raise DeviceError("Anritsu returned an invalid trace response.") from exc
+        if not (
+            math.isclose(start_before, start_after, rel_tol=1e-9, abs_tol=1.0)
+            and math.isclose(stop_before, stop_after, rel_tol=1e-9, abs_tol=1.0)
+            and points == points_after
+        ):
+            raise DeviceError(
+                "Anritsu frequency grid parameters changed during trace acquisition; "
+                "temporal coherence between frequency axis and power trace was lost."
+            )
+        start, stop = start_after, stop_after
         if len(values) != points:
             raise DeviceError(
                 f"Anritsu returned {len(values)} trace points; expected {points}."

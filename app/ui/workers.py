@@ -6,6 +6,8 @@ QObject/QThread pair.  GUI code only emits queued operation requests.
 
 from __future__ import annotations
 
+from contextlib import contextmanager
+import math
 from collections.abc import Callable, Iterable
 from dataclasses import dataclass, field
 from threading import Event
@@ -35,6 +37,7 @@ class _RunCall:
     completed: Event = field(default_factory=Event)
     result: object = None
     error: BaseException | None = None
+    timeout_s: float | None = None
 
 
 class RunDeviceAdapter:
@@ -46,6 +49,19 @@ class RunDeviceAdapter:
 
     def __init__(self, controller: "DeviceController") -> None:
         self._controller = controller
+        self._active_timeout_s: float | None = None
+
+    @contextmanager
+    def io_timeout(self, timeout_s: float):
+        """Scope an I/O timeout without accessing the underlying session outside its owner thread."""
+        if not math.isfinite(timeout_s) or timeout_s <= 0:
+            raise ValueError("Operation I/O timeout must be finite and positive.")
+        previous = self._active_timeout_s
+        self._active_timeout_s = timeout_s if previous is None else min(previous, timeout_s)
+        try:
+            yield
+        finally:
+            self._active_timeout_s = previous
 
     @property
     def state(self) -> object:
@@ -68,7 +84,9 @@ class RunDeviceAdapter:
             raise AttributeError(member)
 
         def invoke(*args: object, **kwargs: object) -> object:
-            return self._controller.call_for_run(member, *args, **kwargs)
+            return self._controller.call_for_run(
+                member, *args, timeout_s=self._active_timeout_s, **kwargs
+            )
 
         return invoke
 
@@ -188,7 +206,11 @@ class InstrumentWorker(QObject):
             else:
                 if not callable(member):
                     raise TypeError(f"Adapter member {request.member!r} is not callable.")
-                request.result = member(*request.args, **request.kwargs)
+                if request.timeout_s is not None and hasattr(self._adapter, "io_timeout"):
+                    with self._adapter.io_timeout(request.timeout_s):
+                        request.result = member(*request.args, **request.kwargs)
+                else:
+                    request.result = member(*request.args, **request.kwargs)
         except BaseException as exc:
             request.error = exc
         finally:
@@ -379,12 +401,22 @@ class DeviceController(QObject):
 
         return RunDeviceAdapter(self)
 
-    def call_for_run(self, method: str, *args: object, **kwargs: object) -> object:
+    def call_for_run(
+        self,
+        method: str,
+        *args: object,
+        timeout_s: float | None = None,
+        **kwargs: object,
+    ) -> object:
         """Synchronously invoke one adapter method for an active recipe run."""
 
-        request = _RunCall(method, tuple(args), dict(kwargs))
+        request = _RunCall(method, tuple(args), dict(kwargs), timeout_s=timeout_s)
         self.run_request.emit(request)
-        request.completed.wait()
+        deadline_s = (timeout_s + 15.0) if timeout_s is not None else 60.0
+        if not request.completed.wait(timeout=deadline_s):
+            raise TimeoutError(
+                f"Call to {method!r} on instrument worker timed out after {deadline_s:.1f} s."
+            )
         if request.error is not None:
             raise request.error
         return request.result
@@ -394,18 +426,21 @@ class DeviceController(QObject):
 
         request = _RunCall(attribute, read_attribute=True)
         self.run_request.emit(request)
-        request.completed.wait()
+        deadline_s = 10.0
+        if not request.completed.wait(timeout=deadline_s):
+            raise TimeoutError(
+                f"Reading attribute {attribute!r} on instrument worker timed out after {deadline_s:.1f} s."
+            )
         if request.error is not None:
             raise request.error
         return request.result
-
 
     def reconfigure(self, adapter: DeviceAdapter) -> None:
         """Safely discard the session before applying a newly saved profile."""
 
         self.call("replace_adapter", adapter)
 
-    def close(self) -> None:
+    def close(self) -> bool:
         if self._thread.isRunning():
             wait_loop = QEventLoop()
             self._worker.shutdown_complete.connect(wait_loop.quit)
@@ -416,20 +451,25 @@ class DeviceController(QObject):
             )
             QTimer.singleShot(3_000, wait_loop.quit)
             wait_loop.exec()
-            self._worker.shutdown_complete.disconnect(wait_loop.quit)
-        self.request.disconnect(self._worker.execute)
+            try:
+                self._worker.shutdown_complete.disconnect(wait_loop.quit)
+            except (RuntimeError, TypeError):
+                pass
+        try:
+            self.request.disconnect(self._worker.execute)
+        except (RuntimeError, TypeError):
+            pass
         self._thread.finished.connect(self._worker.deleteLater)
         self._thread.quit()
-        self._thread.wait(1_000)
+        return self._thread.wait(3_000)
 
     @classmethod
-    def close_all(cls, controllers: Iterable[DeviceController], timeout_ms: int = 3_000) -> None:
+    def close_all(cls, controllers: Iterable[DeviceController], timeout_ms: int = 3_000) -> bool:
         """Shut down multiple device controllers concurrently instead of sequentially."""
-        active = [c for c in controllers if c._thread.isRunning()]
+        controllers_list = list(controllers)
+        active = [c for c in controllers_list if c._thread.isRunning()]
         if not active:
-            for c in controllers:
-                c.close()
-            return
+            return all(c.close() for c in controllers_list)
 
         wait_loop = QEventLoop()
         remaining = set(active)
@@ -462,7 +502,8 @@ class DeviceController(QObject):
             except (RuntimeError, TypeError):
                 pass
 
-        for c in controllers:
+        all_stopped = True
+        for c in controllers_list:
             try:
                 self_request = getattr(c, "request", None)
                 if self_request is not None:
@@ -471,4 +512,7 @@ class DeviceController(QObject):
                 pass
             c._thread.finished.connect(c._worker.deleteLater)
             c._thread.quit()
-            c._thread.wait(500)
+            if not c._thread.wait(2_000):
+                all_stopped = False
+
+        return all_stopped

@@ -171,8 +171,9 @@ class RigolSafety(StrictModel):
 
     @model_validator(mode="after")
     def validate_source_resistance(self) -> "RigolSafety":
-        if parse_quantity(self.fixed_source_resistance, DIMENSION_RESISTANCE).si_value <= 0:
-            raise ValueError("fixed_source_resistance must be positive")
+        val = parse_quantity(self.fixed_source_resistance, DIMENSION_RESISTANCE).si_value
+        if val < 50.0 - 1e-9:
+            raise ValueError("fixed_source_resistance cannot be lower than the DG1032Z hardware 50 Ω internal impedance")
         if set(self.channels) - {"1", "2"} or not self.channels:
             raise ValueError("Rigol must define channel 1 and/or 2")
         return self
@@ -302,7 +303,7 @@ class KeithleyChannelSettings(StrictModel):
 
 class KeithleySafety(StrictModel):
     allow_output_enable: bool = False
-    outputs_off_on_connect: bool = True
+    outputs_off_on_connect: bool = False
     outputs_off_on_disconnect: bool = True
     output_off_mode: Literal["normal", "high_impedance", "zero"] = "normal"
     stop_on_compliance: bool = False
@@ -509,7 +510,7 @@ class MokeBoxSettings(StrictModel):
     allowed_vout_channels: tuple[int, ...] = ()
     live_interval: str = "1 s"
     plot_refresh_interval: str = "500 ms"
-    history_window: str = "300 s"
+    history_window: str = "60 s"
 
     @model_validator(mode="after")
     def validate_timeout(self) -> "MokeBoxSettings":

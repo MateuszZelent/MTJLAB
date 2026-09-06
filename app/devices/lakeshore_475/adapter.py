@@ -89,6 +89,7 @@ class LakeShore475Adapter(DeviceAdapter):
         self._session: InstrumentSession | None = None
         self._connection: _ReadOnlyConnection | None = None
         self._official_model: object | None = None
+        self._cached_snapshot: GaussmeterSnapshot | None = None
 
     def _require_connection(self) -> _ReadOnlyConnection:
         if self._connection is None:
@@ -151,7 +152,21 @@ class LakeShore475Adapter(DeviceAdapter):
                 self._capabilities = None
             raise
         self._identity = identity
-        self._capabilities = DeviceCapabilities(device_name="lakeshore_gaussmeter", model="475", firmware=identity.firmware, features=frozenset({"field_reading", "dc", "rms", "peak", "read_only", "official_driver_bridge"}))
+        self._capabilities = DeviceCapabilities(
+            device_name="lakeshore_gaussmeter",
+            model="475",
+            firmware=identity.firmware,
+            features=frozenset(
+                {
+                    "field_reading",
+                    "dc",
+                    "rms",
+                    "peak",
+                    "read_only",
+                    "official_driver_bridge",
+                }
+            ),
+        )
         self._state = DeviceState.VERIFIED
         return identity
 
@@ -159,6 +174,7 @@ class LakeShore475Adapter(DeviceAdapter):
         session, self._session = self._session, None
         self._connection = None
         self._official_model = None
+        self._cached_snapshot = None
         if session is not None:
             try:
                 session.close()
@@ -220,13 +236,63 @@ class LakeShore475Adapter(DeviceAdapter):
                 peak_display_code=peak_display_code,
             )
         except (DeviceError, ValueError) as exc:
+            self._cached_snapshot = None
             self._state = DeviceState.FAULT
             raise DeviceError(f"Lake Shore configuration read failed: {exc}") from exc
+        self._cached_snapshot = snapshot
         return snapshot
 
-    def read_measurement(self) -> GaussmeterReading:
+    def read_field(self) -> float:
+        """Fast reading of field magnitude in tesla without metadata queries."""
+        connection = self._require_connection()
+        if self._cached_snapshot is None:
+            self.read_snapshot()
+        assert self._cached_snapshot is not None
+        try:
+            raw = self._numeric(connection.query("RDGFIELD?"), "RDGFIELD?")
+            field_t = self._tesla(raw, self._cached_snapshot.unit)
+            self._state = DeviceState.VERIFIED
+            return field_t
+        except DeviceError:
+            self._state = DeviceState.FAULT
+            raise
+
+    def read_measurement(self, use_cached_snapshot: bool = False) -> GaussmeterReading:
         connection = self._require_connection()
         try:
+            if use_cached_snapshot and self._cached_snapshot is not None:
+                snapshot = self._cached_snapshot
+                if snapshot.mode in {MeasurementMode.DC, MeasurementMode.RMS}:
+                    field_t = self._tesla(self._numeric(connection.query("RDGFIELD?"), "RDGFIELD?"), snapshot.unit)
+                    frequency_hz = (
+                        self._numeric(connection.query("RDGFRQ?"), "RDGFRQ?")
+                        if snapshot.mode is MeasurementMode.RMS
+                        else None
+                    )
+                    self._state = DeviceState.VERIFIED
+                    return GaussmeterReading.now(
+                        mode=snapshot.mode,
+                        unit=snapshot.unit,
+                        snapshot=snapshot,
+                        field_t=field_t,
+                        frequency_hz=frequency_hz,
+                    )
+                else:
+                    values = [
+                        self._numeric(part, "RDGPEAK?")
+                        for part in connection.query("RDGPEAK?").split(",")
+                    ]
+                    if len(values) != 2:
+                        raise DeviceError("Lake Shore RDGPEAK? must return negative and positive values.")
+                    self._state = DeviceState.VERIFIED
+                    return GaussmeterReading.now(
+                        mode=snapshot.mode,
+                        unit=snapshot.unit,
+                        snapshot=snapshot,
+                        negative_peak_t=self._tesla(values[0], snapshot.unit),
+                        positive_peak_t=self._tesla(values[1], snapshot.unit),
+                    )
+
             for _attempt in range(2):
                 snapshot = self.read_snapshot()
                 if snapshot.mode in {MeasurementMode.DC, MeasurementMode.RMS}:

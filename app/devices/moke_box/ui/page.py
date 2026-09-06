@@ -404,17 +404,16 @@ class MokeBoxPage(QWidget):
     def set_settings(self, settings: StationSettings) -> None:
         self._settings = settings
         profile = settings.moke_box
-        for combo, configured in (
-            (self.sample_interval, profile.live_interval),
-            (self.refresh_interval, profile.plot_refresh_interval),
-            (self.history_window, profile.history_window),
+        for combo, configured, in_seconds in (
+            (self.sample_interval, profile.live_interval, False),
+            (self.refresh_interval, profile.plot_refresh_interval, False),
+            (self.history_window, profile.history_window, True),
         ):
-            configured_ms = round(
-                parse_quantity(configured, DIMENSION_TIME).si_value * 1000
-            )
+            si_seconds = parse_quantity(configured, DIMENSION_TIME).si_value
+            configured_val = round(si_seconds if in_seconds else si_seconds * 1000)
             closest = min(
                 range(combo.count()),
-                key=lambda index: abs(int(combo.itemData(index)) - configured_ms),
+                key=lambda index: abs(int(combo.itemData(index)) - configured_val),
             )
             combo.setCurrentIndex(closest)
         self.endpoint.setText(f"Endpoint  {profile.endpoint or 'not configured'}")

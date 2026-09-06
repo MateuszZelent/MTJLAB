@@ -17,6 +17,7 @@ from app.domain.errors import ExecutionError
 from app.domain.models import MeasurementPoint
 from app.recipes.models import legacy_dut_limits_policy
 from app.storage.thatec_writer import ThatecHdf5Writer
+from app.version import get_full_version
 
 
 def _spectrum_compression(point_count: int) -> dict[str, object]:
@@ -83,7 +84,7 @@ class Hdf5RunWriter:
         try:
             run.attrs["application_version"] = version("lab-control")
         except PackageNotFoundError:
-            run.attrs["application_version"] = "0.1.0+source"
+            run.attrs["application_version"] = get_full_version()
         run.create_dataset("recipe_yaml", data=recipe_source, dtype=h5py.string_dtype("utf-8"))
         run.create_dataset("settings_yaml", data=settings_source, dtype=h5py.string_dtype("utf-8"))
         run.create_dataset(
@@ -561,6 +562,7 @@ class Hdf5RunWriter:
             committed.attrs["complete"] = True
             self._point_count += 1
             self._file.flush()
+            self._thatec.commit_point()
         except Exception as exc:
             self._thatec.rollback_last(trace is not None)
             for container in (self._pending, self._spectra, self._points):
@@ -583,13 +585,13 @@ class Hdf5RunWriter:
         try:
             self._append_csv_summary(index, point, trace)
         except Exception as exc:
-            # HDF5 is the source of truth.  A secondary CSV failure must not
-            # roll back a durable measurement checkpoint.
-            self.append_event("csv_checkpoint_failed", {"point_index": index, "error": str(exc)}, severity="warning")
-            if self._csv_stream is not None:
-                self._csv_stream.close()
-            self._csv_stream = None
-            self._csv_writer = None
+            # CSV export is secondary: never invalidate or re-attempt an
+            # already-committed HDF5 checkpoint because of a reporting error.
+            self.append_event(
+                "csv_append_failed",
+                {"point_index": index, "error": str(exc)},
+                severity="warning",
+            )
         return index
 
     @staticmethod
@@ -684,15 +686,33 @@ class Hdf5RunWriter:
             sort_keys=True,
         )
         index = len(self._event_names)
-        for dataset, value in (
-            (self._event_timestamps, timestamp),
-            (self._event_severities, severity),
-            (self._event_names, name),
-            (self._event_messages, message),
-        ):
-            dataset.resize((index + 1,))
-            dataset[index] = value
-        self._file.flush()
+        try:
+            for dataset, value in (
+                (self._event_timestamps, timestamp),
+                (self._event_severities, severity),
+                (self._event_names, name),
+                (self._event_messages, message),
+            ):
+                dataset.resize((index + 1,))
+                dataset[index] = value
+            self._file.flush()
+        except Exception:
+            for dataset in (
+                self._event_timestamps,
+                self._event_severities,
+                self._event_names,
+                self._event_messages,
+            ):
+                try:
+                    if len(dataset) > index:
+                        dataset.resize((index,))
+                except Exception:
+                    pass
+            try:
+                self._file.flush()
+            except Exception:
+                pass
+            raise
 
     def close(self, status: str) -> None:
         if self._closed:

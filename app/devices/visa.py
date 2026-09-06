@@ -18,13 +18,21 @@ class PyVisaSessionFactory:
 
     def __init__(self) -> None:
         self._traffic_callback: Callable[[str], None] | None = None
+        self._managers: dict[str, pyvisa.ResourceManager] = {}
 
     def set_traffic_callback(self, callback: Callable[[str], None] | None) -> None:
         self._traffic_callback = callback
 
+    def _get_manager(self, backend: str) -> pyvisa.ResourceManager:
+        if backend not in self._managers:
+            self._managers[backend] = (
+                pyvisa.ResourceManager() if backend == "system" else pyvisa.ResourceManager(backend)
+            )
+        return self._managers[backend]
+
     def open(self, resource: str, backend: str, timeout_ms: int) -> InstrumentSession:
         try:
-            manager = pyvisa.ResourceManager() if backend == "system" else pyvisa.ResourceManager(backend)
+            manager = self._get_manager(backend)
             session = manager.open_resource(resource, open_timeout=timeout_ms)
             session.timeout = timeout_ms
             if self._traffic_callback is not None:
@@ -33,11 +41,19 @@ class PyVisaSessionFactory:
                     f"read_termination={session.read_termination!r}, "
                     f"write_termination={session.write_termination!r}"
                 )
-            return _ManagedVisaSession(session, manager, self._traffic_callback)
+            return _ManagedVisaSession(session, manager=None, traffic_callback=self._traffic_callback)
         except Exception as exc:
             if self._traffic_callback is not None:
                 self._traffic_callback(f"OPEN ERROR {resource!r}: {exc}")
             raise ConnectionError(f"Could not open VISA resource {resource!r}: {exc}") from exc
+
+    def close(self) -> None:
+        for manager in self._managers.values():
+            try:
+                manager.close()
+            except Exception:
+                pass
+        self._managers.clear()
 
 
 class _ManagedVisaSession:
@@ -208,11 +224,13 @@ class _ManagedVisaSession:
             self._session.close()
         except Exception as exc:  # best effort cleanup
             errors.append(exc)
-        try:
-            close = getattr(self._manager, "close")
-            close()
-        except Exception as exc:  # best effort cleanup
-            errors.append(exc)
+        if self._manager is not None:
+            try:
+                close = getattr(self._manager, "close", None)
+                if close is not None:
+                    close()
+            except Exception as exc:  # best effort cleanup
+                errors.append(exc)
         if errors:
             raise DeviceError(f"Could not close VISA: {errors[0]}") from errors[0]
 
@@ -327,16 +345,18 @@ class FakeVisaSession:
                 command,
             ):
                 return "OFF"
-            scpi_readback = re.match(r"^(:[A-Za-z0-9:]+)\?$", command)
+            scpi_readback = re.match(r"^:?([A-Za-z0-9:]+)\?$", command)
             if scpi_readback:
                 field = scpi_readback.group(1)
                 assignment = re.compile(
-                    rf"^{re.escape(field)}\s+(.+)$", re.IGNORECASE
+                    rf"^:?{re.escape(field)}\s+(.+)$", re.IGNORECASE
                 )
                 for write in reversed(self.writes[:-1]):
                     match = assignment.match(write)
                     if match:
                         return match.group(1)
+                if field in ("OUTP", "OUTP1", "OUTP2"):
+                    return "0"
             raise DeviceError(f"No fake VISA response is configured for {command!r}.")
         return response(command) if callable(response) else response
 

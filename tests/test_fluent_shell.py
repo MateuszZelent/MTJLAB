@@ -168,6 +168,8 @@ class MainWindowFluentShellTests(unittest.TestCase):
                 widget
                 for widget in self.application.topLevelWidgets()
                 if widget.isVisible()
+                and widget.windowType() != Qt.WindowType.ToolTip
+                and type(widget).__name__ != "ToolTip"
             ]
             self.assertEqual(visible_top_levels, [window])
             self.assertFalse(
@@ -390,6 +392,7 @@ class MainWindowFluentShellTests(unittest.TestCase):
                 all(first[2] < second[1] for first, second in zip(compact_rows, compact_rows[1:]))
             )
 
+            window.resize(900, 820)
             self.application.processEvents()
             self.application.processEvents()
             self.assertTrue(window.apparatus_navigation_item.isExpanded)

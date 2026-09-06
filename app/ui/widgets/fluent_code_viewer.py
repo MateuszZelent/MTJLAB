@@ -92,6 +92,13 @@ class CodeSyntaxHighlighter(QSyntaxHighlighter):
         self._rules.append(
             (re.compile(r"#[^\n]*"), self._formats["comment"])
         )
+        # Quoted strings (double and single)
+        self._rules.append(
+            (re.compile(r'"[^"\\]*(?:\\.[^"\\]*)*"'), self._formats["string"])
+        )
+        self._rules.append(
+            (re.compile(r"'[^'\\]*(?:\\.[^'\\]*)*'"), self._formats["string"])
+        )
         # Directives / Tags: !tag
         self._rules.append(
             (re.compile(r"![a-zA-Z0-9_\.\-]+"), self._formats["tag"])
@@ -122,13 +129,6 @@ class CodeSyntaxHighlighter(QSyntaxHighlighter):
                 self._formats["number"],
             )
         )
-        # Quoted strings (double and single)
-        self._rules.append(
-            (re.compile(r'"[^"\\]*(?:\\.[^"\\]*)*"'), self._formats["string"])
-        )
-        self._rules.append(
-            (re.compile(r"'[^'\\]*(?:\\.[^'\\]*)*'"), self._formats["string"])
-        )
         # List markers: -
         self._rules.append(
             (re.compile(r"^\s*(-)\s+"), self._formats["operator"])
@@ -156,11 +156,17 @@ class CodeSyntaxHighlighter(QSyntaxHighlighter):
         )
 
     def highlightBlock(self, text: str) -> None:
+        if not text:
+            return
+        claimed = [False] * len(text)
         for pattern, fmt in self._rules:
             for match in pattern.finditer(text):
                 start = match.start()
-                length = match.end() - start
-                self.setFormat(start, length, fmt)
+                end = match.end()
+                if not any(claimed[start:end]):
+                    for i in range(start, end):
+                        claimed[i] = True
+                    self.setFormat(start, end - start, fmt)
 
 
 class LineNumberArea(QWidget):
@@ -345,22 +351,23 @@ class FluentCodeViewer(QWidget):
 
     def setPlainText(self, text: str) -> None:
         self.editor.setPlainText(text)
-        self._update_stats()
 
     def toPlainText(self) -> str:
         return self.editor.toPlainText()
 
     def clear(self) -> None:
         self.editor.clear()
-        self._update_stats()
 
     def setReadOnly(self, read_only: bool) -> None:
         self.editor.setReadOnly(read_only)
 
     def _update_stats(self) -> None:
-        text = self.editor.toPlainText()
-        lines = len(text.splitlines()) if text else 0
-        chars = len(text.encode("utf-8"))
+        doc = self.editor.document()
+        if doc.isEmpty():
+            self.stats_label.setText("0 lines | 0 B")
+            return
+        lines = max(1, doc.blockCount())
+        chars = max(0, doc.characterCount() - 1)
         if chars >= 1024 * 1024:
             size_str = f"{chars / (1024 * 1024):.1f} MB"
         elif chars >= 1024:

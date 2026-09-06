@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import unittest
-from unittest.mock import MagicMock
 
 from PySide6.QtCore import QPoint, Qt
 from PySide6.QtGui import QWheelEvent
@@ -55,7 +54,7 @@ class RecipePageScrollingTests(unittest.TestCase):
 
     def test_fluent_page_host_sets_expanding_for_viewport_owning_pages(self) -> None:
         standard_content = QWidget()
-        standard_host = FluentPageHost(standard_content)
+        _standard_host = FluentPageHost(standard_content)
         self.assertEqual(
             standard_content.sizePolicy().verticalPolicy(),
             QSizePolicy.Policy.Preferred,
@@ -63,7 +62,7 @@ class RecipePageScrollingTests(unittest.TestCase):
 
         workspace_content = QWidget()
         workspace_content.owns_viewport = True
-        workspace_host = FluentPageHost(workspace_content)
+        _workspace_host = FluentPageHost(workspace_content)
         self.assertEqual(
             workspace_content.sizePolicy().verticalPolicy(),
             QSizePolicy.Policy.Expanding,

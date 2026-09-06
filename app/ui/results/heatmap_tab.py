@@ -11,7 +11,7 @@ from typing import Any
 import numpy as np
 import pyqtgraph as pg
 from pyqtgraph.exporters import ImageExporter, SVGExporter
-from PySide6.QtCore import QSize, QThreadPool, Signal
+from PySide6.QtCore import QRectF, QSize, QThreadPool, Signal
 from PySide6.QtGui import QResizeEvent, QShowEvent
 from PySide6.QtWidgets import (
     QBoxLayout,
@@ -170,8 +170,14 @@ class HeatmapPlotWidget(QWidget):
         self.setMinimumHeight(190)
         self.plot.sizeHint = lambda: QSize(600, 220)
 
-        self.image_item = pg.PColorMeshItem()
-        self.plot.addItem(self.image_item)
+        self.pcolor_item = pg.PColorMeshItem()
+        self.raster_item = pg.ImageItem()
+        self.raster_item.setVisible(False)
+        self.image_item = self.pcolor_item
+        self.plot.addItem(self.pcolor_item)
+        self.plot.addItem(self.raster_item)
+        self._cached_mesh_fingerprint: tuple[int, float, float, int, float, float] | None = None
+        self._cached_mesh_vertices: tuple[np.ndarray, np.ndarray] | None = None
 
         # Color bar
         self.color_bar = pg.ColorBarItem(
@@ -284,16 +290,51 @@ class HeatmapPlotWidget(QWidget):
         self._cell_checkpoint_indices = checkpoint_indices
         self._last_readout_cell = None
 
-        # PColorMeshItem accepts the physical cell vertices directly.  An
-        # ImageItem can only apply one affine scale, which silently distorts
-        # logarithmic and otherwise nonuniform sweep axes.
-        x_vertices, y_vertices = np.meshgrid(self._x_edges, self._y_edges)
-        self.image_item.setData(
-            x_vertices,
-            y_vertices,
-            self._data,
-            autoLevels=False,
-        )
+        # Fast path: ImageItem for uniform sweeps, PColorMeshItem for nonuniform (GUI-03)
+        use_raster = self._is_uniform_axis(x_axis) and self._is_uniform_axis(y_axis)
+        if use_raster:
+            self.pcolor_item.setVisible(False)
+            self.pcolor_item.setData()
+            self.raster_item.setVisible(True)
+            self.raster_item.setImage(self._data.T, autoLevels=False)
+            rect = QRectF(
+                float(self._x_edges[0]),
+                float(self._y_edges[0]),
+                float(self._x_edges[-1] - self._x_edges[0]),
+                float(self._y_edges[-1] - self._y_edges[0]),
+            )
+            self.raster_item.setRect(rect)
+            self.image_item = self.raster_item
+        else:
+            self.raster_item.setVisible(False)
+            self.raster_item.clear()
+            self.pcolor_item.setVisible(True)
+            fingerprint = (
+                len(self._x_edges),
+                float(self._x_edges[0]),
+                float(self._x_edges[-1]),
+                len(self._y_edges),
+                float(self._y_edges[0]),
+                float(self._y_edges[-1]),
+            )
+            if (
+                self._cached_mesh_fingerprint == fingerprint
+                and self._cached_mesh_vertices is not None
+            ):
+                x_vertices, y_vertices = self._cached_mesh_vertices
+            else:
+                x_vertices, y_vertices = np.meshgrid(self._x_edges, self._y_edges)
+                self._cached_mesh_fingerprint = fingerprint
+                self._cached_mesh_vertices = (x_vertices, y_vertices)
+            self.pcolor_item.setData(
+                x_vertices,
+                y_vertices,
+                self._data,
+                autoLevels=False,
+            )
+            self.image_item = self.pcolor_item
+
+        self.color_bar.setImageItem(self.image_item)
 
         self.plot.setLabel("bottom", x_label, units=x_unit)
         self.plot.setLabel("left", y_label, units=y_unit if y_unit else None)
@@ -316,7 +357,10 @@ class HeatmapPlotWidget(QWidget):
         self.auto_range()
 
     def clear(self) -> None:
-        self.image_item.setData()
+        self.pcolor_item.setData()
+        self.raster_item.clear()
+        self._cached_mesh_fingerprint = None
+        self._cached_mesh_vertices = None
         self._data = None
         self._x_values = None
         self._y_values = None
@@ -375,6 +419,17 @@ class HeatmapPlotWidget(QWidget):
         except Exception:
             cmap = pg.colormap.get("viridis")
         self.color_bar.setColorMap(cmap)
+
+    @staticmethod
+    def _is_uniform_axis(axis: np.ndarray) -> bool:
+        """Return True if coordinates are uniformly spaced within floating tolerance."""
+        if axis.size <= 2:
+            return True
+        deltas = np.diff(axis)
+        mean_delta = float(np.mean(deltas))
+        if abs(mean_delta) < 1e-15:
+            return False
+        return bool(np.allclose(deltas, mean_delta, rtol=1e-3, atol=1e-9))
 
     @staticmethod
     def _cell_edges(values: np.ndarray) -> np.ndarray:

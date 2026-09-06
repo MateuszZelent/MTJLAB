@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone
 from io import StringIO
 from pathlib import Path
@@ -78,10 +79,9 @@ def serialize_settings_snapshot(
 ) -> str:
     """Return the exact settings provenance used for new and resumed runs."""
 
-    if not simulation:
-        return settings_path.read_text(encoding="utf-8")
     stream = StringIO()
-    stream.write("# SIMULATION: in-memory profile; not persisted to settings.yml.\n")
+    if simulation:
+        stream.write("# SIMULATION: in-memory profile; not persisted to settings.yml.\n")
     YAML().dump(settings.model_dump(mode="python"), stream)
     return stream.getvalue()
 
@@ -224,6 +224,7 @@ class RunTelemetryCoalescer:
             self._emit_semantic(name, data, count)
 
 
+
 class RunWorker(QObject):
     event = Signal(str, object)
     finished = Signal(object)
@@ -260,6 +261,7 @@ class RunWorker(QObject):
         if outputs_forced_off:
             self._execution_mode = ExecutionMode.DRY_RUN
         self._outputs_forced_off = self._execution_mode is ExecutionMode.DRY_RUN
+        self._early_stop_requested = threading.Event()
         self._runner: RecipeRunner | None = None
         self._telemetry_forwarder = RunTelemetryCoalescer(
             lambda name, data: self.event.emit(name, data),
@@ -388,7 +390,11 @@ class RunWorker(QObject):
                 if self._outputs_forced_off
                 else set(devices)
             )
+            if self._early_stop_requested.is_set():
+                raise RuntimeError("Run was stopped by operator before device connection.")
             identities = {name: devices[name].connect().idn for name in sorted(required)}
+            if self._early_stop_requested.is_set():
+                raise RuntimeError("Run was stopped by operator before storage initialization.")
             settings_source = self._settings_snapshot()
             if self._recovery is None:
                 result_path, csv_summary_path = planned_run_paths(
@@ -440,6 +446,8 @@ class RunWorker(QObject):
                 policy=ExecutionPolicy.from_settings(self._settings),
                 execution_mode=self._execution_mode,
             )
+            if self._early_stop_requested.is_set():
+                self._runner.request_stop()
             result = self._runner.run(
                 self._plan,
                 start_action_index=(
@@ -580,7 +588,7 @@ class EmergencyStopWorker(QObject):
     The normal run owns its VISA sessions in one worker thread.  During an
     E-STOP it may be blocked in a long instrument query, so this worker opens
     separate short-lived sessions and sends only each adapter's fixed emergency
-    action.  It never configures a source or enables an output.
+    action concurrently.  It never configures a source or enables an output.
     """
 
     finished = Signal(object)
@@ -610,17 +618,32 @@ class EmergencyStopWorker(QObject):
             ),
         )
         errors: list[str] = []
-        for device in devices:
+
+        def stop_device(device: object) -> list[str]:
+            dev_errors: list[str] = []
             try:
-                device.connect()
-                device.emergency_off()
+                connect_fn = getattr(device, "connect", None)
+                if callable(connect_fn):
+                    connect_fn()
+                emergency_fn = getattr(device, "emergency_off", None)
+                if callable(emergency_fn):
+                    emergency_fn()
             except Exception as exc:
-                errors.append(f"{type(device).__name__}: {exc}")
+                dev_errors.append(f"{type(device).__name__}: {exc}")
             finally:
                 try:
-                    device.disconnect()
+                    disconnect_fn = getattr(device, "disconnect", None)
+                    if callable(disconnect_fn):
+                        disconnect_fn()
                 except Exception as exc:
-                    errors.append(f"{type(device).__name__} disconnect: {exc}")
+                    dev_errors.append(f"{type(device).__name__} disconnect: {exc}")
+            return dev_errors
+
+        with ThreadPoolExecutor(max_workers=len(devices)) as executor:
+            futures = [executor.submit(stop_device, d) for d in devices]
+            for f in futures:
+                errors.extend(f.result())
+
         self.finished.emit(tuple(errors))
 
 
@@ -641,10 +664,18 @@ class RunController(QObject):
         self._run_simulation = False
         self._run_outputs_forced_off = False
         self._watchdog_estop_started = False
+        self._emergency_latch = False
 
     @property
     def running(self) -> bool:
         return self._thread is not None and self._thread.isRunning()
+
+    @property
+    def is_emergency_latched(self) -> bool:
+        return self._emergency_latch
+
+    def reset_emergency_latch(self) -> None:
+        self._emergency_latch = False
 
     def start(
         self,
@@ -663,6 +694,12 @@ class RunController(QObject):
     ) -> None:
         if self.running:
             raise RuntimeError("A measurement is already running.")
+        if self._emergency_thread is not None and self._emergency_thread.isRunning():
+            raise RuntimeError("Cannot start a measurement while emergency stop is running.")
+        if self._emergency_latch:
+            raise RuntimeError(
+                "Emergency stop is latched. Reset emergency stop before starting a new run."
+            )
         self._run_settings = settings
         self._run_simulation = simulation
         # A caller that only supplies the former boolean policy must still get
@@ -728,6 +765,7 @@ class RunController(QObject):
     def request_emergency_stop(self, settings: StationSettings, *, simulation: bool = False) -> None:
         """Request cooperative stop and concurrently issue a best-effort OFF."""
 
+        self._emergency_latch = True
         self.request_stop()
         if self._emergency_thread is not None and self._emergency_thread.isRunning():
             return

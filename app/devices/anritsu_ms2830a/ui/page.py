@@ -862,30 +862,29 @@ class _AnritsuTraceDiagnosticsDialog(StationDialog):
     preview_points = 64
 
     def __init__(self, parent: QWidget) -> None:
-        super().__init__(parent)
+        super().__init__(parent, resizable=True)
         self.setWindowTitle("Anritsu MS2830A — trace diagnostics")
         self.setObjectName("anritsuTraceDiagnosticsDialog")
         self.setModal(False)
         self.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose, True)
         self.resize(780, 560)
         self.setMinimumSize(540, 400)
-        layout = QVBoxLayout(self)
-        layout.setContentsMargins(16, 36, 16, 14)
-        layout.setSpacing(8)
+        surface = self.use_modal_shell_content().surface
+        layout = self.modal_content_layout(spacing=8)
 
-        title = StrongBodyLabel("Anritsu read-only diagnostics", self)
+        title = StrongBodyLabel("Anritsu read-only diagnostics", surface)
         title.setObjectName("sectionTitle")
         layout.addWidget(title)
         description = BodyLabel(
             "This window mirrors completed TRAC1 data already returned by the "
             "instrument. Opening it never starts or configures a measurement.",
-            self,
+            surface,
         )
         description.setWordWrap(True)
         description.setObjectName("muted")
         layout.addWidget(description)
 
-        self.tabs = FluentTabView(self)
+        self.tabs = FluentTabView(surface)
         raw_page = QWidget(self.tabs)
         raw_layout = QVBoxLayout(raw_page)
         raw_layout.setContentsMargins(0, 0, 0, 0)
@@ -925,7 +924,7 @@ class _AnritsuTraceDiagnosticsDialog(StationDialog):
 
         actions = QHBoxLayout()
         actions.addStretch(1)
-        self.close_button = PushButton("Close", self)
+        self.close_button = PushButton("Close", surface)
         self.close_button.clicked.connect(self.close)
         actions.addWidget(self.close_button)
         layout.addLayout(actions)

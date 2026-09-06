@@ -58,6 +58,8 @@ from app.settings.models import StationSettings
 from app.ui.common import line_edit as _line
 from app.ui.dialogs import StationDialog, StationMessageBox as QMessageBox
 from app.ui.widgets import LimitField, NotificationBanner, SpectrumPlotWidget
+from app.ui.widgets.fluent_tab_view import FluentTabView
+from app.devices.keithley_2600.ui.characterization_card import KeithleyCharacterizationCard
 from app.devices.keithley_2600.ui.twin_axis_plot import KeithleyTwinAxisPlotWidget
 from app.ui.recipes.fluent_dialog import FluentRecipeDialog
 from app.ui.workers import DeviceController
@@ -1466,8 +1468,8 @@ class KeithleyPage(QWidget):
         layout = QVBoxLayout(self)
         self.banner = NotificationBanner()
         layout.addWidget(self.banner)
-        layout.setContentsMargins(10, 8, 10, 8)
-        layout.setSpacing(8)
+        layout.setContentsMargins(10, 4, 10, 4)
+        layout.setSpacing(4)
         self.hero_card = CardWidget()
         hero = self.hero_card
         hero.setObjectName("keithleyHero")
@@ -1548,7 +1550,7 @@ class KeithleyPage(QWidget):
                 0,
                 column,
             )
-        layout.addLayout(channel_grid)
+        self.channel_grid = channel_grid
         source_tab = QWidget()
         source_layout = QVBoxLayout(source_tab)
         source_layout.setContentsMargins(8, 6, 8, 6)
@@ -1695,7 +1697,26 @@ class KeithleyPage(QWidget):
         self.workspace_splitter.setSizes([450, 910])
         self.workspace_splitter.setChildrenCollapsible(False)
         self._workspace_compact: bool | None = None
-        layout.addWidget(self.workspace_splitter, 1)
+        control_page = QWidget()
+        control_page.setObjectName("keithleyControlTabPage")
+        control_layout = QVBoxLayout(control_page)
+        control_layout.setContentsMargins(0, 0, 0, 0)
+        control_layout.setSpacing(4)
+        control_layout.addLayout(self.channel_grid)
+        control_layout.addWidget(self.workspace_splitter, 1)
+
+        self.tab_view = FluentTabView(self)
+        self.tab_view.setObjectName("keithleyTabView")
+        self.tab_view.layout().setSpacing(4)
+        self.tab_view.addTab(control_page, "Sterowanie i monitorowanie")
+
+        self.characterization_card = KeithleyCharacterizationCard(
+            controller=self._controller,
+            settings=self._station_settings,
+            parent=self,
+        )
+        self.tab_view.addTab(self.characterization_card, "Charakterystyka próbki i raport")
+        layout.addWidget(self.tab_view, 1)
         self.apply_configuration_button.clicked.connect(self.configure)
         self.read_configuration_button.clicked.connect(
             self.read_configuration_from_device
@@ -4170,6 +4191,8 @@ class KeithleyPage(QWidget):
         active_channel = self.channel.currentText()
         self._station_settings = settings
         self.configuration_panel.set_settings(settings)
+        if hasattr(self, "characterization_card") and self.characterization_card is not None:
+            self.characterization_card.set_settings(settings)
         self.max_abs_power.setText(
             settings.keithley.safety.channels[
                 active_channel

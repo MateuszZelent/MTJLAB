@@ -13,7 +13,6 @@ from PySide6.QtGui import (
 )
 from PySide6.QtWidgets import (
     QFileDialog,
-    QGraphicsDropShadowEffect,
     QMessageBox as QtMessageBox,
     QDialog,
     QHBoxLayout,

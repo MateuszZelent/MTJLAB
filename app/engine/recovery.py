@@ -82,34 +82,44 @@ class RunRecoveryManager:
     ) -> tuple[int, int] | None:
         if "events/name" not in h5 or "events/message" not in h5:
             return None
-        names = tuple(str(value) for value in h5["events/name"].asstr()[:])
-        messages = tuple(str(value) for value in h5["events/message"].asstr()[:])
-        if len(names) != len(messages):
+        names_ds = h5["events/name"]
+        messages_ds = h5["events/message"]
+        total = len(names_ds)
+        if total != len(messages_ds):
             raise ExecutionError("Recovery event arrays have different lengths.")
-        for name, message in reversed(tuple(zip(names, messages))):
-            if name != "safe_resume_boundary":
-                continue
-            try:
-                payload = json.loads(message)
-                stored_points = int(payload["stored_points"])
-                next_action_index = int(payload["next_action_index"])
-            except (KeyError, TypeError, ValueError, json.JSONDecodeError) as exc:
-                raise ExecutionError("Malformed safe resume boundary event.") from exc
-            if payload.get("plan_sha256") != plan.sha256:
-                continue
-            if not 0 <= stored_points <= committed_count:
-                raise ExecutionError("Safe boundary point count exceeds committed data.")
-            if not 0 <= next_action_index <= len(plan.actions):
-                raise ExecutionError("Safe boundary action index is outside the plan.")
-            acquired = sum(
-                action.kind in {"acquire_spectrum", "checkpoint"}
-                for action in plan.actions[:next_action_index]
-            )
-            if acquired != stored_points:
-                raise ExecutionError(
-                    "Safe boundary point count does not match completed acquisition actions."
+        if total == 0:
+            return None
+
+        # Scan backwards in bounded chunks (500 events) to prevent huge memory spikes (GUI-02)
+        chunk_size = 500
+        for end in range(total, 0, -chunk_size):
+            start = max(0, end - chunk_size)
+            chunk_names = tuple(str(value) for value in names_ds.asstr()[start:end])
+            chunk_messages = tuple(str(value) for value in messages_ds.asstr()[start:end])
+            for name, message in reversed(tuple(zip(chunk_names, chunk_messages))):
+                if name != "safe_resume_boundary":
+                    continue
+                try:
+                    payload = json.loads(message)
+                    stored_points = int(payload["stored_points"])
+                    next_action_index = int(payload["next_action_index"])
+                except (KeyError, TypeError, ValueError, json.JSONDecodeError) as exc:
+                    raise ExecutionError("Malformed safe resume boundary event.") from exc
+                if payload.get("plan_sha256") != plan.sha256:
+                    continue
+                if not 0 <= stored_points <= committed_count:
+                    raise ExecutionError("Safe boundary point count exceeds committed data.")
+                if not 0 <= next_action_index <= len(plan.actions):
+                    raise ExecutionError("Safe boundary action index is outside the plan.")
+                acquired = sum(
+                    action.kind in {"acquire_spectrum", "checkpoint"}
+                    for action in plan.actions[:next_action_index]
                 )
-            return stored_points, next_action_index
+                if acquired != stored_points:
+                    raise ExecutionError(
+                        "Safe boundary point count does not match completed acquisition actions."
+                    )
+                return stored_points, next_action_index
         return None
 
     @staticmethod

@@ -27,7 +27,6 @@ from qfluentwidgets import (
     CardWidget,
     ComboBox,
     FluentIcon,
-    InfoBadge,
     PushButton,
     SpinBox,
     TreeWidget,

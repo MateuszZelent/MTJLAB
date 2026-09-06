@@ -6,6 +6,7 @@ build-backend = "setuptools.build_meta"
 name = "lab-control"
 version = "0.1.0"
 description = "Safe local control software for a Rigol, Keithley and Anritsu measurement station."
+license = { text = "GPL-3.0-or-later" }
 requires-python = ">=3.11"
 dependencies = [
   "h5py>=3.11",

@@ -3,7 +3,8 @@ __pycache__/gui.cpython-314.pyc
 *.pyc
 *.egg-info/
 measurements/
-qualification/
+/qualification/
+!app/qualification/
 !docs/qualification/
 !docs/qualification/unified-sweep-tree-release-gate.md
 !docs/qualification/artifacts/

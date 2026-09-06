@@ -13,12 +13,14 @@ from PySide6.QtWidgets import QApplication, QLineEdit
 
 from app.devices.anritsu_ms2830a.ui.manual_save import ManualSpectrumSaveDialog
 from app.storage import ManualSpectrumSaveMode
-from app.integrations.elab.client import ElabApiClient, ElabTemplate
+from app.integrations.elab.client import ElabApiClient, ElabApiError, ElabTemplate
 from app.integrations.elab.config import (
+    ElabConfigurationError,
     ElabCredentials,
     ElabIntegrationProfile,
     ElabTemplateReference,
     load_credentials,
+    normalize_api_base_url,
     resolve_env_path,
     save_credentials,
 )
@@ -86,6 +88,18 @@ class ElabConfigurationTests(unittest.TestCase):
             self.assertIn("OTHER=value", text)
             self.assertIn('ELAB_HOST="https://elab.rptu.de"', text)
             self.assertIn('ELAB_API="test-key"', text)
+
+    def test_insecure_http_rejected_for_remote_hosts_unless_loopback_or_flag(self) -> None:
+        with self.assertRaisesRegex(ElabConfigurationError, "Insecure HTTP connection"):
+            normalize_api_base_url("http://remote.elabftw.net")
+
+        # Local loopback addresses allowed for local testing
+        self.assertIn("http://localhost", normalize_api_base_url("http://localhost:8080"))
+        self.assertIn("http://127.0.0.1", normalize_api_base_url("http://127.0.0.1:8080"))
+
+        # Explicit test override flag allows remote HTTP
+        with patch.dict(os.environ, {"MTJLAB_ALLOW_INSECURE_HTTP": "1"}):
+            self.assertIn("http://remote.elabftw.net", normalize_api_base_url("http://remote.elabftw.net"))
 
     def test_title_pattern_rejects_unknown_placeholders(self) -> None:
         with self.assertRaisesRegex(ValueError, r"only \{run_name\}"):
@@ -172,6 +186,17 @@ class ElabClientTests(unittest.TestCase):
         )
         self.assertEqual(json.loads(requests[1].data.decode("utf-8"))["template"], 42)
         self.assertIn(b'filename="run.h5"', requests[3].data)
+
+    def test_oversized_response_rejected_fail_closed(self) -> None:
+        def opener(_request, *, timeout):
+            return _FakeResponse(b"x" * (10 * 1024 * 1024 + 10))
+
+        client = ElabApiClient(
+            ElabCredentials.from_values("https://elab.rptu.de", "secret"),
+            opener=opener,
+        )
+        with self.assertRaisesRegex(ElabApiError, "exceeded maximum allowable size"):
+            client.list_experiment_templates()
 
 
 class ElabUploadServiceTests(unittest.TestCase):

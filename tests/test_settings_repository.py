@@ -58,7 +58,7 @@ class SettingsRepositoryTests(unittest.TestCase):
             self.assertEqual(
                 loaded["devices"]["keithley"]["safety"]["channels"]["B"]
                 ["lab_limits"]["source_current"],
-                {"min": "0 A", "max": "10 mA", "max_abs": "10 mA"},
+                {"min": "0 mA", "max": "10 mA", "max_abs": "10 mA"},
             )
             self.assertTrue(
                 loaded["devices"]["keithley"]["safety"]["allow_output_enable"]
@@ -142,7 +142,7 @@ class SettingsRepositoryTests(unittest.TestCase):
             self.assertEqual(preserved["max"], "10 mA")
             self.assertFalse(preserved["enabled"])
 
-    def test_load_repairs_anritsu_rf_requirement_without_inventing_power_limit(self) -> None:
+    def test_load_does_not_silently_disable_anritsu_rf_requirement(self) -> None:
         raw = deepcopy(SettingsRepository(SETTINGS_TEMPLATE).load().raw)
         safety = raw["devices"]["anritsu"]["safety"]
         safety["acquisition_allowed"] = True
@@ -154,22 +154,17 @@ class SettingsRepositoryTests(unittest.TestCase):
             repository = SettingsRepository(path)
             repository._atomic_dump(raw)
 
-            loaded = repository.load()
+            with self.assertRaises(ConfigurationError):
+                repository.load()
 
+            safety["acquisition_allowed"] = False
+            repository._atomic_dump(raw)
+            loaded = repository.load()
             repaired = loaded.raw["devices"]["anritsu"]["safety"]
-            self.assertTrue(repaired["acquisition_allowed"])
-            self.assertFalse(repaired["require_rf_input_limit_definition"])
+            self.assertFalse(repaired["acquisition_allowed"])
+            self.assertTrue(repaired["require_rf_input_limit_definition"])
             self.assertIsNone(
                 repaired["rf_input"]["max_expected_power_at_connector"]
-            )
-            self.assertEqual(
-                repaired["reference_level"],
-                {"min": "-120 dBm", "max": "+50 dBm"},
-            )
-            persisted = repository._yaml.load(path.read_text(encoding="utf-8"))
-            self.assertFalse(
-                persisted["devices"]["anritsu"]["safety"]
-                ["require_rf_input_limit_definition"]
             )
 
     def test_legacy_profile_gets_explicit_disabled_moke_box_section(self) -> None:

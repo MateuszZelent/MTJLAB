@@ -8,7 +8,6 @@ import time
 
 os.environ["QT_QPA_PLATFORM"] = "offscreen"
 
-from PySide6.QtCore import QPoint
 from PySide6.QtWidgets import QApplication
 
 from app.ui.shell import MainWindow

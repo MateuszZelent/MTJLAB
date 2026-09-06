@@ -6,6 +6,7 @@ from copy import deepcopy
 from dataclasses import dataclass
 from importlib.resources import files
 from functools import wraps
+import math
 import os
 from pathlib import Path
 import tempfile
@@ -291,14 +292,6 @@ class SettingsRepository:
             return changed
         if not isinstance(safety, dict):
             return changed
-        rf_input = safety.get("rf_input")
-        if (
-            isinstance(rf_input, dict)
-            and safety.get("require_rf_input_limit_definition") is True
-            and rf_input.get("max_expected_power_at_connector") in (None, "", "null")
-        ):
-            safety["require_rf_input_limit_definition"] = False
-            changed = True
 
         documented_reference = {"min": "-120 dBm", "max": "+50 dBm"}
         if safety.get("reference_level") != documented_reference:
@@ -315,9 +308,8 @@ class SettingsRepository:
         """Replace incompatible legacy Keithley envelopes with safe template ranges.
 
         This migration only narrows a source or compliance range when its
-        existing trip envelope does not cover it.  The replacement is accepted
-        only when the current packaged default fits inside the station's
-        existing trip envelope; trip thresholds are never widened.
+        existing trip envelope does not cover it. It strictly narrows rather
+        than expands any user envelope.
         """
 
         try:
@@ -359,8 +351,11 @@ class SettingsRepository:
                     continue
                 if cls._range_contains(trip, value, dimension):
                     continue
-                if cls._range_contains(trip, safe_default, dimension):
-                    limits[value_name] = deepcopy(safe_default)
+                if not cls._range_contains(trip, safe_default, dimension):
+                    continue
+                candidate = cls._intersect_ranges(value, safe_default, dimension)
+                if candidate is not None and cls._range_contains(trip, candidate, dimension):
+                    limits[value_name] = candidate
                     changed = True
                     channel_narrowed = True
 
@@ -374,8 +369,11 @@ class SettingsRepository:
                     continue
                 if cls._trip_covers_magnitude(trip, value, dimension):
                     continue
-                if cls._trip_covers_magnitude(trip, safe_default, dimension):
-                    limits[value_name] = deepcopy(safe_default)
+                if not cls._trip_covers_magnitude(trip, safe_default, dimension):
+                    continue
+                candidate = cls._intersect_ranges(value, safe_default, dimension)
+                if candidate is not None and cls._trip_covers_magnitude(trip, candidate, dimension):
+                    limits[value_name] = candidate
                     changed = True
                     channel_narrowed = True
             if channel_narrowed and isinstance(default_channel.get("defaults"), dict):
@@ -384,6 +382,49 @@ class SettingsRepository:
                 # guarantees that its persisted default output state is OFF.
                 channel["defaults"] = deepcopy(default_channel["defaults"])
         return changed
+
+    @classmethod
+    def _intersect_ranges(
+        cls,
+        current: dict[str, Any],
+        safe: dict[str, Any],
+        dimension: str,
+    ) -> dict[str, Any] | None:
+        """Intersect current range with safe default so that neither bound is widened."""
+        try:
+            c_min_q = parse_quantity(current["min"], dimension)
+            c_max_q = parse_quantity(current["max"], dimension)
+            s_min_q = parse_quantity(safe["min"], dimension)
+            s_max_q = parse_quantity(safe["max"], dimension)
+        except (KeyError, TypeError, ValueError):
+            return None
+
+        new_min = max(c_min_q.si_value, s_min_q.si_value)
+        new_max = min(c_max_q.si_value, s_max_q.si_value)
+
+        if new_min > new_max:
+            return None
+
+        result = deepcopy(safe)
+        if math.isclose(new_min, s_min_q.si_value, abs_tol=1e-12):
+            result["min"] = safe["min"]
+        elif math.isclose(new_min, c_min_q.si_value, abs_tol=1e-12):
+            result["min"] = current["min"]
+        else:
+            unit = "A" if dimension == DIMENSION_CURRENT else "V"
+            result["min"] = f"{new_min:.12g} {unit}"
+
+        if math.isclose(new_max, s_max_q.si_value, abs_tol=1e-12):
+            result["max"] = safe["max"]
+        elif math.isclose(new_max, c_max_q.si_value, abs_tol=1e-12):
+            result["max"] = current["max"]
+        else:
+            unit = "A" if dimension == DIMENSION_CURRENT else "V"
+            result["max"] = f"{new_max:.12g} {unit}"
+
+        if "max_abs" in current:
+            result["max_abs"] = safe.get("max_abs", result["max"])
+        return result
 
     @staticmethod
     def _range_contains(

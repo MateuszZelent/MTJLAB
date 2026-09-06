@@ -1,13 +1,111 @@
 schema_version: 1
-name: semantic-move
+name: Keithley B current × Rigol CH1 high level × Anritsu spectrum
+
+# Safe, executable 100 × 20 example. It deliberately contains no OUTPUT ON
+# action, so compiling or simulating it cannot energise a source.
 root:
-  id: root
+  id: sequence-main
   type: sequence
   children:
-  - id: second
-    type: wait
-    duration: 20 ms
-  - id: first
-    type: wait
-    duration: 10 ms
-finally: []
+  - id: anritsu-spectrum-setup
+    type: configure_anritsu
+    start_frequency: 1 MHz
+    stop_frequency: 10 MHz
+    reference_level: 0 dBm
+    points: 1001
+  - id: keithley-current-sweep
+    type: sweep
+    target: keithley.B.current
+    start: 1 mA
+    stop: 10 mA
+    points: 100
+    spacing: linear
+    children:
+    - id: keithley-b-config
+      type: configure_keithley
+      channel: B
+      mode: current
+      level: ${keithley.B.current}
+      compliance: 67 mV
+      nplc: 1.0
+    - id: rigol-high-level-sweep
+      type: sweep
+      target: rigol.1.high_level
+      start: 1 mV
+      stop: 3 mV
+      points: 20
+      spacing: linear
+      children:
+      - id: rigol-ch1-config
+        type: configure_rigol
+        channel: 1
+        waveform: SQU
+        frequency: 1 kHz
+        high_level: ${rigol.1.high_level}
+        low_level: -1 mV
+        output_load: HIGHZ
+        dut_min_impedance: 50 ohm
+      - id: wait-for-settle
+        type: wait
+        duration: 100 ms
+      - id: measure-keithley-b
+        type: measure_keithley
+        channel: B
+      - id: acquire-spectrum
+        type: acquire_spectrum
+        trace: TRAC1
+
+  - id: sweep-601ceaf0
+    type: sweep
+    target: keithley.B.current
+    segments:
+    - start: 0 A
+      stop: 1 mA
+      points: 5
+      spacing: linear
+    children:
+    - id: keithley-output-on-703b1722
+      type: set_keithley_output
+      channel: B
+      enabled: true
+    - id: output-off-e0328f5b
+      type: set_keithley_output
+      enabled: false
+      channel: B
+    - id: rigol-output-on-49eb32cb
+      type: enable_rigol_output
+      channel: 1
+    - id: output-off-d07dd180
+      type: set_rigol_output
+      enabled: false
+      channel: 1
+    - id: anritsu-sg-output-on-f249547d
+      type: enable_anritsu_sg_output
+    - id: output-off-8b3c3706
+      type: set_anritsu_sg_output
+      enabled: false
+    - id: configure-keithley-01cda43c
+      type: configure_keithley
+      channel: B
+      mode: current
+      level: ${keithley.B.current}
+      compliance: 67 mV
+      nplc: 1.0
+      settle_time: 100 ms
+      sense_mode: 2wire
+    - id: settle-wait-39c634ba
+      type: wait
+      duration: 100 ms
+finally:
+- id: rigol-ch1-off-finally
+  type: set_rigol_output
+  channel: 1
+  enabled: false
+- id: keithley-b-ramp-zero-finally
+  type: ramp_keithley_to_zero
+  channel: B
+  deadline: 10 s
+- id: keithley-b-off-finally
+  type: set_keithley_output
+  channel: B
+  enabled: false

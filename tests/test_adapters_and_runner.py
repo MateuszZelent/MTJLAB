@@ -1084,6 +1084,22 @@ class AdapterAndRunnerTests(unittest.TestCase):
         )
         self.assertEqual(adapter.state, DeviceState.OUTPUT_ON)
 
+    def test_keithley_connect_safe_mode_commands_outputs_off_and_verifies(self) -> None:
+        session = FakeVisaSession(
+            responses={
+                "*IDN?": "KEITHLEY INSTRUMENTS,2602A,123456,1.0",
+                "print(smua.source.output)": "0",
+                "print(smub.source.output)": "0",
+            }
+        )
+        adapter = KeithleyAdapter(
+            self.settings, session_factory=FakeVisaSessionFactory(session)
+        )
+        adapter.connect(force_outputs_off=True)
+        self.assertIn("smua.source.output = smua.OUTPUT_OFF", session.writes)
+        self.assertIn("smub.source.output = smub.OUTPUT_OFF", session.writes)
+        self.assertEqual(adapter.state, DeviceState.OUTPUT_OFF)
+
     def test_keithley_dut_output_off_mode_is_channel_specific_and_verified(self) -> None:
         session = FakeVisaSession(
             responses={"*IDN?": "KEITHLEY INSTRUMENTS,2602A,123456,1.0"}
@@ -3178,6 +3194,7 @@ root:
         )
         keithley = KeithleyAdapter(self.settings, session_factory=FakeVisaSessionFactory(session))
         keithley.connect()
+        keithley.set_compliance_policy("B", True)
         rigol = RigolAdapter(self.settings, session_factory=FakeVisaSessionFactory(FakeVisaSession()))
         anritsu = AnritsuAdapter(self.settings, session_factory=FakeVisaSessionFactory(FakeVisaSession()))
         plan = ExecutionPlan(

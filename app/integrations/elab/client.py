@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+import io
 import json
 import mimetypes
 from pathlib import Path
@@ -32,6 +33,80 @@ class ElabApiResponse:
     status: int
     headers: Mapping[str, str]
     payload: Any
+
+
+class MultipartFileStream:
+    """Stream multipart form-data for large file uploads without buffering the file in RAM (NET-02)."""
+
+    def __init__(self, prefix: bytes, file_path: Path, suffix: bytes) -> None:
+        self._prefix_bytes = prefix
+        self._prefix_stream: io.BytesIO | None = io.BytesIO(prefix)
+        self._file_path = file_path
+        self._file_stream: io.BufferedReader | None = None
+        self._file_done = False
+        self._suffix_bytes = suffix
+        self._suffix_stream: io.BytesIO | None = io.BytesIO(suffix)
+        try:
+            file_size = file_path.stat().st_size
+        except OSError as exc:
+            raise ElabApiError(f"Cannot stat result attachment {file_path.name}: {exc}") from exc
+        self._total_length = len(prefix) + file_size + len(suffix)
+
+    @property
+    def total_length(self) -> int:
+        return self._total_length
+
+    def __len__(self) -> int:
+        return self._total_length
+
+    def __bytes__(self) -> bytes:
+        with self._file_path.open("rb") as stream:
+            return self._prefix_bytes + stream.read() + self._suffix_bytes
+
+    def __contains__(self, item: bytes) -> bool:
+        if item in self._prefix_bytes or item in self._suffix_bytes:
+            return True
+        with self._file_path.open("rb") as stream:
+            while chunk := stream.read(65536):
+                if item in chunk:
+                    return True
+        return False
+
+    def read(self, size: int = 65536) -> bytes:
+        if self._prefix_stream is not None:
+            chunk = self._prefix_stream.read(size)
+            if chunk:
+                return chunk
+            self._prefix_stream = None
+
+        if not self._file_done:
+            if self._file_stream is None:
+                try:
+                    self._file_stream = self._file_path.open("rb")
+                except OSError as exc:
+                    raise ElabApiError(
+                        f"Cannot open result attachment {self._file_path.name}: {exc}"
+                    ) from exc
+            chunk = self._file_stream.read(size)
+            if chunk:
+                return chunk
+            self._file_stream.close()
+            self._file_stream = None
+            self._file_done = True
+
+        if self._suffix_stream is not None:
+            chunk = self._suffix_stream.read(size)
+            if chunk:
+                return chunk
+            self._suffix_stream = None
+
+        return b""
+
+    def close(self) -> None:
+        if self._file_stream is not None:
+            self._file_stream.close()
+            self._file_stream = None
+        self._file_done = True
 
 
 class ElabApiClient:
@@ -132,35 +207,32 @@ class ElabApiClient:
         target = Path(path).expanduser()
         if not target.is_file():
             raise ElabApiError(f"Result attachment does not exist: {target}")
-        try:
-            content = target.read_bytes()
-        except OSError as exc:
-            raise ElabApiError(f"Cannot read result attachment {target.name}: {exc}") from exc
         boundary = f"----PyLabElab{uuid.uuid4().hex}"
         mime_type = mimetypes.guess_type(target.name)[0] or "application/octet-stream"
         safe_name = target.name.replace('"', "'").replace("\r", " ").replace("\n", " ")
-        parts = [
-            (
-                f"--{boundary}\r\n"
-                f'Content-Disposition: form-data; name="file"; filename="{safe_name}"\r\n'
-                f"Content-Type: {mime_type}\r\n\r\n"
-            ).encode("utf-8"),
-            content,
-        ]
+        prefix = (
+            f"--{boundary}\r\n"
+            f'Content-Disposition: form-data; name="file"; filename="{safe_name}"\r\n'
+            f"Content-Type: {mime_type}\r\n\r\n"
+        ).encode("utf-8")
         clean_comment = str(comment).strip()
-        if clean_comment:
-            parts.append(
-                (
-                    f"\r\n--{boundary}\r\n"
-                    'Content-Disposition: form-data; name="comment"\r\n\r\n'
-                    f"{clean_comment}\r\n"
-                ).encode("utf-8")
-            )
-        parts.append(f"\r\n--{boundary}--\r\n".encode("ascii"))
+        comment_part = (
+            (
+                f"\r\n--{boundary}\r\n"
+                'Content-Disposition: form-data; name="comment"\r\n\r\n'
+                f"{clean_comment}\r\n"
+            ).encode("utf-8")
+            if clean_comment
+            else b""
+        )
+        suffix = comment_part + f"\r\n--{boundary}--\r\n".encode("ascii")
+
+        # Stream attachment in chunks without loading entire file into memory (NET-02)
+        stream = MultipartFileStream(prefix, target, suffix)
         response = self._request(
             "POST",
             f"/experiments/{self._checked_id(experiment_id)}/uploads",
-            data=b"".join(parts),
+            data=stream,
             content_type=f"multipart/form-data; boundary={boundary}",
         )
         return self._header(response.headers, "location") or ""
@@ -172,7 +244,7 @@ class ElabApiClient:
         *,
         params: Mapping[str, object] | None = None,
         payload: Mapping[str, object] | None = None,
-        data: bytes | None = None,
+        data: bytes | Any | None = None,
         content_type: str | None = None,
     ) -> ElabApiResponse:
         url = f"{self.base_url}/{path.lstrip('/')}"
@@ -183,7 +255,6 @@ class ElabApiClient:
         request_data = data
         headers = {
             "Accept": "application/json",
-            "Authorization": self._credentials.api_key,
             "User-Agent": "PyLab-eLabFTW/0.1",
         }
         if payload is not None:
@@ -192,9 +263,22 @@ class ElabApiClient:
         elif content_type is not None:
             headers["Content-Type"] = content_type
         request = Request(url, data=request_data, headers=headers, method=method.upper())
+        # Prevent credential leakage across cross-host redirects (NET-01)
+        request.add_unredirected_header("Authorization", self._credentials.api_key)
+        if hasattr(request_data, "total_length"):
+            request.add_unredirected_header("Content-Length", str(request_data.total_length))
         try:
             with self._opener(request, timeout=self._timeout_s) as response:
-                raw = response.read()
+                # NET-02: Bound response read to 10 MB to prevent unbounded memory allocation
+                max_response_bytes = 10 * 1024 * 1024
+                try:
+                    raw = response.read(max_response_bytes + 1)
+                except TypeError:
+                    raw = response.read()
+                if len(raw) > max_response_bytes:
+                    raise ElabApiError(
+                        f"eLab API response exceeded maximum allowable size of {max_response_bytes} bytes."
+                    )
                 status = int(response.getcode() or 0)
                 response_headers = {
                     str(key).lower(): str(value) for key, value in response.headers.items()

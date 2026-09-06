@@ -10,6 +10,7 @@ from PySide6.QtWidgets import QApplication
 
 from app.settings import repair_settings_file
 from app.ui.shell import MainWindow
+from app.version import APP_NAME
 
 
 def parse_args() -> argparse.Namespace:
@@ -26,7 +27,7 @@ def main() -> int:
     settings_path = Path(args.settings)
     repair_settings_file(settings_path)
     app = QApplication(sys.argv)
-    app.setApplicationName("PyLab")
+    app.setApplicationName(APP_NAME)
     window = MainWindow(settings_path, simulation=args.simulate)
 
     window._set_theme_mode(str(window._settings.ui.get("theme", "system")), persist=False)

@@ -165,8 +165,10 @@ def estimate_rigol_current(
     numeric = (high_v, low_v, source_ohm)
     if not all(math.isfinite(value) for value in numeric):
         raise SafetyViolation("Rigol voltage and impedance values must be finite.")
-    if source_ohm <= 0:
-        raise SafetyViolation("Source impedance must be positive.")
+    if source_ohm < 50.0 - 1e-9:
+        raise SafetyViolation(
+            f"Rigol source impedance cannot be below hardware minimum 50 Ω (received {source_ohm:.6g} Ω)."
+        )
     open_high = _open_circuit_voltage(high_v, output_load, source_ohm)
     open_low = _open_circuit_voltage(low_v, output_load, source_ohm)
     # Short circuit maximises load current. Matching Rload=Rsource maximises

@@ -15,10 +15,8 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 from qfluentwidgets import (
-    BodyLabel,
     CaptionLabel,
     FluentIcon,
-    PlainTextEdit,
     PushButton,
     SegmentedWidget,
     SpinBox,
