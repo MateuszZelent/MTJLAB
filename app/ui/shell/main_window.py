@@ -1068,6 +1068,8 @@ class MainWindow(FluentWindow):
         if device == "rigol":
             channel = self.rigol_page.channel.currentText()
             path = ("devices", "rigol", "safety", "channels", channel, "lab_limits", key)
+            if key == "combined_voltage_limit":
+                return f"Rigol CH{channel} — voltage limits", path, True
             return f"Rigol CH{channel} — {key.replace('_', ' ')}", path, True
         if device == "anritsu":
             path = ("devices", "anritsu", "safety", key)
@@ -1132,20 +1134,74 @@ class MainWindow(FluentWindow):
             QMessageBox.critical(self, "Cannot edit limits", str(exc))
             return
 
+        key = str(field.property("limitKey"))
+        guidance: str | None = None
+        max_label = "Maximum"
+        if scalar_limit:
+            if key == "combined_voltage_limit":
+                value_label = "Minimum voltage"
+                max_label = "Maximum voltage"
+                maximum_enabled = True
+                try:
+                    current_si = parse_quantity(str(minimum), DIMENSION_VOLTAGE).si_value
+                    minimum = format_quantity_auto(-abs(current_si), DIMENSION_VOLTAGE)
+                    maximum = format_quantity_auto(abs(current_si), DIMENSION_VOLTAGE)
+                except Exception:
+                    minimum = f"-{range_data}"
+                    maximum = str(range_data)
+                guidance = (
+                    "Enter the symmetric voltage limits for this channel (for example: minimum -800 mV, maximum 800 mV). "
+                    "The shared voltage budget (Vpp + |offset|) will not exceed the maximum absolute limit."
+                )
+            elif key == "max_abs_power":
+                value_label = "Maximum power"
+                guidance = (
+                    "Enter the maximum absolute power limit for this Keithley channel (for example: 1000 uW, 10 mW). "
+                    "The complete configuration is validated before it is saved."
+                )
+            else:
+                value_label = "Limit value"
+        else:
+            value_label = "Minimum"
+
         dialog = LimitEditDialog(
             title,
             minimum,
             maximum,
             maximum_enabled=maximum_enabled,
-            value_label="Maximum power" if scalar_limit else "Minimum",
+            value_label=value_label,
+            max_label=max_label,
+            guidance=guidance,
             parent=self,
         )
         if dialog.exec() != QDialog.DialogCode.Accepted:
             return
         try:
             if scalar_limit:
-                replacement = self._coerce_limit_value(dialog.minimum.text(), minimum)
-                parse_quantity(str(replacement), DIMENSION_POWER)
+                if key == "combined_voltage_limit":
+                    min_text = dialog.minimum.text().strip()
+                    max_text = dialog.maximum.text().strip()
+                    if not min_text and not max_text:
+                        raise ValueError("Voltage limit cannot be empty.")
+                    min_v = parse_quantity(min_text, DIMENSION_VOLTAGE).si_value if min_text else None
+                    max_v = parse_quantity(max_text, DIMENSION_VOLTAGE).si_value if max_text else None
+                    if min_v is not None and max_v is not None:
+                        budget_v = max(abs(min_v), abs(max_v))
+                    elif min_v is not None:
+                        budget_v = abs(min_v)
+                    else:
+                        assert max_v is not None
+                        budget_v = abs(max_v)
+                    if budget_v <= 0:
+                        raise ValueError("Voltage limit must be greater than zero.")
+                    replacement = format_quantity_auto(budget_v, DIMENSION_VOLTAGE)
+                elif key == "max_abs_power":
+                    replacement = self._coerce_limit_value(dialog.minimum.text(), minimum)
+                    parsed = parse_quantity(str(replacement), DIMENSION_POWER)
+                    if parsed.si_value <= 0:
+                        raise ValueError("Maximum power limit must be positive.")
+                else:
+                    replacement = self._coerce_limit_value(dialog.minimum.text(), minimum)
             else:
                 replacement = dict(range_data)
                 replacement["min"] = self._coerce_limit_value(dialog.minimum.text(), minimum)
@@ -1205,7 +1261,12 @@ class MainWindow(FluentWindow):
         else:
             self.settings_page.stage_external_snapshot(settings, raw)
         if scalar_limit:
-            field.editor.setText(str(replacement))
+            if key == "combined_voltage_limit":
+                budget_qty = parse_quantity(str(replacement), DIMENSION_VOLTAGE)
+                neg_bound = format_quantity_auto(-budget_qty.si_value, DIMENSION_VOLTAGE)
+                field.set_limits(neg_bound, str(replacement))
+            else:
+                field.editor.setText(str(replacement))
         else:
             fields = (field,)
             if device == "anritsu":
@@ -1219,6 +1280,8 @@ class MainWindow(FluentWindow):
                 )
             for candidate in fields:
                 candidate.set_limits(replacement["min"], replacement.get("max", "N/A"))
+        if device == "rigol":
+            self.rigol_page.set_settings(settings)
         if device == "keithley":
             self.keithley_page.set_settings(settings)
             if hasattr(self, "keithley_characterization_page") and self.keithley_characterization_page is not None:

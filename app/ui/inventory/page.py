@@ -1033,6 +1033,10 @@ class SampleInventoryPage(QWidget):
             col=col,
             device_label=label,
             notes=notes,
+            row_label=self._current_sample.row_label(row),
+            col_label=self._current_sample.col_label(col),
+            description=self._current_sample.description,
+            tags=self._current_sample.tags,
         )
         self.store.set_active_target(target)
         self._sync_active_target_display()
@@ -1099,6 +1103,10 @@ class SampleInventoryPage(QWidget):
             col=next_c,
             device_label=next_label,
             notes=self._current_sample.cell_notes(next_r, next_c),
+            row_label=self._current_sample.row_label(next_r),
+            col_label=self._current_sample.col_label(next_c),
+            description=self._current_sample.description,
+            tags=self._current_sample.tags,
         )
         self.store.set_active_target(next_target)
         self._sync_active_target_display()

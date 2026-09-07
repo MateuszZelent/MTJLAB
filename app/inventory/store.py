@@ -139,13 +139,27 @@ class InventoryStore:
                     row TEXT,
                     col TEXT,
                     device_label TEXT,
-                    notes TEXT
+                    notes TEXT,
+                    row_label TEXT,
+                    col_label TEXT,
+                    description TEXT,
+                    tags_json TEXT NOT NULL DEFAULT '[]'
                 );
                 """
             )
             cursor.execute(
                 "INSERT OR IGNORE INTO active_target (id, sample_id) VALUES (1, NULL);"
             )
+            cursor.execute("PRAGMA table_info(active_target);")
+            existing_cols = {r["name"] for r in cursor.fetchall()}
+            for col_name, col_type in (
+                ("row_label", "TEXT"),
+                ("col_label", "TEXT"),
+                ("description", "TEXT"),
+                ("tags_json", "TEXT NOT NULL DEFAULT '[]'"),
+            ):
+                if col_name not in existing_cols:
+                    cursor.execute(f"ALTER TABLE active_target ADD COLUMN {col_name} {col_type};")
 
     # -------------------------------------------------------------------------
     # Sample CRUD
@@ -589,6 +603,12 @@ class InventoryStore:
             row = cursor.fetchone()
             if row is None or not row["sample_id"]:
                 return ActiveSampleTarget()
+            row_keys = row.keys() if hasattr(row, "keys") else ()
+            tags_json = row["tags_json"] if "tags_json" in row_keys else "[]"
+            try:
+                tags = tuple(json.loads(tags_json or "[]"))
+            except Exception:
+                tags = ()
             return ActiveSampleTarget(
                 sample_id=row["sample_id"],
                 sample_name=row["sample_name"],
@@ -596,6 +616,10 @@ class InventoryStore:
                 col=row["col"],
                 device_label=row["device_label"],
                 notes=row["notes"],
+                row_label=row["row_label"] if "row_label" in row_keys else None,
+                col_label=row["col_label"] if "col_label" in row_keys else None,
+                description=row["description"] if "description" in row_keys else None,
+                tags=tags,
             )
 
     def set_active_target(self, target: ActiveSampleTarget) -> None:
@@ -606,7 +630,8 @@ class InventoryStore:
                 """
                 UPDATE active_target
                 SET sample_id = ?, sample_name = ?, row = ?, col = ?,
-                    device_label = ?, notes = ?
+                    device_label = ?, notes = ?, row_label = ?, col_label = ?,
+                    description = ?, tags_json = ?
                 WHERE id = 1;
                 """,
                 (
@@ -616,6 +641,10 @@ class InventoryStore:
                     target.col,
                     target.device_label,
                     target.notes,
+                    target.row_label,
+                    target.col_label,
+                    target.description,
+                    json.dumps(list(target.tags)),
                 ),
             )
 

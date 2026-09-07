@@ -6,7 +6,6 @@ from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone
 from io import StringIO
 from pathlib import Path
-import re
 import secrets
 import threading
 import time
@@ -34,14 +33,16 @@ from app.storage import Hdf5RunWriter
 from app.ui.workers import DeviceController
 
 
-def sanitize_run_file_stem(raw_name: object, *, fallback: str = "run") -> str:
-    """Convert a user- or recipe-provided name into a safe file stem."""
+from app.storage.naming import automated_run_file_stem, sanitize_run_file_stem
 
-    candidate = Path(str(raw_name or "").strip()).name
-    if candidate.lower().endswith((".h5", ".hdf5")):
-        candidate = Path(candidate).stem
-    safe_name = re.sub(r"[^A-Za-z0-9_.-]+", "_", candidate).strip("_")
-    return safe_name or fallback
+__all__ = [
+    "RunController",
+    "RunWorker",
+    "automated_run_file_stem",
+    "planned_run_paths",
+    "sanitize_run_file_stem",
+    "serialize_settings_snapshot",
+]
 
 
 def planned_run_paths(
@@ -51,6 +52,7 @@ def planned_run_paths(
     output_dir_override: str | Path | None = None,
     file_stem_override: str | None = None,
     timestamp: datetime | None = None,
+    sample_target: object | None = None,
 ) -> tuple[Path, Path | None]:
     """Return the HDF5 and optional CSV path for a new run."""
 
@@ -58,14 +60,22 @@ def planned_run_paths(
         "output_directory", "./measurements"
     )
     output_dir = Path(str(raw_output_dir)).expanduser()
-    base_name = sanitize_run_file_stem(file_stem_override or recipe_name)
+    pattern = None
+    if hasattr(settings, "storage") and isinstance(settings.storage, Mapping):
+        pattern = settings.storage.get("filename_pattern")
+    base_name = automated_run_file_stem(
+        recipe_name,
+        sample_target=sample_target,
+        file_stem_override=file_stem_override,
+        pattern=pattern,
+    )
     run_timestamp = (timestamp or datetime.now(timezone.utc)).strftime(
         "%Y%m%dT%H%M%S.%fZ"
     )
     run_stem = f"{run_timestamp}_{base_name}"
     csv_path = (
         output_dir / f"{run_stem}.csv"
-        if settings.storage.get("write_csv_summary")
+        if hasattr(settings, "storage") and settings.storage.get("write_csv_summary")
         else None
     )
     return output_dir / f"{run_stem}.h5", csv_path
@@ -407,6 +417,11 @@ class RunWorker(QObject):
                         "sample_row": str(self._sample_target.row or ""),
                         "sample_col": str(self._sample_target.col or ""),
                         "sample_coordinate_label": str(self._sample_target.device_label or ""),
+                        "sample_row_label": str(getattr(self._sample_target, "row_label", "") or ""),
+                        "sample_col_label": str(getattr(self._sample_target, "col_label", "") or ""),
+                        "sample_description": str(getattr(self._sample_target, "description", "") or ""),
+                        "sample_tags": list(getattr(self._sample_target, "tags", ()) or ()),
+                        "sample_cell_notes": str(getattr(self._sample_target, "notes", "") or ""),
                     }
                 elif isinstance(self._sample_target, Mapping) and self._sample_target.get("sample_id"):
                     sample_attrs = {
@@ -415,6 +430,11 @@ class RunWorker(QObject):
                         "sample_row": str(self._sample_target.get("row") or ""),
                         "sample_col": str(self._sample_target.get("col") or ""),
                         "sample_coordinate_label": str(self._sample_target.get("device_label") or ""),
+                        "sample_row_label": str(self._sample_target.get("row_label") or ""),
+                        "sample_col_label": str(self._sample_target.get("col_label") or ""),
+                        "sample_description": str(self._sample_target.get("description") or ""),
+                        "sample_tags": list(self._sample_target.get("tags") or ()),
+                        "sample_cell_notes": str(self._sample_target.get("notes") or ""),
                     }
 
             if self._recovery is None:
@@ -423,6 +443,7 @@ class RunWorker(QObject):
                     self._plan.recipe_name,
                     output_dir_override=self._output_dir_override,
                     file_stem_override=self._file_stem_override,
+                    sample_target=self._sample_target,
                 )
                 writer = Hdf5RunWriter(
                     result_path,

@@ -569,7 +569,9 @@ class SettingsPage(QWidget):
         try:
             for path in changed_paths:
                 value = self._get_path(self._raw, path)
-                self._sync_limit_from_tree(path, self._format_scalar(value))
+                formatted = self._format_scalar(value)
+                self._sync_limit_from_tree(path, formatted)
+                self._sync_tree_from_limit(path, formatted)
         finally:
             self._changing = previous_changing
         self._update_subtitle()
@@ -806,7 +808,12 @@ class SettingsPage(QWidget):
             for label, data in choices:
                 editor.addItem(label, userData=data)
             editor.setCurrentIndex(max(0, editor.findData(self._format_scalar(value))))
-            editor.currentIndexChanged.connect(lambda _index, path=path: self._form_changed(path))
+            if self._is_keithley_sense_mode_path(path):
+                editor.currentIndexChanged.connect(
+                    lambda index, path=path, ed=editor: self._on_sense_mode_choice_changed(index, path, ed)
+                )
+            else:
+                editor.currentIndexChanged.connect(lambda _index, path=path: self._form_changed(path))
         elif isinstance(value, int) and not isinstance(value, bool):
             editor = SpinBox()
             editor.setRange(-1_000_000_000, 1_000_000_000)
@@ -1006,10 +1013,76 @@ class SettingsPage(QWidget):
     ) -> tuple[tuple[str, str], ...]:
         if isinstance(value, bool):
             return (("Yes", "true"), ("No", "false"))
+        if cls._is_keithley_sense_mode_path(path):
+            return (("2-wire (Local)", "2wire"), ("4-wire (Kelvin)", "4wire"))
         annotation = cls._annotation_for_path(path)
         if annotation is not None and get_origin(annotation) is Literal:
             return tuple((str(option), str(option)) for option in get_args(annotation))
         return ()
+
+    @staticmethod
+    def _is_keithley_sense_mode_path(path: tuple[str | int, ...]) -> bool:
+        if not path:
+            return False
+        return str(path[-1]) == "sense_mode" and "keithley" in [str(p) for p in path]
+
+    def _on_sense_mode_choice_changed(
+        self, index: int, path: tuple[str | int, ...], editor: ComboBox
+    ) -> None:
+        if self._changing:
+            return
+        selected = str(editor.currentData() or editor.itemData(index) or "")
+        if "4" in selected:
+            reply = QMessageBox.warning(
+                self.window(),
+                "Warning: 4-Wire (Remote Kelvin) Sense Mode",
+                "4-wire remote sensing requires dedicated Sense HI and Sense LO probes physically wired to the DUT.\n\n"
+                "⚠️ DANGER: If you are using a standard 2-probe fixture or if Sense lines are open/floating, "
+                "the Keithley SMU cannot read voltage across the device. Voltage compliance is bypassed and the "
+                "SMU will drive the Force terminals to maximum rail voltage (up to 20 V – 40 V).\n\n"
+                "This will instantaneously destroy delicate MTJ tunnel barriers!\n\n"
+                "Do you confirm that separate Sense leads are physically connected to the DUT?",
+                buttons=QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.Cancel,
+                defaultButton=QMessageBox.StandardButton.Cancel,
+            )
+            if reply != QMessageBox.StandardButton.Yes:
+                self._changing = True
+                try:
+                    idx = editor.findData("2wire")
+                    editor.setCurrentIndex(max(0, idx))
+                finally:
+                    self._changing = False
+                return
+        self._form_changed(path)
+
+    def _on_sense_mode_tree_changed(
+        self, index: int, item: QTreeWidgetItem, editor: ComboBox, path: tuple[str | int, ...]
+    ) -> None:
+        if self._changing:
+            return
+        selected = str(editor.currentData() or editor.itemData(index) or "")
+        if "4" in selected:
+            reply = QMessageBox.warning(
+                self.window(),
+                "Warning: 4-Wire (Remote Kelvin) Sense Mode",
+                "4-wire remote sensing requires dedicated Sense HI and Sense LO probes physically wired to the DUT.\n\n"
+                "⚠️ DANGER: If you are using a standard 2-probe fixture or if Sense lines are open/floating, "
+                "the Keithley SMU cannot read voltage across the device. Voltage compliance is bypassed and the "
+                "SMU will drive the Force terminals to maximum rail voltage (up to 20 V – 40 V).\n\n"
+                "This will instantaneously destroy delicate MTJ tunnel barriers!\n\n"
+                "Do you confirm that separate Sense leads are physically connected to the DUT?",
+                buttons=QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.Cancel,
+                defaultButton=QMessageBox.StandardButton.Cancel,
+            )
+            if reply != QMessageBox.StandardButton.Yes:
+                self._changing = True
+                try:
+                    idx = editor.findData("2wire")
+                    editor.setCurrentIndex(max(0, idx))
+                finally:
+                    self._changing = False
+                return
+        item.setText(1, str(editor.currentData()))
 
     def _install_choice_editor(
         self,
@@ -1025,9 +1098,14 @@ class SettingsPage(QWidget):
         editor.setCurrentIndex(max(index, 0))
         editor.setToolTip("Select a validated value from the list.")
         editor.setEnabled(bool(item.flags() & Qt.ItemFlag.ItemIsEditable))
-        editor.currentIndexChanged.connect(
-            lambda _index, item=item, editor=editor: item.setText(1, str(editor.currentData()))
-        )
+        if self._is_keithley_sense_mode_path(path):
+            editor.currentIndexChanged.connect(
+                lambda index, item=item, ed=editor, p=path: self._on_sense_mode_tree_changed(index, item, ed, p)
+            )
+        else:
+            editor.currentIndexChanged.connect(
+                lambda _index, item=item, editor=editor: item.setText(1, str(editor.currentData()))
+            )
         tree.setItemWidget(item, 1, editor)
         self._choice_editors[path] = editor
 
@@ -1042,7 +1120,12 @@ class SettingsPage(QWidget):
 
         for path, editor in self._form_editors.items():
             original = self._get_path(draft, path)
-            self._set_path(draft, path, self._form_value(editor, original))
+            val = self._form_value(editor, original)
+            self._set_path(draft, path, val)
+            if self._is_keithley_sense_mode_path(path):
+                if len(path) >= 2 and path[-1] == "sense_mode" and str(path[-2]) in ("A", "B"):
+                    def_path = path[:-1] + ("defaults", "sense_mode")
+                    self._set_path(draft, def_path, val)
 
         def walk(item: QTreeWidgetItem) -> None:
             path = item.data(0, Qt.ItemDataRole.UserRole)
@@ -1050,7 +1133,12 @@ class SettingsPage(QWidget):
                 if tuple(path) in self._form_editors:
                     return
                 original = self._get_path(draft, tuple(path))
-                self._set_path(draft, tuple(path), self._parse_scalar(item.text(1), original))
+                val = self._parse_scalar(item.text(1), original)
+                self._set_path(draft, tuple(path), val)
+                if self._is_keithley_sense_mode_path(tuple(path)):
+                    if len(path) >= 2 and path[-1] == "sense_mode" and str(path[-2]) in ("A", "B"):
+                        def_path = tuple(path[:-1]) + ("defaults", "sense_mode")
+                        self._set_path(draft, def_path, val)
             for index in range(item.childCount()):
                 walk(item.child(index))
 
@@ -1081,7 +1169,7 @@ class SettingsPage(QWidget):
                 if isinstance(nested, dict):
                     walk(nested, path + (str(key),))
                 elif (
-                    key == "max_abs_power"
+                    key in {"max_abs_power", "combined_voltage_limit"}
                     and path[-1:] == ("lab_limits",)
                     and isinstance(nested, str)
                 ):

@@ -275,9 +275,58 @@ class SettingsRepository:
                         if isinstance(channel, dict)
                         else None
                     )
-                    if isinstance(limits, dict) and "declared_dut_impedance" in limits:
-                        del limits["declared_dut_impedance"]
-                        changed = True
+                    if isinstance(limits, dict):
+                        if "declared_dut_impedance" in limits:
+                            del limits["declared_dut_impedance"]
+                            changed = True
+                        legacy_limits: list[float] = []
+                        for name in (
+                            "high_level",
+                            "low_level",
+                            "amplitude_vpp",
+                            "offset",
+                        ):
+                            legacy = limits.get(name)
+                            if not isinstance(legacy, dict) or not legacy.get(
+                                "enabled", True
+                            ):
+                                continue
+                            try:
+                                lower = parse_quantity(
+                                    legacy["min"], DIMENSION_VOLTAGE
+                                ).si_value
+                                upper = parse_quantity(
+                                    legacy["max"], DIMENSION_VOLTAGE
+                                ).si_value
+                            except (KeyError, TypeError, ValueError):
+                                continue
+                            if name == "amplitude_vpp":
+                                if upper > 0:
+                                    legacy_limits.append(upper)
+                            elif lower <= 0 <= upper:
+                                legacy_limits.append(min(abs(lower), abs(upper)))
+                        if legacy_limits:
+                            try:
+                                existing_limit = parse_quantity(
+                                    limits["combined_voltage_limit"],
+                                    DIMENSION_VOLTAGE,
+                                ).si_value
+                            except (KeyError, TypeError, ValueError):
+                                existing_limit = math.inf
+                            migrated_limit = min(existing_limit, *legacy_limits)
+                            limits["combined_voltage_limit"] = (
+                                f"{migrated_limit:.12g} V"
+                            )
+                            changed = True
+                        for obsolete_key in (
+                            "high_level",
+                            "low_level",
+                            "amplitude_vpp",
+                            "offset",
+                        ):
+                            if obsolete_key in limits:
+                                del limits[obsolete_key]
+                                changed = True
         anritsu = devices.get("anritsu") if isinstance(devices, dict) else None
         generator = (
             anritsu.get("signal_generator") if isinstance(anritsu, dict) else None

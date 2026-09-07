@@ -64,6 +64,10 @@ class ActiveSampleTarget:
     col: str | None = None
     device_label: str | None = None
     notes: str | None = None
+    row_label: str | None = None
+    col_label: str | None = None
+    description: str | None = None
+    tags: tuple[str, ...] = ()
 
     @property
     def is_active(self) -> bool:
@@ -95,12 +99,18 @@ class ActiveSampleTarget:
             "col": self.col,
             "device_label": self.device_label,
             "notes": self.notes,
+            "row_label": self.row_label,
+            "col_label": self.col_label,
+            "description": self.description,
+            "tags": list(self.tags),
         }
 
     @classmethod
     def from_dict(cls, data: Mapping[str, Any] | None) -> ActiveSampleTarget:
         if not data:
             return cls()
+        tags_raw = data.get("tags") or ()
+        tags = tuple(str(t) for t in tags_raw) if isinstance(tags_raw, (list, tuple)) else ()
         return cls(
             sample_id=str(data.get("sample_id") or "") or None,
             sample_name=str(data.get("sample_name") or "") or None,
@@ -108,6 +118,10 @@ class ActiveSampleTarget:
             col=str(data.get("col") or "") or None,
             device_label=str(data.get("device_label") or "") or None,
             notes=str(data.get("notes") or "") or None,
+            row_label=str(data.get("row_label") or "") or None,
+            col_label=str(data.get("col_label") or "") or None,
+            description=str(data.get("description") or "") or None,
+            tags=tags,
         )
 
 
@@ -218,6 +232,12 @@ class Sample:
 
     def cell_notes(self, row: str | int, col: str | int) -> str:
         return self.device_notes.get(self.coord_key(row, col), "")
+
+    def row_label(self, row: str | int) -> str:
+        return self.row_labels.get(str(row), "")
+
+    def col_label(self, col: str | int) -> str:
+        return self.col_labels.get(str(col), "")
 
     def with_cell_update(
         self,

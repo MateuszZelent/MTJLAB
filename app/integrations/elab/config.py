@@ -321,11 +321,20 @@ class ElabIntegrationProfile:
             raise ElabConfigurationError("The eLab experiment title pattern cannot be empty.")
         try:
             self.title_pattern.format_map(
-                {"run_name": "example", "status": "completed", "created_at": "2026-01-01T00:00:00Z"}
+                {
+                    "run_name": "example",
+                    "status": "completed",
+                    "created_at": "2026-01-01T00:00:00Z",
+                    "sample_id": "example",
+                    "sample_name": "example",
+                    "sample_coord": "example",
+                    "device_label": "example",
+                }
             )
         except (KeyError, ValueError) as exc:
             raise ElabConfigurationError(
-                "The title pattern may use only {run_name}, {status} and {created_at}."
+                "The title pattern may use only {run_name}, {status}, {created_at}, "
+                "{sample_id}, {sample_name}, {sample_coord} and {device_label}."
             ) from exc
         if not self.upload_hdf5 and not self.upload_csv:
             raise ElabConfigurationError("Select at least one result format to upload.")
@@ -352,11 +361,28 @@ class ElabIntegrationProfile:
                 "A favorite eLab template title must contain 1-255 characters."
             )
 
-    def render_title(self, *, run_name: str, status: str, created_at: str) -> str:
+    def render_title(
+        self,
+        *,
+        run_name: str,
+        status: str,
+        created_at: str,
+        sample_id: str | None = None,
+        sample_name: str | None = None,
+        sample_coord: str | None = None,
+        device_label: str | None = None,
+    ) -> str:
         self.validate()
-        title = self.title_pattern.format(
-            run_name=str(run_name), status=str(status), created_at=str(created_at)
-        ).strip()
+        mapping = {
+            "run_name": str(run_name),
+            "status": str(status),
+            "created_at": str(created_at),
+            "sample_id": str(sample_id or ""),
+            "sample_name": str(sample_name or sample_id or ""),
+            "sample_coord": str(sample_coord or ""),
+            "device_label": str(device_label or ""),
+        }
+        title = self.title_pattern.format_map(mapping).strip()
         if not title:
             raise ElabConfigurationError("The rendered eLab experiment title cannot be empty.")
         return title[:255]

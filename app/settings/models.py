@@ -125,10 +125,7 @@ class IntegerRangeSettings(StrictModel):
 
 class RigolChannelLimits(StrictModel):
     frequency: RangeSettings
-    high_level: RangeSettings
-    low_level: RangeSettings
-    amplitude_vpp: RangeSettings
-    offset: RangeSettings
+    combined_voltage_limit: str
     estimated_load_current: CurrentEstimateSettings
     estimated_load_power: RangeSettings
     settle_time: RangeSettings
@@ -141,10 +138,14 @@ class RigolChannelLimits(StrictModel):
     @model_validator(mode="after")
     def validate_dimensions(self) -> "RigolChannelLimits":
         self.frequency.checked(DIMENSION_FREQUENCY)
-        self.high_level.checked(DIMENSION_VOLTAGE)
-        self.low_level.checked(DIMENSION_VOLTAGE)
-        self.amplitude_vpp.checked(DIMENSION_VOLTAGE)
-        self.offset.checked(DIMENSION_VOLTAGE)
+        parsed_qty = parse_quantity(
+            self.combined_voltage_limit, DIMENSION_VOLTAGE
+        )
+        combined_limit = abs(parsed_qty.si_value)
+        if not math.isfinite(combined_limit) or combined_limit == 0:
+            raise ConfigurationError("combined_voltage_limit must be positive and non-zero")
+        if parsed_qty.si_value < 0:
+            self.combined_voltage_limit = format_quantity_auto(combined_limit, DIMENSION_VOLTAGE)
         self.estimated_load_current.checked(DIMENSION_CURRENT)
         self.estimated_load_power.checked(DIMENSION_POWER)
         self.settle_time.checked(DIMENSION_TIME)
@@ -299,6 +300,28 @@ class KeithleyChannelSettings(StrictModel):
     allowed_source_modes: tuple[Literal["current", "voltage", "measure_only"], ...]
     lab_limits: KeithleyChannelLimits
     defaults: dict[str, Any]
+    sense_mode: Literal["2wire", "4wire"] = "2wire"
+
+    @model_validator(mode="before")
+    @classmethod
+    def _normalize_sense_mode(cls, data: Any) -> Any:
+        if isinstance(data, dict):
+            data = dict(data)
+            raw = data.get("sense_mode")
+            if raw is None and isinstance(data.get("defaults"), dict):
+                raw = data["defaults"].get("sense_mode")
+            if raw is not None:
+                norm = "4wire" if "4" in str(raw) else "2wire"
+                data["sense_mode"] = norm
+                if isinstance(data.get("defaults"), dict):
+                    data["defaults"] = dict(data["defaults"])
+                    data["defaults"]["sense_mode"] = norm
+            else:
+                data["sense_mode"] = "2wire"
+                if isinstance(data.get("defaults"), dict):
+                    data["defaults"] = dict(data["defaults"])
+                    data["defaults"]["sense_mode"] = "2wire"
+        return data
 
 
 class KeithleySafety(StrictModel):

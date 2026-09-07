@@ -173,6 +173,7 @@ class RigolSimulator(_BaseSimulator):
         self.frequency = {1: 1_000.0, 2: 1_000.0}
         self.high = {1: 0.001, 2: 0.001}
         self.low = {1: -0.001, 2: -0.001}
+        self.voltage_unit = {1: "VPP", 2: "VPP"}
         self.output = {1: False, 2: False}
         self.load = {1: "INF", 2: "INF"}
         self.polarity = {1: "NORM", 2: "NORM"}
@@ -234,6 +235,10 @@ class RigolSimulator(_BaseSimulator):
         match = re.match(r"^:OUTP([12])\s+(ON|OFF)$", command, re.IGNORECASE)
         if match:
             self.output[int(match.group(1))] = match.group(2).upper() == "ON"
+            return
+        match = re.match(r"^:SOUR([12]):VOLT:UNIT\s+(VPP|VRMS|DBM)$", command, re.IGNORECASE)
+        if match:
+            self.voltage_unit[int(match.group(1))] = match.group(2).upper()
             return
         match = re.match(r"^:OUTP([12]):LOAD\s+(\S+)$", command, re.IGNORECASE)
         if match:
@@ -396,6 +401,9 @@ class RigolSimulator(_BaseSimulator):
         if match:
             channel = int(match.group(1))
             return str((self.high[channel] + self.low[channel]) / 2.0)
+        match = re.match(r"^:SOUR([12]):VOLT:UNIT\?$", command, re.IGNORECASE)
+        if match:
+            return self.voltage_unit[int(match.group(1))]
         match = re.match(r"^:SOUR([12]):VOLT\?$", command, re.IGNORECASE)
         if match:
             channel = int(match.group(1))

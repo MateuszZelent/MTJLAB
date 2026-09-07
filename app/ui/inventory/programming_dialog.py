@@ -292,57 +292,62 @@ class SampleProgrammingDialog(QDialog):
         gen_grid.setHorizontalSpacing(14)
         gen_grid.setVerticalSpacing(10)
 
-        # Rows setup
-        gen_grid.addWidget(BodyLabel("Rows Setup:", gen_card), 0, 0)
-        row_box = QHBoxLayout()
-        row_box.setSpacing(6)
-        self.rows_count = SpinBox(gen_card)
-        self.rows_count.setRange(1, 500)
-        self.rows_count.setValue(10)
-        self.rows_count.setFixedWidth(70)
-
+        # Row 0: Rows Scheme & Prefix
+        gen_grid.addWidget(BodyLabel("Rows Scheme:", gen_card), 0, 0)
         self.row_scheme = ComboBox(gen_card)
         self.row_scheme.addItems(["1..N (1, 2, 3...)", "Custom Range (e.g. 20..30)", "Letters (A, B, C...)"])
         self.row_scheme.currentIndexChanged.connect(self._on_row_scheme_changed)
-
-        self.row_start_label = CaptionLabel("From:", gen_card)
-        self.row_start_label.setVisible(False)
-        self.row_start = SpinBox(gen_card)
-        self.row_start.setRange(0, 5000)
-        self.row_start.setValue(20)
-        self.row_start.setFixedWidth(70)
-        self.row_start.setVisible(False)
-
-        self.row_end_label = CaptionLabel("To:", gen_card)
-        self.row_end_label.setVisible(False)
-        self.row_end = SpinBox(gen_card)
-        self.row_end.setRange(0, 5000)
-        self.row_end.setValue(30)
-        self.row_end.setFixedWidth(70)
-        self.row_end.setVisible(False)
-
-        row_box.addWidget(self.rows_count)
-        row_box.addWidget(self.row_scheme)
-        row_box.addWidget(self.row_start_label)
-        row_box.addWidget(self.row_start)
-        row_box.addWidget(self.row_end_label)
-        row_box.addWidget(self.row_end)
-        row_box.addStretch(1)
-        gen_grid.addLayout(row_box, 0, 1)
+        gen_grid.addWidget(self.row_scheme, 0, 1)
 
         gen_grid.addWidget(BodyLabel("Row Prefix:", gen_card), 0, 2)
         self.row_label_prefix = LineEdit(gen_card)
         self.row_label_prefix.setPlaceholderText("Optional label prefix (e.g. Strip, Row, l)")
         gen_grid.addWidget(self.row_label_prefix, 0, 3)
 
-        # Columns setup
-        gen_grid.addWidget(BodyLabel("Columns Setup:", gen_card), 1, 0)
+        # Row 1: Range & Count controls
+        gen_grid.addWidget(BodyLabel("Rows Range / Count:", gen_card), 1, 0)
+        row_range_box = QHBoxLayout()
+        row_range_box.setSpacing(8)
+
+        self.rows_count_label = CaptionLabel("Count:", gen_card)
+        self.rows_count = SpinBox(gen_card)
+        self.rows_count.setRange(1, 500)
+        self.rows_count.setValue(10)
+        self.rows_count.setFixedWidth(75)
+
+        self.row_start_label = CaptionLabel("From Row:", gen_card)
+        self.row_start_label.setVisible(False)
+        self.row_start = SpinBox(gen_card)
+        self.row_start.setRange(0, 5000)
+        self.row_start.setValue(20)
+        self.row_start.setFixedWidth(75)
+        self.row_start.setVisible(False)
+
+        self.row_end_label = CaptionLabel("To Row:", gen_card)
+        self.row_end_label.setVisible(False)
+        self.row_end = SpinBox(gen_card)
+        self.row_end.setRange(0, 5000)
+        self.row_end.setValue(30)
+        self.row_end.setFixedWidth(75)
+        self.row_end.setVisible(False)
+
+        row_range_box.addWidget(self.rows_count_label)
+        row_range_box.addWidget(self.rows_count)
+        row_range_box.addWidget(self.row_start_label)
+        row_range_box.addWidget(self.row_start)
+        row_range_box.addWidget(self.row_end_label)
+        row_range_box.addWidget(self.row_end)
+        row_range_box.addStretch(1)
+        gen_grid.addLayout(row_range_box, 1, 1, 1, 3)
+
+        # Row 2: Columns setup & Presets
+        gen_grid.addWidget(BodyLabel("Columns Setup:", gen_card), 2, 0)
         col_box = QHBoxLayout()
         col_box.setSpacing(8)
         self.cols_count = SpinBox(gen_card)
         self.cols_count.setRange(1, 100)
         self.cols_count.setValue(5)
-        self.cols_count.setFixedWidth(70)
+        self.cols_count.setFixedWidth(75)
 
         self.col_scheme = ComboBox(gen_card)
         self.col_scheme.addItems(["1..N (1, 2, 3...)", "Letters (A, B, C...)"])
@@ -350,16 +355,16 @@ class SampleProgrammingDialog(QDialog):
         col_box.addWidget(self.cols_count)
         col_box.addWidget(self.col_scheme)
         col_box.addStretch(1)
-        gen_grid.addLayout(col_box, 1, 1)
+        gen_grid.addLayout(col_box, 2, 1)
 
-        gen_grid.addWidget(BodyLabel("Preset:", gen_card), 1, 2)
+        gen_grid.addWidget(BodyLabel("Preset:", gen_card), 2, 2)
         self.col_presets = ComboBox(gen_card)
         self.col_presets.addItems(list(self._COLUMN_PRESETS.keys()))
         self.col_presets.currentIndexChanged.connect(self._on_col_preset_changed)
-        gen_grid.addWidget(self.col_presets, 1, 3)
+        gen_grid.addWidget(self.col_presets, 2, 3)
 
-        # Column dimension labels
-        gen_grid.addWidget(BodyLabel("Column Dimensions:", gen_card), 2, 0, Qt.AlignmentFlag.AlignTop)
+        # Row 3: Column dimension labels
+        gen_grid.addWidget(BodyLabel("Column Dimensions:", gen_card), 3, 0, Qt.AlignmentFlag.AlignTop)
         col_labels_vbox = QVBoxLayout()
         col_labels_vbox.setSpacing(4)
         self.col_labels_input = ColumnLabelsEdit(gen_card)
@@ -372,7 +377,7 @@ class SampleProgrammingDialog(QDialog):
                 gen_card,
             )
         )
-        gen_grid.addLayout(col_labels_vbox, 2, 1, 1, 3)
+        gen_grid.addLayout(col_labels_vbox, 3, 1, 1, 3)
 
         gen_card_layout.addLayout(gen_grid)
 

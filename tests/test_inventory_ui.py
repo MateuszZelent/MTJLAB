@@ -13,6 +13,7 @@ from PySide6.QtWidgets import QApplication
 
 from app.inventory import ActiveSampleTarget, InventoryStore, Sample, SampleRunRecord
 from app.ui.inventory import (
+    RenumberRowsDialog,
     SampleInventoryPage,
     SampleMatrixWidget,
     SampleProgrammingDialog,
@@ -275,6 +276,41 @@ class SampleInventoryUITests(unittest.TestCase):
         self.assertEqual(updated.col_labels.get("3"), "150 nm")
         # Existing device state for (1, 1) is retained!
         self.assertEqual(updated.cell_state("1", "1"), "good")
+
+    def test_renumber_rows_dialog(self) -> None:
+        sample = Sample(
+            sample_id="SAMPLE-REN",
+            name="INL Chip",
+            rows=("1", "2", "3"),
+            row_labels={"1": "Row 1", "2": "Row 2", "3": "Row 3"},
+            cols=("1", "2"),
+            device_states={"2,1": "completed"},
+        )
+        dialog = RenumberRowsDialog(sample=sample)
+        dialog.start_spin.setValue(20)
+        dialog.end_spin.setValue(30)
+        self.assertEqual(dialog.count_spin.value(), 11)
+
+        renumbered = dialog.get_renumbered_sample()
+        self.assertEqual(len(renumbered.rows), 11)
+        self.assertEqual(renumbered.rows[0], "20")
+        self.assertEqual(renumbered.rows[-1], "30")
+        # Check cell state preservation (old row 2 -> new row 21)
+        self.assertEqual(renumbered.cell_state("21", "1"), "completed")
+
+    def test_programming_dialog_custom_range_rows(self) -> None:
+        dialog = SampleProgrammingDialog()
+        dialog.id_input.setText("INL-20-30")
+        dialog.row_scheme.setCurrentIndex(1)  # Custom Range
+        dialog.row_start.setValue(20)
+        dialog.row_end.setValue(30)
+        self.assertEqual(dialog.rows_count.value(), 11)
+        dialog.col_labels_input.setText("100 nm, 200 nm, 500 nm")
+
+        sample = dialog.get_sample()
+        self.assertEqual(len(sample.rows), 11)
+        self.assertEqual(sample.rows[0], "20")
+        self.assertEqual(sample.rows[-1], "30")
 
 
 if __name__ == "__main__":

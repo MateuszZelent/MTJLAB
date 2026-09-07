@@ -159,8 +159,6 @@ class KeithleyConfigurationPanel(CardWidget):
         self.compliance = _line("67 mV")
         self.nplc = _line("1")
         self.settle = _line("100 ms")
-        self.sense_mode = ComboBox()
-        self.sense_mode.addItems(["2wire", "4wire"])
         self.source_autorange = CheckBox("Source autorange", self)
         self.source_autorange.setChecked(True)
         self.source_range = _line("AUTO")
@@ -201,14 +199,22 @@ class KeithleyConfigurationPanel(CardWidget):
             self.measure_current_range_field,
         )
 
+        self.measure_only_note = CaptionLabel(
+            "Channel is in measure-only mode (read-only). Change Source mode to "
+            "'current' or 'voltage' to configure source levels and limits.",
+            self,
+        )
+        self.measure_only_note.setWordWrap(True)
+        self.measure_only_note.setObjectName("keithleyMeasureOnlyNote")
+
         for label, widget in (
             ("Channel", self.channel),
             ("Source mode", self.mode),
+            ("", self.measure_only_note),
             ("Source current", self.level_field),
             ("Voltage limit (compliance)", self.compliance_field),
             ("NPLC", self.nplc_field),
             ("Settling time", self._bounded("settle", self.settle)),
-            ("Sense mode", self.sense_mode),
             ("", self.advanced_ranges_button),
             ("", self.source_autorange),
             ("Current source range", self.source_range_field),
@@ -358,6 +364,8 @@ class KeithleyConfigurationPanel(CardWidget):
         source_visible = mode != "measure_only"
         self.form.setRowVisible(self.level_field, source_visible)
         self.form.setRowVisible(self.compliance_field, source_visible)
+        if hasattr(self, "measure_only_note"):
+            self.form.setRowVisible(self.measure_only_note, not source_visible)
         self.update_advanced_ranges_visibility()
         if mode == "current":
             self.form.labelForField(self.level_field).setText("Source current")
@@ -374,14 +382,18 @@ class KeithleyConfigurationPanel(CardWidget):
         self.refresh_limits()
 
     def snapshot(self) -> KeithleyConfigurationSnapshot:
+        ch = self.channel.currentText()
+        sense_mode = "2wire"
+        if self._settings and ch in self._settings.keithley.safety.channels:
+            sense_mode = self._settings.keithley.safety.channels[ch].sense_mode
         return KeithleyConfigurationSnapshot(
-            channel=self.channel.currentText(),
+            channel=ch,
             source_mode=self.mode.currentText(),
             source_level=self.level.text().strip(),
             compliance=self.compliance.text().strip(),
             nplc=self.nplc.text().strip(),
             settling_time=self.settle.text().strip(),
-            sense_mode=self.sense_mode.currentText(),
+            sense_mode=sense_mode,
             source_autorange=self.source_autorange.isChecked(),
             source_range=self.source_range.text().strip(),
             measure_voltage_autorange=self.measure_voltage_autorange.isChecked(),
@@ -401,7 +413,6 @@ class KeithleyConfigurationPanel(CardWidget):
         self.compliance.setText(snapshot.compliance)
         self.nplc.setText(snapshot.nplc)
         self.settle.setText(snapshot.settling_time)
-        self.sense_mode.setCurrentText(snapshot.sense_mode)
         self.source_autorange.setChecked(snapshot.source_autorange)
         self.source_range.setText(snapshot.source_range)
         self.measure_voltage_autorange.setChecked(snapshot.measure_voltage_autorange)
@@ -466,7 +477,6 @@ class KeithleyNodeEditorDialog(FluentRecipeDialog):
         self.compliance = self.configuration_panel.compliance
         self.nplc = self.configuration_panel.nplc
         self.settle = self.configuration_panel.settle
-        self.sense_mode = self.configuration_panel.sense_mode
         parameter_card = CardWidget(surface)
         parameter_card.setObjectName("recipeEditorParameters")
         parameter_layout = QGridLayout(parameter_card)
@@ -1461,6 +1471,9 @@ class KeithleyPage(QWidget):
         self._loading_form_snapshot = False
         self._quick_control_projection = False
         self._panel_placeholders: dict[str, CardWidget] = {}
+        self._level_edited_while_live: bool = False
+        self._compliance_edited_while_live: bool = False
+        self._return_pressed_active: bool = False
         self._live_timer = QTimer(self)
         self._live_timer.setInterval(1000)
         self._live_timer.timeout.connect(self._request_live_measurement)
@@ -1598,7 +1611,6 @@ class KeithleyPage(QWidget):
             self.configuration_panel.nplc_field, False
         )
         self.settle = self.configuration_panel.settle
-        self.sense_mode = self.configuration_panel.sense_mode
         self.source_autorange = self.configuration_panel.source_autorange
         self.source_range = self.configuration_panel.source_range
         self.measure_voltage_autorange = (
@@ -1780,12 +1792,15 @@ class KeithleyPage(QWidget):
             self.measure_current_range,
         ):
             editor.editingFinished.connect(self._persist_form_defaults)
+        self.level.setProperty("requiresLiveControl", True)
+        self.compliance.setProperty("requiresLiveControl", True)
         self.level.textChanged.connect(self._publish_quick_control_draft)
         self.level.textEdited.connect(self._on_level_text_edited)
+        self.level.returnPressed.connect(self._on_level_return_pressed)
         self.level.editingFinished.connect(self._submit_active_source_level)
         self.compliance.textEdited.connect(self._on_compliance_text_edited)
+        self.compliance.returnPressed.connect(self._on_compliance_return_pressed)
         self.compliance.editingFinished.connect(self._submit_active_compliance)
-        self.sense_mode.currentIndexChanged.connect(self._persist_form_defaults)
         self.source_autorange.toggled.connect(
             lambda enabled: self._autorange_changed(
                 enabled, self.source_range, "source range"
@@ -1823,17 +1838,28 @@ class KeithleyPage(QWidget):
             self.characterization_card.set_inventory_store(store)
 
     def _live_control_toggled(self, enabled: bool) -> None:
-        if enabled:
-            if not self._is_device_connected():
-                self.status.emit("Keithley live control enabled (instrument offline).")
+        self._suppress_focus_loss_dispatch = True
+        try:
+            focused = QApplication.focusWidget()
+            if focused is not None and hasattr(focused, "clearFocus"):
+                focused.clearFocus()
+            if hasattr(self, "_live_level_timer"):
+                self._live_level_timer.stop()
+            if hasattr(self, "_live_compliance_timer"):
+                self._live_compliance_timer.stop()
+            if enabled:
+                if not self._is_device_connected():
+                    self.status.emit("Keithley live control enabled (instrument offline).")
+                else:
+                    self.status.emit(
+                        "Keithley live control active: parameter changes are applied immediately."
+                    )
             else:
                 self.status.emit(
-                    "Keithley live control active: parameter changes are applied immediately."
+                    "Keithley live control disabled: parameter changes apply on command."
                 )
-        else:
-            self.status.emit(
-                "Keithley live control disabled: parameter changes apply on command."
-            )
+        finally:
+            self._suppress_focus_loss_dispatch = False
 
     def _is_device_connected(self) -> bool:
         return self._device_state_value in {
@@ -1857,6 +1883,12 @@ class KeithleyPage(QWidget):
                 pass
         return None
 
+    def _on_level_return_pressed(self) -> None:
+        self._submit_active_source_level()
+
+    def _on_compliance_return_pressed(self) -> None:
+        self._submit_active_compliance()
+
     def _on_level_text_edited(self, _text: str) -> None:
         if not self.live_control_switch.isChecked():
             return
@@ -1876,10 +1908,13 @@ class KeithleyPage(QWidget):
             self._live_level_timer.stop()
         if not self.live_control_switch.isChecked():
             return
+        if getattr(self, "_suppress_focus_loss_dispatch", False):
+            return
         if not self._is_device_connected():
             return
         if self._loading_form_snapshot or self._quick_control_projection:
             return
+
         channel = self.channel.currentText()
         mode = self.mode.currentText()
         if mode not in {"current", "voltage"}:
@@ -1911,6 +1946,8 @@ class KeithleyPage(QWidget):
         if hasattr(self, "_live_compliance_timer"):
             self._live_compliance_timer.stop()
         if not self.live_control_switch.isChecked():
+            return
+        if getattr(self, "_suppress_focus_loss_dispatch", False):
             return
         if not self._is_device_connected():
             return
@@ -2621,11 +2658,17 @@ class KeithleyPage(QWidget):
         header = QHBoxLayout()
         name = StrongBodyLabel(f"CHANNEL {channel}")
         name.setObjectName("keithleyCardTitle")
+        disabled_badge = CaptionLabel("DISABLED IN PROFILE", card)
+        disabled_badge.setObjectName("keithleyChannelDisabledBadge")
+        disabled_badge.setVisible(
+            not self._station_settings.keithley.safety.channels[channel].enabled
+        )
         led = BodyLabel("●")
         led.setObjectName("keithleyOutputLed")
         output = BodyLabel("OUTPUT OFF")
         output.setObjectName("keithleyOutputState")
         header.addWidget(name)
+        header.addWidget(disabled_badge)
         header.addStretch(1)
         header.addWidget(led)
         header.addWidget(output)
@@ -2750,6 +2793,7 @@ class KeithleyPage(QWidget):
         self.channel_cards[channel] = {
             "card": card,
             "led": led,
+            "disabled_badge": disabled_badge,
             "output": output,
             "compliance": compliance,
             "compliance_policy_combo": compliance_policy_combo,
@@ -2786,7 +2830,6 @@ class KeithleyPage(QWidget):
             self.compliance: ("Opposite-quantity safety limit", "The protection limit shown directly below the source setpoint. Current mode exposes Voltage limit (compliance); Voltage mode exposes Current limit (compliance). Reaching it means the requested source value cannot be maintained."),
             self.nplc: ("NPLC", "Number of power-line cycles integrated for one measurement. Higher values reduce noise but make readings slower. For 50 Hz mains, NPLC 1 integrates for approximately 20 ms."),
             self.settle: ("Settling time", "Delay allowed after changing a source point before a measurement is taken. Longer settling can improve stability but increases sweep duration."),
-            self.sense_mode: ("Sense mode", "2-wire measures through the source leads and includes lead/contact resistance. 4-wire uses separate sense leads to remove most lead-voltage error; it requires correct Kelvin wiring."),
             self.advanced_ranges_button: ("Advanced range settings", "Expands or collapses manual source and measurement range settings. By default, Keithley manages all ranges automatically (recommended)."),
             self.source_autorange: ("Source autorange", "Lets Keithley choose the source range automatically. Disable only when a qualified measurement procedure requires a fixed range."),
             self.source_range: ("Manual source range", "Maximum magnitude supported by the selected fixed source range. AUTO uses autorange. A manual value does not set the output; it selects instrument resolution/headroom."),
@@ -2816,6 +2859,7 @@ class KeithleyPage(QWidget):
         for channel, card in self.channel_cards.items():
             self._set_help(card["card"], f"Channel {channel} overview", "Live overview of this channel. Voltage and current are direct readings; resistance and power are derived from the latest I/V pair.")
             self._set_help(card["led"], f"Channel {channel} output LED", "The indicator is lit only for confirmed OUTPUT ON. Grey means OUTPUT OFF, unknown, or disconnected; use the adjacent text to distinguish those states.")
+            self._set_help(card["disabled_badge"], f"Channel {channel} disabled state", "Indicates whether this channel is enabled or disabled in Station Settings.")
             self._set_help(card["output"], f"Channel {channel} output state", "Shows the last state confirmed by a successful connect, configure, enable, ramp-off or compliance-stop operation.")
             self._set_help(card["restore_compliance"], "Restore previous setpoint", "Reconfigures this channel with the last measured non-compliance setpoint while keeping OUTPUT OFF. You must apply and explicitly enable it again.")
             self._set_help(card["keep_off_compliance"], "Keep channel OFF", "Acknowledges this channel's compliance stop and leaves OUTPUT OFF so you can edit a new safe setpoint. It never enables an output.")
@@ -3580,6 +3624,10 @@ class KeithleyPage(QWidget):
             channel_enabled = (
                 self._station_settings.keithley.safety.channels[channel].enabled
             )
+            if "disabled_badge" in self.channel_cards[channel]:
+                self.channel_cards[channel]["disabled_badge"].setVisible(
+                    not channel_enabled
+                )
             measurement_path_available = (
                 not high_impedance_off or self._output_states[channel]
             )
@@ -3602,6 +3650,10 @@ class KeithleyPage(QWidget):
             elif not channel_enabled:
                 checkbox.setToolTip(
                     f"Channel {channel} is disabled in the station profile."
+                )
+                measure_button.setToolTip(
+                    f"Channel {channel} is disabled in the station profile. "
+                    "Enable it in Settings to measure or energize."
                 )
             elif channel in self._compliance_channels:
                 checkbox.setToolTip(
@@ -3704,6 +3756,8 @@ class KeithleyPage(QWidget):
     def _capture_form_snapshot(
         self, *, channel: str, mode: str
     ) -> KeithleyConfigurationSnapshot:
+        ch_settings = self._station_settings.keithley.safety.channels.get(channel)
+        sense_mode = ch_settings.sense_mode if ch_settings else "2wire"
         return KeithleyConfigurationSnapshot(
             channel=channel,
             source_mode=mode,
@@ -3711,7 +3765,7 @@ class KeithleyPage(QWidget):
             compliance=self.compliance.text().strip(),
             nplc=self.nplc.text().strip(),
             settling_time=self.settle.text().strip(),
-            sense_mode=self.sense_mode.currentText(),
+            sense_mode=sense_mode,
             source_autorange=self.source_autorange.isChecked(),
             source_range=self.source_range.text().strip(),
             measure_voltage_autorange=self.measure_voltage_autorange.isChecked(),
@@ -3878,7 +3932,8 @@ class KeithleyPage(QWidget):
             "voltage_compliance" if mode == "current" else "current_compliance"
         )
         fallback_level, fallback_compliance, _ = self._default_source_values(channel, mode)
-        sense = str(defaults.get("sense_mode", "2wire")).replace("-", "").lower()
+        ch_settings = self._station_settings.keithley.safety.channels.get(channel)
+        sense = ch_settings.sense_mode if ch_settings else str(defaults.get("sense_mode", "2wire")).replace("-", "").lower()
         return KeithleyConfigurationSnapshot(
             channel=channel,
             source_mode=mode,
@@ -3910,7 +3965,6 @@ class KeithleyPage(QWidget):
             self.compliance.setText(snapshot.compliance)
             self.nplc.setText(snapshot.nplc)
             self.settle.setText(snapshot.settling_time)
-            self.sense_mode.setCurrentText(snapshot.sense_mode)
             self.source_autorange.setChecked(snapshot.source_autorange)
             self.source_range.setText(snapshot.source_range)
             self.measure_voltage_autorange.setChecked(snapshot.measure_voltage_autorange)
@@ -3989,6 +4043,7 @@ class KeithleyPage(QWidget):
         self._update_source_mode_ui()
         self._persist_form_defaults()
 
+
     def _persist_form_defaults(self, *_args: object) -> None:
         """Keep working values in the page draft without staging Settings.
 
@@ -4028,6 +4083,10 @@ class KeithleyPage(QWidget):
         source_visible = mode != "measure_only"
         for widget in (self.level_field, self.compliance_field):
             self.keithley_form.setRowVisible(widget, source_visible)
+        if hasattr(self.configuration_panel, "measure_only_note"):
+            self.keithley_form.setRowVisible(
+                self.configuration_panel.measure_only_note, not source_visible
+            )
         if hasattr(self.configuration_panel, "update_advanced_ranges_visibility"):
             self.configuration_panel.update_advanced_ranges_visibility()
         if mode == "current":
@@ -4634,7 +4693,8 @@ class KeithleyPage(QWidget):
         )
         if blocked is not None:
             detail += f" The last accepted source level was {blocked:.12g} SI."
-        self.banner.show_message(detail, severity="warning", timeout_ms=15_000)
+        self.banner.last_message = detail
+        self.banner.last_severity = "warning"
         self.status.emit(f"Keithley CH {channel}: source increase blocked by compliance")
 
     def _apply_restored_source_request(self, request: KeithleySourceRequest) -> None:

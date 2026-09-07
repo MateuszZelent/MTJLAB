@@ -57,6 +57,7 @@ from app.inventory.models import ActiveSampleTarget, SampleRunRecord
 from app.inventory.store import InventoryStore
 from app.safety.quick_controls import quick_control_safety_bounds
 from app.settings.models import StationSettings
+from app.storage.naming import sanitize_run_file_stem
 from app.ui.design_system import tokens_for
 from app.ui.design_system.plot_theme import plot_theme
 from app.ui.dialogs import StationMessageBox
@@ -88,6 +89,13 @@ INL_PILLAR_PRESETS: list[tuple[str, float]] = [
 TARGET_RA_PRODUCT_OHM_UM2 = 8.0  # From INL sample specifications: RA = 8 Ω·µm²
 ESTIMATED_LEAD_RESISTANCE_OHM = 25.0  # Series / lead resistance typical for bottom/top contacts
 
+
+class CompactComboBox(ComboBox):
+    """Fluent ComboBox that caps horizontal sizeHint so long item text does not stretch form layouts."""
+
+    def sizeHint(self) -> QSize:
+        sh = super().sizeHint()
+        return QSize(min(sh.width(), 260), sh.height())
 
 
 class KeithleyCharacterizationCard(QWidget):
@@ -157,46 +165,52 @@ class KeithleyCharacterizationCard(QWidget):
         form_layout = QFormLayout()
         form_layout.setSpacing(6)
 
-        self.mode_combo = ComboBox()
+        self.mode_combo = CompactComboBox()
         self.mode_combo.addItems(["Current Sweep (I → V)", "Voltage Sweep (V → I)"])
         self.mode_combo.currentTextChanged.connect(self._on_mode_changed)
-        form_layout.addRow("Measurement mode:", self.mode_combo)
+        form_layout.addRow("Sweep mode:", self.mode_combo)
 
-        self.channel_combo = ComboBox()
+        self.channel_combo = CompactComboBox()
         self.channel_combo.addItems(["Channel A", "Channel B"])
         self.channel_combo.currentTextChanged.connect(self._on_channel_changed)
-        form_layout.addRow("Keithley channel:", self.channel_combo)
+        form_layout.addRow("Channel:", self.channel_combo)
 
         self.start_level_edit = LineEdit()
-        self.start_level_edit.setText("-1 mA")
+        self.start_level_edit.setText("-100 uA")
         self.start_level_field = self._bounded("level", self.start_level_edit)
         form_layout.addRow("Start level:", self.start_level_field)
 
         self.stop_level_edit = LineEdit()
-        self.stop_level_edit.setText("1 mA")
+        self.stop_level_edit.setText("100 uA")
         self.stop_level_field = self._bounded("level", self.stop_level_edit)
         form_layout.addRow("Stop level:", self.stop_level_field)
 
         self.points_spin = SpinBox()
         self.points_spin.setRange(3, 1001)
         self.points_spin.setValue(101)
-        form_layout.addRow("Number of points:", self.points_spin)
+        form_layout.addRow("Points:", self.points_spin)
 
         self.compliance_edit = LineEdit()
-        self.compliance_edit.setText("670 mV")
+        self.compliance_edit.setText("500 mV")
         self.compliance_field = self._bounded("compliance", self.compliance_edit)
-        form_layout.addRow("Compliance limit:", self.compliance_field)
+        form_layout.addRow("Compliance:", self.compliance_field)
 
         self.dwell_edit = LineEdit()
         self.dwell_edit.setText("50 ms")
         self.dwell_field = self._bounded("settle", self.dwell_edit)
-        form_layout.addRow("Settling time (dwell):", self.dwell_field)
-
-        self.sense_combo = ComboBox()
-        self.sense_combo.addItems(["4-wire (Kelvin)", "2-wire"])
-        form_layout.addRow("Sense mode:", self.sense_combo)
+        form_layout.addRow("Dwell time:", self.dwell_field)
 
         config_layout.addLayout(form_layout)
+
+        self.sense_warning_label = CaptionLabel(
+            "⚠️ 4-wire (Kelvin) mode is enabled in Settings for this channel. "
+            "Ensure physical Sense HI and Sense LO leads are connected to the DUT. "
+            "Floating sense leads will cause the SMU to output full rail voltage (~20–40 V) and destroy delicate MTJ tunnel junctions!"
+        )
+        self.sense_warning_label.setWordWrap(True)
+        self.sense_warning_label.setStyleSheet("color: #dc2626; font-weight: 500;")
+        self.sense_warning_label.hide()
+        config_layout.addWidget(self.sense_warning_label)
 
         # Sample Metadata Section
         meta_header = QHBoxLayout()
@@ -215,16 +229,16 @@ class KeithleyCharacterizationCard(QWidget):
         meta_form.setSpacing(6)
 
         # 1. Sample Selector (from InventoryStore)
-        self.sample_combo = ComboBox(self)
+        self.sample_combo = CompactComboBox(self)
         self.sample_combo.setPlaceholderText("Select Sample from Inventory…")
         self.sample_combo.currentIndexChanged.connect(self._on_sample_combo_changed)
         meta_form.addRow("Sample:", self.sample_combo)
 
         # 2. Device / Junction Selector (cascading for chosen sample)
-        self.device_combo = ComboBox(self)
+        self.device_combo = CompactComboBox(self)
         self.device_combo.setPlaceholderText("Select Device / Junction…")
         self.device_combo.currentIndexChanged.connect(self._on_device_combo_changed)
-        meta_form.addRow("Device / Junction:", self.device_combo)
+        meta_form.addRow("Device / cell:", self.device_combo)
 
         # 3. Synchronized / Editable fields
         self.sample_id_edit = LineEdit()
@@ -235,7 +249,7 @@ class KeithleyCharacterizationCard(QWidget):
         self.structure_edit = LineEdit()
         self.structure_edit.setPlaceholderText("e.g. R1:C1 · 200 nm Pillar A")
         self.structure_edit.textChanged.connect(self._on_metadata_field_changed)
-        meta_form.addRow("Structure / chip:", self.structure_edit)
+        meta_form.addRow("Structure:", self.structure_edit)
 
         # Diameter row with LineEdit and Preset ComboBox
         diameter_row = QHBoxLayout()
@@ -249,7 +263,7 @@ class KeithleyCharacterizationCard(QWidget):
         self.diameter_edit.textChanged.connect(self._on_metadata_field_changed)
         diameter_row.addWidget(self.diameter_edit, 1)
 
-        self.diameter_preset_combo = ComboBox(self)
+        self.diameter_preset_combo = CompactComboBox(self)
         for label, d_val in INL_PILLAR_PRESETS:
             self.diameter_preset_combo.addItem(label, userData=d_val)
         self.diameter_preset_combo.currentIndexChanged.connect(self._on_diameter_preset_changed)
@@ -272,7 +286,7 @@ class KeithleyCharacterizationCard(QWidget):
         self.expected_resistance_label.setWordWrap(True)
         self.expected_resistance_label.setStyleSheet("color: #0284c7; font-weight: 500;")
         area_layout.addWidget(self.expected_resistance_label)
-        meta_form.addRow("Junction area [µm²]:", area_layout)
+        meta_form.addRow("Area [µm²]:", area_layout)
 
         self._update_expected_resistance(0.7854)
         self._sync_preset_combo_to_diameter(1000.0)
@@ -282,7 +296,7 @@ class KeithleyCharacterizationCard(QWidget):
         self.thickness_edit.setPlaceholderText("Barrier in nm (MgO)")
         self.thickness_edit.setToolTip("Target RA = 8 Ω·µm² corresponds to ~0.80 - 0.85 nm MgO tunnel barrier")
         self.thickness_edit.textChanged.connect(self._on_metadata_field_changed)
-        meta_form.addRow("Barrier thickness [nm]:", self.thickness_edit)
+        meta_form.addRow("Barrier [nm]:", self.thickness_edit)
 
         self.operator_edit = LineEdit()
         self.operator_edit.setPlaceholderText("Operator initials")
@@ -404,15 +418,17 @@ class KeithleyCharacterizationCard(QWidget):
         left_scroll = ScrollArea()
         left_scroll.setWidget(left_widget)
         left_scroll.setWidgetResizable(True)
-        left_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        left_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
         left_scroll.enableTransparentBackground()
-        left_scroll.setMinimumWidth(440)
+        left_scroll.setMinimumWidth(560)
 
         splitter.addWidget(left_scroll)
         splitter.addWidget(right_widget)
-        splitter.setStretchFactor(0, 4)
-        splitter.setStretchFactor(1, 6)
-        splitter.setSizes([480, 880])
+        splitter.setCollapsible(0, False)
+        splitter.setCollapsible(1, False)
+        splitter.setStretchFactor(0, 0)
+        splitter.setStretchFactor(1, 1)
+        splitter.setSizes([560, 560])
         main_layout.addWidget(splitter, 1)
 
         # --- BOTTOM ACTION BAR ---
@@ -470,8 +486,16 @@ class KeithleyCharacterizationCard(QWidget):
 
     def _on_mode_changed(self) -> None:
         self.refresh_limits()
-        self._update_limits_from_settings()
+        if self._is_current_mode():
+            self.compliance_edit.setText("500 mV")
+            self.start_level_edit.setText("-100 uA")
+            self.stop_level_edit.setText("100 uA")
+        else:
+            self.compliance_edit.setText("100 uA")
+            self.start_level_edit.setText("-100 mV")
+            self.stop_level_edit.setText("100 mV")
         self._update_plot_labels()
+
 
     # -------------------------------------------------------------------------
     # Sample Inventory & Device Selection
@@ -966,7 +990,9 @@ class KeithleyCharacterizationCard(QWidget):
         field = LimitField(editor, *self.limit_values(key), range_mode=True)
         field.setProperty("limitKey", key)
         field.setProperty("characterizationField", True)
-        field.edit_button.setFixedWidth(78)
+        editor.setMaximumWidth(85)
+        field.range_pill.setMinimumWidth(120)
+        field.edit_button.setFixedWidth(68)
         field.edit_button.setFixedHeight(30)
         field.edit_button.setIcon(FluentIcon.EDIT)
         field.edit_button.setText("Edit")
@@ -1051,16 +1077,68 @@ class KeithleyCharacterizationCard(QWidget):
         ch = self._selected_channel()
         try:
             channel_settings = self._settings.keithley.safety.channels[ch]
+            is_4wire = channel_settings.sense_mode == "4wire"
+            self.sense_warning_label.setText(
+                f"⚠️ Channel {ch} is configured for 4-wire (Kelvin) mode in Station Settings. "
+                "Ensure physical Sense HI and Sense LO leads are connected to the DUT. "
+                "Floating sense leads will bypass compliance and output full rail voltage (~20–40 V), destroying delicate MTJ barriers!"
+            )
+            self.sense_warning_label.setVisible(is_4wire)
             limits = channel_settings.lab_limits
-            # Autofill compliance and levels based on mode
             if self._is_current_mode():
-                self.compliance_edit.setText(limits.voltage_compliance.max)
-                self.start_level_edit.setText(limits.source_current.min)
-                self.stop_level_edit.setText(limits.source_current.max)
+                max_comp_si = parse_quantity(limits.voltage_compliance.max, DIMENSION_VOLTAGE).si_value
+                try:
+                    current_comp_si = abs(parse_quantity(self.compliance_edit.text(), DIMENSION_VOLTAGE).si_value)
+                    if current_comp_si > max_comp_si:
+                        self.compliance_edit.setText(limits.voltage_compliance.max)
+                except Exception:
+                    self.compliance_edit.setText(limits.voltage_compliance.max)
+
+                min_curr_si = parse_quantity(limits.source_current.min, DIMENSION_CURRENT).si_value
+                max_curr_si = parse_quantity(limits.source_current.max, DIMENSION_CURRENT).si_value
+                try:
+                    start_si = parse_quantity(self.start_level_edit.text(), DIMENSION_CURRENT).si_value
+                    if start_si < min_curr_si:
+                        self.start_level_edit.setText(limits.source_current.min)
+                    elif start_si > max_curr_si:
+                        self.start_level_edit.setText(limits.source_current.max)
+                except Exception:
+                    pass
+                try:
+                    stop_si = parse_quantity(self.stop_level_edit.text(), DIMENSION_CURRENT).si_value
+                    if stop_si > max_curr_si:
+                        self.stop_level_edit.setText(limits.source_current.max)
+                    elif stop_si < min_curr_si:
+                        self.stop_level_edit.setText(limits.source_current.min)
+                except Exception:
+                    pass
             else:
-                self.compliance_edit.setText(limits.current_compliance.max)
-                self.start_level_edit.setText(limits.source_voltage.min)
-                self.stop_level_edit.setText(limits.source_voltage.max)
+                max_comp_si = parse_quantity(limits.current_compliance.max, DIMENSION_CURRENT).si_value
+                try:
+                    current_comp_si = abs(parse_quantity(self.compliance_edit.text(), DIMENSION_CURRENT).si_value)
+                    if current_comp_si > max_comp_si:
+                        self.compliance_edit.setText(limits.current_compliance.max)
+                except Exception:
+                    self.compliance_edit.setText(limits.current_compliance.max)
+
+                min_volt_si = parse_quantity(limits.source_voltage.min, DIMENSION_VOLTAGE).si_value
+                max_volt_si = parse_quantity(limits.source_voltage.max, DIMENSION_VOLTAGE).si_value
+                try:
+                    start_si = parse_quantity(self.start_level_edit.text(), DIMENSION_VOLTAGE).si_value
+                    if start_si < min_volt_si:
+                        self.start_level_edit.setText(limits.source_voltage.min)
+                    elif start_si > max_volt_si:
+                        self.start_level_edit.setText(limits.source_voltage.max)
+                except Exception:
+                    pass
+                try:
+                    stop_si = parse_quantity(self.stop_level_edit.text(), DIMENSION_VOLTAGE).si_value
+                    if stop_si > max_volt_si:
+                        self.stop_level_edit.setText(limits.source_voltage.max)
+                    elif stop_si < min_volt_si:
+                        self.stop_level_edit.setText(limits.source_voltage.min)
+                except Exception:
+                    pass
         except Exception:
             pass
         self.refresh_limits()
@@ -1101,7 +1179,11 @@ class KeithleyCharacterizationCard(QWidget):
             except ValueError:
                 pass
 
-        sense_mode = "4wire" if "4" in self.sense_combo.currentText() else "2wire"
+        try:
+            channel_settings = self._settings.keithley.safety.channels[ch]
+            sense_mode = channel_settings.sense_mode
+        except Exception:
+            sense_mode = "2wire"
 
         metadata = SampleMetadata(
             sample_id=self.sample_id_edit.text().strip() or "Sample-1",
@@ -1320,7 +1402,14 @@ class KeithleyCharacterizationCard(QWidget):
         if self._current_dataset is None or self._current_parameters is None:
             return
 
-        default_name = f"Report_{self._current_dataset.config.metadata.sample_id}.pdf"
+        sample_id = sanitize_run_file_stem(
+            self._current_dataset.config.metadata.sample_id, fallback="sample"
+        )
+        row, col, label = self.selected_device_coord()
+        coord_part = f"_R{row}C{col}" if row and col else ""
+        label_part = f"_{sanitize_run_file_stem(label)}" if label and label not in {f"R{row}:C{col}", f"R{row}C{col}"} else ""
+        ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+        default_name = f"Report_{sample_id}{coord_part}{label_part}_{ts}.pdf"
         path, _ = QFileDialog.getSaveFileName(
             self,
             "Save Sample Characterization PDF Report",
@@ -1359,7 +1448,14 @@ class KeithleyCharacterizationCard(QWidget):
         if self._current_dataset is None:
             return
 
-        default_name = f"Data_{self._current_dataset.config.metadata.sample_id}.csv"
+        sample_id = sanitize_run_file_stem(
+            self._current_dataset.config.metadata.sample_id, fallback="sample"
+        )
+        row, col, label = self.selected_device_coord()
+        coord_part = f"_R{row}C{col}" if row and col else ""
+        label_part = f"_{sanitize_run_file_stem(label)}" if label and label not in {f"R{row}:C{col}", f"R{row}C{col}"} else ""
+        ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+        default_name = f"Data_{sample_id}{coord_part}{label_part}_{ts}.csv"
         path, _ = QFileDialog.getSaveFileName(
             self,
             "Export Raw Measurement Data to CSV",

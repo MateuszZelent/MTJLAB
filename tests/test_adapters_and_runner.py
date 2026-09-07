@@ -148,6 +148,42 @@ class AdapterAndRunnerTests(unittest.TestCase):
     def setUp(self) -> None:
         self.settings = simulation_settings()
 
+    def test_rigol_rejects_dc_above_operator_voltage_limit_before_traffic(self) -> None:
+        session = RigolSimulator()
+        adapter = RigolAdapter(self.settings, session_factory=FakeVisaSessionFactory(session))
+        adapter.connect()
+        commands_before = tuple(session.commands)
+
+        with self.assertRaisesRegex(SafetyViolation, "combined_voltage_limit"):
+            adapter.configure_channel(
+                RigolChannelConfig(1, "DC", 1.0, 0.1001, 0.1001, output_load="HIGHZ")
+            )
+
+        self.assertEqual(tuple(session.commands), commands_before)
+
+    def test_rigol_rejects_wire_quantization_that_crosses_shared_limit(self) -> None:
+        session = RigolSimulator()
+        adapter = RigolAdapter(
+            self.settings, session_factory=FakeVisaSessionFactory(session)
+        )
+        adapter.connect()
+        commands_before = tuple(session.commands)
+        amplitude_vpp = 0.08005
+        offset_v = 0.01995
+
+        with self.assertRaisesRegex(SafetyViolation, "combined_voltage_limit"):
+            adapter.configure_channel(
+                RigolChannelConfig(
+                    1,
+                    "SIN",
+                    1_000.0,
+                    offset_v + amplitude_vpp / 2.0,
+                    offset_v - amplitude_vpp / 2.0,
+                )
+            )
+
+        self.assertEqual(tuple(session.commands), commands_before)
+
     def test_rigol_failed_live_mutation_invalidates_verified_carrier(self) -> None:
         session = RigolSimulator()
         adapter = RigolAdapter(
@@ -858,6 +894,11 @@ class AdapterAndRunnerTests(unittest.TestCase):
         self.assertIn(":SOUR1:VOLT 0.004", session.writes)
         self.assertIn(":SOUR1:VOLT:OFFS 0.001", session.writes)
         writes_before = len(session.writes)
+        with self.assertRaisesRegex(SafetyViolation, "combined_voltage_limit"):
+            # 4 mVpp at +99 mV offset would reach +101 mV, above
+            # the operator-configured +100 mV endpoint limit.
+            adapter.update_offset(1, 0.099)
+        self.assertEqual(len(session.writes), writes_before)
         with self.assertRaises(SafetyViolation):
             adapter.update_amplitude_vpp(1, 1_000.0)
         self.assertEqual(len(session.writes), writes_before)

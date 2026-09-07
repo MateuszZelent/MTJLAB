@@ -192,6 +192,8 @@ def persist_keithley_default_snapshots(
         channels = payload["devices"]["keithley"]["safety"]["channels"]
         for channel, values in updates.items():
             channels[channel]["defaults"].update(values)
+            if "sense_mode" in values:
+                channels[channel]["sense_mode"] = values["sense_mode"]
         return payload
 
     return repository.update_raw(merge)

@@ -36,15 +36,57 @@ def _experiment_body(summary: RunSummary, path: Path, file_sha256: str) -> str:
     created = summary.created_at_utc or "unknown"
     sample_section = ""
     if summary.sample_id:
+        coord_parts = []
+        if summary.sample_row:
+            r_text = f"Row {summary.sample_row}"
+            if summary.sample_row_label:
+                r_text += f" ({summary.sample_row_label})"
+            coord_parts.append(r_text)
+        if summary.sample_col:
+            c_text = f"Col {summary.sample_col}"
+            if summary.sample_col_label:
+                c_text += f" ({summary.sample_col_label})"
+            coord_parts.append(c_text)
+        coord_disp = " · ".join(coord_parts) if coord_parts else "-"
+
+        table_rows = [
+            f"<tr><th>Sample ID</th><td><code>{escape(summary.sample_id)}</code></td></tr>",
+            f"<tr><th>Sample Name</th><td><strong>{escape(summary.sample_name or summary.sample_id)}</strong></td></tr>",
+            f"<tr><th>Device Coordinate</th><td>{escape(coord_disp)}</td></tr>",
+        ]
+        if summary.sample_row:
+            r_val = escape(summary.sample_row)
+            if summary.sample_row_label:
+                r_val += f" ({escape(summary.sample_row_label)})"
+            table_rows.append(f"<tr><th>Row</th><td>{r_val}</td></tr>")
+        if summary.sample_col:
+            c_val = escape(summary.sample_col)
+            if summary.sample_col_label:
+                c_val += f" ({escape(summary.sample_col_label)})"
+            table_rows.append(f"<tr><th>Column</th><td>{c_val}</td></tr>")
+        table_rows.append(f"<tr><th>Device Label</th><td><strong>{escape(summary.sample_coordinate_label or '-')}</strong></td></tr>")
+        if summary.sample_cell_notes:
+            table_rows.append(f"<tr><th>Device Notes / Target</th><td>{escape(summary.sample_cell_notes)}</td></tr>")
+        if summary.sample_tags:
+            tag_badges = " ".join(
+                f"<span style=\"display:inline-block;padding:2px 8px;margin:2px;background:#e1dfdd;border-radius:12px;font-size:12px;\">{escape(t)}</span>"
+                for t in summary.sample_tags
+            )
+            table_rows.append(f"<tr><th>Sample Tags</th><td>{tag_badges}</td></tr>")
+
+        stack_section = ""
+        if summary.sample_description and summary.sample_description.strip():
+            stack_section = (
+                "<h3>Sample Fabrication Stack &amp; Research Notes</h3>"
+                f"<pre style=\"background:#f8f9fa;border-left:4px solid #0078d4;padding:12px;font-family:monospace;font-size:12px;line-height:1.5;white-space:pre-wrap;\">{escape(summary.sample_description.strip())}</pre>"
+            )
+
         sample_section = (
             "<h2>Sample &amp; Coordinate Inventory</h2>"
             "<table>"
-            f"<tr><th>Sample ID</th><td><code>{escape(summary.sample_id)}</code></td></tr>"
-            f"<tr><th>Sample Name</th><td>{escape(summary.sample_name or summary.sample_id)}</td></tr>"
-            f"<tr><th>Row</th><td>{escape(summary.sample_row or '-')}</td></tr>"
-            f"<tr><th>Column</th><td>{escape(summary.sample_col or '-')}</td></tr>"
-            f"<tr><th>Device Label</th><td><strong>{escape(summary.sample_coordinate_label or '-')}</strong></td></tr>"
-            "</table>"
+            + "".join(table_rows)
+            + "</table>"
+            + stack_section
         )
     return (
         "<h1>PyLab measurement result</h1>"
@@ -154,10 +196,22 @@ def upload_result(
         client = ElabApiClient(request.credentials, timeout_s=request.timeout_s)
         if record.experiment_id is None:
             report("Creating an eLab experiment from the selected template...")
+            coord_str = ""
+            if summary.sample_row and summary.sample_col:
+                coord_str = f"R{summary.sample_row}C{summary.sample_col}"
+            elif summary.sample_row:
+                coord_str = f"R{summary.sample_row}"
+            elif summary.sample_col:
+                coord_str = f"C{summary.sample_col}"
+
             title = request.profile.render_title(
                 run_name=target.stem,
                 status=summary.status,
                 created_at=summary.created_at_utc or "unknown",
+                sample_id=summary.sample_id,
+                sample_name=summary.sample_name,
+                sample_coord=coord_str,
+                device_label=summary.sample_coordinate_label,
             )
             experiment_id, experiment_url = client.create_experiment(
                 template_id=request.profile.template_id,
@@ -175,8 +229,14 @@ def upload_result(
                 tags_to_add.append(f"sample:{summary.sample_id}")
                 if summary.sample_coordinate_label:
                     tags_to_add.append(f"device:{summary.sample_coordinate_label}")
-                elif summary.sample_row and summary.sample_col:
-                    tags_to_add.append(f"coord:R{summary.sample_row}C{summary.sample_col}")
+                if summary.sample_row and summary.sample_col:
+                    coord_tag = f"coord:R{summary.sample_row}C{summary.sample_col}"
+                    if coord_tag not in tags_to_add:
+                        tags_to_add.append(coord_tag)
+                for stag in summary.sample_tags:
+                    clean_tag = stag.strip()
+                    if clean_tag and clean_tag not in tags_to_add:
+                        tags_to_add.append(clean_tag)
             for tag in tags_to_add:
                 try:
                     client.add_tag(experiment_id=experiment_id, tag=tag)
@@ -194,7 +254,8 @@ def upload_result(
             coord_desc = f"R{summary.sample_row or '?'}C{summary.sample_col or '?'}"
             if summary.sample_coordinate_label:
                 coord_desc += f" ({summary.sample_coordinate_label})"
-            sample_info = f"; Sample: {summary.sample_id} [{coord_desc}]"
+            name_part = f" - {summary.sample_name}" if summary.sample_name and summary.sample_name != summary.sample_id else ""
+            sample_info = f"; Sample: {summary.sample_id}{name_part} [{coord_desc}]"
 
         for attachment in attachments:
             attachment_name = attachment.name

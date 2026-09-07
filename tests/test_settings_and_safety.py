@@ -223,14 +223,7 @@ class QuantityAndSafetyTests(unittest.TestCase):
     def test_disabled_quick_control_limits_resolve_to_finite_hardware_ranges(self) -> None:
         raw = deepcopy(SettingsRepository(SETTINGS_TEMPLATE).load().raw)
         for channel in raw["devices"]["rigol"]["safety"]["channels"].values():
-            for name in (
-                "frequency",
-                "high_level",
-                "low_level",
-                "amplitude_vpp",
-                "offset",
-            ):
-                channel["lab_limits"][name]["enabled"] = False
+            channel["lab_limits"]["frequency"]["enabled"] = False
         for channel in raw["devices"]["keithley"]["safety"]["channels"].values():
             for name in ("source_current", "source_voltage"):
                 channel["lab_limits"][name]["enabled"] = False
@@ -258,10 +251,7 @@ class QuantityAndSafetyTests(unittest.TestCase):
         self.assertAlmostEqual(estimate.peak_estimated_dut_power_w, 5e-9)
         raw = deepcopy(SettingsRepository(SETTINGS_TEMPLATE).load().raw)
         limits = raw["devices"]["rigol"]["safety"]["channels"]["1"]["lab_limits"]
-        limits["high_level"] = {"min": "-1 V", "max": "1 V"}
-        limits["low_level"] = {"min": "-1 V", "max": "1 V"}
-        limits["amplitude_vpp"] = {"min": "0 V", "max": "2 V"}
-        limits["offset"] = {"min": "-1 V", "max": "1 V"}
+        limits["combined_voltage_limit"] = "2 V"
         expanded = StationSettings.model_validate(raw)
         with self.assertRaises(SafetyViolation):
             validate_rigol_waveform(
@@ -274,9 +264,74 @@ class QuantityAndSafetyTests(unittest.TestCase):
                 output_load="HIGHZ",
             )
 
+    def test_rigol_dc_obeys_combined_voltage_limit(self) -> None:
+        settings = loaded_settings()
+        channel = settings.rigol.safety.channels["1"]
+
+        with self.assertRaisesRegex(SafetyViolation, "combined_voltage_limit"):
+            validate_rigol_waveform(
+                channel=channel,
+                safety=settings.rigol.safety,
+                waveform="DC",
+                frequency=1.0,
+                high_level="101 mV",
+                low_level="101 mV",
+                output_load="HIGHZ",
+            )
+
+    def test_rigol_amplitude_and_offset_share_one_voltage_budget(self) -> None:
+        settings = loaded_settings()
+        channel = settings.rigol.safety.channels["1"]
+
+        for offset_v in (-0.02, 0.02):
+            with self.subTest(offset_v=offset_v):
+                validate_rigol_waveform(
+                    channel=channel,
+                    safety=settings.rigol.safety,
+                    waveform="SIN",
+                    frequency="1 kHz",
+                    high_level=offset_v + 0.04,
+                    low_level=offset_v - 0.04,
+                    output_load="HIGHZ",
+                )
+
+        for offset_v in (-0.0201, 0.0201):
+            with self.subTest(offset_v=offset_v):
+                with self.assertRaisesRegex(
+                    SafetyViolation, r"amplitude_vpp \+ abs\(offset\)"
+                ):
+                    validate_rigol_waveform(
+                        channel=channel,
+                        safety=settings.rigol.safety,
+                        waveform="SIN",
+                        frequency="1 kHz",
+                        high_level=offset_v + 0.04,
+                        low_level=offset_v - 0.04,
+                        output_load="HIGHZ",
+                    )
+
+    def test_legacy_rigol_voltage_ranges_migrate_without_widening(self) -> None:
+        raw = deepcopy(SettingsRepository(SETTINGS_TEMPLATE).load().raw)
+        limits = raw["devices"]["rigol"]["safety"]["channels"]["1"]["lab_limits"]
+        del limits["combined_voltage_limit"]
+        limits["high_level"] = {"min": "-50 mV", "max": "50 mV"}
+        limits["low_level"] = {"min": "-60 mV", "max": "60 mV"}
+        limits["amplitude_vpp"] = {"min": "2 mV", "max": "800 mV"}
+        limits["offset"] = {"min": "-100 mV", "max": "100 mV"}
+
+        self.assertTrue(SettingsRepository.repair_known_issues(raw))
+        migrated = raw["devices"]["rigol"]["safety"]["channels"]["1"][
+            "lab_limits"
+        ]
+        self.assertEqual(migrated["combined_voltage_limit"], "0.05 V")
+        for obsolete in ("high_level", "low_level", "amplitude_vpp", "offset"):
+            self.assertNotIn(obsolete, migrated)
+        StationSettings.model_validate(raw)
+
     def test_rigol_estimated_dut_power_limit_is_enforced_independently(self) -> None:
         raw = deepcopy(SettingsRepository(SETTINGS_TEMPLATE).load().raw)
         limits = raw["devices"]["rigol"]["safety"]["channels"]["1"]["lab_limits"]
+        limits["combined_voltage_limit"] = "200 mV"
         limits["estimated_load_power"] = {"min": "0 W", "max": "1 uW", "max_abs": "1 uW"}
         settings = StationSettings.model_validate(raw)
         with self.assertRaisesRegex(SafetyViolation, "Rigol DUT power"):

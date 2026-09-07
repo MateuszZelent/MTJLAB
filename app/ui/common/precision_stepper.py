@@ -20,6 +20,7 @@ from PySide6.QtWidgets import (
     QComboBox,
     QFileDialog,
     QLineEdit,
+    QToolTip,
     QWidget,
 )
 
@@ -39,6 +40,28 @@ _NUMERIC_VALUE_RE = re.compile(
 )
 
 
+def _requires_live_control(editor: QLineEdit) -> bool:
+    """Determine if editor requires active live control to step with arrow keys."""
+    prop = editor.property("requiresLiveControl")
+    if callable(prop):
+        return bool(prop())
+    return bool(prop)
+
+
+def _is_live_control_active(editor: QLineEdit) -> bool:
+    """Check whether live control is active for an editor requiring it."""
+    checker = editor.property("isLiveControlActive")
+    if callable(checker):
+        return bool(checker())
+    ancestor: QWidget | None = editor.parentWidget()
+    while ancestor is not None:
+        if hasattr(ancestor, "live_control_enabled"):
+            prop = getattr(ancestor, "live_control_enabled")
+            return bool(prop() if callable(prop) else prop)
+        ancestor = ancestor.parentWidget()
+    return False
+
+
 class PrecisionArrowStepper(QObject):
     """Apply spin-box-like arrow keys to plain numeric text fields.
 
@@ -52,6 +75,18 @@ class PrecisionArrowStepper(QObject):
             return False
         if not isinstance(event, QKeyEvent) or not self._can_step(watched, event):
             return False
+
+        if _requires_live_control(watched) and not _is_live_control_active(watched):
+            QToolTip.showText(
+                watched.mapToGlobal(watched.rect().bottomLeft()),
+                "Enable 'Live control' to adjust setpoint with arrow keys / "
+                "Włącz 'Live control', aby zmieniać nastawę strzałkami.",
+                watched,
+                watched.rect(),
+                3000,
+            )
+            event.accept()
+            return True
 
         direction = 1 if event.key() == Qt.Key.Key_Up else -1
         stepped_text = _step_text(watched.text(), direction)

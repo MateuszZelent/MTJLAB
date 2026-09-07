@@ -148,7 +148,7 @@ from app.ui.recipes.device_extensions import (
 from app.integrations.elab.config import ElabCredentials, ElabIntegrationProfile
 from app.ui.recipes.elab_dialog import ElabUploadEditorDialog
 from app.ui.recipes.sweep_editor import SweepGeneratorDialog
-from app.ui.run_worker import planned_run_paths
+from app.ui.run_worker import automated_run_file_stem, planned_run_paths
 from app.ui.widgets import LimitEditDialog, LimitField, SpectrumPlotWidget
 from app.ui.measurement_tree import (
     MeasurementTreeLibraryDropRequest,
@@ -604,9 +604,9 @@ class RecipePage(QWidget):
         self.output_file_stem.setPlaceholderText("Auto from recipe name")
         self.output_file_stem.setClearButtonEnabled(True)
         self.output_file_stem.setAccessibleName("Sweep result file name")
-        self.output_file_stem.setProperty("precisionArrowStepping", False)
         self.output_file_stem.setToolTip(
-            "The run keeps its automatic UTC timestamp prefix to avoid accidental overwrites."
+            "Automatic naming incorporates active sample, coordinates and recipe (e.g. {sample_id}_{coord}_{device}_{recipe}). "
+            "Leave blank for automatic naming or enter a custom name or template tokens."
         )
         output_line.addWidget(self.output_file_stem, 1, 1, 1, 2)
         self.output_file_preview = CaptionLabel(self.document_card)
@@ -947,12 +947,24 @@ class RecipePage(QWidget):
 
     def set_active_sample_target(self, target: object) -> None:
         """Update the active DUT sample and device target displayed on the sweeps page."""
+        self._active_sample_target = target
         if hasattr(target, "is_active") and getattr(target, "is_active", False):
             self.sample_target_label.setText(f"DUT Target: {target.display_text()}")
             self.sample_target_label.setToolTip(f"Active DUT: {target.display_text()}")
+            pattern = None
+            if hasattr(self._settings, "storage") and isinstance(self._settings.storage, dict):
+                pattern = self._settings.storage.get("filename_pattern")
+            auto_name = automated_run_file_stem(
+                self._suggested_recipe_name(),
+                sample_target=target,
+                pattern=pattern,
+            )
+            self.output_file_stem.setPlaceholderText(f"Auto: {auto_name}")
         else:
             self.sample_target_label.setText("DUT Target: No active sample target (unassigned)")
             self.sample_target_label.setToolTip("Click Set Target... to choose a sample and device coordinate.")
+            self.output_file_stem.setPlaceholderText("Auto from recipe name")
+        self._refresh_output_preview()
 
     def _default_output_directory(self) -> str:
         return str(self._settings.storage.get("output_directory", "./measurements"))
@@ -988,12 +1000,27 @@ class RecipePage(QWidget):
     def _refresh_output_preview(self, _text: str = "") -> None:
         if not hasattr(self, "output_file_preview"):
             return
+        active_target = getattr(self, "_active_sample_target", None)
+        pattern = None
+        if hasattr(self._settings, "storage") and isinstance(self._settings.storage, dict):
+            pattern = self._settings.storage.get("filename_pattern")
+        if not self.output_file_stem.text().strip():
+            if hasattr(active_target, "is_active") and getattr(active_target, "is_active", False):
+                auto_name = automated_run_file_stem(
+                    self._suggested_recipe_name(),
+                    sample_target=active_target,
+                    pattern=pattern,
+                )
+                self.output_file_stem.setPlaceholderText(f"Auto: {auto_name}")
+            else:
+                self.output_file_stem.setPlaceholderText("Auto from recipe name")
         try:
             result_path, csv_summary_path = planned_run_paths(
                 self._settings,
                 self._suggested_recipe_name(),
                 output_dir_override=self._requested_output_directory(),
                 file_stem_override=self._requested_output_file_stem() or None,
+                sample_target=active_target,
             )
         except Exception as exc:
             self.output_file_preview.setText(f"Run output preview unavailable: {exc}")

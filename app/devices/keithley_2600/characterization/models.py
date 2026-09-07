@@ -27,12 +27,12 @@ class CharacterizationSweepConfig:
 
     channel: Literal["A", "B"] = "A"
     mode: Literal["current", "voltage"] = "current"
-    start_level_si: float = -0.010
-    stop_level_si: float = 0.010
+    start_level_si: float = -100e-6
+    stop_level_si: float = 100e-6
     points_count: int = 101
-    compliance_si: float = 0.670
+    compliance_si: float = 0.500
     dwell_time_s: float = 0.05
-    sense_mode: Literal["2wire", "4wire"] = "4wire"
+    sense_mode: Literal["2wire", "4wire"] = "2wire"
     metadata: SampleMetadata = field(default_factory=lambda: SampleMetadata(sample_id="Sample-1"))
 
 

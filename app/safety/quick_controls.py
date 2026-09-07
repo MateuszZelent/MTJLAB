@@ -111,30 +111,34 @@ def quick_control_safety_bounds(
             hard_minimum_si=rigol_hardware_frequency_min_hz(),
             hard_maximum_si=rigol_hardware_frequency_max_hz(),
         )
-        bounds[f"rigol.{channel}.amplitude"] = _effective_range(
-            limits.amplitude_vpp,
-            "voltage",
-            hard_minimum_si=rigol_amplitude_minimum,
-            hard_maximum_si=rigol_amplitude_maximum,
+        configured_limit = parse_quantity(
+            limits.combined_voltage_limit, "voltage"
+        ).si_value
+        voltage_limit = min(
+            configured_limit,
+            abs(rigol_voltage_minimum),
+            abs(rigol_voltage_maximum),
         )
-        bounds[f"rigol.{channel}.offset"] = _effective_range(
-            limits.offset,
-            "voltage",
-            hard_minimum_si=rigol_voltage_minimum,
-            hard_maximum_si=rigol_voltage_maximum,
+        voltage_limit_text = (
+            limits.combined_voltage_limit
+            if voltage_limit == configured_limit
+            else format_quantity_auto(voltage_limit, "voltage")
         )
-        bounds[f"rigol.{channel}.high_level"] = _effective_range(
-            limits.high_level,
-            "voltage",
-            hard_minimum_si=rigol_voltage_minimum,
-            hard_maximum_si=rigol_voltage_maximum,
+        bounds[f"rigol.{channel}.amplitude"] = QuickControlSafetyBound(
+            rigol_amplitude_minimum,
+            min(voltage_limit, rigol_amplitude_maximum),
+            format_quantity_auto(rigol_amplitude_minimum, "voltage"),
+            voltage_limit_text,
         )
-        bounds[f"rigol.{channel}.low_level"] = _effective_range(
-            limits.low_level,
-            "voltage",
-            hard_minimum_si=rigol_voltage_minimum,
-            hard_maximum_si=rigol_voltage_maximum,
+        symmetric_bound = QuickControlSafetyBound(
+            -voltage_limit,
+            voltage_limit,
+            format_quantity_auto(-voltage_limit, "voltage"),
+            voltage_limit_text,
         )
+        bounds[f"rigol.{channel}.offset"] = symmetric_bound
+        bounds[f"rigol.{channel}.high_level"] = symmetric_bound
+        bounds[f"rigol.{channel}.low_level"] = symmetric_bound
     return bounds
 
 

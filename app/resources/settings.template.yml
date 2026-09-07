@@ -75,6 +75,7 @@ execution:
 
 storage:
   output_directory: "./measurements"
+  filename_pattern: "{sample_id}_{coord}_{device}_{recipe}"
   primary_format: "hdf5"
   write_csv_summary: true
   save_recipe_snapshot: true
@@ -134,18 +135,7 @@ devices:
             frequency:
               min: 1 Hz
               max: 30 MHz
-            high_level:
-              min: "-100 mV"
-              max: "100 mV"
-            low_level:
-              min: "-100 mV"
-              max: "100 mV"
-            amplitude_vpp:
-              min: 2 mV
-              max: 800 mV
-            offset:
-              min: "-100 mV"
-              max: "100 mV"
+            combined_voltage_limit: "100 mV"
             estimated_load_current:
               min: "-10 mA"
               max: "10 mA"
@@ -194,18 +184,7 @@ devices:
             frequency:
               min: "1 Hz"
               max: "1 MHz"
-            high_level:
-              min: "-100 mV"
-              max: "100 mV"
-            low_level:
-              min: "-100 mV"
-              max: "100 mV"
-            amplitude_vpp:
-              min: "0 V"
-              max: "200 mV"
-            offset:
-              min: "-100 mV"
-              max: "100 mV"
+            combined_voltage_limit: "100 mV"
             estimated_load_current:
               min: "-10 mA"
               max: "10 mA"
@@ -271,6 +250,7 @@ devices:
       channels:
         A:
           enabled: false
+          sense_mode: "2wire"
           allowed_source_modes:
           - "current"
           - "voltage"
@@ -307,7 +287,7 @@ devices:
           defaults:
             source_mode: "measure_only"
             output_enabled: false
-            sense_mode: "2-wire"
+            sense_mode: "2wire"
             nplc: 1.0
             settling_time: "100 ms"
             source_autorange: true
@@ -319,6 +299,7 @@ devices:
             measure_delay: "auto"
         B:
           enabled: true
+          sense_mode: "2wire"
           allowed_source_modes:
           - "current"
           - "voltage"
@@ -359,7 +340,7 @@ devices:
             source_current: "1 mA"
             voltage_compliance: "67 mV"
             output_enabled: false
-            sense_mode: "2-wire"
+            sense_mode: "2wire"
             nplc: 1.0
             settling_time: "100 ms"
             source_autorange: true

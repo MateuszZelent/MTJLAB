@@ -32,6 +32,11 @@ class RunSummary:
     sample_row: str | None = None
     sample_col: str | None = None
     sample_coordinate_label: str | None = None
+    sample_row_label: str | None = None
+    sample_col_label: str | None = None
+    sample_description: str | None = None
+    sample_tags: tuple[str, ...] = ()
+    sample_cell_notes: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -222,6 +227,11 @@ class Hdf5RunReader:
             sample_row=Hdf5RunReader._attribute_text(run.attrs.get("sample_row")),
             sample_col=Hdf5RunReader._attribute_text(run.attrs.get("sample_col")),
             sample_coordinate_label=Hdf5RunReader._attribute_text(run.attrs.get("sample_coordinate_label")),
+            sample_row_label=Hdf5RunReader._attribute_text(run.attrs.get("sample_row_label")),
+            sample_col_label=Hdf5RunReader._attribute_text(run.attrs.get("sample_col_label")),
+            sample_description=Hdf5RunReader._attribute_text(run.attrs.get("sample_description")),
+            sample_tags=Hdf5RunReader._attribute_tags(run.attrs.get("sample_tags")),
+            sample_cell_notes=Hdf5RunReader._attribute_text(run.attrs.get("sample_cell_notes")),
         )
 
     @staticmethod
@@ -510,6 +520,21 @@ class Hdf5RunReader:
         if isinstance(value, bytes):
             return value.decode("utf-8", errors="replace")
         return str(value)
+
+    @staticmethod
+    def _attribute_tags(value: object) -> tuple[str, ...]:
+        if value is None:
+            return ()
+        text = Hdf5RunReader._attribute_text(value)
+        if not text:
+            return ()
+        try:
+            parsed = json.loads(text)
+            if isinstance(parsed, (list, tuple)):
+                return tuple(str(x) for x in parsed if str(x).strip())
+        except Exception:
+            pass
+        return tuple(p.strip() for p in text.split(",") if p.strip())
 
     @staticmethod
     def _numeric_names(group: Any) -> tuple[str, ...]:

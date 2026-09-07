@@ -8,6 +8,7 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 from PySide6.QtCore import QPoint, Qt
 from PySide6.QtGui import QPalette
+from PySide6.QtTest import QTest
 from PySide6.QtWidgets import QApplication, QLabel
 from qfluentwidgets import (
     CardWidget,
@@ -49,6 +50,10 @@ class FluentDevicePageTests(unittest.TestCase):
             self.assertTrue(rigol.waveform_apply_button.isVisibleTo(window))
             self.assertIsInstance(rigol.channel, ComboBox)
             self.assertTrue(rigol._limit_fields)
+            self.assertTrue(rigol.combined_voltage_usage.isVisibleTo(window))
+            self.assertGreater(rigol.combined_voltage_usage.width(), 0)
+            self.assertGreater(rigol.combined_voltage_usage.height(), 0)
+            self.assertEqual(rigol.combined_voltage_usage.text(), "2 mV")
             self.assertTrue(
                 all(
                     isinstance(limit.edit_button, PushButton)
@@ -239,6 +244,18 @@ class FluentDevicePageTests(unittest.TestCase):
             assert isinstance(payload.configuration, RigolChannelConfig)
             self.assertEqual(payload.configuration.channel, 1)
             self.assertAlmostEqual(payload.configuration.frequency_hz, 2_000.0)
+
+            rigol._output_state_known[1] = True
+            rigol._output_states[1] = True
+            rigol._confirmed_carrier_configs[1] = RigolChannelConfig(
+                1, "SIN", 1000.0, 0.001, -0.001
+            )
+            with self.assertRaisesRegex(
+                SafetyViolation, "combined_voltage_limit"
+            ):
+                rigol.quick_control_hardware_request(
+                    "rigol.1.offset", "99 mV", "output_on"
+                )
         finally:
             window.close()
             self.application.processEvents()
@@ -566,6 +583,169 @@ class FluentDevicePageTests(unittest.TestCase):
                 self.assertTrue(field.maximum.isHidden())
                 self.assertEqual(field.edit_button.width(), 78)
                 self.assertEqual(field.edit_button.height(), 30)
+        finally:
+            window.close()
+            self.application.processEvents()
+
+    def test_keithley_arrow_stepping_requires_live_control(self) -> None:
+        window = MainWindow(".config/settings.yml", simulation=True)
+        try:
+            window.resize(1360, 880)
+            window.show()
+            window._navigate_to("keithley")
+            self.application.processEvents()
+
+            keithley = window.keithley_page
+            keithley.channel.setCurrentText("B")
+            self.application.processEvents()
+
+            # Live control is OFF by default
+            self.assertFalse(keithley.live_control_enabled)
+            initial_text = keithley.level.text()
+            self.assertEqual(initial_text, "0.1 mA")
+
+            # Press Up arrow: should be blocked by PrecisionArrowStepper because live control is OFF
+            keithley.level.setFocus()
+            self.application.processEvents()
+            QTest.keyClick(keithley.level, Qt.Key.Key_Up)
+            self.application.processEvents()
+            self.assertEqual(keithley.level.text(), initial_text)
+
+            # Turn live control ON and connect
+            keithley._device_state_changed("OUTPUT_OFF")
+            keithley.set_live_control_enabled(True)
+            self.assertTrue(keithley.live_control_enabled)
+
+            # Press Up arrow: now it should step the value
+            QTest.keyClick(keithley.level, Qt.Key.Key_Up)
+            self.application.processEvents()
+            self.assertNotEqual(keithley.level.text(), initial_text)
+        finally:
+            window.close()
+            self.application.processEvents()
+
+    def test_keithley_compliance_increase_blocked_does_not_popup_toast(self) -> None:
+        window = MainWindow(".config/settings.yml", simulation=True)
+        try:
+            window.resize(1360, 880)
+            window.show()
+            window._navigate_to("keithley")
+            self.application.processEvents()
+
+            keithley = window.keithley_page
+            status_emitted: list[str] = []
+            keithley.status.connect(status_emitted.append)
+
+            # Record compliance block
+            keithley._compliance_block_levels["B"] = 0.001
+            keithley._show_compliance_increase_blocked("B", 0.002)
+            self.application.processEvents()
+
+            # No floating toast was displayed
+            self.assertIsNone(keithley.banner._active_bar)
+            # Quiet state is preserved
+            self.assertIn("CH B is at COMPLIANCE", keithley.banner.last_message)
+            self.assertEqual(keithley.banner.last_severity, "warning")
+            self.assertIn("Keithley CH B: source increase blocked by compliance", status_emitted)
+        finally:
+            window.close()
+            self.application.processEvents()
+
+    def test_keithley_live_control_toggle_does_not_fire_focus_loss_dispatch(self) -> None:
+        window = MainWindow(".config/settings.yml", simulation=True)
+        try:
+            window.resize(1360, 880)
+            window.show()
+            window._navigate_to("keithley")
+            self.application.processEvents()
+
+            keithley = window.keithley_page
+            keithley.channel.setCurrentText("B")
+            keithley._device_state_changed("OUTPUT_OFF")
+            self.application.processEvents()
+
+            emitted: list[tuple[str, str]] = []
+            keithley.quick_setpoint_requested.connect(
+                lambda target, text: emitted.append((target, text))
+            )
+
+            # Focus the level editor while Live Control is OFF
+            keithley.level.setFocus()
+            self.application.processEvents()
+            keithley.level.setText("2.5 mA")
+
+            # Toggling live control to ON must suppress any dispatch caused by focus loss
+            keithley.set_live_control_enabled(True)
+            self.application.processEvents()
+
+            self.assertEqual(emitted, [])
+        finally:
+            window.close()
+            self.application.processEvents()
+
+    def test_keithley_channel_a_measure_only_and_disabled_state_guidance(self) -> None:
+        window = MainWindow(".config/settings.yml", simulation=True)
+        try:
+            window.resize(1360, 880)
+            window.show()
+            window._navigate_to("keithley")
+            self.application.processEvents()
+
+            keithley = window.keithley_page
+            keithley.channel.setCurrentText("A")
+            self.application.processEvents()
+
+            # Switch mode to measure_only
+            keithley.mode.setCurrentText("measure_only")
+            self.application.processEvents()
+            self.assertEqual(keithley.mode.currentText(), "measure_only")
+            self.assertFalse(keithley.level_field.isVisibleTo(keithley))
+            self.assertFalse(keithley.compliance_field.isVisibleTo(keithley))
+            self.assertTrue(keithley.configuration_panel.measure_only_note.isVisibleTo(keithley))
+            self.assertIn("measure-only mode", keithley.configuration_panel.measure_only_note.text())
+
+            # Switch mode back to current: measure_only_note hides and level_field shows
+            keithley.mode.setCurrentText("current")
+            self.application.processEvents()
+            self.assertTrue(keithley.level_field.isVisibleTo(keithley))
+            self.assertTrue(keithley.compliance_field.isVisibleTo(keithley))
+            self.assertFalse(keithley.configuration_panel.measure_only_note.isVisibleTo(keithley))
+
+            # Channel disabled badge in card header exists and responds to channel state
+            badge = keithley.channel_cards["A"]["disabled_badge"]
+            self.assertIsNotNone(badge)
+        finally:
+            window.close()
+            self.application.processEvents()
+
+    def test_rigol_arrow_stepping_requires_live_control(self) -> None:
+        window = MainWindow(".config/settings.yml", simulation=True)
+        try:
+            window.resize(1360, 880)
+            window.show()
+            window._navigate_to("rigol")
+            self.application.processEvents()
+
+            rigol = window.rigol_page
+            self.assertFalse(rigol.live_control_enabled)
+            initial_freq = rigol.frequency.text()
+
+            # With live control OFF, arrow stepping is blocked
+            rigol.frequency.setFocus()
+            self.application.processEvents()
+            QTest.keyClick(rigol.frequency, Qt.Key.Key_Up)
+            self.application.processEvents()
+            self.assertEqual(rigol.frequency.text(), initial_freq)
+
+            # Turn live control ON
+            rigol._device_state_changed("OUTPUT_OFF")
+            rigol.set_live_control_enabled(True)
+            self.assertTrue(rigol.live_control_enabled)
+
+            # With live control ON, arrow stepping works
+            QTest.keyClick(rigol.frequency, Qt.Key.Key_Up)
+            self.application.processEvents()
+            self.assertNotEqual(rigol.frequency.text(), initial_freq)
         finally:
             window.close()
             self.application.processEvents()

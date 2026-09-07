@@ -567,8 +567,14 @@ class RigolAdapter(DeviceAdapter):
         self._burst_enabled.discard(config.channel)
         self._last_burst_config.pop(config.channel, None)
         session.write(f":OUTP{config.channel}:LOAD {self._format_load(config.output_load)}")
+        # VOLT without a suffix is interpreted in the persistent channel
+        # amplitude unit. Establish Vpp explicitly even for DC so every later
+        # live update starts from a verified, deterministic unit state.
+        session.write(f"{prefix}:VOLT:UNIT VPP")
         if waveform == "DC":
-            session.write(f"{prefix}:APPL:DC {self._format_wire_voltage(config.high_level_v)}")
+            session.write(
+                f"{prefix}:APPL:DC DEF,DEF,{self._format_wire_voltage(config.high_level_v)}"
+            )
             session.write(f"{prefix}:VOLT:OFFS {self._format_wire_voltage(config.high_level_v)}")
         else:
             session.write(f"{prefix}:FUNC {waveform}")
@@ -753,6 +759,11 @@ class RigolAdapter(DeviceAdapter):
             self.update_offset(channel, new_offset)
             applied = self.last_channel_config(channel)
             return applied.high_level_v, applied.low_level_v
+        # Both canonical controls will be written. Validate the exact
+        # amplitude/offset state representable on the wire before any query or
+        # write; their independent rounding can otherwise move an endpoint.
+        updated = self._quantize_channel_config(updated)
+        self._validate_waveform_config(updated)
         self._assert_independent_channels()
         session = self._require_session()
         prefix = f":SOUR{channel}"
@@ -801,8 +812,8 @@ class RigolAdapter(DeviceAdapter):
             self._fail_live_setpoint_update(output_was_on=output_before, cause=exc)
         self._last_config[channel] = replace(
             updated,
-            high_level_v=quantize_rigol_voltage(actual_high),
-            low_level_v=quantize_rigol_voltage(actual_low),
+            high_level_v=actual_high,
+            low_level_v=actual_low,
         )
         self._output_states[channel] = output_after
         self._update_aggregate_output_state()
@@ -944,15 +955,15 @@ class RigolAdapter(DeviceAdapter):
             offset = quantize_rigol_voltage((config.high_level_v + config.low_level_v) / 2.0)
             normalized_updated = replace(
                 config,
-                high_level_v=quantize_rigol_voltage(offset + normalized_requested / 2.0),
-                low_level_v=quantize_rigol_voltage(offset - normalized_requested / 2.0),
+                high_level_v=offset + normalized_requested / 2.0,
+                low_level_v=offset - normalized_requested / 2.0,
             )
         elif command_suffix == "VOLT:OFFS":
             amplitude = quantize_rigol_voltage(config.high_level_v - config.low_level_v)
             normalized_updated = replace(
                 config,
-                high_level_v=quantize_rigol_voltage(normalized_requested + amplitude / 2.0),
-                low_level_v=quantize_rigol_voltage(normalized_requested - amplitude / 2.0),
+                high_level_v=normalized_requested + amplitude / 2.0,
+                low_level_v=normalized_requested - amplitude / 2.0,
             )
         elif command_suffix == "VOLT:HIGH":
             normalized_updated = replace(
@@ -1020,8 +1031,8 @@ class RigolAdapter(DeviceAdapter):
             self._fail_live_setpoint_update(output_was_on=output_before, cause=exc)
         self._last_config[channel] = replace(
             updated,
-            high_level_v=quantize_rigol_voltage(actual_high),
-            low_level_v=quantize_rigol_voltage(actual_low),
+            high_level_v=actual_high,
+            low_level_v=actual_low,
         )
         self._output_states[channel] = output_after
         self._update_aggregate_output_state()
@@ -1142,11 +1153,26 @@ class RigolAdapter(DeviceAdapter):
 
     @staticmethod
     def _quantize_channel_config(config: RigolChannelConfig) -> RigolChannelConfig:
+        frequency_hz = quantize_rigol_frequency(config.frequency_hz)
+        if config.waveform.upper() == "DC":
+            dc_level = quantize_rigol_voltage(config.high_level_v)
+            return replace(
+                config,
+                frequency_hz=frequency_hz,
+                high_level_v=dc_level,
+                low_level_v=dc_level,
+            )
+        amplitude_vpp = quantize_rigol_voltage(
+            config.high_level_v - config.low_level_v
+        )
+        offset_v = quantize_rigol_voltage(
+            (config.high_level_v + config.low_level_v) / 2.0
+        )
         return replace(
             config,
-            frequency_hz=quantize_rigol_frequency(config.frequency_hz),
-            high_level_v=quantize_rigol_voltage(config.high_level_v),
-            low_level_v=quantize_rigol_voltage(config.low_level_v),
+            frequency_hz=frequency_hz,
+            high_level_v=offset_v + amplitude_vpp / 2.0,
+            low_level_v=offset_v - amplitude_vpp / 2.0,
         )
 
     def _validate_waveform_config(self, config: RigolChannelConfig) -> RigolCurrentEstimate:
@@ -1201,6 +1227,7 @@ class RigolAdapter(DeviceAdapter):
             actual_load = session.query(
                 f":OUTP{expected.channel}:LOAD?"
             ).strip().upper()
+            actual_voltage_unit = session.query(f"{prefix}:VOLT:UNIT?").strip().upper()
             actual_phase = (
                 float(session.query(f"{prefix}:PHAS?"))
                 if expected.waveform.upper() not in {"DC", "NOIS"}
@@ -1239,6 +1266,8 @@ class RigolAdapter(DeviceAdapter):
             mismatches.append(
                 f"LOAD {actual_load} ≠ {self._format_load(expected.output_load)}"
             )
+        if actual_voltage_unit != "VPP":
+            mismatches.append(f"VOLT:UNIT {actual_voltage_unit} != VPP")
         if not self._same_number(actual_phase, expected.phase_deg, absolute=1e-6):
             mismatches.append(
                 f"PHAS {actual_phase:.9g} ≠ {expected.phase_deg:.9g} deg"
@@ -1308,8 +1337,8 @@ class RigolAdapter(DeviceAdapter):
         return replace(
             expected,
             frequency_hz=actual_frequency,
-            high_level_v=quantize_rigol_voltage(actual_high),
-            low_level_v=quantize_rigol_voltage(actual_low),
+            high_level_v=actual_high,
+            low_level_v=actual_low,
             phase_deg=actual_phase,
         )
 

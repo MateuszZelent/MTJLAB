@@ -9,7 +9,7 @@ from dataclasses import asdict, dataclass, replace
 
 from PySide6.QtCore import Qt, Signal
 from PySide6.QtWidgets import (
-    QFormLayout, QFrame, QGridLayout, QHBoxLayout,
+    QApplication, QFormLayout, QFrame, QGridLayout, QHBoxLayout,
     QPushButton, QSplitter,
     QVBoxLayout, QWidget,
 )
@@ -36,6 +36,7 @@ from app.domain.quantities import (
 )
 from app.safety.rigol_current import (
     quantize_rigol_voltage,
+    rigol_voltage_resolution_v,
     validate_rigol_frequency_sweep,
     validate_rigol_waveform,
 )
@@ -123,6 +124,8 @@ class RigolPage(QWidget):
         self._output_state_known = {1: False, 2: False}
         self._last_counter_reading: RigolCounterReading | None = None
         self._execution_readbacks: dict[int, dict[str, object]] = {}
+        self._rigol_field_edited_while_live: set[str] = set()
+        self._rigol_return_pressed_field: str | None = None
         layout = QVBoxLayout(self)
         layout.setContentsMargins(18, 18, 18, 18)
         layout.setSpacing(14)
@@ -201,6 +204,13 @@ class RigolPage(QWidget):
         self.low_level = _line("-1 mV")
         self.vpp = _line("2 mV")
         self.offset = _line("0 V")
+        self.combined_voltage_usage = _line("2 mV")
+        self.combined_voltage_usage.setReadOnly(True)
+        self.combined_voltage_usage.setObjectName("rigolCombinedVoltageUsage")
+        self.combined_voltage_usage.setToolTip(
+            "Current use of the shared Rigol voltage limit. For AC waveforms this "
+            "is Vpp + |offset|; for DC it is |DC level|."
+        )
         self.load = _line("HIGHZ")
         self.output_polarity = ComboBox()
         self.output_polarity.addItems(["NORM", "INV"])
@@ -245,11 +255,17 @@ class RigolPage(QWidget):
                 ("Period", self.period),
                 ("Voltage entry mode", self.level_mode),
                 ("", self.level_mode_hint),
-                ("High Level", self._bounded(self.high_level, "high_level")),
-                ("Low Level", self._bounded(self.low_level, "low_level")),
-            ("Amplitude (Vpp)", self._bounded(self.vpp, "amplitude_vpp")),
-            ("Offset / DC level", self._bounded(self.offset, "offset")),
-            ("Phase [deg]", self.phase),
+                ("High Level", self.high_level),
+                ("Low Level", self.low_level),
+                ("Amplitude (Vpp)", self.vpp),
+                ("Offset / DC level", self.offset),
+                (
+                    "Shared voltage budget",
+                    self._bounded(
+                        self.combined_voltage_usage, "combined_voltage_limit"
+                    ),
+                ),
+                ("Phase [deg]", self.phase),
             ),
             (configure,),
         )
@@ -371,6 +387,18 @@ class RigolPage(QWidget):
         shape_apply.clicked.connect(self.configure)
         configure_output.clicked.connect(self.configure_output)
         self.sync_phases_button.clicked.connect(lambda: self._controller.call("synchronize_phases"))
+        self.high_level.editingFinished.connect(
+            lambda: self._clamp_voltage_to_shared_budget("high_level", self.high_level)
+        )
+        self.low_level.editingFinished.connect(
+            lambda: self._clamp_voltage_to_shared_budget("low_level", self.low_level)
+        )
+        self.vpp.editingFinished.connect(
+            lambda: self._clamp_voltage_to_shared_budget("amplitude", self.vpp)
+        )
+        self.offset.editingFinished.connect(
+            lambda: self._clamp_voltage_to_shared_budget("offset", self.offset)
+        )
         self.high_level.editingFinished.connect(self._sync_vpp_offset_from_levels)
         self.low_level.editingFinished.connect(self._sync_vpp_offset_from_levels)
         self.vpp.editingFinished.connect(self._sync_levels_from_vpp_offset)
@@ -404,8 +432,54 @@ class RigolPage(QWidget):
         self.channel.currentTextChanged.connect(self._update_preview)
         self.channel.currentTextChanged.connect(self._selected_output_channel_changed)
         self.channel.currentTextChanged.connect(self._refresh_rigol_limits)
+        for field in (
+            self.frequency,
+            self.period,
+            self.high_level,
+            self.low_level,
+            self.vpp,
+            self.offset,
+        ):
+            field.setProperty("requiresLiveControl", True)
+        self.frequency.textEdited.connect(lambda: self._on_rigol_field_edited("frequency"))
+        self.period.textEdited.connect(lambda: self._on_rigol_field_edited("frequency"))
+        self.high_level.textEdited.connect(lambda: self._on_rigol_field_edited("high_level"))
+        self.low_level.textEdited.connect(lambda: self._on_rigol_field_edited("low_level"))
+        self.vpp.textEdited.connect(lambda: self._on_rigol_field_edited("amplitude"))
+        self.offset.textEdited.connect(lambda: self._on_rigol_field_edited("offset"))
+
+        self.frequency.returnPressed.connect(
+            lambda: self._on_rigol_return_pressed("frequency", self._submit_active_frequency)
+        )
+        self.period.returnPressed.connect(
+            lambda: self._on_rigol_return_pressed("frequency", self._submit_active_frequency)
+        )
+        self.high_level.returnPressed.connect(
+            lambda: self._on_rigol_return_pressed(
+                "high_level", lambda: self._submit_active_voltage("high_level", self.high_level)
+            )
+        )
+        self.low_level.returnPressed.connect(
+            lambda: self._on_rigol_return_pressed(
+                "low_level", lambda: self._submit_active_voltage("low_level", self.low_level)
+            )
+        )
+        self.vpp.returnPressed.connect(
+            lambda: self._on_rigol_return_pressed(
+                "amplitude", lambda: self._submit_active_voltage("amplitude", self.vpp)
+            )
+        )
+        self.offset.returnPressed.connect(
+            lambda: self._on_rigol_return_pressed(
+                "offset", lambda: self._submit_active_voltage("offset", self.offset)
+            )
+        )
         for field in (self.frequency, self.period, self.high_level, self.low_level, self.vpp, self.offset, self.duty, self.ramp_symmetry, self.pulse_width):
             field.textChanged.connect(self._update_preview)
+        for field in (self.high_level, self.low_level, self.vpp, self.offset):
+            field.textChanged.connect(self._update_combined_voltage_usage)
+        self.waveform.currentTextChanged.connect(self._update_combined_voltage_usage)
+        self.level_mode.currentTextChanged.connect(self._update_combined_voltage_usage)
         for field in (
             self.frequency,
             self.high_level,
@@ -418,6 +492,7 @@ class RigolPage(QWidget):
         self._sync_vpp_offset_from_levels()
         self._sync_period_from_frequency()
         self._update_dynamic_controls()
+        self._update_combined_voltage_usage()
         self._update_preview()
         self._refresh_confirmed_advanced_controls()
         self._refresh_rigol_output_controls()
@@ -450,13 +525,20 @@ class RigolPage(QWidget):
         self.live_control_switch.setChecked(enabled)
 
     def _live_control_toggled(self, enabled: bool) -> None:
-        if enabled:
-            if not self._is_device_connected():
-                self.status.emit("Rigol live control enabled (instrument offline).")
+        self._suppress_focus_loss_dispatch = True
+        try:
+            focused = QApplication.focusWidget()
+            if focused is not None and hasattr(focused, "clearFocus"):
+                focused.clearFocus()
+            if enabled:
+                if not self._is_device_connected():
+                    self.status.emit("Rigol live control enabled (instrument offline).")
+                else:
+                    self.status.emit("Rigol live control active: parameter changes are applied immediately.")
             else:
-                self.status.emit("Rigol live control active: parameter changes are applied immediately.")
-        else:
-            self.status.emit("Rigol live control disabled: parameter changes apply on command.")
+                self.status.emit("Rigol live control disabled: parameter changes apply on command.")
+        finally:
+            self._suppress_focus_loss_dispatch = False
 
     def quick_control_draft_snapshot(self) -> dict[str, str]:
         """Return all visible/basic channel drafts with explicit units."""
@@ -558,6 +640,9 @@ class RigolPage(QWidget):
                 )
             dimension = DIMENSION_FREQUENCY if field == "frequency" else DIMENSION_VOLTAGE
             parse_quantity(text, dimension)
+            snapshot = self.configuration_snapshot_for(channel)
+            updated = self._snapshot_with_quick_value(snapshot, field, text)
+            self._channel_config_from_snapshot(updated)
             return "quick_setpoint", QuickControlCommand(target, text)
         if normalized_state == "output_on" and not self._output_state_known[channel]:
             raise SafetyViolation(
@@ -624,19 +709,19 @@ class RigolPage(QWidget):
         low = parse_quantity(snapshot.low_level, DIMENSION_VOLTAGE).si_value
         value = parse_quantity(text, DIMENSION_VOLTAGE).si_value
         if snapshot.waveform == "DC":
-            high, low = value, value
+            high = low = quantize_rigol_voltage(value)
         elif field == "high_level":
-            high = value
+            high = quantize_rigol_voltage(value)
         elif field == "low_level":
-            low = value
+            low = quantize_rigol_voltage(value)
         elif field == "amplitude":
-            offset = (high + low) / 2.0
-            high, low = offset + value / 2.0, offset - value / 2.0
+            offset = quantize_rigol_voltage((high + low) / 2.0)
+            amplitude = quantize_rigol_voltage(value)
+            high, low = offset + amplitude / 2.0, offset - amplitude / 2.0
         elif field == "offset":
-            amplitude = high - low
-            high, low = value + amplitude / 2.0, value - amplitude / 2.0
-        high = quantize_rigol_voltage(high)
-        low = quantize_rigol_voltage(low)
+            amplitude = quantize_rigol_voltage(high - low)
+            offset = quantize_rigol_voltage(value)
+            high, low = offset + amplitude / 2.0, offset - amplitude / 2.0
         preferred = (
             "mV"
             if ("mV" in text or "mV" in snapshot.high_level or "mV" in snapshot.low_level)
@@ -653,8 +738,11 @@ class RigolPage(QWidget):
             return
         if self.waveform.currentText() in {"DC", "NOIS"}:
             return
+        if getattr(self, "_suppress_focus_loss_dispatch", False):
+            return
         if not self._is_device_connected():
             return
+
         channel = int(self.channel.currentText())
         try:
             parse_quantity(self.frequency.text(), DIMENSION_FREQUENCY)
@@ -676,14 +764,18 @@ class RigolPage(QWidget):
     def _submit_active_voltage(self, field: str, editor: QWidget) -> None:
         if not self.live_control_switch.isChecked():
             return
+        if getattr(self, "_suppress_focus_loss_dispatch", False):
+            return
         if not self._is_device_connected():
             return
+
         channel = int(self.channel.currentText())
         try:
             parse_quantity(editor.text(), DIMENSION_VOLTAGE)  # type: ignore[attr-defined]
+            self._channel_config_from_snapshot(self.configuration_snapshot())
         except Exception as exc:
             self.banner.show_message(
-                f"Rigol CH{channel}: invalid voltage: {exc}",
+                f"Rigol CH{channel}: voltage change rejected before hardware traffic: {exc}",
                 severity="error",
                 timeout_ms=12_000,
             )
@@ -992,12 +1084,18 @@ class RigolPage(QWidget):
 
     def _rigol_limit_values(self, key: str) -> tuple[object, object]:
         limits = self._station_settings.rigol.safety.channels[self.channel.currentText()].lab_limits
+        if key == "combined_voltage_limit":
+            limit_str = limits.combined_voltage_limit
+            try:
+                si_val = parse_quantity(limit_str, DIMENSION_VOLTAGE).si_value
+                neg_str = format_quantity_auto(-abs(si_val), DIMENSION_VOLTAGE)
+                pos_str = format_quantity_auto(abs(si_val), DIMENSION_VOLTAGE)
+            except Exception:
+                neg_str = f"-{limit_str}"
+                pos_str = str(limit_str)
+            return neg_str, pos_str
         quick_field = {
             "frequency": "frequency",
-            "amplitude_vpp": "amplitude",
-            "offset": "offset",
-            "high_level": "high_level",
-            "low_level": "low_level",
         }.get(key)
         if quick_field is not None:
             bound = quick_control_safety_bounds(self._station_settings)[
@@ -1023,6 +1121,145 @@ class RigolPage(QWidget):
         for field in self._limit_fields.values():
             key = str(field.property("limitKey"))
             field.set_limits(*self._rigol_limit_values(key))
+        self._update_combined_voltage_usage()
+
+    def _update_combined_voltage_usage(self, *_args: object) -> None:
+        """Show the one voltage budget used by every Rigol entry mode."""
+
+        try:
+            high_v, low_v = self._effective_levels()
+            amplitude_vpp = (
+                0.0 if self.waveform.currentText() == "DC" else high_v - low_v
+            )
+            offset_v = (high_v + low_v) / 2.0
+            used_v = amplitude_vpp + abs(offset_v)
+            limit_v = parse_quantity(
+                self._station_settings.rigol.safety.channels[
+                    self.channel.currentText()
+                ].lab_limits.combined_voltage_limit,
+                DIMENSION_VOLTAGE,
+            ).si_value
+        except Exception as exc:
+            self.combined_voltage_usage.setText("invalid")
+            self._limit_fields[self.combined_voltage_usage]._show_validation_warning(
+                str(exc)
+            )
+            return
+
+        self.combined_voltage_usage.setText(
+            format_quantity_auto(used_v, DIMENSION_VOLTAGE)
+        )
+        field = self._limit_fields[self.combined_voltage_usage]
+        if used_v > limit_v + max(limit_v, 1.0) * 1e-12:
+            field._show_validation_warning(
+                "Vpp + |offset| exceeds the shared voltage limit; the change "
+                "will not be sent to the instrument."
+            )
+        else:
+            field._clear_validation_warning()
+
+    def _clamp_voltage_to_shared_budget(self, field_name: str, editor: QWidget) -> None:
+        """Keep keyboard/arrow edits inside the coupled voltage budget."""
+
+        try:
+            limit_v = parse_quantity(
+                self._station_settings.rigol.safety.channels[
+                    self.channel.currentText()
+                ].lab_limits.combined_voltage_limit,
+                DIMENSION_VOLTAGE,
+            ).si_value
+            requested_v = parse_quantity(
+                editor.text(), DIMENSION_VOLTAGE  # type: ignore[attr-defined]
+            ).si_value
+            original_text = editor.text()  # type: ignore[attr-defined]
+            preferred = "mV" if "mV" in original_text else "V"
+            clamped_v = requested_v
+
+            if field_name == "amplitude":
+                offset_v = parse_quantity(
+                    self.offset.text(), DIMENSION_VOLTAGE
+                ).si_value
+                clamped_v = min(max(requested_v, 0.0), max(0.0, limit_v - abs(offset_v)))
+            elif field_name == "offset":
+                amplitude_vpp = (
+                    0.0
+                    if self.waveform.currentText() == "DC"
+                    else parse_quantity(self.vpp.text(), DIMENSION_VOLTAGE).si_value
+                )
+                remaining_v = max(0.0, limit_v - amplitude_vpp)
+                clamped_v = min(max(requested_v, -remaining_v), remaining_v)
+            elif field_name in {"high_level", "low_level"}:
+                high_v = parse_quantity(
+                    self.high_level.text(), DIMENSION_VOLTAGE
+                ).si_value
+                low_v = parse_quantity(
+                    self.low_level.text(), DIMENSION_VOLTAGE
+                ).si_value
+
+                def used(candidate_high: float, candidate_low: float) -> float:
+                    return (
+                        candidate_high
+                        - candidate_low
+                        + abs((candidate_high + candidate_low) / 2.0)
+                    )
+
+                if high_v > low_v and used(high_v, low_v) > limit_v:
+                    if field_name == "high_level" and abs(low_v) <= limit_v:
+                        safe, unsafe = low_v, high_v
+                        for _ in range(64):
+                            candidate = (safe + unsafe) / 2.0
+                            if used(candidate, low_v) <= limit_v:
+                                safe = candidate
+                            else:
+                                unsafe = candidate
+                        clamped_v = safe
+                    elif field_name == "low_level" and abs(high_v) <= limit_v:
+                        unsafe, safe = low_v, high_v
+                        for _ in range(64):
+                            candidate = (unsafe + safe) / 2.0
+                            if used(high_v, candidate) <= limit_v:
+                                safe = candidate
+                            else:
+                                unsafe = candidate
+                        clamped_v = safe
+
+            clamped_v = quantize_rigol_voltage(clamped_v)
+            for _ in range(4):
+                if field_name == "amplitude":
+                    candidate_used_v = clamped_v + abs(offset_v)
+                    safer_direction = -1.0
+                elif field_name == "offset":
+                    candidate_used_v = amplitude_vpp + abs(clamped_v)
+                    safer_direction = -1.0 if clamped_v > 0 else 1.0
+                elif field_name == "high_level":
+                    candidate_used_v = used(clamped_v, low_v)
+                    safer_direction = -1.0
+                else:
+                    candidate_used_v = used(high_v, clamped_v)
+                    safer_direction = 1.0
+                if candidate_used_v <= limit_v + max(limit_v, 1.0) * 1e-12:
+                    break
+                step_v = rigol_voltage_resolution_v(clamped_v)
+                clamped_v = quantize_rigol_voltage(
+                    clamped_v + safer_direction * step_v
+                )
+            if not math.isclose(
+                requested_v, clamped_v, rel_tol=1e-12, abs_tol=1e-12
+            ):
+                editor.setText(  # type: ignore[attr-defined]
+                    self._format_voltage(clamped_v, preferred_unit=preferred)
+                )
+                self.banner.show_message(
+                    "Rigol voltage clamped to the shared limit: "
+                    "Vpp + |offset| may not exceed "
+                    f"{self._station_settings.rigol.safety.channels[self.channel.currentText()].lab_limits.combined_voltage_limit}.",
+                    severity="warning",
+                    timeout_ms=12_000,
+                )
+        except Exception:
+            # Parsing and complete validation remain fail-closed in the submit
+            # and configure paths, which provide the actionable error text.
+            return
 
     def set_settings(self, settings: StationSettings) -> None:
         self._station_settings = settings
@@ -1911,6 +2148,7 @@ class RigolPage(QWidget):
             self.low_level: not is_dc and high_low_mode,
             self.vpp: not is_dc and not high_low_mode,
             self.offset: is_dc or not high_low_mode,
+            self.combined_voltage_usage: True,
             self.phase: waveform not in {"DC", "NOIS"},
         }
         for widget, visible in visibility.items():
@@ -1943,7 +2181,7 @@ class RigolPage(QWidget):
         if self.level_mode.currentText() == self.LEVEL_MODE_AMPLITUDE_OFFSET:
             vpp = quantize_rigol_voltage(parse_quantity(self.vpp.text(), DIMENSION_VOLTAGE).si_value)
             offset = quantize_rigol_voltage(parse_quantity(self.offset.text(), DIMENSION_VOLTAGE).si_value)
-            return quantize_rigol_voltage(offset + vpp / 2), quantize_rigol_voltage(offset - vpp / 2)
+            return offset + vpp / 2, offset - vpp / 2
         return (
             quantize_rigol_voltage(parse_quantity(self.high_level.text(), DIMENSION_VOLTAGE).si_value),
             quantize_rigol_voltage(parse_quantity(self.low_level.text(), DIMENSION_VOLTAGE).si_value),

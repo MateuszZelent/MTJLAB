@@ -135,10 +135,7 @@ def settings_issue_for_error(error: Exception | str) -> SettingsIssue | None:
                 ("modulation rate", "modulation_rate"),
                 ("burst period", "burst_period"),
                 ("burst cycle", "burst_cycles"),
-                ("amplitude_vpp", "amplitude_vpp"),
-                ("high_level", "high_level"),
-                ("low_level", "low_level"),
-                ("offset", "offset"),
+                ("combined_voltage_limit", "combined_voltage_limit"),
                 ("frequency", "frequency"),
             )
             if marker in normalized

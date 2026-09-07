@@ -571,14 +571,17 @@ class LimitEditDialog(StationDialog):
         self,
         title: str,
         minimum: object,
-        maximum: object,
+        maximum: object = None,
         *,
         maximum_enabled: bool = True,
         value_label: str = "Minimum",
+        max_label: str = "Maximum",
+        guidance: str | None = None,
         parent: QWidget | None = None,
     ) -> None:
         super().__init__(parent)
-        self.setWindowTitle(f"Edit limits — {title}")
+        dialog_title = f"Edit limit — {title}" if not maximum_enabled else f"Edit limits — {title}"
+        self.setWindowTitle(dialog_title)
         self.setModal(True)
         self.setMinimumWidth(430)
         surface = self.use_modal_shell_content().surface
@@ -586,10 +589,11 @@ class LimitEditDialog(StationDialog):
         heading = StrongBodyLabel(title, surface)
         heading.setObjectName("pageTitle")
         layout.addWidget(heading)
-        note = BodyLabel(
+        note_text = guidance or (
             "Enter explicit units where applicable (for example: 10 mA, 67 mV, 1 MHz). "
             "The complete configuration is validated before it is saved."
         )
+        note = BodyLabel(note_text)
         note.setWordWrap(True)
         layout.addWidget(note)
         form = QFormLayout()
@@ -598,10 +602,11 @@ class LimitEditDialog(StationDialog):
         self.maximum = LineEdit(surface)
         self.maximum.setText("" if maximum is None else str(maximum))
         self.maximum.setEnabled(maximum_enabled)
-        if not maximum_enabled:
-            self.maximum.setPlaceholderText("Not applicable")
         form.addRow(value_label, self.minimum)
-        form.addRow("Maximum", self.maximum)
+        if maximum_enabled:
+            form.addRow(max_label, self.maximum)
+        else:
+            self.maximum.hide()
         layout.addLayout(form)
         warning = BodyLabel(
             "On success the new range is applied immediately. If validation or the "
@@ -613,7 +618,7 @@ class LimitEditDialog(StationDialog):
         footer = QHBoxLayout()
         footer.addStretch(1)
         cancel = PushButton("Cancel", surface)
-        save = PrimaryPushButton("Save limits", surface)
+        save = PrimaryPushButton("Save limit" if not maximum_enabled else "Save limits", surface)
         cancel.clicked.connect(self.reject)
         save.clicked.connect(self.accept)
         footer.addWidget(cancel)

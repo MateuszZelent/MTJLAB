@@ -4,6 +4,7 @@ import os
 import inspect
 import math
 import time
+from copy import deepcopy
 from dataclasses import replace
 from datetime import datetime, timezone
 from pathlib import Path
@@ -1792,35 +1793,35 @@ class MainWindowTests(unittest.TestCase):
                 window.close()
                 self.application.processEvents()
 
-    def test_manual_waveform_above_amplitude_limit_is_not_queued(self) -> None:
+    def test_manual_waveform_above_combined_voltage_limit_is_not_queued(self) -> None:
         window = MainWindow(".config/settings.yml", simulation=True)
         try:
             rigol = window.rigol_page
             rigol.channel.setCurrentText("1")
             rigol.waveform.setCurrentText("SIN")
             rigol.level_mode.setCurrentText("Amplitude / Offset")
-            rigol.vpp.setText("805 mV")
-            rigol.offset.setText("0 V")
+            rigol.vpp.setText("80 mV")
+            rigol.offset.setText("21 mV")
             rigol._controller.call = Mock()
             rigol.configure()
             rigol._controller.call.assert_not_called()
-            self.assertIn("outside the configured", rigol.banner.last_message)
+            self.assertIn("combined_voltage_limit", rigol.banner.last_message)
 
         finally:
             window.close()
             self.application.processEvents()
 
-    def test_limit_field_clamps_amplitude_on_focus_loss_and_shows_warning(self) -> None:
+    def test_shared_voltage_budget_clamps_amplitude_on_focus_loss(self) -> None:
         window = MainWindow(".config/settings.yml", simulation=True)
         try:
             rigol = window.rigol_page
             rigol.channel.setCurrentText("1")
-            rigol.vpp.setText("802 mV")
+            rigol.offset.setText("20 mV")
+            rigol.vpp.setText("90 mV")
             rigol.vpp.editingFinished.emit()
-            field = rigol._limit_fields[rigol.vpp]
-            self.assertEqual(rigol.vpp.text(), "800 mV")
-            self.assertFalse(field.validation_warning.isHidden())
-            self.assertIn("exceeded MAX", field.validation_warning.text())
+            self.assertEqual(rigol.vpp.text(), "80 mV")
+            self.assertEqual(rigol.combined_voltage_usage.text(), "100 mV")
+            self.assertIn("shared limit", rigol.banner.last_message)
         finally:
             window.close()
             self.application.processEvents()
@@ -1885,22 +1886,26 @@ class MainWindowTests(unittest.TestCase):
         try:
             shared_bounds = quick_control_safety_bounds(window._settings)
             rigol = window.rigol_page
-            for editor, target in (
-                (rigol.frequency, "rigol.1.frequency"),
-                (rigol.high_level, "rigol.1.high_level"),
-                (rigol.low_level, "rigol.1.low_level"),
-                (rigol.vpp, "rigol.1.amplitude"),
-                (rigol.offset, "rigol.1.offset"),
+            frequency_bound = shared_bounds["rigol.1.frequency"]
+            self.assertEqual(
+                rigol._limit_fields[rigol.frequency].minimum.text(),
+                f"MIN  {frequency_bound.minimum_text}",
+            )
+            self.assertEqual(
+                rigol._limit_fields[rigol.frequency].maximum.text(),
+                f"MAX  {frequency_bound.maximum_text}",
+            )
+            shared_field = rigol._limit_fields[rigol.combined_voltage_usage]
+            self.assertEqual(shared_field.minimum.text(), "MIN  0 V")
+            self.assertEqual(shared_field.maximum.text(), "MAX  100 mV")
+            for target in (
+                "rigol.1.frequency",
+                "rigol.1.high_level",
+                "rigol.1.low_level",
+                "rigol.1.amplitude",
+                "rigol.1.offset",
             ):
                 bound = shared_bounds[target]
-                self.assertEqual(
-                    rigol._limit_fields[editor].minimum.text(),
-                    f"MIN  {bound.minimum_text}",
-                )
-                self.assertEqual(
-                    rigol._limit_fields[editor].maximum.text(),
-                    f"MAX  {bound.maximum_text}",
-                )
                 self.assertEqual(
                     window.quick_control_coordinator._bounds[target],
                     (bound.minimum_si, bound.maximum_si),
@@ -2055,7 +2060,6 @@ class MainWindowTests(unittest.TestCase):
                 keithley.compliance,
                 keithley.nplc,
                 keithley.settle,
-                keithley.sense_mode,
                 keithley.source_autorange,
                 keithley.source_range,
                 keithley.measure_voltage_autorange,
@@ -3267,12 +3271,14 @@ class MainWindowTests(unittest.TestCase):
             keithley = window.keithley_page
             keithley._controller.call = Mock()
             keithley._device_state_changed("verified")
+            updated = deepcopy(keithley._station_settings.model_dump(mode="python"))
+            updated["devices"]["keithley"]["safety"]["channels"]["B"]["sense_mode"] = "4wire"
+            keithley.set_settings(StationSettings.model_validate(updated))
             keithley.channel.setCurrentText("B")
             keithley.mode.setCurrentText("current")
             keithley.level.setText("500 uA")
             keithley.compliance.setText("50 mV")
             keithley.settle.setText("200 ms")
-            keithley.sense_mode.setCurrentText("4wire")
 
             self.assertTrue(keithley.apply_configuration_button.isEnabled())
             keithley.apply_configuration_button.click()
@@ -3682,7 +3688,7 @@ class MainWindowTests(unittest.TestCase):
             self.assertEqual(keithley.level.text(), "500 uA")
             self.assertEqual(keithley.compliance.text(), "50 mV")
             self.assertEqual(keithley.nplc.text(), "0.5")
-            self.assertEqual(keithley.sense_mode.currentText(), "4wire")
+            self.assertEqual(keithley._station_settings.keithley.safety.channels["A"].sense_mode, "4wire")
             self.assertTrue(keithley.source_autorange.isChecked())
             self.assertEqual(keithley.source_range.text(), "AUTO")
             self.assertFalse(keithley.measure_current_autorange.isChecked())
@@ -3791,7 +3797,7 @@ class MainWindowTests(unittest.TestCase):
                 self.assertEqual(keithley.source_range.text(), "10 mA")
                 keithley.channel.setCurrentText("A")
                 self.assertEqual(keithley.level.text(), "500 uA")
-                self.assertEqual(keithley.sense_mode.currentText(), "4wire")
+                self.assertEqual(keithley._station_settings.keithley.safety.channels["A"].sense_mode, "4wire")
                 self.assertFalse(keithley.measure_current_autorange.isChecked())
                 self.assertEqual(keithley.measure_current_range.text(), "1 mA")
             finally:
@@ -5322,6 +5328,57 @@ class MainWindowTests(unittest.TestCase):
                     "4 mW",
                 )
                 self.assertEqual(field.editor.text(), "4 mW")
+            finally:
+                window.close()
+                self.application.processEvents()
+
+    def test_rigol_shared_voltage_budget_limit_edit_dialog_and_save(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            path = Path(temporary) / "settings.yml"
+            write_engineer_settings(path)
+            window = MainWindow(path, simulation=False, authenticated_username=TEST_ENGINEER)
+            try:
+                window.resize(1600, 900)
+                window.show()
+                window._navigate_to("rigol")
+                self.application.processEvents()
+
+                field = window.rigol_page._limit_fields[window.rigol_page.combined_voltage_usage]
+                self.assertTrue(field.isVisible())
+                self.assertTrue(field.edit_button.isEnabled())
+
+                dialog_checked: list[bool] = []
+
+                def complete_dialog() -> None:
+                    dialog = QApplication.activeModalWidget()
+                    self.assertIsInstance(dialog, LimitEditDialog)
+                    self.assertEqual(dialog.windowTitle(), "Edit limits — Rigol CH1 — voltage limits")
+                    self.assertFalse(dialog.maximum.isHidden())
+                    self.assertTrue(dialog.maximum.isEnabled())
+                    self.assertEqual(dialog.minimum.text(), "-100 mV")
+                    self.assertEqual(dialog.maximum.text(), "100 mV")
+                    dialog_checked.append(True)
+                    dialog.minimum.setText("-250 mV")
+                    dialog.maximum.setText("250 mV")
+                    dialog.accept()
+
+                QTimer.singleShot(0, complete_dialog)
+                field.edit_button.click()
+                self.assertTrue(dialog_checked)
+
+                # Limit range pill is updated immediately with symmetric bipolar bounds
+                self.assertEqual(field._minimum_value, "-250 mV")
+                self.assertEqual(field._maximum_value, "250 mV")
+                # But combined_voltage_usage editor still shows current usage, NOT the limit
+                self.assertNotEqual(window.rigol_page.combined_voltage_usage.text(), "250 mV")
+
+                # Save settings to persist
+                window.safety_strip.save_settings.click()
+                saved = SettingsRepository(path).load().settings
+                self.assertEqual(
+                    saved.rigol.safety.channels["1"].lab_limits.combined_voltage_limit,
+                    "250 mV",
+                )
             finally:
                 window.close()
                 self.application.processEvents()

@@ -199,9 +199,8 @@ class InstrumentPrecisionTests(unittest.TestCase):
                 low_level_v=0.007,
             )
         )
-        self.assertIn(":SOUR1:APPL:DC 0.007", session.commands)
+        self.assertIn(":SOUR1:APPL:DC DEF,DEF,0.007", session.commands)
         self.assertIn(":SOUR1:VOLT:OFFS 0.007", session.commands)
-        self.assertNotIn(":SOUR1:APPL:DC DEF,DEF,0.007", session.commands)
         self.assertEqual(session.query(":SOUR1:VOLT:OFFS?"), "0.007")
 
 

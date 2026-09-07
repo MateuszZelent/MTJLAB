@@ -83,14 +83,15 @@ class KeithleyCharacterizationUiTests(unittest.TestCase):
             host.close()
 
     def test_channel_change_autofills_limits(self) -> None:
-        """Verify selecting Channel B autofills limits from station settings."""
+        """Verify selecting Channel B clamps compliance to limits but preserves safe sweep level."""
         card = self.page.characterization_card
         card.channel_combo.setCurrentText("Channel B")
         self.app.processEvents()
 
-        # Channel B in simulated settings has voltage compliance 67 mV and max current 10 mA
+        # Channel B in simulated settings has voltage compliance 67 mV
         self.assertEqual(card.compliance_edit.text(), "67 mV")
-        self.assertEqual(card.stop_level_edit.text(), "10 mA")
+        # Sweep level remains at safe microampere default and is not blown up to 10 mA
+        self.assertEqual(card.stop_level_edit.text(), "100 uA")
 
     def test_preflight_rejection_shows_banner(self) -> None:
         """Verify invalid or out-of-limits parameters display a warning message in banner."""
@@ -738,5 +739,60 @@ class KeithleyCharacterizationUiTests(unittest.TestCase):
         cfg = card._build_config()
         self.assertEqual(cfg.metadata.diameter_nm, 600.0)
         self.assertAlmostEqual(cfg.metadata.junction_area_um2 or 0.0, 0.2827, places=3)
+
+    def test_sense_mode_defaults_to_2wire_and_warns_on_4wire(self) -> None:
+        """Verify 2-wire is default, removed from main cards, and switching to 4-wire in Settings warns."""
+        from unittest.mock import patch
+        from app.ui.dialogs import StationMessageBox
+        from app.settings.repository import SettingsRepository
+        from app.ui.settings_page import SettingsPage
+
+        card = self.page.characterization_card
+
+        # 1. Neither KeithleyPage nor CharacterizationCard has a sense_mode combo box
+        self.assertFalse(hasattr(card, "sense_combo"))
+        self.assertFalse(hasattr(self.page, "sense_mode"))
+
+        # 2. 2-wire is default everywhere
+        self.assertEqual(card._build_config().sense_mode, "2wire")
+        self.assertTrue(card.sense_warning_label.isHidden())
+
+        # 3. SettingsPage controls 4-wire with safety confirmation
+        repo = SettingsRepository(".config/settings.yml")
+        settings_page = SettingsPage(repo)
+        try:
+            path = ("devices", "keithley", "safety", "channels", "B", "sense_mode")
+            editor = settings_page._form_editors.get(path)
+            self.assertIsNotNone(editor, "Keithley Channel B sense_mode editor should exist in SettingsPage")
+            idx_4wire = editor.findData("4wire")
+            self.assertGreaterEqual(idx_4wire, 0)
+
+            # Cancel reverts to 2-wire
+            with patch.object(StationMessageBox, "warning", return_value=StationMessageBox.StandardButton.Cancel) as mock_warn:
+                editor.setCurrentIndex(idx_4wire)
+                self.app.processEvents()
+                self.assertTrue(mock_warn.called)
+                self.assertEqual(editor.currentData(), "2wire")
+
+            # Yes accepts 4-wire
+            with patch.object(StationMessageBox, "warning", return_value=StationMessageBox.StandardButton.Yes) as mock_warn:
+                editor.setCurrentIndex(idx_4wire)
+                self.app.processEvents()
+                self.assertTrue(mock_warn.called)
+                self.assertEqual(editor.currentData(), "4wire")
+        finally:
+            settings_page.deleteLater()
+
+        # 4. Updating settings to 4-wire updates characterization card
+        updated = deepcopy(self.settings.model_dump(mode="python"))
+        updated["devices"]["keithley"]["safety"]["channels"]["B"]["sense_mode"] = "4wire"
+        new_settings = StationSettings.model_validate(updated)
+        self.page.set_settings(new_settings)
+        card.channel_combo.setCurrentText("Channel B")
+        self.app.processEvents()
+
+        self.assertEqual(card._build_config().sense_mode, "4wire")
+        self.assertFalse(card.sense_warning_label.isHidden())
+
 
 

@@ -239,14 +239,20 @@ def validate_rigol_waveform(
     limits = channel.lab_limits
     if waveform_normalized not in {"DC", "NOIS"} and limits.frequency.enabled:
         _enforce_range("frequency", freq_hz, limits.frequency.min, limits.frequency.max, DIMENSION_FREQUENCY)
-    if waveform_normalized != "DC" and limits.high_level.enabled:
-        _enforce_range("high_level", high_v, limits.high_level.min, limits.high_level.max, DIMENSION_VOLTAGE)
-    if waveform_normalized != "DC" and limits.low_level.enabled:
-        _enforce_range("low_level", low_v, limits.low_level.min, limits.low_level.max, DIMENSION_VOLTAGE)
-    if waveform_normalized != "DC" and limits.amplitude_vpp.enabled:
-        _enforce_range("amplitude_vpp", high_v - low_v, limits.amplitude_vpp.min, limits.amplitude_vpp.max, DIMENSION_VOLTAGE)
-    if limits.offset.enabled:
-        _enforce_range("offset", (high_v + low_v) / 2.0, limits.offset.min, limits.offset.max, DIMENSION_VOLTAGE)
+    combined_limit_v = parse_quantity(
+        limits.combined_voltage_limit, DIMENSION_VOLTAGE
+    ).si_value
+    amplitude_vpp = 0.0 if waveform_normalized == "DC" else high_v - low_v
+    offset_v = (high_v + low_v) / 2.0
+    combined_voltage_v = amplitude_vpp + abs(offset_v)
+    tolerance = max(combined_limit_v, 1.0) * 1e-12
+    if combined_voltage_v > combined_limit_v + tolerance:
+        raise SafetyViolation(
+            "Rigol combined_voltage_limit exceeded: "
+            f"amplitude_vpp + abs(offset) = {amplitude_vpp:.9g} V + "
+            f"{abs(offset_v):.9g} V = {combined_voltage_v:.9g} V, "
+            f"configured limit {combined_limit_v:.9g} V."
+        )
 
     estimate = estimate_rigol_current(
         high_level=high_v,

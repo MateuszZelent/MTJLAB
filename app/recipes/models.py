@@ -229,11 +229,20 @@ def _parse_node(value: object, where: str) -> RecipeNode:
                 )
             try:
                 title_pattern.format_map(
-                    {"run_name": "example", "status": "completed", "created_at": "2026-01-01T00:00:00Z"}
+                    {
+                        "run_name": "example",
+                        "status": "completed",
+                        "created_at": "2026-01-01T00:00:00Z",
+                        "sample_id": "example",
+                        "sample_name": "example",
+                        "sample_coord": "example",
+                        "device_label": "example",
+                    }
                 )
             except (KeyError, ValueError) as exc:
                 raise ConfigurationError(
-                    f"{where}.title_pattern may use only {{run_name}}, {{status}} and {{created_at}}."
+                    f"{where}.title_pattern may use only {{run_name}}, {{status}}, {{created_at}}, "
+                    "{{sample_id}}, {{sample_name}}, {{sample_coord}} and {{device_label}}."
                 ) from exc
         tags = raw.get("tags")
         if tags is not None:

@@ -331,3 +331,13 @@ def test_runner_positive_only_limits(station_settings):
     )
     # Must not raise SafetyViolation even though 0.0 < 1 mA
     KeithleyCharacterizationRunner.validate_preflight(valid_pos_cfg, mod_settings)
+
+
+def test_characterization_config_defaults_are_safe_for_mtj():
+    """Default config must use 2-wire sense and microampere sweep range to protect MTJ samples."""
+    cfg = CharacterizationSweepConfig()
+    assert cfg.sense_mode == "2wire"
+    assert cfg.start_level_si == -100e-6
+    assert cfg.stop_level_si == 100e-6
+    assert cfg.compliance_si == 0.500
+

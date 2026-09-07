@@ -4,8 +4,7 @@
 inline card it occupies no layout space: messages are rendered by QFluent's
 overlay layer and therefore never move a page's controls or plots.
 """
-
-from __future__ import annotations
+from __future__ import annotations
 
 from PySide6.QtWidgets import QSizePolicy, QWidget
 from qfluentwidgets import InfoBar, InfoBarPosition
@@ -26,13 +25,13 @@ def show_toast(
     severity: str = "warning",
     timeout_ms: int = 10_000,
     title: str | None = None,
-) -> None:
+) -> object | None:
     """Present one page-scoped notification without changing its geometry."""
 
     normalized = severity.strip().lower()
     method = _TOAST_METHODS.get(normalized, InfoBar.warning)
     owner = parent.window() if parent.window().isVisible() else parent
-    method(
+    return method(
         title=title or normalized.title(),
         content=message,
         isClosable=True,
@@ -59,6 +58,7 @@ class NotificationBanner(QWidget):
         )
         self.last_message = ""
         self.last_severity = ""
+        self._active_bar: object | None = None
         self.hide()
 
     def show_message(
@@ -68,9 +68,23 @@ class NotificationBanner(QWidget):
         severity: str = "warning",
         timeout_ms: int = 10_000,
     ) -> None:
+        if self.last_message == message and self._active_bar is not None:
+            try:
+                if self._active_bar.isVisible():
+                    return
+            except Exception:
+                pass
+
+        if self._active_bar is not None:
+            try:
+                self._active_bar.close()
+            except Exception:
+                pass
+            self._active_bar = None
+
         self.last_message = message
         self.last_severity = severity.strip().lower()
-        show_toast(
+        self._active_bar = show_toast(
             self,
             message,
             severity=severity,
