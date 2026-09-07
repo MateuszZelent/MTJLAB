@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from dataclasses import replace
 from pathlib import Path
 
 from app.devices.keithley_2600.characterization.analyzer import KeithleyCharacterizationAnalyzer
@@ -78,11 +79,41 @@ def test_csv_export(tmp_path: Path):
     content = res_path.read_text(encoding="utf-8")
     assert "# MTJLAB - Keithley Sample Characterization Dataset" in content
     assert "# Sample ID: MTJ-Test-01" in content
-    assert "# Sense Mode: 4WIRE (Kelvin)" in content
+    assert "# Sense Mode: Local (2-wire)" in content
+    assert "# Compliance Policy: stop" in content
+    assert "# NPLC: 1.0" in content
+    assert "# Source Autorange: True" in content
+    assert "# Measure Voltage Autorange: True" in content
+    assert "# Measure Current Autorange: True" in content
+    assert "# Completion Status: completed" in content
+    assert "# Zero Setpoint Policy: omitted from characterization" in content
+    assert "# Zero Setpoint Omitted: False" in content
+    assert "# Acquired Points: 101 of 101" in content
     assert "# Dwell Time [s]: 0.05" in content
     assert "Demanded_SI,Voltage_V,Current_A,True_Resistance_Ohm" in content
     lines = content.strip().splitlines()
     assert len(lines) >= 110
+
+
+def test_csv_export_marks_compliance_stop_as_partial(tmp_path: Path):
+    """A compliance-terminated export must carry its partial-run provenance."""
+    complete = _build_ohmic_clamped_dataset()
+    detail = "Compliance detected at point 3/101; no subsequent setpoint was applied."
+    partial = replace(
+        complete,
+        points=complete.points[:3],
+        completion_status="stopped_on_compliance",
+        termination_detail=detail,
+    )
+
+    output_csv = KeithleyDataExporter.export_csv(partial, tmp_path / "partial.csv")
+    content = output_csv.read_text(encoding="utf-8")
+
+    assert "# Completion Status: stopped_on_compliance" in content
+    assert "# Acquired Points: 3 of 101" in content
+    assert f"# Termination Detail: {detail}" in content
+    assert "# Completed At:" not in content
+    assert "# Ended At:" in content
 
 
 def test_pdf_report_with_resistance_outliers(tmp_path: Path):
@@ -272,4 +303,3 @@ def test_pdf_report_and_commentary_strictly_english(tmp_path: Path):
         text_lower = text.lower()
         for kw in polish_keywords:
             assert kw not in text_lower, f"Polish keyword '{kw}' found in commentary: {text}"
-

@@ -383,6 +383,48 @@ class KeithleyDualPlotsTests(unittest.TestCase):
         finally:
             page.close()
 
+    def test_stop_compliance_keeps_live_readout_running_with_output_off(self) -> None:
+        """A stop latch disables OUTPUT but must not silently deselect Live."""
+        raw = deepcopy(simulated_station_settings(loaded_settings()).model_dump(mode="python"))
+        settings = StationSettings.model_validate(raw)
+        controller = Mock()
+        page = KeithleyPage(controller, settings)
+        try:
+            page.show()
+            self.application.processEvents()
+            page._device_state_changed("OUTPUT_ON")
+            page._set_channel_output("B", True)
+            page.live_channel_b.setChecked(True)
+            page._measure_pending = False
+            page._live_timer.start()
+
+            measurement = KeithleyMeasurement(
+                channel="B",
+                voltage_v=0.067,
+                current_a=0.001,
+                power_w=0.000067,
+                output_enabled=False,
+                compliance_detected=True,
+                compliance_stop_required=True,
+                source_level_si=0.001,
+                source_mode="current",
+            )
+            page._set_channel_output("B", False)
+            page._mark_channel_compliance("B", measurement)
+
+            self.assertTrue(page.live_channel_b.isChecked())
+            self.assertTrue(page.live_channel_b.isEnabled())
+            self.assertIn("B", page._selected_live_channels())
+            self.assertTrue(page._live_timer.isActive())
+
+            controller.call.reset_mock()
+            page._measure_pending = False
+            page._request_live_measurement()
+            controller.call.assert_called_once_with("measure", "B")
+        finally:
+            page._live_timer.stop()
+            page.close()
+
 
 if __name__ == "__main__":
     unittest.main()

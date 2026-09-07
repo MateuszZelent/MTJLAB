@@ -31,8 +31,16 @@ class CharacterizationSweepConfig:
     stop_level_si: float = 100e-6
     points_count: int = 101
     compliance_si: float = 0.500
+    compliance_policy: Literal["stop", "warn_clamp", "skip"] = "stop"
     dwell_time_s: float = 0.05
+    nplc: float = 1.0
     sense_mode: Literal["2wire", "4wire"] = "2wire"
+    source_autorange: bool = True
+    source_range_si: float | None = None
+    measure_voltage_autorange: bool = True
+    measure_voltage_range_si: float | None = None
+    measure_current_autorange: bool = True
+    measure_current_range_si: float | None = None
     metadata: SampleMetadata = field(default_factory=lambda: SampleMetadata(sample_id="Sample-1"))
 
 
@@ -83,6 +91,11 @@ class CharacterizationDataset:
     started_at_iso: str
     completed_at_iso: str
     checksum_sha256: str = ""
+    completion_status: Literal[
+        "completed", "cancelled", "stopped_on_compliance"
+    ] = "completed"
+    termination_detail: str = ""
+    zero_setpoint_omitted: bool = False
 
     @staticmethod
     def calculate_checksum(points: tuple[CharacterizationPoint, ...] | list[CharacterizationPoint]) -> str:

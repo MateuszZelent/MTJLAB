@@ -68,19 +68,69 @@ jakimkolwiek ruchem sprzętowym.
 
 ## Ustalenia dotyczące Keithley i charakteryzacji
 
-Domyślny tryb pomiaru został zmieniony z `4wire` na `2wire` w modelu
-charakteryzacji oraz w profilach kanałów. Tryb sense jest własnością profilu
-stacji, a formularz charakteryzacji nie może go przypadkowo przełączyć lokalnym
-polem. Wybrana wartość przechodzi do żądania adaptera, który ustawia
+Domyślny tryb pomiaru został zmieniony z `4wire` na `2wire` w profilach kanałów.
+Tryb sense jest własnością profilu stacji, a formularz charakteryzacji nie ma
+lokalnego pola, które mogłoby go przełączyć. Wybrana wartość przechodzi do żądania adaptera, który ustawia
 `SENSE_LOCAL` dla 2-wire albo `SENSE_REMOTE` dla 4-wire i weryfikuje stan
 odczytem zwrotnym przed uznaniem konfiguracji za zastosowaną.
 
 Włączenie 4-wire wymaga teraz jawnej zmiany w ustawieniach kanału. Karta
 charakteryzacji pokazuje wtedy widoczne ostrzeżenie o konieczności fizycznego
-podłączenia przewodów Sense HI i Sense LO. Domyślne wartości sweepu
-charakteryzacji zostały zmniejszone z ±10 mA do ±100 µA, a domyślne compliance
-z 670 mV do 500 mV. Ostateczną granicą pozostają limity kanału w profilu;
-adapter ponownie je sprawdza przed wysłaniem nastawy.
+podłączenia przewodów Sense HI i Sense LO. Domyślne wartości poziomów sweepu
+charakteryzacji zostały zmniejszone z ±10 mA do ±100 µA. Compliance nie ma już
+własnej wartości domyślnej używanej do pomiaru: jest wyświetlane tylko do odczytu
+i pochodzi ze zwykłej karty Keithley. Ostateczną granicą pozostają limity kanału
+w profilu; adapter ponownie je sprawdza przed wysłaniem nastawy.
+
+Charakteryzacja nie ma odrębnej konfiguracji sprzętowej ani odrębnych pozycji w
+ustawieniach. Kanał i tryb są synchronizowane ze zwykłą kartą Keithley, a dokładnie
+ten sam konstruktor żądania przekazuje compliance, NPLC, czas settling, 2/4-wire,
+autorange oraz ręczne zakresy źródła i obu torów pomiarowych. Tylko poziom źródła
+jest zastępowany kolejnymi wartościami start–stop, a liczba punktów jest parametrem
+sweepu. Compliance i settling są na karcie charakteryzacji polami tylko do odczytu.
+Brak dostępu do konfiguracji zwykłej karty blokuje start zamiast uruchamiać pomiar
+z wartościami lokalnymi.
+
+Punkt o zerowej wartości źródła jest usuwany z planu charakteryzacji przed
+zaprogramowaniem pierwszej nastawy. Dotyczy to zera będącego początkiem sweepu oraz
+zera wypadającego wewnątrz zakresu, także gdy `linspace` reprezentuje je jako
+minimalny artefakt zmiennoprzecinkowy. Zero nie jest ustawiane ani zapisywane jako
+punkt pomiarowy. Bezpieczny `ramp_to_zero` po pomiarze pozostaje obowiązkowy i nie
+jest dodawany do danych.
+
+Przed włączeniem wyjścia runner wymaga ostatniej konfiguracji zastosowanej ręcznie
+i potwierdzonej odczytem zwrotnym na tym samym adapterze oraz w tej samej sesji
+urządzenia. Po zaprogramowaniu pierwszego punktu przy `OUTPUT OFF` porównuje każdy
+parametr poza zmiennym poziomem źródła z konfiguracją ręczną. Niezgodność blokuje
+start. Po każdej zmianie poziomu pełna konfiguracja i stan wyjścia są ponownie
+odczytywane z urządzenia.
+
+W module charakteryzacji znaleziono dodatkowy błąd krytyczny: runner na czas
+sweepu jawnie zmieniał politykę compliance na `skip`, zapisywał punkt ograniczony
+przez compliance i przechodził do kolejnej, potencjalnie wyższej nastawy. Limit
+compliance przy wymuszaniu prądu ogranicza napięcie wyjściowe; nie jest niezależnym
+limitem wartości zadanego prądu. Dlatego kontynuowanie sweepu po compliance nie
+chroni próbki, której rezystancja może zmienić się w czasie pomiaru.
+
+Runner charakteryzacji wymaga, aby zwykła karta i urządzenie miały już politykę
+`stop`; nie zmienia jej lokalnie. Zmiana oczekująca na potwierdzenie albo polityka
+`warn_clamp`/`skip` blokuje start przed włączeniem wyjścia.
+
+Dla zwykłej pracy Keithley domyślną polityką jest ponownie `warn_clamp`: sprzęt
+utrzymuje wyjście w ograniczeniu, aplikacja pokazuje compliance i blokuje ruch
+nastawy dalej w niebezpiecznym kierunku. Gdy operator wybierze `stop`, compliance
+nadal wyłącza i zatrzaskuje wyjście danego kanału, lecz nie wyłącza zaznaczonego
+odczytu Live. Live kontynuuje pomiary przy `OUTPUT OFF`, dzięki czemu stan na ekranie
+odpowiada zaznaczonej kontrolce. Charakteryzacja pozostaje wyjątkiem wymagającym
+jawnego wyboru `stop` przed startem sweepu.
+Pierwszy punkt, w którym urządzenie zgłosi compliance, jest zapisywany jako ostatni
+punkt danych. Adapter wyłącza kanał i potwierdza `OUTPUT OFF`, runner nie wysyła
+następnej nastawy, zeruje nastawę i ponownie żąda wyłączenia wyjścia. Jeśli końcowego
+stanu `OUTPUT OFF` nie można potwierdzić, przebieg kończy się błędem zamiast zwrócić
+wynik. Częściowy zbiór otrzymuje status `stopped_on_compliance`, liczbę zapisanych
+punktów i opis przyczyny. Ten status jest widoczny w karcie, inwentarzu, CSV i PDF;
+nie jest prezentowany jako poprawnie zakończony pełny sweep. Anulowanie ma odrębny
+status `cancelled`.
 
 ## Wynik weryfikacji
 
@@ -94,6 +144,19 @@ Trzy ukierunkowane testy głównego okna potwierdziły blokadę konfiguracji pon
 wspólnym limitem, ograniczenie wartości po zakończeniu edycji oraz spójność
 granic z Quick Controls. Test renderowania potwierdził, że wspólny budżet jest
 widoczny i ma niezerową geometrię po pokazaniu okna i przetworzeniu zdarzeń Qt.
+
+Po zmianach charakteryzacji zaliczono 25 testów runnera, analizatora i eksportów,
+26 testów UI (z wyłączeniem opisanego niżej testu `QSettings`), 10 pozostałych
+testów strony Keithley oraz 58 testów ustawień i symulatorów wraz z 49 podtestami.
+Obejmują one przerwanie przed kolejną nastawą, zachowanie ostatniego punktu,
+odrzucenie profilu `warn_clamp`, brak niezależnej konfiguracji charakteryzacji,
+dziedziczenie wszystkich pól zwykłej karty, identyczność komend TSP konfiguracji
+przed `OUTPUT ON`, pełny odczyt zwrotny przy każdym punkcie, potwierdzenie
+wyłączenia na pełnym adapterze z symulatorem oraz oznaczenie częściowych danych
+w UI, CSV i PDF. Kontrola Ruff i `git diff --check` nie zgłosiły błędów.
+Dwa niezależne, istniejące testy trwałości wyboru próbki i ustawienia wykresu w
+`QSettings` nie przechodzą w tym środowisku także poza tym zakresem; nie dotyczą
+sterowania wyjściem ani konfiguracji charakteryzacji.
 
 ## Ograniczenie fizyczne
 

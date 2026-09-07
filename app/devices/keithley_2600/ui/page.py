@@ -1748,9 +1748,29 @@ class KeithleyPage(QWidget):
             if self.channel.currentText() != target:
                 self.channel.setCurrentText(target)
 
+        def _sync_card_mode(mode: str) -> None:
+            target = (
+                "Current Sweep (I → V)"
+                if mode == "current"
+                else "Voltage Sweep (V → I)"
+            )
+            if mode in {"current", "voltage"} and self.characterization_card.mode_combo.currentText() != target:
+                self.characterization_card.mode_combo.blockSignals(True)
+                self.characterization_card.mode_combo.setCurrentText(target)
+                self.characterization_card.mode_combo.blockSignals(False)
+                self.characterization_card._on_mode_changed()
+
+        def _sync_page_mode(card_text: str) -> None:
+            target = "current" if "Current" in card_text else "voltage"
+            if self.mode.currentText() != target:
+                self.mode.setCurrentText(target)
+
         self.channel.currentTextChanged.connect(_sync_card_channel)
         self.characterization_card.channel_combo.currentTextChanged.connect(_sync_page_channel)
+        self.mode.currentTextChanged.connect(_sync_card_mode)
+        self.characterization_card.mode_combo.currentTextChanged.connect(_sync_page_mode)
         _sync_card_channel(self.channel.currentText())
+        _sync_card_mode(self.mode.currentText())
 
         self.tab_view = None
         self.apply_configuration_button.clicked.connect(self.configure)
@@ -1779,9 +1799,19 @@ class KeithleyPage(QWidget):
             for channel in ("A", "B")
         }
         self._load_form_snapshot(self._channel_form_snapshots[self._active_channel])
+        self.characterization_card.set_source_request_provider(
+            self._characterization_source_request,
+            self._characterization_compliance_policy,
+        )
         self.channel.currentTextChanged.connect(self._channel_changed)
         self.mode.currentTextChanged.connect(self._mode_changed)
         self.channel.currentTextChanged.connect(self._selected_channel_changed)
+        self.channel.currentTextChanged.connect(
+            self.characterization_card.refresh_shared_source_configuration
+        )
+        self.mode.currentTextChanged.connect(
+            self.characterization_card.refresh_shared_source_configuration
+        )
         for editor in (
             self.level,
             self.compliance,
@@ -1792,6 +1822,9 @@ class KeithleyPage(QWidget):
             self.measure_current_range,
         ):
             editor.editingFinished.connect(self._persist_form_defaults)
+            editor.editingFinished.connect(
+                self.characterization_card.refresh_shared_source_configuration
+            )
         self.level.setProperty("requiresLiveControl", True)
         self.compliance.setProperty("requiresLiveControl", True)
         self.level.textChanged.connect(self._publish_quick_control_draft)
@@ -1816,6 +1849,14 @@ class KeithleyPage(QWidget):
                 enabled, self.measure_current_range, "current measurement range"
             )
         )
+        for autorange in (
+            self.source_autorange,
+            self.measure_voltage_autorange,
+            self.measure_current_autorange,
+        ):
+            autorange.toggled.connect(
+                self.characterization_card.refresh_shared_source_configuration
+            )
         self._selected_channel_changed(self.channel.currentText())
         self._update_source_mode_ui()
         self._update_output_readiness()
@@ -3582,7 +3623,6 @@ class KeithleyPage(QWidget):
             )
             if checkbox.isChecked()
             and self._station_settings.keithley.safety.channels[channel].enabled
-            and channel not in self._compliance_channels
         ]
 
     def _live_interval_changed(self, interval_ms: int) -> None:
@@ -3635,7 +3675,6 @@ class KeithleyPage(QWidget):
                 connected
                 and channel_enabled
                 and not dut_isolation_busy
-                and channel not in self._compliance_channels
             )
             measure_button = self.channel_cards[channel]["measure"]
             measure_button.setEnabled(
@@ -3657,8 +3696,8 @@ class KeithleyPage(QWidget):
                 )
             elif channel in self._compliance_channels:
                 checkbox.setToolTip(
-                    f"Channel {channel} is latched OFF after COMPLIANCE. "
-                    "Acknowledge recovery before restarting Live."
+                    f"Channel {channel} is latched OUTPUT OFF after COMPLIANCE. "
+                    "Live measurement remains active and continues read-only sampling."
                 )
             elif not measurement_path_available:
                 checkbox.setToolTip(
@@ -4031,9 +4070,12 @@ class KeithleyPage(QWidget):
         if snapshot is not None:
             self._load_form_snapshot(snapshot)
         else:
-            self._refresh_keithley_limits()
             self._load_source_values()
             self._update_source_mode_ui()
+        # A saved draft may predate a stricter station profile. Revalidate it
+        # after loading the selected channel so every consumer, including
+        # characterization, sees the same safely clamped values.
+        self._refresh_keithley_limits()
 
     def _mode_changed(self, mode: str) -> None:
         self._remember_source_values()
@@ -4323,6 +4365,7 @@ class KeithleyPage(QWidget):
         self._refresh_keithley_limits()
         self._update_output_readiness()
         self._update_ramp_defaults(reset_values=True)
+        self.characterization_card.refresh_shared_source_configuration()
 
     def configure(self) -> None:
         if self._readback_pending or self._auto_enable_channel is not None or any(
@@ -4518,7 +4561,10 @@ class KeithleyPage(QWidget):
         )
 
     def _source_request_from_snapshot(
-        self, snapshot: KeithleyConfigurationSnapshot
+        self,
+        snapshot: KeithleyConfigurationSnapshot,
+        *,
+        level_override_si: float | None = None,
     ) -> KeithleySourceRequest:
         mode = snapshot.source_mode
         level_dimension = DIMENSION_CURRENT if mode == "current" else DIMENSION_VOLTAGE
@@ -4526,9 +4572,13 @@ class KeithleyPage(QWidget):
         request = KeithleySourceRequest(
             channel=snapshot.channel,  # type: ignore[arg-type]
             mode=mode,  # type: ignore[arg-type]
-            level_si=0.0
-            if mode == "measure_only"
-            else parse_quantity(snapshot.source_level, level_dimension).si_value,
+            level_si=(
+                0.0
+                if mode == "measure_only"
+                else level_override_si
+                if level_override_si is not None
+                else parse_quantity(snapshot.source_level, level_dimension).si_value
+            ),
             compliance_si=0.0
             if mode == "measure_only"
             else parse_quantity(snapshot.compliance, compliance_dimension).si_value,
@@ -4560,6 +4610,30 @@ class KeithleyPage(QWidget):
             request,
         )
         return request
+
+    def _characterization_source_request(
+        self,
+        channel: str,
+        mode: str,
+        level_override_si: float | None,
+    ) -> KeithleySourceRequest:
+        """Build characterization requests from the normal card's current draft."""
+        if channel not in {"A", "B"} or mode not in {"current", "voltage"}:
+            raise SafetyViolation(
+                "Characterization requires the normal Keithley card to use "
+                "channel A/B and current/voltage source mode."
+            )
+        snapshot = self.configuration_snapshot_for(channel, mode)
+        return self._source_request_from_snapshot(
+            snapshot,
+            level_override_si=level_override_si,
+        )
+
+    def _characterization_compliance_policy(self, channel: str) -> str:
+        """Return the normal card policy, marking an unconfirmed change pending."""
+        if channel in self._pending_compliance_policy:
+            return f"pending_{self._pending_compliance_policy[channel]}"
+        return self._compliance_policy.get(channel, "warn_clamp")
 
     @staticmethod
     def _manual_range(text: str, dimension: str, autorange: bool) -> float | None:
@@ -4659,6 +4733,7 @@ class KeithleyPage(QWidget):
         self.status.emit(
             f"Keithley CH {channel}: compliance policy '{policy_str}' requested"
         )
+        self.characterization_card.refresh_shared_source_configuration()
         self._controller.call("set_compliance_policy", (channel, policy_str))
 
     def _compliance_increase_is_blocked(
@@ -4916,6 +4991,7 @@ class KeithleyPage(QWidget):
             self.status.emit(
                 f"Keithley CH {channel}: compliance policy '{policy_str}' active"
             )
+            self.characterization_card.refresh_shared_source_configuration()
         elif operation == "recover_from_compliance" and isinstance(result, dict):
             channel = str(result.get("channel", ""))
             if channel not in self.channel_cards:
@@ -5082,6 +5158,7 @@ class KeithleyPage(QWidget):
                 timeout_ms=15_000,
             )
             self.status.emit(f"Keithley CH {channel}: compliance policy failed: {error}")
+            self.characterization_card.refresh_shared_source_configuration()
             return
         if operation == "set_dut_output_off_mode":
             channel = self._dut_isolation_channel

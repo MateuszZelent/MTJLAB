@@ -272,6 +272,8 @@ class SimulatorTests(unittest.TestCase):
     def test_keithley_compliance_turns_output_off_in_simulation(self) -> None:
         raw = deepcopy(simulated_station_settings(loaded_settings()).model_dump(mode="python"))
         raw["devices"]["keithley"]["safety"]["allow_output_enable"] = True
+        raw["devices"]["keithley"]["safety"]["stop_on_compliance"] = True
+        raw["devices"]["keithley"]["safety"]["compliance_policy"] = "stop"
         settings = StationSettings.model_validate(raw)
         keithley = KeithleyAdapter(
             settings,
@@ -292,6 +294,8 @@ class SimulatorTests(unittest.TestCase):
         raw["devices"]["keithley"]["safety"]["allow_output_enable"] = True
         raw["devices"]["keithley"]["safety"]["channels"]["A"]["enabled"] = True
         raw["devices"]["keithley"]["safety"]["channels"]["B"]["enabled"] = True
+        raw["devices"]["keithley"]["safety"]["stop_on_compliance"] = True
+        raw["devices"]["keithley"]["safety"]["compliance_policy"] = "stop"
         settings = StationSettings.model_validate(raw)
         keithley = KeithleyAdapter(
             settings,
@@ -432,6 +436,7 @@ class SimulatorTests(unittest.TestCase):
         raw["devices"]["keithley"]["safety"]["channels"]["A"]["enabled"] = True
         raw["devices"]["keithley"]["safety"]["channels"]["B"]["enabled"] = True
         raw["devices"]["keithley"]["safety"]["stop_on_compliance"] = False
+        raw["devices"]["keithley"]["safety"]["compliance_policy"] = "warn_clamp"
         settings = StationSettings.model_validate(raw)
         keithley = KeithleyAdapter(
             settings,
@@ -470,6 +475,7 @@ class SimulatorTests(unittest.TestCase):
         raw = deepcopy(simulated_station_settings(loaded_settings()).model_dump(mode="python"))
         raw["devices"]["keithley"]["safety"]["allow_output_enable"] = True
         raw["devices"]["keithley"]["safety"]["stop_on_compliance"] = False
+        raw["devices"]["keithley"]["safety"]["compliance_policy"] = "warn_clamp"
         settings = StationSettings.model_validate(raw)
         keithley = KeithleyAdapter(
             settings,
@@ -533,6 +539,8 @@ class SimulatorTests(unittest.TestCase):
     def test_keithley_compliance_can_recover_without_reconnecting(self) -> None:
         raw = deepcopy(simulated_station_settings(loaded_settings()).model_dump(mode="python"))
         raw["devices"]["keithley"]["safety"]["allow_output_enable"] = True
+        raw["devices"]["keithley"]["safety"]["stop_on_compliance"] = True
+        raw["devices"]["keithley"]["safety"]["compliance_policy"] = "stop"
         settings = StationSettings.model_validate(raw)
         keithley = KeithleyAdapter(
             settings,

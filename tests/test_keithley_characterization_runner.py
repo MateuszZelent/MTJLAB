@@ -7,6 +7,7 @@ import threading
 from typing import Any
 import pytest
 
+from app.devices.keithley_2600 import KeithleySourceRequest
 from app.devices.keithley_2600.adapter import KeithleyMeasurement
 from app.devices.keithley_2600.characterization.models import (
     CharacterizationSweepConfig,
@@ -14,7 +15,7 @@ from app.devices.keithley_2600.characterization.models import (
 from app.devices.keithley_2600.characterization.runner import (
     KeithleyCharacterizationRunner,
 )
-from app.domain.errors import SafetyViolation
+from app.domain.errors import DeviceError, SafetyViolation
 from tests.helpers import loaded_settings
 from app.devices.simulators import simulated_station_settings
 
@@ -37,6 +38,15 @@ class _MockKeithleyDevice:
         self.current_level = 0.0
         self.calls: list[str] = []
         self.compliance_policy_state = "stop"
+        self._last_request = KeithleySourceRequest(
+            channel="A",
+            mode=mode,
+            level_si=0.0,
+            compliance_si=v_comp if mode == "current" else i_comp,
+            nplc=1.0,
+            settle_time_s=0.001,
+            sense_mode="2wire",
+        )
 
     def compliance_policy(self, channel: str) -> str:
         return self.compliance_policy_state
@@ -48,13 +58,18 @@ class _MockKeithleyDevice:
             self.compliance_policy_state = str(stop_on_compliance)
         self.calls.append(f"set_compliance_policy:{self.compliance_policy_state}")
 
-    def configure_source(self, request) -> None:
+    def configure_source(self, request):
         self.mode = request.mode
         if self.mode == "current":
             self.v_comp = request.compliance_si
         else:
             self.i_comp = request.compliance_si
+        self._last_request = request
         self.calls.append(f"configure_source:{request.channel}:{request.mode}:{request.compliance_si}")
+        return request
+
+    def last_source_request(self, channel: str):
+        return self._last_request
 
     def set_output(self, channel: str, enabled: bool) -> None:
         self.output_enabled = enabled
@@ -97,6 +112,12 @@ class _MockKeithleyDevice:
             source_level_si=self.current_level,
             source_mode=self.mode,
         )
+
+    def assert_output_state(self, channel: str, *, expected_enabled: bool) -> bool:
+        self.calls.append(f"assert_output_state:{channel}:{expected_enabled}")
+        if self.output_enabled != expected_enabled:
+            raise RuntimeError("output state mismatch")
+        return self.output_enabled
 
     def ramp_to_zero(self, channel: str) -> None:
         self.current_level = 0.0
@@ -209,7 +230,7 @@ def test_runner_preflight_limits(station_settings):
 
 def test_runner_execution_and_shutdown():
     """Verify nominal sweep execution order and guaranteed shutdown."""
-    device = _MockKeithleyDevice()
+    device = _MockKeithleyDevice(r_sample=100.0)
     config = CharacterizationSweepConfig(
         channel="A",
         mode="current",
@@ -222,18 +243,20 @@ def test_runner_execution_and_shutdown():
 
     dataset = KeithleyCharacterizationRunner.run_sweep(device, config)
 
-    assert len(dataset.points) == 5
+    assert len(dataset.points) == 4
+    assert dataset.completion_status == "completed"
     # Output must be confirmed OFF after sweep
     assert device.output_enabled is False
     assert "ramp_to_zero:A" in device.calls
     assert "set_output:A:False" in device.calls
+    assert device.calls.count("assert_output_state:A:True") == 4
     # Original compliance policy must be restored
     assert device.compliance_policy_state == "stop"
 
 
 def test_runner_early_cancellation():
     """Verify that cancellation stops the sweep and still executes safe shutdown."""
-    device = _MockKeithleyDevice()
+    device = _MockKeithleyDevice(r_sample=50.0)
     config = CharacterizationSweepConfig(
         channel="A",
         mode="current",
@@ -258,14 +281,39 @@ def test_runner_early_cancellation():
 
     # Should have stopped early (around 3 points)
     assert len(dataset.points) < 10
+    assert dataset.completion_status == "cancelled"
     # Safe shutdown must still have executed
     assert device.output_enabled is False
     assert "ramp_to_zero:A" in device.calls
     assert "set_output:A:False" in device.calls
 
 
+def test_runner_omits_zero_from_symmetric_current_sweep():
+    """Zero current is neither applied nor recorded as a characterization point."""
+    device = _MockKeithleyDevice(r_sample=100.0)
+    config = CharacterizationSweepConfig(
+        channel="A",
+        mode="current",
+        start_level_si=-10e-6,
+        stop_level_si=10e-6,
+        points_count=101,
+        compliance_si=0.670,
+        dwell_time_s=0.001,
+    )
+
+    dataset = KeithleyCharacterizationRunner.run_sweep(device, config)
+
+    assert len(dataset.points) == 100
+    assert dataset.zero_setpoint_omitted is True
+    assert dataset.points[0].demanded_si == pytest.approx(-10e-6)
+    assert dataset.points[-1].demanded_si == pytest.approx(10e-6)
+    assert all(point.demanded_si != 0.0 for point in dataset.points)
+    assert "update_source_level:A:0.000000e+00" not in device.calls
+    assert "ramp_to_zero:A" in device.calls
+
+
 def test_runner_voltage_mode_execution():
-    """Verify runner handles voltage sweep mode and computes apparent resistance accurately."""
+    """Verify voltage sweep records the compliance point and stops immediately."""
     device = _MockKeithleyDevice(r_sample=50.0, i_comp=0.010, mode="voltage")
     config = CharacterizationSweepConfig(
         channel="A",
@@ -277,10 +325,12 @@ def test_runner_voltage_mode_execution():
         dwell_time_s=0.001,
     )
     dataset = KeithleyCharacterizationRunner.run_sweep(device, config)
-    assert len(dataset.points) == 5
+    assert len(dataset.points) == 1
+    assert dataset.completion_status == "stopped_on_compliance"
+    assert "point 1/4" in dataset.termination_detail
     assert device.output_enabled is False
 
-    # Check point 4 (at demanded V=1.0 V):
+    # The first demanded point is -1.0 V:
     # Sample has R=50 Ohm, current clamped at I=0.010 A.
     # Measured voltage = 0.010 * 50 = 0.5 V.
     # True R = V_meas / I_meas = 0.5 / 0.010 = 50 Ohm.
@@ -291,10 +341,10 @@ def test_runner_voltage_mode_execution():
     assert math.isclose(pt_last.apparent_resistance_ohm, 100.0, rel_tol=0.01)
 
 
-def test_runner_compliance_skip_policy_and_restoration():
-    """Verify that during the sweep policy is switched to skip and then original is restored."""
+def test_runner_compliance_stops_before_next_setpoint_without_policy_change():
+    """Compliance stores its point and stops without changing the shared policy."""
     device = _MockKeithleyDevice(mode="current")
-    device.compliance_policy_state = "warn_clamp"
+    device.compliance_policy_state = "stop"
     config = CharacterizationSweepConfig(
         channel="A",
         mode="current",
@@ -305,11 +355,172 @@ def test_runner_compliance_skip_policy_and_restoration():
         dwell_time_s=0.001,
     )
     dataset = KeithleyCharacterizationRunner.run_sweep(device, config)
-    assert len(dataset.points) == 3
-    # Check call history
-    assert "set_compliance_policy:skip" in device.calls
-    assert "set_compliance_policy:warn_clamp" in device.calls
-    assert device.compliance_policy_state == "warn_clamp"
+    assert len(dataset.points) == 2
+    assert dataset.points[-1].compliance_active is True
+    assert dataset.completion_status == "stopped_on_compliance"
+    assert not any(call.startswith("set_compliance_policy:") for call in device.calls)
+    assert "update_source_level:A:3.000000e-03" not in device.calls
+    assert device.output_enabled is False
+    assert device.compliance_policy_state == "stop"
+
+
+def test_runner_reports_unconfirmed_output_off_as_failure():
+    """The runner must not return a successful dataset when shutdown is unconfirmed."""
+
+    class _OffFailureDevice(_MockKeithleyDevice):
+        def set_output(self, channel: str, enabled: bool) -> None:
+            if not enabled:
+                raise RuntimeError("readback unavailable")
+            super().set_output(channel, enabled)
+
+    device = _OffFailureDevice(r_sample=100.0)
+    config = CharacterizationSweepConfig(
+        channel="A",
+        mode="current",
+        start_level_si=-0.001,
+        stop_level_si=0.001,
+        points_count=3,
+        compliance_si=0.670,
+        dwell_time_s=0.001,
+    )
+
+    with pytest.raises(DeviceError, match="OUTPUT OFF could not be confirmed"):
+        KeithleyCharacterizationRunner.run_sweep(device, config)
+
+
+def test_runner_rejects_adapter_policy_different_from_shared_stop(station_settings):
+    """Characterization must not silently change a different normal-card policy."""
+    from copy import deepcopy
+
+    from app.devices.keithley_2600.adapter import KeithleyAdapter
+    from app.devices.simulators import SimulatedVisaFactory
+    from app.settings.models import StationSettings
+
+    raw = deepcopy(station_settings.model_dump(mode="python"))
+    raw["devices"]["keithley"]["safety"]["allow_output_enable"] = True
+    raw["devices"]["keithley"]["safety"]["compliance_policy"] = "warn_clamp"
+    raw["devices"]["keithley"]["safety"]["stop_on_compliance"] = False
+    settings = StationSettings.model_validate(raw)
+    device = KeithleyAdapter(
+        settings,
+        session_factory=SimulatedVisaFactory(
+            "keithley", keithley_resistance_ohm=67.0
+        ),
+    )
+    device.connect()
+    config = CharacterizationSweepConfig(
+        channel="B",
+        mode="current",
+        start_level_si=0.0005,
+        stop_level_si=0.0015,
+        points_count=3,
+        compliance_si=0.067,
+        dwell_time_s=0.0,
+    )
+
+    with pytest.raises(SafetyViolation, match="No characterization output was enabled"):
+        KeithleyCharacterizationRunner.run_sweep(device, config)
+
+    assert device._output_states["B"] is False
+    assert device.compliance_policy("B") == "warn_clamp"
+
+
+def test_characterization_initial_tsp_matches_normal_configuration(station_settings):
+    """The complete pre-output TSP configuration must match the normal card path."""
+    from copy import deepcopy
+
+    from app.devices.keithley_2600 import KeithleySourceRequest
+    from app.devices.keithley_2600.adapter import KeithleyAdapter
+    from app.devices.simulators import KeithleySimulator
+    from app.settings.models import StationSettings
+
+    class _CapturingFactory:
+        def __init__(self) -> None:
+            self.session = KeithleySimulator()
+
+        def open(self, resource: str, backend: str, timeout_ms: int):
+            del resource, backend
+            self.session.timeout = timeout_ms
+            return self.session
+
+    raw = deepcopy(station_settings.model_dump(mode="python"))
+    raw["devices"]["keithley"]["safety"]["allow_output_enable"] = True
+    raw["devices"]["keithley"]["safety"]["stop_on_compliance"] = True
+    raw["devices"]["keithley"]["safety"]["compliance_policy"] = "stop"
+    settings = StationSettings.model_validate(raw)
+    normal_request = KeithleySourceRequest(
+        channel="B",
+        mode="current",
+        level_si=0.0005,
+        compliance_si=0.050,
+        nplc=2.5,
+        settle_time_s=0.0,
+        sense_mode="2wire",
+        source_autorange=False,
+        source_range_si=0.010,
+        measure_voltage_autorange=False,
+        measure_voltage_range_si=0.100,
+        measure_current_autorange=False,
+        measure_current_range_si=0.010,
+    )
+
+    normal_factory = _CapturingFactory()
+    normal_adapter = KeithleyAdapter(settings, session_factory=normal_factory)
+    normal_adapter.connect()
+    normal_start = len(normal_factory.session.commands)
+    normal_adapter.configure_source(normal_request)
+    normal_adapter.set_output("B", True)
+    normal_traffic = normal_factory.session.commands[normal_start:]
+    normal_output_on_index = normal_traffic.index(
+        "smub.source.output = smub.OUTPUT_ON"
+    )
+    normal_commands = [
+        command
+        for command in normal_traffic[:normal_output_on_index]
+        if " = " in command
+        and ".source.output" not in command
+        and ".source.offmode" not in command
+    ]
+    normal_adapter.set_output("B", False)
+
+    config = CharacterizationSweepConfig(
+        channel="B",
+        mode="current",
+        start_level_si=0.0005,
+        stop_level_si=0.0006,
+        points_count=2,
+        compliance_si=0.050,
+        dwell_time_s=0.0,
+        nplc=2.5,
+        sense_mode="2wire",
+        source_autorange=False,
+        source_range_si=0.010,
+        measure_voltage_autorange=False,
+        measure_voltage_range_si=0.100,
+        measure_current_autorange=False,
+        measure_current_range_si=0.010,
+    )
+    characterization_start = len(normal_factory.session.commands)
+    dataset = KeithleyCharacterizationRunner.run_sweep(
+        normal_adapter,
+        config,
+    )
+    characterization_commands = normal_factory.session.commands[
+        characterization_start:
+    ]
+    output_on_index = characterization_commands.index(
+        "smub.source.output = smub.OUTPUT_ON"
+    )
+    characterization_programming_commands = [
+        command
+        for command in characterization_commands[:output_on_index]
+        if " = " in command
+        and ".source.output" not in command
+        and ".source.offmode" not in command
+    ]
+
+    assert dataset.completion_status == "completed"
+    assert characterization_programming_commands == normal_commands
 
 
 def test_runner_positive_only_limits(station_settings):
@@ -340,4 +551,3 @@ def test_characterization_config_defaults_are_safe_for_mtj():
     assert cfg.start_level_si == -100e-6
     assert cfg.stop_level_si == 100e-6
     assert cfg.compliance_si == 0.500
-

@@ -212,7 +212,44 @@ class KeithleyPdfReportGenerator:
                 Paragraph("<b>Acquisition Time:</b>", body_style),
                 Paragraph(f"{dataset.started_at_iso[:19]} UTC", body_style),
                 Paragraph("<b>Sense Mode:</b>", body_style),
-                Paragraph(f"{cfg.sense_mode.upper()} (Kelvin)", body_style),
+                Paragraph(
+                    "Kelvin (4-wire)" if cfg.sense_mode == "4wire" else "Local (2-wire)",
+                    body_style,
+                ),
+            ],
+            [
+                Paragraph("<b>Acquisition Status:</b>", body_style),
+                Paragraph(dataset.completion_status.replace("_", " ").title(), body_style),
+                Paragraph("<b>Acquired Points:</b>", body_style),
+                Paragraph(f"{len(dataset.points)} of {cfg.points_count}", body_style),
+            ],
+            [
+                Paragraph("<b>Compliance Policy:</b>", body_style),
+                Paragraph(cfg.compliance_policy, body_style),
+                Paragraph("<b>NPLC / Settling:</b>", body_style),
+                Paragraph(f"{cfg.nplc:g} / {cfg.dwell_time_s:g} s", body_style),
+            ],
+            [
+                Paragraph("<b>Zero Setpoint:</b>", body_style),
+                Paragraph(
+                    "Omitted" if dataset.zero_setpoint_omitted else "Not present",
+                    body_style,
+                ),
+                "",
+                "",
+            ],
+            [
+                Paragraph("<b>Source Range:</b>", body_style),
+                Paragraph(
+                    "AUTO" if cfg.source_autorange else f"{cfg.source_range_si:g} SI",
+                    body_style,
+                ),
+                Paragraph("<b>Measurement Ranges:</b>", body_style),
+                Paragraph(
+                    f"V: {'AUTO' if cfg.measure_voltage_autorange else f'{cfg.measure_voltage_range_si:g} V'}; "
+                    f"I: {'AUTO' if cfg.measure_current_autorange else f'{cfg.measure_current_range_si:g} A'}",
+                    body_style,
+                ),
             ],
         ]
 
@@ -229,6 +266,15 @@ class KeithleyPdfReportGenerator:
         story.append(meta_table)
         story.append(Spacer(1, 8))
 
+        if dataset.termination_detail:
+            story.append(
+                Paragraph(
+                    f"<b>Termination detail:</b> {dataset.termination_detail}",
+                    body_style,
+                )
+            )
+            story.append(Spacer(1, 8))
+
         # 3. Scientific Parameters Table
         story.append(Paragraph("Scientific and Physical Junction Parameters", h2_style))
 
@@ -241,9 +287,14 @@ class KeithleyPdfReportGenerator:
         if params.compliance_detected and params.compliance_onset_point:
             ci, cv = params.compliance_onset_point
             if cfg.mode == "current":
-                comp_status_str = f"Active at |I| &ge; {abs(ci) * 1e3:.2f} mA (V = {abs(cv) * 1e3:.1f} mV)"
+                onset_str = f"|I| = {abs(ci) * 1e3:.2f} mA (V = {abs(cv) * 1e3:.1f} mV)"
             else:
-                comp_status_str = f"Active at |V| &ge; {abs(cv) * 1e3:.1f} mV (I = {abs(ci) * 1e3:.2f} mA)"
+                onset_str = f"|V| = {abs(cv) * 1e3:.1f} mV (I = {abs(ci) * 1e3:.2f} mA)"
+            comp_status_str = (
+                f"STOP triggered at {onset_str}"
+                if dataset.completion_status == "stopped_on_compliance"
+                else f"Active at {onset_str}"
+            )
         else:
             comp_status_str = "Not reached (linear ohmic range)"
 

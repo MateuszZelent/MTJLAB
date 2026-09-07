@@ -5,7 +5,7 @@ from __future__ import annotations
 from datetime import datetime, timezone
 import threading
 import time
-from typing import Any
+from typing import Any, Literal
 
 import numpy as np
 from PySide6.QtCore import QObject, QThread, Signal
@@ -16,7 +16,7 @@ from app.devices.keithley_2600.characterization.models import (
     CharacterizationPoint,
     CharacterizationSweepConfig,
 )
-from app.domain.errors import SafetyViolation
+from app.domain.errors import DeviceError, SafetyViolation
 from app.domain.quantities import (
     DIMENSION_CURRENT,
     DIMENSION_POWER,
@@ -30,6 +30,80 @@ from app.settings.models import StationSettings
 class KeithleyCharacterizationRunner:
     """Safely executes Keithley IV sweeps with preflight checks and clean safe shutdowns."""
 
+    @staticmethod
+    def sweep_setpoints_excluding_zero(
+        start_level_si: float,
+        stop_level_si: float,
+        points_count: int,
+    ) -> np.ndarray:
+        """Build sweep points while excluding numerical and exact zero."""
+        setpoints = np.linspace(start_level_si, stop_level_si, max(2, points_count))
+        scale = max(
+            abs(float(start_level_si)),
+            abs(float(stop_level_si)),
+            np.finfo(float).tiny,
+        )
+        zero_tolerance = np.finfo(float).eps * scale * 8.0
+        nonzero = setpoints[np.abs(setpoints) > zero_tolerance]
+        if nonzero.size == 0:
+            raise SafetyViolation("Characterization sweep contains no non-zero points.")
+        return nonzero
+
+    @staticmethod
+    def source_request_for_level(
+        config: CharacterizationSweepConfig,
+        level_si: float,
+    ) -> KeithleySourceRequest:
+        """Build one sweep request without changing shared Keithley parameters."""
+        return KeithleySourceRequest(
+            channel=config.channel,
+            mode=config.mode,
+            level_si=float(level_si),
+            compliance_si=config.compliance_si,
+            nplc=config.nplc,
+            settle_time_s=config.dwell_time_s,
+            sense_mode=config.sense_mode,
+            source_autorange=config.source_autorange,
+            source_range_si=config.source_range_si,
+            measure_voltage_autorange=config.measure_voltage_autorange,
+            measure_voltage_range_si=config.measure_voltage_range_si,
+            measure_current_autorange=config.measure_current_autorange,
+            measure_current_range_si=config.measure_current_range_si,
+        )
+
+    @staticmethod
+    def _assert_matches_verified_manual_configuration(
+        previous: KeithleySourceRequest,
+        applied: KeithleySourceRequest,
+    ) -> None:
+        """Require every non-swept parameter to match the manual readback."""
+        shared_fields = (
+            "channel",
+            "mode",
+            "compliance_si",
+            "nplc",
+            "settle_time_s",
+            "sense_mode",
+            "source_autorange",
+            "source_range_si",
+            "measure_voltage_autorange",
+            "measure_voltage_range_si",
+            "measure_current_autorange",
+            "measure_current_range_si",
+        )
+        mismatches = [
+            name
+            for name in shared_fields
+            if getattr(previous, name) != getattr(applied, name)
+        ]
+        if mismatches:
+            raise SafetyViolation(
+                "Characterization configuration differs from the last manually "
+                "applied and verified Keithley configuration: "
+                + ", ".join(mismatches)
+                + ". OUTPUT remained OFF; repeat the manual check with the current card settings."
+            )
+
     @classmethod
     def validate_preflight(
         cls,
@@ -40,6 +114,11 @@ class KeithleyCharacterizationRunner:
         channel_name = config.channel
         if channel_name not in settings.keithley.safety.channels:
             raise SafetyViolation(f"Unknown Keithley channel: {channel_name}")
+        if config.compliance_policy != "stop":
+            raise SafetyViolation(
+                "Characterization requires 'Stop on compliance' on the normal "
+                "Keithley card."
+            )
 
         channel_settings = settings.keithley.safety.channels[channel_name]
         lab_limits = channel_settings.lab_limits
@@ -74,15 +153,7 @@ class KeithleyCharacterizationRunner:
             levels_to_check.append(0.0)
 
         for level in levels_to_check:
-            req = KeithleySourceRequest(
-                channel=channel_name,
-                mode=config.mode,
-                level_si=level,
-                compliance_si=config.compliance_si,
-                nplc=1.0,
-                settle_time_s=config.dwell_time_s,
-                sense_mode=config.sense_mode,
-            )
+            req = cls.source_request_for_level(config, level)
             validate_keithley_source(channel_settings, req)
 
         # Explicit check for power envelope
@@ -108,55 +179,73 @@ class KeithleyCharacterizationRunner:
     ) -> CharacterizationDataset:
         """Run the characterization sweep synchronously with guaranteed zero-ramp and shutdown."""
         channel = config.channel
-        points_count = max(2, config.points_count)
-        setpoints = np.linspace(config.start_level_si, config.stop_level_si, points_count)
+        setpoints = cls.sweep_setpoints_excluding_zero(
+            config.start_level_si,
+            config.stop_level_si,
+            config.points_count,
+        )
+        zero_setpoint_omitted = len(setpoints) < max(2, config.points_count)
+        points_count = len(setpoints)
+
+        if config.compliance_policy != "stop":
+            raise SafetyViolation(
+                "Characterization requires the shared Keithley compliance policy "
+                "to be 'stop'. Select 'Stop on compliance' on the normal Keithley card."
+            )
+        try:
+            active_policy = device.compliance_policy(channel)
+        except Exception as exc:
+            raise SafetyViolation(
+                "Keithley compliance policy could not be confirmed; no "
+                "characterization output was enabled."
+            ) from exc
+        if active_policy != config.compliance_policy:
+            raise SafetyViolation(
+                f"Keithley channel {channel} compliance policy is {active_policy!r}, "
+                f"but the shared card requires {config.compliance_policy!r}. "
+                "No characterization output was enabled."
+            )
 
         started_at = datetime.now(timezone.utc).isoformat()
         points: list[CharacterizationPoint] = []
+        completion_status: Literal[
+            "completed", "cancelled", "stopped_on_compliance"
+        ] = "completed"
+        termination_detail = ""
 
-        # 1. Temporarily configure compliance policy to "skip" during characterization
-        # to allow acquiring the complete clamped curve without blocking subsequent setpoints.
-        original_policy: str | bool | None = None
-        if hasattr(device, "compliance_policy"):
-            try:
-                original_policy = device.compliance_policy(channel)
-            except Exception:
-                pass
         try:
-            device.set_compliance_policy(channel, "skip")
-        except Exception:
-            pass
-
-        # 2. Configure initial safe state (OUTPUT OFF, initial 0 or start level)
-        init_req = KeithleySourceRequest(
-            channel=channel,
-            mode=config.mode,
-            level_si=0.0,
-            compliance_si=config.compliance_si,
-            nplc=1.0,
-            settle_time_s=config.dwell_time_s,
-            sense_mode=config.sense_mode,
-        )
-        try:
-            device.configure_source(init_req)
-        except SafetyViolation:
-            init_req = KeithleySourceRequest(
-                channel=channel,
-                mode=config.mode,
-                level_si=config.start_level_si,
-                compliance_si=config.compliance_si,
-                nplc=1.0,
-                settle_time_s=config.dwell_time_s,
-                sense_mode=config.sense_mode,
+            verified_manual_request = device.last_source_request(channel)
+        except Exception as exc:
+            raise SafetyViolation(
+                "Characterization requires a manually applied and readback-verified "
+                f"Keithley configuration on channel {channel}. No output was enabled."
+            ) from exc
+        if not isinstance(verified_manual_request, KeithleySourceRequest):
+            raise SafetyViolation(
+                "Keithley did not return a valid manually verified source request. "
+                "No characterization output was enabled."
             )
-            device.configure_source(init_req)
 
-        # 3. Enable output
-        device.set_output(channel, True)
+        # 1. Configure the exact first sweep request while OUTPUT is OFF.  This
+        # is the same complete request shape used by the normal Keithley card.
+        init_req = cls.source_request_for_level(config, float(setpoints[0]))
+        applied_request = device.configure_source(init_req)
+        if not isinstance(applied_request, KeithleySourceRequest):
+            raise DeviceError(
+                "Keithley did not return the applied characterization configuration."
+            )
+        cls._assert_matches_verified_manual_configuration(
+            verified_manual_request,
+            applied_request,
+        )
 
         try:
+            # 2. Enable output only after the shared stop policy is confirmed.
+            device.set_output(channel, True)
             for idx, demanded in enumerate(setpoints):
                 if cancel_event is not None and cancel_event.is_set():
+                    completion_status = "cancelled"
+                    termination_detail = "Sweep cancelled before applying the next setpoint."
                     break
 
                 # Apply setpoint with keyword arguments for real adapter and positional fallback
@@ -165,10 +254,14 @@ class KeithleyCharacterizationRunner:
                 except TypeError:
                     device.update_source_level(channel, float(demanded))
 
+                device.assert_output_state(channel, expected_enabled=True)
+
                 if config.dwell_time_s > 0:
                     time.sleep(config.dwell_time_s)
 
                 if cancel_event is not None and cancel_event.is_set():
+                    completion_status = "cancelled"
+                    termination_detail = "Sweep cancelled before the next measurement."
                     break
 
                 meas = device.measure(channel)
@@ -178,7 +271,10 @@ class KeithleyCharacterizationRunner:
                 comp_active = bool(meas.compliance_detected)
 
                 if comp_active and on_compliance is not None:
-                    on_compliance(f"Compliance active on channel {channel}: V={v_meas * 1e3:.1f} mV, I={i_meas * 1e3:.2f} mA")
+                    on_compliance(
+                        f"Compliance detected on channel {channel}; stopping sweep: "
+                        f"V={v_meas * 1e3:.1f} mV, I={i_meas * 1e3:.2f} mA"
+                    )
 
                 # Resistance calculations:
                 # True sample resistance: V_meas / I_meas (avoid zero division)
@@ -215,21 +311,30 @@ class KeithleyCharacterizationRunner:
                 if on_progress is not None:
                     on_progress(idx + 1, points_count)
 
+                if comp_active:
+                    completion_status = "stopped_on_compliance"
+                    termination_detail = (
+                        f"Compliance detected at point {idx + 1}/{points_count} "
+                        f"(demanded={float(demanded):.9e} SI); no subsequent setpoint was applied."
+                    )
+                    break
+
         finally:
-            # 4. Fail-safe shutdown: ramp to zero and disable output
+            # 3. Fail-safe shutdown: ramp to zero and disable output
             try:
                 device.ramp_to_zero(channel)
             except Exception:
                 pass
+            shutdown_error: Exception | None = None
             try:
                 device.set_output(channel, False)
-            except Exception:
-                pass
-            if original_policy is not None:
-                try:
-                    device.set_compliance_policy(channel, original_policy)
-                except Exception:
-                    pass
+            except Exception as exc:
+                shutdown_error = exc
+            if shutdown_error is not None:
+                raise DeviceError(
+                    f"Keithley channel {channel} OUTPUT OFF could not be confirmed "
+                    "after characterization."
+                ) from shutdown_error
 
         completed_at = datetime.now(timezone.utc).isoformat()
         checksum = CharacterizationDataset.calculate_checksum(points)
@@ -239,6 +344,9 @@ class KeithleyCharacterizationRunner:
             started_at_iso=started_at,
             completed_at_iso=completed_at,
             checksum_sha256=checksum,
+            completion_status=completion_status,
+            termination_detail=termination_detail,
+            zero_setpoint_omitted=zero_setpoint_omitted,
         )
 
 

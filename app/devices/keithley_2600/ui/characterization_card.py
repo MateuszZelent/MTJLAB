@@ -4,6 +4,7 @@ from datetime import datetime, timezone
 import math
 import os
 import re
+from collections.abc import Callable
 from typing import Any
 
 import pyqtgraph as pg
@@ -46,11 +47,13 @@ from app.devices.keithley_2600.characterization.models import (
     SampleMetadata,
 )
 from app.devices.keithley_2600.characterization.runner import CharacterizationWorker
+from app.devices.keithley_2600 import KeithleySourceRequest
 from app.domain.errors import SafetyViolation
 from app.domain.quantities import (
     DIMENSION_CURRENT,
     DIMENSION_TIME,
     DIMENSION_VOLTAGE,
+    format_quantity_auto,
     parse_quantity,
 )
 from app.inventory.models import ActiveSampleTarget, SampleRunRecord
@@ -118,6 +121,10 @@ class KeithleyCharacterizationCard(QWidget):
         self._worker: CharacterizationWorker | None = None
         self._current_dataset: CharacterizationDataset | None = None
         self._current_parameters: ExtractedScientificParameters | None = None
+        self._source_request_provider: Callable[
+            [str, str, float | None], KeithleySourceRequest
+        ] | None = None
+        self._compliance_policy_provider: Callable[[str], str] | None = None
 
         self._live_v_points: list[float] = []
         self._live_i_points: list[float] = []
@@ -192,15 +199,26 @@ class KeithleyCharacterizationCard(QWidget):
 
         self.compliance_edit = LineEdit()
         self.compliance_edit.setText("500 mV")
+        self.compliance_edit.setReadOnly(True)
         self.compliance_field = self._bounded("compliance", self.compliance_edit)
-        form_layout.addRow("Compliance:", self.compliance_field)
+        self.compliance_field.edit_button.hide()
+        form_layout.addRow("Compliance (Keithley card):", self.compliance_field)
 
         self.dwell_edit = LineEdit()
         self.dwell_edit.setText("50 ms")
+        self.dwell_edit.setReadOnly(True)
         self.dwell_field = self._bounded("settle", self.dwell_edit)
-        form_layout.addRow("Dwell time:", self.dwell_field)
+        self.dwell_field.edit_button.hide()
+        form_layout.addRow("Settling time (Keithley card):", self.dwell_field)
 
         config_layout.addLayout(form_layout)
+
+        self.shared_configuration_label = CaptionLabel(
+            "Source and measurement settings are inherited from the Keithley card."
+        )
+        self.shared_configuration_label.setObjectName("characterizationSharedConfiguration")
+        self.shared_configuration_label.setWordWrap(True)
+        config_layout.addWidget(self.shared_configuration_label)
 
         self.sense_warning_label = CaptionLabel(
             "⚠️ 4-wire (Kelvin) mode is enabled in Settings for this channel. "
@@ -483,18 +501,18 @@ class KeithleyCharacterizationCard(QWidget):
     def _on_channel_changed(self) -> None:
         self.refresh_limits()
         self._update_limits_from_settings()
+        self.refresh_shared_source_configuration()
 
     def _on_mode_changed(self) -> None:
         self.refresh_limits()
         if self._is_current_mode():
-            self.compliance_edit.setText("500 mV")
             self.start_level_edit.setText("-100 uA")
             self.stop_level_edit.setText("100 uA")
         else:
-            self.compliance_edit.setText("100 uA")
             self.start_level_edit.setText("-100 mV")
             self.stop_level_edit.setText("100 mV")
         self._update_plot_labels()
+        self.refresh_shared_source_configuration()
 
 
     # -------------------------------------------------------------------------
@@ -506,6 +524,90 @@ class KeithleyCharacterizationCard(QWidget):
         self._inventory_store = store
         self.refresh_samples_list()
         self._restore_saved_metadata_selection()
+
+    def set_source_request_provider(
+        self,
+        provider: Callable[[str, str, float | None], KeithleySourceRequest],
+        compliance_policy_provider: Callable[[str], str] | None = None,
+    ) -> None:
+        """Use the normal Keithley card as the only hardware-configuration source."""
+        self._source_request_provider = provider
+        self._compliance_policy_provider = compliance_policy_provider
+        self.refresh_shared_source_configuration()
+
+    def refresh_shared_source_configuration(self) -> None:
+        """Project the normal card's current hardware settings into this page."""
+        if self._source_request_provider is None:
+            return
+        channel = self._selected_channel()
+        mode = "current" if self._is_current_mode() else "voltage"
+        try:
+            request = self._source_request_provider(channel, mode, None)
+        except Exception as exc:
+            self.shared_configuration_label.setText(
+                f"Keithley card settings are not valid: {exc}"
+            )
+            self.shared_configuration_label.setStyleSheet(
+                "color: #dc2626; font-weight: 600;"
+            )
+            return
+
+        compliance_dimension = (
+            DIMENSION_VOLTAGE if mode == "current" else DIMENSION_CURRENT
+        )
+        compliance_unit = "mV" if mode == "current" else "uA"
+        self.compliance_edit.setText(
+            format_quantity_auto(
+                request.compliance_si,
+                compliance_dimension,
+                preferred_unit=compliance_unit,
+            )
+        )
+        self.dwell_edit.setText(
+            format_quantity_auto(
+                request.settle_time_s,
+                DIMENSION_TIME,
+                preferred_unit="ms",
+            )
+        )
+        source_dimension = (
+            DIMENSION_CURRENT if mode == "current" else DIMENSION_VOLTAGE
+        )
+        source_range = (
+            "AUTO"
+            if request.source_autorange
+            else format_quantity_auto(request.source_range_si or 0.0, source_dimension)
+        )
+        voltage_range = (
+            "AUTO"
+            if request.measure_voltage_autorange
+            else format_quantity_auto(
+                request.measure_voltage_range_si or 0.0, DIMENSION_VOLTAGE
+            )
+        )
+        current_range = (
+            "AUTO"
+            if request.measure_current_autorange
+            else format_quantity_auto(
+                request.measure_current_range_si or 0.0, DIMENSION_CURRENT
+            )
+        )
+        sense = "2-wire local" if request.sense_mode == "2wire" else "4-wire Kelvin"
+        policy = (
+            self._compliance_policy_provider(channel)
+            if self._compliance_policy_provider is not None
+            else "stop"
+        )
+        self.shared_configuration_label.setText(
+            "Inherited from Keithley card · "
+            f"compliance policy {policy} · "
+            f"NPLC {request.nplc:g} · settling {self.dwell_edit.text()} · "
+            f"source range {source_range} · measure V {voltage_range} · "
+            f"measure I {current_range} · {sense}"
+        )
+        self.shared_configuration_label.setStyleSheet(
+            "" if policy == "stop" else "color: #dc2626; font-weight: 600;"
+        )
 
     def refresh_samples_list(self) -> None:
         """Reload samples from inventory store into the sample combobox."""
@@ -1086,14 +1188,6 @@ class KeithleyCharacterizationCard(QWidget):
             self.sense_warning_label.setVisible(is_4wire)
             limits = channel_settings.lab_limits
             if self._is_current_mode():
-                max_comp_si = parse_quantity(limits.voltage_compliance.max, DIMENSION_VOLTAGE).si_value
-                try:
-                    current_comp_si = abs(parse_quantity(self.compliance_edit.text(), DIMENSION_VOLTAGE).si_value)
-                    if current_comp_si > max_comp_si:
-                        self.compliance_edit.setText(limits.voltage_compliance.max)
-                except Exception:
-                    self.compliance_edit.setText(limits.voltage_compliance.max)
-
                 min_curr_si = parse_quantity(limits.source_current.min, DIMENSION_CURRENT).si_value
                 max_curr_si = parse_quantity(limits.source_current.max, DIMENSION_CURRENT).si_value
                 try:
@@ -1113,14 +1207,6 @@ class KeithleyCharacterizationCard(QWidget):
                 except Exception:
                     pass
             else:
-                max_comp_si = parse_quantity(limits.current_compliance.max, DIMENSION_CURRENT).si_value
-                try:
-                    current_comp_si = abs(parse_quantity(self.compliance_edit.text(), DIMENSION_CURRENT).si_value)
-                    if current_comp_si > max_comp_si:
-                        self.compliance_edit.setText(limits.current_compliance.max)
-                except Exception:
-                    self.compliance_edit.setText(limits.current_compliance.max)
-
                 min_volt_si = parse_quantity(limits.source_voltage.min, DIMENSION_VOLTAGE).si_value
                 max_volt_si = parse_quantity(limits.source_voltage.max, DIMENSION_VOLTAGE).si_value
                 try:
@@ -1149,12 +1235,29 @@ class KeithleyCharacterizationCard(QWidget):
         mode = "current" if is_current else "voltage"
 
         dim_sweep = DIMENSION_CURRENT if is_current else DIMENSION_VOLTAGE
-        dim_comp = DIMENSION_VOLTAGE if is_current else DIMENSION_CURRENT
 
         start_si = parse_quantity(self.start_level_edit.text(), dim_sweep).si_value
         stop_si = parse_quantity(self.stop_level_edit.text(), dim_sweep).si_value
-        comp_si = abs(parse_quantity(self.compliance_edit.text(), dim_comp).si_value)
-        dwell_si = max(0.0, parse_quantity(self.dwell_edit.text(), DIMENSION_TIME).si_value)
+        if self._source_request_provider is None or self._compliance_policy_provider is None:
+            raise SafetyViolation(
+                "Shared normal Keithley card configuration is unavailable; "
+                "characterization cannot start."
+            )
+        shared_request = self._source_request_provider(ch, mode, start_si)
+        if shared_request.channel != ch or shared_request.mode != mode:
+            raise SafetyViolation(
+                "Keithley card returned a different channel or source mode."
+            )
+        comp_si = shared_request.compliance_si
+        dwell_si = shared_request.settle_time_s
+        compliance_policy = self._compliance_policy_provider(ch)
+
+        if compliance_policy != "stop":
+            raise SafetyViolation(
+                "Characterization is blocked because the normal Keithley card "
+                f"uses compliance policy {compliance_policy!r}. Select 'Stop on "
+                "compliance' there before the manual check and characterization."
+            )
 
         if comp_si <= 0:
             raise ValueError("Compliance limit must be greater than zero.")
@@ -1179,12 +1282,6 @@ class KeithleyCharacterizationCard(QWidget):
             except ValueError:
                 pass
 
-        try:
-            channel_settings = self._settings.keithley.safety.channels[ch]
-            sense_mode = channel_settings.sense_mode
-        except Exception:
-            sense_mode = "2wire"
-
         metadata = SampleMetadata(
             sample_id=self.sample_id_edit.text().strip() or "Sample-1",
             structure_name=self.structure_edit.text().strip(),
@@ -1201,8 +1298,16 @@ class KeithleyCharacterizationCard(QWidget):
             stop_level_si=stop_si,
             points_count=self.points_spin.value(),
             compliance_si=comp_si,
+            compliance_policy=compliance_policy,  # type: ignore[arg-type]
             dwell_time_s=dwell_si,
-            sense_mode=sense_mode,
+            nplc=shared_request.nplc,
+            sense_mode=shared_request.sense_mode,
+            source_autorange=shared_request.source_autorange,
+            source_range_si=shared_request.source_range_si,
+            measure_voltage_autorange=shared_request.measure_voltage_autorange,
+            measure_voltage_range_si=shared_request.measure_voltage_range_si,
+            measure_current_autorange=shared_request.measure_current_autorange,
+            measure_current_range_si=shared_request.measure_current_range_si,
             metadata=metadata,
         )
 
@@ -1318,8 +1423,9 @@ class KeithleyCharacterizationCard(QWidget):
 
     @Slot(str)
     def _on_compliance_event(self, msg: str) -> None:
-        self.metric_comp.setText("Compliance: ACTIVE (clamping)")
+        self.metric_comp.setText("Compliance: DETECTED — stopping safely")
         self.metric_comp.setStyleSheet("color: #ef4444; font-weight: bold;")
+        self.status_label.setText("Compliance detected — stopping and switching output OFF")
 
     @Slot(object)
     def _on_sweep_finished(self, dataset: CharacterizationDataset) -> None:
@@ -1328,7 +1434,24 @@ class KeithleyCharacterizationCard(QWidget):
         self.stop_button.setEnabled(False)
         self.pdf_button.setEnabled(True)
         self.csv_button.setEnabled(True)
-        self.status_label.setText("Measurement completed successfully")
+        if dataset.completion_status == "stopped_on_compliance":
+            self.status_label.setText(
+                f"Stopped safely on compliance after {len(dataset.points)} of "
+                f"{dataset.config.points_count} points — output OFF"
+            )
+            self.banner.show_message(
+                dataset.termination_detail
+                or "Compliance detected. The sweep stopped before the next setpoint and the output was switched OFF.",
+                severity="warning",
+                timeout_ms=0,
+            )
+        elif dataset.completion_status == "cancelled":
+            self.status_label.setText(
+                f"Measurement cancelled after {len(dataset.points)} of "
+                f"{dataset.config.points_count} points — output OFF"
+            )
+        else:
+            self.status_label.setText("Measurement completed successfully — output OFF")
 
         # Run scientific analysis
         params = KeithleyCharacterizationAnalyzer.analyze(dataset)
@@ -1347,9 +1470,16 @@ class KeithleyCharacterizationCard(QWidget):
         if params.compliance_detected and params.compliance_onset_point:
             ci, cv = params.compliance_onset_point
             if dataset.config.mode == "current":
-                self.metric_comp.setText(f"Compliance: Onset |I|={abs(ci)*1e3:.2f} mA ({params.clamped_points_fraction*100:.0f}% saturation)")
+                onset = f"|I|={abs(ci)*1e3:.2f} mA"
             else:
-                self.metric_comp.setText(f"Compliance: Onset |V|={abs(cv)*1e3:.1f} mV ({params.clamped_points_fraction*100:.0f}% saturation)")
+                onset = f"|V|={abs(cv)*1e3:.1f} mV"
+            if dataset.completion_status == "stopped_on_compliance":
+                self.metric_comp.setText(f"Compliance: STOP at {onset}")
+            else:
+                self.metric_comp.setText(
+                    f"Compliance: Onset {onset} "
+                    f"({params.clamped_points_fraction*100:.0f}% saturation)"
+                )
             self.metric_comp.setStyleSheet("color: #ef4444; font-weight: bold;")
         else:
             self.metric_comp.setText("Compliance: None (linear ohmic range)")
@@ -1374,11 +1504,15 @@ class KeithleyCharacterizationCard(QWidget):
                     run_path="",
                     run_sha256="",
                     created_at_utc=getattr(dataset, "completed_at_iso", "") or datetime.now(timezone.utc).isoformat(),
-                    status="completed",
+                    status=dataset.completion_status,
                     point_count=len(dataset.points),
                     spectrum_count=0,
                     recipe_name=f"Keithley IV Characterization ({dataset.config.mode})",
-                    notes=f"R₀={r0:.1f} Ω, G₀={g0*1e3:.3f} mS, Linearity R²={params.linearity_r2:.4f}",
+                    notes=(
+                        f"R₀={r0:.1f} Ω, G₀={g0*1e3:.3f} mS, "
+                        f"Linearity R²={params.linearity_r2:.4f}"
+                        + (f"; {dataset.termination_detail}" if dataset.termination_detail else "")
+                    ),
                 )
                 self._inventory_store.record_run(rec)
                 self._populate_device_combo_for_selected_sample()
@@ -1487,6 +1621,7 @@ class KeithleyCharacterizationCard(QWidget):
         ):
             if field is not None:
                 field.validate_and_clamp()
+        self.refresh_shared_source_configuration()
 
     def closeEvent(self, event) -> None:
         """Safely terminate background acquisition worker on card close."""

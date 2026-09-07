@@ -97,6 +97,8 @@ class KeithleyCharacterizationUiTests(unittest.TestCase):
         """Verify invalid or out-of-limits parameters display a warning message in banner."""
         card = self.page.characterization_card
         card.channel_combo.setCurrentText("Channel B")
+        self.page._compliance_policy["B"] = "stop"
+        self.page._stop_on_compliance["B"] = True
         # Set level far exceeding channel limit
         card.stop_level_edit.setText("500 mA")
         card._on_start_clicked()
@@ -127,17 +129,17 @@ class KeithleyCharacterizationUiTests(unittest.TestCase):
     def test_set_settings_updates_characterization_card(self) -> None:
         """Verify updating station settings on KeithleyPage propagates to characterization card."""
         card = self.page.characterization_card
-        # Deepcopy and modify limits for Channel A (50 mV is safely within measured_voltage_trip)
+        # Tighten the enabled Channel B profile below the current shared draft.
         updated = deepcopy(self.settings.model_dump(mode="python"))
-        updated["devices"]["keithley"]["safety"]["channels"]["A"]["lab_limits"]["voltage_compliance"]["max"] = "50 mV"
+        updated["devices"]["keithley"]["safety"]["channels"]["B"]["lab_limits"]["voltage_compliance"]["max"] = "50 mV"
         new_settings = StationSettings.model_validate(updated)
 
         self.page.set_settings(new_settings)
         self.app.processEvents()
 
-        # Switch to Channel A
-        card.channel_combo.setCurrentText("Channel A")
+        card.channel_combo.setCurrentText("Channel B")
         self.app.processEvents()
+        self.assertEqual(self.page.compliance.text(), "50 mV")
         self.assertEqual(card.compliance_edit.text(), "50 mV")
 
     def test_live_compliance_marker_plotting(self) -> None:
@@ -187,6 +189,8 @@ class KeithleyCharacterizationUiTests(unittest.TestCase):
         """Verify that starting a sweep when device is disconnected shows an error banner."""
         card = self.page.characterization_card
         card.channel_combo.setCurrentText("Channel B")
+        self.page._compliance_policy["B"] = "stop"
+        self.page._stop_on_compliance["B"] = True
         self.app.processEvents()
 
         proxy = Mock()
@@ -629,6 +633,161 @@ class KeithleyCharacterizationUiTests(unittest.TestCase):
             finally:
                 store.close()
 
+    def test_compliance_finish_is_rendered_as_partial_safe_stop(self) -> None:
+        """A compliance stop must never be presented as a completed sweep."""
+        from app.devices.keithley_2600.characterization.models import (
+            CharacterizationDataset,
+            CharacterizationPoint,
+            CharacterizationSweepConfig,
+        )
+
+        card = self.page.characterization_card
+        cfg = CharacterizationSweepConfig(
+            channel="A",
+            mode="current",
+            start_level_si=0.0,
+            stop_level_si=0.001,
+            points_count=5,
+            compliance_si=0.1,
+        )
+        point = CharacterizationPoint(
+            index=0,
+            demanded_si=0.001,
+            measured_voltage_v=0.1,
+            measured_current_a=0.001,
+            true_resistance_ohm=100.0,
+            apparent_resistance_ohm=100.0,
+            power_w=0.0001,
+            compliance_active=True,
+            timestamp_epoch=1700000000.0,
+        )
+        detail = "Compliance detected at point 1/5; no subsequent setpoint was applied."
+        dataset = CharacterizationDataset(
+            config=cfg,
+            points=(point,),
+            started_at_iso="2026-09-07T12:00:00Z",
+            completed_at_iso="2026-09-07T12:00:01Z",
+            completion_status="stopped_on_compliance",
+            termination_detail=detail,
+        )
+
+        host = FluentPageHost(card)
+        try:
+            host.resize(1366, 768)
+            host.show()
+            self.app.processEvents()
+
+            card._on_sweep_finished(dataset)
+            self.app.processEvents()
+
+            self.assertTrue(card.isVisible())
+            self.assertGreater(card.geometry().width(), 0)
+            self.assertIn("Stopped safely on compliance", card.status_label.text())
+            self.assertIn("output OFF", card.status_label.text())
+            self.assertNotIn("completed successfully", card.status_label.text())
+            self.assertIn("Compliance: STOP at", card.metric_comp.text())
+            self.assertEqual(card.banner.last_message, detail)
+            self.assertEqual(card.banner.last_severity, "warning")
+            self.assertTrue(card.csv_button.isEnabled())
+            self.assertTrue(card.pdf_button.isEnabled())
+        finally:
+            host.close()
+
+    def test_characterization_inherits_complete_normal_keithley_request(self) -> None:
+        """Only the source level may differ between the card and sweep points."""
+        from dataclasses import fields, replace
+
+        from app.devices.keithley_2600.characterization.runner import (
+            KeithleyCharacterizationRunner,
+        )
+        from app.devices.keithley_2600 import KeithleySourceRequest
+        from app.domain.quantities import DIMENSION_TIME, DIMENSION_VOLTAGE, parse_quantity
+
+        page = self.page
+        card = page.characterization_card
+        page.channel.setCurrentText("B")
+        page._compliance_policy["B"] = "stop"
+        page._stop_on_compliance["B"] = True
+        page.mode.setCurrentText("current")
+        page.level.setText("1 mA")
+        page.compliance.setText("50 mV")
+        page.nplc.setText("2.5")
+        page.settle.setText("75 ms")
+        page.source_autorange.setChecked(False)
+        page.source_range.setText("10 mA")
+        page.measure_voltage_autorange.setChecked(False)
+        page.measure_voltage_range.setText("100 mV")
+        page.measure_current_autorange.setChecked(False)
+        page.measure_current_range.setText("10 mA")
+        card.start_level_edit.setText("500 uA")
+        card.stop_level_edit.setText("2 mA")
+        card.refresh_shared_source_configuration()
+
+        normal_request = page._source_request()
+        config = card._build_config()
+        first_sweep_request = KeithleyCharacterizationRunner.source_request_for_level(
+            config, config.start_level_si
+        )
+        last_sweep_request = KeithleyCharacterizationRunner.source_request_for_level(
+            config, config.stop_level_si
+        )
+
+        self.assertEqual(
+            first_sweep_request,
+            replace(normal_request, level_si=config.start_level_si),
+        )
+        for field in fields(KeithleySourceRequest):
+            if field.name != "level_si":
+                self.assertEqual(
+                    getattr(first_sweep_request, field.name),
+                    getattr(last_sweep_request, field.name),
+                    field.name,
+                )
+        self.assertTrue(card.compliance_edit.isReadOnly())
+        self.assertTrue(card.dwell_edit.isReadOnly())
+        self.assertAlmostEqual(
+            parse_quantity(card.compliance_edit.text(), DIMENSION_VOLTAGE).si_value,
+            0.050,
+        )
+        self.assertAlmostEqual(
+            parse_quantity(card.dwell_edit.text(), DIMENSION_TIME).si_value,
+            0.075,
+        )
+        self.assertIn("NPLC 2.5", card.shared_configuration_label.text())
+        self.assertIn("compliance policy stop", card.shared_configuration_label.text())
+        self.assertIn("source range 10 mA", card.shared_configuration_label.text())
+        self.assertIn("measure V 100 mV", card.shared_configuration_label.text())
+        self.assertIn("measure I 10 mA", card.shared_configuration_label.text())
+        self.assertIn("2-wire local", card.shared_configuration_label.text())
+
+    def test_characterization_blocks_non_stop_policy_from_normal_card(self) -> None:
+        """A manual warn/skip policy cannot be silently replaced for a sweep."""
+        from app.domain.errors import SafetyViolation
+
+        page = self.page
+        card = page.characterization_card
+        page._compliance_policy[page.channel.currentText()] = "warn_clamp"
+        card.refresh_shared_source_configuration()
+
+        with self.assertRaisesRegex(SafetyViolation, "Select 'Stop on compliance'"):
+            card._build_config()
+
+        self.assertIn("compliance policy warn_clamp", card.shared_configuration_label.text())
+
+    def test_characterization_cannot_build_an_independent_hardware_configuration(self) -> None:
+        """A detached card must fail closed instead of using local defaults."""
+        from app.domain.errors import SafetyViolation
+
+        card = KeithleyCharacterizationCard(self.controller, self.settings)
+        try:
+            with self.assertRaisesRegex(
+                SafetyViolation,
+                "Shared normal Keithley card configuration is unavailable",
+            ):
+                card._build_config()
+        finally:
+            card.deleteLater()
+
     def test_keithley_page_configuration_panel_range_mode(self) -> None:
         """Verify KeithleyPage configuration panel fields use SafetyRangePill with widened Edit buttons."""
         panel = self.page.configuration_panel
@@ -728,6 +887,9 @@ class KeithleyCharacterizationUiTests(unittest.TestCase):
     def test_diameter_cell_hint_and_metadata_export(self) -> None:
         """Verify cell hints detect P1-P10 pillar designs and pass diameter to sweep config."""
         card = self.page.characterization_card
+        active_channel = self.page.channel.currentText()
+        self.page._compliance_policy[active_channel] = "stop"
+        self.page._stop_on_compliance[active_channel] = True
 
         # Cell notes mentioning "P8" (600 nm pillar)
         card._try_parse_and_fill_cell_hints(notes="Tested structure P8 with MgO barrier", label="R3C2")
@@ -748,6 +910,9 @@ class KeithleyCharacterizationUiTests(unittest.TestCase):
         from app.ui.settings_page import SettingsPage
 
         card = self.page.characterization_card
+        active_channel = self.page.channel.currentText()
+        self.page._compliance_policy[active_channel] = "stop"
+        self.page._stop_on_compliance[active_channel] = True
 
         # 1. Neither KeithleyPage nor CharacterizationCard has a sense_mode combo box
         self.assertFalse(hasattr(card, "sense_combo"))
@@ -789,10 +954,9 @@ class KeithleyCharacterizationUiTests(unittest.TestCase):
         new_settings = StationSettings.model_validate(updated)
         self.page.set_settings(new_settings)
         card.channel_combo.setCurrentText("Channel B")
+        self.page._compliance_policy["B"] = "stop"
+        self.page._stop_on_compliance["B"] = True
         self.app.processEvents()
 
         self.assertEqual(card._build_config().sense_mode, "4wire")
         self.assertFalse(card.sense_warning_label.isHidden())
-
-
-

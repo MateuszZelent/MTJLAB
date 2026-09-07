@@ -21,6 +21,7 @@ from app.domain.quantities import (
     DIMENSION_RESISTANCE,
     DIMENSION_TIME,
     DIMENSION_VOLTAGE,
+    format_quantity_auto,
     parse_quantity,
 )
 
