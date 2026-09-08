@@ -482,6 +482,14 @@ class QuickControlCoordinator(QObject):
             for target, value in result.items():
                 if str(target) in QUICK_CONTROLS_BY_TARGET:
                     target = str(target)
+                    if (
+                        target in self._pending.get(device, {})
+                        or (
+                            self._inflight.get(device) is not None
+                            and self._inflight[device].target == target
+                        )
+                    ):
+                        continue
                     adopt_draft = target in self._adopt_readback_targets[device]
                     self.confirmed_snapshot(
                         target, float(value), adopt_draft=adopt_draft
@@ -503,8 +511,9 @@ class QuickControlCoordinator(QObject):
         if request is not None:
             if operation == "quick_configure":
                 self.configuration_verified.emit(request.target, payload)
+            has_newer = request.target in self._pending[device]
             self.confirmed_snapshot(
-                request.target, float(result), adopt_draft=True
+                request.target, float(result), adopt_draft=not has_newer
             )
             descriptor = QUICK_CONTROLS_BY_TARGET[request.target]
             if descriptor.device_module == "rigol" and request.target.rsplit(".", 1)[-1] in {
@@ -519,7 +528,8 @@ class QuickControlCoordinator(QObject):
                     for descriptor in QUICK_CONTROL_DESCRIPTORS
                     if descriptor.atomic_group == atomic_group
                 )
-            self.value_read.emit(request.target, float(result))
+            if not has_newer:
+                self.value_read.emit(request.target, float(result))
             self.state_changed.emit(
                 request.target,
                 "applied",

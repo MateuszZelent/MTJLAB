@@ -5,7 +5,7 @@ from __future__ import annotations
 
 import math
 import time
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from copy import deepcopy
 from dataclasses import dataclass, replace
 from typing import Any
@@ -1442,6 +1442,10 @@ class KeithleyPage(QWidget):
         self._compliance_block_modes: dict[str, str] = {}
         self._pending_compliance_policy: dict[str, str] = {}
         self._previous_compliance_policy: dict[str, str] = {}
+        self._characterization_policy_requests: dict[
+            str, tuple[str, bool, Callable[[str], None], Callable[[str], None]]
+        ] = {}
+        self._characterization_policy_runtime: dict[str, str] = {}
         self._latest_measurements: dict[str, KeithleyMeasurement] = {}
         self._last_configuration_readback: KeithleyConfigurationReadback | None = None
         self._ramp_pending = False
@@ -1802,6 +1806,7 @@ class KeithleyPage(QWidget):
         self.characterization_card.set_source_request_provider(
             self._characterization_source_request,
             self._characterization_compliance_policy,
+            self._request_characterization_policy_transition,
         )
         self.channel.currentTextChanged.connect(self._channel_changed)
         self.mode.currentTextChanged.connect(self._mode_changed)
@@ -1955,6 +1960,10 @@ class KeithleyPage(QWidget):
             return
         if self._loading_form_snapshot or self._quick_control_projection:
             return
+        if bool(self.level.property("precisionArrowStepInProgress")):
+            if hasattr(self, "_live_level_timer"):
+                self._live_level_timer.start(160)
+            return
 
         channel = self.channel.currentText()
         mode = self.mode.currentText()
@@ -1993,6 +2002,10 @@ class KeithleyPage(QWidget):
         if not self._is_device_connected():
             return
         if self._loading_form_snapshot or self._quick_control_projection:
+            return
+        if bool(self.compliance.property("precisionArrowStepInProgress")):
+            if hasattr(self, "_live_compliance_timer"):
+                self._live_compliance_timer.start(160)
             return
         channel = self.channel.currentText()
         mode = self.mode.currentText()
@@ -2047,6 +2060,12 @@ class KeithleyPage(QWidget):
             return
         _device, channel, mode = parts
         if channel != self.channel.currentText() or mode != self.mode.currentText():
+            return
+        if (
+            self.level.hasFocus()
+            or bool(self.level.property("precisionArrowStepInProgress"))
+            or (hasattr(self, "_live_level_timer") and self._live_level_timer.isActive())
+        ):
             return
         dimension = DIMENSION_CURRENT if mode == "current" else DIMENSION_VOLTAGE
         preferred_unit = self._extract_unit(self.level.text(), dimension) or (
@@ -4325,6 +4344,15 @@ class KeithleyPage(QWidget):
         # form is an active user draft and must not be replaced by persisted
         # defaults unless the page is being constructed or the user explicitly
         # imports device values.
+        previous_runtime_policies = dict(self._compliance_policy)
+        previous_default_policy = (
+            getattr(self._station_settings.keithley.safety, "compliance_policy", None)
+            or (
+                "stop"
+                if bool(self._station_settings.keithley.safety.stop_on_compliance)
+                else "warn_clamp"
+            )
+        )
         self._remember_source_values()
         snapshots = dict(self._channel_form_snapshots)
         active_channel = self.channel.currentText()
@@ -4344,21 +4372,33 @@ class KeithleyPage(QWidget):
             getattr(settings.keithley.safety, "compliance_policy", None)
             or ("stop" if bool(settings.keithley.safety.stop_on_compliance) else "warn_clamp")
         )
-        default_stop = (default_policy == "stop")
+        policy_changed_in_settings = default_policy != previous_default_policy
         for channel in ("A", "B"):
-            if channel not in self._pending_compliance_policy:
-                self._stop_on_compliance[channel] = default_stop
-                self._compliance_policy[channel] = default_policy
+            # A characterization may be running under a temporary runtime
+            # policy.  Saving unrelated station settings must not overwrite
+            # that live policy in the page projection while the adapter is
+            # energizing a DUT.
+            if (
+                channel not in self._pending_compliance_policy
+                and channel not in self._characterization_policy_runtime
+            ):
+                target_policy = (
+                    default_policy
+                    if policy_changed_in_settings
+                    else previous_runtime_policies.get(channel, default_policy)
+                )
+                self._stop_on_compliance[channel] = (target_policy == "stop")
+                self._compliance_policy[channel] = target_policy
                 if channel in self.channel_cards:
                     toggle = self.channel_cards[channel]["stop_compliance_toggle"]
                     toggle.blockSignals(True)
-                    toggle.setChecked(default_stop)
+                    toggle.setChecked(target_policy == "stop")
                     toggle.blockSignals(False)
                     combo = self.channel_cards[channel].get("compliance_policy_combo")
                     if combo is not None:
                         combo.blockSignals(True)
                         for i in range(combo.count()):
-                            if combo.itemData(i) == default_policy:
+                            if combo.itemData(i) == target_policy:
                                 combo.setCurrentIndex(i)
                                 break
                         combo.blockSignals(False)
@@ -4708,11 +4748,18 @@ class KeithleyPage(QWidget):
             self._set_channel_output(channel, self._output_states[channel])
             self._update_output_readiness()
 
-    def _set_compliance_policy(self, channel: str, policy: str | bool) -> None:
+    def _set_compliance_policy(self, channel: str, policy: str | bool) -> bool:
         if channel not in self.channel_cards:
-            return
+            return False
         if self._pending_compliance_policy:
-            return
+            return False
+        if (
+            channel in self._characterization_policy_runtime
+            and channel not in self._characterization_policy_requests
+        ):
+            # The normal policy selector is locked while characterization is
+            # using its temporary stop-on-compliance transaction.
+            return False
         if isinstance(policy, bool):
             policy_str = "stop" if policy else "warn_clamp"
         else:
@@ -4735,6 +4782,42 @@ class KeithleyPage(QWidget):
         )
         self.characterization_card.refresh_shared_source_configuration()
         self._controller.call("set_compliance_policy", (channel, policy_str))
+        return True
+
+    def _request_characterization_policy_transition(
+        self,
+        channel: str,
+        policy: str,
+        temporary: bool,
+        on_applied: Callable[[str], None],
+        on_failed: Callable[[str], None],
+    ) -> bool:
+        """Apply a characterization-only policy through the normal card path.
+
+        The normal page owns the pending request and its result/readback.  The
+        characterization card receives callbacks only after the adapter has
+        confirmed the exact requested policy, which prevents it from starting
+        a worker on a stale UI value.
+        """
+
+        if channel not in self.channel_cards:
+            return False
+        if policy not in {"stop", "warn_clamp", "skip"}:
+            return False
+        if channel in self._characterization_policy_requests:
+            return False
+        if self._pending_compliance_policy:
+            return False
+        self._characterization_policy_requests[channel] = (
+            policy,
+            bool(temporary),
+            on_applied,
+            on_failed,
+        )
+        if not self._set_compliance_policy(channel, policy):
+            self._characterization_policy_requests.pop(channel, None)
+            return False
+        return True
 
     def _compliance_increase_is_blocked(
         self,
@@ -4956,6 +5039,9 @@ class KeithleyPage(QWidget):
             channel = next(
                 iter(self._pending_compliance_policy), self.channel.currentText()
             )
+            characterization_request = self._characterization_policy_requests.pop(
+                channel, None
+            )
             self._pending_compliance_policy.pop(channel, None)
             self._previous_compliance_policy.pop(channel, None)
             if isinstance(result, bool):
@@ -4964,12 +5050,52 @@ class KeithleyPage(QWidget):
                 policy_str = result
             else:
                 policy_str = "stop"
+            characterization_error: str | None = None
+            characterization_callbacks: tuple[
+                Callable[[str], None], Callable[[str], None]
+            ] | None = None
+            if characterization_request is not None:
+                desired_policy, temporary, on_applied, on_failed = (
+                    characterization_request
+                )
+                characterization_callbacks = (on_applied, on_failed)
+                if policy_str != desired_policy:
+                    characterization_error = (
+                        f"Keithley returned {policy_str!r}; expected {desired_policy!r}."
+                    )
+                else:
+                    try:
+                        readback_policy = str(
+                            self._controller.adapter_for_run().compliance_policy(channel)
+                        )
+                    except Exception as exc:
+                        characterization_error = (
+                            f"Keithley compliance policy readback failed: {exc}"
+                        )
+                    else:
+                        if readback_policy != desired_policy:
+                            characterization_error = (
+                                "Keithley compliance policy readback returned "
+                                f"{readback_policy!r}; expected {desired_policy!r}."
+                            )
+                if characterization_error is None:
+                    if temporary:
+                        self._characterization_policy_runtime[channel] = desired_policy
+                    else:
+                        self._characterization_policy_runtime.pop(channel, None)
             if channel in self.channel_cards:
                 self._compliance_policy[channel] = policy_str
                 self._stop_on_compliance[channel] = (policy_str == "stop")
+                keep_locked = (
+                    characterization_request is not None
+                    and (
+                        characterization_error is not None
+                        or characterization_request[1]
+                    )
+                )
                 combo = self.channel_cards[channel].get("compliance_policy_combo")
                 if combo is not None:
-                    combo.setEnabled(True)
+                    combo.setEnabled(not keep_locked)
                     combo.blockSignals(True)
                     for i in range(combo.count()):
                         if combo.itemData(i) == policy_str:
@@ -4978,7 +5104,7 @@ class KeithleyPage(QWidget):
                     combo.blockSignals(False)
                 toggle = self.channel_cards[channel].get("stop_compliance_toggle")
                 if toggle is not None:
-                    toggle.setEnabled(True)
+                    toggle.setEnabled(not keep_locked)
                     toggle.blockSignals(True)
                     toggle.setChecked(policy_str == "stop")
                     toggle.blockSignals(False)
@@ -4992,6 +5118,12 @@ class KeithleyPage(QWidget):
                 f"Keithley CH {channel}: compliance policy '{policy_str}' active"
             )
             self.characterization_card.refresh_shared_source_configuration()
+            if characterization_callbacks is not None:
+                on_applied, on_failed = characterization_callbacks
+                if characterization_error is None:
+                    on_applied(policy_str)
+                else:
+                    on_failed(characterization_error)
         elif operation == "recover_from_compliance" and isinstance(result, dict):
             channel = str(result.get("channel", ""))
             if channel not in self.channel_cards:
@@ -5124,6 +5256,9 @@ class KeithleyPage(QWidget):
             channel = next(
                 iter(self._pending_compliance_policy), self.channel.currentText()
             )
+            characterization_request = self._characterization_policy_requests.pop(
+                channel, None
+            )
             previous = self._previous_compliance_policy.pop(
                 channel, self._compliance_policy.get(channel, "stop")
             )
@@ -5134,10 +5269,14 @@ class KeithleyPage(QWidget):
                 prev_policy = str(previous)
             self._compliance_policy[channel] = prev_policy
             self._stop_on_compliance[channel] = (prev_policy == "stop")
+            keep_locked = (
+                characterization_request is not None
+                and not characterization_request[1]
+            )
             if channel in self.channel_cards:
                 combo = self.channel_cards[channel].get("compliance_policy_combo")
                 if combo is not None:
-                    combo.setEnabled(True)
+                    combo.setEnabled(not keep_locked)
                     combo.blockSignals(True)
                     for i in range(combo.count()):
                         if combo.itemData(i) == prev_policy:
@@ -5146,7 +5285,7 @@ class KeithleyPage(QWidget):
                     combo.blockSignals(False)
                 toggle = self.channel_cards[channel].get("stop_compliance_toggle")
                 if toggle is not None:
-                    toggle.setEnabled(True)
+                    toggle.setEnabled(not keep_locked)
                     toggle.blockSignals(True)
                     toggle.setChecked(prev_policy == "stop")
                     toggle.blockSignals(False)
@@ -5159,6 +5298,9 @@ class KeithleyPage(QWidget):
             )
             self.status.emit(f"Keithley CH {channel}: compliance policy failed: {error}")
             self.characterization_card.refresh_shared_source_configuration()
+            if characterization_request is not None:
+                _desired, _temporary, _on_applied, on_failed = characterization_request
+                on_failed(error)
             return
         if operation == "set_dut_output_off_mode":
             channel = self._dut_isolation_channel

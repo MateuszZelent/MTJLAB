@@ -16,11 +16,12 @@ class KeithleyDataExporter:
         """Write characterization dataset to a standardized CSV file."""
         target = Path(file_path)
         target.parent.mkdir(parents=True, exist_ok=True)
+        temporary = target.with_name(f".{target.name}.tmp")
 
         config = dataset.config
         meta = config.metadata
 
-        with target.open("w", newline="", encoding="utf-8") as f:
+        with temporary.open("w", newline="", encoding="utf-8") as f:
             # Metadata header
             f.write("# MTJLAB - Keithley Sample Characterization Dataset\n")
             f.write(f"# Sample ID: {meta.sample_id}\n")
@@ -86,4 +87,7 @@ class KeithleyDataExporter:
                     f"{p.timestamp_epoch:.4f}",
                 ])
 
+            f.flush()
+
+        temporary.replace(target)
         return target

@@ -5,7 +5,7 @@ from __future__ import annotations
 from copy import deepcopy
 import os
 import unittest
-from unittest.mock import Mock
+from unittest.mock import Mock, patch
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
@@ -16,6 +16,7 @@ from app.devices.keithley_2600.ui.page import KeithleyPage
 from app.devices.keithley_2600.ui.characterization_card import KeithleyCharacterizationCard
 from app.devices.simulators import simulated_station_settings
 from app.settings.models import StationSettings
+from app.ui.dialogs import StationMessageBox
 from app.ui.shell.page_host import FluentPageHost
 from app.ui.widgets import LimitField
 from tests.helpers import loaded_settings
@@ -173,15 +174,17 @@ class KeithleyCharacterizationUiTests(unittest.TestCase):
         self.assertAlmostEqual(yr_data[0], 450.0)
 
         # Switch to resistance view and verify curve visibility
-        card._set_plot_view(1)
+        card.plot_view_nav.setCurrentItem("res")
         self.app.processEvents()
+        self.assertEqual(card._active_plot_view, 1)
         self.assertTrue(card.curve_r_true.isVisible())
         self.assertFalse(card.curve_iv.isVisible())
         self.assertIn("Resistance", card.plot_widget.getAxis("left").labelText)
 
         # Switch back to IV view
-        card._set_plot_view(0)
+        card.plot_view_nav.setCurrentItem("iv")
         self.app.processEvents()
+        self.assertEqual(card._active_plot_view, 0)
         self.assertTrue(card.curve_iv.isVisible())
         self.assertFalse(card.curve_r_true.isVisible())
 
@@ -550,6 +553,7 @@ class KeithleyCharacterizationUiTests(unittest.TestCase):
                 sample = Sample(
                     sample_id="RUN-SAMPLE",
                     name="Run Test Sample",
+                    folder_name="1_RunTestSample",
                     rows=("1",),
                     cols=("1",),
                     device_labels={"1,1": "Cell 11"},
@@ -622,6 +626,16 @@ class KeithleyCharacterizationUiTests(unittest.TestCase):
                 self.assertEqual(runs[0].col, "1")
                 self.assertEqual(runs[0].status, "completed")
                 self.assertEqual(runs[0].point_count, 2)
+                self.assertTrue(Path(runs[0].csv_path).is_file())
+                self.assertTrue(Path(runs[0].report_path).is_file())
+                self.assertEqual(runs[0].run_path, runs[0].csv_path)
+                self.assertTrue(
+                    Path(runs[0].csv_path).is_relative_to(store.catalogue_root / sample.folder_name)
+                )
+                self.assertIn(
+                    str(Path("measurements") / "Keithley_2600" / "characterization" / "R1C1"),
+                    runs[0].csv_path,
+                )
 
                 # Verify cell state was marked as 'measured'
                 sample_after = store.get_sample("RUN-SAMPLE")
@@ -773,6 +787,112 @@ class KeithleyCharacterizationUiTests(unittest.TestCase):
             card._build_config()
 
         self.assertIn("compliance policy warn_clamp", card.shared_configuration_label.text())
+
+    def test_characterization_policy_transition_is_readback_verified_and_restored(self) -> None:
+        """Temporary stop policy is locked during a run and restored afterwards."""
+
+        page = self.page
+        proxy = Mock()
+        proxy.compliance_policy.return_value = "stop"
+        self.controller.adapter_for_run.return_value = proxy
+        applied: list[str] = []
+        failed: list[str] = []
+
+        self.assertTrue(
+            page._request_characterization_policy_transition(
+                "A", "stop", True, applied.append, failed.append
+            )
+        )
+        self.assertEqual(page._pending_compliance_policy, {"A": "stop"})
+        page._result("set_compliance_policy", "stop")
+        self.assertEqual(applied, ["stop"])
+        self.assertEqual(failed, [])
+        self.assertEqual(page._characterization_policy_runtime, {"A": "stop"})
+        self.assertFalse(
+            page.channel_cards["A"]["compliance_policy_combo"].isEnabled()
+        )
+
+        # An unrelated profile refresh must keep the live runtime projection
+        # aligned with the adapter while characterization owns the channel.
+        updated = deepcopy(page._station_settings.model_dump(mode="python"))
+        updated["devices"]["keithley"]["safety"]["channels"]["A"][
+            "defaults"
+        ]["nplc"] = 2.0
+        page.set_settings(StationSettings.model_validate(updated))
+        self.assertEqual(page._compliance_policy["A"], "stop")
+
+        proxy.compliance_policy.return_value = "warn_clamp"
+        restored: list[str] = []
+        self.assertTrue(
+            page._request_characterization_policy_transition(
+                "A", "warn_clamp", False, restored.append, failed.append
+            )
+        )
+        page._result("set_compliance_policy", "warn_clamp")
+        self.assertEqual(restored, ["warn_clamp"])
+        self.assertEqual(page._characterization_policy_runtime, {})
+        self.assertTrue(
+            page.channel_cards["A"]["compliance_policy_combo"].isEnabled()
+        )
+
+    def test_characterization_warn_policy_requires_confirmation_before_hardware_run(self) -> None:
+        """Warn/clamp confirmation changes policy before any worker/output command."""
+
+        page = self.page
+        card = page.characterization_card
+        card.channel_combo.setCurrentText("Channel B")
+        proxy = Mock()
+        proxy.connected = True
+        proxy.compliance_policy.return_value = "warn_clamp"
+        proxy.read_configuration.return_value = Mock(
+            channels=(Mock(channel="B", output_enabled=False),)
+        )
+        self.controller.adapter_for_run.return_value = proxy
+
+        with patch(
+            "app.devices.keithley_2600.ui.characterization_card.StationMessageBox.warning",
+            return_value=StationMessageBox.StandardButton.Yes,
+        ):
+            card._on_start_clicked()
+
+        self.app.processEvents()
+        self.assertEqual(card._temporary_policy_phase, "setting")
+        self.assertIsNone(card._worker)
+        self.controller.call.assert_called_once_with(
+            "set_compliance_policy", ("B", "stop")
+        )
+        self.assertFalse(any("set_output" in str(call) for call in proxy.mock_calls))
+
+    def test_characterization_stop_policy_starts_only_after_output_off_readback(self) -> None:
+        """An already-synchronized stop policy starts from a confirmed OFF channel."""
+
+        page = self.page
+        card = page.characterization_card
+        card.channel_combo.setCurrentText("Channel B")
+        page._compliance_policy["B"] = "stop"
+        page._stop_on_compliance["B"] = True
+        proxy = Mock()
+        proxy.connected = True
+        proxy.compliance_policy.return_value = "stop"
+        proxy.read_configuration.return_value = Mock(
+            channels=(Mock(channel="B", output_enabled=False),)
+        )
+        self.controller.adapter_for_run.return_value = proxy
+
+        with patch(
+            "app.devices.keithley_2600.ui.characterization_card.CharacterizationWorker"
+        ) as worker_type:
+            worker = worker_type.return_value
+            card._on_start_clicked()
+            self.app.processEvents()
+
+        self.assertEqual(card._temporary_policy_phase, "idle")
+        self.assertEqual(
+            worker_type.call_args.kwargs["config"].compliance_policy, "stop"
+        )
+        worker.start.assert_called_once_with()
+        self.assertFalse(any("set_output" in str(call) for call in proxy.mock_calls))
+        card._worker = None
 
     def test_characterization_cannot_build_an_independent_hardware_configuration(self) -> None:
         """A detached card must fail closed instead of using local defaults."""

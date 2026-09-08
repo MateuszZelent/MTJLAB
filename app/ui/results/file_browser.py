@@ -22,6 +22,7 @@ from qfluentwidgets import (
     BodyLabel,
     CaptionLabel,
     ComboBox,
+    FluentIcon,
     LineEdit,
     PrimaryPushButton,
     PushButton,
@@ -149,8 +150,42 @@ class SampleGroupItem(QTreeWidgetItem):
         self.group_title = title
 
 
+class CatalogueGroupItem(QTreeWidgetItem):
+    """A non-selectable folder row in the sample measurement catalogue tree."""
+
+    def __init__(self, title: str, count: int) -> None:
+        super().__init__([f"{title} ({count})", "", "", "", "", ""])
+        self.group_title = title
+        self._title = title
+        self.setFont(0, self.font(0))
+        self.setFlags(self.flags() & ~Qt.ItemFlag.ItemIsSelectable)
+        self.setIcon(0, FluentIcon.FOLDER.icon())
+
+    def __lt__(self, other: QTreeWidgetItem) -> bool:
+        if isinstance(other, CatalogueGroupItem):
+            return self._title.casefold() < other._title.casefold()
+        return super().__lt__(other)
+
+
+class CatalogueArtifactItem(QTreeWidgetItem):
+    """A CSV/PDF measurement artifact shown below its sample folder."""
+
+    def __init__(self, path: Path) -> None:
+        try:
+            recorded = Hdf5RunReader._extract_timestamp(path, None)
+        except OSError:
+            recorded = None
+        suffix = path.suffix.lower().lstrip(".").upper() or "FILE"
+        super().__init__([path.name, format_timestamp(recorded), suffix, "—", "—", "—"])
+        self.path = path
+        self.setData(COL_FILE, Qt.ItemDataRole.UserRole, str(path))
+        self.setData(COL_DATE, Qt.ItemDataRole.UserRole, str(path))
+        self.setIcon(COL_FILE, FluentIcon.DOCUMENT.icon())
+        self.setToolTip(COL_FILE, f"Measurement artifact:\n{path.resolve()}")
+
+
 class FileBrowserPanel(QWidget):
-    """List station and public THATEC/PyThat HDF5 results."""
+    """Browse flat result folders or a nested sample measurement catalogue."""
 
     file_selected = Signal(object)  # Path | None
     file_opened = Signal(object)  # Path
@@ -159,9 +194,16 @@ class FileBrowserPanel(QWidget):
     _ASYNC_REFRESH_FILE_COUNT = 8
     _ASYNC_REFRESH_BYTES = 32 * 1024 * 1024
 
-    def __init__(self, output_dir: str, parent: QWidget | None = None) -> None:
+    def __init__(
+        self,
+        output_dir: str,
+        parent: QWidget | None = None,
+        *,
+        catalogue_tree: bool = False,
+    ) -> None:
         super().__init__(parent)
         self._output_dir = Path(output_dir)
+        self._catalogue_tree_requested = catalogue_tree
         self._selected_path: Path | None = None
         self._state_action: Callable[[], None] = self.browse_file
         self._refresh_request_id = 0
@@ -169,6 +211,8 @@ class FileBrowserPanel(QWidget):
 
         self._all_summaries: list[RunSummary] = []
         self._filtered_summaries: list[RunSummary] = []
+        self._catalogue_artifacts: list[Path] = []
+        self._filtered_artifacts: list[Path] = []
         self._view_mode = "flat"  # "flat" or "grouped"
         self._current_page = 1
         self._page_size = 25  # 15, 25, 50, 100, 0 (all)
@@ -235,7 +279,10 @@ class FileBrowserPanel(QWidget):
         self.view_mode_combo.addItem("Flat list", userData="flat")
         self.view_mode_combo.addItem("Group by date", userData="grouped")
         self.view_mode_combo.addItem("Group by Sample & DUT", userData="sample")
-        self.view_mode_combo.setToolTip("Switch between flat table, date-grouped, and sample-grouped view")
+        self.view_mode_combo.addItem("Sample catalogue tree", userData="catalogue")
+        self.view_mode_combo.setToolTip(
+            "Switch between flat, date-grouped, sample-grouped, and catalogue tree views"
+        )
         filter_bar.addWidget(self.view_mode_combo, 1)
 
         self.clear_filter_btn = PushButton("Clear", self)
@@ -260,7 +307,8 @@ class FileBrowserPanel(QWidget):
         self.runs.setMinimumWidth(260)
         self.runs.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
         self.runs.setUniformRowHeights(True)
-        self.runs.setAccessibleName("Recorded HDF5 results")
+        self.runs.setAlternatingRowColors(True)
+        self.runs.setAccessibleName("Recorded measurement results and artifacts")
         self.runs.setSortingEnabled(True)
         header = self.runs.header()
         header.setSectionsClickable(True)
@@ -345,6 +393,13 @@ class FileBrowserPanel(QWidget):
         self.last_page_btn.clicked.connect(lambda: self._set_page(self._total_pages()))
         self.page_size_combo.currentTextChanged.connect(self._on_page_size_changed)
 
+        if self._catalogue_tree_requested:
+            self._view_mode = "catalogue"
+            self.view_mode_combo.setCurrentIndex(
+                self.view_mode_combo.findData("catalogue")
+            )
+            self.pagination_bar.setVisible(False)
+
     def minimumSizeHint(self) -> QSize:
         return QSize(280, 200)
 
@@ -381,18 +436,25 @@ class FileBrowserPanel(QWidget):
             )
             self.content.setCurrentWidget(self.state_card)
             request_id = self._refresh_request_id
-            task = ResultReadTask(request_id, Hdf5RunReader.list_runs, self._output_dir)
+            task = ResultReadTask(
+                request_id,
+                Hdf5RunReader.list_runs,
+                self._output_dir,
+                recursive=True,
+            )
             self._refresh_task = task
             task.signals.loaded.connect(self._on_refresh_loaded)
             task.signals.failed.connect(self._on_refresh_failed)
             QThreadPool.globalInstance().start(task)
             return
-        self._populate_summaries(Hdf5RunReader.list_runs(self._output_dir), previous)
+        self._populate_summaries(
+            Hdf5RunReader.list_runs(self._output_dir, recursive=True), previous
+        )
 
     def _should_refresh_async(self) -> bool:
         try:
-            paths = tuple(self._output_dir.glob("*.h5")) + tuple(
-                self._output_dir.glob("*.hdf5")
+            paths = tuple(self._output_dir.rglob("*.h5")) + tuple(
+                self._output_dir.rglob("*.hdf5")
             )
             total_bytes = sum(path.stat().st_size for path in paths if path.is_file())
         except OSError:
@@ -429,6 +491,7 @@ class FileBrowserPanel(QWidget):
 
     def _populate_summaries(self, summaries: tuple[object, ...], previous: Path | None) -> None:
         self._all_summaries = [s for s in summaries if isinstance(s, RunSummary)]
+        self._catalogue_artifacts = self._discover_catalogue_artifacts()
 
         # Populate operator filter choices dynamically
         current_op = self.operator_filter.currentText()
@@ -538,10 +601,55 @@ class FileBrowserPanel(QWidget):
             filtered.append(s)
 
         self._filtered_summaries = filtered
+        self._filtered_artifacts = []
+        if self._view_mode == "catalogue":
+            for artifact in self._catalogue_artifacts:
+                searchable = f"{artifact.name} {artifact} " + " ".join(artifact.parts)
+                if query and query not in searchable.casefold():
+                    continue
+                if state_filter != "All states":
+                    continue
+                if date_filter != "All time":
+                    timestamp = Hdf5RunReader._extract_timestamp(artifact, None)
+                    if date_filter == "Today" and categorize_date(timestamp, now) != "Today":
+                        continue
+                    if date_filter == "Yesterday" and categorize_date(timestamp, now) != "Yesterday":
+                        continue
+                    if date_filter == "Last 7 days" and categorize_date(timestamp, now) not in (
+                        "Today", "Yesterday", "This week"
+                    ):
+                        continue
+                    if date_filter == "Last 30 days" and categorize_date(timestamp, now) not in (
+                        "Today", "Yesterday", "This week", "This month"
+                    ):
+                        continue
+                self._filtered_artifacts.append(artifact)
         self._render_page(previous=previous)
+
+    def _discover_catalogue_artifacts(self) -> list[Path]:
+        """Find durable sample measurement CSV/PDF files for the catalogue tree."""
+
+        if not self._catalogue_tree_requested or not self._output_dir.is_dir():
+            return []
+        artifacts: list[Path] = []
+        try:
+            candidates = self._output_dir.rglob("*")
+            for path in candidates:
+                if not path.is_file() or path.suffix.lower() not in {".csv", ".pdf"}:
+                    continue
+                if path.name.casefold() == "info.csv":
+                    continue
+                if "measurements" not in {part.casefold() for part in path.parts}:
+                    continue
+                artifacts.append(path)
+        except OSError:
+            return []
+        return sorted(artifacts, key=lambda item: str(item).casefold())
 
     def _render_page(self, previous: Path | None = None) -> None:
         total_items = len(self._filtered_summaries)
+        if self._view_mode == "catalogue":
+            total_items += len(self._filtered_artifacts)
         total_pages = self._total_pages()
         self._current_page = max(1, min(self._current_page, total_pages))
 
@@ -555,15 +663,16 @@ class FileBrowserPanel(QWidget):
         self.last_page_btn.setEnabled(self._current_page < total_pages)
 
         # Handle empty states
-        if len(self._all_summaries) == 0:
+        all_entries = len(self._all_summaries) + len(self._catalogue_artifacts)
+        if all_entries == 0:
             self._state_action = self.browse_file
             self.state_card.show_state(
                 title="No recorded results yet",
                 description=(
                     "Open a THATEC/PyThat HDF5 file, or choose another result "
-                    "directory to inspect stored spectra."
+                    "directory to inspect stored spectra and measurement artifacts."
                 ),
-                accessible_name="No HDF5 result files",
+                accessible_name="No measurement result files",
                 action_text="Open result file...",
             )
             self.content.setCurrentWidget(self.state_card)
@@ -631,6 +740,10 @@ class FileBrowserPanel(QWidget):
                         child.setText(COL_OPERATOR, f"{coord_lbl} · {s.operator or '—'}")
                     group_item.addChild(child)
             self.runs.expandAll()
+        elif self._view_mode == "catalogue":
+            self._render_catalogue_tree(
+                self._filtered_summaries, self._filtered_artifacts
+            )
         else:
             # Flat paginated view
             if self._page_size > 0:
@@ -649,6 +762,88 @@ class FileBrowserPanel(QWidget):
 
         if previous is not None:
             self._restore_selection(previous)
+
+    def _catalogue_parts(self, summary: RunSummary) -> tuple[str, ...]:
+        """Return path components relative to the configured catalogue root."""
+
+        try:
+            relative = summary.path.resolve().relative_to(self._output_dir.resolve())
+            parts = tuple(part for part in relative.parts if part)
+        except ValueError:
+            parts = (summary.path.name,)
+        return parts or (summary.path.name,)
+
+    @staticmethod
+    def _catalogue_label(part: str) -> str:
+        labels = {
+            "measurements": "Measurements",
+            "sweeps": "Sweeps",
+            "attachments": "Attachments",
+            "characterization": "Characterization",
+        }
+        return labels.get(part.casefold(), part)
+
+    def _render_catalogue_tree(
+        self, summaries: list[RunSummary], artifacts: list[Path]
+    ) -> None:
+        """Render the sample folder hierarchy using the same Fluent tree surface."""
+
+        entries: list[tuple[tuple[str, ...], RunSummary | Path]] = [
+            (self._catalogue_parts(summary), summary) for summary in summaries
+        ]
+        entries.extend(
+            (self._relative_catalogue_parts(path), path) for path in artifacts
+        )
+        entries.sort(key=lambda item: tuple(part.casefold() for part in item[0]))
+
+        counts: dict[tuple[str, ...], int] = defaultdict(int)
+        for parts, _summary in entries:
+            for depth in range(1, len(parts)):
+                counts[parts[:depth]] += 1
+
+        groups: dict[tuple[str, ...], CatalogueGroupItem] = {}
+        for parts, summary in entries:
+            parent: QTreeWidgetItem | TreeWidget = self.runs
+            for depth in range(1, len(parts)):
+                key = parts[:depth]
+                group = groups.get(key)
+                if group is None:
+                    group = CatalogueGroupItem(
+                        self._catalogue_label(parts[depth - 1]), counts[key]
+                    )
+                    groups[key] = group
+                    if depth == 1:
+                        self.runs.addTopLevelItem(group)
+                    else:
+                        parent.addChild(group)
+                parent = group
+
+            if isinstance(summary, RunSummary):
+                date_text = format_timestamp(summary.created_at_utc)
+                leaf = ResultFileItem(summary, date_text)
+                absolute_path = summary.path
+            else:
+                leaf = CatalogueArtifactItem(summary)
+                absolute_path = summary
+            leaf.setText(COL_FILE, parts[-1])
+            leaf.setToolTip(
+                COL_FILE,
+                f"Relative path: {Path(*parts)}\nAbsolute path: {absolute_path.resolve()}",
+            )
+            if isinstance(parent, TreeWidget):
+                self.runs.addTopLevelItem(leaf)
+            else:
+                parent.addChild(leaf)
+
+        self.runs.expandAll()
+
+    def _relative_catalogue_parts(self, path: Path) -> tuple[str, ...]:
+        try:
+            relative = path.resolve().relative_to(self._output_dir.resolve())
+            parts = tuple(part for part in relative.parts if part)
+        except ValueError:
+            parts = (path.name,)
+        return parts or (path.name,)
 
     def choose_directory(self) -> None:
         """Browse another directory without changing persisted station settings."""
@@ -730,37 +925,73 @@ class FileBrowserPanel(QWidget):
         self._restore_selection(target)
         self.file_opened.emit(target)
 
+    def select_path(self, path: str | Path) -> bool:
+        """Select an already indexed result or catalogue artifact."""
+
+        target = Path(path).expanduser().resolve()
+        if not target.is_file():
+            return False
+        if target.suffix.lower() not in {".h5", ".hdf5", ".csv", ".pdf"}:
+            return False
+        if target.suffix.lower() in {".csv", ".pdf"}:
+            if target not in {artifact.resolve() for artifact in self._catalogue_artifacts}:
+                return False
+            self.clear_filters()
+            self._selected_path = target
+            self._filter_and_render(previous=target)
+            self._restore_selection(target)
+            self.file_selected.emit(target)
+            return True
+        if not any(summary.path.resolve() == target for summary in self._all_summaries):
+            self.open_file(target)
+            return True
+        self.clear_filters()
+        self._selected_path = target
+        self._filter_and_render(previous=target)
+        self._restore_selection(target)
+        self.file_selected.emit(target)
+        return True
+
     def has_files(self) -> bool:
         """Return whether the browser contains any entries before filtering."""
-        return len(self._all_summaries) > 0
+        return bool(self._all_summaries or self._catalogue_artifacts)
 
     def _on_current_changed(
         self,
         item: QTreeWidgetItem | None,
         _previous: QTreeWidgetItem | None,
     ) -> None:
-        if item is None or isinstance(item, DateGroupItem):
+        if item is None or isinstance(
+            item, (DateGroupItem, SampleGroupItem, CatalogueGroupItem)
+        ):
             return
         path_str = str(item.data(COL_DATE, Qt.ItemDataRole.UserRole) or item.data(COL_FILE, Qt.ItemDataRole.UserRole) or "")
         if not path_str:
             return
-        path = Path(path_str)
+        path = Path(path_str).expanduser().resolve()
         self._selected_path = path
         self.file_selected.emit(path)
 
     def _find_item_by_path(self, target: Path) -> QTreeWidgetItem | None:
-        for i in range(self.runs.topLevelItemCount()):
-            top = self.runs.topLevelItem(i)
-            if isinstance(top, DateGroupItem):
-                for j in range(top.childCount()):
-                    child = top.child(j)
-                    p_str = str(child.data(COL_DATE, Qt.ItemDataRole.UserRole) or child.data(COL_FILE, Qt.ItemDataRole.UserRole) or "")
-                    if p_str and Path(p_str) == target:
-                        return child
-            else:
-                p_str = str(top.data(COL_DATE, Qt.ItemDataRole.UserRole) or top.data(COL_FILE, Qt.ItemDataRole.UserRole) or "")
-                if p_str and Path(p_str) == target:
-                    return top
+        def walk(item: QTreeWidgetItem) -> QTreeWidgetItem | None:
+            if not isinstance(item, (DateGroupItem, SampleGroupItem, CatalogueGroupItem)):
+                p_str = str(
+                    item.data(COL_DATE, Qt.ItemDataRole.UserRole)
+                    or item.data(COL_FILE, Qt.ItemDataRole.UserRole)
+                    or ""
+                )
+                if p_str and Path(p_str).expanduser().resolve() == target.resolve():
+                    return item
+            for index in range(item.childCount()):
+                found = walk(item.child(index))
+                if found is not None:
+                    return found
+            return None
+
+        for index in range(self.runs.topLevelItemCount()):
+            found = walk(self.runs.topLevelItem(index))
+            if found is not None:
+                return found
         return None
 
     def _restore_selection(self, target: Path | None = None) -> bool:

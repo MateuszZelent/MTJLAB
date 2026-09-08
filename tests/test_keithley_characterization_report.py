@@ -94,6 +94,16 @@ def test_csv_export(tmp_path: Path):
     lines = content.strip().splitlines()
     assert len(lines) >= 110
 
+    from app.storage.characterization_csv_reader import CharacterizationCsvReader
+
+    resistance = CharacterizationCsvReader.read_series(
+        res_path, preferred_y_channel="True_Resistance_Ohm"
+    )
+    assert resistance.point_count == len(dataset.points)
+    assert resistance.y_label == "True Resistance"
+    assert resistance.y_unit == "Ω"
+    assert "Voltage_V" in resistance.available_y_channels
+
 
 def test_csv_export_marks_compliance_stop_as_partial(tmp_path: Path):
     """A compliance-terminated export must carry its partial-run provenance."""

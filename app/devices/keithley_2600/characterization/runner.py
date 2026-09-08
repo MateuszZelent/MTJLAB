@@ -371,6 +371,10 @@ class CharacterizationWorker(QThread):
         self._config = config
         self._settings = settings
         self._cancel_event = threading.Event()
+        # A temporary characterization policy is restored only after this
+        # flag is confirmed.  Failures perform an independent OUTPUT-OFF
+        # readback before the failed signal is delivered to the UI.
+        self.output_off_confirmed = False
 
     def request_stop(self) -> None:
         """Signal the running sweep to safely terminate."""
@@ -387,6 +391,23 @@ class CharacterizationWorker(QThread):
                 on_progress=self.progress_changed.emit,
                 on_compliance=self.compliance_event.emit,
             )
+            self.output_off_confirmed = True
             self.finished_dataset.emit(dataset)
         except Exception as exc:
-            self.failed.emit(str(exc))
+            try:
+                confirm_output_off = getattr(self._device, "confirm_output_off", None)
+                if callable(confirm_output_off):
+                    confirm_output_off(self._config.channel)
+                else:
+                    self._device.assert_output_state(
+                        self._config.channel,
+                        expected_enabled=False,
+                    )
+            except Exception as off_exc:
+                self.output_off_confirmed = False
+                self.failed.emit(
+                    f"{exc} OUTPUT OFF could not be independently confirmed: {off_exc}"
+                )
+            else:
+                self.output_off_confirmed = True
+                self.failed.emit(str(exc))

@@ -4,10 +4,10 @@ from __future__ import annotations
 
 import math
 from collections import defaultdict, deque
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from dataclasses import asdict, dataclass, replace
 
-from PySide6.QtCore import Qt, Signal
+from PySide6.QtCore import QTimer, Qt, Signal
 from PySide6.QtWidgets import (
     QApplication, QFormLayout, QFrame, QGridLayout, QHBoxLayout,
     QPushButton, QSplitter,
@@ -441,6 +441,24 @@ class RigolPage(QWidget):
             self.offset,
         ):
             field.setProperty("requiresLiveControl", True)
+        self._live_rigol_timers: dict[str, QTimer] = {}
+        for timer_field in ("frequency", "high_level", "low_level", "amplitude", "offset"):
+            t = QTimer(self)
+            t.setSingleShot(True)
+            self._live_rigol_timers[timer_field] = t
+        self._live_rigol_timers["frequency"].timeout.connect(self._submit_active_frequency)
+        self._live_rigol_timers["high_level"].timeout.connect(
+            lambda: self._submit_active_voltage("high_level", self.high_level)
+        )
+        self._live_rigol_timers["low_level"].timeout.connect(
+            lambda: self._submit_active_voltage("low_level", self.low_level)
+        )
+        self._live_rigol_timers["amplitude"].timeout.connect(
+            lambda: self._submit_active_voltage("amplitude", self.vpp)
+        )
+        self._live_rigol_timers["offset"].timeout.connect(
+            lambda: self._submit_active_voltage("offset", self.offset)
+        )
         self.frequency.textEdited.connect(lambda: self._on_rigol_field_edited("frequency"))
         self.period.textEdited.connect(lambda: self._on_rigol_field_edited("frequency"))
         self.high_level.textEdited.connect(lambda: self._on_rigol_field_edited("high_level"))
@@ -733,7 +751,23 @@ class RigolPage(QWidget):
             low_level=self._format_voltage(low, preferred_unit=preferred),
         )
 
+    def _on_rigol_field_edited(self, field: str) -> None:
+        if not self.live_control_switch.isChecked():
+            return
+        timer = getattr(self, "_live_rigol_timers", {}).get(field)
+        if timer is not None:
+            timer.start(400)
+
+    def _on_rigol_return_pressed(self, field: str, submit_callback: Callable[[], None]) -> None:
+        timer = getattr(self, "_live_rigol_timers", {}).get(field)
+        if timer is not None:
+            timer.stop()
+        submit_callback()
+
     def _submit_active_frequency(self) -> None:
+        timer = getattr(self, "_live_rigol_timers", {}).get("frequency")
+        if timer is not None:
+            timer.stop()
         if not self.live_control_switch.isChecked():
             return
         if self.waveform.currentText() in {"DC", "NOIS"}:
@@ -741,6 +775,13 @@ class RigolPage(QWidget):
         if getattr(self, "_suppress_focus_loss_dispatch", False):
             return
         if not self._is_device_connected():
+            return
+        if (
+            bool(self.frequency.property("precisionArrowStepInProgress"))
+            or bool(self.period.property("precisionArrowStepInProgress"))
+        ):
+            if timer is not None:
+                timer.start(160)
             return
 
         channel = int(self.channel.currentText())
@@ -762,11 +803,18 @@ class RigolPage(QWidget):
         )
 
     def _submit_active_voltage(self, field: str, editor: QWidget) -> None:
+        timer = getattr(self, "_live_rigol_timers", {}).get(field)
+        if timer is not None:
+            timer.stop()
         if not self.live_control_switch.isChecked():
             return
         if getattr(self, "_suppress_focus_loss_dispatch", False):
             return
         if not self._is_device_connected():
+            return
+        if bool(editor.property("precisionArrowStepInProgress")):
+            if timer is not None:
+                timer.start(160)
             return
 
         channel = int(self.channel.currentText())
@@ -805,6 +853,34 @@ class RigolPage(QWidget):
         if len(parts) != 3 or parts[0] != "rigol" or parts[1] != self.channel.currentText():
             return
         field = parts[2]
+        if field == "frequency":
+            timer = getattr(self, "_live_rigol_timers", {}).get("frequency")
+            if (
+                self.frequency.hasFocus()
+                or self.period.hasFocus()
+                or bool(self.frequency.property("precisionArrowStepInProgress"))
+                or bool(self.period.property("precisionArrowStepInProgress"))
+                or (timer is not None and timer.isActive())
+            ):
+                return
+        else:
+            editors = {
+                "high_level": self.high_level,
+                "low_level": self.low_level,
+                "amplitude": self.vpp,
+                "offset": self.offset,
+            }
+            editor = editors.get(field)
+            if editor is None:
+                return
+            timer = getattr(self, "_live_rigol_timers", {}).get(field)
+            if (
+                editor.hasFocus()
+                or bool(editor.property("precisionArrowStepInProgress"))
+                or (timer is not None and timer.isActive())
+            ):
+                return
+
         self._quick_control_projection = True
         try:
             if field == "frequency":

@@ -262,11 +262,18 @@ class SampleProgrammingDialog(QDialog):
         self.tags_input.setPlaceholderText("Comma-separated tags (e.g. CoFeB, MTJ, Wedge, 300K)")
         meta_grid.addWidget(self.tags_input, 1, 1, 1, 3)
 
-        meta_grid.addWidget(BodyLabel("Notes / Stack:", meta_card), 2, 0, Qt.AlignmentFlag.AlignTop)
+        meta_grid.addWidget(BodyLabel("Folder name:", meta_card), 2, 0)
+        self.folder_name_input = LineEdit(meta_card)
+        self.folder_name_input.setPlaceholderText(
+            "Created automatically; you may rename it, e.g. 1_CoFeBWedge"
+        )
+        meta_grid.addWidget(self.folder_name_input, 2, 1, 1, 3)
+
+        meta_grid.addWidget(BodyLabel("Notes / Stack:", meta_card), 3, 0, Qt.AlignmentFlag.AlignTop)
         self.desc_input = PlainTextEdit(meta_card)
         self.desc_input.setPlaceholderText("Fabrication stack details, wafer position, lithography notes...")
         self.desc_input.setFixedHeight(54)
-        meta_grid.addWidget(self.desc_input, 2, 1, 1, 3)
+        meta_grid.addWidget(self.desc_input, 3, 1, 1, 3)
 
         meta_layout.addLayout(meta_grid)
         layout.addWidget(meta_card)
@@ -689,6 +696,7 @@ class SampleProgrammingDialog(QDialog):
             self.name_input.setText(sample.name)
             self.tags_input.setText(", ".join(sample.tags))
             self.desc_input.setPlainText(sample.description)
+            self.folder_name_input.setText(sample.folder_name)
 
             count = len(sample.rows) or 10
             self.rows_count.setValue(count)
@@ -858,6 +866,7 @@ class SampleProgrammingDialog(QDialog):
             t.strip() for t in self.tags_input.text().split(",") if t.strip()
         )
         desc = self.desc_input.toPlainText().strip()
+        folder_name = self.folder_name_input.text().strip()
 
         row_keys: list[str] = []
         row_labels: dict[str, str] = {}
@@ -904,12 +913,14 @@ class SampleProgrammingDialog(QDialog):
                 name=name,
                 description=desc,
                 tags=tags,
+                folder_name=folder_name,
             )
 
         return Sample(
             sample_id=sample_id,
             name=name,
             description=desc,
+            folder_name=folder_name,
             tags=tags,
             rows=tuple(row_keys),
             row_labels=row_labels,

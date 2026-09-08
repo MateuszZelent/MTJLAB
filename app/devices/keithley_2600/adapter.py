@@ -493,13 +493,12 @@ class KeithleyAdapter(DeviceAdapter):
             raise TypeError("Keithley context refresh requires StationSettings.")
         self._station = station
         self._settings = station.keithley
-        default_policy: KeithleyCompliancePolicy = (
-            getattr(self._settings.safety, "compliance_policy", None)
-            or ("stop" if bool(self._settings.safety.stop_on_compliance) else "warn_clamp")
-        )
-        default_stop = (default_policy == "stop")
-        self._compliance_policies.update({"A": default_policy, "B": default_policy})
-        self._stop_on_compliance.update({"A": default_stop, "B": default_stop})
+        # A context refresh updates limits and metadata only.  Compliance
+        # response is a live per-channel runtime state: resetting it from the
+        # persisted default here could silently turn a characterization's
+        # temporary ``stop`` policy back into ``warn_clamp`` while OUTPUT is
+        # active.  Explicit policy changes and adapter replacement still apply
+        # the station default through construction/apply_limit_settings.
 
     def _clear_errors(self) -> None:
         self._require_session().write("errorqueue.clear()")
@@ -1375,6 +1374,34 @@ class KeithleyAdapter(DeviceAdapter):
         self._output_states[channel] = observed
         self._update_aggregate_output_state()
         return observed
+
+    def confirm_output_off(self, channel: Literal["A", "B"]) -> bool:
+        """Confirm only the channel OUTPUT state after a failed run.
+
+        A run can fail before a complete source request exists.  In that case
+        ``assert_output_state(..., expected_enabled=False)`` cannot be used
+        because it also validates the last source configuration.  Policy
+        restoration needs only a trustworthy OFF readback, so this narrow
+        method performs that readback and escalates to ``emergency_off`` if
+        the channel is still active.
+        """
+
+        if channel not in {"A", "B"}:
+            raise SafetyViolation("Keithley channel must be A or B.")
+        try:
+            observed = self._output_is_enabled(channel)
+        except Exception:
+            self.emergency_off()
+            raise
+        if observed:
+            self.emergency_off()
+            self._state = DeviceState.UNKNOWN
+            raise DeviceError(
+                f"Keithley channel {channel} OUTPUT is still ON after a failed run."
+            )
+        self._output_states[channel] = False
+        self._update_aggregate_output_state()
+        return True
 
     def set_output(self, channel: Literal["A", "B"], enabled: bool) -> bool:
         if channel not in {"A", "B"}:

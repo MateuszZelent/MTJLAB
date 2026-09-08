@@ -10,6 +10,7 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 import h5py
 import numpy as np
+from PySide6.QtCore import Qt
 from PySide6.QtWidgets import QApplication, QBoxLayout
 
 from app.devices.anritsu_ms2830a import SpectrumTrace
@@ -446,6 +447,118 @@ class ResultsBrowserTests(unittest.TestCase):
                 self.assertTrue(browser.prev_page_btn.isEnabled())
             finally:
                 browser.close()
+
+    def test_file_browser_catalogue_tree_indexes_nested_sample_sweeps(self) -> None:
+        from app.ui.results.file_browser import FileBrowserPanel
+
+        with tempfile.TemporaryDirectory() as temporary:
+            catalogue = Path(temporary) / "PyLab"
+            sweep_dir = catalogue / "1_MtjSample" / "measurements" / "sweeps"
+            sweep_dir.mkdir(parents=True)
+            path = sweep_dir / "current_sweep.h5"
+            writer = Hdf5RunWriter(
+                path,
+                recipe_source="name: nested sweep\n",
+                settings_source="schema_version: 1\n",
+                plan_hash="nested",
+                device_idn={},
+            )
+            writer.close("completed")
+            characterization_dir = (
+                catalogue
+                / "1_MtjSample"
+                / "measurements"
+                / "Keithley_2600"
+                / "characterization"
+                / "R1C1"
+                / "20260907_120000"
+            )
+            characterization_dir.mkdir(parents=True)
+            csv_path = characterization_dir / "characterization.csv"
+            csv_path.write_text("Current (A),Voltage (V)\n0.001,0.1\n", encoding="utf-8")
+            pdf_path = characterization_dir / "characterization_report.pdf"
+            pdf_path.write_bytes(b"%PDF-1.4\n")
+
+            browser = FileBrowserPanel(str(catalogue), catalogue_tree=True)
+            browser.refresh()
+            try:
+                browser.resize(1000, 700)
+                browser.show()
+                self.application.processEvents()
+                self.assertGreater(browser.width(), 0)
+                self.assertGreater(browser.height(), 0)
+                self.assertEqual(browser.view_mode_combo.currentData(), "catalogue")
+                self.assertEqual(browser.runs.topLevelItemCount(), 1)
+
+                sample_item = browser.runs.topLevelItem(0)
+                self.assertIn("1_MtjSample", sample_item.text(0))
+                measurements_item = sample_item.child(0)
+                self.assertEqual(measurements_item.text(0).split(" (")[0], "Measurements")
+                sweeps_item = measurements_item.child(0)
+                leaf = sweeps_item.child(0)
+                self.assertEqual(leaf.text(0), path.name)
+                self.assertEqual(
+                    Path(leaf.data(1, Qt.ItemDataRole.UserRole)).resolve(),
+                    path.resolve(),
+                )
+
+                browser.runs.setCurrentItem(leaf)
+                self.application.processEvents()
+                self.assertEqual(browser.selected_path, path.resolve())
+                self.assertTrue(browser.select_path(path))
+                self.assertEqual(browser.selected_path, path.resolve())
+
+                self.assertEqual(
+                    {artifact.name for artifact in browser._catalogue_artifacts},
+                    {csv_path.name, pdf_path.name},
+                )
+                sample_item = browser.runs.topLevelItem(0)
+
+                def find_leaf(item, filename: str):
+                    if item.text(0) == filename:
+                        return item
+                    for index in range(item.childCount()):
+                        found = find_leaf(item.child(index), filename)
+                        if found is not None:
+                            return found
+                    return None
+
+                csv_item = find_leaf(sample_item, csv_path.name)
+                self.assertIsNotNone(csv_item)
+                browser.runs.setCurrentItem(csv_item)
+                self.application.processEvents()
+                self.assertEqual(browser.selected_path, csv_path.resolve())
+                self.assertTrue(browser.select_path(pdf_path))
+                self.assertEqual(browser.selected_path, pdf_path.resolve())
+            finally:
+                browser.close()
+
+    def test_results_page_selects_catalogue_artifact_without_hdf5_reader(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            catalogue = Path(temporary) / "PyLab"
+            artifact_dir = (
+                catalogue
+                / "1_MtjSample"
+                / "measurements"
+                / "Keithley_2600"
+                / "characterization"
+                / "R1C1"
+                / "20260907_120000"
+            )
+            artifact_dir.mkdir(parents=True)
+            csv_path = artifact_dir / "characterization.csv"
+            csv_path.write_text("Current (A),Voltage (V)\n0.001,0.1\n", encoding="utf-8")
+
+            page = ResultsPage(str(catalogue), catalogue_tree=True)
+            try:
+                self.application.processEvents()
+                self.assertTrue(page.file_browser.select_path(csv_path))
+                self.application.processEvents()
+                self.assertEqual(page._selected_artifact, csv_path.resolve())
+                self.assertIn("CSV characterization data", page.result_state.title.text())
+                self.assertTrue(page.result_state.action.isEnabled())
+            finally:
+                page.close()
 
     def test_sweep_tree_panel_sweeps_compatibility(self) -> None:
         from app.ui.measurement_tree import MeasurementTreeView, MeasurementTreeModel

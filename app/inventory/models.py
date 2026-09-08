@@ -146,6 +146,8 @@ class SampleRunRecord:
     elab_url: str | None = None
     elab_status: str = "not_uploaded"  # not_uploaded, pending, uploaded, failed
     notes: str = ""
+    csv_path: str = ""
+    report_path: str = ""
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -166,6 +168,8 @@ class SampleRunRecord:
             "elab_url": self.elab_url,
             "elab_status": self.elab_status,
             "notes": self.notes,
+            "csv_path": self.csv_path,
+            "report_path": self.report_path,
         }
 
     @classmethod
@@ -188,6 +192,8 @@ class SampleRunRecord:
             elab_url=data.get("elab_url"),
             elab_status=str(data.get("elab_status") or "not_uploaded"),
             notes=str(data.get("notes") or ""),
+            csv_path=str(data.get("csv_path") or ""),
+            report_path=str(data.get("report_path") or ""),
         )
 
 
@@ -198,6 +204,7 @@ class Sample:
     sample_id: str
     name: str
     description: str = ""
+    folder_name: str = ""
     created_at_utc: str = field(
         default_factory=lambda: datetime.now(timezone.utc).isoformat()
     )
@@ -637,6 +644,7 @@ class Sample:
             "sample_id": self.sample_id,
             "name": self.name,
             "description": self.description,
+            "folder_name": self.folder_name,
             "created_at_utc": self.created_at_utc,
             "updated_at_utc": self.updated_at_utc,
             "tags": list(self.tags),
@@ -661,6 +669,7 @@ class Sample:
             sample_id=str(data["sample_id"]),
             name=str(data.get("name") or data["sample_id"]),
             description=str(data.get("description") or ""),
+            folder_name=str(data.get("folder_name") or ""),
             created_at_utc=str(data.get("created_at_utc") or ""),
             updated_at_utc=str(data.get("updated_at_utc") or ""),
             tags=tuple(str(tag) for tag in (data.get("tags") or ())),

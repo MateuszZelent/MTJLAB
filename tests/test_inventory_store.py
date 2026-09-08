@@ -5,6 +5,7 @@ from __future__ import annotations
 from pathlib import Path
 import tempfile
 import unittest
+import sqlite3
 
 from app.inventory import (
     ActiveSampleTarget,
@@ -30,6 +31,7 @@ class InventoryStoreTests(unittest.TestCase):
             sample_id="SAMPLE-XYZ",
             name="CoFeB Wedge A",
             description="Test MTJ stack with wedge",
+            folder_name="1_CoFeBWedgeA",
             rows=("1", "2", "3"),
             row_labels={"2": "Middle region"},
             cols=("1", "2", "3"),
@@ -45,11 +47,16 @@ class InventoryStoreTests(unittest.TestCase):
         self.assertIsNotNone(retrieved)
         assert retrieved is not None
         self.assertEqual(retrieved.name, "CoFeB Wedge A")
+        self.assertEqual(retrieved.folder_name, "1_CoFeBWedgeA")
         self.assertEqual(retrieved.rows, ("1", "2", "3"))
         self.assertEqual(retrieved.cols, ("1", "2", "3"))
         self.assertEqual(retrieved.cell_label("2", "3"), "200 nm Pillar")
         self.assertEqual(retrieved.cell_label("1", "1"), "50 nm")
         self.assertEqual(retrieved.cell_state("2", "3"), "untested")
+        sample_dir = self.store.sample_directory("SAMPLE-XYZ")
+        self.assertTrue((sample_dir / "attachments").is_dir())
+        self.assertTrue((sample_dir / "measurements" / "sweeps").is_dir())
+        self.assertTrue((sample_dir / "info.csv").is_file())
 
         # Update cell
         updated = retrieved.with_cell_update("2", "3", state="good", notes="R = 1.2 kOhm")
@@ -71,6 +78,51 @@ class InventoryStoreTests(unittest.TestCase):
         self.assertIsNone(self.store.get_sample("SAMPLE-XYZ"))
         self.assertEqual(len(self.store.list_samples()), 0)
 
+    def test_existing_database_is_migrated_for_measurement_artifacts(self) -> None:
+        legacy_path = self.root / "legacy.db"
+        connection = sqlite3.connect(legacy_path)
+        connection.executescript(
+            """
+            CREATE TABLE samples (
+                sample_id TEXT PRIMARY KEY, name TEXT NOT NULL,
+                description TEXT NOT NULL DEFAULT '', created_at_utc TEXT NOT NULL,
+                updated_at_utc TEXT NOT NULL, tags_json TEXT NOT NULL DEFAULT '[]',
+                rows_json TEXT NOT NULL DEFAULT '[]', row_labels_json TEXT NOT NULL DEFAULT '{}',
+                cols_json TEXT NOT NULL DEFAULT '[]', col_labels_json TEXT NOT NULL DEFAULT '{}',
+                device_labels_json TEXT NOT NULL DEFAULT '{}',
+                device_states_json TEXT NOT NULL DEFAULT '{}', device_notes_json TEXT NOT NULL DEFAULT '{}'
+            );
+            CREATE TABLE sample_runs (
+                id INTEGER PRIMARY KEY AUTOINCREMENT, sample_id TEXT NOT NULL,
+                sample_name TEXT NOT NULL DEFAULT '', row TEXT NOT NULL, col TEXT NOT NULL,
+                device_label TEXT NOT NULL, run_path TEXT NOT NULL,
+                run_sha256 TEXT NOT NULL DEFAULT '', created_at_utc TEXT NOT NULL,
+                status TEXT NOT NULL DEFAULT 'unknown', point_count INTEGER NOT NULL DEFAULT 0,
+                spectrum_count INTEGER NOT NULL DEFAULT 0, recipe_name TEXT NOT NULL DEFAULT '',
+                elab_experiment_id INTEGER, elab_url TEXT,
+                elab_status TEXT NOT NULL DEFAULT 'not_uploaded', notes TEXT NOT NULL DEFAULT ''
+            );
+            """
+        )
+        connection.close()
+
+        migrated = InventoryStore(legacy_path)
+        try:
+            cols = {
+                row["name"]
+                for row in migrated._connection.execute("PRAGMA table_info(samples)")
+            }
+            run_cols = {
+                row["name"]
+                for row in migrated._connection.execute("PRAGMA table_info(sample_runs)")
+            }
+            self.assertIn("measurement_directory", cols)
+            self.assertIn("folder_name", cols)
+            self.assertIn("csv_path", run_cols)
+            self.assertIn("report_path", run_cols)
+        finally:
+            migrated.close()
+
     def test_attachments(self) -> None:
         sample = Sample(sample_id="SAMPLE-ATT", name="Attachment Test Sample")
         self.store.save_sample(sample)
@@ -88,6 +140,12 @@ class InventoryStoreTests(unittest.TestCase):
         self.assertEqual(att_img.caption, "Chip photo")
         img_path = self.store.get_attachment_path(att_img)
         self.assertTrue(img_path.is_file())
+        self.assertEqual(img_path.parent.name, "attachments")
+        self.assertTrue(img_path.is_relative_to(self.store.catalogue_root))
+        info_text = (self.store.sample_directory("SAMPLE-ATT") / "info.csv").read_text(
+            encoding="utf-8"
+        )
+        self.assertIn("microscope.png", info_text)
 
         att_pdf = self.store.add_attachment("SAMPLE-ATT", dummy_pdf, caption="Process PDF")
         self.assertTrue(att_pdf.is_pdf)
@@ -107,6 +165,42 @@ class InventoryStoreTests(unittest.TestCase):
         assert sample_after is not None
         self.assertEqual(len(sample_after.attachments), 1)
         self.assertEqual(sample_after.attachments[0].id, att_pdf.id)
+
+    def test_catalogue_root_migrates_existing_sample_attachments(self) -> None:
+        sample = self.store.save_sample(
+            Sample(sample_id="MOVE-01", name="Energy Harvesting Report")
+        )
+        source = self.root / "report.pdf"
+        source.write_bytes(b"%PDF-1.4\nreport")
+        attachment = self.store.add_attachment(sample.sample_id, source)
+        old_path = self.store.get_attachment_path(attachment)
+        self.assertTrue(old_path.is_file())
+
+        new_root = self.root / "PyLab"
+        self.store.set_catalogue_root(new_root)
+        refreshed = self.store.get_sample(sample.sample_id)
+        assert refreshed is not None
+        migrated = self.store.get_attachment_path(refreshed.attachments[0])
+        self.assertTrue(migrated.is_file())
+        self.assertTrue(migrated.is_relative_to(new_root / refreshed.folder_name / "attachments"))
+        self.assertTrue((new_root / refreshed.folder_name / "info.csv").is_file())
+
+        self.store.close()
+        self.store = InventoryStore(self.db_path)
+        self.assertEqual(self.store.catalogue_root, new_root.resolve())
+
+    def test_automatic_folder_name_and_manual_rename(self) -> None:
+        saved = self.store.save_sample(Sample(sample_id="S-1", name="Short sample name"))
+        self.assertEqual(saved.folder_name, "S-1_ShortSampleName")
+        old_dir = self.store.sample_directory(saved.sample_id)
+        marker = old_dir / "attachments" / "keep.txt"
+        marker.write_text("keep", encoding="utf-8")
+
+        renamed = self.store.save_sample(
+            Sample.from_dict({**saved.to_dict(), "folder_name": "1_CustomFolder"})
+        )
+        self.assertEqual(renamed.folder_name, "1_CustomFolder")
+        self.assertTrue((self.store.sample_directory(saved.sample_id) / "attachments" / "keep.txt").is_file())
 
     def test_runs_and_active_target(self) -> None:
         sample = Sample(
@@ -149,6 +243,8 @@ class InventoryStoreTests(unittest.TestCase):
             point_count=50,
             spectrum_count=50,
             recipe_name="IV_Sweep",
+            csv_path=str(self.root / "run_001.csv"),
+            report_path=str(self.root / "run_001.pdf"),
         )
         saved_run = self.store.record_run(run_record)
         self.assertIsNotNone(saved_run.id)
@@ -162,6 +258,12 @@ class InventoryStoreTests(unittest.TestCase):
         runs = self.store.list_runs_for_sample("SAMPLE-RUNS")
         self.assertEqual(len(runs), 1)
         self.assertEqual(runs[0].recipe_name, "IV_Sweep")
+        self.assertEqual(runs[0].csv_path, str(self.root / "run_001.csv"))
+        self.assertEqual(runs[0].report_path, str(self.root / "run_001.pdf"))
+        info_text = (self.store.sample_directory("SAMPLE-RUNS") / "info.csv").read_text(
+            encoding="utf-8"
+        )
+        self.assertIn("IV_Sweep", info_text)
 
         cell_runs = self.store.list_runs_for_cell("SAMPLE-RUNS", "1", "2")
         self.assertEqual(len(cell_runs), 1)

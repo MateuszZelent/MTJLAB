@@ -6,7 +6,7 @@ from collections import defaultdict
 from pathlib import Path
 from typing import Sequence
 
-from PySide6.QtCore import QPoint, Qt, Signal
+from PySide6.QtCore import QPoint, Qt, QUrl, Signal
 from PySide6.QtGui import QColor, QDesktopServices, QGuiApplication
 from PySide6.QtWidgets import (
     QHBoxLayout,
@@ -404,6 +404,9 @@ class MeasurementTreeWidget(QWidget):
         item.setData(0, Qt.ItemDataRole.UserRole, run)
         item.setFlags(item.flags() | Qt.ItemFlag.ItemIsUserCheckable)
         item.setCheckState(0, Qt.CheckState.Unchecked)
+        artifacts = [p for p in (run.csv_path, run.report_path) if p]
+        if artifacts:
+            item.setToolTip(0, "Saved artifacts:\n" + "\n".join(artifacts))
 
         # Style status text with color
         if run.status.lower() == "completed":
@@ -514,13 +517,30 @@ class MeasurementTreeWidget(QWidget):
         menu = RoundMenu(parent=self)
 
         if isinstance(run, SampleRunRecord):
-            menu.addAction(
-                Action(
-                    FluentIcon.DOCUMENT,
-                    "Open in Results Tab",
-                    triggered=lambda: self.open_in_results_requested.emit(run.run_path),
+            if run.csv_path:
+                menu.addAction(
+                    Action(
+                        FluentIcon.DOCUMENT,
+                        "Open CSV Data",
+                        triggered=lambda: self._open_file(run.csv_path),
+                    )
                 )
-            )
+            if run.report_path:
+                menu.addAction(
+                    Action(
+                        FluentIcon.DOCUMENT,
+                        "Open PDF Report",
+                        triggered=lambda: self._open_file(run.report_path),
+                    )
+                )
+            if not run.run_path.lower().endswith(".csv"):
+                menu.addAction(
+                    Action(
+                        FluentIcon.DOCUMENT,
+                        "Open in Results Tab",
+                        triggered=lambda: self.open_in_results_requested.emit(run.run_path),
+                    )
+                )
             menu.addSeparator()
             menu.addAction(
                 Action(
@@ -588,6 +608,9 @@ class MeasurementTreeWidget(QWidget):
         p = Path(file_path)
         folder = p.parent if p.exists() else p
         QDesktopServices.openUrl(f"file:///{folder.as_posix()}")
+
+    def _open_file(self, file_path: str) -> None:
+        QDesktopServices.openUrl(QUrl.fromLocalFile(str(Path(file_path).resolve())))
 
     def _open_elab(self, url: str) -> None:
         if url:

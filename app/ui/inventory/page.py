@@ -40,7 +40,9 @@ from qfluentwidgets import (
     SegmentedWidget,
     SimpleCardWidget,
     SubtitleLabel,
+    TableWidget,
     TitleLabel,
+    ToggleButton,
     ToolButton,
 )
 
@@ -156,6 +158,61 @@ class AddHeaderDialog(QDialog):
         return key, label
 
 
+class CatalogueSettingsDialog(QDialog):
+    """Configure the single parent directory used by the Samples catalogue."""
+
+    def __init__(self, current_root: Path, parent: QWidget | None = None) -> None:
+        super().__init__(parent)
+        self.setWindowTitle("Samples Catalogue Settings")
+        self.setMinimumWidth(620)
+        self.setModal(True)
+
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(20, 20, 20, 20)
+        layout.setSpacing(12)
+        layout.addWidget(SubtitleLabel("Samples Catalogue Root", self))
+        layout.addWidget(
+            CaptionLabel(
+                "Every sample receives its own folder with info.csv, attachments, and structured measurements.",
+                self,
+            )
+        )
+        row = QHBoxLayout()
+        self.path_input = LineEdit(self)
+        self.path_input.setText(str(current_root))
+        self.path_input.setPlaceholderText(r"C:\Users\Name\Documents\PyLab")
+        row.addWidget(self.path_input, 1)
+        browse = PushButton("Browse…", self, FluentIcon.FOLDER)
+        browse.clicked.connect(self._browse)
+        row.addWidget(browse)
+        layout.addLayout(row)
+        layout.addWidget(
+            CaptionLabel(
+                "Example: PyLab/1_SampleName/{info.csv, attachments/, measurements/sweeps/, measurements/Device/…}",
+                self,
+            )
+        )
+        buttons = QHBoxLayout()
+        buttons.addStretch(1)
+        cancel = PushButton("Cancel", self)
+        cancel.clicked.connect(self.reject)
+        save = PrimaryPushButton("Save Catalogue", self, FluentIcon.SAVE)
+        save.clicked.connect(self.accept)
+        buttons.addWidget(cancel)
+        buttons.addWidget(save)
+        layout.addLayout(buttons)
+
+    def _browse(self) -> None:
+        selected = QFileDialog.getExistingDirectory(
+            self, "Select Samples Catalogue Root", self.path_input.text().strip()
+        )
+        if selected:
+            self.path_input.setText(selected)
+
+    def selected_root(self) -> Path:
+        return Path(self.path_input.text().strip()).expanduser()
+
+
 class SampleInventoryPage(QWidget):
     """Central laboratory sample catalogue, device grid matrix, and measurement ledger."""
 
@@ -239,9 +296,16 @@ class SampleInventoryPage(QWidget):
         header_layout.addWidget(self.active_target_card)
 
         # New Sample button
-        self.new_sample_btn = PrimaryPushButton("+ New Sample", header_card, FluentIcon.ADD)
+        self.new_sample_btn = PrimaryPushButton("New Sample", header_card, FluentIcon.ADD)
         self.new_sample_btn.clicked.connect(self._create_new_sample)
         header_layout.addWidget(self.new_sample_btn)
+
+        self.catalogue_settings_btn = PushButton("Catalogue Settings", header_card, FluentIcon.SETTING)
+        self.catalogue_settings_btn.setToolTip(
+            f"Samples catalogue root: {self.store.catalogue_root}"
+        )
+        self.catalogue_settings_btn.clicked.connect(self._configure_catalogue_root)
+        header_layout.addWidget(self.catalogue_settings_btn)
 
         main_layout.addWidget(header_card)
 
@@ -326,8 +390,11 @@ class SampleInventoryPage(QWidget):
         self.current_sample_title.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred)
         self.current_sample_desc = CaptionLabel("No sample selected", self.sample_header_card)
         self.current_sample_desc.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred)
+        self.current_sample_path = CaptionLabel("Catalogue folder: —", self.sample_header_card)
+        self.current_sample_path.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred)
         sample_name_box.addWidget(self.current_sample_title)
         sample_name_box.addWidget(self.current_sample_desc)
+        sample_name_box.addWidget(self.current_sample_path)
         header_row1.addLayout(sample_name_box, 1)
 
         self.edit_structure_header_btn = PushButton(
@@ -429,10 +496,10 @@ class SampleInventoryPage(QWidget):
 
         # Right: Cell Inspector with scroll area to prevent overlap on compact heights
         self.inspector_card = SimpleCardWidget(self.matrix_splitter)
-        self.inspector_card.setMinimumWidth(230)
-        self.inspector_card.setMaximumWidth(380)
+        self.inspector_card.setMinimumWidth(280)
+        self.inspector_card.setMaximumWidth(420)
         inspector_card_layout = QVBoxLayout(self.inspector_card)
-        inspector_card_layout.setContentsMargins(10, 10, 10, 10)
+        inspector_card_layout.setContentsMargins(12, 12, 12, 12)
         inspector_card_layout.setSpacing(8)
 
         inspector_card_layout.addWidget(SubtitleLabel("Device Inspector", self.inspector_card))
@@ -448,11 +515,12 @@ class SampleInventoryPage(QWidget):
         inspector_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
         inspector_scroll_content = QWidget(inspector_scroll)
         inspector_layout = QVBoxLayout(inspector_scroll_content)
-        inspector_layout.setContentsMargins(0, 0, 4, 0)
+        inspector_layout.setContentsMargins(0, 0, 8, 0)
         inspector_layout.setSpacing(8)
 
         form = QFormLayout()
         form.setSpacing(6)
+        form.setLabelAlignment(Qt.AlignmentFlag.AlignRight)
         self.cell_label_input = LineEdit(inspector_scroll_content)
         self.cell_label_input.setPlaceholderText("e.g. 200 nm Pillar A")
         form.addRow("Device Label:", self.cell_label_input)
@@ -469,18 +537,48 @@ class SampleInventoryPage(QWidget):
         self.cell_state_combo.addItems([
             "untested", "completed", "good", "measured", "burned", "shorted", "open", "degraded"
         ])
+        self.cell_state_combo.currentTextChanged.connect(self._on_cell_state_combo_changed)
         form.addRow("State:", self.cell_state_combo)
         inspector_layout.addLayout(form)
 
-        # Quick State Action buttons
+        # Quick State Action buttons (Instant Toggle)
         quick_state_layout = QHBoxLayout()
-        self.quick_completed_btn = PushButton("✔ Completed", inspector_scroll_content, FluentIcon.ACCEPT)
-        self.quick_completed_btn.setToolTip("Quickly mark cell as Completed (Green) and save immediately")
-        self.quick_completed_btn.clicked.connect(lambda: self._quick_mark_state("completed"))
+        quick_state_layout.setSpacing(6)
+        self.quick_completed_btn = ToggleButton("Completed", inspector_scroll_content, FluentIcon.ACCEPT)
+        self.quick_completed_btn.setObjectName("quickCompletedToggle")
+        self.quick_completed_btn.setToolTip("Toggle Completed state (Green) instantly")
+        self.quick_completed_btn.setStyleSheet("""
+            ToggleButton[hasIcon=true] {
+                padding: 5px 12px 6px 36px;
+            }
+            ToggleButton:checked {
+                background-color: #16a34a;
+                border: 1px solid #15803d;
+                color: white;
+            }
+            ToggleButton:checked:hover {
+                background-color: #15803d;
+            }
+        """)
+        self.quick_completed_btn.clicked.connect(self._on_toggle_completed_clicked)
 
-        self.quick_burned_btn = PushButton("🔥 Burned", inspector_scroll_content, FluentIcon.CANCEL)
-        self.quick_burned_btn.setToolTip("Quickly mark cell as Burned / Damaged (Red) and save immediately")
-        self.quick_burned_btn.clicked.connect(lambda: self._quick_mark_state("burned"))
+        self.quick_burned_btn = ToggleButton("Burned", inspector_scroll_content, FluentIcon.CLOSE)
+        self.quick_burned_btn.setObjectName("quickBurnedToggle")
+        self.quick_burned_btn.setToolTip("Toggle Burned / Damaged state (Red) instantly")
+        self.quick_burned_btn.setStyleSheet("""
+            ToggleButton[hasIcon=true] {
+                padding: 5px 12px 6px 36px;
+            }
+            ToggleButton:checked {
+                background-color: #dc2626;
+                border: 1px solid #b91c1c;
+                color: white;
+            }
+            ToggleButton:checked:hover {
+                background-color: #b91c1c;
+            }
+        """)
+        self.quick_burned_btn.clicked.connect(self._on_toggle_burned_clicked)
 
         quick_state_layout.addWidget(self.quick_completed_btn)
         quick_state_layout.addWidget(self.quick_burned_btn)
@@ -488,13 +586,15 @@ class SampleInventoryPage(QWidget):
 
         inspector_layout.addWidget(CaptionLabel("Device Notes / Resistance:", inspector_scroll_content))
         self.cell_notes_input = PlainTextEdit(inspector_scroll_content)
-        self.cell_notes_input.setMaximumHeight(60)
+        self.cell_notes_input.setMinimumHeight(85)
+        self.cell_notes_input.setMaximumHeight(130)
         inspector_layout.addWidget(self.cell_notes_input)
 
         cell_btns = QHBoxLayout()
+        cell_btns.setSpacing(6)
         self.save_cell_btn = PushButton("Save Cell", inspector_scroll_content, FluentIcon.SAVE)
         self.save_cell_btn.clicked.connect(self._save_cell_changes)
-        self.set_target_btn = PrimaryPushButton("★ Set Target", inspector_scroll_content, FluentIcon.TAG)
+        self.set_target_btn = PrimaryPushButton("Set Target", inspector_scroll_content, FluentIcon.PIN)
         self.set_target_btn.clicked.connect(self._set_selected_as_active_target)
         cell_btns.addWidget(self.save_cell_btn)
         cell_btns.addWidget(self.set_target_btn)
@@ -509,7 +609,9 @@ class SampleInventoryPage(QWidget):
         runs_hdr_layout.addWidget(self.explore_cell_runs_btn)
         inspector_layout.addLayout(runs_hdr_layout)
 
-        self.cell_runs_table = QTableWidget(inspector_scroll_content)
+        self.cell_runs_table = TableWidget(inspector_scroll_content)
+        self.cell_runs_table.setBorderVisible(True)
+        self.cell_runs_table.setBorderRadius(6)
         self.cell_runs_table.setColumnCount(3)
         self.cell_runs_table.setHorizontalHeaderLabels(["Run / Recipe", "Pts", "Status"])
         self.cell_runs_table.horizontalHeader().setSectionResizeMode(0, QHeaderView.ResizeMode.Stretch)
@@ -517,7 +619,7 @@ class SampleInventoryPage(QWidget):
         self.cell_runs_table.horizontalHeader().setSectionResizeMode(2, QHeaderView.ResizeMode.ResizeToContents)
         self.cell_runs_table.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
         self.cell_runs_table.itemDoubleClicked.connect(self._on_cell_run_double_clicked)
-        self.cell_runs_table.setMinimumHeight(80)
+        self.cell_runs_table.setMinimumHeight(90)
         inspector_layout.addWidget(self.cell_runs_table, 1)
 
         inspector_scroll.setWidget(inspector_scroll_content)
@@ -526,7 +628,7 @@ class SampleInventoryPage(QWidget):
         self.matrix_splitter.addWidget(self.inspector_card)
         self.matrix_splitter.setStretchFactor(0, 1)
         self.matrix_splitter.setStretchFactor(1, 0)
-        self.matrix_splitter.setSizes([800, 270])
+        self.matrix_splitter.setSizes([760, 320])
 
         matrix_layout.addWidget(self.matrix_splitter, 1)
         self._add_tab(matrix_page, "matrixTab", "Device Grid", FluentIcon.TILES)
@@ -587,7 +689,7 @@ class SampleInventoryPage(QWidget):
         gallery_toolbar.addWidget(SubtitleLabel("Files & Layouts", gallery_card))
         gallery_toolbar.addStretch(1)
         self.add_attachment_btn = PrimaryPushButton(
-            "+ Add Photo / PDF...", gallery_card, FluentIcon.ADD
+            "Add Photo / PDF...", gallery_card, FluentIcon.ADD
         )
         self.add_attachment_btn.clicked.connect(self._prompt_add_attachment)
         gallery_toolbar.addWidget(self.add_attachment_btn)
@@ -638,6 +740,36 @@ class SampleInventoryPage(QWidget):
     # -------------------------------------------------------------------------
     # Sample Management Logic
     # -------------------------------------------------------------------------
+
+    def _configure_catalogue_root(self) -> None:
+        dialog = CatalogueSettingsDialog(self.store.catalogue_root, self)
+        if dialog.exec() != QDialog.DialogCode.Accepted:
+            return
+        selected = dialog.selected_root()
+        if not str(selected).strip():
+            return
+        try:
+            root = self.store.set_catalogue_root(selected)
+        except Exception as exc:
+            InfoBar.error(
+                title="Catalogue not changed",
+                content=str(exc),
+                parent=self,
+                position=InfoBarPosition.TOP_RIGHT,
+                duration=-1,
+            )
+            return
+        self.catalogue_settings_btn.setToolTip(f"Samples catalogue root: {root}")
+        self.refresh_samples()
+        self.samples_updated.emit()
+        self.status.emit(f"Samples catalogue root saved: {root}")
+        InfoBar.success(
+            title="Samples catalogue ready",
+            content=f"Sample folders and standard subfolders were created in {root}",
+            parent=self,
+            position=InfoBarPosition.TOP_RIGHT,
+            duration=4000,
+        )
 
     def refresh_samples(self) -> None:
         """Reload all samples from SQLite store."""
@@ -716,6 +848,7 @@ class SampleInventoryPage(QWidget):
         if sample is None:
             self.current_sample_title.setText("Select or create a sample")
             self.current_sample_desc.setText("No sample selected.")
+            self.current_sample_path.setText("Catalogue folder: —")
             self.stats_devices_label.setText("Devices: -")
             self.stats_tested_label.setText("Tested: -")
             self.stats_completed_label.setText("Completed: -")
@@ -730,6 +863,9 @@ class SampleInventoryPage(QWidget):
         self.current_sample_title.setText(f"{sample.name} [{sample.sample_id}]")
         tags_str = f" · Tags: {', '.join(sample.tags)}" if sample.tags else ""
         self.current_sample_desc.setText(f"Created: {sample.created_at_utc[:10]}{tags_str}")
+        sample_path = self.store.sample_directory(sample.sample_id)
+        self.current_sample_path.setText(f"Catalogue folder: {sample_path}")
+        self.current_sample_path.setToolTip(str(sample_path))
 
         all_runs = self._refresh_stats(sample)
 
@@ -830,13 +966,23 @@ class SampleInventoryPage(QWidget):
         self.row_label_input.setText(row_label)
         self.col_label_input.setText(col_label)
 
-        state_idx = self.cell_state_combo.findText(state)
-        if state_idx >= 0:
-            self.cell_state_combo.setCurrentIndex(state_idx)
-        else:
-            self.cell_state_combo.setCurrentIndex(0)
-
+        self._update_inspector_state_controls(state)
         self.cell_notes_input.setPlainText(notes)
+
+        # Update target button state
+        active_target = self.store.get_active_target()
+        is_target_cell = (
+            active_target.is_active
+            and active_target.sample_id == self._current_sample.sample_id
+            and active_target.row == row
+            and active_target.col == col
+        )
+        if is_target_cell:
+            self.set_target_btn.setText("Target Active")
+            self.set_target_btn.setIcon(FluentIcon.ACCEPT)
+        else:
+            self.set_target_btn.setText("Set Target")
+            self.set_target_btn.setIcon(FluentIcon.PIN)
 
         # Refresh cell runs mini-table
         cell_runs = self.store.list_runs_for_cell(self._current_sample.sample_id, row, col)
@@ -848,6 +994,23 @@ class SampleInventoryPage(QWidget):
             self.cell_runs_table.setItem(idx, 0, item_f)
             self.cell_runs_table.setItem(idx, 1, QTableWidgetItem(str(cr.point_count)))
             self.cell_runs_table.setItem(idx, 2, QTableWidgetItem(cr.status))
+
+    def _update_inspector_state_controls(self, state: str) -> None:
+        self.cell_state_combo.blockSignals(True)
+        idx = self.cell_state_combo.findText(state)
+        if idx >= 0:
+            self.cell_state_combo.setCurrentIndex(idx)
+        else:
+            self.cell_state_combo.setCurrentIndex(0)
+        self.cell_state_combo.blockSignals(False)
+
+        self.quick_completed_btn.blockSignals(True)
+        self.quick_completed_btn.setChecked(state == "completed")
+        self.quick_completed_btn.blockSignals(False)
+
+        self.quick_burned_btn.blockSignals(True)
+        self.quick_burned_btn.setChecked(state == "burned")
+        self.quick_burned_btn.blockSignals(False)
 
     def _on_cell_activated(self, row: str, col: str) -> None:
         """Double click sets as active measurement target."""
@@ -867,24 +1030,29 @@ class SampleInventoryPage(QWidget):
         updated = self._current_sample.with_cell_update(
             row, col, label=new_label, state=new_state, notes=new_notes
         )
+        structure_changed = False
         if new_row_label != self._current_sample.row_labels.get(row, ""):
             updated = updated.with_row_label(row, new_row_label)
+            structure_changed = True
         if new_col_label != self._current_sample.col_labels.get(col, ""):
             updated = updated.with_col_label(col, new_col_label)
+            structure_changed = True
 
         self.store.save_sample(updated)
         self._current_sample = updated
         self._refresh_stats(updated)
 
-        # Update matrix view
-        all_runs = self.store.list_runs_for_sample(updated.sample_id)
-        active = self.store.get_active_target()
-        self.matrix_widget.set_sample(updated, run_records=all_runs, active_target=active)
-        self.matrix_widget.select_cell(row, col)
+        if structure_changed:
+            all_runs = self.store.list_runs_for_sample(updated.sample_id)
+            active = self.store.get_active_target()
+            self.matrix_widget.set_sample(updated, run_records=all_runs, active_target=active)
+            self.matrix_widget.select_cell(row, col)
+        else:
+            self.matrix_widget.update_cell(row, col, state=new_state, label=new_label)
 
         InfoBar.success(
-            title="Device Updated",
-            content=f"Saved settings for R{row}:C{col} and labels.",
+            title="Device Saved",
+            content=f"Saved settings for R{row}:C{col}.",
             parent=self,
             position=InfoBarPosition.TOP_RIGHT,
             duration=2000,
@@ -970,20 +1138,55 @@ class SampleInventoryPage(QWidget):
         self._set_current_sample(updated)
         self.status.emit(f"Deleted row {row}.")
 
-    def _quick_mark_state(self, new_state: str) -> None:
+    def _set_cell_state_fast(self, new_state: str) -> None:
         if self._current_sample is None or self._selected_cell is None:
             return
-        idx = self.cell_state_combo.findText(new_state)
-        if idx >= 0:
-            self.cell_state_combo.setCurrentIndex(idx)
-        self._save_cell_changes()
+        row, col = self._selected_cell
+        self._update_inspector_state_controls(new_state)
+
+        updated = self._current_sample.with_cell_update(row, col, state=new_state)
+        self._current_sample = updated
+        self.matrix_widget.update_cell(row, col, state=new_state)
+        self._refresh_stats(updated)
+        self.store.save_sample(updated)
+        self.status.emit(f"Marked R{row}:C{col} as {new_state}.")
+
+    def _on_toggle_completed_clicked(self) -> None:
+        if self._selected_cell is None or self._current_sample is None:
+            return
+        row, col = self._selected_cell
+        current_state = self._current_sample.cell_state(row, col)
+        new_state = "untested" if current_state == "completed" else "completed"
+        self._set_cell_state_fast(new_state)
+
+    def _on_toggle_burned_clicked(self) -> None:
+        if self._selected_cell is None or self._current_sample is None:
+            return
+        row, col = self._selected_cell
+        current_state = self._current_sample.cell_state(row, col)
+        new_state = "untested" if current_state == "burned" else "burned"
+        self._set_cell_state_fast(new_state)
+
+    def _on_cell_state_combo_changed(self, new_state: str) -> None:
+        if self._selected_cell is None or self._current_sample is None:
+            return
+        row, col = self._selected_cell
+        if self._current_sample.cell_state(row, col) != new_state:
+            self._set_cell_state_fast(new_state)
+
+    def _quick_mark_state(self, new_state: str) -> None:
+        self._set_cell_state_fast(new_state)
 
     def _on_cell_state_change_requested(self, row: str, col: str, new_state: str) -> None:
         if self._current_sample is None:
             return
         updated = self._current_sample.with_cell_update(row, col, state=new_state)
+        self._current_sample = updated
+        self.matrix_widget.update_cell(row, col, state=new_state)
+        self._refresh_stats(updated)
         self.store.save_sample(updated)
-        self._set_current_sample(updated)
+        if self._selected_cell == (row, col):
+            self._update_inspector_state_controls(new_state)
         self.matrix_widget.select_cell(row, col)
         self.status.emit(f"Marked R{row}:C{col} as {new_state}.")
 
@@ -993,8 +1196,12 @@ class SampleInventoryPage(QWidget):
         if self._current_sample is None or not coords:
             return
         updated = self._current_sample.with_cells_state(coords, state=new_state)
+        self._current_sample = updated
+        self.matrix_widget.update_cells(coords, state=new_state)
+        self._refresh_stats(updated)
         self.store.save_sample(updated)
-        self._set_current_sample(updated)
+        if self._selected_cell in coords:
+            self._update_inspector_state_controls(new_state)
         if coords:
             self.matrix_widget.select_cell(coords[0][0], coords[0][1])
         self.status.emit(f"Marked {len(coords)} devices as {new_state}.")
@@ -1002,18 +1209,14 @@ class SampleInventoryPage(QWidget):
     def _on_row_state_change_requested(self, row: str, new_state: str) -> None:
         if self._current_sample is None:
             return
-        updated = self._current_sample.with_row_state(row, state=new_state)
-        self.store.save_sample(updated)
-        self._set_current_sample(updated)
-        self.status.emit(f"Marked entire row {row} as {new_state}.")
+        coords = [(row, c) for c in self._current_sample.cols]
+        self._on_batch_cell_state_change_requested(coords, new_state)
 
     def _on_col_state_change_requested(self, col: str, new_state: str) -> None:
         if self._current_sample is None:
             return
-        updated = self._current_sample.with_col_state(col, state=new_state)
-        self.store.save_sample(updated)
-        self._set_current_sample(updated)
-        self.status.emit(f"Marked entire column {col} as {new_state}.")
+        coords = [(r, col) for r in self._current_sample.rows]
+        self._on_batch_cell_state_change_requested(coords, new_state)
 
     # -------------------------------------------------------------------------
     # Active Target Handling
@@ -1048,6 +1251,9 @@ class SampleInventoryPage(QWidget):
         self.matrix_widget.set_sample(self._current_sample, run_records=all_runs, active_target=target)
         self.matrix_widget.select_cell(row, col)
 
+        self.set_target_btn.setText("Target Active")
+        self.set_target_btn.setIcon(FluentIcon.ACCEPT)
+
         InfoBar.info(
             title="Target Activated",
             content=f"Upcoming measurements will record DUT: {target.display_text()}",
@@ -1059,6 +1265,8 @@ class SampleInventoryPage(QWidget):
     def _clear_active_target(self) -> None:
         self.store.clear_active_target()
         self._sync_active_target_display()
+        self.set_target_btn.setText("Set Target")
+        self.set_target_btn.setIcon(FluentIcon.PIN)
         self.active_target_changed.emit(ActiveSampleTarget())
         if self._current_sample:
             all_runs = self.store.list_runs_for_sample(self._current_sample.sample_id)
@@ -1142,6 +1350,8 @@ class SampleInventoryPage(QWidget):
             sample_id=self._current_sample.sample_id,
             name=self._current_sample.name,
             description=new_desc,
+            folder_name=self._current_sample.folder_name,
+            created_at_utc=self._current_sample.created_at_utc,
             tags=self._current_sample.tags,
             rows=self._current_sample.rows,
             row_labels=self._current_sample.row_labels,

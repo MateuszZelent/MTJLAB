@@ -102,6 +102,10 @@ class SampleInventoryUITests(unittest.TestCase):
         dialog.rows_count.setValue(5)
         dialog.cols_count.setValue(3)
         dialog.col_labels_input.setText("50 nm, 100 nm, 200 nm")
+        dialog.folder_name_input.setText("1_CoFeBWedge")
+        dialog.show()
+        self.application.processEvents()
+        self.assertGreater(dialog.folder_name_input.width(), 0)
 
         sample = dialog.get_sample()
         self.assertEqual(sample.sample_id, "XYZ")
@@ -110,6 +114,8 @@ class SampleInventoryUITests(unittest.TestCase):
         self.assertEqual(len(sample.cols), 3)
         self.assertEqual(sample.col_labels.get("3"), "200 nm")
         self.assertEqual(sample.cell_label("1", "3"), "200 nm")
+        self.assertEqual(sample.folder_name, "1_CoFeBWedge")
+        dialog.close()
 
     def test_sample_inventory_page_lifecycle_and_geometry(self) -> None:
         # Prepopulate sample
@@ -131,6 +137,8 @@ class SampleInventoryUITests(unittest.TestCase):
         self.assertGreater(page.width(), 0)
         self.assertGreater(page.height(), 0)
         self.assertGreater(page.matrix_widget.width(), 0)
+        self.assertTrue(page.catalogue_settings_btn.isVisible())
+        self.assertIn(str(self.store.catalogue_root), page.catalogue_settings_btn.toolTip())
 
         # Check sample is listed
         self.assertGreaterEqual(page.sample_list.count(), 1)
@@ -311,6 +319,139 @@ class SampleInventoryUITests(unittest.TestCase):
         self.assertEqual(len(sample.rows), 11)
         self.assertEqual(sample.rows[0], "20")
         self.assertEqual(sample.rows[-1], "30")
+
+    def test_instant_toggle_buttons_and_state_toggling(self) -> None:
+        sample = Sample(
+            sample_id="TOGGLE-TEST",
+            name="Toggle Sample",
+            rows=("1", "2"),
+            cols=("1", "2"),
+        )
+        self.store.save_sample(sample)
+        page = SampleInventoryPage(self.store)
+        page.show()
+        self.application.processEvents()
+
+        # Select (1, 1)
+        page._on_cell_selected("1", "1")
+        self.assertFalse(page.quick_completed_btn.isChecked())
+        self.assertFalse(page.quick_burned_btn.isChecked())
+
+        # Click Completed toggle button -> becomes completed
+        page.quick_completed_btn.click()
+        self.assertTrue(page.quick_completed_btn.isChecked())
+        self.assertEqual(page.store.get_sample("TOGGLE-TEST").cell_state("1", "1"), "completed")
+
+        # Click Completed toggle button again -> untoggles back to untested!
+        page.quick_completed_btn.click()
+        self.assertFalse(page.quick_completed_btn.isChecked())
+        self.assertEqual(page.store.get_sample("TOGGLE-TEST").cell_state("1", "1"), "untested")
+
+        # Click Burned toggle button -> becomes burned
+        page.quick_burned_btn.click()
+        self.assertTrue(page.quick_burned_btn.isChecked())
+        self.assertEqual(page.store.get_sample("TOGGLE-TEST").cell_state("1", "1"), "burned")
+
+        # Click Burned toggle button again -> untoggles back to untested!
+        page.quick_burned_btn.click()
+        self.assertFalse(page.quick_burned_btn.isChecked())
+        self.assertEqual(page.store.get_sample("TOGGLE-TEST").cell_state("1", "1"), "untested")
+
+        # Verify notes input has expanded height
+        self.assertGreaterEqual(page.cell_notes_input.minimumHeight(), 80)
+        page.close()
+
+    def test_matrix_widget_in_place_update_and_keyboard_shortcuts(self) -> None:
+        from PySide6.QtCore import QEvent, Qt
+        from PySide6.QtGui import QKeyEvent
+
+        widget = SampleMatrixWidget()
+        sample = Sample(
+            sample_id="KEY-TEST",
+            name="Key Test",
+            rows=("1", "2"),
+            cols=("1", "2"),
+        )
+        widget.set_sample(sample)
+        item_before = widget.table.item(0, 0)
+        self.assertIsNotNone(item_before)
+
+        # In-place update
+        widget.update_cell("1", "1", state="completed")
+        item_after = widget.table.item(0, 0)
+        self.assertIs(item_before, item_after)  # Same item identity, NO table recreation!
+        self.assertIn("COMPLETED", item_after.text())
+
+        # Select item (0, 0)
+        widget.table.setCurrentCell(0, 0)
+        item_after.setSelected(True)
+
+        # Press 'B' key -> marks as burned
+        b_key = QKeyEvent(QEvent.Type.KeyPress, Qt.Key.Key_B, Qt.KeyboardModifier.NoModifier)
+        state_changes: list[tuple[str, str, str]] = []
+        widget.cell_state_change_requested.connect(lambda r, c, s: state_changes.append((r, c, s)))
+        widget.table.keyPressEvent(b_key)
+        self.assertEqual(state_changes, [("1", "1", "burned")])
+
+        # Press 'C' key -> marks as completed
+        c_key = QKeyEvent(QEvent.Type.KeyPress, Qt.Key.Key_C, Qt.KeyboardModifier.NoModifier)
+        widget.table.keyPressEvent(c_key)
+        self.assertEqual(state_changes[-1], ("1", "1", "completed"))
+
+        # Press 'U' key -> marks as untested
+        u_key = QKeyEvent(QEvent.Type.KeyPress, Qt.Key.Key_U, Qt.KeyboardModifier.NoModifier)
+        widget.table.keyPressEvent(u_key)
+        self.assertEqual(state_changes[-1], ("1", "1", "untested"))
+
+    def test_device_inspector_clean_icons_and_target_state(self) -> None:
+        from qfluentwidgets import TableWidget, ToggleButton
+
+        sample = Sample(
+            sample_id="INSP-CLEAN",
+            name="Clean Inspector Test",
+            rows=("1", "2"),
+            cols=("1", "2"),
+        )
+        self.store.save_sample(sample)
+        page = SampleInventoryPage(self.store)
+        page.show()
+        self.application.processEvents()
+
+        # Check button types and clean text (no duplicate icons in text)
+        self.assertIsInstance(page.quick_completed_btn, ToggleButton)
+        self.assertIsInstance(page.quick_burned_btn, ToggleButton)
+        self.assertEqual(page.quick_completed_btn.text(), "Completed")
+        self.assertEqual(page.quick_burned_btn.text(), "Burned")
+        self.assertNotIn("✔", page.quick_completed_btn.text())
+        self.assertNotIn("🔥", page.quick_burned_btn.text())
+        self.assertEqual(page.new_sample_btn.text(), "New Sample")
+        self.assertNotIn("+", page.new_sample_btn.text())
+
+        # Check TableWidget
+        self.assertIsInstance(page.cell_runs_table, TableWidget)
+
+        # Select (1, 1) - initially not target
+        page._on_cell_selected("1", "1")
+        self.assertEqual(page.set_target_btn.text(), "Set Target")
+        self.assertNotIn("★", page.set_target_btn.text())
+
+        # Set as active target
+        page.set_target_btn.click()
+        self.assertEqual(page.set_target_btn.text(), "Target Active")
+
+        # Select another cell (1, 2)
+        page._on_cell_selected("1", "2")
+        self.assertEqual(page.set_target_btn.text(), "Set Target")
+
+        # Select back (1, 1) -> should show Target Active
+        page._on_cell_selected("1", "1")
+        self.assertEqual(page.set_target_btn.text(), "Target Active")
+
+        # Clear target
+        page._clear_active_target()
+        self.assertEqual(page.set_target_btn.text(), "Set Target")
+
+        page.close()
 
 
 if __name__ == "__main__":

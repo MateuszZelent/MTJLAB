@@ -15,6 +15,7 @@ from qfluentwidgets import SimpleCardWidget
 from app.inventory.analysis import calculate_mtj_metrics
 from app.inventory.models import Sample, SampleRunRecord
 from app.storage.hdf5_series_reader import Hdf5SeriesReader, MeasurementSeries
+from app.storage.characterization_csv_reader import CharacterizationCsvReader
 from app.ui.inventory.measurement_card import MeasurementAnalyticsCard
 from app.ui.inventory.measurement_plot import MeasurementPlotWidget
 from app.ui.inventory.measurement_tree import MeasurementTreeWidget
@@ -124,7 +125,14 @@ class MeasurementBrowserView(QWidget):
         if cache_key in self._series_cache:
             return self._series_cache[cache_key]
 
-        series = Hdf5SeriesReader.read_series(run.run_path, preferred_y_channel=preferred_channel)
+        if run.run_path.lower().endswith(".csv"):
+            series = CharacterizationCsvReader.read_series(
+                run.run_path, preferred_y_channel=preferred_channel
+            )
+        else:
+            series = Hdf5SeriesReader.read_series(
+                run.run_path, preferred_y_channel=preferred_channel
+            )
         if series is not None:
             self._series_cache[cache_key] = series
         return series
@@ -159,7 +167,7 @@ class MeasurementBrowserView(QWidget):
         # Single run inspection
         series = self._get_series(run, self._current_channel)
         if series is None:
-            self.plot_widget.show_error(f"Cannot read HDF5 series:\n{run.run_path}")
+            self.plot_widget.show_error(f"Cannot read measurement series:\n{run.run_path}")
             self.analytics_card.set_run_data(run, None, None)
             return
 

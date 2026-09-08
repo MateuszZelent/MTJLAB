@@ -84,9 +84,10 @@ class KeithleyPdfReportGenerator:
         cls._ensure_fonts()
         target = Path(output_path)
         target.parent.mkdir(parents=True, exist_ok=True)
+        temporary = target.with_name(f".{target.stem}.tmp{target.suffix}")
 
         doc = SimpleDocTemplate(
-            str(target),
+            str(temporary),
             pagesize=A4,
             leftMargin=36,
             rightMargin=36,
@@ -382,6 +383,7 @@ class KeithleyPdfReportGenerator:
         story.append(Paragraph(footer_text, subtitle_style))
 
         doc.build(story)
+        temporary.replace(target)
         return target
 
     @classmethod

@@ -112,9 +112,10 @@ compliance przy wymuszaniu prądu ogranicza napięcie wyjściowe; nie jest nieza
 limitem wartości zadanego prądu. Dlatego kontynuowanie sweepu po compliance nie
 chroni próbki, której rezystancja może zmienić się w czasie pomiaru.
 
-Runner charakteryzacji wymaga, aby zwykła karta i urządzenie miały już politykę
-`stop`; nie zmienia jej lokalnie. Zmiana oczekująca na potwierdzenie albo polityka
-`warn_clamp`/`skip` blokuje start przed włączeniem wyjścia.
+Runner charakteryzacji wymaga, aby zwykła karta i urządzenie miały politykę
+`stop` przed włączeniem wyjścia. Jeśli normalny profil ma `warn_clamp`/`skip`,
+karta pokazuje jawne potwierdzenie i wykonuje tymczasowe przejście przez wspólny
+mechanizm normalnej karty; brak potwierdzonego readbacku nadal blokuje start.
 
 Dla zwykłej pracy Keithley domyślną polityką jest ponownie `warn_clamp`: sprzęt
 utrzymuje wyjście w ograniczeniu, aplikacja pokazuje compliance i blokuje ruch
@@ -165,3 +166,37 @@ większej od granicy ustawionej przez operatora według powyższej reguły. Nie
 gwarantuje określonego prądu MTJ, ponieważ aplikacja nie otrzymuje rzeczywistego
 pomiaru tego prądu z Rigola. Dobór `combined_voltage_limit` nadal musi wynikać z
 bezpiecznej procedury dla danej próbki i jej spodziewanego zakresu rezystancji.
+## Uzupełnienie: prezentacja i trwałość wyników charakterystyki (2026-09-07)
+
+Podczas pomiaru rezystancja była obliczana z tych samych punktów, które tworzą krzywą V-I, i pozostawała w pamięci zestawu danych. Błąd dotyczył nawigacji `SegmentedWidget`: test sprawdzał bezpośrednie wywołanie funkcji przełączającej, ale rzeczywista zmiana aktywnej pozycji kontrolki nie była obsługiwana w sposób zgodny z sygnałem Fluent. Podłączono `currentItemChanged` i dodano test przełączający rzeczywistą kontrolkę między V-I oraz R.
+
+Wykryto również błąd trwałości danych: po zakończeniu charakterystyki tworzony był wpis `SampleRunRecord` z pustym `run_path`, zanim operator ręcznie wyeksportował pliki, a wyjątek zapisu do katalogu próbki był ignorowany. Obecnie zakończenie przebiegu automatycznie:
+
+1. tworzy unikalny katalog przebiegu w katalogu pomiarów przypisanym do próbki,
+2. zapisuje atomowo `characterization.csv` i `characterization_report.pdf`,
+3. oblicza SHA-256 pliku CSV,
+4. rejestruje rzeczywiste ścieżki CSV i PDF w bazie Samples,
+5. odświeża widok `Measurements & Curves`.
+
+Jedyny katalog nadrzędny jest wybierany w `Samples → Catalogue Settings`. Dla każdej próbki aplikacja automatycznie tworzy katalog `<ID>_<SkróconaNazwaCamelCase>`; jego nazwę można zmienić w edycji próbki. Wewnątrz powstają `info.csv`, `attachments/`, `measurements/sweeps/` oraz katalogi urządzeń. Charakterystyka Keithleya trafia do `measurements/Keithley_2600/characterization/`. Zmiana katalogu nadrzędnego kopiuje istniejące dane i załączniki oraz aktualizuje zarejestrowane ścieżki. Przyciski na karcie charakterystyki otwierają już zapisane pliki i nie pokazują okna „Zapisz jako”. Czytnik katalogu pomiarów obsługuje CSV charakterystyki, w tym kanały napięcia, prądu, rezystancji rzeczywistej i pozornej oraz mocy. Przeglądarka `Results` skanuje katalog rekurencyjnie i pokazuje HDF5, CSV oraz PDF w drzewie `próbka → measurements → sweeps/urządzenie → typ → komórka → wykonanie`; liście HDF5 otwierają pełny analizator wyników, a CSV/PDF pozostają dostępne z drzewa i przez katalog próbki.
+
+`reportlab` został dodany do deklarowanych zależności projektu i do pliku blokady, więc środowisko instalowane z projektu zawiera generator PDF. Błąd zapisu artefaktów jest jawnie wyświetlany i nie jest mylony ze stanem wyjścia Keithleya; zapis następuje dopiero po zakończeniu przebiegu i po wyłączeniu wyjścia.
+
+## Uzupełnienie: tymczasowa polityka compliance charakterystyki (2026-09-07)
+
+Charakterystyka nie wymaga już ręcznego przełączania zwykłej karty na `stop`. Przy
+domyślnym `warn_clamp` (lub legacy `skip`) przed startem pojawia się modalne
+potwierdzenie. Po akceptacji normalna karta ustawia na wybranym kanale `stop`, a
+adapter potwierdza tę wartość dodatkowym readbackiem. Dopiero po tym readbacku
+worker może wykonać `OUTPUT ON`. Anulowanie modalnego pytania nie wysyła
+polecenia wyjścia.
+
+Po zakończeniu runner najpierw potwierdza `OUTPUT OFF`, a dopiero potem normalna
+karta przywraca dokładnie politykę zapamiętaną przed startem. Także przy błędzie
+workera wykonywany jest niezależny readback OFF; brak potwierdzenia blokuje
+przywrócenie i kolejną charakterystykę. Zwykła karta blokuje selektor polityki na
+czas przejścia i zapisu, a `refresh_station_context()` nie resetuje żywej polityki
+kanału podczas takiego przebiegu.
+
+Pełna sekwencja, kontrakty readbacku i testy są opisane w
+`CHARAKTERYZACJA_POLITYKA_COMPLIANCE.md`.

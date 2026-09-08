@@ -100,15 +100,23 @@ class Hdf5RunReader:
     """Read schema-version-1 HDF5 runs without ever modifying them."""
 
     @staticmethod
-    def list_runs(directory: str | Path) -> tuple[RunSummary, ...]:
+    def list_runs(
+        directory: str | Path, *, recursive: bool = False
+    ) -> tuple[RunSummary, ...]:
+        """Index immutable HDF5 runs below ``directory``.
+
+        The station normally writes one run per file, but a sample catalogue
+        deliberately nests those files below ``<sample>/measurements``.  The
+        default remains a direct-directory scan for callers that use a
+        dedicated output folder; catalogue browsers can opt into the
+        recursive scan without changing the reader's compatibility surface.
+        """
         output_dir = Path(directory)
         if not output_dir.exists():
             return ()
         summaries: list[RunSummary] = []
-        paths = {
-            *output_dir.glob("*.h5"),
-            *output_dir.glob("*.hdf5"),
-        }
+        glob = output_dir.rglob if recursive else output_dir.glob
+        paths = {*glob("*.h5"), *glob("*.hdf5")}
         for path in sorted(paths, key=lambda item: item.stat().st_mtime, reverse=True):
             try:
                 summaries.append(Hdf5RunReader.summary(path))

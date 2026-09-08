@@ -451,7 +451,8 @@ class MainWindow(FluentWindow):
         )
         self.run_monitor = RunMonitorPage()
         self.results_page = ResultsPage(
-            str(self._settings.storage.get("output_directory", "./measurements"))
+            str(self.inventory_store.catalogue_root),
+            catalogue_tree=True,
         )
         self.elab_page = ElabPage(
             self._repository,
@@ -471,11 +472,15 @@ class MainWindow(FluentWindow):
         self.inventory_page.samples_updated.connect(
             self.keithley_characterization_page.refresh_samples_list
         )
+        self.inventory_page.samples_updated.connect(self._refresh_results_catalogue)
         self.keithley_characterization_page.active_target_changed.connect(
             self._on_active_sample_target_changed
         )
         self.keithley_characterization_page.browse_samples_requested.connect(
             lambda: self._navigate_to("inventory")
+        )
+        self.keithley_characterization_page.measurement_saved.connect(
+            lambda _sample_id: self.inventory_page.refresh_samples()
         )
         self.elab_page.upload_completed_record.connect(self._on_elab_upload_completed)
         self.recipe_page.set_elab_context(
@@ -1893,6 +1898,13 @@ class MainWindow(FluentWindow):
                 plan,  # type: ignore[union-attr]
             )
             active_controllers = self._active_device_controllers()
+            sample_target = self.inventory_store.get_active_target()
+            if sample_target.is_active and sample_target.sample_id:
+                output_dir_override = str(
+                    self.inventory_store.measurement_directory_for(
+                        sample_target.sample_id, "sweeps"
+                    )
+                )
             self._run_controller.start(
                 self._settings,
                 self._repository.path,
@@ -1904,7 +1916,7 @@ class MainWindow(FluentWindow):
                 output_dir_override=output_dir_override,
                 file_stem_override=file_stem_override,
                 device_controllers=active_controllers,
-                sample_target=self.inventory_store.get_active_target(),
+                sample_target=sample_target,
             )
         except Exception as exc:
             issue = settings_issue_for_error(exc)
@@ -2413,9 +2425,9 @@ class MainWindow(FluentWindow):
         result_path = None
         if isinstance(result, dict) and result.get("path"):
             result_path = Path(str(result["path"]))
-        if result_path is not None:
-            self.results_page.set_output_directory(result_path.parent)
         self.results_page.refresh()
+        if result_path is not None:
+            self.results_page.select_result_path(result_path)
         run_result = result["result"]
         state = str(getattr(getattr(run_result, "state", None), "value", "unknown"))
         error = getattr(run_result, "error", None)
@@ -2487,11 +2499,16 @@ class MainWindow(FluentWindow):
     def _open_inventory_result(self, run_path: str) -> None:
         path = Path(run_path)
         if path.is_file():
-            self.results_page.set_output_directory(path.parent)
             self.results_page.select_result_path(path)
             self._navigate_to("results")
         else:
             self._log(f"Measurement file not found: {run_path}")
+
+    def _refresh_results_catalogue(self) -> None:
+        """Keep Results pointed at the one Samples catalogue root."""
+
+        self.results_page.set_output_directory(self.inventory_store.catalogue_root)
+        self.results_page.file_browser.refresh()
 
     def _on_elab_upload_completed(self, record: object) -> None:
         if hasattr(record, "run_path") and hasattr(record, "experiment_id"):

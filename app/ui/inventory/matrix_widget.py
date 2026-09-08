@@ -6,7 +6,7 @@ from collections import Counter
 from typing import Sequence
 
 from PySide6.QtCore import QPoint, Qt, Signal
-from PySide6.QtGui import QColor
+from PySide6.QtGui import QColor, QKeyEvent
 from PySide6.QtWidgets import (
     QHeaderView,
     QTableWidget,
@@ -112,7 +112,56 @@ class SampleMatrixWidget(SimpleCardWidget):
         )
         self.table.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
         self.table.customContextMenuRequested.connect(self._on_table_context_menu)
+        self.table.keyPressEvent = self._on_table_key_press
         layout.addWidget(self.table)
+
+    def _format_cell_item(
+        self,
+        item: QTableWidgetItem,
+        r: str,
+        c: str,
+        *,
+        label: str,
+        state: str,
+        run_count: int,
+        is_active: bool,
+    ) -> None:
+        lines = []
+        if is_active:
+            lines.append("★ ACTIVE")
+        lines.append(f"R{r}:C{c}")
+        if label and label != f"R{r}C{c}":
+            lines.append(label)
+
+        # Status label badge
+        if state == "burned":
+            lines.append("🔥 BURNED")
+        elif state == "completed":
+            lines.append("✔ COMPLETED")
+        elif state != "untested":
+            lines.append(f"[{state.upper()}]")
+
+        # Sweep / run count
+        if run_count > 0:
+            lines.append(f"({run_count} runs)")
+
+        item.setText("\n".join(lines))
+        item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
+
+        font = item.font()
+        font.setPointSize(8)
+        font.setBold(bool(is_active or state in {"burned", "completed"}))
+        item.setFont(font)
+
+        # Background color
+        if is_active:
+            item.setBackground(self._ACTIVE_BG)
+        elif state in self._STATE_COLORS and self._STATE_COLORS[state] is not None:
+            item.setBackground(self._STATE_COLORS[state])
+        else:
+            item.setData(Qt.ItemDataRole.BackgroundRole, None)
+
+        item.setData(Qt.ItemDataRole.UserRole, (r, c))
 
     def set_sample(
         self,
@@ -174,45 +223,118 @@ class SampleMatrixWidget(SimpleCardWidget):
                     and str(active_target.col) == c
                 )
 
-                lines = []
-                if is_active:
-                    lines.append("★ ACTIVE")
-                lines.append(f"R{r}:C{c}")
-                if label and label != f"R{r}C{c}":
-                    lines.append(label)
-
-                # Status label badge
-                if state == "burned":
-                    lines.append("🔥 BURNED")
-                elif state == "completed":
-                    lines.append("✔ COMPLETED")
-                elif state != "untested":
-                    lines.append(f"[{state.upper()}]")
-
-                # Sweep / run count
-                if run_count > 0:
-                    lines.append(f"({run_count} runs)")
-
-                item_text = "\n".join(lines)
-                item = QTableWidgetItem(item_text)
-                item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
-
-                font = item.font()
-                font.setPointSize(8)
-                if is_active or state in {"burned", "completed"}:
-                    font.setBold(True)
-                item.setFont(font)
-
-                # Background color
-                if is_active:
-                    item.setBackground(self._ACTIVE_BG)
-                elif state in self._STATE_COLORS and self._STATE_COLORS[state] is not None:
-                    item.setBackground(self._STATE_COLORS[state])
-
-                item.setData(Qt.ItemDataRole.UserRole, (r, c))
+                item = QTableWidgetItem()
+                self._format_cell_item(
+                    item,
+                    r,
+                    c,
+                    label=label,
+                    state=state,
+                    run_count=run_count,
+                    is_active=is_active,
+                )
                 self.table.setItem(row_idx, col_idx, item)
 
         self.table.blockSignals(False)
+
+    def update_cell(
+        self,
+        row: str,
+        col: str,
+        *,
+        state: str | None = None,
+        label: str | None = None,
+        is_active: bool | None = None,
+    ) -> None:
+        """Update a single cell in place without clearing the table."""
+        if self._sample is None:
+            return
+        r = str(row)
+        c = str(col)
+        if r not in self._sample.rows or c not in self._sample.cols:
+            return
+        row_idx = self._sample.rows.index(r)
+        col_idx = self._sample.cols.index(c)
+        item = self.table.item(row_idx, col_idx)
+        if item is None:
+            return
+
+        cell_state = state if state is not None else self._sample.cell_state(r, c)
+        cell_label = label if label is not None else self._sample.cell_label(r, c)
+        run_count = self._run_counts.get((r, c), 0)
+
+        is_target_sample = (
+            self._active_target is not None
+            and self._active_target.is_active
+            and self._active_target.sample_id == self._sample.sample_id
+        )
+        if is_active is None:
+            is_active = (
+                is_target_sample
+                and self._active_target is not None
+                and str(self._active_target.row) == r
+                and str(self._active_target.col) == c
+            )
+
+        self.table.blockSignals(True)
+        self._format_cell_item(
+            item,
+            r,
+            c,
+            label=cell_label,
+            state=cell_state,
+            run_count=run_count,
+            is_active=is_active,
+        )
+        self.table.blockSignals(False)
+
+    def update_cells(
+        self,
+        coords: list[tuple[str, str]],
+        *,
+        state: str | None = None,
+    ) -> None:
+        """Update multiple cells in place without clearing the table."""
+        for r, c in coords:
+            self.update_cell(r, c, state=state)
+
+    def get_selected_coordinates_list(self) -> list[tuple[str, str]]:
+        coords: list[tuple[str, str]] = []
+        for it in self.table.selectedItems():
+            data = it.data(Qt.ItemDataRole.UserRole)
+            if data and isinstance(data, (tuple, list)) and len(data) == 2:
+                coords.append((str(data[0]), str(data[1])))
+        return coords
+
+    def _on_table_key_press(self, event: QKeyEvent) -> None:
+        key = event.key()
+        coords = self.get_selected_coordinates_list()
+        if key == Qt.Key.Key_B and coords:
+            all_burned = self._sample is not None and all(
+                self._sample.cell_state(r, c) == "burned" for r, c in coords
+            )
+            new_state = "untested" if all_burned else "burned"
+            self._apply_batch_state(coords, new_state)
+            event.accept()
+            return
+        if key == Qt.Key.Key_C and coords:
+            all_completed = self._sample is not None and all(
+                self._sample.cell_state(r, c) == "completed" for r, c in coords
+            )
+            new_state = "untested" if all_completed else "completed"
+            self._apply_batch_state(coords, new_state)
+            event.accept()
+            return
+        if key == Qt.Key.Key_U and coords:
+            self._apply_batch_state(coords, "untested")
+            event.accept()
+            return
+        if key in (Qt.Key.Key_Space, Qt.Key.Key_Return, Qt.Key.Key_Enter) and len(coords) == 1:
+            r, c = coords[0]
+            self.cell_activated.emit(r, c)
+            event.accept()
+            return
+        QTableWidget.keyPressEvent(self.table, event)
 
     def select_cell(self, row: str, col: str) -> None:
         if self._sample is None:

@@ -5,8 +5,8 @@ from __future__ import annotations
 from dataclasses import dataclass
 from pathlib import Path
 
-from PySide6.QtCore import QEvent, QSize, QThreadPool, QTimer, Qt, Signal
-from PySide6.QtGui import QResizeEvent, QShowEvent
+from PySide6.QtCore import QEvent, QUrl, QSize, QThreadPool, QTimer, Qt, Signal
+from PySide6.QtGui import QDesktopServices, QResizeEvent, QShowEvent
 from PySide6.QtWidgets import (
     QBoxLayout,
     QHBoxLayout,
@@ -242,8 +242,8 @@ class ResultsPage(QWidget):
 
     The page is divided into three sections:
 
-    * **Left** — ``FileBrowserPanel`` listing HDF5 results in the output
-      directory.
+    * **Left** — ``FileBrowserPanel`` listing HDF5 results and sample
+      measurement artifacts in the configured catalogue tree.
     * **Right** — Fluent section navigation for:
         - *Overview* — run metadata, recipe snapshot, settings and device
           state (``MetadataPanel``).
@@ -261,7 +261,13 @@ class ResultsPage(QWidget):
     result_selected = Signal(object)
     _ASYNC_LOAD_BYTES = 4 * 1024 * 1024
 
-    def __init__(self, output_dir: str, parent: QWidget | None = None) -> None:
+    def __init__(
+        self,
+        output_dir: str,
+        parent: QWidget | None = None,
+        *,
+        catalogue_tree: bool = False,
+    ) -> None:
         super().__init__(parent)
         self.owns_viewport = True
         self._selected_path: Path | None = None
@@ -269,6 +275,7 @@ class ResultsPage(QWidget):
         self._thatec_tree_available = False
         self._result_request_id = 0
         self._result_task: ResultReadTask | None = None
+        self._selected_artifact: Path | None = None
 
         layout = QVBoxLayout(self)
         layout.setContentsMargins(16, 8, 16, 8)
@@ -321,7 +328,9 @@ class ResultsPage(QWidget):
         splitter = self.results_splitter
 
         # Left: file browser
-        self.file_browser = FileBrowserPanel(output_dir)
+        self.file_browser = FileBrowserPanel(
+            output_dir, catalogue_tree=catalogue_tree
+        )
         splitter.addWidget(self.file_browser)
 
         # Right: tabbed result views
@@ -374,7 +383,7 @@ class ResultsPage(QWidget):
         self.file_browser.files_loaded.connect(self._on_file_list_loaded)
         self.resume_button.clicked.connect(self._request_resume)
         self.open_sweep_button.clicked.connect(self._request_open_sweep)
-        self.result_state.action_requested.connect(self.browse_result_file)
+        self.result_state.action_requested.connect(self._run_result_state_action)
 
         # Cross-tab coordination: sweep tree → spectrum
         self.sweep_tree.spectrum_requested.connect(
@@ -465,6 +474,7 @@ class ResultsPage(QWidget):
         self.resume_button.setEnabled(False)
         self.open_sweep_button.setEnabled(False)
         self._thatec_tree_available = False
+        self._selected_artifact = None
         self.metadata_panel.clear()
         self.sweep_tree.clear()
         self.spectrum_tab.clear()
@@ -486,7 +496,7 @@ class ResultsPage(QWidget):
             )
 
     def set_output_directory(self, output_dir: str | Path) -> None:
-        """Point Results at the directory used by the latest run."""
+        """Point Results at a result folder or the global Samples catalogue."""
 
         self.file_browser.set_output_directory(output_dir)
 
@@ -497,6 +507,23 @@ class ResultsPage(QWidget):
     def open_result_file(self, path: str | Path) -> None:
         """Add and open an arbitrary public THATEC result file in this session."""
         self.file_browser.open_file(Path(path))
+
+    def select_result_path(self, path: str | Path) -> bool:
+        """Focus a result from a run callback while preserving catalogue context."""
+
+        target = Path(path).expanduser().resolve()
+        if not target.is_file() or target.suffix.lower() not in {
+            ".h5",
+            ".hdf5",
+            ".csv",
+            ".pdf",
+        }:
+            return False
+        try:
+            target.relative_to(self.file_browser.output_dir.resolve())
+        except ValueError:
+            self.set_output_directory(target.parent)
+        return self.file_browser.select_path(target)
 
     # ------------------------------------------------------------------
     # File selection handler
@@ -517,6 +544,7 @@ class ResultsPage(QWidget):
         if path_or_none is None:
             self._selected_path = None
             self._thatec_run = None
+            self._selected_artifact = None
             self._thatec_tree_available = False
             self.result_selected.emit(None)
             if self.file_browser.has_files():
@@ -532,9 +560,26 @@ class ResultsPage(QWidget):
                 )
             return
 
-        path = Path(str(path_or_none))
+        path = Path(str(path_or_none)).expanduser().resolve()
         self._selected_path = path
         self.result_selected.emit(path)
+        if path.suffix.lower() in {".csv", ".pdf"}:
+            self._selected_artifact = path
+            kind = (
+                "CSV characterization data"
+                if path.suffix.lower() == ".csv"
+                else "PDF measurement report"
+            )
+            self._show_result_state(
+                kind,
+                (
+                    f"This file is stored in the sample catalogue:\n{path}\n\n"
+                    "Use Samples → Measurements & Curves for a curve preview."
+                ),
+                action_text="Open file",
+            )
+            return
+        self._selected_artifact = None
         self._show_result_state(
             "Loading result",
             f"Reading public and station metadata from {path.name}...",
@@ -589,6 +634,7 @@ class ResultsPage(QWidget):
             action_text="Open another file...",
         )
         self._thatec_run = None
+        self._selected_artifact = None
 
     def _apply_result_payload(self, request_id: int, payload: _ResultPayload) -> None:
         if request_id != self._result_request_id:
@@ -648,6 +694,12 @@ class ResultsPage(QWidget):
             action_text=action_text,
         )
         self.result_state.show()
+
+    def _run_result_state_action(self) -> None:
+        if self._selected_artifact is not None and self._selected_artifact.is_file():
+            QDesktopServices.openUrl(QUrl.fromLocalFile(str(self._selected_artifact)))
+            return
+        self.browse_result_file()
 
     def _on_file_list_loaded(self, has_files: bool) -> None:
         """Refresh the page-level empty state after a background index completes."""

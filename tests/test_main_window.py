@@ -31,6 +31,7 @@ from PySide6.QtTest import QTest
 from app.domain.errors import ConfigurationError
 from app.domain.models import DeviceCapabilities
 from app.engine import ExecutionPlan, PlanAction
+from app.inventory.models import ActiveSampleTarget
 from app.domain.quick_controls import QuickConfigureCommand
 from app.devices.discovery import DiscoveredInstrument
 from app.devices.moke_box.models import MokeHallVoltageReading
@@ -945,8 +946,16 @@ class MainWindowTests(unittest.TestCase):
                 ),
             )
             window._run_controller.start = Mock()
+            target = ActiveSampleTarget(
+                sample_id="SAMPLE-1", sample_name="Sample One", row="1", col="1"
+            )
+            sample_sweeps = Path("catalogue") / "SAMPLE-1_SampleOne" / "measurements" / "sweeps"
+            window.inventory_store.get_active_target = Mock(return_value=target)
+            window.inventory_store.measurement_directory_for = Mock(
+                return_value=sample_sweeps
+            )
 
-            window._start_run(plan, True)
+            window._start_run(plan, True, output_dir_override="ignored-operator-folder")
             dialog = window._sweep_readiness_dialog
             self.assertIsNotNone(dialog)
             assert dialog is not None
@@ -954,6 +963,13 @@ class MainWindowTests(unittest.TestCase):
 
             window._run_controller.start.assert_called_once()
             self.assertTrue(window._run_controller.start.call_args.kwargs["outputs_forced_off"])
+            self.assertEqual(
+                window._run_controller.start.call_args.kwargs["output_dir_override"],
+                str(sample_sweeps),
+            )
+            window.inventory_store.measurement_directory_for.assert_called_once_with(
+                "SAMPLE-1", "sweeps"
+            )
             self.assertEqual(window.run_monitor.state.text(), "DRY RUN — OUTPUTS OFF")
             self.assertIn("forced OFF", window.run_monitor.state.toolTip())
         finally:

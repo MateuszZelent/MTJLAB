@@ -112,6 +112,7 @@ class PrecisionArrowStepper(QObject):
         event.accept()
         return True
 
+
     @staticmethod
     def _can_step(editor: QLineEdit, event: QKeyEvent) -> bool:
         if event.key() not in {Qt.Key.Key_Up, Qt.Key.Key_Down}:

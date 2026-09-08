@@ -1,16 +1,17 @@
 """Fluent UI card for Keithley sample characterization and reporting."""
 
 from datetime import datetime, timezone
+import hashlib
 import math
-import os
+from pathlib import Path
 import re
 from collections.abc import Callable
 from typing import Any
 
 import pyqtgraph as pg
-from PySide6.QtCore import QSettings, QSize, Qt, Signal, Slot
+from PySide6.QtCore import QSettings, QSize, Qt, QUrl, Signal, Slot
+from PySide6.QtGui import QDesktopServices
 from PySide6.QtWidgets import (
-    QFileDialog,
     QFormLayout,
     QGridLayout,
     QHBoxLayout,
@@ -106,6 +107,7 @@ class KeithleyCharacterizationCard(QWidget):
 
     active_target_changed = Signal(object)  # ActiveSampleTarget
     browse_samples_requested = Signal()
+    measurement_saved = Signal(str)  # sample_id
 
     def __init__(
         self,
@@ -121,10 +123,28 @@ class KeithleyCharacterizationCard(QWidget):
         self._worker: CharacterizationWorker | None = None
         self._current_dataset: CharacterizationDataset | None = None
         self._current_parameters: ExtractedScientificParameters | None = None
+        self._current_csv_path: Path | None = None
+        self._current_pdf_path: Path | None = None
+        self._run_inventory_target: tuple[str, str, str, str] | None = None
         self._source_request_provider: Callable[
             [str, str, float | None], KeithleySourceRequest
         ] | None = None
         self._compliance_policy_provider: Callable[[str], str] | None = None
+        self._compliance_policy_transition_provider: Callable[
+            [str, str, bool, Callable[[str], None], Callable[[str], None]], bool
+        ] | None = None
+
+        # A characterization sweep may temporarily switch a channel from the
+        # normal ``warn_clamp`` (or legacy ``skip``) response to ``stop``.  The
+        # transition is deliberately kept in the UI state machine so that no
+        # worker can energize the instrument before the adapter has confirmed
+        # the requested policy, and so that restoration happens after the
+        # runner's OUTPUT-OFF finally block.
+        self._temporary_policy_channel: str | None = None
+        self._temporary_policy_original: str | None = None
+        self._temporary_policy_phase = "idle"
+        self._pending_start_config: CharacterizationSweepConfig | None = None
+        self._pending_start_device: Any | None = None
 
         self._live_v_points: list[float] = []
         self._live_i_points: list[float] = []
@@ -346,6 +366,7 @@ class KeithleyCharacterizationCard(QWidget):
         self.plot_view_nav = SegmentedWidget(self)
         self.plot_view_nav.addItem("iv", "V-I Curve", onClick=lambda: self._set_plot_view(0))
         self.plot_view_nav.addItem("res", "Resistance R", onClick=lambda: self._set_plot_view(1))
+        self.plot_view_nav.currentItemChanged.connect(self._on_plot_view_route_changed)
         self.plot_view_nav.setCurrentItem("iv")
         plot_header.addWidget(self.plot_view_nav)
 
@@ -464,18 +485,25 @@ class KeithleyCharacterizationCard(QWidget):
         self.stop_button.setEnabled(False)
         self.stop_button.clicked.connect(self._on_stop_clicked)
 
-        self.pdf_button = PushButton("Generate PDF Report…", self)
+        self.pdf_button = PushButton("Open PDF Report", self)
         self.pdf_button.setIcon(FluentIcon.DOCUMENT)
         self.pdf_button.setEnabled(False)
         self.pdf_button.clicked.connect(self._on_generate_pdf_clicked)
 
-        self.csv_button = PushButton("Export CSV…", self)
+        self.csv_button = PushButton("Open CSV Data", self)
         self.csv_button.setIcon(FluentIcon.SHARE)
         self.csv_button.setEnabled(False)
         self.csv_button.clicked.connect(self._on_export_csv_clicked)
 
+        self.policy_retry_button = PushButton("Retry policy restore", self)
+        self.policy_retry_button.setIcon(FluentIcon.SYNC)
+        self.policy_retry_button.setVisible(False)
+        self.policy_retry_button.setEnabled(False)
+        self.policy_retry_button.clicked.connect(self._on_policy_retry_clicked)
+
         actions_layout.addWidget(self.start_button)
         actions_layout.addWidget(self.stop_button)
+        actions_layout.addWidget(self.policy_retry_button)
         actions_layout.addStretch(1)
         actions_layout.addWidget(self.pdf_button)
         actions_layout.addWidget(self.csv_button)
@@ -529,10 +557,16 @@ class KeithleyCharacterizationCard(QWidget):
         self,
         provider: Callable[[str, str, float | None], KeithleySourceRequest],
         compliance_policy_provider: Callable[[str], str] | None = None,
+        compliance_policy_transition_provider: Callable[
+            [str, str, bool, Callable[[str], None], Callable[[str], None]], bool
+        ] | None = None,
     ) -> None:
         """Use the normal Keithley card as the only hardware-configuration source."""
         self._source_request_provider = provider
         self._compliance_policy_provider = compliance_policy_provider
+        self._compliance_policy_transition_provider = (
+            compliance_policy_transition_provider
+        )
         self.refresh_shared_source_configuration()
 
     def refresh_shared_source_configuration(self) -> None:
@@ -961,6 +995,7 @@ class KeithleyCharacterizationCard(QWidget):
         settings.setValue(KEY_LAST_AREA, self.area_edit.text().strip())
         settings.setValue(KEY_LAST_THICKNESS, self.thickness_edit.text().strip())
         settings.setValue(KEY_LAST_OPERATOR, self.operator_edit.text().strip())
+        settings.sync()
 
     def _persist_selection_to_settings(
         self, sample_id: str, row: str, col: str, device_label: str
@@ -974,6 +1009,7 @@ class KeithleyCharacterizationCard(QWidget):
         settings.setValue(KEY_LAST_AREA, self.area_edit.text().strip())
         settings.setValue(KEY_LAST_THICKNESS, self.thickness_edit.text().strip())
         settings.setValue(KEY_LAST_OPERATOR, self.operator_edit.text().strip())
+        settings.sync()
 
         # Also update active target in InventoryStore
         if self._inventory_store is not None and sample_id and (row or col):
@@ -1162,6 +1198,13 @@ class KeithleyCharacterizationCard(QWidget):
             self.plot_widget.setLabel("bottom", "Demanded Current [A]" if is_current else "Demanded Voltage [V]")
             self.plot_widget.setLabel("left", "Resistance R [Ω]")
 
+    @Slot(str)
+    def _on_plot_view_route_changed(self, route_key: str) -> None:
+        """Keep plotted curves synchronized with the Fluent segmented control."""
+        if not hasattr(self, "curve_iv"):
+            return
+        self._set_plot_view(1 if route_key == "res" else 0)
+
     def _update_plot_labels(self) -> None:
         is_current = self._is_current_mode()
         if self._active_plot_view == 1:
@@ -1229,7 +1272,9 @@ class KeithleyCharacterizationCard(QWidget):
             pass
         self.refresh_limits()
 
-    def _build_config(self) -> CharacterizationSweepConfig:
+    def _build_config(
+        self, *, compliance_policy_override: str | None = None
+    ) -> CharacterizationSweepConfig:
         ch = self._selected_channel()
         is_current = self._is_current_mode()
         mode = "current" if is_current else "voltage"
@@ -1250,7 +1295,11 @@ class KeithleyCharacterizationCard(QWidget):
             )
         comp_si = shared_request.compliance_si
         dwell_si = shared_request.settle_time_s
-        compliance_policy = self._compliance_policy_provider(ch)
+        compliance_policy = (
+            compliance_policy_override
+            if compliance_policy_override is not None
+            else self._compliance_policy_provider(ch)
+        )
 
         if compliance_policy != "stop":
             raise SafetyViolation(
@@ -1313,11 +1362,37 @@ class KeithleyCharacterizationCard(QWidget):
 
     @Slot()
     def _on_start_clicked(self) -> None:
-        if self._worker is not None and self._worker.isRunning():
+        if (
+            self._worker is not None
+            and self._worker.isRunning()
+        ) or self._temporary_policy_phase != "idle":
+            return
+
+        channel = self._selected_channel()
+        try:
+            device_proxy = self._controller.adapter_for_run()
+        except Exception as exc:
+            self.banner.show_message(f"Keithley instrument unavailable: {exc}")
             return
 
         try:
-            config = self._build_config()
+            if hasattr(device_proxy, "connected") and not device_proxy.connected:
+                self.banner.show_message(
+                    "Keithley instrument is not connected. Connect the device before starting measurement."
+                )
+                return
+        except Exception as exc:
+            self.banner.show_message(
+                "Keithley connection state could not be read; characterization was blocked: "
+                f"{exc}"
+            )
+            return
+
+        # The normal card remains the single source of every source, range,
+        # sense, NPLC, dwell and compliance-limit field.  Only the response to
+        # a compliance event is allowed to be overridden for this run.
+        try:
+            config = self._build_config(compliance_policy_override="stop")
         except Exception as exc:
             self.banner.show_message(f"Invalid input parameters: {exc}")
             return
@@ -1329,6 +1404,155 @@ class KeithleyCharacterizationCard(QWidget):
         except SafetyViolation as exc:
             self.banner.show_message(f"Station safety preflight rejection: {exc}")
             return
+
+        # Do not begin a policy transition while a manual run is still
+        # energizing the selected channel.  This read-only snapshot is also
+        # the explicit proof that the modal's "no output" promise is true.
+        try:
+            readback = device_proxy.read_configuration()
+            channels = getattr(readback, "channels", ())
+            channel_readback = next(
+                (
+                    item
+                    for item in channels
+                    if str(getattr(item, "channel", "")) == channel
+                ),
+                None,
+            )
+            if channel_readback is None:
+                raise SafetyViolation(
+                    f"Keithley channel {channel} output state was not returned by readback."
+                )
+            if bool(getattr(channel_readback, "output_enabled", True)):
+                self.banner.show_message(
+                    f"Keithley channel {channel} OUTPUT is ON. Turn it OFF and verify "
+                    "the manual configuration before starting characterization."
+                )
+                return
+        except Exception as exc:
+            self.banner.show_message(
+                "Keithley output state could not be confirmed OFF; characterization was blocked: "
+                f"{exc}"
+            )
+            return
+
+        try:
+            active_policy = str(device_proxy.compliance_policy(channel))
+        except Exception as exc:
+            self.banner.show_message(
+                "Keithley compliance policy could not be read; characterization was blocked: "
+                f"{exc}"
+            )
+            return
+
+        if active_policy not in {"stop", "warn_clamp", "skip"}:
+            self.banner.show_message(
+                "Keithley returned an unknown compliance policy; characterization was blocked."
+            )
+            return
+
+        try:
+            normal_policy = str(self._compliance_policy_provider(channel))
+        except Exception as exc:
+            self.banner.show_message(
+                "The normal Keithley card policy could not be read; characterization was blocked: "
+                f"{exc}"
+            )
+            return
+        if normal_policy not in {"stop", "warn_clamp", "skip"}:
+            self.banner.show_message(
+                "The normal Keithley card has a pending or unknown compliance policy; "
+                "wait for its readback before starting characterization."
+            )
+            return
+
+        # Treat either side of the shared state as authoritative only after
+        # they agree.  A stale page projection is synchronized through the
+        # same temporary transaction, then restored to the policy shown in the
+        # normal card after OUTPUT OFF.
+        transition_needed = not (
+            active_policy == "stop" and normal_policy == "stop"
+        )
+        if transition_needed:
+            labels = {
+                "stop": "Stop on compliance",
+                "warn_clamp": "Warn & clamp",
+                "skip": "Skip compliance (legacy)",
+            }
+            current_label = labels.get(normal_policy, normal_policy)
+            adapter_note = ""
+            if active_policy != normal_policy:
+                adapter_note = (
+                    f"\n\nThe adapter currently reports '{active_policy}', while the "
+                    f"normal card shows '{normal_policy}'. The application will "
+                    "synchronize the adapter before the sweep."
+                )
+            choice = StationMessageBox.warning(
+                self,
+                "Temporary Keithley safety policy",
+                (
+                    f"Channel {channel} is currently using '{current_label}'.\n\n"
+                    "Characterization requires 'Stop on compliance' so the output "
+                    "is switched OFF at the first compliance event.\n\n"
+                    "The application will change only this response policy for the "
+                    "duration of this measurement. Source level, compliance limit, "
+                    "ranges, NPLC, settling time and sense wiring remain inherited "
+                    "from the normal Keithley card. The previous policy will be "
+                    "restored after OUTPUT OFF is confirmed.\n\n"
+                    "No output will be enabled until you confirm."
+                    + adapter_note
+                ),
+                StationMessageBox.StandardButton.Yes
+                | StationMessageBox.StandardButton.Cancel,
+                StationMessageBox.StandardButton.Cancel,
+            )
+            if choice != StationMessageBox.StandardButton.Yes:
+                self.status_label.setText("Characterization cancelled before output enable")
+                self.banner.show_message(
+                    "Characterization was cancelled; Keithley output remains OFF.",
+                    severity="warning",
+                )
+                return
+
+            self._temporary_policy_channel = channel
+            self._temporary_policy_original = normal_policy
+            self._temporary_policy_phase = "setting"
+            self._pending_start_config = config
+            self._pending_start_device = device_proxy
+            self._set_run_input_lock(True)
+            self.start_button.setEnabled(False)
+            self.stop_button.setEnabled(False)
+            self.status_label.setText(
+                f"Applying temporary Stop on compliance to channel {channel}; output remains OFF..."
+            )
+            provider = self._compliance_policy_transition_provider
+            if provider is None:
+                self._on_policy_transition_failed(
+                    "The normal Keithley card cannot apply a temporary compliance policy."
+                )
+                return
+            if not provider(
+                channel,
+                "stop",
+                True,
+                self._on_policy_set_for_characterization,
+                self._on_policy_transition_failed,
+            ):
+                self._on_policy_transition_failed(
+                    "The normal Keithley card rejected the temporary compliance policy."
+                )
+            return
+
+        self._start_worker(config, device_proxy)
+
+    def _start_worker(
+        self,
+        config: CharacterizationSweepConfig,
+        device_proxy: Any,
+    ) -> None:
+        """Start the worker only after all policy and source preflight gates pass."""
+
+        self._set_run_input_lock(True)
 
         # Reset plots and data
         self._live_v_points.clear()
@@ -1350,15 +1574,10 @@ class KeithleyCharacterizationCard(QWidget):
         self.compliance_line_pos.setValue(comp_val)
         self.compliance_line_neg.setValue(-comp_val)
 
-        try:
-            device_proxy = self._controller.adapter_for_run()
-        except Exception as exc:
-            self.banner.show_message(f"Keithley instrument unavailable: {exc}")
-            return
-
-        if hasattr(device_proxy, "connected") and not device_proxy.connected:
-            self.banner.show_message("Keithley instrument is not connected. Connect the device before starting measurement.")
-            return
+        row, col, label = self.selected_device_coord()
+        self._run_inventory_target = (
+            self.selected_sample_id(), str(row), str(col), str(label)
+        )
 
         self._worker = CharacterizationWorker(
             device=device_proxy,
@@ -1376,8 +1595,260 @@ class KeithleyCharacterizationCard(QWidget):
         self.stop_button.setEnabled(True)
         self.pdf_button.setEnabled(False)
         self.csv_button.setEnabled(False)
+        self._current_csv_path = None
+        self._current_pdf_path = None
 
         self._worker.start()
+
+    def _on_policy_set_for_characterization(self, policy: str) -> None:
+        """Handle a confirmed temporary policy change before starting output."""
+
+        if self._temporary_policy_phase != "setting":
+            return
+        channel = self._temporary_policy_channel
+        config = self._pending_start_config
+        device_proxy = self._pending_start_device
+        if channel is None or config is None or device_proxy is None:
+            self._on_policy_transition_failed(
+                "Characterization lost its pending safety context before output enable."
+            )
+            return
+        if policy != "stop":
+            self._on_policy_transition_failed(
+                f"Keithley confirmed unexpected compliance policy {policy!r}; expected 'stop'."
+            )
+            return
+        try:
+            actual_policy = str(device_proxy.compliance_policy(channel))
+        except Exception as exc:
+            self._on_policy_transition_failed(
+                f"Keithley Stop on compliance readback failed: {exc}"
+            )
+            return
+        if actual_policy != "stop":
+            self._on_policy_transition_failed(
+                f"Keithley readback returned {actual_policy!r} after requesting 'stop'."
+            )
+            return
+
+        self._temporary_policy_phase = "running"
+        self._pending_start_config = None
+        self._pending_start_device = None
+        self._start_worker(config, device_proxy)
+
+    def _on_policy_transition_failed(self, error: str) -> None:
+        """Fail closed and restore the original policy after a transition fault."""
+
+        phase = self._temporary_policy_phase
+        channel = self._temporary_policy_channel
+        original = self._temporary_policy_original
+        if phase == "setting" and channel and original:
+            # A failed write may still have reached the adapter.  Always issue
+            # an explicit restore request before declaring the start aborted.
+            self._temporary_policy_phase = "restoring_after_start_failure"
+            self._pending_start_config = None
+            self._pending_start_device = None
+            provider = self._compliance_policy_transition_provider
+            if provider is not None and provider(
+                channel,
+                original,
+                False,
+                self._on_policy_restored_after_start_failure,
+                self._on_policy_transition_failed,
+            ):
+                self.status_label.setText(
+                    f"Temporary policy failed; restoring channel {channel} policy with output OFF..."
+                )
+                return
+            self._on_policy_transition_failed(
+                f"{error} Policy restoration could not be queued."
+            )
+            return
+
+        if phase == "restoring_after_start_failure":
+            self._temporary_policy_phase = "restore_failed"
+            self.start_button.setEnabled(False)
+            self.stop_button.setEnabled(False)
+            self.policy_retry_button.setVisible(True)
+            self.policy_retry_button.setEnabled(True)
+            self.status_label.setText(
+                "Characterization was not started; OUTPUT remains OFF, but the previous compliance policy was not confirmed."
+            )
+            self.banner.show_message(
+                "Characterization was blocked and OUTPUT remains OFF. "
+                f"Keithley policy restoration failed: {error}",
+                severity="error",
+                timeout_ms=0,
+            )
+            StationMessageBox.critical(
+                self,
+                "Keithley policy restoration failed",
+                "OUTPUT remains OFF. Do not continue characterization until the "
+                "normal Keithley card confirms the previous compliance policy.\n\n"
+                f"{error}",
+            )
+            return
+
+        if phase == "restoring":
+            self._temporary_policy_phase = "restore_failed"
+            self.start_button.setEnabled(False)
+            self.stop_button.setEnabled(False)
+            self.policy_retry_button.setVisible(True)
+            self.policy_retry_button.setEnabled(True)
+            self.status_label.setText(
+                "Measurement ended with OUTPUT OFF; previous compliance policy was not confirmed."
+            )
+            self.banner.show_message(
+                "Measurement ended safely with OUTPUT OFF, but restoring the previous "
+                f"Keithley compliance policy failed: {error}",
+                severity="error",
+                timeout_ms=0,
+            )
+            StationMessageBox.critical(
+                self,
+                "Keithley policy restoration failed",
+                "OUTPUT remains OFF. Do not start another characterization until the "
+                "previous compliance policy is confirmed in the normal Keithley card.\n\n"
+                f"{error}",
+            )
+            return
+
+        self._temporary_policy_phase = "idle"
+        self._temporary_policy_channel = None
+        self._temporary_policy_original = None
+        self._set_run_input_lock(False)
+        self.start_button.setEnabled(True)
+        self.stop_button.setEnabled(False)
+        self.policy_retry_button.setVisible(False)
+        self.policy_retry_button.setEnabled(False)
+        self.status_label.setText(f"Characterization was blocked: {error}")
+        self.banner.show_message(f"Characterization was blocked: {error}")
+
+    def _on_policy_restored_after_start_failure(self, policy: str) -> None:
+        expected = self._temporary_policy_original
+        if expected is None or policy != expected:
+            self._on_policy_transition_failed(
+                f"Keithley restored {policy!r}; expected {expected!r}."
+            )
+            return
+        self._temporary_policy_phase = "idle"
+        self._temporary_policy_channel = None
+        self._temporary_policy_original = None
+        self._set_run_input_lock(False)
+        self.start_button.setEnabled(True)
+        self.stop_button.setEnabled(False)
+        self.policy_retry_button.setVisible(False)
+        self.policy_retry_button.setEnabled(False)
+        self.status_label.setText(
+            "Characterization was cancelled before output enable; previous policy restored."
+        )
+        self.banner.show_message(
+            "Characterization was not started; Keithley policy restored and output remains OFF.",
+            severity="warning",
+        )
+
+    def _begin_policy_restore(self) -> None:
+        """Restore the pre-characterization policy after the runner is fully OFF."""
+
+        channel = self._temporary_policy_channel
+        original = self._temporary_policy_original
+        if channel is None or original is None:
+            self._finalize_run_ui()
+            return
+        self._temporary_policy_phase = "restoring"
+        self.start_button.setEnabled(False)
+        self.stop_button.setEnabled(False)
+        self.status_label.setText(
+            f"{self.status_label.text()} OUTPUT OFF confirmed; restoring channel "
+            f"{channel} compliance policy..."
+        )
+        provider = self._compliance_policy_transition_provider
+        if provider is None or not provider(
+            channel,
+            original,
+            False,
+            self._on_policy_restored,
+            self._on_policy_transition_failed,
+        ):
+            self._on_policy_transition_failed(
+                "The normal Keithley card could not queue policy restoration."
+            )
+
+    def _on_policy_restored(self, policy: str) -> None:
+        expected = self._temporary_policy_original
+        if expected is None or policy != expected:
+            self._on_policy_transition_failed(
+                f"Keithley restored {policy!r}; expected {expected!r}."
+            )
+            return
+        policy_label = {
+            "warn_clamp": "Warn & clamp",
+            "skip": "Skip compliance (legacy)",
+            "stop": "Stop on compliance",
+        }.get(expected, expected)
+        self.status_label.setText(
+            f"{self.status_label.text()} Policy restored: {policy_label}."
+        )
+        self._temporary_policy_phase = "idle"
+        self._temporary_policy_channel = None
+        self._temporary_policy_original = None
+        self.policy_retry_button.setVisible(False)
+        self.policy_retry_button.setEnabled(False)
+        self._finalize_run_ui()
+
+    def _finalize_run_ui(self) -> None:
+        self._set_run_input_lock(False)
+        self.start_button.setEnabled(True)
+        self.stop_button.setEnabled(False)
+        self.policy_retry_button.setVisible(False)
+        self.policy_retry_button.setEnabled(False)
+        self._run_inventory_target = None
+
+    def _set_run_input_lock(self, locked: bool) -> None:
+        """Freeze the sweep snapshot while policy/output transitions are active."""
+
+        for name in (
+            "mode_combo",
+            "channel_combo",
+            "start_level_field",
+            "stop_level_field",
+            "points_spin",
+            "sample_combo",
+            "device_combo",
+        ):
+            widget = getattr(self, name, None)
+            if widget is not None:
+                widget.setEnabled(not locked)
+
+    @Slot()
+    def _on_policy_retry_clicked(self) -> None:
+        """Retry restoration only after independently confirming OUTPUT OFF."""
+
+        if self._temporary_policy_phase != "restore_failed":
+            return
+        channel = self._temporary_policy_channel
+        if channel is None:
+            return
+        try:
+            device_proxy = self._controller.adapter_for_run()
+            if hasattr(device_proxy, "connected") and not device_proxy.connected:
+                raise RuntimeError("Keithley instrument is not connected.")
+            confirm_output_off = getattr(device_proxy, "confirm_output_off", None)
+            if callable(confirm_output_off):
+                confirm_output_off(channel)
+            else:
+                device_proxy.assert_output_state(channel, expected_enabled=False)
+        except Exception as exc:
+            self.banner.show_message(
+                "Policy restoration retry blocked; OUTPUT OFF is not confirmed: "
+                f"{exc}",
+                severity="error",
+                timeout_ms=0,
+            )
+            return
+        self.policy_retry_button.setEnabled(False)
+        self._temporary_policy_phase = "restoring"
+        self._begin_policy_restore()
 
     @Slot()
     def _on_stop_clicked(self) -> None:
@@ -1430,10 +1901,13 @@ class KeithleyCharacterizationCard(QWidget):
     @Slot(object)
     def _on_sweep_finished(self, dataset: CharacterizationDataset) -> None:
         self._current_dataset = dataset
-        self.start_button.setEnabled(True)
+        # Keep the characterization gate closed until the temporary policy has
+        # been restored.  The runner has already completed its OUTPUT-OFF
+        # finally block before this signal is delivered.
+        self.start_button.setEnabled(False)
         self.stop_button.setEnabled(False)
-        self.pdf_button.setEnabled(True)
-        self.csv_button.setEnabled(True)
+        self.pdf_button.setEnabled(False)
+        self.csv_button.setEnabled(False)
         if dataset.completion_status == "stopped_on_compliance":
             self.status_label.setText(
                 f"Stopped safely on compliance after {len(dataset.points)} of "
@@ -1488,126 +1962,183 @@ class KeithleyCharacterizationCard(QWidget):
         self.metric_pmax.setText(f"P_max: {params.max_power_dissipated_w * 1e3:.2f} mW")
         self.metric_r2.setText(f"Linearity R²: {params.linearity_r2:.4f}")
 
-        # Record measurement in inventory if a registered sample and cell are active
-        sample_id = self.selected_sample_id()
-        row, col, label = self.selected_device_coord()
-        if self._inventory_store is not None and sample_id and (row or col):
+        self._save_completed_measurement(dataset, params)
+        self._begin_policy_restore()
+
+    def _automatic_run_directory(self, dataset: CharacterizationDataset) -> Path:
+        sample_id = sanitize_run_file_stem(
+            dataset.config.metadata.sample_id or self.selected_sample_id(), fallback="sample"
+        )
+        if self._run_inventory_target is not None:
+            selected_id, row, col, _label = self._run_inventory_target
+        else:
+            selected_id = self.selected_sample_id()
+            row, col, _label = self.selected_device_coord()
+        sample = (
+            self._inventory_store.get_sample(selected_id)
+            if self._inventory_store is not None and selected_id
+            else None
+        )
+        if sample is not None and self._inventory_store is not None:
+            root = self._inventory_store.measurement_directory_for(
+                sample.sample_id, "Keithley_2600", "characterization"
+            )
+        else:
+            root = Path(
+                str(self._settings.storage.get("output_directory", "./measurements"))
+            ) / "samples" / sample_id
+
+        coord = sanitize_run_file_stem(
+            f"R{row}C{col}" if row and col else "unassigned", fallback="unassigned"
+        )
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S_%f")
+        return root.resolve() / coord / timestamp
+
+    def _save_completed_measurement(
+        self,
+        dataset: CharacterizationDataset,
+        params: ExtractedScientificParameters,
+    ) -> None:
+        """Persist CSV and PDF before publishing the run in the sample catalogue."""
+        run_dir = self._automatic_run_directory(dataset)
+        try:
+            run_dir.mkdir(parents=True, exist_ok=False)
+        except Exception as exc:
+            self.banner.show_message(
+                f"Measurement finished with output OFF, but its run directory could not be created: {exc}",
+                severity="error",
+                timeout_ms=0,
+            )
+            self._run_inventory_target = None
+            return
+
+        csv_path = run_dir / "characterization.csv"
+        pdf_path = run_dir / "characterization_report.pdf"
+        errors: list[str] = []
+        try:
+            self._current_csv_path = KeithleyDataExporter.export_csv(dataset, csv_path)
+        except Exception as exc:
+            self._current_csv_path = None
+            errors.append(f"CSV: {exc}")
+
+        try:
+            from app.devices.keithley_2600.characterization.report_pdf import (
+                KeithleyPdfReportGenerator,
+            )
+            self._current_pdf_path = KeithleyPdfReportGenerator.generate(
+                dataset, params, pdf_path
+            )
+        except Exception as exc:
+            self._current_pdf_path = None
+            errors.append(f"PDF: {exc}")
+
+        self.csv_button.setEnabled(self._current_csv_path is not None)
+        self.pdf_button.setEnabled(self._current_pdf_path is not None)
+
+        if self._run_inventory_target is not None:
+            sample_id, row, col, label = self._run_inventory_target
+        else:
+            sample_id = self.selected_sample_id()
+            row, col, label = self.selected_device_coord()
+        if (
+            self._inventory_store is not None
+            and sample_id
+            and (row or col)
+            and self._current_csv_path is not None
+        ):
             try:
                 sample = self._inventory_store.get_sample(sample_id)
                 s_name = sample.name if sample else sample_id
+                digest = hashlib.sha256(self._current_csv_path.read_bytes()).hexdigest()
                 rec = SampleRunRecord(
                     sample_id=sample_id,
                     sample_name=s_name,
                     row=str(row),
                     col=str(col),
                     device_label=str(label or f"R{row}:C{col}"),
-                    run_path="",
-                    run_sha256="",
-                    created_at_utc=getattr(dataset, "completed_at_iso", "") or datetime.now(timezone.utc).isoformat(),
+                    run_path=str(self._current_csv_path),
+                    run_sha256=digest,
+                    created_at_utc=dataset.completed_at_iso or datetime.now(timezone.utc).isoformat(),
                     status=dataset.completion_status,
                     point_count=len(dataset.points),
                     spectrum_count=0,
                     recipe_name=f"Keithley IV Characterization ({dataset.config.mode})",
                     notes=(
-                        f"R₀={r0:.1f} Ω, G₀={g0*1e3:.3f} mS, "
+                        f"R₀={params.zero_bias_resistance_ohm:.1f} Ω, "
+                        f"G₀={params.zero_bias_conductance_s*1e3:.3f} mS, "
                         f"Linearity R²={params.linearity_r2:.4f}"
                         + (f"; {dataset.termination_detail}" if dataset.termination_detail else "")
                     ),
+                    csv_path=str(self._current_csv_path),
+                    report_path=str(self._current_pdf_path or ""),
                 )
                 self._inventory_store.record_run(rec)
                 self._populate_device_combo_for_selected_sample()
-                new_idx = self._find_device_index(str(row), str(col))
-                if new_idx >= 0:
-                    self.device_combo.blockSignals(True)
-                    self.device_combo.setCurrentIndex(new_idx)
-                    self.device_combo.blockSignals(False)
-            except Exception:
-                pass
+                self.measurement_saved.emit(sample_id)
+            except Exception as exc:
+                errors.append(f"sample catalogue: {exc}")
+
+        if errors:
+            self.banner.show_message(
+                "Measurement finished with output OFF, but automatic artifact saving was incomplete: "
+                + " | ".join(errors),
+                severity="error",
+                timeout_ms=0,
+            )
+        else:
+            self.status_label.setText(
+                f"{self.status_label.text()} · CSV and PDF saved automatically"
+            )
+        self._run_inventory_target = None
 
     @Slot(str)
     def _on_sweep_failed(self, error_msg: str) -> None:
-        self.start_button.setEnabled(True)
+        self.start_button.setEnabled(False)
         self.stop_button.setEnabled(False)
         self.status_label.setText(f"Error: {error_msg}")
         self.banner.show_message(f"Characterization execution failed: {error_msg}")
+        if self._worker is not None and not self._worker.output_off_confirmed:
+            # Restoring the response policy while the adapter cannot confirm
+            # OUTPUT OFF would hide a potentially energized DUT.  Keep the
+            # temporary stop policy locked and fail closed.
+            self._temporary_policy_phase = "restore_failed"
+            self.policy_retry_button.setVisible(True)
+            self.policy_retry_button.setEnabled(True)
+            self._run_inventory_target = None
+            self.banner.show_message(
+                "Characterization failed and Keithley OUTPUT OFF could not be confirmed. "
+                "The previous compliance policy was not restored.",
+                severity="error",
+                timeout_ms=0,
+            )
+            StationMessageBox.critical(
+                self,
+                "Keithley OUTPUT OFF not confirmed",
+                "Do not start another measurement. OUTPUT state and compliance policy "
+                "must be verified in the normal Keithley card before continuing.\n\n"
+                f"{error_msg}",
+            )
+            return
+        self._begin_policy_restore()
 
     @Slot()
     def _on_generate_pdf_clicked(self) -> None:
-        if self._current_dataset is None or self._current_parameters is None:
-            return
-
-        sample_id = sanitize_run_file_stem(
-            self._current_dataset.config.metadata.sample_id, fallback="sample"
-        )
-        row, col, label = self.selected_device_coord()
-        coord_part = f"_R{row}C{col}" if row and col else ""
-        label_part = f"_{sanitize_run_file_stem(label)}" if label and label not in {f"R{row}:C{col}", f"R{row}C{col}"} else ""
-        ts = datetime.now().strftime("%Y%m%d_%H%M%S")
-        default_name = f"Report_{sample_id}{coord_part}{label_part}_{ts}.pdf"
-        path, _ = QFileDialog.getSaveFileName(
-            self,
-            "Save Sample Characterization PDF Report",
-            default_name,
-            "PDF Document (*.pdf)",
-        )
-        if not path:
-            return
-
-        try:
-            from app.devices.keithley_2600.characterization.report_pdf import (
-                KeithleyPdfReportGenerator,
-            )
-
-            res_path = KeithleyPdfReportGenerator.generate(
-                self._current_dataset,
-                self._current_parameters,
-                path,
-            )
-            StationMessageBox.information(
-                self,
-                "PDF Report Generated",
-                f"Laboratory report generated successfully:\n{res_path}\n\nDo you want to open it now?",
-            )
-            # Try opening in default viewer on Windows
-            if os.name == "nt":
-                try:
-                    os.startfile(str(res_path))
-                except Exception:
-                    pass
-        except Exception as exc:
-            StationMessageBox.critical(self, "PDF Generation Error", f"Failed to generate report: {exc}")
+        self._open_saved_artifact(self._current_pdf_path, "PDF report")
 
     @Slot()
     def _on_export_csv_clicked(self) -> None:
-        if self._current_dataset is None:
-            return
+        self._open_saved_artifact(self._current_csv_path, "CSV data")
 
-        sample_id = sanitize_run_file_stem(
-            self._current_dataset.config.metadata.sample_id, fallback="sample"
-        )
-        row, col, label = self.selected_device_coord()
-        coord_part = f"_R{row}C{col}" if row and col else ""
-        label_part = f"_{sanitize_run_file_stem(label)}" if label and label not in {f"R{row}:C{col}", f"R{row}C{col}"} else ""
-        ts = datetime.now().strftime("%Y%m%d_%H%M%S")
-        default_name = f"Data_{sample_id}{coord_part}{label_part}_{ts}.csv"
-        path, _ = QFileDialog.getSaveFileName(
-            self,
-            "Export Raw Measurement Data to CSV",
-            default_name,
-            "CSV File (*.csv)",
-        )
-        if not path:
-            return
-
-        try:
-            res_path = KeithleyDataExporter.export_csv(self._current_dataset, path)
-            StationMessageBox.information(
-                self,
-                "Export Completed",
-                f"Measurement data successfully exported:\n{res_path}",
+    def _open_saved_artifact(self, path: Path | None, description: str) -> None:
+        if path is None or not path.is_file():
+            StationMessageBox.critical(
+                self, "File unavailable", f"The automatically saved {description} is unavailable."
             )
-        except Exception as exc:
-            StationMessageBox.critical(self, "CSV Export Error", f"Failed to export data: {exc}")
+            return
+        if not QDesktopServices.openUrl(QUrl.fromLocalFile(str(path.resolve()))):
+            StationMessageBox.critical(
+                self, "Open file failed", f"Could not open {description}:\n{path}"
+            )
 
     def set_settings(self, settings: StationSettings) -> None:
         """Update station settings and refresh limit fields."""

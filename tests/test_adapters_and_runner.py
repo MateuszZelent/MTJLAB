@@ -689,6 +689,21 @@ class AdapterAndRunnerTests(unittest.TestCase):
         for adapter in adapters:
             adapter.apply_limit_settings(updated)
 
+    def test_keithley_context_refresh_preserves_live_compliance_policy(self) -> None:
+        """A context refresh must not reset a characterization's temporary policy."""
+
+        adapter = KeithleyAdapter(self.settings)
+        adapter.set_compliance_policy("A", "stop")
+
+        updated_raw = deepcopy(self.settings.model_dump(mode="python"))
+        updated_raw["devices"]["keithley"]["safety"]["channels"]["A"][
+            "defaults"
+        ]["nplc"] = 2.0
+        updated = StationSettings.model_validate(updated_raw)
+        adapter.refresh_station_context(updated)
+
+        self.assertEqual(adapter.compliance_policy("A"), "stop")
+
     def test_keithley_rejects_unconfirmed_output_state(self) -> None:
         raw = deepcopy(self.settings.model_dump(mode="python"))
         raw["devices"]["keithley"]["safety"]["allow_output_enable"] = True
