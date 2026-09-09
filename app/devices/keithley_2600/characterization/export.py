@@ -34,6 +34,10 @@ class KeithleyDataExporter:
             if meta.junction_area_um2 is not None:
                 f.write(f"# Junction Area [um^2]: {meta.junction_area_um2}\n")
             f.write(f"# Channel: {config.channel}\n")
+            if dataset.field_line_current_a is not None:
+                f.write(f"# Field Line Current [A]: {dataset.field_line_current_a:.12g}\n")
+                f.write(f"# Field Sequence Index: {dataset.field_sequence_index}\n")
+                f.write(f"# Field History Segment: {dataset.field_history_segment}\n")
             f.write(f"# Mode: {config.mode}\n")
             sense_description = "Kelvin (4-wire)" if config.sense_mode == "4wire" else "Local (2-wire)"
             f.write(f"# Sense Mode: {sense_description}\n")
@@ -72,10 +76,15 @@ class KeithleyDataExporter:
                 "Power_W",
                 "Compliance_Active",
                 "Timestamp_Epoch_s",
+                "Valid",
+                "Field_Before_Demanded_A", "Field_Before_Current_A", "Field_Before_Voltage_V",
+                "Field_Before_Power_W", "Field_Before_Timestamp_s", "Field_Before_Compliance",
+                "Field_After_Demanded_A", "Field_After_Current_A", "Field_After_Voltage_V",
+                "Field_After_Power_W", "Field_After_Timestamp_s", "Field_After_Compliance",
             ])
 
             for p in dataset.points:
-                writer.writerow([
+                row = [
                     p.index,
                     f"{p.demanded_si:.9e}",
                     f"{p.measured_voltage_v:.9e}",
@@ -85,7 +94,18 @@ class KeithleyDataExporter:
                     f"{p.power_w:.9e}",
                     1 if p.compliance_active else 0,
                     f"{p.timestamp_epoch:.4f}",
-                ])
+                    int(p.valid),
+                ]
+                for observation in (p.field_before, p.field_after):
+                    row.extend([
+                        f"{observation.demanded_current_a:.12g}",
+                        f"{observation.measured_current_a:.12g}",
+                        f"{observation.measured_voltage_v:.12g}",
+                        f"{observation.power_w:.12g}",
+                        f"{observation.timestamp_epoch:.6f}",
+                        int(observation.compliance_active),
+                    ] if observation else [""] * 6)
+                writer.writerow(row)
 
             f.flush()
 

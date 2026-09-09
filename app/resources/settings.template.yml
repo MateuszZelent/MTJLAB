@@ -290,8 +290,8 @@ devices:
             sense_mode: "2wire"
             nplc: 1.0
             settling_time: "100 ms"
-            source_autorange: true
-            source_range: "AUTO"
+            source_autorange: false
+            source_range: "10 mA"
             measure_voltage_autorange: true
             measure_voltage_range: "AUTO"
             measure_current_autorange: true
@@ -343,8 +343,8 @@ devices:
             sense_mode: "2wire"
             nplc: 1.0
             settling_time: "100 ms"
-            source_autorange: true
-            source_range: "AUTO"
+            source_autorange: false
+            source_range: "1 A"
             measure_voltage_autorange: true
             measure_voltage_range: "AUTO"
             measure_current_autorange: true

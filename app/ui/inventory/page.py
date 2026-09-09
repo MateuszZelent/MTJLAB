@@ -58,6 +58,7 @@ from app.ui.inventory.attachment_viewer import open_attachment
 from app.ui.inventory.matrix_widget import SampleMatrixWidget
 from app.ui.inventory.measurement_browser_view import MeasurementBrowserView
 from app.ui.inventory.programming_dialog import RenumberRowsDialog, SampleProgrammingDialog
+from app.ui.dialogs import StationMessageBox as QMessageBox
 
 
 class RenameHeaderDialog(QDialog):
@@ -306,6 +307,13 @@ class SampleInventoryPage(QWidget):
         )
         self.catalogue_settings_btn.clicked.connect(self._configure_catalogue_root)
         header_layout.addWidget(self.catalogue_settings_btn)
+
+        self.move_catalogue_btn = PushButton("Move Catalogue", header_card, FluentIcon.FOLDER)
+        self.move_catalogue_btn.setToolTip(
+            "Explicitly move the active database and sample files to another root"
+        )
+        self.move_catalogue_btn.clicked.connect(self._move_catalogue)
+        header_layout.addWidget(self.move_catalogue_btn)
 
         main_layout.addWidget(header_card)
 
@@ -761,11 +769,68 @@ class SampleInventoryPage(QWidget):
             return
         self.catalogue_settings_btn.setToolTip(f"Samples catalogue root: {root}")
         self.refresh_samples()
+        self.active_target_changed.emit(self.store.get_active_target())
         self.samples_updated.emit()
         self.status.emit(f"Samples catalogue root saved: {root}")
         InfoBar.success(
-            title="Samples catalogue ready",
-            content=f"Sample folders and standard subfolders were created in {root}",
+            title="Samples catalogue selected",
+            content=f"Opened the catalogue database in {root}. No database or sample files were moved.",
+            parent=self,
+            position=InfoBarPosition.TOP_RIGHT,
+            duration=4000,
+        )
+
+    def _move_catalogue(self) -> None:
+        selected = QFileDialog.getExistingDirectory(
+            self,
+            "Select destination for Samples Catalogue",
+            str(self.store.catalogue_root),
+        )
+        if not selected:
+            return
+
+        destination = Path(selected).expanduser().resolve()
+        if (
+            destination == self.store.catalogue_root
+            and self.store.db_path == destination / "inventory.db"
+        ):
+            return
+
+        answer = QMessageBox.warning(
+            self,
+            "Move Samples Catalogue",
+            (
+                f"This will move the active database and indexed sample files from\n"
+                f"{self.store.catalogue_root}\n\n"
+                f"to\n{destination}.\n\n"
+                "The source files will no longer remain at the old location. Continue?"
+            ),
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.Cancel,
+            QMessageBox.StandardButton.Cancel,
+        )
+        if answer != QMessageBox.StandardButton.Yes:
+            return
+
+        try:
+            root = self.store.move_catalogue(destination)
+        except Exception as exc:
+            InfoBar.error(
+                title="Catalogue not moved",
+                content=str(exc),
+                parent=self,
+                position=InfoBarPosition.TOP_RIGHT,
+                duration=-1,
+            )
+            return
+
+        self.catalogue_settings_btn.setToolTip(f"Samples catalogue root: {root}")
+        self.refresh_samples()
+        self.active_target_changed.emit(self.store.get_active_target())
+        self.samples_updated.emit()
+        self.status.emit(f"Samples catalogue moved to: {root}")
+        InfoBar.success(
+            title="Samples catalogue moved",
+            content=f"Database and indexed sample files were moved to {root}",
             parent=self,
             position=InfoBarPosition.TOP_RIGHT,
             duration=4000,

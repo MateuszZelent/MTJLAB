@@ -138,6 +138,7 @@ class SampleInventoryUITests(unittest.TestCase):
         self.assertGreater(page.height(), 0)
         self.assertGreater(page.matrix_widget.width(), 0)
         self.assertTrue(page.catalogue_settings_btn.isVisible())
+        self.assertTrue(page.move_catalogue_btn.isVisible())
         self.assertIn(str(self.store.catalogue_root), page.catalogue_settings_btn.toolTip())
 
         # Check sample is listed

@@ -46,6 +46,8 @@ root:
           level: "${keithley.B.current}"
           compliance: "67 mV"
           nplc: 1.0
+          source_autorange: false
+          source_range: 1 A
         - id: keithley-b-on
           type: set_keithley_output
           channel: B

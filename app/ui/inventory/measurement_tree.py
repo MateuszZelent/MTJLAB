@@ -517,6 +517,10 @@ class MeasurementTreeWidget(QWidget):
         menu = RoundMenu(parent=self)
 
         if isinstance(run, SampleRunRecord):
+            from app.devices.keithley_2600.characterization.field_catalogue import summary_artifacts_for_run
+            for label, artifact in summary_artifacts_for_run(run):
+                menu.addAction(Action(FluentIcon.DOCUMENT, label,
+                                      triggered=lambda checked=False, path=artifact: self._open_file(path)))
             if run.csv_path:
                 menu.addAction(
                     Action(

@@ -176,7 +176,7 @@ class QuantityAndSafetyTests(unittest.TestCase):
 
         validate_keithley_source(
             channel,
-            KeithleySourceRequest("A", "current", 0.004, 0.67),
+            KeithleySourceRequest("A", "current", 0.004, 0.67, source_range_si=0.01),
         )
         validate_keithley_measurement(channel, 0.159851, 0.00383496)
 
@@ -405,7 +405,7 @@ class QuantityAndSafetyTests(unittest.TestCase):
         with self.assertRaisesRegex(SafetyViolation, "must be finite"):
             validate_keithley_source(
                 settings.keithley.safety.channels["B"],
-                KeithleySourceRequest("B", "current", float("nan"), 0.067),
+                KeithleySourceRequest("B", "current", float("nan"), 0.067, source_range_si=0.01),
             )
         simulated = simulation_settings()
         with self.assertRaisesRegex(SafetyViolation, "finite numbers"):
@@ -509,7 +509,7 @@ class QuantityAndSafetyTests(unittest.TestCase):
         with self.assertRaisesRegex(SafetyViolation, "source × compliance"):
             validate_keithley_source(
                 settings.keithley.safety.channels["B"],
-                KeithleySourceRequest("B", "current", 0.1, 1.0),
+                KeithleySourceRequest("B", "current", 0.1, 1.0, source_range_si=0.01),
             )
 
     def test_keithley_manual_ranges_use_hardware_not_trip_ceiling(self) -> None:
@@ -540,7 +540,7 @@ class QuantityAndSafetyTests(unittest.TestCase):
                     67e-3,
                     measure_voltage_autorange=False,
                     measure_voltage_range_si=41.0,
-                ),
+                 source_range_si=0.01),
             )
 
 

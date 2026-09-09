@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import math
 import numpy as np
+import pytest
 
 from app.devices.keithley_2600.characterization.analyzer import KeithleyCharacterizationAnalyzer
 from app.devices.keithley_2600.characterization.models import (
@@ -12,6 +13,51 @@ from app.devices.keithley_2600.characterization.models import (
     CharacterizationSweepConfig,
     SampleMetadata,
 )
+
+
+@pytest.mark.parametrize("current,voltage", [([1e-6], [.001]), ([1e-6, 2e-6], [.001, .002]),
+    ([1e-6] * 3, [.001] * 3), ([1e-6, 2e-6, 3e-6], [.001] * 3)])
+def test_insufficient_or_degenerate_linearity_is_not_perfect(current, voltage):
+    result = KeithleyCharacterizationAnalyzer._calculate_linearity(
+        np.array(current), np.array(voltage), np.zeros(len(current), dtype=bool), 1000)
+    assert math.isnan(result)
+
+
+def test_differentials_keep_order_and_split_at_turning_point():
+    current = np.array([1, 2, 3, 2, 1], dtype=float) * 1e-6
+    voltage = current * 1000
+    conductance, resistance = KeithleyCharacterizationAnalyzer._compute_differential_curves(current, voltage)
+    assert len(resistance) == 7
+    assert math.isnan(resistance[3][0])
+    assert [v for v, r in resistance[:3]] == pytest.approx([.001, .002, .003])
+    assert [v for v, r in resistance[4:]] == pytest.approx([.003, .002, .001])
+    assert all(r == pytest.approx(1000) for v, r in resistance if math.isfinite(v))
+    assert all(g == pytest.approx(.001) for v, g in conductance if math.isfinite(v))
+
+
+def test_differentials_do_not_bridge_invalid_or_duplicate_coordinates():
+    current = np.array([1, 2, np.nan, 4, 5]) * 1e-6
+    assert KeithleyCharacterizationAnalyzer._compute_differential_curves(current, current * 1000) == ([], [])
+    current = np.array([1, 2, 2, 3]) * 1e-6
+    assert KeithleyCharacterizationAnalyzer._compute_differential_curves(current, current * 1000) == ([], [])
+
+
+@pytest.mark.parametrize("defect", ["gap", "turn", "duplicate", "nonfinite"])
+def test_bdr_rejects_disconnected_or_multibranch_data(defect):
+    voltage = np.linspace(-.1, .1, 21)
+    current = (voltage + voltage ** 3) / 1000
+    mask = np.zeros(len(voltage), dtype=bool)
+    if defect == "gap":
+        mask[10] = True
+    elif defect == "turn":
+        voltage[11:] = voltage[11:][::-1]
+        current[11:] = current[11:][::-1]
+    elif defect == "duplicate":
+        voltage[10] = voltage[9]
+    else:
+        current[10] = np.nan
+    result = KeithleyCharacterizationAnalyzer._fit_bdr_tunnel_model(current, voltage, mask)
+    assert result == ((None, None, None), None)
 
 
 def _build_ohmic_clamped_dataset(
@@ -196,7 +242,9 @@ def test_edge_cases_empty_and_single_point():
         completed_at_iso="",
     )
     params_1 = KeithleyCharacterizationAnalyzer.analyze(dataset_1)
-    assert math.isclose(params_1.zero_bias_resistance_ohm, 450.0, rel_tol=0.01)
+    # One finite-bias ratio cannot determine a zero-bias slope and offset.
+    assert math.isnan(params_1.zero_bias_resistance_ohm)
+    assert math.isnan(params_1.zero_bias_conductance_s)
 
 
 def test_all_points_in_compliance():
@@ -329,3 +377,19 @@ def test_reversed_sweep_direction_and_rectification_ratio():
     # Rectification ratio should be ~2.0 even when sweep order is reversed
     assert params.rectification_ratio is not None
     assert math.isclose(params.rectification_ratio, 2.0, rel_tol=0.05)
+
+
+def test_zero_bias_fit_requires_three_distinct_currents():
+    analyzer = KeithleyCharacterizationAnalyzer
+    for currents in ([1e-6, 2e-6], [1e-6, 1e-6, 1e-6], [1e-6, 2e-6, 2e-6]):
+        current = np.asarray(currents)
+        voltage = 1000 * current + .001
+        result = analyzer._extract_zero_bias_resistance(
+            current, voltage, np.zeros(len(current), dtype=bool)
+        )
+        assert math.isnan(result)
+    current = np.asarray([1e-6, 2e-6, 3e-6])
+    result = analyzer._extract_zero_bias_resistance(
+        current, 1000 * current + .001, np.zeros(3, dtype=bool)
+    )
+    assert math.isclose(result, 1000, rel_tol=1e-12)

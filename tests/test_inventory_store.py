@@ -166,7 +166,26 @@ class InventoryStoreTests(unittest.TestCase):
         self.assertEqual(len(sample_after.attachments), 1)
         self.assertEqual(sample_after.attachments[0].id, att_pdf.id)
 
-    def test_catalogue_root_migrates_existing_sample_attachments(self) -> None:
+    def test_catalogue_root_change_does_not_move_database_or_files(self) -> None:
+        sample = self.store.save_sample(
+            Sample(sample_id="SELECT-01", name="Selection Only")
+        )
+        old_db = self.store.db_path
+        old_root = self.store.catalogue_root
+        old_sample_dir = self.store.sample_directory(sample.sample_id)
+        self.assertTrue(old_sample_dir.is_dir())
+
+        new_root = self.root / "SelectedCatalogue"
+        self.store.set_catalogue_root(new_root)
+
+        self.assertEqual(self.store.db_path, (new_root / "inventory.db").resolve())
+        self.assertEqual(tuple(self.store.list_samples()), ())
+        self.assertTrue(old_db.is_file())
+        self.assertTrue(old_sample_dir.is_dir())
+        self.assertFalse((new_root / sample.folder_name).exists())
+        self.assertEqual(old_root, old_sample_dir.parent)
+
+    def test_move_catalogue_migrates_existing_sample_attachments(self) -> None:
         sample = self.store.save_sample(
             Sample(sample_id="MOVE-01", name="Energy Harvesting Report")
         )
@@ -175,19 +194,36 @@ class InventoryStoreTests(unittest.TestCase):
         attachment = self.store.add_attachment(sample.sample_id, source)
         old_path = self.store.get_attachment_path(attachment)
         self.assertTrue(old_path.is_file())
+        old_db = self.store.db_path
 
         new_root = self.root / "PyLab"
-        self.store.set_catalogue_root(new_root)
+        self.store.move_catalogue(new_root)
         refreshed = self.store.get_sample(sample.sample_id)
         assert refreshed is not None
         migrated = self.store.get_attachment_path(refreshed.attachments[0])
         self.assertTrue(migrated.is_file())
         self.assertTrue(migrated.is_relative_to(new_root / refreshed.folder_name / "attachments"))
         self.assertTrue((new_root / refreshed.folder_name / "info.csv").is_file())
+        self.assertEqual(self.store.db_path, (new_root / "inventory.db").resolve())
+        self.assertFalse(old_db.exists())
+        self.assertFalse(old_path.exists())
 
         self.store.close()
-        self.store = InventoryStore(self.db_path)
+        self.store = InventoryStore(new_root / "inventory.db")
         self.assertEqual(self.store.catalogue_root, new_root.resolve())
+
+    def test_catalogue_root_uses_existing_database_without_overwriting(self) -> None:
+        self.store.save_sample(Sample(sample_id="SOURCE", name="Source sample"))
+        target_root = self.root / "ExistingCatalogue"
+        target_store = InventoryStore(target_root / "inventory.db")
+        target_store.save_sample(Sample(sample_id="TARGET", name="Target sample"))
+        target_store.close()
+
+        self.store.set_catalogue_root(target_root)
+
+        self.assertEqual(self.store.db_path, (target_root / "inventory.db").resolve())
+        self.assertEqual(tuple(s.sample_id for s in self.store.list_samples()), ("TARGET",))
+        self.assertTrue(self.db_path.is_file())
 
     def test_automatic_folder_name_and_manual_rename(self) -> None:
         saved = self.store.save_sample(Sample(sample_id="S-1", name="Short sample name"))

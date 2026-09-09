@@ -274,6 +274,7 @@ class SavedInstrumentsView(QWidget):
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
         self.cards: list[SavedInstrumentCard] = []
+        self._instrument_values: tuple[tuple[str, str, str, str], ...] = ()
         layout = QStackedLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
         self.scroll_area = ScrollArea(self)
@@ -303,11 +304,14 @@ class SavedInstrumentsView(QWidget):
         return len(self.cards)
 
     def set_instruments(self, values: Iterable[tuple[str, str, str, str]]) -> None:
+        values = tuple(values)
+        if values == self._instrument_values:
+            return
+        self._instrument_values = values
         for card in self.cards:
             self.content_layout.removeWidget(card)
             card.deleteLater()
         self.cards.clear()
-        values = tuple(values)
         self.layout().setCurrentWidget(self.scroll_area if values else self.empty_state)
         for value in values:
             card = SavedInstrumentCard(value, self.content)

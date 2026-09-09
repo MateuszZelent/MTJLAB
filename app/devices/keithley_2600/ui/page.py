@@ -76,8 +76,8 @@ class KeithleyConfigurationSnapshot:
     nplc: str = "1"
     settling_time: str = "100 ms"
     sense_mode: str = "2wire"
-    source_autorange: bool = True
-    source_range: str = "AUTO"
+    source_autorange: bool = False
+    source_range: str = "Select range"
     measure_voltage_autorange: bool = True
     measure_voltage_range: str = "AUTO"
     measure_current_autorange: bool = True
@@ -125,6 +125,129 @@ def _keithley_roi_definition(
     return {"device": "Keithley", **definitions[parameter_id]}
 
 
+KEITHLEY_CURRENT_RANGES_TEXT = (
+    "100 nA",
+    "1 uA",
+    "10 uA",
+    "100 uA",
+    "1 mA",
+    "10 mA",
+    "100 mA",
+    "1 A",
+    "3 A",
+)
+KEITHLEY_VOLTAGE_RANGES_TEXT = (
+    "100 mV",
+    "1 V",
+    "6 V",
+    "40 V",
+)
+
+
+class KeithleyRangeComboBox(ComboBox):
+    """Dropdown selector offering discrete Keithley hardware ranges."""
+
+    textChanged = Signal(str)
+    editingFinished = Signal()
+
+    def __init__(self, parent: QWidget | None = None) -> None:
+        super().__init__(parent)
+        self._standard_items: list[str] = []
+        self.currentTextChanged.connect(self.textChanged.emit)
+        self.currentTextChanged.connect(lambda _: self.editingFinished.emit())
+
+    def set_standard_items(self, items: list[str] | tuple[str, ...]) -> None:
+        """Set the standard hardware discrete range items."""
+        current = self.text()
+        self._standard_items = list(items)
+        self.blockSignals(True)
+        self.clear()
+        self.addItems(self._standard_items)
+        self.blockSignals(False)
+        if current:
+            idx = self.findText(current)
+            if idx >= 0:
+                self.setCurrentIndex(idx)
+                super().setText(self.itemText(idx))
+                return
+            try:
+                target = parse_quantity(current)
+                for i, item_txt in enumerate(self._standard_items):
+                    if item_txt == "AUTO":
+                        continue
+                    try:
+                        item_qty = parse_quantity(item_txt)
+                        if (
+                            item_qty.dimension == target.dimension
+                            and math.isclose(item_qty.si_value, target.si_value, rel_tol=1e-12)
+                        ):
+                            self.setCurrentIndex(i)
+                            super().setText(self.itemText(i))
+                            return
+                    except Exception:
+                        pass
+            except Exception:
+                pass
+        if current:
+            try:
+                if parse_quantity(current).dimension != parse_quantity(self._standard_items[0]).dimension:
+                    current = "Select range"
+            except (ValueError, IndexError):
+                pass
+            self.setText(current)
+            return
+        if self._standard_items:
+            self.setCurrentIndex(0)
+            super().setText(self.itemText(0))
+
+    def text(self) -> str:
+        """Return the current text (compat with QLineEdit.text)."""
+        return self.currentText()
+
+    def setText(self, text: str) -> None:
+        """Select the matching range item, or add it if non-standard (e.g. 'AUTO')."""
+        if not text:
+            super().setText("")
+            return
+        if text == self.currentText():
+            super().setText(text)
+            return
+        idx = self.findText(text)
+        if idx >= 0:
+            if idx == self.currentIndex():
+                super().setText(self.itemText(idx))
+            else:
+                self.setCurrentIndex(idx)
+                super().setText(self.itemText(idx))
+            return
+        # Try matching by parsed quantity if text is a numeric quantity with compatible dimension
+        try:
+            target = parse_quantity(text)
+            for i in range(self.count()):
+                item_txt = self.itemText(i)
+                if item_txt == "AUTO":
+                    continue
+                try:
+                    item_qty = parse_quantity(item_txt)
+                    if (
+                        item_qty.dimension == target.dimension
+                        and math.isclose(item_qty.si_value, target.si_value, rel_tol=1e-12)
+                    ):
+                        if i == self.currentIndex():
+                            super().setText(self.itemText(i))
+                        else:
+                            self.setCurrentIndex(i)
+                            super().setText(self.itemText(i))
+                        return
+                except Exception:
+                    pass
+        except Exception:
+            pass
+        self.addItem(text)
+        self.setCurrentIndex(self.count() - 1)
+        super().setText(text)
+
+
 class KeithleyConfigurationPanel(CardWidget):
     """Reusable source/measurement form with no hardware side effects."""
 
@@ -159,15 +282,23 @@ class KeithleyConfigurationPanel(CardWidget):
         self.compliance = _line("67 mV")
         self.nplc = _line("1")
         self.settle = _line("100 ms")
-        self.source_autorange = CheckBox("Source autorange", self)
-        self.source_autorange.setChecked(True)
-        self.source_range = _line("AUTO")
+        self.source_autorange = CheckBox("Source autorange (Settings)", self)
+        self.source_autorange.setChecked(False)
+        self.source_autorange.setEnabled(False)
+        self.source_autorange.toggled.connect(self._apply_source_autorange_policy)
+        self.source_range = KeithleyRangeComboBox(self)
+        self.source_range.set_standard_items(KEITHLEY_CURRENT_RANGES_TEXT)
+        self.source_range.setText("Select range")
         self.measure_voltage_autorange = CheckBox("Measure V autorange", self)
         self.measure_voltage_autorange.setChecked(True)
-        self.measure_voltage_range = _line("AUTO")
+        self.measure_voltage_range = KeithleyRangeComboBox(self)
+        self.measure_voltage_range.set_standard_items(KEITHLEY_VOLTAGE_RANGES_TEXT)
+        self.measure_voltage_range.setText("AUTO")
         self.measure_current_autorange = CheckBox("Measure I autorange", self)
         self.measure_current_autorange.setChecked(True)
-        self.measure_current_range = _line("AUTO")
+        self.measure_current_range = KeithleyRangeComboBox(self)
+        self.measure_current_range.set_standard_items(KEITHLEY_CURRENT_RANGES_TEXT)
+        self.measure_current_range.setText("AUTO")
         self.level_field = self._bounded("level", self.level)
         self.compliance_field = self._bounded("compliance", self.compliance)
         self.nplc_field = self._bounded("nplc", self.nplc)
@@ -262,7 +393,7 @@ class KeithleyConfigurationPanel(CardWidget):
         if key in {"source_range", "measure_voltage_range", "measure_current_range"}:
             field.edit_button.hide()
             field.setToolTip(
-                "Disable autorange and enter the requested instrument range directly. "
+                "Select a hardware range from the list when autorange is OFF. "
                 "The displayed maximum is the immutable 2602A hardware ceiling."
             )
             field.range_pill.setCursor(Qt.CursorShape.ArrowCursor)
@@ -311,6 +442,14 @@ class KeithleyConfigurationPanel(CardWidget):
         for key, field in self.limit_fields.items():
             field.set_limits(*self.limit_values(key))
 
+    def _apply_source_autorange_policy(self, *_args: object) -> None:
+        enabled = self._settings.keithley.safety.channels[self.channel.currentText()].defaults.get("source_autorange", False) is True
+        previous = self.source_autorange.blockSignals(True)
+        self.source_autorange.setChecked(enabled)
+        self.source_autorange.blockSignals(previous)
+        self.source_autorange.setEnabled(False)
+        self.source_range.setEnabled(not enabled)
+
     def _toggle_advanced_ranges(self) -> None:
         self.set_advanced_ranges_expanded(not self._advanced_ranges_expanded)
 
@@ -331,6 +470,8 @@ class KeithleyConfigurationPanel(CardWidget):
             self.form.setRowVisible(self.measure_voltage_range_field, True)
             self.form.setRowVisible(self.measure_current_autorange, True)
             self.form.setRowVisible(self.measure_current_range_field, True)
+        self.form.setRowVisible(self.source_autorange, source_visible)
+        self.form.setRowVisible(self.source_range_field, source_visible and not self.source_autorange.isChecked())
         self._update_ranges_summary()
 
     def _update_ranges_summary(self) -> None:
@@ -360,6 +501,7 @@ class KeithleyConfigurationPanel(CardWidget):
             self.advanced_ranges_button.setText("Hide advanced range settings")
 
     def _update_mode_ui(self, *_args: object) -> None:
+        self._apply_source_autorange_policy()
         mode = self.mode.currentText()
         source_visible = mode != "measure_only"
         self.form.setRowVisible(self.level_field, source_visible)
@@ -373,12 +515,14 @@ class KeithleyConfigurationPanel(CardWidget):
                 "Voltage limit (compliance)"
             )
             self.form.labelForField(self.source_range_field).setText("Current source range")
+            self.source_range.set_standard_items(KEITHLEY_CURRENT_RANGES_TEXT)
         elif mode == "voltage":
             self.form.labelForField(self.level_field).setText("Source voltage")
             self.form.labelForField(self.compliance_field).setText(
                 "Current limit (compliance)"
             )
             self.form.labelForField(self.source_range_field).setText("Voltage source range")
+            self.source_range.set_standard_items(KEITHLEY_VOLTAGE_RANGES_TEXT)
         self.refresh_limits()
 
     def snapshot(self) -> KeithleyConfigurationSnapshot:
@@ -413,8 +557,8 @@ class KeithleyConfigurationPanel(CardWidget):
         self.compliance.setText(snapshot.compliance)
         self.nplc.setText(snapshot.nplc)
         self.settle.setText(snapshot.settling_time)
-        self.source_autorange.setChecked(snapshot.source_autorange)
-        self.source_range.setText(snapshot.source_range)
+        self._apply_source_autorange_policy()
+        self.source_range.setText("Select range" if snapshot.source_range == "AUTO" else snapshot.source_range)
         self.measure_voltage_autorange.setChecked(snapshot.measure_voltage_autorange)
         self.measure_voltage_range.setText(snapshot.measure_voltage_range)
         self.measure_current_autorange.setChecked(snapshot.measure_current_autorange)
@@ -429,6 +573,8 @@ class KeithleyConfigurationPanel(CardWidget):
 
     def set_settings(self, settings: StationSettings) -> None:
         self._settings = settings
+        self._apply_source_autorange_policy()
+        self.update_advanced_ranges_visibility()
         self.refresh_limits()
 
 
@@ -758,7 +904,8 @@ class KeithleyNodeEditorDialog(FluentRecipeDialog):
                 source_mode=selection[1],
                 source_level=level,
                 compliance=compliance,
-                source_range="AUTO",
+                source_autorange=defaults.get("source_autorange", False) is True,
+                source_range=str(defaults.get("source_range", "Select range")),
             )
         self._active_selection = selection
         self.configuration_panel.load_snapshot(snapshot)
@@ -790,8 +937,8 @@ class KeithleyNodeEditorDialog(FluentRecipeDialog):
                     snapshot.settling_time, DIMENSION_TIME
                 ).si_value,
                 sense_mode=snapshot.sense_mode,  # type: ignore[arg-type]
-                source_autorange=snapshot.source_autorange,
-                source_range_si=KeithleyPage._manual_range(
+                source_autorange=False if mode == "measure_only" else snapshot.source_autorange,
+                source_range_si=None if mode == "measure_only" or snapshot.source_autorange else KeithleyPage._manual_range(
                     snapshot.source_range, level_dimension, snapshot.source_autorange
                 ),
                 measure_voltage_autorange=snapshot.measure_voltage_autorange,
@@ -909,7 +1056,8 @@ class _KeithleyReadbackDialog(StationDialog):
         range_title.setObjectName("sectionTitle")
         layout.addWidget(range_title)
         self.range_guidance = BodyLabel(
-            "Source autorange lets the SMU choose the range used to generate the "
+            "Source autorange defaults to OFF and can be enabled only in Settings. "
+            "When enabled, the SMU chooses the range used to generate the "
             "selected source (I or V). Active source range is the range currently "
             "reported by the device; with autorange ON it may change as the source "
             "level changes. These are not measurement ranges. They can indirectly "
@@ -1744,8 +1892,8 @@ class KeithleyPage(QWidget):
                 self.characterization_card.channel_combo.blockSignals(True)
                 self.characterization_card.channel_combo.setCurrentText(target)
                 self.characterization_card.channel_combo.blockSignals(False)
-                self.characterization_card.refresh_limits()
-                self.characterization_card._update_limits_from_settings()
+            if self.characterization_card._draft_channel != ch_text:
+                self.characterization_card._on_channel_changed()
 
         def _sync_page_channel(card_text: str) -> None:
             target = "B" if "B" in card_text else "A"
@@ -2891,8 +3039,8 @@ class KeithleyPage(QWidget):
             self.nplc: ("NPLC", "Number of power-line cycles integrated for one measurement. Higher values reduce noise but make readings slower. For 50 Hz mains, NPLC 1 integrates for approximately 20 ms."),
             self.settle: ("Settling time", "Delay allowed after changing a source point before a measurement is taken. Longer settling can improve stability but increases sweep duration."),
             self.advanced_ranges_button: ("Advanced range settings", "Expands or collapses manual source and measurement range settings. By default, Keithley manages all ranges automatically (recommended)."),
-            self.source_autorange: ("Source autorange", "Lets Keithley choose the source range automatically. Disable only when a qualified measurement procedure requires a fixed range."),
-            self.source_range: ("Manual source range", "Maximum magnitude supported by the selected fixed source range. AUTO uses autorange. A manual value does not set the output; it selects instrument resolution/headroom."),
+            self.source_autorange: ("Source autorange", "Controlled only in Settings, separately for A and B. OFF requires a fixed source range. Actual instrument state is shown by readback."),
+            self.source_range: ("Manual source range", "Maximum magnitude supported by the selected fixed source range. A fixed range is mandatory when source autorange is OFF. A manual value does not set the output; it selects instrument resolution/headroom."),
             self.measure_voltage_autorange: ("Voltage measurement autorange", "Automatically selects the voltage measurement range. Usually the safest default when the expected voltage is not precisely known."),
             self.measure_voltage_range: ("Voltage measurement range", "Fixed voltage measurement range used only when voltage autorange is disabled. It is not Voltage compliance and does not energize the output."),
             self.measure_current_autorange: ("Current measurement autorange", "Automatically selects the current measurement range. It changes measurement range, not the sourced current or compliance."),
@@ -3848,8 +3996,8 @@ class KeithleyPage(QWidget):
         )
         if base.source_autorange:
             source_range = "AUTO"
-        elif source_range == "AUTO":
-            source_range = base.source_range
+        elif source_range in {"AUTO", "Select range"}:
+            source_range = base.source_range if base.source_range not in {"AUTO", "Select range"} else ("10 mA" if mode == "current" else "1 V")
         return replace(
             base,
             channel=channel,
@@ -4000,8 +4148,8 @@ class KeithleyPage(QWidget):
             nplc=str(defaults.get("nplc", 1)),
             settling_time=str(defaults.get("settling_time", "100 ms")),
             sense_mode=sense,
-            source_autorange=bool(defaults.get("source_autorange", True)),
-            source_range=str(defaults.get("source_range", "AUTO")),
+            source_autorange=defaults.get("source_autorange", False) is True,
+            source_range=str(defaults.get("source_range", "Select range")),
             measure_voltage_autorange=bool(
                 defaults.get("measure_voltage_autorange", True)
             ),
@@ -4023,8 +4171,8 @@ class KeithleyPage(QWidget):
             self.compliance.setText(snapshot.compliance)
             self.nplc.setText(snapshot.nplc)
             self.settle.setText(snapshot.settling_time)
-            self.source_autorange.setChecked(snapshot.source_autorange)
-            self.source_range.setText(snapshot.source_range)
+            self.configuration_panel._apply_source_autorange_policy()
+            self.source_range.setText("Select range" if snapshot.source_range == "AUTO" else snapshot.source_range)
             self.measure_voltage_autorange.setChecked(snapshot.measure_voltage_autorange)
             self.measure_voltage_range.setText(snapshot.measure_voltage_range)
             self.measure_current_autorange.setChecked(snapshot.measure_current_autorange)
@@ -4051,6 +4199,8 @@ class KeithleyPage(QWidget):
         limits = channel_settings.lab_limits
         defaults = channel_settings.defaults
         default_range = str(defaults.get("source_range", "AUTO"))
+        if default_range in {"AUTO", "Select range"}:
+            default_range = "10 mA" if mode == "current" else "1 V"
         if mode == "current":
             return (
                 str(defaults.get("source_current", limits.source_current.min)),
@@ -4120,6 +4270,9 @@ class KeithleyPage(QWidget):
     def _autorange_changed(
         self, enabled: bool, range_editor: QLineEdit, label: str
     ) -> None:
+        if range_editor is self.source_range:
+            self.configuration_panel._apply_source_autorange_policy()
+            return
         if self._loading_form_snapshot:
             return
         range_editor.setEnabled(not enabled)
@@ -4131,6 +4284,11 @@ class KeithleyPage(QWidget):
             return
         if hasattr(self.configuration_panel, "set_advanced_ranges_expanded"):
             self.configuration_panel.set_advanced_ranges_expanded(True)
+        if range_editor.text() == "AUTO":
+            auto_idx = range_editor.findText("AUTO")
+            if auto_idx >= 0:
+                range_editor.removeItem(auto_idx)
+            range_editor.setText("1 V" if range_editor is self.measure_voltage_range else "10 mA")
         self.banner.show_message(
             f"Autorange disabled: enter an explicit {label} with a unit. "
             "The draft will be validated when you press SAVE SETTINGS, "
@@ -4154,11 +4312,13 @@ class KeithleyPage(QWidget):
             self.keithley_form.labelForField(self.level_field).setText("Source current")
             self.keithley_form.labelForField(self.compliance_field).setText("Voltage limit (compliance)")
             self.keithley_form.labelForField(self.source_range_field).setText("Current source range")
+            self.source_range.set_standard_items(KEITHLEY_CURRENT_RANGES_TEXT)
         elif mode == "voltage":
             self.keithley_form.labelForField(self.level_field).setText("Source voltage")
             self.keithley_form.labelForField(self.compliance_field).setText("Current limit (compliance)")
             self.keithley_form.labelForField(self.source_range_field).setText("Voltage source range")
-        self.source_range.setEnabled(not self.source_autorange.isChecked())
+            self.source_range.set_standard_items(KEITHLEY_VOLTAGE_RANGES_TEXT)
+        self.configuration_panel._apply_source_autorange_policy()
         self.measure_voltage_range.setEnabled(
             not self.measure_voltage_autorange.isChecked()
         )
@@ -4324,7 +4484,7 @@ class KeithleyPage(QWidget):
         if key in {"source_range", "measure_voltage_range", "measure_current_range"}:
             field.edit_button.hide()
             field.setToolTip(
-                "Disable autorange and enter the requested instrument range directly. "
+                "Select a hardware range from the list when autorange is OFF. "
                 "The displayed maximum is the immutable 2602A hardware ceiling."
             )
             field.range_pill.setCursor(Qt.CursorShape.ArrowCursor)
@@ -4607,6 +4767,7 @@ class KeithleyPage(QWidget):
         level_override_si: float | None = None,
     ) -> KeithleySourceRequest:
         mode = snapshot.source_mode
+        source_auto = mode != "measure_only" and self._station_settings.keithley.safety.channels[snapshot.channel].defaults.get("source_autorange", False) is True
         level_dimension = DIMENSION_CURRENT if mode == "current" else DIMENSION_VOLTAGE
         compliance_dimension = DIMENSION_VOLTAGE if mode == "current" else DIMENSION_CURRENT
         request = KeithleySourceRequest(
@@ -4625,9 +4786,9 @@ class KeithleyPage(QWidget):
             nplc=float(snapshot.nplc.replace(",", ".")),
             settle_time_s=parse_quantity(snapshot.settling_time, "time").si_value,
             sense_mode=snapshot.sense_mode,  # type: ignore[arg-type]
-            source_autorange=snapshot.source_autorange,
-            source_range_si=self._manual_range(
-                snapshot.source_range, level_dimension, snapshot.source_autorange
+            source_autorange=source_auto,
+            source_range_si=None if mode == "measure_only" or source_auto else self._manual_range(
+                snapshot.source_range, level_dimension, source_auto
             ),
             measure_voltage_autorange=snapshot.measure_voltage_autorange,
             measure_voltage_range_si=self._manual_range(
@@ -4678,11 +4839,14 @@ class KeithleyPage(QWidget):
     @staticmethod
     def _manual_range(text: str, dimension: str, autorange: bool) -> float | None:
         value = text.strip()
-        if value.upper() == "AUTO":
+        if not value or value.upper() in {"AUTO", "SELECT RANGE"}:
             return None
         if autorange:
             raise ValueError("Disable autorange before entering a manual range.")
-        return parse_quantity(value, dimension).si_value
+        try:
+            return parse_quantity(value, dimension).si_value
+        except Exception:
+            return None
 
     def _output_toggled(self, enabled: bool) -> None:
         channel = self.channel.currentText()

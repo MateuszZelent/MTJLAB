@@ -219,6 +219,7 @@ class SettingsPage(QWidget):
         self._safety_limit_editors: dict[tuple[str | int, ...], QLineEdit] = {}
         self._safety_limit_error_labels: dict[tuple[str | int, ...], QLabel] = {}
         self._changing = False
+        self._source_autorange_acknowledged: set[tuple[str | int, ...]] = set()
         self._dirty = False
         self._autosave_enabled = False
         self._autosave_timer = QTimer(self)
@@ -802,7 +803,13 @@ class SettingsPage(QWidget):
         if isinstance(value, bool):
             editor = CheckBox("Enabled")
             editor.setChecked(value)
-            editor.toggled.connect(lambda _checked, path=path: self._form_changed(path))
+            if self._is_source_autorange_path(path):
+                editor.setText("Source AUTO (exception for other experiments)")
+                editor.toggled.connect(
+                    lambda checked, path=path, ed=editor: self._on_source_autorange_form_changed(checked, path, ed)
+                )
+            else:
+                editor.toggled.connect(lambda _checked, path=path: self._form_changed(path))
         elif choices:
             editor = ComboBox()
             for label, data in choices:
@@ -1021,6 +1028,59 @@ class SettingsPage(QWidget):
         return ()
 
     @staticmethod
+    def _is_source_autorange_path(path: tuple[str | int, ...]) -> bool:
+        return bool(path) and path[-1] == "source_autorange" and "keithley" in path and "defaults" in path
+
+    def _confirm_source_autorange(self, path: tuple[str | int, ...]) -> bool:
+        channel = next((str(part) for part in path if part in ("A", "B")), "?")
+        reply = QMessageBox.warning(
+            self.window(),
+            f"Enable source autorange ? Channel {channel}",
+            f"Channel {channel}: source AUTO is an exception for experiments requiring automatic range selection.\n\n"
+            "OFF with a fixed range remains the default for MTJ measurements. Automatic source range changes "
+            "can introduce switching transients and additional settling; compliance alone does not guarantee "
+            "protection of a sensitive sample.\n\n"
+            "After saving, manual measurements, recipes and characterization will use this channel's AUTO setting. "
+            "The main control page displays the setting but cannot change it. "
+            "Saving Settings does not itself enable the output.\n\n"
+            "Enable source AUTO for this channel?",
+            buttons=QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.Cancel,
+            defaultButton=QMessageBox.StandardButton.Cancel,
+        )
+        accepted = reply == QMessageBox.StandardButton.Yes
+        if accepted:
+            self._source_autorange_acknowledged.add(path)
+        return accepted
+
+    def _on_source_autorange_form_changed(
+        self, checked: bool, path: tuple[str | int, ...], editor: CheckBox
+    ) -> None:
+        if self._changing:
+            return
+        if not checked:
+            self._source_autorange_acknowledged.discard(path)
+        if checked and not self._confirm_source_autorange(path):
+            previous = editor.blockSignals(True)
+            editor.setChecked(False)
+            editor.blockSignals(previous)
+            return
+        self._form_changed(path)
+
+    def _on_source_autorange_tree_changed(
+        self, item: QTreeWidgetItem, editor: ComboBox, path: tuple[str | int, ...]
+    ) -> None:
+        if self._changing:
+            return
+        if str(editor.currentData()) != "true":
+            self._source_autorange_acknowledged.discard(path)
+        if str(editor.currentData()) == "true" and not self._confirm_source_autorange(path):
+            previous = editor.blockSignals(True)
+            editor.setCurrentIndex(editor.findData("false"))
+            editor.blockSignals(previous)
+            return
+        item.setText(1, str(editor.currentData()))
+
+    @staticmethod
     def _is_keithley_sense_mode_path(path: tuple[str | int, ...]) -> bool:
         if not path:
             return False
@@ -1098,7 +1158,11 @@ class SettingsPage(QWidget):
         editor.setCurrentIndex(max(index, 0))
         editor.setToolTip("Select a validated value from the list.")
         editor.setEnabled(bool(item.flags() & Qt.ItemFlag.ItemIsEditable))
-        if self._is_keithley_sense_mode_path(path):
+        if self._is_source_autorange_path(path):
+            editor.currentIndexChanged.connect(
+                lambda _index, item=item, ed=editor, p=path: self._on_source_autorange_tree_changed(item, ed, p)
+            )
+        elif self._is_keithley_sense_mode_path(path):
             editor.currentIndexChanged.connect(
                 lambda index, item=item, ed=editor, p=path: self._on_sense_mode_tree_changed(index, item, ed, p)
             )
@@ -2058,6 +2122,12 @@ class SettingsPage(QWidget):
         try:
             local_draft = self._apply_tree_values()
             local_changed_paths = self._changed_leaf_paths(self._persisted_raw, local_draft)
+            for path in local_changed_paths:
+                if self._is_source_autorange_path(path) and self._get_path(local_draft, path) is True and path not in self._source_autorange_acknowledged:
+                    if silent:
+                        raise AuthorizationError("Source AUTO requires explicit operator confirmation in Settings.")
+                    if not self._confirm_source_autorange(path):
+                        return False
             changed_paths = local_changed_paths
             general_edit_allowed = self._access.allows(Permission.EDIT_SETTINGS)
             operator_output_edit = (
@@ -2093,6 +2163,10 @@ class SettingsPage(QWidget):
                 if extra_transform is not None:
                     extra_transform(draft)
                 repair_result[0] = self._repository.repair_known_issues(draft)
+                for channel in ("A", "B"):
+                    path = ("devices", "keithley", "safety", "channels", channel, "defaults", "source_autorange")
+                    if self._get_path(draft, path[:-1]).get("source_autorange", False) is True and self._get_path(latest, path[:-1]).get("source_autorange", False) is not True and path not in self._source_autorange_acknowledged:
+                        raise AuthorizationError("Source AUTO requires explicit operator confirmation in Settings.")
                 return draft
 
             settings, draft = self._repository.update_raw(merge_latest)
@@ -2111,6 +2185,7 @@ class SettingsPage(QWidget):
             return False
         self._raw = draft
         self._persisted_raw = deepcopy(draft)
+        self._source_autorange_acknowledged.clear()
         self._settings = settings
         self._dirty = False
         self._clear_validation_errors()

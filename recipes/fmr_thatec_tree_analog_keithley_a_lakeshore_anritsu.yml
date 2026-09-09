@@ -46,9 +46,10 @@ root:
       compliance: "100 mV"
       nplc: 1.0
       sense_mode: 2wire
-      source_autorange: true
+      source_autorange: false
       measure_voltage_autorange: true
       measure_current_autorange: true
+      source_range: 10 mA
     - {id: keithley-a-positive-on, type: set_keithley_output, channel: A, enabled: true}
     - {id: positive-saturation-settle, type: wait, duration: "10 s"}
     - {id: positive-saturation-field, type: measure_lakeshore_field, checkpoint: false}
@@ -90,9 +91,10 @@ root:
       compliance: "100 mV"
       nplc: 1.0
       sense_mode: 2wire
-      source_autorange: true
+      source_autorange: false
       measure_voltage_autorange: true
       measure_current_autorange: true
+      source_range: 10 mA
     - {id: keithley-a-negative-on, type: set_keithley_output, channel: A, enabled: true}
     - {id: negative-saturation-settle, type: wait, duration: "10 s"}
     - {id: negative-saturation-field, type: measure_lakeshore_field, checkpoint: false}

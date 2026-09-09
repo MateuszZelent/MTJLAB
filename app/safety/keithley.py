@@ -107,7 +107,7 @@ class KeithleySourceRequest:
     nplc: float = 1.0
     settle_time_s: float = 0.0
     sense_mode: Literal["2wire", "4wire"] = "2wire"
-    source_autorange: bool = True
+    source_autorange: bool = False
     source_range_si: float | None = None
     measure_voltage_autorange: bool = True
     measure_voltage_range_si: float | None = None
@@ -125,6 +125,41 @@ def _range_check(name: str, value: float, lower: str, upper: str, dimension: str
     tolerance = max(abs(minimum), abs(maximum), 1.0) * 1e-12
     if value < minimum - tolerance or value > maximum + tolerance:
         raise SafetyViolation(f"{name}={value:.9g} is outside [{minimum:.9g}, {maximum:.9g}] SI.")
+
+
+def validate_source_range(request: KeithleySourceRequest) -> None:
+    """Validate fixed ranges; Settings authorization is checked separately."""
+    if not isinstance(request.source_autorange, bool):
+        raise SafetyViolation("source_autorange must be a boolean.")
+    if request.source_autorange:
+        if request.source_range_si is not None:
+            raise SafetyViolation("Source autorange cannot also specify a fixed source range.")
+        _require_finite("source level", request.level_si)
+        return
+    if request.mode == "measure_only":
+        if request.source_range_si is not None:
+            raise SafetyViolation("measure_only does not use a source range.")
+        return
+    ranges = (
+        KEITHLEY_2602A_CURRENT_RANGES if request.mode == "current"
+        else KEITHLEY_2602A_VOLTAGE_RANGES
+    )
+    value = request.source_range_si
+    if value is not None and math.isfinite(value) and value > ranges[-1]:
+        raise SafetyViolation(f"Channel {request.channel}: source range exceeds the 2602A hardware maximum.")
+    if value is None or not math.isfinite(value) or not any(
+        math.isclose(value, item, rel_tol=1e-12, abs_tol=0.0) for item in ranges
+    ):
+        raise SafetyViolation(
+            f"Channel {request.channel}: select an explicit fixed {request.mode} "
+            "source range from the 2602A hardware ranges before running."
+        )
+    _require_finite("source level", request.level_si)
+    if abs(request.level_si) > value:
+        raise SafetyViolation(
+            f"Channel {request.channel}: source range {value:.12g} SI does not cover "
+            f"source level {request.level_si:.12g} SI. Select a range covering the whole sweep."
+        )
 
 
 def validate_keithley_source(channel: KeithleyChannelSettings, request: KeithleySourceRequest) -> None:
@@ -172,8 +207,6 @@ def validate_keithley_source(channel: KeithleyChannelSettings, request: Keithley
     else:
         if request.level_si != 0 or request.compliance_si != 0:
             raise SafetyViolation("measure_only mode cannot set a source level or compliance.")
-        if not request.source_autorange or request.source_range_si is not None:
-            raise SafetyViolation("measure_only mode does not use a source range; set source_autorange=true.")
     if request.mode != "measure_only":
         worst_case_power = abs(request.level_si * request.compliance_si)
         max_power = (
@@ -188,19 +221,30 @@ def validate_keithley_source(channel: KeithleyChannelSettings, request: Keithley
                 f"{worst_case_power:.9g} W exceeds the station profile "
                 f"{max_power:.9g} W."
             )
+    if request.mode != "measure_only":
+        configured_auto = channel.defaults.get("source_autorange", False)
+        if not isinstance(configured_auto, bool) or request.source_autorange != configured_auto:
+            raise SafetyViolation(
+                f"Channel {request.channel}: source autorange must match Settings. "
+                "Only the operator can change source_autorange in Settings."
+            )
+    elif request.source_autorange:
+        raise SafetyViolation("measure_only does not use source autorange.")
+    validate_source_range(request)
     source_required = abs(request.level_si)
     source_range_max = (
         KEITHLEY_2602A_MAX_CURRENT_RANGE_A
         if request.mode == "current"
         else KEITHLEY_2602A_MAX_VOLTAGE_RANGE_V
     )
-    _validate_manual_range(
-        "source range",
-        request.source_autorange,
-        request.source_range_si,
-        source_required,
-        source_range_max,
-    )
+    if request.mode != "measure_only":
+        _validate_manual_range(
+            "source range",
+            request.source_autorange,
+            request.source_range_si,
+            source_required,
+            source_range_max,
+        )
     voltage_required = abs(request.compliance_si if request.mode == "current" else request.level_si)
     current_required = abs(request.level_si if request.mode == "current" else request.compliance_si)
     _validate_manual_range(

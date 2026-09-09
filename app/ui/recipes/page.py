@@ -5392,8 +5392,8 @@ class RecipePage(QWidget):
             nplc=str(node.data.get("nplc", "1")),
             settling_time=str(node.data.get("settle_time", "100 ms")),
             sense_mode=str(node.data.get("sense_mode", "2wire")),
-            source_autorange=bool(node.data.get("source_autorange", True)),
-            source_range=str(node.data.get("source_range", "AUTO")),
+            source_autorange=bool(node.data.get("source_autorange", False)),
+            source_range=str(node.data.get("source_range", "Select range")),
             measure_voltage_autorange=bool(
                 node.data.get("measure_voltage_autorange", True)
             ),

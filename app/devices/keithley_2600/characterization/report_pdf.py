@@ -6,6 +6,8 @@ import io
 import math
 import os
 from pathlib import Path
+from threading import RLock
+from app.domain.quantities import format_quantity_auto
 
 import matplotlib
 matplotlib.use("Agg")
@@ -31,6 +33,8 @@ from app.devices.keithley_2600.characterization.models import (
     CharacterizationDataset,
     ExtractedScientificParameters,
 )
+
+REPORT_RENDER_LOCK = RLock()
 
 
 class KeithleyPdfReportGenerator:
@@ -75,6 +79,17 @@ class KeithleyPdfReportGenerator:
 
     @classmethod
     def generate(
+        cls,
+        dataset: CharacterizationDataset,
+        params: ExtractedScientificParameters,
+        output_path: str | Path,
+    ) -> Path:
+        # Matplotlib and ReportLab font registration are shared process state.
+        with REPORT_RENDER_LOCK:
+            return cls._generate(dataset, params, output_path)
+
+    @classmethod
+    def _generate(
         cls,
         dataset: CharacterizationDataset,
         params: ExtractedScientificParameters,
@@ -151,6 +166,21 @@ class KeithleyPdfReportGenerator:
         )
         story.append(Spacer(1, 4))
         story.append(HRFlowable(width="100%", thickness=1.5, color=colors.HexColor("#0f2d59"), spaceAfter=8))
+        if dataset.field_line_current_a is not None:
+            story.append(Paragraph(
+                f"<b>Field-line channel B:</b> target {dataset.field_line_current_a:.9g} A; "
+                f"sequence index {dataset.field_sequence_index}; history segment {dataset.field_history_segment}. "
+                "Field-line current is not a calibrated magnetic field.", body_style))
+            observations = [observation for point in dataset.points
+                            for observation in (point.field_before, point.field_after)
+                            if observation is not None]
+            if observations:
+                currents = [item.measured_current_a for item in observations]
+                story.append(Paragraph(
+                    f"Recorded B current: {min(currents):.9g} to {max(currents):.9g} A; "
+                    f"{sum(item.compliance_active for item in observations)} observations with B compliance. "
+                    "Points marked invalid are excluded from scientific analysis and Rigol recommendations.", body_style))
+            story.append(Spacer(1, 8))
 
         # 2. Metadata & Test Configuration Table
         meta = dataset.config.metadata
@@ -192,9 +222,8 @@ class KeithleyPdfReportGenerator:
                 ),
                 Paragraph("<b>Sweep Range:</b>", body_style),
                 Paragraph(
-                    f"{cfg.start_level_si * 1e3:.2f} mA to {cfg.stop_level_si * 1e3:.2f} mA ({cfg.points_count} pts)"
-                    if cfg.mode == "current"
-                    else f"{cfg.start_level_si * 1e3:.1f} mV to {cfg.stop_level_si * 1e3:.1f} mV ({cfg.points_count} pts)",
+                    f"{format_quantity_auto(cfg.start_level_si, cfg.mode)} to "
+                    f"{format_quantity_auto(cfg.stop_level_si, cfg.mode)} ({cfg.points_count} pts)",
                     body_style,
                 ),
             ],
@@ -203,9 +232,7 @@ class KeithleyPdfReportGenerator:
                 Paragraph(meta.operator or "&mdash;", body_style),
                 Paragraph("<b>Compliance Limit:</b>", body_style),
                 Paragraph(
-                    f"{cfg.compliance_si * 1e3:.1f} mV"
-                    if cfg.mode == "current"
-                    else f"{cfg.compliance_si * 1e3:.2f} mA",
+                    format_quantity_auto(cfg.compliance_si, "voltage" if cfg.mode == "current" else "current"),
                     body_style,
                 ),
             ],
@@ -282,8 +309,9 @@ class KeithleyPdfReportGenerator:
         r0_str = f"{params.zero_bias_resistance_ohm:.2f} &Omega;" if math.isfinite(params.zero_bias_resistance_ohm) else "&mdash;"
         g0_str = f"{params.zero_bias_conductance_s * 1e3:.3f} mS" if math.isfinite(params.zero_bias_conductance_s) else "&mdash;"
         ra_str = f"{params.ra_product_ohm_um2:.1f} &Omega;&bull;&mu;m&sup2;" if params.ra_product_ohm_um2 is not None else "No area specified"
-        pmax_str = f"{params.max_power_dissipated_w * 1e3:.2f} mW"
-        r2_str = f"{params.linearity_r2:.4f}"
+        pmax_str = (format_quantity_auto(params.max_power_dissipated_w, "power")
+                    if math.isfinite(params.max_power_dissipated_w) else "&mdash;")
+        r2_str = f"{params.linearity_r2:.4f}" if math.isfinite(params.linearity_r2) else "Not determined"
 
         if params.compliance_detected and params.compliance_onset_point:
             ci, cv = params.compliance_onset_point
@@ -297,7 +325,7 @@ class KeithleyPdfReportGenerator:
                 else f"Active at {onset_str}"
             )
         else:
-            comp_status_str = "Not reached (linear ohmic range)"
+            comp_status_str = "Not reached in the measured range"
 
         clamped_pct_str = f"{params.clamped_points_fraction * 100:.1f}% points"
         rect_str = f"{params.rectification_ratio:.3f}" if params.rectification_ratio is not None else "&mdash;"
@@ -382,6 +410,9 @@ class KeithleyPdfReportGenerator:
         )
         story.append(Paragraph(footer_text, subtitle_style))
 
+        from app.devices.keithley_2600.characterization.rigol_report import rigol_report_story
+        story.extend(rigol_report_story(dataset, h2_style, body_style))
+
         doc.build(story)
         temporary.replace(target)
         return target
@@ -395,6 +426,7 @@ class KeithleyPdfReportGenerator:
         """Generate detailed physical diagnosis in English."""
         cfg = dataset.config
         r0 = params.zero_bias_resistance_ohm
+        linearity = f"{params.linearity_r2:.4f}" if math.isfinite(params.linearity_r2) else "not determined"
 
         if not math.isfinite(r0):
             return "Diagnostic error: Unable to determine zero-bias device resistance."
@@ -417,7 +449,7 @@ class KeithleyPdfReportGenerator:
                     f"At |I| &approx; {i_clamp_ma:.2f} mA, the terminal voltage reached the saturation threshold ({v_clamp_mv:.1f} mV), "
                     f"prompting the Keithley SMU to clamp further current delivery. An instrument saturation regime occurred "
                     f"between demanded and acquired current ({params.clamped_points_fraction * 100:.0f}% clamped points). "
-                    f"The sample barrier was successfully protected against dielectric breakdown."
+                    f"Compliance detection does not establish that the sample remained undamaged."
                 )
             else:
                 max_v_mv = params.max_voltage_v * 1e3
@@ -425,7 +457,7 @@ class KeithleyPdfReportGenerator:
                     f"The sample with zero-bias resistance R<sub>0</sub> = {r0:.1f} &Omega; operated strictly within the "
                     f"compliance limit V<sub>comp</sub> = {v_comp_mv:.1f} mV throughout the entire current sweep range. "
                     f"The peak voltage applied across the junction was {max_v_mv:.1f} mV. "
-                    f"The I-V response exhibits high ohmic linearity (R&sup2; = {params.linearity_r2:.4f}) with zero compliance clamping."
+                    f"Measured-data linearity R&sup2; = {linearity}. Compliance was not detected in these recorded points."
                 )
         else:
             i_comp_ma = cfg.compliance_si * 1e3
@@ -444,7 +476,7 @@ class KeithleyPdfReportGenerator:
                     f"had an active compliance limit of I<sub>comp</sub> = {i_comp_ma:.2f} mA. "
                     f"At |V| &approx; {v_clamp_mv:.1f} mV, the current reached the compliance threshold ({i_clamp_ma:.2f} mA), "
                     f"prompting the Keithley SMU to limit further current flow ({params.clamped_points_fraction * 100:.0f}% clamped points). "
-                    f"The junction was successfully protected against thermal degradation and electromigration."
+                    f"Compliance detection does not establish that the sample remained undamaged."
                 )
             else:
                 max_i_ma = params.max_current_a * 1e3
@@ -452,7 +484,7 @@ class KeithleyPdfReportGenerator:
                     f"The sample with zero-bias resistance R<sub>0</sub> = {r0:.1f} &Omega; operated strictly within the "
                     f"compliance limit I<sub>comp</sub> = {i_comp_ma:.2f} mA throughout the entire voltage sweep range. "
                     f"The peak current conducted through the junction was {max_i_ma:.2f} mA. "
-                    f"The I-V response exhibits high ohmic linearity (R&sup2; = {params.linearity_r2:.4f}) with zero compliance clamping."
+                    f"Measured-data linearity R&sup2; = {linearity}. Compliance was not detected in these recorded points."
                 )
 
     @classmethod
@@ -539,7 +571,7 @@ class KeithleyPdfReportGenerator:
         if params.differential_conductance_curve:
             v_diff = [pt[0] for pt in params.differential_conductance_curve]
             g_diff = [pt[1] * 1e3 for pt in params.differential_conductance_curve]  # mS
-            ax3.plot(v_diff, g_diff, color="#7c3aed", lw=1.5, label="Numerical dI/dV")
+            ax3.plot(v_diff, g_diff, color="#7c3aed", lw=1.5, label="dI/dV: unsmoothed, separate branches")
             if params.bdr_coefficients and params.tunnel_barrier_height_ev is not None:
                 c0, c1, c2 = params.bdr_coefficients
                 v_fit = np.linspace(min(v_diff), max(v_diff), 100)

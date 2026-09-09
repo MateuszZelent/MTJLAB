@@ -42,9 +42,10 @@ root:
       nplc: 1.0
       settle_time: "100 ms"
       sense_mode: 2wire
-      source_autorange: true
+      source_autorange: false
       measure_voltage_autorange: true
       measure_current_autorange: true
+      source_range: 10 mA
 
     # OUTPUT is enabled once here, after configuration, and remains enabled
     # throughout the sweep.

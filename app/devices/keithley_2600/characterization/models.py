@@ -2,8 +2,9 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import asdict, dataclass, field
 import hashlib
+import json
 from typing import Literal
 
 
@@ -35,13 +36,23 @@ class CharacterizationSweepConfig:
     dwell_time_s: float = 0.05
     nplc: float = 1.0
     sense_mode: Literal["2wire", "4wire"] = "2wire"
-    source_autorange: bool = True
+    source_autorange: bool = False
     source_range_si: float | None = None
     measure_voltage_autorange: bool = True
     measure_voltage_range_si: float | None = None
     measure_current_autorange: bool = True
     measure_current_range_si: float | None = None
     metadata: SampleMetadata = field(default_factory=lambda: SampleMetadata(sample_id="Sample-1"))
+
+
+@dataclass(frozen=True, slots=True)
+class FieldLineObservation:
+    demanded_current_a: float
+    measured_current_a: float
+    measured_voltage_v: float
+    power_w: float
+    timestamp_epoch: float
+    compliance_active: bool
 
 
 @dataclass(frozen=True, slots=True)
@@ -57,6 +68,9 @@ class CharacterizationPoint:
     power_w: float
     compliance_active: bool
     timestamp_epoch: float
+    field_before: FieldLineObservation | None = None
+    field_after: FieldLineObservation | None = None
+    valid: bool = True
 
 
 @dataclass(frozen=True, slots=True)
@@ -92,10 +106,13 @@ class CharacterizationDataset:
     completed_at_iso: str
     checksum_sha256: str = ""
     completion_status: Literal[
-        "completed", "cancelled", "stopped_on_compliance"
+        "completed", "cancelled", "stopped_on_compliance", "stopped_on_field_compliance"
     ] = "completed"
     termination_detail: str = ""
     zero_setpoint_omitted: bool = False
+    field_line_current_a: float | None = None
+    field_sequence_index: int | None = None
+    field_history_segment: int | None = None
 
     @staticmethod
     def calculate_checksum(points: tuple[CharacterizationPoint, ...] | list[CharacterizationPoint]) -> str:
@@ -105,4 +122,10 @@ class CharacterizationDataset:
             hasher.update(
                 f"{p.index}:{p.demanded_si:.9e}:{p.measured_voltage_v:.9e}:{p.measured_current_a:.9e}:{p.compliance_active}".encode("utf-8")
             )
+            if p.field_before is not None or p.field_after is not None or not p.valid:
+                hasher.update(json.dumps({
+                    "field_before": asdict(p.field_before) if p.field_before else None,
+                    "field_after": asdict(p.field_after) if p.field_after else None,
+                    "valid": p.valid,
+                }, sort_keys=True, allow_nan=False).encode("utf-8"))
         return hasher.hexdigest()

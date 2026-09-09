@@ -77,6 +77,7 @@ from app.engine.recovery import RunRecoveryManager
 from app.engine.runner import ExecutionMode
 from app.recipes import parse_recipe_text
 from app.inventory import ActiveSampleTarget, InventoryStore, SampleRunRecord
+from app.platform.paths import default_catalogue_root
 from app.settings import SettingsRepository
 from app.settings.models import StationSettings
 from app.settings.validation import format_settings_validation_error
@@ -137,8 +138,30 @@ class MainWindow(FluentWindow):
         self._run_elab_upload_config: dict[str, Any] | None = None
         persisted = self._repository.load().settings
         self._settings = simulated_station_settings(persisted) if simulation else persisted
-        output_dir = Path(self._settings.storage.get("output_directory", "./measurements"))
-        self.inventory_store = InventoryStore(output_dir / "inventory.db")
+        raw_output_dir = Path(
+            self._settings.storage.get("output_directory", "./measurements")
+        ).expanduser()
+        output_dir = (
+            raw_output_dir
+            if raw_output_dir.is_absolute()
+            else (Path.cwd() / raw_output_dir).resolve()
+        )
+        legacy_db_path = output_dir / "inventory.db"
+        configured_catalogue_root = InventoryStore.catalogue_root_from_database(
+            legacy_db_path
+        )
+        if configured_catalogue_root is not None:
+            catalogue_root = configured_catalogue_root
+        elif raw_output_dir.is_absolute():
+            # Isolated test/custom profiles remain isolated instead of
+            # touching the user's default Documents/PyLab catalogue.
+            catalogue_root = output_dir
+        else:
+            catalogue_root = default_catalogue_root()
+        self.inventory_store = InventoryStore.open_for_catalogue_root(
+            catalogue_root,
+            legacy_db_path=legacy_db_path,
+        )
         # Establish the global Fluent theme before constructing the large page
         # tree.  QFluent's synchronous stylesheet refresh walks every existing
         # widget; doing it after ``_build()`` made the first ``show()`` block
@@ -3752,6 +3775,14 @@ class MainWindow(FluentWindow):
         if not self.recipe_page.confirm_close():
             event.ignore()
             return
+        if not self.keithley_page.characterization_card.prepare_application_shutdown():
+            self._navigate_to("keithley_characterization")
+            self.keithley_page.characterization_card.banner.show_message(
+                "Application close is waiting for characterization shutdown, policy restoration or reporting. "
+                "Complete any displayed recovery step, then close again.",
+                severity="warning", timeout_ms=0)
+            event.ignore()
+            return
         self._audit_record(
             "Application safe shutdown started",
             category="application",
@@ -3840,4 +3871,8 @@ class MainWindow(FluentWindow):
             self._audit.close()
         except (OSError, RuntimeError):
             self._audit_healthy = False
+        try:
+            self.inventory_store.close()
+        except (OSError, RuntimeError):
+            pass
         event.accept()

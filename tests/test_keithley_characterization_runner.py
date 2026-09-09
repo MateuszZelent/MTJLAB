@@ -15,7 +15,7 @@ from app.devices.keithley_2600.characterization.models import (
 from app.devices.keithley_2600.characterization.runner import (
     KeithleyCharacterizationRunner,
 )
-from app.domain.errors import DeviceError, SafetyViolation
+from app.domain.errors import DeviceError, RunInterrupted, SafetyViolation
 from tests.helpers import loaded_settings
 from app.devices.simulators import simulated_station_settings
 
@@ -46,10 +46,19 @@ class _MockKeithleyDevice:
             nplc=1.0,
             settle_time_s=0.001,
             sense_mode="2wire",
-        )
+         source_range_si=(None if mode == "measure_only" else 0.01 if mode == "current" else 1.0))
 
     def compliance_policy(self, channel: str) -> str:
         return self.compliance_policy_state
+
+    def recover_from_compliance(self, channel, choice):
+        assert choice == "keep_off"
+        assert not self.output_enabled
+        self.calls.append(f"recover:{channel}:keep_off")
+        return {"outputs_confirmed_off": True}
+
+    def confirm_output_off(self, channel):
+        self.assert_output_state(channel, expected_enabled=False)
 
     def set_compliance_policy(self, channel: str, stop_on_compliance: Any) -> None:
         if isinstance(stop_on_compliance, bool):
@@ -129,6 +138,43 @@ def station_settings():
     return simulated_station_settings(loaded_settings())
 
 
+def test_restart_after_compliance_uses_first_point_with_real_adapter(station_settings):
+    from app.devices.keithley_2600.adapter import KeithleyAdapter
+    from app.devices.simulators import SimulatedVisaFactory
+    from app.settings.models import StationSettings
+
+    raw = station_settings.model_dump(mode="python")
+    raw["devices"]["keithley"]["safety"].update(
+        allow_output_enable=True, compliance_policy="stop", stop_on_compliance=True)
+    device = KeithleyAdapter(StationSettings.model_validate(raw),
+                            session_factory=SimulatedVisaFactory(
+                                "keithley", keithley_resistance_ohm=67.0))
+    device.connect()
+    cfg = CharacterizationSweepConfig(channel="B", mode="current",
+        start_level_si=0.0001, stop_level_si=0.0015, points_count=15,
+        compliance_si=0.05, dwell_time_s=0.0, source_range_si=0.01)
+    try:
+        for _ in range(2):
+            result = KeithleyCharacterizationRunner.run_sweep(device, cfg)
+            assert result.completion_status == "stopped_on_compliance"
+            assert result.points[0].demanded_si == pytest.approx(0.0001)
+            device.assert_output_state("B", expected_enabled=False)
+    finally:
+        device.disconnect()
+
+
+def test_unconfirmed_recovery_never_configures_or_enables():
+    device = _MockKeithleyDevice()
+    device.recover_from_compliance = lambda channel, choice: {"outputs_confirmed_off": False}
+    cfg = CharacterizationSweepConfig(channel="A", mode="current",
+        start_level_si=1e-6, stop_level_si=2e-6, points_count=2,
+        compliance_si=0.67, dwell_time_s=0, source_range_si=0.01)
+    with pytest.raises(DeviceError, match="recovery.*not confirmed"):
+        KeithleyCharacterizationRunner.run_sweep(device, cfg)
+    assert not any(call.startswith("configure_source") for call in device.calls)
+    assert "set_output:A:True" not in device.calls
+
+
 def test_runner_preflight_limits(station_settings):
     """Verify preflight rejects setpoints that exceed lab limits."""
     # Valid config on enabled channel B (which has limit 0 mA to 10 mA, 10 mV to 67 mV compliance): 0 mA to 5 mA, 50 mV compliance
@@ -139,7 +185,7 @@ def test_runner_preflight_limits(station_settings):
         stop_level_si=0.005,
         points_count=21,
         compliance_si=0.050,
-    )
+     source_range_si=0.01)
     # Should pass without exception
     KeithleyCharacterizationRunner.validate_preflight(valid_cfg, station_settings)
 
@@ -151,7 +197,7 @@ def test_runner_preflight_limits(station_settings):
         stop_level_si=0.005,
         points_count=21,
         compliance_si=0.670,
-    )
+     source_range_si=0.01)
     with pytest.raises(SafetyViolation):
         KeithleyCharacterizationRunner.validate_preflight(neg_cfg, station_settings)
 
@@ -163,7 +209,7 @@ def test_runner_preflight_limits(station_settings):
         stop_level_si=0.500,
         points_count=21,
         compliance_si=0.670,
-    )
+     source_range_si=0.01)
     with pytest.raises(SafetyViolation):
         KeithleyCharacterizationRunner.validate_preflight(excess_cfg, station_settings)
 
@@ -175,7 +221,7 @@ def test_runner_preflight_limits(station_settings):
         stop_level_si=0.005,
         points_count=21,
         compliance_si=50.0,
-    )
+     source_range_si=0.01)
     with pytest.raises(SafetyViolation):
         KeithleyCharacterizationRunner.validate_preflight(excess_v_cfg, station_settings)
 
@@ -187,7 +233,7 @@ def test_runner_preflight_limits(station_settings):
         stop_level_si=0.005,
         points_count=1,
         compliance_si=0.050,
-    )
+     source_range_si=0.01)
     with pytest.raises(SafetyViolation, match="at least 2"):
         KeithleyCharacterizationRunner.validate_preflight(too_few_pts, station_settings)
 
@@ -199,7 +245,7 @@ def test_runner_preflight_limits(station_settings):
         stop_level_si=0.005,
         points_count=1500,
         compliance_si=0.050,
-    )
+     source_range_si=0.01)
     with pytest.raises(SafetyViolation, match="exceeds station lab limit"):
         KeithleyCharacterizationRunner.validate_preflight(too_many_pts, station_settings)
 
@@ -211,7 +257,7 @@ def test_runner_preflight_limits(station_settings):
         stop_level_si=0.005,
         points_count=21,
         compliance_si=0.0,
-    )
+     source_range_si=0.01)
     with pytest.raises(SafetyViolation, match="strictly positive"):
         KeithleyCharacterizationRunner.validate_preflight(zero_comp, station_settings)
 
@@ -223,7 +269,7 @@ def test_runner_preflight_limits(station_settings):
         stop_level_si=0.001,
         points_count=21,
         compliance_si=0.050,
-    )
+     source_range_si=0.01)
     with pytest.raises(SafetyViolation, match="cannot be identical"):
         KeithleyCharacterizationRunner.validate_preflight(zero_span, station_settings)
 
@@ -239,7 +285,7 @@ def test_runner_execution_and_shutdown():
         points_count=5,
         compliance_si=0.670,
         dwell_time_s=0.001,
-    )
+     source_range_si=0.01)
 
     dataset = KeithleyCharacterizationRunner.run_sweep(device, config)
 
@@ -265,7 +311,7 @@ def test_runner_early_cancellation():
         points_count=100,
         compliance_si=0.670,
         dwell_time_s=0.001,
-    )
+     source_range_si=0.01)
     cancel = threading.Event()
 
     def _cancel_after_first_point(pt):
@@ -299,7 +345,7 @@ def test_runner_omits_zero_from_symmetric_current_sweep():
         points_count=101,
         compliance_si=0.670,
         dwell_time_s=0.001,
-    )
+     source_range_si=0.01)
 
     dataset = KeithleyCharacterizationRunner.run_sweep(device, config)
 
@@ -323,7 +369,7 @@ def test_runner_voltage_mode_execution():
         points_count=5,
         compliance_si=0.010,  # 10 mA compliance
         dwell_time_s=0.001,
-    )
+     source_range_si=1.0)
     dataset = KeithleyCharacterizationRunner.run_sweep(device, config)
     assert len(dataset.points) == 1
     assert dataset.completion_status == "stopped_on_compliance"
@@ -353,7 +399,7 @@ def test_runner_compliance_stops_before_next_setpoint_without_policy_change():
         points_count=3,
         compliance_si=0.670,
         dwell_time_s=0.001,
-    )
+     source_range_si=0.01)
     dataset = KeithleyCharacterizationRunner.run_sweep(device, config)
     assert len(dataset.points) == 2
     assert dataset.points[-1].compliance_active is True
@@ -382,7 +428,7 @@ def test_runner_reports_unconfirmed_output_off_as_failure():
         points_count=3,
         compliance_si=0.670,
         dwell_time_s=0.001,
-    )
+     source_range_si=0.01)
 
     with pytest.raises(DeviceError, match="OUTPUT OFF could not be confirmed"):
         KeithleyCharacterizationRunner.run_sweep(device, config)
@@ -416,7 +462,7 @@ def test_runner_rejects_adapter_policy_different_from_shared_stop(station_settin
         points_count=3,
         compliance_si=0.067,
         dwell_time_s=0.0,
-    )
+     source_range_si=0.01)
 
     with pytest.raises(SafetyViolation, match="No characterization output was enabled"):
         KeithleyCharacterizationRunner.run_sweep(device, config)
@@ -539,15 +585,68 @@ def test_runner_positive_only_limits(station_settings):
         stop_level_si=0.008,
         points_count=11,
         compliance_si=0.050,
-    )
+     source_range_si=0.01)
     # Must not raise SafetyViolation even though 0.0 < 1 mA
     KeithleyCharacterizationRunner.validate_preflight(valid_pos_cfg, mod_settings)
 
 
 def test_characterization_config_defaults_are_safe_for_mtj():
     """Default config must use 2-wire sense and microampere sweep range to protect MTJ samples."""
-    cfg = CharacterizationSweepConfig()
+    cfg = CharacterizationSweepConfig( source_range_si=0.01)
     assert cfg.sense_mode == "2wire"
     assert cfg.start_level_si == -100e-6
     assert cfg.stop_level_si == 100e-6
     assert cfg.compliance_si == 0.500
+
+
+@pytest.mark.parametrize("error_type", [RunInterrupted, DeviceError, SafetyViolation])
+def test_partial_dataset_only_for_explicit_interruption(error_type):
+    device = _MockKeithleyDevice(v_comp=.5)
+    config = CharacterizationSweepConfig(start_level_si=1e-6, stop_level_si=3e-6,
+        points_count=3, dwell_time_s=.001, source_range_si=0.01)
+    cancelled = threading.Event()
+    acquired = []
+    def interrupt_after_point(point):
+        acquired.append(point)
+        cancelled.set()
+        raise error_type("injected interruption or fault")
+    if error_type is RunInterrupted:
+        dataset = KeithleyCharacterizationRunner.run_sweep(
+            device, config, cancel_event=cancelled, on_point=interrupt_after_point)
+        assert dataset.completion_status == "cancelled"
+        assert dataset.points == tuple(acquired)
+        assert len(dataset.points) == 1
+    else:
+        with pytest.raises(error_type, match="injected interruption or fault"):
+            KeithleyCharacterizationRunner.run_sweep(
+                device, config, cancel_event=cancelled, on_point=interrupt_after_point)
+    assert not device.output_enabled
+    assert device.calls[-1] == "set_output:A:False"
+    assert len([call for call in device.calls if call.startswith("update_source_level:")]) == 1
+
+
+def test_runner_applies_card_settings_without_previous_manual_request():
+    device = _MockKeithleyDevice(v_comp=.5)
+    def no_manual_request(channel):
+        raise AssertionError('Runner must not depend on a previous manual Apply')
+    device.last_source_request = no_manual_request
+    config = CharacterizationSweepConfig(start_level_si=1e-6, stop_level_si=3e-6,
+        points_count=3, dwell_time_s=.001, source_range_si=0.01)
+    dataset = KeithleyCharacterizationRunner.run_sweep(device, config)
+    assert dataset.completion_status == 'completed'
+    assert len(dataset.points) == 3
+    assert device.calls.index('configure_source:A:current:0.5') < device.calls.index('set_output:A:True')
+    assert not device.output_enabled
+
+
+def test_runner_readback_mismatch_never_enables_output():
+    from dataclasses import replace
+    device = _MockKeithleyDevice(v_comp=.5)
+    configure = device.configure_source
+    device.configure_source = lambda request: replace(configure(request), nplc=2)
+    config = CharacterizationSweepConfig(start_level_si=1e-6, stop_level_si=3e-6,
+        points_count=3, dwell_time_s=.001, source_range_si=0.01)
+    with pytest.raises(SafetyViolation, match='nplc'):
+        KeithleyCharacterizationRunner.run_sweep(device, config)
+    assert 'set_output:A:True' not in device.calls
+    assert not device.output_enabled

@@ -464,6 +464,12 @@ class ResultsBrowserTests(unittest.TestCase):
                 device_idn={},
             )
             writer.close("completed")
+            nested_sweep_dir = sweep_dir / "archived"
+            nested_sweep_dir.mkdir()
+            nested_csv_path = nested_sweep_dir / "previous_sweep.csv"
+            nested_csv_path.write_text(
+                "Current (A),Voltage (V)\n0.001,0.1\n", encoding="utf-8"
+            )
             characterization_dir = (
                 catalogue
                 / "1_MtjSample"
@@ -495,7 +501,14 @@ class ResultsBrowserTests(unittest.TestCase):
                 measurements_item = sample_item.child(0)
                 self.assertEqual(measurements_item.text(0).split(" (")[0], "Measurements")
                 sweeps_item = measurements_item.child(0)
-                leaf = sweeps_item.child(0)
+                # A folder and an HDF5 result are siblings here. Re-enabling
+                # QTreeWidget sorting must not recurse through Python __lt__.
+                self.assertEqual(sweeps_item.childCount(), 2)
+                leaf = next(
+                    sweeps_item.child(index)
+                    for index in range(sweeps_item.childCount())
+                    if sweeps_item.child(index).text(0) == path.name
+                )
                 self.assertEqual(leaf.text(0), path.name)
                 self.assertEqual(
                     Path(leaf.data(1, Qt.ItemDataRole.UserRole)).resolve(),
@@ -510,7 +523,7 @@ class ResultsBrowserTests(unittest.TestCase):
 
                 self.assertEqual(
                     {artifact.name for artifact in browser._catalogue_artifacts},
-                    {csv_path.name, pdf_path.name},
+                    {csv_path.name, pdf_path.name, nested_csv_path.name},
                 )
                 sample_item = browser.runs.topLevelItem(0)
 

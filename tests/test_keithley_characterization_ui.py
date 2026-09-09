@@ -28,7 +28,20 @@ class KeithleyCharacterizationUiTests(unittest.TestCase):
         cls.app = QApplication.instance() or QApplication([])
 
     def setUp(self) -> None:
+        from PySide6.QtCore import QSettings
+        import tempfile
+        from app.devices.keithley_2600.ui import characterization_card as char_module
+        self._temp_settings_dir = tempfile.TemporaryDirectory()
+        self.addCleanup(self._temp_settings_dir.cleanup)
+        self._isolated_settings = QSettings(os.path.join(self._temp_settings_dir.name, "drafts.ini"), QSettings.Format.IniFormat)
+        settings_patch = patch.object(char_module, "QSettings", lambda *args: self._isolated_settings)
+        settings_patch.start()
+        self.addCleanup(settings_patch.stop)
         raw = deepcopy(simulated_station_settings(loaded_settings()).model_dump(mode="python"))
+        # Characterization uses a bipolar sweep; qualify the test fixture for it.
+        b_limits = raw["devices"]["keithley"]["safety"]["channels"]["B"]["lab_limits"]
+        b_limits["source_current"]["min"] = "-10 mA"
+        b_limits["measured_current_trip"]["min"] = "-10.5 mA"
         self.settings = StationSettings.model_validate(raw)
         self.controller = Mock()
         self.page = KeithleyPage(self.controller, self.settings)
@@ -94,13 +107,82 @@ class KeithleyCharacterizationUiTests(unittest.TestCase):
         # Sweep level remains at safe microampere default and is not blown up to 10 mA
         self.assertEqual(card.stop_level_edit.text(), "100 uA")
 
+    def test_field_series_is_available_only_from_channel_a(self) -> None:
+        card = self.page.characterization_card
+        card.resize(1440, 900)
+        card.show()
+        card.channel_combo.setCurrentText("Channel A")
+        self.app.processEvents()
+        self.assertTrue(card.field_panel.enabled_box.isEnabled())
+        self.assertGreater(card.field_panel.enabled_box.width(), 0)
+
+        card.field_panel.enabled_box.setChecked(True)
+        card.channel_combo.setCurrentText("Channel B")
+        self.app.processEvents()
+        self.assertFalse(card.field_panel.enabled_box.isChecked())
+        self.assertFalse(card.field_panel.enabled_box.isEnabled())
+        self.assertFalse(card.field_panel.controls.isVisible())
+        self.assertIn("Select Channel A", card.field_panel.enabled_box.toolTip())
+
+        card.resize(900, 700)
+        self.app.processEvents()
+        self.assertGreater(card.field_panel.enabled_box.width(), 0)
+        card.channel_combo.setCurrentText("Channel A")
+        self.app.processEvents()
+        self.assertTrue(card.field_panel.enabled_box.isEnabled())
+
+    def test_channel_and_dimension_drafts_are_independent(self) -> None:
+        card = self.page.characterization_card
+        card.channel_combo.setCurrentText("Channel A")
+        card.start_level_edit.setText("1 uA")
+        card.stop_level_edit.setText("87 uA")
+        card.points_spin.setValue(37)
+        bounds_a = card.limit_values("level")
+        card.channel_combo.setCurrentText("Channel B")
+        self.assertEqual(card.stop_level_edit.text(), "100 uA")
+        card.start_level_edit.setText("2 uA")
+        card.stop_level_edit.setText("63 uA")
+        card.points_spin.setValue(23)
+        card.mode_combo.setCurrentIndex(1)
+        card.start_level_edit.setText("1 mV")
+        card.stop_level_edit.setText("12 mV")
+        card.points_spin.setValue(17)
+        card.channel_combo.setCurrentText("Channel A")
+        self.assertEqual(card.mode_combo.currentIndex(), 0)
+        self.assertEqual(card.start_level_edit.text(), "1 uA")
+        self.assertEqual(card.stop_level_edit.text(), "87 uA")
+        self.assertEqual(card.points_spin.value(), 37)
+        self.assertEqual(card.limit_values("level"), bounds_a)
+        card.channel_combo.setCurrentText("Channel B")
+        self.assertEqual(card.mode_combo.currentIndex(), 1)
+        self.assertEqual(card.stop_level_edit.text(), "12 mV")
+        self.assertEqual(card.points_spin.value(), 17)
+        card.mode_combo.setCurrentIndex(0)
+        self.assertEqual(card.start_level_edit.text(), "2 uA")
+        self.assertEqual(card.stop_level_edit.text(), "63 uA")
+        self.assertEqual(card.points_spin.value(), 23)
+
+    def test_main_card_channel_sync_preserves_characterization_drafts(self) -> None:
+        card = self.page.characterization_card
+        initial = self.page.channel.currentText()
+        self.assertEqual(card._draft_channel, initial)
+        card.start_level_edit.setText("2 uA")
+        card.stop_level_edit.setText("41 uA")
+        other = "B" if initial == "A" else "A"
+        self.page.channel.setCurrentText(other)
+        self.assertEqual(card._draft_channel, other)
+        self.page.channel.setCurrentText(initial)
+        self.assertEqual(card.stop_level_edit.text(), "41 uA")
+
     def test_preflight_rejection_shows_banner(self) -> None:
         """Verify invalid or out-of-limits parameters display a warning message in banner."""
         card = self.page.characterization_card
         card.channel_combo.setCurrentText("Channel B")
         self.page._compliance_policy["B"] = "stop"
         self.page._stop_on_compliance["B"] = True
-        # Set level far exceeding channel limit
+        # The widget clamps lab-limit violations; a narrower fixed range
+        # still has to reject the clamped endpoint during preflight.
+        self.page.source_range.setText("1 mA")
         card.stop_level_edit.setText("500 mA")
         card._on_start_clicked()
         self.app.processEvents()
@@ -122,6 +204,10 @@ class KeithleyCharacterizationUiTests(unittest.TestCase):
         # Plot labels should update to English voltage sweep titles
         self.assertIn("Demanded Voltage", card.plot_widget.getAxis("bottom").labelText)
         self.assertIn("Current Response", card.plot_widget.getAxis("left").labelText)
+
+        # A mode change requires an explicit source range of the new dimension.
+        self.page.source_range.setText("1 V")
+        self.app.processEvents()
 
         # Limits should update to voltage levels and current compliance
         self.assertIn("V", card.stop_level_edit.text())
@@ -447,7 +533,7 @@ class KeithleyCharacterizationUiTests(unittest.TestCase):
                 self.assertIn("R2:CY", card.structure_edit.text())
 
                 # Check QSettings were written
-                settings = QSettings("LabControl", "LabControl")
+                settings = self._isolated_settings
                 self.assertEqual(settings.value("keithley_characterization/last_sample_id"), "PERSIST-SMPL")
                 self.assertEqual(settings.value("keithley_characterization/last_row"), "2")
                 self.assertEqual(settings.value("keithley_characterization/last_col"), "Y")
@@ -608,7 +694,7 @@ class KeithleyCharacterizationUiTests(unittest.TestCase):
                     dwell_time_s=0.01,
                     sense_mode="4wire",
                     metadata=SampleMetadata(sample_id="RUN-SAMPLE", structure_name="Cell 11"),
-                )
+                 source_range_si=0.01)
                 dataset = CharacterizationDataset(
                     config=cfg,
                     points=tuple(pts),
@@ -663,7 +749,7 @@ class KeithleyCharacterizationUiTests(unittest.TestCase):
             stop_level_si=0.001,
             points_count=5,
             compliance_si=0.1,
-        )
+         source_range_si=0.01)
         point = CharacterizationPoint(
             index=0,
             demanded_si=0.001,
@@ -768,7 +854,8 @@ class KeithleyCharacterizationUiTests(unittest.TestCase):
             0.075,
         )
         self.assertIn("NPLC 2.5", card.shared_configuration_label.text())
-        self.assertIn("compliance policy stop", card.shared_configuration_label.text())
+        self.assertNotIn("compliance policy", card.shared_configuration_label.text())
+        self.assertEqual(card.shared_configuration_label.styleSheet(), "")
         self.assertIn("source range 10 mA", card.shared_configuration_label.text())
         self.assertIn("measure V 100 mV", card.shared_configuration_label.text())
         self.assertIn("measure I 10 mA", card.shared_configuration_label.text())
@@ -786,7 +873,8 @@ class KeithleyCharacterizationUiTests(unittest.TestCase):
         with self.assertRaisesRegex(SafetyViolation, "Select 'Stop on compliance'"):
             card._build_config()
 
-        self.assertIn("compliance policy warn_clamp", card.shared_configuration_label.text())
+        self.assertNotIn("warn_clamp", card.shared_configuration_label.text())
+        self.assertEqual(card.shared_configuration_label.styleSheet(), "")
 
     def test_characterization_policy_transition_is_readback_verified_and_restored(self) -> None:
         """Temporary stop policy is locked during a run and restored afterwards."""
@@ -924,7 +1012,7 @@ class KeithleyCharacterizationUiTests(unittest.TestCase):
         self.assertTrue(panel.level_field.maximum.isHidden())
 
         # Formatted intervals
-        self.assertEqual(panel.level_field.range_pill._interval_text(), "[0 mA … 10 mA]")
+        self.assertEqual(panel.level_field.range_pill._interval_text(), "[-10 mA … 10 mA]")
         self.assertEqual(panel.compliance_field.range_pill._interval_text(), "[10 mV … 67 mV]")
         self.assertEqual(panel.nplc_field.range_pill._interval_text(), "[0.001 … 25]")
         self.assertEqual(panel.source_range_field.range_pill._interval_text(), "[> 0 … 3 A]")
@@ -1080,3 +1168,53 @@ class KeithleyCharacterizationUiTests(unittest.TestCase):
 
         self.assertEqual(card._build_config().sense_mode, "4wire")
         self.assertFalse(card.sense_warning_label.isHidden())
+
+    def test_keithley_discrete_hardware_range_comboboxes(self) -> None:
+        """Verify range controls use discrete hardware ComboBoxes switching dynamically with mode."""
+        panel = self.page.configuration_panel
+        from app.devices.keithley_2600.ui.page import (
+            KeithleyRangeComboBox,
+            KEITHLEY_CURRENT_RANGES_TEXT,
+            KEITHLEY_VOLTAGE_RANGES_TEXT,
+        )
+
+        # 1. Verify types
+        self.assertIsInstance(panel.source_range, KeithleyRangeComboBox)
+        self.assertIsInstance(panel.measure_voltage_range, KeithleyRangeComboBox)
+        self.assertIsInstance(panel.measure_current_range, KeithleyRangeComboBox)
+
+        # 2. Current mode: source_range has discrete current ranges
+        panel.mode.setCurrentText("current")
+        self.app.processEvents()
+        self.assertEqual(panel.form.labelForField(panel.source_range_field).text(), "Current source range")
+        items = [panel.source_range.itemText(i) for i in range(panel.source_range.count()) if panel.source_range.itemText(i) not in {"AUTO", "Select range"}]
+        self.assertEqual(items, list(KEITHLEY_CURRENT_RANGES_TEXT))
+
+        # 3. Voltage mode: source_range dynamically switches to discrete voltage ranges
+        panel.mode.setCurrentText("voltage")
+        self.app.processEvents()
+        self.assertEqual(panel.form.labelForField(panel.source_range_field).text(), "Voltage source range")
+        items_v = [panel.source_range.itemText(i) for i in range(panel.source_range.count()) if panel.source_range.itemText(i) not in {"AUTO", "Select range"}]
+        self.assertEqual(items_v, list(KEITHLEY_VOLTAGE_RANGES_TEXT))
+
+        # 4. Measure voltage and current ranges have fixed hardware lists
+        items_meas_v = [panel.measure_voltage_range.itemText(i) for i in range(panel.measure_voltage_range.count()) if panel.measure_voltage_range.itemText(i) != "AUTO"]
+        self.assertEqual(items_meas_v, list(KEITHLEY_VOLTAGE_RANGES_TEXT))
+        items_meas_i = [panel.measure_current_range.itemText(i) for i in range(panel.measure_current_range.count()) if panel.measure_current_range.itemText(i) != "AUTO"]
+        self.assertEqual(items_meas_i, list(KEITHLEY_CURRENT_RANGES_TEXT))
+
+        # 5. Autorange toggling disables/enables and sets AUTO vs hardware range
+        self.page.measure_voltage_autorange.setChecked(True)
+        self.app.processEvents()
+        self.assertFalse(self.page.measure_voltage_range.isEnabled())
+        self.assertEqual(self.page.measure_voltage_range.text(), "AUTO")
+
+        self.page.measure_voltage_autorange.setChecked(False)
+        self.app.processEvents()
+        self.assertTrue(self.page.measure_voltage_range.isEnabled())
+        self.assertEqual(self.page.measure_voltage_range.text(), "1 V")
+        self.assertNotIn("AUTO", [self.page.measure_voltage_range.itemText(i) for i in range(self.page.measure_voltage_range.count())])
+
+        # Selecting another item from the list
+        self.page.source_range.setText("6 V")
+        self.assertEqual(self.page.source_range.text(), "6 V")

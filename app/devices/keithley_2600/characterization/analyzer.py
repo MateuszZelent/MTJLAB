@@ -22,7 +22,9 @@ class KeithleyCharacterizationAnalyzer:
     @classmethod
     def analyze(cls, dataset: CharacterizationDataset) -> ExtractedScientificParameters:
         """Run complete scientific analysis on the dataset."""
-        points = dataset.points
+        points = tuple(p for p in dataset.points if p.valid
+                       and math.isfinite(p.measured_current_a)
+                       and math.isfinite(p.measured_voltage_v))
         if not points:
             return cls._empty_parameters()
 
@@ -47,7 +49,7 @@ class KeithleyCharacterizationAnalyzer:
 
         # 2. Extract zero-bias resistance R0 and conductance G0
         r0 = cls._extract_zero_bias_resistance(i_meas, v_meas, comp_active)
-        g0 = (1.0 / r0) if (math.isfinite(r0) and abs(r0) > 1e-12) else 0.0
+        g0 = (1.0 / r0) if (math.isfinite(r0) and abs(r0) > 1e-12) else float("nan")
 
         # 3. Resistance-Area product (RA)
         ra_product: float | None = None
@@ -68,13 +70,16 @@ class KeithleyCharacterizationAnalyzer:
         linearity_r2 = cls._calculate_linearity(i_meas, v_meas, comp_active, r0)
 
         # 6. Differential curves: dI/dV and dV/dI
-        diff_cond_curve, diff_res_curve = cls._compute_differential_curves(i_meas, v_meas)
+        diff_cond_curve, diff_res_curve = cls._compute_differential_curves(
+            np.array([p.measured_current_a if p.valid and not p.compliance_active else np.nan for p in dataset.points]),
+            np.array([p.measured_voltage_v if p.valid and not p.compliance_active else np.nan for p in dataset.points]),
+        )
 
         # 7. Brinkman-Dynes-Rowell (BDR) tunnel barrier parameter fitting
         bdr_params, bdr_coeffs = cls._fit_bdr_tunnel_model(
-            i_meas,
-            v_meas,
-            comp_active,
+            np.array([p.measured_current_a for p in dataset.points]),
+            np.array([p.measured_voltage_v for p in dataset.points]),
+            np.array([p.compliance_active or not p.valid for p in dataset.points]),
             nominal_thickness_nm=config.metadata.nominal_barrier_thickness_nm,
         )
 
@@ -111,18 +116,11 @@ class KeithleyCharacterizationAnalyzer:
         comp_mask: np.ndarray,
     ) -> float:
         """Fit linear slope Delta V / Delta I around zero bias robustly."""
-        valid = ~comp_mask
+        valid = ~comp_mask & np.isfinite(i_arr) & np.isfinite(v_arr)
         i_val = i_arr[valid]
         v_val = v_arr[valid]
 
-        # If all points are in compliance (e.g. open circuit or high megaohm), use all available points
-        if len(i_val) < 2:
-            i_val = i_arr
-            v_val = v_arr
-
-        if len(i_val) < 2:
-            if len(i_val) == 1 and abs(i_val[0]) > 1e-15:
-                return float(v_val[0] / i_val[0])
+        if len(i_val) < 3:
             return float("nan")
 
         abs_v = np.abs(v_val)
@@ -135,18 +133,11 @@ class KeithleyCharacterizationAnalyzer:
             indices = np.argsort(abs_v)[: min(7, len(v_val))]
             mask = np.zeros(len(v_val), dtype=bool)
             mask[indices] = True
-        elif np.sum(mask) < 2:
-            indices = np.argsort(abs_v)[:2]
-            mask = np.zeros(len(v_val), dtype=bool)
-            mask[indices] = True
 
         x = i_val[mask]
         y = v_val[mask]
 
-        if np.ptp(x) < 1e-15:
-            non_zero = np.abs(x) > 1e-15
-            if np.any(non_zero):
-                return float(np.median(y[non_zero] / x[non_zero]))
+        if len(np.unique(x)) < 3 or np.ptp(x) < 1e-15:
             return float("nan")
 
         poly = np.polyfit(x, y, 1)
@@ -166,11 +157,11 @@ class KeithleyCharacterizationAnalyzer:
         v_val = v_arr[valid]
 
         if len(v_val) < 3 or not math.isfinite(r0):
-            return 1.0 if len(v_val) >= 1 else 0.0
+            return float("nan")
 
         # Pearson correlation squared r^2 measures strict linearity between I and V
         if np.ptp(i_val) < 1e-15 or np.ptp(v_val) < 1e-15:
-            return 1.0
+            return float("nan")
 
         try:
             corr_mat = np.corrcoef(i_val, v_val)
@@ -196,32 +187,47 @@ class KeithleyCharacterizationAnalyzer:
         i_arr: np.ndarray,
         v_arr: np.ndarray,
     ) -> tuple[list[tuple[float, float]], list[tuple[float, float]]]:
-        """Calculate dI/dV (differential conductance) and dV/dI curves."""
+        """Unsmooth finite differences on contiguous monotonic acquired branches.
+
+        NaN separates branches in the plotting representation. Never sort away
+        acquisition history or bridge an invalid/compliance point.
+        """
         if len(v_arr) < 3:
             return [], []
 
-        # Sort by voltage
-        sort_idx = np.argsort(v_arr)
-        v_sorted = v_arr[sort_idx]
-        i_sorted = i_arr[sort_idx]
-
-        # Filter duplicates in voltage
-        unique_mask = np.concatenate(([True], np.diff(v_sorted) > 1e-12))
-        v_unique = v_sorted[unique_mask]
-        i_unique = i_sorted[unique_mask]
-
-        if len(v_unique) < 3:
-            return [], []
-
-        di_dv = np.gradient(i_unique, v_unique)
         cond_curve: list[tuple[float, float]] = []
         res_curve: list[tuple[float, float]] = []
-
-        for v, g in zip(v_unique, di_dv):
-            cond_curve.append((float(v), float(g)))
-            r_diff = (1.0 / g) if abs(g) > 1e-15 else float("nan")
-            res_curve.append((float(v), float(r_diff)))
-
+        segments, segment, direction = [], [], None
+        for current, voltage in zip(i_arr, v_arr):
+            if not (math.isfinite(current) and math.isfinite(voltage)):
+                segments.append(segment)
+                segment, direction = [], None
+                continue
+            if segment:
+                di, dv = current - segment[-1][0], voltage - segment[-1][1]
+                new_direction = (np.sign(di), np.sign(dv))
+                if di == 0 or dv == 0:
+                    segments.append(segment)
+                    segment, direction = [], None
+                elif direction is not None and new_direction != direction:
+                    previous = segment[-1]
+                    segments.append(segment)
+                    segment, direction = [previous], new_direction
+                else:
+                    direction = new_direction
+            segment.append((current, voltage))
+        segments.append(segment)
+        for segment in segments:
+            if len(segment) < 3:
+                continue
+            currents, voltages = np.asarray(segment).T
+            conductance = np.gradient(currents, voltages)
+            resistance = np.gradient(voltages, currents)
+            if cond_curve:
+                cond_curve.append((math.nan, math.nan))
+                res_curve.append((math.nan, math.nan))
+            cond_curve.extend((float(v), float(g)) for v, g in zip(voltages, conductance))
+            res_curve.extend((float(v), float(r)) for v, r in zip(voltages, resistance))
         return cond_curve, res_curve
 
     @classmethod
@@ -233,20 +239,21 @@ class KeithleyCharacterizationAnalyzer:
         nominal_thickness_nm: float = 1.0,
     ) -> tuple[tuple[float | None, float | None, float | None], tuple[float, float, float] | None]:
         """Fit Brinkman-Dynes-Rowell G(V) = c0 + c1*V + c2*V^2 and extract barrier parameters."""
-        valid = ~comp_mask
+        valid = ~comp_mask & np.isfinite(i_arr) & np.isfinite(v_arr)
+        indices = np.flatnonzero(valid)
+        if len(indices) < 5 or np.any(np.diff(indices) != 1):
+            return (None, None, None), None
         i_val = i_arr[valid]
         v_val = v_arr[valid]
 
         if len(v_val) < 5:
             return (None, None, None), None
 
-        sort_idx = np.argsort(v_val)
-        v_sorted = v_val[sort_idx]
-        i_sorted = i_val[sort_idx]
-
-        unique_mask = np.concatenate(([True], np.diff(v_sorted) > 1e-12))
-        v_u = v_sorted[unique_mask]
-        i_u = i_sorted[unique_mask]
+        for values in (i_val, v_val):
+            differences = np.diff(values)
+            if not (np.all(differences > 0) or np.all(differences < 0)):
+                return (None, None, None), None
+        v_u, i_u = v_val, i_val
 
         if len(v_u) < 5 or np.ptp(v_u) < 0.05:
             return (None, None, None), None
@@ -332,7 +339,7 @@ class KeithleyCharacterizationAnalyzer:
     def _empty_parameters(cls) -> ExtractedScientificParameters:
         return ExtractedScientificParameters(
             zero_bias_resistance_ohm=float("nan"),
-            zero_bias_conductance_s=0.0,
+            zero_bias_conductance_s=float("nan"),
             ra_product_ohm_um2=None,
             compliance_detected=False,
             compliance_onset_point=None,
@@ -342,5 +349,5 @@ class KeithleyCharacterizationAnalyzer:
             tunnel_barrier_height_ev=None,
             tunnel_barrier_asymmetry_ev=None,
             tunnel_barrier_thickness_nm=None,
-            linearity_r2=0.0,
+            linearity_r2=float("nan"),
         )

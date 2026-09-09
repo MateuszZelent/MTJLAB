@@ -3,6 +3,7 @@
 from app.platform.paths import (
     app_config_dir,
     app_data_dir,
+    default_catalogue_root,
     default_measurements_dir,
     default_settings_path,
     resolve_platform_env_path,
@@ -11,6 +12,7 @@ from app.platform.paths import (
 __all__ = [
     "app_config_dir",
     "app_data_dir",
+    "default_catalogue_root",
     "default_measurements_dir",
     "default_settings_path",
     "resolve_platform_env_path",

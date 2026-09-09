@@ -96,6 +96,15 @@ def default_measurements_dir() -> Path:
     return docs / _APP_NAME / "measurements"
 
 
+def default_catalogue_root() -> Path:
+    """Return the per-user root that owns sample data and its index."""
+
+    docs = _qstandardpaths_location("DocumentsLocation")
+    if docs is None:
+        docs = Path.home() / "Documents"
+    return (docs / _APP_NAME).resolve()
+
+
 def resolve_platform_env_path(path: str | Path = ".env") -> Path:
     """Resolve the .env credential file securely and consistently.
 

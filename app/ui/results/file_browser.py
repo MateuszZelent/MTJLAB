@@ -42,6 +42,23 @@ COL_SPECTRA = 4
 COL_POINTS = 5
 
 
+def _mixed_item_sort_key(item: QTreeWidgetItem, column: int) -> tuple[int, str, str]:
+    """Return a deterministic key without calling Qt's virtual comparator.
+
+    PySide can dispatch ``super().__lt__`` back into the Python override when
+    different QTreeWidgetItem subclasses are siblings.  Catalogue folders and
+    result/artifact leaves are intentionally mixed, so keep that comparison
+    entirely in Python and place folders before files.
+    """
+
+    priority = int(getattr(item, "_sort_priority", 10))
+    return (
+        priority,
+        item.text(column).casefold(),
+        item.text(COL_FILE).casefold(),
+    )
+
+
 def format_timestamp(iso_str: str | None) -> str:
     """Format an ISO UTC timestamp into readable text."""
     if not iso_str:
@@ -80,6 +97,8 @@ def categorize_date(iso_str: str | None, now_utc: datetime) -> str:
 class ResultFileItem(QTreeWidgetItem):
     """Sortable TreeWidgetItem representing a recorded HDF5 run."""
 
+    _sort_priority = 10
+
     def __init__(self, summary: RunSummary, formatted_date: str) -> None:
         super().__init__(
             [
@@ -105,7 +124,9 @@ class ResultFileItem(QTreeWidgetItem):
 
     def __lt__(self, other: QTreeWidgetItem) -> bool:
         if not isinstance(other, ResultFileItem):
-            return super().__lt__(other)
+            tree = self.treeWidget()
+            col = tree.sortColumn() if tree is not None else COL_DATE
+            return _mixed_item_sort_key(self, col) < _mixed_item_sort_key(other, col)
         tree = self.treeWidget()
         col = tree.sortColumn() if tree is not None else COL_DATE
         if col == COL_DATE:
@@ -153,6 +174,8 @@ class SampleGroupItem(QTreeWidgetItem):
 class CatalogueGroupItem(QTreeWidgetItem):
     """A non-selectable folder row in the sample measurement catalogue tree."""
 
+    _sort_priority = 0
+
     def __init__(self, title: str, count: int) -> None:
         super().__init__([f"{title} ({count})", "", "", "", "", ""])
         self.group_title = title
@@ -164,11 +187,15 @@ class CatalogueGroupItem(QTreeWidgetItem):
     def __lt__(self, other: QTreeWidgetItem) -> bool:
         if isinstance(other, CatalogueGroupItem):
             return self._title.casefold() < other._title.casefold()
-        return super().__lt__(other)
+        tree = self.treeWidget()
+        col = tree.sortColumn() if tree is not None else COL_FILE
+        return _mixed_item_sort_key(self, col) < _mixed_item_sort_key(other, col)
 
 
 class CatalogueArtifactItem(QTreeWidgetItem):
     """A CSV/PDF measurement artifact shown below its sample folder."""
+
+    _sort_priority = 10
 
     def __init__(self, path: Path) -> None:
         try:
@@ -182,6 +209,11 @@ class CatalogueArtifactItem(QTreeWidgetItem):
         self.setData(COL_DATE, Qt.ItemDataRole.UserRole, str(path))
         self.setIcon(COL_FILE, FluentIcon.DOCUMENT.icon())
         self.setToolTip(COL_FILE, f"Measurement artifact:\n{path.resolve()}")
+
+    def __lt__(self, other: QTreeWidgetItem) -> bool:
+        tree = self.treeWidget()
+        col = tree.sortColumn() if tree is not None else COL_DATE
+        return _mixed_item_sort_key(self, col) < _mixed_item_sort_key(other, col)
 
 
 class FileBrowserPanel(QWidget):

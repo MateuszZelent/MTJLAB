@@ -37,6 +37,8 @@ root:
       level: "1 mA"
       compliance: "67 mV"
       nplc: 1.0
+      source_autorange: false
+      source_range: 1 A
     - id: rigol-ch1-config
       type: configure_rigol
       channel: 1

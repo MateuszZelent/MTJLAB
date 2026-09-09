@@ -283,6 +283,7 @@ class RecipeCompiler:
             self._visit(node, {}, actions, is_finally=True)
         self._validate_reference_flow(actions)
         self._validate_device_state_flow(actions)
+        self._validate_keithley_range_flow(actions)
         if not actions:
             raise ConfigurationError("The recipe contains no executable actions.")
         if len(actions) > self._max_actions:
@@ -342,6 +343,22 @@ class RecipeCompiler:
             dict(recipe.dut_limits),
             elab_upload_config,
         )
+
+    def _validate_keithley_range_flow(self, actions: list[PlanAction]) -> None:
+        """Check expanded legacy level updates against each channel's fixed range."""
+        configured: dict[str, KeithleySourceRequest] = {}
+        for action in actions:
+            if action.kind == "configure_keithley":
+                request = action.payload["request"]
+                configured[request.channel] = request
+            elif action.kind == "update_keithley_level":
+                channel = action.payload["channel"]
+                request = configured.get(channel)
+                if request is not None:
+                    validate_keithley_source(
+                        self._settings.keithley.safety.channels[channel],
+                        replace(request, level_si=action.payload["level_si"]),
+                    )
 
     @staticmethod
     def _validate_reference_flow(actions: list[PlanAction]) -> None:
@@ -939,8 +956,8 @@ class RecipeCompiler:
             "nplc": configuration.get("nplc", 1.0),
             "settle_time": configuration.get("settling_time", "0 s"),
             "sense_mode": configuration.get("sense_mode", "2wire"),
-            "source_autorange": configuration.get("source_autorange", True),
-            "source_range": configuration.get("source_range", "AUTO"),
+            "source_autorange": configuration.get("source_autorange", False),
+            "source_range": configuration.get("source_range"),
             "measure_voltage_autorange": configuration.get(
                 "measure_voltage_autorange", True
             ),
@@ -2641,6 +2658,13 @@ class RecipeCompiler:
         mode = str(data.get("mode", ""))
         if channel not in {"A", "B"} or mode not in {"current", "voltage", "measure_only"}:
             raise ConfigurationError("configure_keithley requires channel A/B and mode current/voltage/measure_only.")
+        configured_auto = self._settings.keithley.safety.channels[channel].defaults.get("source_autorange", False)
+        if not isinstance(configured_auto, bool):
+            raise ConfigurationError("Settings source_autorange must be a boolean.")
+        recipe_auto = self._optional_boolean(data, "source_autorange", False, node_id)
+        if recipe_auto and not configured_auto:
+            raise SafetyViolation("A recipe cannot enable source autorange; change it explicitly in Settings.")
+        source_auto = configured_auto and mode != "measure_only"
         dimension = DIMENSION_CURRENT if mode == "current" else DIMENSION_VOLTAGE
         level = 0.0 if mode == "measure_only" else self._resolve_quantity(data.get("level"), dimension, {}).si_value
         compliance_dimension = DIMENSION_VOLTAGE if mode == "current" else DIMENSION_CURRENT
@@ -2657,8 +2681,8 @@ class RecipeCompiler:
                 {},
             ).si_value,
             sense_mode=str(data.get("sense_mode", "2wire")),  # type: ignore[arg-type]
-            source_autorange=self._optional_boolean(data, "source_autorange", True, node_id),
-            source_range_si=self._optional_quantity(data, "source_range", dimension),
+            source_autorange=source_auto,
+            source_range_si=None if source_auto or mode == "measure_only" else self._optional_quantity(data, "source_range", dimension),
             measure_voltage_autorange=self._optional_boolean(data, "measure_voltage_autorange", True, node_id),
             measure_voltage_range_si=self._optional_quantity(data, "measure_voltage_range", DIMENSION_VOLTAGE),
             measure_current_autorange=self._optional_boolean(data, "measure_current_autorange", True, node_id),

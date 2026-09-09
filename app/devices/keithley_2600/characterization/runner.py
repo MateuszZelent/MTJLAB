@@ -15,20 +15,30 @@ from app.devices.keithley_2600.characterization.models import (
     CharacterizationDataset,
     CharacterizationPoint,
     CharacterizationSweepConfig,
+    FieldLineObservation,
 )
-from app.domain.errors import DeviceError, SafetyViolation
+from app.domain.errors import DeviceError, RunInterrupted, SafetyViolation
 from app.domain.quantities import (
     DIMENSION_CURRENT,
     DIMENSION_POWER,
     DIMENSION_VOLTAGE,
     parse_quantity,
 )
-from app.safety.keithley import validate_keithley_source
+from app.safety.keithley import validate_source_range, validate_keithley_source
 from app.settings.models import StationSettings
 
 
 class KeithleyCharacterizationRunner:
     """Safely executes Keithley IV sweeps with preflight checks and clean safe shutdowns."""
+
+    @staticmethod
+    def prepare_new_sweep_output(device: Any, channel: str) -> None:
+        """A new operator-started run acknowledges compliance without restoring a level."""
+        device.confirm_output_off(channel)
+        result = device.recover_from_compliance(channel, "keep_off")
+        if not isinstance(result, dict) or result.get("outputs_confirmed_off") is not True:
+            raise DeviceError(f"Compliance recovery for {channel} was not confirmed.")
+        device.confirm_output_off(channel)
 
     @staticmethod
     def sweep_setpoints_excluding_zero(
@@ -72,11 +82,11 @@ class KeithleyCharacterizationRunner:
         )
 
     @staticmethod
-    def _assert_matches_verified_manual_configuration(
+    def assert_applied_configuration_matches_request(
         previous: KeithleySourceRequest,
         applied: KeithleySourceRequest,
     ) -> None:
-        """Require every non-swept parameter to match the manual readback."""
+        """Require every non-swept parameter to match the reviewed card request."""
         shared_fields = (
             "channel",
             "mode",
@@ -98,10 +108,9 @@ class KeithleyCharacterizationRunner:
         ]
         if mismatches:
             raise SafetyViolation(
-                "Characterization configuration differs from the last manually "
-                "applied and verified Keithley configuration: "
+                "Keithley readback differs from the requested card configuration: "
                 + ", ".join(mismatches)
-                + ". OUTPUT remained OFF; repeat the manual check with the current card settings."
+                + ". Characterization output was not enabled."
             )
 
     @classmethod
@@ -176,9 +185,14 @@ class KeithleyCharacterizationRunner:
         on_point: Any | None = None,
         on_progress: Any | None = None,
         on_compliance: Any | None = None,
+        read_field: Any | None = None,
+        on_raw_measurement: Any | None = None,
     ) -> CharacterizationDataset:
         """Run the characterization sweep synchronously with guaranteed zero-ramp and shutdown."""
         channel = config.channel
+        # Also guard direct runner callers before recovery/configure can touch hardware.
+        for level in (config.start_level_si, config.stop_level_si, 0.0):
+            validate_source_range(cls.source_request_for_level(config, level))
         setpoints = cls.sweep_setpoints_excluding_zero(
             config.start_level_si,
             config.stop_level_si,
@@ -209,33 +223,21 @@ class KeithleyCharacterizationRunner:
         started_at = datetime.now(timezone.utc).isoformat()
         points: list[CharacterizationPoint] = []
         completion_status: Literal[
-            "completed", "cancelled", "stopped_on_compliance"
+            "completed", "cancelled", "stopped_on_compliance", "stopped_on_field_compliance"
         ] = "completed"
         termination_detail = ""
-
-        try:
-            verified_manual_request = device.last_source_request(channel)
-        except Exception as exc:
-            raise SafetyViolation(
-                "Characterization requires a manually applied and readback-verified "
-                f"Keithley configuration on channel {channel}. No output was enabled."
-            ) from exc
-        if not isinstance(verified_manual_request, KeithleySourceRequest):
-            raise SafetyViolation(
-                "Keithley did not return a valid manually verified source request. "
-                "No characterization output was enabled."
-            )
 
         # 1. Configure the exact first sweep request while OUTPUT is OFF.  This
         # is the same complete request shape used by the normal Keithley card.
         init_req = cls.source_request_for_level(config, float(setpoints[0]))
+        cls.prepare_new_sweep_output(device, channel)
         applied_request = device.configure_source(init_req)
         if not isinstance(applied_request, KeithleySourceRequest):
             raise DeviceError(
                 "Keithley did not return the applied characterization configuration."
             )
-        cls._assert_matches_verified_manual_configuration(
-            verified_manual_request,
+        cls.assert_applied_configuration_matches_request(
+            init_req,
             applied_request,
         )
 
@@ -248,6 +250,12 @@ class KeithleyCharacterizationRunner:
                     termination_detail = "Sweep cancelled before applying the next setpoint."
                     break
 
+                field_before: FieldLineObservation | None = read_field() if read_field else None
+                if field_before is not None and field_before.compliance_active:
+                    completion_status = "stopped_on_field_compliance"
+                    termination_detail = "Field line reached compliance before the next sample point."
+                    break
+
                 # Apply setpoint with keyword arguments for real adapter and positional fallback
                 try:
                     device.update_source_level(channel, mode=config.mode, level_si=float(demanded))
@@ -257,7 +265,10 @@ class KeithleyCharacterizationRunner:
                 device.assert_output_state(channel, expected_enabled=True)
 
                 if config.dwell_time_s > 0:
-                    time.sleep(config.dwell_time_s)
+                    if cancel_event is not None:
+                        cancel_event.wait(config.dwell_time_s)
+                    else:
+                        time.sleep(config.dwell_time_s)
 
                 if cancel_event is not None and cancel_event.is_set():
                     completion_status = "cancelled"
@@ -269,6 +280,14 @@ class KeithleyCharacterizationRunner:
                 i_meas = float(meas.current_a)
                 p_meas = float(abs(meas.power_w))
                 comp_active = bool(meas.compliance_detected)
+                if on_raw_measurement is not None:
+                    on_raw_measurement({
+                        "index": idx, "demanded_si": float(demanded),
+                        "measured_voltage_v": v_meas, "measured_current_a": i_meas,
+                        "power_w": p_meas, "compliance_active": comp_active,
+                        "timestamp_epoch": time.time(),
+                    })
+                field_after: FieldLineObservation | None = read_field() if read_field else None
 
                 if comp_active and on_compliance is not None:
                     on_compliance(
@@ -303,6 +322,9 @@ class KeithleyCharacterizationRunner:
                     power_w=p_meas,
                     compliance_active=comp_active,
                     timestamp_epoch=time.time(),
+                    field_before=field_before,
+                    field_after=field_after,
+                    valid=not (field_after is not None and field_after.compliance_active),
                 )
                 points.append(pt)
 
@@ -310,6 +332,11 @@ class KeithleyCharacterizationRunner:
                     on_point(pt)
                 if on_progress is not None:
                     on_progress(idx + 1, points_count)
+
+                if not pt.valid:
+                    completion_status = "stopped_on_field_compliance"
+                    termination_detail = "Field line reached compliance; the last sample point is invalid."
+                    break
 
                 if comp_active:
                     completion_status = "stopped_on_compliance"
@@ -319,6 +346,9 @@ class KeithleyCharacterizationRunner:
                     )
                     break
 
+        except RunInterrupted as exc:
+            completion_status = "cancelled"
+            termination_detail = str(exc) or "Sweep interrupted by operator."
         finally:
             # 3. Fail-safe shutdown: ramp to zero and disable output
             try:

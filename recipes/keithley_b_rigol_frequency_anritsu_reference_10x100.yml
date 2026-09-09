@@ -57,9 +57,10 @@ root:
       compliance: "67 mV"
       nplc: 1.0
       sense_mode: 2wire
-      source_autorange: true
+      source_autorange: false
       measure_voltage_autorange: true
       measure_current_autorange: true
+      source_range: 1 A
 
     - id: rigol-ch1-initial-configuration
       type: configure_rigol

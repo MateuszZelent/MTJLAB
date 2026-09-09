@@ -151,7 +151,7 @@ root:
   id: root
   type: sequence
   children:
-    - {id: configure, type: configure_keithley, channel: B, mode: current, level: "1 mA", compliance: "67 mV"}
+    - {id: configure, type: configure_keithley, channel: B, mode: current, level: "1 mA", compliance: "67 mV", source_autorange: false, source_range: "10 mA"}
     - id: axis
       type: sweep
       target: keithley.B.current
@@ -320,6 +320,8 @@ root:
       type: configure_keithley
       channel: B
       mode: current
+      source_autorange: false
+      source_range: 1 A
       level: "0 A"
       compliance: "67 mV"
     - id: rigol-config
@@ -344,6 +346,8 @@ root:
           type: update_keithley_level
           channel: B
           mode: current
+          source_autorange: false
+          source_range: 1 A
           level: "${keithley.B.current}"
         - id: rigol-frequency
           type: sweep
@@ -409,8 +413,8 @@ root:
         nplc: 1
         settling_time: 100 ms
         sense_mode: 2wire
-        source_autorange: true
-        source_range: AUTO
+        source_autorange: false
+        source_range: 10 mA
         measure_voltage_autorange: true
         measure_voltage_range: AUTO
         measure_current_autorange: true
@@ -476,8 +480,8 @@ root:
         nplc: 1
         settling_time: 0 s
         sense_mode: 2wire
-        source_autorange: true
-        source_range: AUTO
+        source_autorange: false
+        source_range: 10 mA
         measure_voltage_autorange: true
         measure_voltage_range: AUTO
         measure_current_autorange: true
@@ -554,8 +558,8 @@ root:
     nplc: 1
     settling_time: 0 s
     sense_mode: 2wire
-    source_autorange: true
-    source_range: AUTO
+    source_autorange: false
+    source_range: 10 mA
     measure_voltage_autorange: true
     measure_voltage_range: AUTO
     measure_current_autorange: true
@@ -1226,6 +1230,8 @@ root:
       type: configure_keithley
       channel: A
       mode: current
+      source_autorange: false
+      source_range: 10 mA
       level: 0.5 mA
       compliance: 67 mV
     - id: current-sweep
@@ -1239,6 +1245,8 @@ root:
           type: configure_keithley
           channel: B
           mode: current
+          source_autorange: false
+          source_range: 10 mA
           level: "${keithley.B.current}"
           compliance: 67 mV
         - id: checkpoint
@@ -1381,6 +1389,8 @@ root:
   type: configure_keithley
   channel: B
   mode: current
+  source_autorange: false
+  source_range: 10 mA
   level: "1 mA"
   compliance: "67 mV"
 """
@@ -1402,6 +1412,8 @@ root:
   type: configure_keithley
   channel: B
   mode: current
+  source_autorange: false
+  source_range: 10 mA
   level: "1 mA"
   compliance: "67 mV"
 """
@@ -1462,6 +1474,8 @@ root:
       type: configure_keithley
       channel: B
       mode: current
+      source_autorange: false
+      source_range: 10 mA
       level: 1 mA
       compliance: 67 mV
     - id: output-on
@@ -1550,7 +1564,7 @@ root:
       configuration:
             {channel: A, source_mode: current, source_level: 500 uA,
          compliance: 100 mV, nplc: 1, settling_time: 0 s, sense_mode: 2wire,
-         source_autorange: true, source_range: AUTO,
+         source_autorange: false, source_range: 10 mA,
          measure_voltage_autorange: true, measure_voltage_range: AUTO,
          measure_current_autorange: true, measure_current_range: AUTO}
       parameter_actions:
@@ -1563,7 +1577,7 @@ root:
       configuration:
             {channel: A, source_mode: current, source_level: 500 uA,
          compliance: 100 mV, nplc: 1, settling_time: 0 s, sense_mode: 2wire,
-         source_autorange: true, source_range: AUTO,
+         source_autorange: false, source_range: 10 mA,
          measure_voltage_autorange: true, measure_voltage_range: AUTO,
          measure_current_autorange: true, measure_current_range: AUTO}
       parameter_actions:
@@ -1596,7 +1610,7 @@ root:
   configuration:
     {channel: A, source_mode: current, source_level: 500 uA,
      compliance: 100 mV, nplc: 1, settling_time: 0 s, sense_mode: 2wire,
-     source_autorange: true, source_range: AUTO,
+     source_autorange: false, source_range: 10 mA,
      measure_voltage_autorange: true, measure_voltage_range: AUTO,
      measure_current_autorange: true, measure_current_range: AUTO}
   parameter_actions:

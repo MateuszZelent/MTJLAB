@@ -32,6 +32,7 @@ from app.safety.keithley import (
     KEITHLEY_2602A_VOLTAGE_RANGES,
     KeithleySourceRequest,
     quantize_keithley_value,
+    validate_source_range,
     validate_keithley_measurement,
     validate_keithley_source,
 )
@@ -133,7 +134,17 @@ def build_keithley_ramp_levels(
         raise SafetyViolation("Keithley ramp boundaries and step must be finite.")
     if max_step_si <= 0 or max_points < 1:
         raise SafetyViolation("Keithley ramp step and point limit must be positive.")
-    steps = max(1, math.ceil(abs(target_si - start_si) / max_step_si))
+    ratio = abs(target_si - start_si) / max_step_si
+    nearest_integer = round(ratio)
+    # Unit scaling can represent an exact engineering-unit ratio just above
+    # its integer value (for example 0.1 A / 100 uA becomes
+    # 1000.0000000000001).  Treat only machine-precision-close ratios as the
+    # intended integer; a materially larger transition still gets an extra
+    # point so the maximum step cannot be exceeded.
+    if math.isclose(ratio, nearest_integer, rel_tol=1e-12, abs_tol=1e-12):
+        steps = max(1, nearest_integer)
+    else:
+        steps = max(1, math.ceil(ratio))
     if steps > max_points:
         raise SafetyViolation(
             f"Keithley ramp requires {steps} points; configured maximum is {max_points}."
@@ -1171,9 +1182,11 @@ class KeithleyAdapter(DeviceAdapter):
     ) -> None:
         """Write only whitelisted range/sense settings with source output OFF."""
 
+        validate_source_range(request)
         source_suffix = "i" if request.mode == "current" else "v"
         commands = [
-            f"{smu}.source.autorange{source_suffix} = {smu}.{'AUTORANGE_ON' if request.source_autorange else 'AUTORANGE_OFF'}",
+            f"{smu}.source.autorange{source_suffix} = {smu}."
+            f"{'AUTORANGE_ON' if request.source_autorange else 'AUTORANGE_OFF'}",
             *KeithleyAdapter._measurement_range_and_sense_commands(smu, request),
         ]
         if request.source_range_si is not None:

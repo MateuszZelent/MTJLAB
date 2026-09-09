@@ -17,6 +17,10 @@ class SafetyViolation(LabControlError):
     """A requested operation violates an effective station or DUT limit."""
 
 
+class RunInterrupted(SafetyViolation):
+    """An explicit stop or output-off action interrupted an active run."""
+
+
 class DeviceError(LabControlError):
     """The instrument rejected a command or reported an operational error."""
 

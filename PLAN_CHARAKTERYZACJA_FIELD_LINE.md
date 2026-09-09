@@ -1,6 +1,6 @@
 # Charakterystyka MTJ przy różnych prądach field line
 
-Data: 2026-09-08. Status: plan wdrożenia po przeglądzie kodu, bez zmian sterowania sprzętem.
+Data: 2026-09-08. Status dokumentu: plan wdrożenia. Bieżące zlecenie dotyczy wyłącznie dokumentacji, nie implementacji ani uruchamiania sprzętu. Opis docelowego zachowania nie jest potwierdzeniem gotowości aktualnego kodu.
 
 ## 1. Cel i zakres pierwszej wersji
 
@@ -665,3 +665,84 @@ Aktualny eksport CSV nie zapisuje wszystkich możliwych przyszłych metadanych t
 8. Przejrzeć instrukcję na danych rzeczywistej charakterystyki offline. Dopiero osobne kwalifikowane pomiary toru mogą potwierdzić dokładność fizycznych odpowiedników Rigola.
 
 **Definicja zakończenia:** każda nowa charakterystyka daje automatycznie rozdział instrukcji lub jednoznaczne wyjaśnienie braku danych; liczby pochodzą ze zmierzonych V/I, mają poprawną konwencję LOAD i jednostki; generowanie nie steruje urządzeniem; brak danych o torze lub AC nie jest ukrywany; operator ma instrukcję postępowania i nie otrzymuje pozornej gwarancji prądu ani bezpieczeństwa.
+
+## 19. Instrukcja wykonawcza: automatyczny PDF z instrukcją Rigola
+
+### 19.1. Zakres zlecenia i kontrakt
+
+Na tym etapie aktualizujemy wyłącznie plan. Poniższe zadania należy wykonać dopiero w ramach osobnego zlecenia implementacji. Istniejące zmiany robocze kodu wymagają osobnego przeglądu; sama ich obecność nie oznacza ukończenia funkcji.
+
+Docelowy wynik: każda zakończona lub przerwana charakterystyka ma trwałe dane oraz raport przedstawiający nominalne odpowiedniki DC Rigola albo jawny powód, dlaczego ich nie wyznaczono. Raport nie wysyła komend do Rigola, nie włącza wyjścia i nie modyfikuje limitów operatora. Nie nazywamy oszacowanego prądu zmierzonym prądem Rigola.
+
+### 19.2. Zadania według modułów
+
+| Obszar | Szczegółowe zadanie | Warunek odbioru |
+|---|---|---|
+| `characterization/models.py` | Zdefiniować wersjonowany snapshot: zmierzone I/V, jednostki SI, kolejność i czas punktów, ważność, compliance, status zakończenia, kanał, konfiguracja pomiaru, próbka/komórka, dostępne dane field line. Nieznane warunki toru zapisać jako nieznane. | Snapshot pozwala odtworzyć raport bez aktualnych ustawień i urządzenia. |
+| `app/safety/rigol_current.py` | Udostępnić jedną konwersję konwencji LOAD zgodną z istniejącym modelem generatora; przed zmianą sprawdzić dokumentację dokładnego modelu Rigola i obecne testy. | Niezależne przykłady liczbowe i regresje potwierdzają współczynnik LOAD; dotychczasowe limity zachowują działanie. |
+| `characterization/rigol_equivalence.py` | Czysta funkcja przyjmująca snapshot i jawne założenia modelu. Zwraca wynik każdego punktu, indeks źródłowy i powód wykluczenia. Zachowuje kolejność, znaki i powtórzenia. | Brak dostępu do kontrolera/UI; wynik zależy wyłącznie od wejścia. |
+| `characterization/rigol_report.py` | Z jednego wyniku obliczeń budować tabelę, wykres i instrukcję opisaną w §18.6–18.7. Oddzielić przykłady syntetyczne od danych pomiarowych. | PDF i pochodny CSV pokazują te same liczby, z uwzględnieniem formatowania. |
+| `characterization/report_pdf.py` | Dołączyć rozdział po podstawowych wynikach. Dodać status danych, założenia połączenia, konwencję LOAD i ograniczenia zastosowania AC. | Raport pusty/częściowy nadal powstaje i nie udaje kompletnego pomiaru. |
+| Eksport i czytnik | Zapisać `rigol_equivalence.csv` oraz snapshot potrzebny do ponownego PDF, atomowo, w katalogu konkretnego przebiegu. Dodać odczyt wersji schematu i jawne braki dla starszych plików. | Ponowienie po restarcie aplikacji nie wymaga pomiaru ani połączenia ze sprzętem. |
+| `ui/characterization_card.py` | Uruchomić raportowanie po trwałym zapisie danych i zakończeniu procedury OFF/przywrócenia polityk. Pokazać osobne stany pomiaru i raportu. | Błąd PDF nie kasuje danych i nie zmienia zakończonego pomiaru w pozorny błąd akwizycji. |
+| Samples / Measurements | Korzystać z istniejącego resolvera katalogów i rejestru pomiarów; zarejestrować artefakty tego samego przebiegu, bez tworzenia drugiego pomiaru przy ponowieniu raportu. | CSV i PDF są widoczne przy właściwej próbce i komórce, bez pytania o plik docelowy. |
+
+Nazwy nowych plików są propozycją podziału odpowiedzialności. Przed implementacją sprawdzić istniejące odpowiedniki i rozszerzyć je zamiast tworzyć drugi mechanizm obliczeń, zapisu albo rejestracji.
+
+### 19.3. Dokładna kolejność wykonania
+
+1. Zidentyfikować aktualną ścieżkę: odebrany punkt → dataset → CSV → wyłączenie wyjść → przywrócenie polityk → PDF → rejestr Samples. Udokumentować rzeczywistą kolejność i poprawić ją przed dołączeniem kosztownego renderowania.
+2. Zamrozić kontrakt danych i założeń. Rozróżnić napięcie zmierzone przez Keithleya, nominalne napięcie nieobciążonego generatora i napięcie wyświetlane według LOAD. Dodać wersję modelu oraz źródło dokumentacji producenta.
+3. Napisać testy rachunkowe z §18.8–18.10, następnie czystą funkcję. Dla każdego dopuszczonego punktu zastosować `V_oc = V_measured + I_measured * 50 Ω`; dla nominalnego High-Z `V_display = V_oc`, dla LOAD 50 Ω `V_display = V_oc / 2`. Te wzory dotyczą wskazanego modelu bezpośredniego połączenia, nie dowolnego toru laboratoryjnego.
+4. Dodać trwały wynik przeliczenia i odczyt snapshotu. Dopiero potem tworzyć treść PDF. Brak metadanych nie może być uzupełniany dzisiejszymi ustawieniami.
+5. Dodać tabelę oraz wykres punktów i sekcję instrukcji. Dla danych nieliniowych przeliczać każdy punkt osobno. Nie zastępować krzywej jednym R0 i nie wprowadzać automatycznej ekstrapolacji.
+6. Wpiąć renderowanie w zadanie działające po zakończeniu obsługi wyjść. Odróżnić `measurement_status` od `report_status`; raport może mieć status oczekujący, gotowy lub błąd niezależnie od częściowego/pełnego pomiaru.
+7. Dodać ponawianie raportu z zapisanych danych. Ponowienie zapisuje plik tymczasowy, podmienia docelowy dopiero po sukcesie i aktualizuje istniejący wpis Measurements.
+8. Rozszerzyć na serię field line: osobny odpowiednik dla każdej krzywej, identyfikator kolejności i historii, osobne panele LOAD w raporcie porównawczym. Nie łączyć przebiegów o tym samym I_B, ale innej historii. Nie opisywać I_B jako pola w teslach bez kalibracji.
+9. Wykonać testy funkcjonalne, awaryjne i oględziny rzeczywiście wyrenderowanego PDF. Dopiero po spełnieniu kryteriów niżej oznaczyć funkcję jako ukończoną programowo.
+
+### 19.4. Przebieg widziany przez operatora
+
+Operator wykonuje charakterystykę standardową procedurą. Po jej zakończeniu aplikacja pokazuje rzeczywisty status pomiaru i stan wyjść, a następnie informację „Generowanie raportu”. Po sukcesie przyciski otwierają zapisany PDF i CSV w katalogu pomiaru. Po błędzie pozostają dostępne dane i akcja „Ponów raport”; ponowienie nie uruchamia charakterystyki.
+
+W PDF operator najpierw widzi warunki pomiaru, następnie dwie wyraźnie podpisane alternatywne kolumny DC: High-Z oraz LOAD 50 Ω. Dla hipotetycznie zmierzonego punktu 200 µA przy 600 mV wyniki to odpowiednio 610 mV i 305 mV. Raport nie twierdzi, że 600 mV wpisane w dowolnym trybie Rigola daje 200 µA. Instrukcja nakazuje wybrać kolumnę zgodną z rzeczywistą konwencją LOAD i sprawdzić tor oraz aktualne limity.
+
+Dla pobudzenia AC raport wyjaśnia offset i Vpp, ale nie podaje gotowych nastaw częstotliwościowych na podstawie samego DC. Dla sinusoidy skrajne napięcia wyświetlane to `offset − Vpp/2` i `offset + Vpp/2`; oba muszą mieścić się w ręcznych High/Low. Jest to kontrola napięcia w danej konwencji, a nie pomiar ani gwarancja prądu MTJ przy zmianie rezystancji.
+
+### 19.5. Anomalia około 700 µA
+
+Rozdział raportu może oznaczać obserwowany zakres zmiany R jako „obszar zmiany charakterystyki wymagający weryfikacji”. Musi podawać użyte kryterium detekcji, zakres prądów i punkty źródłowe. Nie wolno automatycznie nadać etykiety „wzbudzenie vortexu”. Sam wykres DC nie rozstrzyga pomiędzy zmianą stanu magnetycznego, nagrzewaniem, dynamiką, zmianą kontaktu czy uszkodzeniem.
+
+Punkty oznaczone anomalią pozostają w surowych danych i na wykresie diagnostycznym, ale nie służą jako automatycznie rekomendowane nastawy. Raport proponuje porównanie powtórzeń, przebiegów powrotnych, różnych czasów stabilizacji i I_B; dowód dynamiki wymaga dodatkowej obserwacji czasowej lub widmowej. Analiza nie zwiększa sama zakresu sweepu w celu znalezienia progu.
+
+### 19.6. Końcowa lista odbiorcza
+
+- Przykład 200 µA / 600 mV daje 610 mV High-Z i 305 mV LOAD 50 Ω, a PDF i CSV są zgodne.
+- Punkty w compliance, nieważne i niefinitywne mają jawne powody wykluczenia. Brak odpowiednich punktów daje czytelny raport bez tabeli sugerującej nastawy.
+- Wyłączenie i obsługa przywracania polityk nie czekają na PDF. Awaria rendererów lub dysku nie powoduje ponownego włączenia wyjścia.
+- Ponowne generowanie działa offline po restarcie, korzysta ze snapshotu i nie odczytuje bieżącej konfiguracji sprzętu.
+- Raport trafia do istniejącego katalogu próbki/komórki/przebiegu, zachowuje wcześniejszy poprawny plik przy awarii i pojawia się w Measurements.
+- Test sprawdza tekst i liczby w rzeczywistym PDF; oględziny stron potwierdzają czytelność tabel, jednostek, wykresów i długich metadanych.
+- Wyniki weryfikacji rozdzielają poprawność oprogramowania od fizycznej kwalifikacji toru. Testy offline nie uprawniają do stwierdzenia, że prąd Rigola został zmierzony albo że próbka jest bezpieczna.
+
+## 20. Modal drzewa pomiarów przed startem serii
+
+Operator musi zobaczyć graficzne drzewo konkretnego scenariusza przed zmianą polityk i włączeniem wyjść. Podgląd korzysta ze zwalidowanego snapshotu przeznaczonego do wykonania, nie z osobnego przykładowego opisu.
+
+Drzewo pokazuje: potwierdzenie obu OFF; czasowy STOP A i B wraz z politykami do przywrócenia; własne nastawy sprzętowe obu kanałów; każdą pozycję listy B w oryginalnej kolejności; rampę i stabilizację; faktyczny pierwszy punkt A i liczbę punktów po pominięciu zera; akwizycję; zapis; warunkowe zachowanie po compliance A/B; końcowe OFF i przywrócenie polityk. Powtórzone prądy B pozostają osobnymi pozycjami.
+
+Opis musi odpowiadać wykonaniu: obecny runner konfiguruje B przy 0 A i OFF, włącza B przy 0 A, a następnie rampuje do docelowego prądu. Nie pokazujemy operatorowi bezpośredniego włączenia B przy −20 mA, jeśli rzeczywisty scenariusz jest inny. Dla A od 0 do 100 µA przy 101 punktach pierwsza rzeczywista nastawa wynosi 1 µA, a liczba punktów po pominięciu zera wynosi 100.
+
+Przycisk „Anuluj”, Escape i zamknięcie okna nie uruchamiają serii. „Zatwierdź i rozpocznij” przekazuje dokładnie pokazany snapshot; zmiana konfiguracji/polityk wykryta po zatwierdzeniu blokuje wykonanie wymagające innego scenariusza. Zatwierdzony opis jest utrwalany przy danych serii. Testy obejmują brak mutacji po anulowaniu, zgodność konfiguracji wykonania, obie ścieżki compliance oraz rzeczywiście renderowaną geometrię drzewa i przycisków.
+
+## Uzgodnione uproszczenie wejścia B — 2026-09-08
+
+Operator wybrał sterowanie prądem B, nie kalibrowanym polem. Formularz ma listę lub przedział prądów (początek, koniec, liczba punktów wraz z końcami). Pięć punktów -10…+10 mA oznacza -10,-5,0,+5,+10 mA. W nowym formularzu nie ma osobnych tolerancji B ani liczby stabilnych odczytów. Stosowany jest czas oczekiwania, odczyt rzeczywistych I/V, compliance i istniejące kontrole bezpieczeństwa; brak dodatkowego kryterium stabilności jest jawny w metadanych i raporcie zbiorczym. Ta decyzja zastępuje wcześniejsze wymaganie ręcznej tolerancji dla nowych serii. Limity A/B, STOP, przywrócenie polityk i pomijanie pozycji B w compliance pozostają obowiązujące.
+
+## Zmiana workflow startu — automatyczne Apply
+
+Wcześniejszy warunek istnienia ręcznie zastosowanej konfiguracji zostaje zastąpiony automatycznym zastosowaniem kompletnej konfiguracji zwykłej karty przy OFF i weryfikacją odczytu przed ON. W serii dotyczy obu kanałów przed uruchomieniem B. Operator nie musi wcześniej klikać Apply settings. Nie zmienia to źródła nastaw, limitów ani wymogu zgodnego readbacku; modal nadal poprzedza mutacje sprzętu.
+
+## Nazwy PDF kolejnych pomiarów
+
+Nowe raporty mają identyfikator pomiaru w nazwie, np. characterization_report_20260908_150000_000000.pdf. Pozycje serii dodają również identyfikator pozycji B, a raport zbiorczy identyfikator serii. Dane CSV pozostają w osobnym katalogu każdego pomiaru. Kolizja katalogu pojedynczego pomiaru powoduje przydzielenie kolejnego sufiksu _002, _003 zamiast użycia istniejącego katalogu.

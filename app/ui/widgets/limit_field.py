@@ -60,6 +60,8 @@ class SafetyRangePill(QWidget):
 
         if isinstance(field.editor, QLineEdit):
             field.editor.textChanged.connect(self._on_editor_changed)
+        elif hasattr(field.editor, "currentTextChanged"):
+            field.editor.currentTextChanged.connect(self._on_editor_changed)
 
     def set_limits(self, minimum: object, maximum: object) -> None:
         self._minimum_value = minimum
@@ -394,7 +396,7 @@ class LimitField(QWidget):
     def _quantity_values(
         self,
     ) -> tuple[float, float | None, float | None, str | None] | None:
-        if not isinstance(self.editor, QLineEdit):
+        if not hasattr(self.editor, "text"):
             return None
         boundaries = [
             value for value in (self._minimum_value, self._maximum_value) if value is not None

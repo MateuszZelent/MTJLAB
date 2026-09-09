@@ -1,7 +1,9 @@
 """Fluent UI card for Keithley sample characterization and reporting."""
 
 from datetime import datetime, timezone
+from dataclasses import replace
 import hashlib
+import json
 import math
 from pathlib import Path
 import re
@@ -16,15 +18,18 @@ from PySide6.QtWidgets import (
     QGridLayout,
     QHBoxLayout,
     QSplitter,
+    QSizePolicy,
     QVBoxLayout,
     QWidget,
 )
 from qfluentwidgets import (
     BodyLabel,
     CaptionLabel,
+    CheckBox,
     CardWidget,
     ComboBox,
     FluentIcon,
+    FlowLayout,
     LineEdit,
     PrimaryPushButton,
     ProgressBar,
@@ -39,6 +44,7 @@ from qfluentwidgets import (
 )
 
 from app.devices.keithley_2600.characterization.analyzer import KeithleyCharacterizationAnalyzer
+from app.devices.keithley_2600.characterization.report_paths import report_path, create_run_directory
 from app.devices.keithley_2600.characterization.export import KeithleyDataExporter
 from app.devices.keithley_2600.characterization.models import (
     CharacterizationDataset,
@@ -76,6 +82,7 @@ KEY_LAST_DIAMETER = "keithley_characterization/last_diameter"
 KEY_LAST_AREA = "keithley_characterization/last_area"
 KEY_LAST_THICKNESS = "keithley_characterization/last_thickness"
 KEY_LAST_OPERATOR = "keithley_characterization/last_operator"
+KEY_SWEEP_DRAFTS = "keithley_characterization/operator_drafts_v1"
 
 INL_PILLAR_PRESETS: list[tuple[str, float]] = [
     ("Custom / manual", 0.0),
@@ -108,6 +115,7 @@ class KeithleyCharacterizationCard(QWidget):
     active_target_changed = Signal(object)  # ActiveSampleTarget
     browse_samples_requested = Signal()
     measurement_saved = Signal(str)  # sample_id
+    field_policies_changed = Signal(object)
 
     def __init__(
         self,
@@ -121,10 +129,20 @@ class KeithleyCharacterizationCard(QWidget):
         self._settings = settings
         self._inventory_store: InventoryStore | None = inventory_store
         self._worker: CharacterizationWorker | None = None
+        self._field_worker = None
+        self._field_lease = None
+        self._field_recovery_worker = None
+        self._field_report_worker = None
+        self._field_report_directory = None
+        self._stored_field_series = None
+        self._displayed_field_dataset = None
+        self._field_overlay_items = []
+        self._field_overlay_legend = None
         self._current_dataset: CharacterizationDataset | None = None
         self._current_parameters: ExtractedScientificParameters | None = None
         self._current_csv_path: Path | None = None
         self._current_pdf_path: Path | None = None
+        self._pending_single_report = None
         self._run_inventory_target: tuple[str, str, str, str] | None = None
         self._source_request_provider: Callable[
             [str, str, float | None], KeithleySourceRequest
@@ -155,12 +173,33 @@ class KeithleyCharacterizationCard(QWidget):
         self._live_comp_y: list[float] = []
         self._active_plot_view: int = 0
         self._syncing_geometry: bool = False
+        # Sweep drafts belong to a channel and source dimension. Hardware
+        # settings and bounds still come exclusively from that channel's card.
+        self._draft_channel = "A"
+        self._draft_mode = 0
+        self._channel_modes: dict[str, int] = {"A": 0, "B": 0}
+        self._sweep_drafts: dict[tuple[str, int], tuple[str, str, int]] = {}
 
         self._init_ui()
         self._update_limits_from_settings()
         self._update_plot_labels()
         self.refresh_samples_list()
         self._restore_saved_metadata_selection()
+        self._restore_operator_drafts()
+        for control in (self.start_level_edit, self.stop_level_edit, self.points_spin,
+                        *self.field_panel.draft_text_controls().values(),
+                        self.field_panel.interval_points, self.field_panel.analysis_reference):
+            control.editingFinished.connect(self._save_operator_drafts)
+        for control in (self.field_panel.enabled_box, self.field_panel.continue_a):
+            control.toggled.connect(self._save_operator_drafts)
+        self.channel_combo.currentIndexChanged.connect(self._save_operator_drafts)
+        self.mode_combo.currentIndexChanged.connect(self._save_operator_drafts)
+        self.field_panel.input_mode.currentIndexChanged.connect(self._save_operator_drafts)
+        self.field_panel.validation_requested.connect(self._refresh_field_validation)
+        self.start_level_edit.textChanged.connect(self._refresh_field_validation)
+        self.stop_level_edit.textChanged.connect(self._refresh_field_validation)
+        self.points_spin.valueChanged.connect(self._refresh_field_validation)
+        self._refresh_field_validation()
 
     def _init_ui(self) -> None:
         main_layout = QVBoxLayout(self)
@@ -172,7 +211,9 @@ class KeithleyCharacterizationCard(QWidget):
         main_layout.addWidget(self.banner)
 
         # 2. Main splitter: Configuration (Left) | Live Plots & Analysis (Right)
-        splitter = QSplitter(Qt.Orientation.Horizontal)
+        splitter = QSplitter(Qt.Orientation.Vertical)
+        self._workspace_splitter = splitter
+        splitter.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Expanding)
         splitter.setObjectName("charSplitter")
 
         # --- LEFT PANEL: Settings & Sample Configuration ---
@@ -249,6 +290,12 @@ class KeithleyCharacterizationCard(QWidget):
         self.sense_warning_label.setStyleSheet("color: #dc2626; font-weight: 500;")
         self.sense_warning_label.hide()
         config_layout.addWidget(self.sense_warning_label)
+
+        from app.devices.keithley_2600.ui.field_series_panel import FieldSeriesPanel
+        self.field_panel = FieldSeriesPanel(self)
+        self.field_panel.refresh_bounds(self._settings)
+        self._sync_field_series_availability()
+        config_layout.addWidget(self.field_panel)
 
         # Sample Metadata Section
         meta_header = QHBoxLayout()
@@ -373,6 +420,34 @@ class KeithleyCharacterizationCard(QWidget):
         plot_header.addStretch(1)
         plot_header.addWidget(self.status_label)
         plot_layout.addLayout(plot_header)
+        series_row = QHBoxLayout()
+        self.open_series_button = PushButton("Open saved field series…", self)
+        self.open_series_button.clicked.connect(self._choose_saved_field_series)
+        self.field_curve_combo = CompactComboBox(self)
+        self.field_curve_combo.setPlaceholderText("Select a field curve")
+        self.field_curve_combo.currentIndexChanged.connect(self._select_field_curve)
+        series_row.addWidget(self.open_series_button)
+        series_row.addWidget(self.field_curve_combo, 1)
+        self.field_overlay_check = CheckBox("Overlay curves", self)
+        self.field_overlay_check.setToolTip("Compare valid points before compliance; field targets skipped on B compliance are excluded.")
+        self.field_overlay_check.toggled.connect(lambda _: self._set_plot_view(self._active_plot_view))
+        overlay_row = QHBoxLayout()
+        overlay_row.addWidget(self.field_overlay_check)
+        self.field_overlay_group = CompactComboBox(self)
+        self.field_overlay_group.setToolTip("Overlay up to 8 original field-list positions at a time")
+        self.field_overlay_group.hide()
+        self.field_overlay_group.currentIndexChanged.connect(lambda _: self._refresh_field_overlays())
+        overlay_row.addWidget(self.field_overlay_group)
+        self.annotate_curve_button = PushButton("Annotate curve", self)
+        self.annotate_curve_button.clicked.connect(self._annotate_saved_curve)
+        overlay_row.addWidget(self.annotate_curve_button)
+        overlay_row.addStretch(1)
+        plot_layout.addLayout(series_row)
+        plot_layout.addLayout(overlay_row)
+        self.saved_series_context = CaptionLabel(self)
+        self.saved_series_context.setWordWrap(True)
+        self.saved_series_context.hide()
+        plot_layout.addWidget(self.saved_series_context)
 
         # pyqtgraph setup with Fluent design tokens
         theme_tokens = tokens_for("dark" if isDarkTheme() else "light")
@@ -472,9 +547,10 @@ class KeithleyCharacterizationCard(QWidget):
 
         # --- BOTTOM ACTION BAR ---
         actions_card = SimpleCardWidget()
-        actions_layout = QHBoxLayout(actions_card)
+        actions_layout = FlowLayout(actions_card, needAni=False, isTight=True)
         actions_layout.setContentsMargins(12, 6, 12, 6)
-        actions_layout.setSpacing(10)
+        actions_layout.setHorizontalSpacing(10)
+        actions_layout.setVerticalSpacing(6)
 
         self.start_button = PrimaryPushButton("Start Characterization", self)
         self.start_button.setIcon(FluentIcon.PLAY)
@@ -500,11 +576,22 @@ class KeithleyCharacterizationCard(QWidget):
         self.policy_retry_button.setVisible(False)
         self.policy_retry_button.setEnabled(False)
         self.policy_retry_button.clicked.connect(self._on_policy_retry_clicked)
+        self.field_report_retry_button = PushButton("Regenerate series reports", self)
+        self.field_report_retry_button.hide()
+        self.field_report_retry_button.clicked.connect(self._start_field_reports)
+        self.field_summary_pdf_button = PushButton("Summary PDF", self)
+        self.field_summary_csv_button = PushButton("Summary CSV", self)
+        for button in (self.field_summary_pdf_button, self.field_summary_csv_button):
+            button.hide()
+        self.field_summary_pdf_button.clicked.connect(lambda: self._open_field_summary("field_series_report.pdf"))
+        self.field_summary_csv_button.clicked.connect(lambda: self._open_field_summary("field_series_summary.csv"))
 
         actions_layout.addWidget(self.start_button)
         actions_layout.addWidget(self.stop_button)
         actions_layout.addWidget(self.policy_retry_button)
-        actions_layout.addStretch(1)
+        actions_layout.addWidget(self.field_report_retry_button)
+        actions_layout.addWidget(self.field_summary_pdf_button)
+        actions_layout.addWidget(self.field_summary_csv_button)
         actions_layout.addWidget(self.pdf_button)
         actions_layout.addWidget(self.csv_button)
 
@@ -512,6 +599,16 @@ class KeithleyCharacterizationCard(QWidget):
 
     def sizeHint(self) -> QSize:
         return QSize(800, 450)
+
+    def resizeEvent(self, event) -> None:
+        super().resizeEvent(event)
+        splitter = getattr(self, "_workspace_splitter", None)
+        if splitter is None:
+            return
+        orientation = Qt.Orientation.Horizontal if self.width() >= 1360 else Qt.Orientation.Vertical
+        if splitter.orientation() != orientation:
+            splitter.setOrientation(orientation)
+            splitter.setSizes([560, 800] if orientation == Qt.Orientation.Horizontal else [300, 500])
 
     def minimumSizeHint(self) -> QSize:
         return QSize(400, 200)
@@ -527,20 +624,163 @@ class KeithleyCharacterizationCard(QWidget):
         )
 
     def _on_channel_changed(self) -> None:
+        self._remember_sweep_draft()
+        self._draft_channel = self._selected_channel()
+        self._draft_mode = self._channel_modes[self._draft_channel]
+        self.mode_combo.blockSignals(True)
+        self.mode_combo.setCurrentIndex(self._draft_mode)
+        self.mode_combo.blockSignals(False)
+        self._restore_sweep_draft()
         self.refresh_limits()
         self._update_limits_from_settings()
-        self.refresh_shared_source_configuration()
-
-    def _on_mode_changed(self) -> None:
-        self.refresh_limits()
-        if self._is_current_mode():
-            self.start_level_edit.setText("-100 uA")
-            self.stop_level_edit.setText("100 uA")
-        else:
-            self.start_level_edit.setText("-100 mV")
-            self.stop_level_edit.setText("100 mV")
         self._update_plot_labels()
         self.refresh_shared_source_configuration()
+        self._sync_field_series_availability()
+
+    def _sync_field_series_availability(self) -> None:
+        """Expose the A-sample/B-field workflow only from the Channel A form."""
+        panel = getattr(self, "field_panel", None)
+        if panel is None:
+            return
+        channel_a = self._selected_channel() == "A"
+        if not channel_a:
+            panel.enabled_box.setChecked(False)
+        panel.enabled_box.setEnabled(channel_a)
+        panel.enabled_box.setToolTip(
+            "Uses Channel A for the sample sweep and Channel B for field-line current."
+            if channel_a else "Select Channel A to enable the field-line series."
+        )
+        self._refresh_field_validation()
+
+    def _refresh_field_validation(self, *_args) -> bool:
+        panel = getattr(self, "field_panel", None)
+        if panel is None:
+            return False
+        if not panel.enabled_box.isChecked():
+            panel.show_ramp_summary(None)
+            message = ("Select Channel A to enable this procedure."
+                       if self._selected_channel() != "A" else
+                       "Enable the field-line series to validate the complete A/B procedure.")
+            panel.show_validation(None, message)
+            return False
+        if self._selected_channel() != "A":
+            panel.show_ramp_summary(None)
+            panel.show_validation(False, "Field-line series requires sample Channel A.")
+            return False
+        if self._source_request_provider is None:
+            panel.show_ramp_summary(None)
+            panel.show_validation(None, "Waiting for the shared Keithley A/B configuration.")
+            return False
+        try:
+            from app.devices.keithley_2600.characterization.field_series import (
+                FieldSeriesRunner,
+                estimated_field_target_durations_s,
+            )
+
+            sweep = self._build_config(compliance_policy_override="stop", channel="A")
+            source = self._source_request_provider("B", "current", 0.0)
+            config = panel.build_config(sweep, source)
+            FieldSeriesRunner.validate(config, self._settings)
+        except Exception as exc:
+            panel.show_ramp_summary(None)
+            panel.show_validation(False, f"Fix before start: {exc}")
+            return False
+        count = len(config.currents_a)
+        limits = self._settings.keithley.safety.channels["B"].lab_limits
+        estimates = estimated_field_target_durations_s(
+            config, max_points=limits.sweep_points_max)
+        panel.show_ramp_summary(config, max_points=limits.sweep_points_max)
+        panel.show_validation(
+            True,
+            f"Ready: {count} B value{'s' if count != 1 else ''}; A/B limits and units passed. "
+            f"Estimated series time ≈ {sum(estimates):.1f} s; longest B target ≈ "
+            f"{max(estimates):.1f} s.",
+        )
+        return True
+
+    def _on_mode_changed(self) -> None:
+        self._remember_sweep_draft()
+        self._draft_mode = self.mode_combo.currentIndex()
+        self._channel_modes[self._draft_channel] = self._draft_mode
+        self._restore_sweep_draft()
+        self.refresh_limits()
+        self._update_limits_from_settings()
+        self._update_plot_labels()
+        self.refresh_shared_source_configuration()
+
+    def _remember_sweep_draft(self) -> None:
+        self._sweep_drafts[(self._draft_channel, self._draft_mode)] = (
+            self.start_level_edit.text(), self.stop_level_edit.text(), self.points_spin.value(),
+        )
+
+    def _save_operator_drafts(self, *_args) -> None:
+        """Persist operator input only; never cache inherited hardware settings."""
+        self._remember_sweep_draft()
+        payload = {
+            "schema_version": 1,
+            "channel": self._draft_channel,
+            "modes": self._channel_modes,
+            "sweeps": {f"{ch}:{mode}": list(values)
+                       for (ch, mode), values in self._sweep_drafts.items()},
+            "field": self.field_panel.draft_state(),
+        }
+        settings = QSettings(SETTINGS_SECTION, SETTINGS_SECTION)
+        settings.setValue(KEY_SWEEP_DRAFTS, json.dumps(payload, ensure_ascii=False))
+        settings.sync()
+
+    def _restore_operator_drafts(self) -> None:
+        settings = QSettings(SETTINGS_SECTION, SETTINGS_SECTION)
+        raw = settings.value(KEY_SWEEP_DRAFTS, "")
+        if not raw:
+            return
+        try:
+            payload = json.loads(raw)
+            if not isinstance(payload, dict) or payload.get("schema_version") != 1:
+                raise ValueError("Unsupported draft schema")
+            channel, modes, sweeps = payload["channel"], payload["modes"], payload["sweeps"]
+            if channel not in ("A", "B") or not isinstance(modes, dict) or set(modes) != {"A", "B"}:
+                raise ValueError("Invalid draft channels")
+            if any(type(mode) is not int or mode not in (0, 1) for mode in modes.values()):
+                raise ValueError("Invalid draft modes")
+            if not isinstance(sweeps, dict):
+                raise ValueError("Invalid sweep drafts")
+            drafts = {}
+            for key, values in sweeps.items():
+                if key not in ("A:0", "A:1", "B:0", "B:1") or not isinstance(values, list) or len(values) != 3:
+                    raise ValueError("Invalid sweep draft")
+                if not all(isinstance(value, str) for value in values[:2]) or type(values[2]) is not int or not 3 <= values[2] <= 2147483647:
+                    raise ValueError("Invalid draft values")
+                drafts[(key[0], int(key[2]))] = tuple(values)
+            self.field_panel.validate_draft_state(payload["field"])
+        except (ValueError, TypeError, KeyError):
+            self.banner.show_message("Saved characterization inputs could not be restored. Review the form before starting.", severity="warning")
+            return
+        self._sweep_drafts = drafts
+        self._channel_modes = dict(modes)
+        self._draft_channel, self._draft_mode = channel, modes[channel]
+        self.channel_combo.blockSignals(True)
+        self.mode_combo.blockSignals(True)
+        self.channel_combo.setCurrentIndex(0 if channel == "A" else 1)
+        self.mode_combo.setCurrentIndex(self._draft_mode)
+        self.mode_combo.blockSignals(False)
+        self.channel_combo.blockSignals(False)
+        self._restore_sweep_draft()
+        self.refresh_limits()
+        self._update_limits_from_settings()
+        self._update_plot_labels()
+        self.field_panel.restore_draft_state(payload["field"])
+        self._sync_field_series_availability()
+
+    def _restore_sweep_draft(self) -> None:
+        unit = "uA" if self._draft_mode == 0 else "mV"
+        start, stop, points = self._sweep_drafts.get(
+            (self._draft_channel, self._draft_mode), (f"-100 {unit}", f"100 {unit}", 101),
+        )
+        self.start_level_edit.setText(start)
+        self.stop_level_edit.setText(stop)
+        limits = self._settings.keithley.safety.channels[self._draft_channel].lab_limits
+        self.points_spin.setMaximum(limits.sweep_points_max)
+        self.points_spin.setValue(points)
 
 
     # -------------------------------------------------------------------------
@@ -568,6 +808,7 @@ class KeithleyCharacterizationCard(QWidget):
             compliance_policy_transition_provider
         )
         self.refresh_shared_source_configuration()
+        self._refresh_field_validation()
 
     def refresh_shared_source_configuration(self) -> None:
         """Project the normal card's current hardware settings into this page."""
@@ -627,21 +868,13 @@ class KeithleyCharacterizationCard(QWidget):
             )
         )
         sense = "2-wire local" if request.sense_mode == "2wire" else "4-wire Kelvin"
-        policy = (
-            self._compliance_policy_provider(channel)
-            if self._compliance_policy_provider is not None
-            else "stop"
-        )
         self.shared_configuration_label.setText(
             "Inherited from Keithley card · "
-            f"compliance policy {policy} · "
             f"NPLC {request.nplc:g} · settling {self.dwell_edit.text()} · "
             f"source range {source_range} · measure V {voltage_range} · "
             f"measure I {current_range} · {sense}"
         )
-        self.shared_configuration_label.setStyleSheet(
-            "" if policy == "stop" else "color: #dc2626; font-weight: 600;"
-        )
+        self.shared_configuration_label.setStyleSheet("")
 
     def refresh_samples_list(self) -> None:
         """Reload samples from inventory store into the sample combobox."""
@@ -1197,6 +1430,9 @@ class KeithleyCharacterizationCard(QWidget):
             is_current = self._is_current_mode()
             self.plot_widget.setLabel("bottom", "Demanded Current [A]" if is_current else "Demanded Voltage [V]")
             self.plot_widget.setLabel("left", "Resistance R [Ω]")
+        self._update_plot_labels()
+        self._fit_saved_field_plot()
+        self._refresh_field_overlays()
 
     @Slot(str)
     def _on_plot_view_route_changed(self, route_key: str) -> None:
@@ -1206,7 +1442,10 @@ class KeithleyCharacterizationCard(QWidget):
         self._set_plot_view(1 if route_key == "res" else 0)
 
     def _update_plot_labels(self) -> None:
-        is_current = self._is_current_mode()
+        is_current = (self._displayed_field_dataset.config.mode == "current"
+                      if self._displayed_field_dataset is not None else self._is_current_mode())
+        if self.field_overlay_check.isChecked() and self._stored_field_series is not None:
+            is_current = self._stored_field_series.manifest["config"]["sweep"]["mode"] == "current"
         if self._active_plot_view == 1:
             self.plot_widget.setLabel("bottom", "Demanded Current [A]" if is_current else "Demanded Voltage [V]")
             self.plot_widget.setLabel("left", "Resistance R [Ω]")
@@ -1273,16 +1512,21 @@ class KeithleyCharacterizationCard(QWidget):
         self.refresh_limits()
 
     def _build_config(
-        self, *, compliance_policy_override: str | None = None
+        self, *, compliance_policy_override: str | None = None, channel: str | None = None,
     ) -> CharacterizationSweepConfig:
-        ch = self._selected_channel()
-        is_current = self._is_current_mode()
+        self._remember_sweep_draft()
+        ch = channel or self._selected_channel()
+        mode_index = self._channel_modes[ch] if channel else self.mode_combo.currentIndex()
+        is_current = mode_index == 0
         mode = "current" if is_current else "voltage"
 
         dim_sweep = DIMENSION_CURRENT if is_current else DIMENSION_VOLTAGE
-
-        start_si = parse_quantity(self.start_level_edit.text(), dim_sweep).si_value
-        stop_si = parse_quantity(self.stop_level_edit.text(), dim_sweep).si_value
+        unit = "uA" if is_current else "mV"
+        start_text, stop_text, point_count = self._sweep_drafts.get(
+            (ch, mode_index), (f"-100 {unit}", f"100 {unit}", 101),
+        )
+        start_si = parse_quantity(start_text, dim_sweep).si_value
+        stop_si = parse_quantity(stop_text, dim_sweep).si_value
         if self._source_request_provider is None or self._compliance_policy_provider is None:
             raise SafetyViolation(
                 "Shared normal Keithley card configuration is unavailable; "
@@ -1345,7 +1589,7 @@ class KeithleyCharacterizationCard(QWidget):
             mode=mode,
             start_level_si=start_si,
             stop_level_si=stop_si,
-            points_count=self.points_spin.value(),
+            points_count=point_count,
             compliance_si=comp_si,
             compliance_policy=compliance_policy,  # type: ignore[arg-type]
             dwell_time_s=dwell_si,
@@ -1360,8 +1604,504 @@ class KeithleyCharacterizationCard(QWidget):
             metadata=metadata,
         )
 
+    def _start_field_series(self) -> None:
+        from app.devices.keithley_2600.characterization.field_scenario import build_field_scenario
+        from app.devices.keithley_2600.characterization.field_worker import FieldSeriesWorker
+        from app.devices.keithley_2600.ui.field_scenario_dialog import FieldScenarioDialog
+
+        if (self._worker is not None and self._worker.isRunning()) or self._temporary_policy_phase != "idle":
+            return
+        if self._selected_channel() != "A":
+            self.banner.show_message(
+                "Field-line series requires Channel A for the sample sweep. Select Channel A first.",
+                severity="error",
+            )
+            return
+        try:
+            sweep = self._build_config(compliance_policy_override="stop", channel="A")
+            source = self._source_request_provider("B", "current", 0.0)
+            config = self.field_panel.build_config(sweep, source)
+            proxy = self._controller.adapter_for_run()
+            initial = {ch: str(proxy.compliance_policy(ch)) for ch in ("A", "B")}
+            originals = {ch: str(self._compliance_policy_provider(ch)) for ch in ("A", "B")}
+            scenario = build_field_scenario(config, self._settings, initial, originals)
+            row, col, label = self.selected_device_coord()
+            selected_id = self.selected_sample_id()
+            run_target = (selected_id, str(row), str(col), str(label))
+            sample = self._inventory_store.get_sample(selected_id) if self._inventory_store and selected_id else None
+            inventory_target = ({
+                "sample_id": sample.sample_id, "sample_name": sample.name,
+                "row": str(row), "col": str(col), "device_label": str(label),
+            } if sample is not None else None)
+            for ch in ("A", "B"):
+                proxy.confirm_output_off(ch)
+        except Exception as exc:
+            self.banner.show_message(f"Field series preflight blocked: {exc}", severity="error")
+            return
+
+        # This is the only path to the field worker from the UI. Cancel/close
+        # exits before reservation, policy writes, or output enablement.
+        dialog = FieldScenarioDialog(scenario, self)
+        if dialog.exec() != dialog.DialogCode.Accepted:
+            self.status_label.setText("Field series cancelled before output enable")
+            dialog.deleteLater()
+            return
+        dialog.deleteLater()
+        try:
+            self._field_lease = self._controller.acquire_run_lease()
+            self._run_inventory_target = run_target
+            directory = self._automatic_run_directory(CharacterizationDataset(sweep, (), "", ""))
+            worker = FieldSeriesWorker(
+                self._field_lease, self._settings, scenario.config, directory,
+                dict(scenario.initial_policies), dict(scenario.restore_policies), self,
+                reviewed_scenario=scenario,
+                inventory_target=inventory_target,
+            )
+            self._field_worker = worker
+            self._stored_field_series = None
+            self.field_overlay_check.setChecked(False)
+            self.field_overlay_group.hide()
+            self.field_curve_combo.clear()
+            worker.policies_changed.connect(self.field_policies_changed.emit)
+            worker.event.connect(self._on_field_event)
+            worker.finished.connect(self._on_field_finished)
+            self.channel_combo.setCurrentIndex(0)
+            self._set_run_input_lock(True)
+            self.start_button.setEnabled(False)
+            self.stop_button.setEnabled(True)
+            self.pdf_button.setEnabled(False)
+            self.csv_button.setEnabled(False)
+            self._current_pdf_path = self._current_csv_path = None
+            self.progress_bar.setValue(0)
+            self.status_label.setText("Preparing reviewed field series; both outputs must be OFF...")
+            self._clear_field_plot()
+            worker.start()
+        except Exception as exc:
+            # No worker has begun if construction/start failed. Releasing a
+            # busy gate still rejects, leaving the card blocked for recovery.
+            if self._field_lease is not None:
+                try:
+                    self._field_lease.release()
+                    self._field_lease = None
+                except Exception:
+                    pass
+            self._set_run_input_lock(self._field_lease is not None)
+            self.start_button.setEnabled(self._field_lease is None)
+            self.stop_button.setEnabled(False)
+            self.banner.show_message(f"Field series could not start: {exc}", severity="error")
+
+    def _clear_field_plot(self):
+        self._remove_field_overlays()
+        self._displayed_field_dataset = None
+        self.saved_series_context.hide()
+        self.plot_widget.enableAutoRange()
+        for values in (self._live_v_points, self._live_i_points, self._live_r_points,
+                       self._live_app_r_points, self._live_dem_points,
+                       self._live_comp_x, self._live_comp_y):
+            values.clear()
+        for curve in (self.curve_iv, self.curve_clamped, self.curve_r_true, self.curve_r_app):
+            curve.setData([], [])
+        self._update_plot_labels()
+        if self._field_worker is not None:
+            compliance = self._field_worker.config.sweep.compliance_si
+            self.compliance_line_pos.setValue(compliance)
+            self.compliance_line_neg.setValue(-compliance)
+
+    @Slot(str, object)
+    def _on_field_event(self, kind, data):
+        if kind == "field_start":
+            self._clear_field_plot()
+            self.status_label.setText(
+                f"Field target {data['field_index'] + 1}/{len(self._field_worker.config.currents_a)}: "
+                f"B = {format_quantity_auto(data['target_a'], 'current')}")
+        elif kind == "sample_point":
+            from app.devices.keithley_2600.characterization.models import FieldLineObservation
+            values = {name: data[name] for name in CharacterizationPoint.__dataclass_fields__}
+            for name in ("field_before", "field_after"):
+                if values[name] is not None:
+                    values[name] = FieldLineObservation(**values[name])
+            self._on_point_acquired(CharacterizationPoint(**values))
+        elif kind == "curve_saved":
+            self.progress_bar.setValue(int(100 * (data["index"] + 1) / len(self._field_worker.config.currents_a)))
+            if data["dataset"] is not None:
+                self._current_dataset = data["dataset"]
+                target = self._field_worker.config.currents_a[data["index"]]
+                self._current_csv_path = self._field_worker.directory / f"{data['index'] + 1:04d}_Ib_{target:+.9g}A" / "characterization.csv"
+
+    @Slot()
+    def _on_field_finished(self):
+        outcome = self._field_worker.outcome
+        self.stop_button.setEnabled(False)
+        if outcome is None:
+            self.banner.show_message("Field worker ended without a shutdown result.", severity="error", timeout_ms=0)
+            self.policy_retry_button.show()
+            return
+        self.status_label.setText(f"Field series: {outcome.status}; " + (
+            "both outputs OFF" if outcome.outputs_off else "OUTPUT state unconfirmed"))
+        self.csv_button.setEnabled(self._current_csv_path is not None)
+        if outcome.outputs_off and outcome.policies_restored:
+            self._release_field_lease()
+            if self._field_lease is None and outcome.directory.is_dir():
+                self._field_report_directory = outcome.directory
+                catalogue_error = self._register_field_catalogue()
+                if catalogue_error:
+                    self.banner.show_message(catalogue_error, severity="error", timeout_ms=0)
+                self._start_field_reports()
+        else:
+            self.policy_retry_button.show()
+            self.policy_retry_button.setEnabled(True)
+            StationMessageBox.critical(
+                self,
+                "Field-line characterization requires recovery",
+                "The procedure ended, but OUTPUT OFF or compliance-policy restoration "
+                "was not confirmed. Do not start another measurement until recovery succeeds.",
+            )
+        if outcome.errors:
+            self.banner.show_message("; ".join(outcome.errors), severity="error", timeout_ms=0)
+
+    def _release_field_lease(self):
+        try:
+            self._field_lease.release()
+        except Exception as exc:
+            self.banner.show_message(f"Instrument reservation remains held: {exc}", severity="error", timeout_ms=0)
+            self.policy_retry_button.show()
+            return
+        self._field_lease = None
+        self._set_run_input_lock(False)
+        self.start_button.setEnabled(True)
+        self.policy_retry_button.hide()
+
+    @Slot()
+    def _start_field_reports(self):
+        if self._field_lease is not None or self._field_report_directory is None:
+            return
+        if self._field_report_worker is not None and self._field_report_worker.isRunning():
+            return
+        try:
+            from app.devices.keithley_2600.characterization.field_reports import FieldReportWorker
+        except Exception as exc:
+            self.field_report_retry_button.show()
+            self.field_report_retry_button.setEnabled(True)
+            self.banner.show_message(f"Report generator unavailable: {exc}", severity="error", timeout_ms=0)
+            self._show_field_completion_dialog([f"Report generator unavailable: {exc}"])
+            return
+        self._field_report_worker = FieldReportWorker(self._field_report_directory, self)
+        self._field_report_worker.finished.connect(self._on_field_reports_finished)
+        self.field_report_retry_button.show()
+        self.field_report_retry_button.setEnabled(False)
+        self.start_button.setEnabled(False)
+        self.status_label.setText(f"{self.status_label.text()} · Generating reports from saved data...")
+        self.open_series_button.setEnabled(False)
+        self._field_report_worker.start()
+
+    @Slot()
+    def _on_field_reports_finished(self):
+        worker = self._field_report_worker
+        self.start_button.setEnabled(self._field_lease is None)
+        self.open_series_button.setEnabled(True)
+        self.field_report_retry_button.setEnabled(True)
+        errors = [worker.error] if worker.error else list(worker.result.errors)
+        catalogue_error = self._register_field_catalogue()
+        if catalogue_error:
+            errors.append(catalogue_error)
+        if worker.result is not None and worker.result.report_paths:
+            candidate = report_path(self._current_csv_path.parent, field_curve=True, existing=True) if self._current_csv_path else None
+            self._current_pdf_path = candidate if candidate in worker.result.report_paths else worker.result.report_paths[-1]
+            self.pdf_button.setEnabled(True)
+        if errors:
+            self.banner.show_message("Report generation incomplete: " + "; ".join(errors), severity="error", timeout_ms=0)
+            self.status_label.setText("Series data retained · report generation incomplete")
+        else:
+            acquisition_status = self._field_worker.outcome.status if self._field_worker is not None else "saved"
+            self.status_label.setText(f"Field series: {acquisition_status} · individual reports saved")
+        display_error = None
+        try:
+            self.open_field_series(worker.directory)
+        except Exception as exc:
+            display_error = str(exc)
+            self.banner.show_message(f"Saved series could not be displayed: {exc}", severity="error", timeout_ms=0)
+        self._show_field_completion_dialog(errors, display_error)
+
+    def _show_field_completion_dialog(self, report_errors, display_error=None) -> None:
+        outcome = self._field_worker.outcome if self._field_worker is not None else None
+        if outcome is None:
+            return
+        curves = tuple(self._stored_field_series.curves) if self._stored_field_series is not None else ()
+        completed = sum(curve.status == "completed" for curve in curves)
+        sample_compliance = sum(curve.status == "sample_compliance" for curve in curves)
+        skipped = sum(curve.status == "skipped_field_compliance" for curve in curves)
+        total = len(curves) or len(self._field_worker.config.currents_a)
+        analysis_configured = self._field_worker.config.analysis_current_window_a is not None
+        lines = [
+            f"Acquisition status: {outcome.status}",
+            f"Field targets: {total}; completed: {completed}; A compliance: "
+            f"{sample_compliance}; B compliance/skipped: {skipped}",
+            "Keithley outputs A and B: confirmed OFF" if outcome.outputs_off
+            else "Keithley output state: NOT CONFIRMED",
+            "Previous compliance policies: restored" if outcome.policies_restored
+            else "Previous compliance policies: restoration required",
+            f"Saved directory: {outcome.directory}",
+        ]
+        if not analysis_configured:
+            lines.append(
+                "Fit analysis: not calculated because no current window was selected; "
+                "raw curves remain available."
+            )
+        all_errors = [str(error) for error in report_errors if error]
+        if display_error:
+            all_errors.append(f"Opening saved series: {display_error}")
+        if all_errors:
+            lines.append("Report/display warnings: " + "; ".join(all_errors))
+        safe_complete = (outcome.outputs_off and outcome.policies_restored
+                         and outcome.status in {"completed", "completed_with_skips"}
+                         and not all_errors)
+        title = "Field-line characterization completed" if safe_complete else "Field-line characterization ended"
+        method = StationMessageBox.information if safe_complete else StationMessageBox.warning
+        method(self, title, "\n\n".join(lines))
+
+    def _choose_saved_field_series(self):
+        from app.ui.dialogs import StationFileDialog
+        directory = StationFileDialog.getExistingDirectory(self, "Open field-series directory")
+        if directory:
+            try:
+                self.open_field_series(Path(directory))
+            except Exception as exc:
+                self.banner.show_message(f"Cannot open field series: {exc}", severity="error")
+
+    def open_field_series(self, directory):
+        """Read and display saved curves without changing any source configuration."""
+        if (self._field_lease is not None or self._temporary_policy_phase != "idle"
+                or (self._worker is not None and self._worker.isRunning())
+                or (self._field_report_worker is not None and self._field_report_worker.isRunning())):
+            raise SafetyViolation("Wait for the active measurement to finish before opening saved curves.")
+        from app.devices.keithley_2600.characterization.field_reader import load_field_series
+        series = load_field_series(directory)
+        self._stored_field_series = series
+        self._field_report_directory = series.directory
+        self.field_overlay_group.blockSignals(True)
+        self.field_overlay_group.clear()
+        for offset in range(0, len(series.curves), 8):
+            self.field_overlay_group.addItem(f"Overlay #{offset + 1}–#{min(offset + 8, len(series.curves))}")
+        self.field_overlay_group.setVisible(len(series.curves) > 8)
+        self.field_overlay_group.blockSignals(False)
+        self.field_curve_combo.blockSignals(True)
+        self.field_curve_combo.clear()
+        for curve in series.curves:
+            self.field_curve_combo.addItem(
+                f"#{curve.index + 1} · B {format_quantity_auto(curve.current_a, 'current')} · "
+                f"{curve.status} · history {curve.history_segment}")
+        candidates = [curve.index for curve in series.curves if curve.dataset is not None]
+        selected = candidates[-1] if candidates else 0
+        self.field_curve_combo.setCurrentIndex(selected)
+        self.field_curve_combo.blockSignals(False)
+        self._select_field_curve(selected)
+        self.field_report_retry_button.setVisible(series.manifest["status"] != "running")
+        self.field_summary_pdf_button.setVisible(report_path(series.directory, summary=True, existing=True).is_file())
+        self.field_summary_csv_button.setVisible((series.directory / "field_series_summary.csv").is_file())
+
+    def _open_field_summary(self, filename):
+        if self._stored_field_series is not None:
+            path = self._stored_field_series.directory / filename
+            if filename == "field_series_report.pdf":
+                path = report_path(self._stored_field_series.directory, summary=True, existing=True)
+            if path.is_file():
+                QDesktopServices.openUrl(QUrl.fromLocalFile(str(path)))
+
+    def _annotate_saved_curve(self):
+        series = self._stored_field_series
+        index = self.field_curve_combo.currentIndex()
+        if self._field_lease is not None or self._temporary_policy_phase != "idle" or (
+            self._worker is not None and self._worker.isRunning()
+        ) or (self._field_report_worker is not None and self._field_report_worker.isRunning()):
+            self.banner.show_message("Wait for measurement and reporting to finish before annotating.")
+            return
+        if series is None or not 0 <= index < len(series.curves) or not (
+            series.curves[index].dataset and series.curves[index].dataset.points
+        ):
+            self.banner.show_message("Select a saved curve with acquired points first.")
+            return
+        from app.devices.keithley_2600.ui.observation_dialog import ObservationDialog
+        dialog = ObservationDialog(series.curves[index], self.operator_edit.text(), self)
+        if dialog.exec() and dialog.saved_path is not None:
+            self._field_report_directory = series.directory
+            self._start_field_reports()
+
+    def _select_field_curve(self, index):
+        series = self._stored_field_series
+        if series is None or not 0 <= index < len(series.curves):
+            return
+        curve = series.curves[index]
+        self._clear_field_plot()
+        dataset = curve.dataset
+        self._current_dataset = dataset
+        self._current_parameters = None
+        self._displayed_field_dataset = dataset
+        self._current_csv_path = curve.directory / "characterization.csv" if dataset is not None else None
+        pdf = report_path(curve.directory, field_curve=True, existing=True) if curve.directory else None
+        self._current_pdf_path = pdf if pdf and pdf.is_file() else None
+        self.csv_button.setEnabled(self._current_csv_path is not None)
+        self.pdf_button.setEnabled(self._current_pdf_path is not None)
+        self.status_label.setText(f"Saved field item {index + 1}: {curve.status}")
+        for metric, title in ((self.metric_r0, "R₀"), (self.metric_g0, "G₀"), (self.metric_ra, "R·A"),
+                              (self.metric_pmax, "P_max"), (self.metric_r2, "R²")):
+            metric.setText(f"{title}: —")
+        self.metric_comp.setText(f"Status: {curve.status}")
+        self.metric_comp.setStyleSheet("")
+        if dataset is None:
+            self._refresh_field_overlays()
+            return
+        config = dataset.config
+        self.saved_series_context.setText(
+            f"Saved configuration · {config.metadata.sample_id} · {config.metadata.structure_name} · "
+            f"{format_quantity_auto(config.start_level_si, config.mode)} → "
+            f"{format_quantity_auto(config.stop_level_si, config.mode)} · "
+            f"compliance {format_quantity_auto(config.compliance_si, 'voltage' if config.mode == 'current' else 'current')} · "
+            f"{len(dataset.points)} acquired points")
+        self.saved_series_context.show()
+        x = [point.demanded_si for point in dataset.points]
+        y = [(point.measured_voltage_v if dataset.config.mode == "current" else point.measured_current_a)
+             if point.valid else math.nan for point in dataset.points]
+        self.curve_iv.setData(x, y, connect="finite")
+        self.curve_r_true.setData(x, [p.true_resistance_ohm if p.valid else math.nan for p in dataset.points], connect="finite")
+        self.curve_r_app.setData(x, [p.apparent_resistance_ohm if p.valid else math.nan for p in dataset.points], connect="finite")
+        clamped = [(point.demanded_si, value) for point, value in zip(dataset.points, y) if point.compliance_active]
+        self.curve_clamped.setData([p[0] for p in clamped], [p[1] for p in clamped])
+        self.compliance_line_pos.setValue(dataset.config.compliance_si)
+        self.compliance_line_neg.setValue(-dataset.config.compliance_si)
+        self._update_plot_labels()
+        parameters = KeithleyCharacterizationAnalyzer.analyze(dataset)
+        self._current_parameters = parameters
+        r0 = parameters.zero_bias_resistance_ohm
+        self.metric_r0.setText(f"R₀: {format_quantity_auto(r0, 'resistance')}" if math.isfinite(r0) else "R₀: —")
+        g0 = parameters.zero_bias_conductance_s
+        self.metric_g0.setText(f"G₀: {g0:.6g} S" if math.isfinite(g0) else "G₀: —")
+        if parameters.ra_product_ohm_um2 is not None:
+            self.metric_ra.setText(f"R·A: {parameters.ra_product_ohm_um2:.6g} Ω·µm²")
+        if math.isfinite(parameters.max_power_dissipated_w):
+            self.metric_pmax.setText(f"P_max: {format_quantity_auto(parameters.max_power_dissipated_w, 'power')}")
+        self.metric_r2.setText(f"R²: {parameters.linearity_r2:.5g}" if math.isfinite(parameters.linearity_r2) else "R²: —")
+        self.plot_widget.enableAutoRange()
+        self._fit_saved_field_plot()
+        self._refresh_field_overlays()
+
+    def _remove_field_overlays(self):
+        for item in self._field_overlay_items:
+            self.plot_widget.removeItem(item)
+        self._field_overlay_items.clear()
+        if self._field_overlay_legend is not None:
+            self._field_overlay_legend.clear()
+            self._field_overlay_legend.hide()
+
+    def _refresh_field_overlays(self):
+        self._remove_field_overlays()
+        if not self.field_overlay_check.isChecked() or self._stored_field_series is None:
+            return
+        from app.devices.keithley_2600.characterization.field_plot_data import field_overlay_curves
+        offset = max(0, self.field_overlay_group.currentIndex()) * 8
+        selected_series = replace(self._stored_field_series, curves=self._stored_field_series.curves[offset:offset + 8])
+        curves = field_overlay_curves(selected_series, resistance=self._active_plot_view == 1)
+        for item in (self.curve_iv, self.curve_clamped, self.curve_r_true, self.curve_r_app):
+            item.hide()
+        if self._field_overlay_legend is None:
+            theme = plot_theme(tokens_for("dark" if isDarkTheme() else "light"))
+            self._field_overlay_legend = self.plot_widget.addLegend(
+                offset=(12, 12), labelTextColor=theme.axes, brush=theme.background)
+        self._field_overlay_legend.show()
+        self._field_overlay_legend.setColumnCount(2 if len(curves) > 4 else 1)
+        values = []
+        for curve in curves:
+            brightness = 220 if isDarkTheme() else 150
+            color = pg.intColor(curve.index, hues=max(len(self._stored_field_series.curves), 6),
+                                minValue=brightness, maxValue=brightness, sat=190)
+            item = self.plot_widget.plot(
+                curve.x, curve.y, pen=pg.mkPen(color, width=2), symbol="o", symbolSize=4,
+                symbolBrush=color, name=curve.label, connect="finite")
+            self._field_overlay_items.append(item)
+            values.extend(value for value in curve.y if math.isfinite(value))
+        if values:
+            low, high = min(values), max(values)
+            center = (low + high) / 2
+            span = max(high - low, max(abs(low), abs(high)) * 0.02, 1e-12)
+            self.plot_widget.setYRange(center - span / 2, center + span / 2, padding=0.08)
+        self._update_plot_labels()
+
+    def _fit_saved_field_plot(self):
+        dataset = self._displayed_field_dataset
+        if dataset is None:
+            return
+        values = []
+        for point in dataset.points:
+            if not point.valid:
+                continue
+            candidates = ((point.true_resistance_ohm, point.apparent_resistance_ohm)
+                          if self._active_plot_view == 1 else
+                          (point.measured_voltage_v if dataset.config.mode == "current" else point.measured_current_a,))
+            values.extend(value for value in candidates if math.isfinite(value))
+        if values:
+            low, high = min(values), max(values)
+            # Display padding only: do not magnify floating-point residue in
+            # a constant curve into an apparent physical resistance change.
+            center = (low + high) / 2
+            span = max(high - low, max(abs(low), abs(high)) * 0.02, 1e-12)
+            self.plot_widget.setYRange(center - span / 2, center + span / 2, padding=0.08)
+
+    def _register_field_catalogue(self):
+        if self._inventory_store is None or self._field_report_directory is None:
+            return None
+        try:
+            from app.devices.keithley_2600.characterization.field_catalogue import register_field_series
+            records = register_field_series(self._inventory_store, self._field_report_directory)
+            for sample_id in {record.sample_id for record in records}:
+                self.measurement_saved.emit(sample_id)
+        except Exception as exc:
+            return f"Measurement catalogue: {exc}"
+        return None
+
+    def _retry_field_restore(self):
+        from app.devices.keithley_2600.characterization.field_worker import FieldPolicyRecoveryWorker
+        if self._field_worker is None or self._field_worker.isRunning():
+            return
+        if self._field_recovery_worker is not None and self._field_recovery_worker.isRunning():
+            return
+        self.policy_retry_button.setEnabled(False)
+        worker = FieldPolicyRecoveryWorker(self._field_lease, self._field_worker.restore_policies, self)
+        self._field_recovery_worker = worker
+        worker.finished_recovery.connect(self._on_field_recovered)
+        worker.start()
+
+    @Slot(bool, bool, object)
+    def _on_field_recovered(self, off, restored, errors):
+        if off and restored:
+            self.field_policies_changed.emit(dict(self._field_worker.restore_policies))
+            self._release_field_lease()
+            if self._field_lease is None:
+                self._field_report_directory = self._field_worker.directory
+                self._start_field_reports()
+        else:
+            self.policy_retry_button.setEnabled(True)
+            self.banner.show_message("; ".join(errors), severity="error", timeout_ms=0)
+
     @Slot()
     def _on_start_clicked(self) -> None:
+        if self._field_report_worker is not None and self._field_report_worker.isRunning():
+            return
+        if self._field_lease is not None:
+            return
+        if self.field_panel.enabled_box.isChecked():
+            if not self._refresh_field_validation():
+                self.banner.show_message(
+                    "Field-series validation failed. Correct the highlighted validation message; "
+                    "no hardware configuration was changed.",
+                    severity="error",
+                )
+                return
+            self._start_field_series()
+            return
+        self._field_worker = None
+        self._field_report_directory = None
+        self.field_report_retry_button.hide()
+        self.field_summary_pdf_button.hide()
+        self.field_summary_csv_button.hide()
         if (
             self._worker is not None
             and self._worker.isRunning()
@@ -1425,8 +2165,8 @@ class KeithleyCharacterizationCard(QWidget):
                 )
             if bool(getattr(channel_readback, "output_enabled", True)):
                 self.banner.show_message(
-                    f"Keithley channel {channel} OUTPUT is ON. Turn it OFF and verify "
-                    "the manual configuration before starting characterization."
+                    f"Keithley channel {channel} OUTPUT is ON. Turn it OFF before starting "
+                    "characterization; card settings will be applied and verified automatically."
                 )
                 return
         except Exception as exc:
@@ -1552,6 +2292,14 @@ class KeithleyCharacterizationCard(QWidget):
     ) -> None:
         """Start the worker only after all policy and source preflight gates pass."""
 
+        self._stored_field_series = None
+        self._displayed_field_dataset = None
+        self._remove_field_overlays()
+        self.field_overlay_check.setChecked(False)
+        self.field_overlay_group.hide()
+        self.field_curve_combo.clear()
+        self.saved_series_context.hide()
+        self.plot_widget.enableAutoRange()
         self._set_run_input_lock(True)
 
         # Reset plots and data
@@ -1797,6 +2545,7 @@ class KeithleyCharacterizationCard(QWidget):
         self._finalize_run_ui()
 
     def _finalize_run_ui(self) -> None:
+        self._finish_single_report_after_restore()
         self._set_run_input_lock(False)
         self.start_button.setEnabled(True)
         self.stop_button.setEnabled(False)
@@ -1815,6 +2564,10 @@ class KeithleyCharacterizationCard(QWidget):
             "points_spin",
             "sample_combo",
             "device_combo",
+            "field_panel",
+            "field_curve_combo",
+            "open_series_button",
+            "field_overlay_check",
         ):
             widget = getattr(self, name, None)
             if widget is not None:
@@ -1823,6 +2576,10 @@ class KeithleyCharacterizationCard(QWidget):
     @Slot()
     def _on_policy_retry_clicked(self) -> None:
         """Retry restoration only after independently confirming OUTPUT OFF."""
+
+        if self._field_lease is not None:
+            self._retry_field_restore()
+            return
 
         if self._temporary_policy_phase != "restore_failed":
             return
@@ -1852,13 +2609,20 @@ class KeithleyCharacterizationCard(QWidget):
 
     @Slot()
     def _on_stop_clicked(self) -> None:
+        if self._field_worker is not None and self._field_worker.isRunning():
+            self.status_label.setText("Stopping field series; confirming both outputs OFF...")
+            self._field_worker.request_stop()
+            return
         if self._worker is not None and self._worker.isRunning():
             self.status_label.setText("Stopping and ramping down to zero...")
             self._worker.request_stop()
 
     @Slot(object)
     def _on_point_acquired(self, point: CharacterizationPoint) -> None:
-        is_current = self._worker is None or self._worker._config.mode == "current"
+        is_current = (
+            self._field_worker.config.sweep.mode == "current" if self._field_worker is not None
+            else self._worker is None or self._worker._config.mode == "current"
+        )
         self._live_dem_points.append(point.demanded_si)
         if math.isfinite(point.true_resistance_ohm):
             self._live_r_points.append(point.true_resistance_ohm)
@@ -1956,11 +2720,11 @@ class KeithleyCharacterizationCard(QWidget):
                 )
             self.metric_comp.setStyleSheet("color: #ef4444; font-weight: bold;")
         else:
-            self.metric_comp.setText("Compliance: None (linear ohmic range)")
+            self.metric_comp.setText("Compliance: Not reached in the measured range")
             self.metric_comp.setStyleSheet("color: #059669; font-weight: bold;")
 
         self.metric_pmax.setText(f"P_max: {params.max_power_dissipated_w * 1e3:.2f} mW")
-        self.metric_r2.setText(f"Linearity R²: {params.linearity_r2:.4f}")
+        self.metric_r2.setText(f"Linearity R²: {params.linearity_r2:.4f}" if math.isfinite(params.linearity_r2) else "Linearity R²: —")
 
         self._save_completed_measurement(dataset, params)
         self._begin_policy_restore()
@@ -1999,10 +2763,10 @@ class KeithleyCharacterizationCard(QWidget):
         dataset: CharacterizationDataset,
         params: ExtractedScientificParameters,
     ) -> None:
-        """Persist CSV and PDF before publishing the run in the sample catalogue."""
+        """Persist raw CSV now; defer PDF until policy restoration completes."""
         run_dir = self._automatic_run_directory(dataset)
         try:
-            run_dir.mkdir(parents=True, exist_ok=False)
+            run_dir = create_run_directory(run_dir)
         except Exception as exc:
             self.banner.show_message(
                 f"Measurement finished with output OFF, but its run directory could not be created: {exc}",
@@ -2013,7 +2777,7 @@ class KeithleyCharacterizationCard(QWidget):
             return
 
         csv_path = run_dir / "characterization.csv"
-        pdf_path = run_dir / "characterization_report.pdf"
+        pdf_path = report_path(run_dir)
         errors: list[str] = []
         try:
             self._current_csv_path = KeithleyDataExporter.export_csv(dataset, csv_path)
@@ -2022,15 +2786,13 @@ class KeithleyCharacterizationCard(QWidget):
             errors.append(f"CSV: {exc}")
 
         try:
-            from app.devices.keithley_2600.characterization.report_pdf import (
-                KeithleyPdfReportGenerator,
-            )
-            self._current_pdf_path = KeithleyPdfReportGenerator.generate(
-                dataset, params, pdf_path
-            )
+            from app.devices.keithley_2600.characterization.rigol_report import export_rigol_equivalence
+            export_rigol_equivalence(dataset, run_dir / "rigol_equivalence.csv")
         except Exception as exc:
-            self._current_pdf_path = None
-            errors.append(f"PDF: {exc}")
+            errors.append(f"Rigol equivalence CSV: {exc}")
+
+        self._current_pdf_path = None
+        self._pending_single_report = (dataset, params, pdf_path, None)
 
         self.csv_button.setEnabled(self._current_csv_path is not None)
         self.pdf_button.setEnabled(self._current_pdf_path is not None)
@@ -2073,6 +2835,7 @@ class KeithleyCharacterizationCard(QWidget):
                     report_path=str(self._current_pdf_path or ""),
                 )
                 self._inventory_store.record_run(rec)
+                self._pending_single_report = (dataset, params, pdf_path, rec)
                 self._populate_device_combo_for_selected_sample()
                 self.measurement_saved.emit(sample_id)
             except Exception as exc:
@@ -2087,9 +2850,29 @@ class KeithleyCharacterizationCard(QWidget):
             )
         else:
             self.status_label.setText(
-                f"{self.status_label.text()} · CSV and PDF saved automatically"
+                f"{self.status_label.text()} · CSV saved; PDF pending policy restoration"
             )
         self._run_inventory_target = None
+
+    def _finish_single_report_after_restore(self) -> None:
+        pending = self._pending_single_report
+        if pending is None or self._temporary_policy_phase != "idle":
+            return
+        dataset, params, path, record = pending
+        self._pending_single_report = None
+        try:
+            from app.devices.keithley_2600.characterization.report_pdf import KeithleyPdfReportGenerator
+            self._current_pdf_path = KeithleyPdfReportGenerator.generate(dataset, params, path)
+            self.pdf_button.setEnabled(True)
+            if record is not None and self._inventory_store is not None:
+                self._inventory_store.register_run_artifacts(
+                    replace(record, report_path=str(self._current_pdf_path)))
+                self.measurement_saved.emit(record.sample_id)
+            self.status_label.setText(f"{self.status_label.text()} · PDF saved automatically")
+        except Exception as exc:
+            self.banner.show_message(
+                f"Output is OFF and policy restoration finished, but PDF publication failed: {exc}",
+                severity="error", timeout_ms=0)
 
     @Slot(str)
     def _on_sweep_failed(self, error_msg: str) -> None:
@@ -2143,6 +2926,7 @@ class KeithleyCharacterizationCard(QWidget):
     def set_settings(self, settings: StationSettings) -> None:
         """Update station settings and refresh limit fields."""
         self._settings = settings
+        self.field_panel.refresh_bounds(settings)
         self._update_limits_from_settings()
         for field in (
             getattr(self, "start_level_field", None),
@@ -2153,9 +2937,38 @@ class KeithleyCharacterizationCard(QWidget):
             if field is not None:
                 field.validate_and_clamp()
         self.refresh_shared_source_configuration()
+        self._refresh_field_validation()
+
+    def prepare_application_shutdown(self) -> bool:
+        """Keep the controller alive until acquisition, restoration and reports finish."""
+        if self._field_recovery_worker is not None and self._field_recovery_worker.isRunning():
+            return False
+        if self._field_worker is not None and self._field_worker.isRunning():
+            self._field_worker.request_stop()
+            return False
+        if self._field_lease is not None:
+            return False
+        if self._worker is not None and self._worker.isRunning():
+            self._worker.request_stop()
+            return False
+        if self._temporary_policy_phase != "idle":
+            return False
+        if self._field_report_worker is not None and self._field_report_worker.isRunning():
+            return False
+        self._save_operator_drafts()
+        return True
 
     def closeEvent(self, event) -> None:
         """Safely terminate background acquisition worker on card close."""
+        self._save_operator_drafts()
+        if self._field_report_worker is not None and self._field_report_worker.isRunning():
+            event.ignore()
+            return
+        if self._field_lease is not None:
+            if self._field_worker is not None and self._field_worker.isRunning():
+                self._field_worker.request_stop()
+            event.ignore()
+            return
         if self._worker is not None and self._worker.isRunning():
             self._worker.request_stop()
             self._worker.wait(2000)

@@ -150,6 +150,13 @@ def _open_circuit_voltage(displayed_v: float, output_load: str | float, source_o
     return displayed_v * (source_ohm + load_ohm) / load_ohm
 
 
+def rigol_display_voltage_from_open_circuit(open_circuit_v: float, output_load: str | float) -> float:
+    """Convert nominal 50-ohm source voltage for offline reports, not arming."""
+    if not math.isfinite(open_circuit_v):
+        raise SafetyViolation("Equivalent Rigol voltage must be finite.")
+    return open_circuit_v / _open_circuit_voltage(1.0, output_load, 50.0)
+
+
 def estimate_rigol_current(
     *,
     high_level: str | float | Quantity,

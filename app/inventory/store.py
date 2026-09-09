@@ -42,17 +42,191 @@ class InventoryStore:
         self.attachments_dir.mkdir(parents=True, exist_ok=True)
 
         self._lock = threading.RLock()
-        self._connection = sqlite3.connect(
-            str(self.db_path),
+        self._connection = self._connect(self.db_path)
+        self._init_db()
+
+    @staticmethod
+    def _connect(db_path: Path) -> sqlite3.Connection:
+        connection = sqlite3.connect(
+            str(db_path),
             check_same_thread=False,
             isolation_level=None,  # autocommit mode
         )
-        self._connection.row_factory = sqlite3.Row
-        self._init_db()
+        connection.row_factory = sqlite3.Row
+        return connection
+
+    @staticmethod
+    def catalogue_root_from_database(db_path: str | Path) -> Path | None:
+        """Read a persisted catalogue root without creating or changing a database."""
+
+        path = Path(db_path).expanduser().resolve()
+        if not path.is_file():
+            return None
+
+        connection: sqlite3.Connection | None = None
+        try:
+            connection = sqlite3.connect(
+                f"file:{path.as_posix()}?mode=ro", uri=True
+            )
+            row = connection.execute(
+                "SELECT value FROM inventory_settings WHERE key = 'catalogue_root';"
+            ).fetchone()
+        except sqlite3.Error:
+            # A legacy or partially-created database is handled by the normal
+            # schema initializer instead of preventing application startup.
+            return None
+        finally:
+            if connection is not None:
+                connection.close()
+
+        configured = str(row[0] if row is not None else "").strip()
+        return Path(configured).expanduser().resolve() if configured else None
+
+    @classmethod
+    def open_for_catalogue_root(
+        cls,
+        root: str | Path,
+        *,
+        legacy_db_path: str | Path | None = None,
+    ) -> "InventoryStore":
+        """Open the database owned by a catalogue root.
+
+        Existing catalogue databases are authoritative. If the target does
+        not yet have a database, a new empty database is created there. The
+        optional legacy path is retained for startup compatibility, but it is
+        never moved implicitly; data relocation is an explicit operation.
+        """
+
+        target_root = Path(root).expanduser().resolve()
+        target_root.mkdir(parents=True, exist_ok=True)
+        target_db = target_root / "inventory.db"
+
+        legacy = (
+            Path(legacy_db_path).expanduser().resolve()
+            if legacy_db_path is not None
+            else None
+        )
+
+        if target_db.is_file():
+            store = cls(target_db, attachments_dir=target_root / "attachments")
+        elif legacy is not None and legacy.is_file() and legacy != target_db:
+            # Keep old installations reachable without silently moving their
+            # database or sample files. The user can invoke move_catalogue()
+            # explicitly after reviewing the destination.
+            store = cls(legacy)
+        else:
+            store = cls(target_db, attachments_dir=target_root / "attachments")
+
+        if store.catalogue_root != target_root:
+            store._write_catalogue_root(target_root)
+        return store
+
+    @staticmethod
+    def _move_sqlite_bundle(source: Path, destination: Path) -> None:
+        """Move a SQLite database and any journal sidecars without overwriting."""
+
+        source = source.resolve()
+        destination = destination.resolve()
+        if source == destination:
+            return
+        if not source.is_file():
+            raise FileNotFoundError(f"Inventory database does not exist: {source}")
+
+        pairs = [
+            (Path(f"{source}{suffix}"), Path(f"{destination}{suffix}"))
+            for suffix in ("", "-wal", "-shm", "-journal")
+        ]
+        collisions = [str(dst) for src, dst in pairs if src.exists() and dst.exists()]
+        if collisions:
+            raise FileExistsError(
+                "Cannot move inventory database; target already exists: "
+                + ", ".join(collisions)
+            )
+
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        moved: list[tuple[Path, Path]] = []
+        try:
+            for src, dst in pairs:
+                if src.exists():
+                    src.replace(dst)
+                    moved.append((src, dst))
+        except Exception:
+            for src, dst in reversed(moved):
+                if dst.exists():
+                    dst.replace(src)
+            raise
+
+    def _switch_database(self, db_path: Path) -> None:
+        """Switch this live store to another catalogue database in-place."""
+
+        target = db_path.expanduser().resolve()
+        if target == self.db_path:
+            return
+        target.parent.mkdir(parents=True, exist_ok=True)
+
+        with self._lock:
+            old_connection = self._connection
+            old_db_path = self.db_path
+            old_attachments_dir = self.attachments_dir
+            new_connection = self._connect(target)
+            self.db_path = target
+            self.attachments_dir = target.parent / "attachments"
+            self.attachments_dir.mkdir(parents=True, exist_ok=True)
+            self._connection = new_connection
+            try:
+                self._init_db()
+            except Exception:
+                new_connection.close()
+                self.db_path = old_db_path
+                self.attachments_dir = old_attachments_dir
+                self._connection = old_connection
+                raise
+            old_connection.close()
+
+    def _move_current_database(self, destination: Path) -> None:
+        """Relocate this store's database, closing it during the filesystem move."""
+
+        destination = destination.expanduser().resolve()
+        with self._lock:
+            old_db_path = self.db_path
+            old_attachments_dir = self.attachments_dir
+            self._connection.commit()
+            try:
+                self._connection.execute("PRAGMA wal_checkpoint(TRUNCATE);")
+            except sqlite3.Error:
+                # The default journal mode does not require a checkpoint, but
+                # a legacy WAL database should be compacted before relocation.
+                pass
+            self._connection.close()
+
+            try:
+                self._move_sqlite_bundle(old_db_path, destination)
+            except Exception:
+                self.db_path = old_db_path
+                self.attachments_dir = old_attachments_dir
+                self._connection = self._connect(old_db_path)
+                self._init_db()
+                raise
+
+            self.db_path = destination
+            self.attachments_dir = destination.parent / "attachments"
+            self.attachments_dir.mkdir(parents=True, exist_ok=True)
+            self._connection = self._connect(destination)
+            self._init_db()
 
     def close(self) -> None:
         with self._lock:
             self._connection.close()
+
+    def _write_catalogue_root(self, root: Path) -> None:
+        with self._lock:
+            self._connection.execute(
+                """
+                INSERT INTO inventory_settings (key, value) VALUES ('catalogue_root', ?)
+                ON CONFLICT(key) DO UPDATE SET value=excluded.value;
+                """,
+                (str(root),),
+            )
 
     def _init_db(self) -> None:
         with self._lock:
@@ -212,31 +386,104 @@ class InventoryStore:
         )
 
     def set_catalogue_root(self, root: str | Path) -> Path:
-        """Set the one application catalogue root and materialize every sample tree."""
+        """Select a catalogue root without moving the current catalogue.
+
+        The root owns ``inventory.db``. An existing database is opened; when
+        it is missing, a new empty database is created. Database and file
+        relocation is deliberately kept in :meth:`move_catalogue` so changing
+        the active root cannot unexpectedly copy or move measurement data.
+        """
+
         target = Path(root).expanduser().resolve()
         target.mkdir(parents=True, exist_ok=True)
-        old_root = self.catalogue_root
-        samples = self.list_samples()
-        for sample in samples:
-            if not sample.folder_name:
-                continue
-            existing_sample_dir = (old_root / sample.folder_name).resolve()
-            try:
-                target.relative_to(existing_sample_dir)
-            except ValueError:
-                continue
-            raise ValueError(
-                "The catalogue root cannot be placed inside an existing sample folder."
-            )
+        target_db = target / "inventory.db"
 
-        with self._lock:
-            self._connection.execute(
-                """
-                INSERT INTO inventory_settings (key, value) VALUES ('catalogue_root', ?)
-                ON CONFLICT(key) DO UPDATE SET value=excluded.value;
-                """,
-                (str(target),),
+        if target_db.resolve() == self.db_path.resolve():
+            self._write_catalogue_root(target)
+            self.attachments_dir = target / "attachments"
+            self.attachments_dir.mkdir(parents=True, exist_ok=True)
+            return target
+
+        self._switch_database(target_db)
+        self._write_catalogue_root(target)
+        return target
+
+    @staticmethod
+    def _move_directory(source: Path, destination: Path) -> None:
+        """Move a directory, merging only when the destination already exists."""
+
+        source = source.expanduser().resolve()
+        destination = destination.expanduser().resolve()
+        if source == destination or not source.is_dir():
+            return
+
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        if not destination.exists():
+            shutil.move(str(source), str(destination))
+            return
+
+        for child in source.iterdir():
+            child_destination = destination / child.name
+            if child.is_dir():
+                InventoryStore._move_directory(child, child_destination)
+            else:
+                if child_destination.exists():
+                    raise FileExistsError(
+                        f"Cannot move catalogue file; target already exists: {child_destination}"
+                    )
+                shutil.move(str(child), str(child_destination))
+        try:
+            source.rmdir()
+        except OSError:
+            # A concurrently-created file is safer to leave in place than to
+            # delete as part of a best-effort catalogue move.
+            pass
+
+    def move_catalogue(self, root: str | Path) -> Path:
+        """Move this database and its indexed files to a new catalogue root.
+
+        This is intentionally separate from :meth:`set_catalogue_root` and
+        must be called explicitly. The destination must be empty (or absent)
+        and an existing destination database is never overwritten.
+        """
+
+        target = Path(root).expanduser().resolve()
+        source_root = self.catalogue_root
+        target_db = target / "inventory.db"
+
+        if target_db.resolve() == self.db_path.resolve() and target == source_root:
+            return target
+
+        if target != source_root:
+            try:
+                target.relative_to(source_root)
+            except ValueError:
+                pass
+            else:
+                raise ValueError(
+                    "The destination catalogue cannot be inside the current catalogue."
+                )
+
+        if target_db.exists() or any(
+            Path(f"{target_db}{suffix}").exists()
+            for suffix in ("-wal", "-shm", "-journal")
+        ):
+            raise FileExistsError(
+                f"The destination already contains an inventory database: {target_db}"
             )
+        if target != source_root and target.exists() and any(target.iterdir()):
+            raise FileExistsError(f"The destination catalogue is not empty: {target}")
+
+        target.mkdir(parents=True, exist_ok=True)
+        samples = self.list_samples()
+        old_root = source_root
+        legacy_attachments_dir = self.attachments_dir
+        target_attachments_dir = target / "attachments"
+        if (
+            legacy_attachments_dir.is_dir()
+            and legacy_attachments_dir.resolve() != target_attachments_dir.resolve()
+        ):
+            self._move_directory(legacy_attachments_dir, target_attachments_dir)
 
         for sample in samples:
             if not sample.folder_name:
@@ -257,23 +504,31 @@ class InventoryStore:
             ).fetchone()
             legacy_measurements = str(legacy_row["measurement_directory"] or "").strip()
             if legacy_measurements:
-                sources.append((Path(legacy_measurements).expanduser(), destination / "measurements"))
+                legacy_path = Path(legacy_measurements).expanduser().resolve()
+                # Some older catalogues stored the catalogue root itself in
+                # measurement_directory. Never copy the whole catalogue into
+                # its own measurements subdirectory during migration.
+                if legacy_path not in {old_root.resolve(), target.resolve()}:
+                    sources.append((legacy_path, destination / "measurements"))
 
             for source, mapped_destination in sources:
                 if source.resolve() == mapped_destination.resolve() or not source.is_dir():
                     continue
-                shutil.copytree(source, mapped_destination, dirs_exist_ok=True)
                 self._rewrite_run_paths(source, mapped_destination, sample.sample_id)
+                self._move_directory(source, mapped_destination)
 
+        self._move_current_database(target_db)
+        self._write_catalogue_root(target)
+
+        for sample in self.list_samples():
             self.ensure_sample_structure(sample.sample_id)
             self._migrate_legacy_attachments(sample.sample_id)
             self.ensure_sample_structure(sample.sample_id)
-            if legacy_measurements:
-                with self._lock:
-                    self._connection.execute(
-                        "UPDATE samples SET measurement_directory = '' WHERE sample_id = ?",
-                        (sample.sample_id,),
-                    )
+            with self._lock:
+                self._connection.execute(
+                    "UPDATE samples SET measurement_directory = '' WHERE sample_id = ?",
+                    (sample.sample_id,),
+                )
         return target
 
     @staticmethod
@@ -909,6 +1164,35 @@ class InventoryStore:
             )
             rows = cursor.fetchall()
             return tuple(SampleRunRecord.from_dict(dict(r)) for r in rows)
+
+    def register_run_artifacts(self, record: SampleRunRecord) -> SampleRunRecord:
+        """Idempotently attach regenerated artifacts to one unchanged raw run.
+
+        Preserve user notes and external publication metadata on repeat calls.
+        A changed raw checksum is a different scientific record, not an update.
+        """
+        with self._lock:
+            rows = self._connection.execute(
+                "SELECT * FROM sample_runs WHERE sample_id = ? AND run_path = ?",
+                (record.sample_id, str(record.run_path)),
+            ).fetchall()
+            if len(rows) > 1:
+                raise ValueError("Multiple catalogue records refer to this run path.")
+            if not rows:
+                return self.record_run(record)
+            existing = SampleRunRecord.from_dict(dict(rows[0]))
+            if (existing.run_sha256 != record.run_sha256
+                    or existing.row != record.row or existing.col != record.col):
+                raise ValueError("Catalogue run identity differs from the saved measurement.")
+            report_path = record.report_path or existing.report_path
+            csv_path = record.csv_path or existing.csv_path
+            self._connection.execute(
+                "UPDATE sample_runs SET csv_path = ?, report_path = ? WHERE id = ?",
+                (csv_path, report_path, existing.id),
+            )
+            values = existing.to_dict()
+            values.update(csv_path=csv_path, report_path=report_path)
+            return SampleRunRecord.from_dict(values)
 
     def list_runs_for_cell(
         self, sample_id: str, row: str, col: str

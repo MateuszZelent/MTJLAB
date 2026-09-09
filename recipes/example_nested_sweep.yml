@@ -28,6 +28,8 @@ root:
           level: "${keithley.B.current}"
           compliance: "67 mV"
           nplc: 1.0
+          source_autorange: false
+          source_range: 1 A
         - id: rigol-high-level-sweep
           type: sweep
           target: "rigol.1.high_level"

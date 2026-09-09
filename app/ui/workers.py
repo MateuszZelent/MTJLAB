@@ -10,7 +10,7 @@ from contextlib import contextmanager
 import math
 from collections.abc import Callable, Iterable
 from dataclasses import dataclass, field
-from threading import Event
+from threading import Event, RLock
 
 from PySide6.QtCore import QEventLoop, QMetaObject, QObject, QThread, QTimer, Qt, Signal, Slot
 
@@ -24,6 +24,77 @@ from app.engine.compiler import RecipeCompiler
 from app.engine.estimation import PlanEstimator
 from app.recipes import parse_recipe_text
 from app.settings.models import StationSettings
+from app.domain.errors import RunInterrupted, SafetyViolation
+
+
+class _RunAccess:
+    """Admission is checked again on the transport thread, including queued calls."""
+
+    def __init__(self):
+        self.lock = RLock()
+        self.owner: object | None = None
+        self.interrupted = Event()
+        self.in_flight = 0
+        self.closing = False
+
+    def begin_shutdown(self):
+        with self.lock:
+            self.closing = True
+            self.interrupted.set()
+
+    def assert_open(self):
+        with self.lock:
+            if self.closing:
+                raise SafetyViolation("Instrument controller is shutting down.")
+
+    @staticmethod
+    def safe(operation, args, kwargs):
+        if operation in {"emergency_off", "confirm_output_off"}:
+            return True
+        if operation in {"set_output", "set_output_group"}:
+            enabled = args[1] if len(args) > 1 else kwargs.get("enabled")
+            return enabled is False
+        return False
+
+    def acquire(self):
+        with self.lock:
+            self.assert_open()
+            if self.owner is not None or self.in_flight:
+                raise SafetyViolation("Instrument is busy; wait for the active operation to finish.")
+            self.owner = object()
+            self.interrupted = Event()
+            return self.owner, self.interrupted
+
+    def release(self, owner):
+        with self.lock:
+            if owner is not self.owner or self.in_flight:
+                raise SafetyViolation("Cannot release an inactive or busy instrument reservation.")
+            self.owner = None
+
+    @contextmanager
+    def enter(self, owner, operation, args=(), kwargs=None):
+        kwargs = kwargs or {}
+        with self.lock:
+            safe = self.safe(operation, args, kwargs)
+            if self.closing and not safe:
+                raise SafetyViolation("Instrument controller is shutting down.")
+            if owner is not None and owner is not self.owner:
+                raise SafetyViolation("Instrument reservation has expired.")
+            if self.owner is not None and owner is not self.owner:
+                if not safe:
+                    raise SafetyViolation("Instrument is reserved by characterization; operation blocked.")
+                self.interrupted.set()
+            if self.owner is not None and self.interrupted.is_set() and not safe:
+                if operation not in {"state", "identity", "capabilities", "connected",
+                                     "compliance_policy", "read_configuration", "last_source_request",
+                                     "set_compliance_policy"}:
+                    raise RunInterrupted("Characterization was interrupted by an output-off action.")
+            self.in_flight += 1
+        try:
+            yield
+        finally:
+            with self.lock:
+                self.in_flight -= 1
 
 
 @dataclass(slots=True)
@@ -38,6 +109,7 @@ class _RunCall:
     result: object = None
     error: BaseException | None = None
     timeout_s: float | None = None
+    owner: object | None = None
 
 
 class RunDeviceAdapter:
@@ -47,9 +119,15 @@ class RunDeviceAdapter:
     returns to the dedicated InstrumentWorker thread that owns the transport.
     """
 
-    def __init__(self, controller: "DeviceController") -> None:
+    def __init__(self, controller: "DeviceController", owner: object | None = None,
+                 interruption_event: Event | None = None) -> None:
         self._controller = controller
+        self._owner = owner
+        self.interruption_event = interruption_event
         self._active_timeout_s: float | None = None
+
+    def release(self) -> None:
+        self._controller.release_run_lease(self._owner)
 
     @contextmanager
     def io_timeout(self, timeout_s: float):
@@ -65,19 +143,19 @@ class RunDeviceAdapter:
 
     @property
     def state(self) -> object:
-        return self._controller.read_for_run("state")
+        return self._controller.read_for_run("state", owner=self._owner)
 
     @property
     def identity(self) -> object:
-        return self._controller.read_for_run("identity")
+        return self._controller.read_for_run("identity", owner=self._owner)
 
     @property
     def capabilities(self) -> object:
-        return self._controller.read_for_run("capabilities")
+        return self._controller.read_for_run("capabilities", owner=self._owner)
 
     @property
     def connected(self) -> bool:
-        return bool(self._controller.read_for_run("connected"))
+        return bool(self._controller.read_for_run("connected", owner=self._owner))
 
     def __getattr__(self, member: str) -> Callable[..., object]:
         if member.startswith("_"):
@@ -85,7 +163,7 @@ class RunDeviceAdapter:
 
         def invoke(*args: object, **kwargs: object) -> object:
             return self._controller.call_for_run(
-                member, *args, timeout_s=self._active_timeout_s, **kwargs
+                member, *args, timeout_s=self._active_timeout_s, owner=self._owner, **kwargs
             )
 
         return invoke
@@ -159,6 +237,7 @@ class InstrumentWorker(QObject):
         super().__init__()
         self._adapter = adapter
         self._dispatcher = dispatcher
+        self._run_access: _RunAccess | None = None
         self._attach_traffic_logger()
 
     def _attach_traffic_logger(self) -> None:
@@ -170,7 +249,12 @@ class InstrumentWorker(QObject):
     @Slot(str, object)
     def execute(self, operation: str, payload: object) -> None:
         try:
-            result = self._dispatch(operation, payload)
+            if self._run_access is None:
+                result = self._dispatch(operation, payload)
+            else:
+                args = payload if isinstance(payload, tuple) else (payload,)
+                with self._run_access.enter(None, operation, args):
+                    result = self._dispatch(operation, payload)
             self.state_changed.emit(self._adapter.state.value)
             if operation == "connect":
                 self.capabilities_changed.emit(self._adapter.capabilities)
@@ -183,6 +267,8 @@ class InstrumentWorker(QObject):
 
     @Slot()
     def shutdown(self) -> None:
+        if self._run_access is not None:
+            self._run_access.begin_shutdown()
         try:
             self._adapter.emergency_off()
         except Exception:
@@ -198,24 +284,31 @@ class InstrumentWorker(QObject):
         """Run a lease call in this worker's adapter-owning thread."""
 
         try:
-            member = getattr(self._adapter, request.member)
-            if request.read_attribute:
-                if request.args or request.kwargs:
-                    raise ValueError("A run attribute request cannot include arguments.")
-                request.result = member
+            if self._run_access is not None:
+                with self._run_access.enter(request.owner, request.member, request.args, request.kwargs):
+                    self._invoke_member(request)
             else:
-                if not callable(member):
-                    raise TypeError(f"Adapter member {request.member!r} is not callable.")
-                if request.timeout_s is not None and hasattr(self._adapter, "io_timeout"):
-                    with self._adapter.io_timeout(request.timeout_s):
-                        request.result = member(*request.args, **request.kwargs)
-                else:
-                    request.result = member(*request.args, **request.kwargs)
+                self._invoke_member(request)
         except BaseException as exc:
             request.error = exc
         finally:
             self.state_changed.emit(self._adapter.state.value)
             request.completed.set()
+
+    def _invoke_member(self, request: _RunCall) -> None:
+        member = getattr(self._adapter, request.member)
+        if request.read_attribute:
+            if request.args or request.kwargs:
+                raise ValueError("A run attribute request cannot include arguments.")
+            request.result = member
+        else:
+            if not callable(member):
+                raise TypeError(f"Adapter member {request.member!r} is not callable.")
+            if request.timeout_s is not None and hasattr(self._adapter, "io_timeout"):
+                with self._adapter.io_timeout(request.timeout_s):
+                    request.result = member(*request.args, **request.kwargs)
+            else:
+                request.result = member(*request.args, **request.kwargs)
 
     def _dispatch(self, operation: str, payload: object) -> object:
         if operation == "replace_adapter":
@@ -357,6 +450,7 @@ class DeviceController(QObject):
     capabilities_changed = Signal(object)
     traffic = Signal(str)
     run_request = Signal(object)
+    reservation_changed = Signal(bool)
 
     def __init__(
         self,
@@ -369,6 +463,8 @@ class DeviceController(QObject):
         self._operation_guard: Callable[[str, object], None] | None = None
         self._thread = QThread(self)
         self._worker = InstrumentWorker(adapter, dispatcher=dispatcher)
+        self._run_access = _RunAccess()
+        self._worker._run_access = self._run_access
         self._worker.moveToThread(self._thread)
         self.request.connect(self._worker.execute, Qt.ConnectionType.QueuedConnection)
         self._worker.completed.connect(self.result)
@@ -401,16 +497,28 @@ class DeviceController(QObject):
 
         return RunDeviceAdapter(self)
 
+    def acquire_run_lease(self) -> RunDeviceAdapter:
+        """Reserve the whole instrument, preventing interleaved channel commands."""
+        owner, interruption = self._run_access.acquire()
+        self.reservation_changed.emit(True)
+        return RunDeviceAdapter(self, owner, interruption)
+
+    def release_run_lease(self, owner: object) -> None:
+        self._run_access.release(owner)
+        self.reservation_changed.emit(False)
+
     def call_for_run(
         self,
         method: str,
         *args: object,
         timeout_s: float | None = None,
+        owner: object | None = None,
         **kwargs: object,
     ) -> object:
         """Synchronously invoke one adapter method for an active recipe run."""
 
-        request = _RunCall(method, tuple(args), dict(kwargs), timeout_s=timeout_s)
+        self._run_access.assert_open()
+        request = _RunCall(method, tuple(args), dict(kwargs), timeout_s=timeout_s, owner=owner)
         self.run_request.emit(request)
         deadline_s = (timeout_s + 15.0) if timeout_s is not None else 60.0
         if not request.completed.wait(timeout=deadline_s):
@@ -421,10 +529,11 @@ class DeviceController(QObject):
             raise request.error
         return request.result
 
-    def read_for_run(self, attribute: str) -> object:
+    def read_for_run(self, attribute: str, *, owner: object | None = None) -> object:
         """Read one adapter property through its owning worker thread."""
 
-        request = _RunCall(attribute, read_attribute=True)
+        self._run_access.assert_open()
+        request = _RunCall(attribute, read_attribute=True, owner=owner)
         self.run_request.emit(request)
         deadline_s = 10.0
         if not request.completed.wait(timeout=deadline_s):
@@ -441,6 +550,7 @@ class DeviceController(QObject):
         self.call("replace_adapter", adapter)
 
     def close(self) -> bool:
+        self._run_access.begin_shutdown()
         if self._thread.isRunning():
             wait_loop = QEventLoop()
             self._worker.shutdown_complete.connect(wait_loop.quit)
@@ -467,6 +577,8 @@ class DeviceController(QObject):
     def close_all(cls, controllers: Iterable[DeviceController], timeout_ms: int = 3_000) -> bool:
         """Shut down multiple device controllers concurrently instead of sequentially."""
         controllers_list = list(controllers)
+        for controller in controllers_list:
+            controller._run_access.begin_shutdown()
         active = [c for c in controllers_list if c._thread.isRunning()]
         if not active:
             return all(c.close() for c in controllers_list)

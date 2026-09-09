@@ -642,7 +642,7 @@ class AdapterAndRunnerTests(unittest.TestCase):
             active_settings, session_factory=FakeVisaSessionFactory(session)
         )
         adapter.connect()
-        adapter.configure_source(KeithleySourceRequest("B", "current", 0.001, 0.067))
+        adapter.configure_source(KeithleySourceRequest("B", "current", 0.001, 0.067, source_range_si=0.01))
         adapter.set_output("B", True)
 
         with self.assertRaisesRegex(SafetyViolation, "confirmed OFF"):
@@ -717,7 +717,7 @@ class AdapterAndRunnerTests(unittest.TestCase):
         )
         adapter = KeithleyAdapter(settings, session_factory=FakeVisaSessionFactory(session))
         adapter.connect()
-        adapter.configure_source(KeithleySourceRequest("B", "current", .001, .067))
+        adapter.configure_source(KeithleySourceRequest("B", "current", .001, .067, source_range_si=0.01))
         with self.assertRaisesRegex(Exception, "did not confirm"):
             adapter.set_output("B", True)
 
@@ -736,7 +736,7 @@ class AdapterAndRunnerTests(unittest.TestCase):
 
         with self.assertRaisesRegex(SafetyViolation, "outside"):
             adapter.configure_source(
-                KeithleySourceRequest("B", "voltage", 5.0, 0.001)
+                KeithleySourceRequest("B", "voltage", 5.0, 0.001, source_range_si=1.0)
             )
 
         self.assertEqual(tuple(session.writes), writes_before)
@@ -756,7 +756,7 @@ class AdapterAndRunnerTests(unittest.TestCase):
         )
         adapter.connect()
         adapter.configure_source(
-            KeithleySourceRequest("B", "current", 0.001, 0.067)
+            KeithleySourceRequest("B", "current", 0.001, 0.067, source_range_si=0.01)
         )
 
         with self.assertRaisesRegex(SafetyViolation, "disabled"):
@@ -773,7 +773,7 @@ class AdapterAndRunnerTests(unittest.TestCase):
         )
         keithley = KeithleyAdapter(settings, session_factory=FakeVisaSessionFactory(keithley_session))
         keithley.connect()
-        keithley.configure_source(KeithleySourceRequest("B", "current", 0.001, 0.067))
+        keithley.configure_source(KeithleySourceRequest("B", "current", 0.001, 0.067, source_range_si=0.01))
         keithley.set_output("B", True)
         keithley.set_output("A", False)
         self.assertEqual(keithley.state, DeviceState.OUTPUT_ON)
@@ -992,7 +992,7 @@ class AdapterAndRunnerTests(unittest.TestCase):
         )
         keithley.connect()
         keithley.configure_source(
-            KeithleySourceRequest("B", "current", 0.001, 0.067)
+            KeithleySourceRequest("B", "current", 0.001, 0.067, source_range_si=0.01)
         )
         keithley_limit = parse_quantity(
             settings.keithley.safety.channels["B"].lab_limits.source_current.max,
@@ -1022,7 +1022,7 @@ class AdapterAndRunnerTests(unittest.TestCase):
     def test_quick_configure_dispatch_returns_the_verified_target_level(self) -> None:
         settings = simulation_settings(approved=True)
         keithley = KeithleyAdapter(settings, session_factory=FakeVisaSessionFactory(FakeVisaSession()))
-        keithley_request = KeithleySourceRequest("B", "current", 0.001, 0.067)
+        keithley_request = KeithleySourceRequest("B", "current", 0.001, 0.067, source_range_si=0.01)
         with patch.object(
             keithley, "configure_source", return_value=keithley_request
         ) as configure:
@@ -1102,7 +1102,7 @@ class AdapterAndRunnerTests(unittest.TestCase):
         )
         adapter = KeithleyAdapter(settings, session_factory=FakeVisaSessionFactory(session))
         adapter.connect()
-        adapter.configure_source(KeithleySourceRequest("B", "current", 0.001, 0.067))
+        adapter.configure_source(KeithleySourceRequest("B", "current", 0.001, 0.067, source_range_si=0.01))
         adapter.set_output("B", True)
 
         with self.assertRaisesRegex(
@@ -1319,7 +1319,7 @@ class AdapterAndRunnerTests(unittest.TestCase):
         )
         adapter.connect()
         adapter.configure_source(
-            KeithleySourceRequest("B", "current", 0.001, 0.067)
+            KeithleySourceRequest("B", "current", 0.001, 0.067, source_range_si=0.01)
         )
         adapter.set_dut_output_off_mode("B", "high_impedance")
         traffic_start = len(session.writes)
@@ -1472,7 +1472,7 @@ class AdapterAndRunnerTests(unittest.TestCase):
 
         adapter.connect()
         applied = adapter.configure_source(
-            KeithleySourceRequest("B", "current", 0.001, 0.067)
+            KeithleySourceRequest("B", "current", 0.001, 0.067, source_range_si=0.01)
         )
 
         self.assertEqual(applied.level_si, 0.001)
@@ -1497,7 +1497,7 @@ class AdapterAndRunnerTests(unittest.TestCase):
         adapter.connect()
         with self.assertRaisesRegex(DeviceError, "Keithley reported an error"):
             adapter.configure_source(
-                KeithleySourceRequest("B", "current", 0.001, 0.067)
+                KeithleySourceRequest("B", "current", 0.001, 0.067, source_range_si=0.01)
             )
 
     def test_keithley_measurement_output_transition_trips_both_channels_off(self) -> None:
@@ -1574,7 +1574,7 @@ class AdapterAndRunnerTests(unittest.TestCase):
         )
         adapter.connect()
         adapter.configure_source(
-            KeithleySourceRequest("B", "current", 0.001, 0.067)
+            KeithleySourceRequest("B", "current", 0.001, 0.067, source_range_si=0.01)
         )
         adapter.set_output("B", True)
 
@@ -1603,7 +1603,7 @@ class AdapterAndRunnerTests(unittest.TestCase):
             adapter.configure_source(
                 KeithleySourceRequest(
                     "B", "current", 0.001, 0.067, nplc=1.0
-                )
+                , source_range_si=0.01)
             )
 
     def test_keithley_configuration_accepts_scientific_numeric_enum_readback(self) -> None:
@@ -1612,7 +1612,7 @@ class AdapterAndRunnerTests(unittest.TestCase):
                 "*IDN?": "KEITHLEY INSTRUMENTS,2602A,123456,1.0",
                 "print(errorqueue.count)": "0",
                 "print(smub.source.func)": "0.00000E+00",
-                "print(smub.source.autorangei)": "1.00000E+00",
+                "print(smub.source.autorangei)": "0.00000E+00",
                 "print(smub.measure.autorangev)": "1.00000E+00",
                 "print(smub.measure.autorangei)": "1.00000E+00",
                 "print(smub.sense)": "0.00000E+00",
@@ -1624,7 +1624,7 @@ class AdapterAndRunnerTests(unittest.TestCase):
         adapter.connect()
 
         adapter.configure_source(
-            KeithleySourceRequest("B", "current", 0.001, 0.067)
+            KeithleySourceRequest("B", "current", 0.001, 0.067, source_range_si=0.01)
         )
 
         self.assertEqual(adapter.state, DeviceState.OUTPUT_OFF)
@@ -1652,7 +1652,7 @@ class AdapterAndRunnerTests(unittest.TestCase):
                 67e-3,
                 measure_voltage_autorange=False,
                 measure_voltage_range_si=67e-3,
-            )
+             source_range_si=0.01)
         )
 
         self.assertEqual(adapter.state, DeviceState.OUTPUT_OFF)
@@ -1672,7 +1672,7 @@ class AdapterAndRunnerTests(unittest.TestCase):
 
         with self.assertRaisesRegex(SafetyViolation, "0.001 PLC increments"):
             adapter.configure_source(
-                KeithleySourceRequest("B", "current", 1e-3, 67e-3, nplc=0.0015)
+                KeithleySourceRequest("B", "current", 1e-3, 67e-3, nplc=0.0015, source_range_si=0.01)
             )
 
         self.assertEqual(session.writes[writes_before:], [])
@@ -1697,7 +1697,7 @@ class AdapterAndRunnerTests(unittest.TestCase):
 
         with self.assertRaisesRegex(SafetyViolation, "between 10 mV and 40 V"):
             adapter.configure_source(
-                KeithleySourceRequest("B", "current", 1e-3, 1e-3)
+                KeithleySourceRequest("B", "current", 1e-3, 1e-3, source_range_si=0.01)
             )
 
         self.assertEqual(session.writes[writes_before:], [])
@@ -1725,7 +1725,7 @@ class AdapterAndRunnerTests(unittest.TestCase):
 
         with self.assertRaisesRegex(SafetyViolation, "above 1 A.*6 V"):
             adapter.configure_source(
-                KeithleySourceRequest("B", "current", 2.0, 10.0)
+                KeithleySourceRequest("B", "current", 2.0, 10.0, source_range_si=3.0)
             )
 
         self.assertEqual(session.writes[writes_before:], [])
@@ -1836,7 +1836,7 @@ class AdapterAndRunnerTests(unittest.TestCase):
                 1e-3,
                 nplc=2.0,
                 source_autorange=False,
-                source_range_si=67e-3,
+                source_range_si=100e-3,
                 measure_voltage_autorange=False,
                 measure_voltage_range_si=70e-3,
                 measure_current_autorange=False,
@@ -1894,7 +1894,7 @@ class AdapterAndRunnerTests(unittest.TestCase):
         )
         adapter = KeithleyAdapter(settings, session_factory=FakeVisaSessionFactory(session))
         adapter.connect()
-        adapter.configure_source(KeithleySourceRequest("B", "current", 0.001, 0.067))
+        adapter.configure_source(KeithleySourceRequest("B", "current", 0.001, 0.067, source_range_si=0.01))
         adapter.set_output("B", True)
 
         result = adapter.ramp_to_level(
@@ -1928,7 +1928,7 @@ class AdapterAndRunnerTests(unittest.TestCase):
         )
         adapter = KeithleyAdapter(settings, session_factory=FakeVisaSessionFactory(session))
         adapter.connect()
-        adapter.configure_source(KeithleySourceRequest("B", "current", 0.001, 0.067))
+        adapter.configure_source(KeithleySourceRequest("B", "current", 0.001, 0.067, source_range_si=0.01))
         adapter.set_output("B", True)
 
         writes_before_limit_check = len(session.writes)
@@ -1965,7 +1965,7 @@ class AdapterAndRunnerTests(unittest.TestCase):
         )
         adapter = KeithleyAdapter(settings, session_factory=FakeVisaSessionFactory(session))
         adapter.connect()
-        adapter.configure_source(KeithleySourceRequest("B", "current", 0.001, 0.067))
+        adapter.configure_source(KeithleySourceRequest("B", "current", 0.001, 0.067, source_range_si=0.01))
         adapter.set_output("B", True)
 
         with self.assertRaisesRegex(DeviceError, "source-level readback"):
@@ -1984,6 +1984,27 @@ class AdapterAndRunnerTests(unittest.TestCase):
         self.assertTrue(all(right > left for left, right in zip((0.0, *levels), levels)))
         with self.assertRaisesRegex(SafetyViolation, "requires 100"):
             build_keithley_ramp_levels(0.0, 0.01, 0.0001, max_points=99)
+
+    def test_keithley_ramp_accepts_exact_engineering_unit_boundary(self) -> None:
+        step_a = parse_quantity("100 uA", "current").si_value
+        target_a = parse_quantity("-100 mA", "current").si_value
+
+        levels = build_keithley_ramp_levels(
+            0.0, target_a, step_a, max_points=1000
+        )
+
+        self.assertEqual(len(levels), 1000)
+        self.assertEqual(levels[-1], target_a)
+        self.assertTrue(
+            all(
+                abs(right - left) <= step_a + 1e-15
+                for left, right in zip((0.0, *levels), levels)
+            )
+        )
+        with self.assertRaisesRegex(SafetyViolation, "requires 1001 points"):
+            build_keithley_ramp_levels(
+                0.0, target_a - 1e-9, step_a, max_points=1000
+            )
 
     def test_each_keithley_ivp_trip_forces_both_outputs_off(self) -> None:
         raw = deepcopy(simulation_settings(approved=True).model_dump(mode="python"))
@@ -2012,7 +2033,7 @@ class AdapterAndRunnerTests(unittest.TestCase):
                 )
                 adapter.connect()
                 adapter.configure_source(
-                    KeithleySourceRequest("B", "current", 0.001, 0.067)
+                    KeithleySourceRequest("B", "current", 0.001, 0.067, source_range_si=0.01)
                 )
                 adapter.set_output("B", True)
 
@@ -3256,7 +3277,7 @@ root:
         plan = ExecutionPlan(
             recipe_name="compliance",
             actions=(
-                PlanAction("setup", "configure_keithley", {"request": KeithleySourceRequest("B", "current", .001, .067)}, {"keithley.B.current": .001}),
+                PlanAction("setup", "configure_keithley", {"request": KeithleySourceRequest("B", "current", .001, .067, source_range_si=0.01)}, {"keithley.B.current": .001}),
                 PlanAction("measure", "measure_keithley", {"channel": "B"}, {}),
             ),
             total_points=0,
@@ -3299,7 +3320,7 @@ root:
                     {
                         "request": KeithleySourceRequest(
                             "B", "current", 0.0005, 0.067
-                        )
+                        , source_range_si=0.01)
                     },
                     {},
                 ),
@@ -3372,7 +3393,7 @@ root:
                     {
                         "request": KeithleySourceRequest(
                             "B", "current", 0.0005, 0.067
-                        )
+                        , source_range_si=0.01)
                     },
                     {},
                 ),
@@ -3459,7 +3480,7 @@ root:
         adapter.connect()
 
         adapter.configure_source(
-            KeithleySourceRequest("B", "current", 0.001, 0.067)
+            KeithleySourceRequest("B", "current", 0.001, 0.067, source_range_si=0.01)
         )
 
         self.assertIn("smub.sense = smub.SENSE_LOCAL", session.writes)
@@ -3483,7 +3504,7 @@ root:
                 sense_mode="4wire",
                 measure_voltage_autorange=False,
                 measure_voltage_range_si=0.067,
-            )
+             source_range_si=None)
         )
         self.assertIn("smub.measure.rangev = 0.067", session.writes)
         self.assertIn("smub.sense = smub.SENSE_REMOTE", session.writes)
@@ -3565,7 +3586,7 @@ root:
             recipe_name="test",
             actions=(
                 PlanAction("anritsu", "configure_anritsu", {"config": SpectrumConfig(1e6, 2e6, 0, 101)}, {}),
-                PlanAction("keithley", "configure_keithley", {"request": KeithleySourceRequest("B", "current", .001, .067)}, {"keithley.B.current": .001}),
+                PlanAction("keithley", "configure_keithley", {"request": KeithleySourceRequest("B", "current", .001, .067, source_range_si=0.01)}, {"keithley.B.current": .001}),
                 PlanAction("rigol", "configure_rigol", {"config": RigolChannelConfig(1, "SQU", 1000, .001, -.001)}, {"rigol.1.high_level": .001}),
                 PlanAction("measure", "measure_keithley", {"channel": "B"}, {}),
                 PlanAction(
@@ -3606,7 +3627,7 @@ root:
                 PlanAction(
                     "keithley-config",
                     "configure_keithley",
-                    {"request": KeithleySourceRequest("B", "current", 0.001, 0.067)},
+                    {"request": KeithleySourceRequest("B", "current", 0.001, 0.067, source_range_si=0.01)},
                     {},
                 ),
                 PlanAction("wait", "wait", {"duration_s": 1.0}, {}),

@@ -3,7 +3,7 @@ from __future__ import annotations
 import unittest
 
 from PySide6.QtWidgets import QApplication
-from qfluentwidgets import BodyLabel, CardWidget, SegmentedWidget, SimpleCardWidget
+from qfluentwidgets import BodyLabel, CaptionLabel, CardWidget, SegmentedWidget, SimpleCardWidget
 
 from app.ui.dashboard.discovery_surfaces import SavedInstrumentsView, TcpDiscoveryResultsView
 from app.ui.shell import MainWindow
@@ -49,10 +49,11 @@ class DiscoverySurfaceTests(unittest.TestCase):
     def test_saved_instruments_are_semantic_cards_without_horizontal_overflow(self) -> None:
         view = SavedInstrumentsView()
         view.resize(420, 520)
-        view.set_instruments((
+        values = (
             ("Rigol DG1032Z", "TCPIP0::192.168.123.123::hislip0::INSTR", "system", "Disconnected"),
             ("MOKE Box", "192.168.1.33:10001", "TCP/IP", "Verified"),
-        ))
+        )
+        view.set_instruments(values)
         view.show()
         self.application.processEvents()
 
@@ -60,6 +61,16 @@ class DiscoverySurfaceTests(unittest.TestCase):
         self.assertTrue(all(card.property("stationSurface") == "card" for card in view.cards))
         self.assertEqual(view.scroll_area.horizontalScrollBar().maximum(), 0)
         self.assertTrue(all(label.wordWrap() for card in view.cards for label in card.findChildren(BodyLabel)))
+        original_cards = tuple(view.cards)
+        for _ in range(20):
+            view.set_instruments(iter(values))
+        self.application.processEvents()
+        self.assertEqual(tuple(view.cards), original_cards)
+        view.set_instruments((("Rigol DG1032Z", values[0][1], "system", "Verified"),))
+        self.application.processEvents()
+        self.assertEqual(view.count, 1)
+        self.assertIsNot(view.cards[0], original_cards[0])
+        self.assertTrue(any(label.text() == "Verified" for label in view.cards[0].findChildren(CaptionLabel)))
         view.close()
 
     def test_dashboard_hosts_tcp_and_saved_routes_as_visible_fluent_card_views(self) -> None:
