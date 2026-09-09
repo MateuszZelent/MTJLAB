@@ -40,9 +40,9 @@ class SampleMatrixWidget(SimpleCardWidget):
     # State colors (semi-transparent backgrounds for light/dark compatibility)
     _STATE_COLORS = {
         "untested": None,
-        "completed": QColor(34, 197, 94, 120),  # vibrant green for All Measurements Complete
-        "burned": QColor(220, 38, 38, 130),     # prominent red for Burned / Damaged
-        "measured": QColor(30, 102, 245, 45),   # blue tint
+        "completed": QColor(34, 197, 94, 110),  # vibrant green for All Measurements Complete
+        "burned": QColor(239, 68, 68, 55),      # light red for Burned / Damaged
+        "measured": QColor(34, 197, 94, 55),    # light green for Measured
         "good": QColor(64, 160, 43, 60),        # soft green tint
         "shorted": QColor(210, 15, 57, 75),     # crimson tint
         "open": QColor(223, 142, 29, 70),       # amber tint
@@ -77,7 +77,6 @@ class SampleMatrixWidget(SimpleCardWidget):
             "}"
             "QTableWidget::item {"
             "padding: 2px 3px;"
-            "border-radius: 3px;"
             "}"
             "QTableWidget::item:selected {"
             "background-color: rgba(30, 102, 245, 0.25);"
@@ -411,7 +410,13 @@ class SampleMatrixWidget(SimpleCardWidget):
         )
         col_state_menu.addAction(
             Action(
-                "🔥 Burned / Damaged (Red)",
+                "✔ Measured (Light Green)",
+                triggered=lambda: self.col_state_change_requested.emit(col_key, "measured"),
+            )
+        )
+        col_state_menu.addAction(
+            Action(
+                "🔥 Burned / Damaged (Light Red)",
                 triggered=lambda: self.col_state_change_requested.emit(col_key, "burned"),
             )
         )
@@ -482,7 +487,13 @@ class SampleMatrixWidget(SimpleCardWidget):
         )
         row_state_menu.addAction(
             Action(
-                "🔥 Burned / Damaged (Red)",
+                "✔ Measured (Light Green)",
+                triggered=lambda: self.row_state_change_requested.emit(row_key, "measured"),
+            )
+        )
+        row_state_menu.addAction(
+            Action(
+                "🔥 Burned / Damaged (Light Red)",
                 triggered=lambda: self.row_state_change_requested.emit(row_key, "burned"),
             )
         )
@@ -571,7 +582,7 @@ class SampleMatrixWidget(SimpleCardWidget):
             else f"R{selected_coords[0][0]}:C{selected_coords[0][1]}"
         )
 
-        # Primary user requested quick actions: Completed and Burned
+        # Primary user requested quick actions: Completed, Measured, Burned
         menu.addAction(
             Action(
                 FluentIcon.ACCEPT,
@@ -581,8 +592,15 @@ class SampleMatrixWidget(SimpleCardWidget):
         )
         menu.addAction(
             Action(
+                FluentIcon.COMPLETED,
+                f"✔ Mark {count_desc} as Measured (Light Green)",
+                triggered=lambda: self._apply_batch_state(selected_coords, "measured"),
+            )
+        )
+        menu.addAction(
+            Action(
                 FluentIcon.CANCEL,
-                f"🔥 Mark {count_desc} as Burned / Damaged (Red)",
+                f"🔥 Mark {count_desc} as Burned / Damaged (Light Red)",
                 triggered=lambda: self._apply_batch_state(selected_coords, "burned"),
             )
         )
@@ -593,7 +611,7 @@ class SampleMatrixWidget(SimpleCardWidget):
         for state, label in (
             ("untested", "Untested (Default)"),
             ("good", "Good (Functional)"),
-            ("measured", "Measured"),
+            ("measured", "Measured (Light Green)"),
             ("shorted", "Shorted (Defect)"),
             ("open", "Open (Disconnected)"),
             ("degraded", "Degraded / High Resistance"),

@@ -439,6 +439,10 @@ class SampleInventoryPage(QWidget):
         header_row2.setSpacing(8)
         self.stats_devices_label = CaptionLabel("Devices: -", self.sample_header_card)
         self.stats_tested_label = CaptionLabel("Tested: -", self.sample_header_card)
+        self.stats_measured_label = CaptionLabel("Measured: -", self.sample_header_card)
+        self.stats_measured_label.setStyleSheet(
+            "background: rgba(34, 197, 94, 0.18); color: #15803d; padding: 3px 8px; border-radius: 4px; font-weight: 600;"
+        )
         self.stats_completed_label = CaptionLabel("Completed: -", self.sample_header_card)
         self.stats_completed_label.setStyleSheet(
             "background: rgba(34, 197, 94, 0.18); color: #15803d; padding: 3px 8px; border-radius: 4px; font-weight: 600;"
@@ -455,6 +459,7 @@ class SampleInventoryPage(QWidget):
         for label in (
             self.stats_devices_label,
             self.stats_tested_label,
+            self.stats_measured_label,
             self.stats_completed_label,
             self.stats_burned_label,
             self.stats_runs_label,
@@ -897,12 +902,14 @@ class SampleInventoryPage(QWidget):
             1 for state in sample.device_states.values()
             if state in {"measured", "good", "completed", "burned", "shorted", "open", "degraded"}
         )
+        measured = sum(1 for state in sample.device_states.values() if state == "measured")
         completed = sum(1 for state in sample.device_states.values() if state == "completed")
         burned = sum(1 for state in sample.device_states.values() if state == "burned")
         all_runs = self.store.list_runs_for_sample(sample.sample_id)
 
         self.stats_devices_label.setText(f"Devices: {total}")
         self.stats_tested_label.setText(f"Tested: {tested}/{total}")
+        self.stats_measured_label.setText(f"Measured: {measured}")
         self.stats_completed_label.setText(f"Completed: {completed}")
         self.stats_burned_label.setText(f"Burned: {burned}")
         self.stats_runs_label.setText(f"Sweeps: {len(all_runs)}")
@@ -916,6 +923,7 @@ class SampleInventoryPage(QWidget):
             self.current_sample_path.setText("Catalogue folder: —")
             self.stats_devices_label.setText("Devices: -")
             self.stats_tested_label.setText("Tested: -")
+            self.stats_measured_label.setText("Measured: -")
             self.stats_completed_label.setText("Completed: -")
             self.stats_burned_label.setText("Burned: -")
             self.stats_runs_label.setText("Sweeps: -")

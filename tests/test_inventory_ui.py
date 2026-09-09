@@ -43,7 +43,7 @@ class SampleInventoryUITests(unittest.TestCase):
             rows=("1", "2"),
             cols=("1", "2", "3"),
             col_labels={"3": "200 nm"},
-            device_states={"1,1": "completed", "1,2": "burned", "1,3": "good"},
+            device_states={"1,1": "completed", "1,2": "burned", "1,3": "good", "2,1": "measured"},
         )
         active = ActiveSampleTarget(
             sample_id="SAMPLE-TEST",
@@ -80,6 +80,17 @@ class SampleInventoryUITests(unittest.TestCase):
         item_burned = widget.table.item(0, 1)
         assert item_burned is not None
         self.assertIn("BURNED", item_burned.text())
+        # Assert burned has light red background
+        self.assertEqual(item_burned.background().color().red(), 239)
+        self.assertEqual(item_burned.background().color().alpha(), 55)
+
+        # Assert measured cell has light green background
+        item_measured = widget.table.item(1, 0)
+        assert item_measured is not None
+        self.assertIn("MEASURED", item_measured.text())
+        self.assertEqual(item_measured.background().color().red(), 34)
+        self.assertEqual(item_measured.background().color().green(), 197)
+        self.assertEqual(item_measured.background().color().alpha(), 55)
 
         # Assert active cell contains indicator
         active_item = widget.table.item(0, 2)
@@ -206,6 +217,12 @@ class SampleInventoryUITests(unittest.TestCase):
         assert sample_completed is not None
         self.assertEqual(sample_completed.cell_state("23", "3"), "completed")
         self.assertIn("Completed: 1", page.stats_completed_label.text())
+
+        page._quick_mark_state("measured")
+        sample_measured = self.store.get_sample("XYZ")
+        assert sample_measured is not None
+        self.assertEqual(sample_measured.cell_state("23", "3"), "measured")
+        self.assertIn("Measured: 1", page.stats_measured_label.text())
 
         # Test batch, row, col callbacks
         page._on_batch_cell_state_change_requested([("23", "2"), ("24", "2")], "burned")
