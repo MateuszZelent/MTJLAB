@@ -23,6 +23,7 @@ from app.settings import SettingsRepository
 from app.settings.models import StationSettings
 from app.ui.settings_page import SettingsPage
 from app.ui.settings_page import _SafetyLimitValidationDelegate
+from app.devices.keithley_2600.ui.page import KeithleyConfigurationPanel
 from app.ui.shell import MainWindow
 from tests.helpers import SETTINGS_TEMPLATE
 
@@ -51,6 +52,18 @@ class FluentSettingsPageTests(unittest.TestCase):
             self.assertTrue(
                 all(isinstance(card, CardWidget) for card in page.findChildren(CardWidget))
             )
+            self.assertEqual(
+                page._title("defaults"), "Startup form values (not safety limits)"
+            )
+            safety_labels = {
+                page.limits_table.item(row, 1).text()
+                for row in range(page.limits_table.rowCount())
+                if page.limits_table.item(row, 1) is not None
+            }
+            self.assertIn(
+                "Emergency measured-voltage cutoff (forces A+B OFF)",
+                safety_labels,
+            )
             self.assertTrue(
                 all(
                     isinstance(editor, (CheckBox, ComboBox, LineEdit, SpinBox))
@@ -59,6 +72,47 @@ class FluentSettingsPageTests(unittest.TestCase):
             )
         finally:
             page.close()
+
+    def test_keithley_panel_explains_working_allowed_and_emergency_limits(self) -> None:
+        settings = SettingsRepository(SETTINGS_TEMPLATE).load().settings
+        panel = KeithleyConfigurationPanel(settings)
+        try:
+            panel.resize(980, 620)
+            panel.show()
+            self.application.processEvents()
+
+            summary = panel.safety_boundary_summary
+            self.assertTrue(summary.isVisible())
+            self.assertGreater(summary.geometry().width(), 0)
+            self.assertGreater(summary.geometry().height(), 0)
+            self.assertIn("Working voltage compliance", summary.text())
+            self.assertIn("allowed compliance setting", summary.text())
+            self.assertIn("emergency measured-voltage cutoff", summary.text())
+            self.assertIn("forces A+B OFF", summary.text())
+
+            panel.compliance.setText("70 mV")
+            self.application.processEvents()
+            self.assertTrue(summary.property("safetyWarning"))
+            self.assertIn("WARNING — no trip headroom", summary.text())
+            self.assertIn("both cutoff sides outside ±70 mV", summary.text())
+
+            updated_raw = settings.model_dump(mode="python")
+            trip = updated_raw["devices"]["keithley"]["safety"]["channels"]["B"][
+                "lab_limits"
+            ]["measured_voltage_trip"]
+            trip["min"] = "-75 mV"
+            trip["max"] = "75 mV"
+            panel.set_settings(StationSettings.model_validate(updated_raw))
+            self.application.processEvents()
+            self.assertFalse(summary.property("safetyWarning"))
+            self.assertIn("-75 mV…75 mV", summary.text())
+
+            panel.resize(620, 520)
+            self.application.processEvents()
+            self.assertTrue(summary.isVisible())
+            self.assertGreater(summary.geometry().height(), 0)
+        finally:
+            panel.close()
 
     def test_every_safety_limit_row_has_a_persisted_disable_control(self) -> None:
         page = SettingsPage(SettingsRepository(".config/settings.yml"))

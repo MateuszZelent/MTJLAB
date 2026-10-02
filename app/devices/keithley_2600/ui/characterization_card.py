@@ -867,6 +867,10 @@ class KeithleyCharacterizationCard(QWidget):
                 request.measure_current_range_si or 0.0, DIMENSION_CURRENT
             )
         )
+        if mode == "current":
+            current_range = f"from source ({source_range})"
+        else:
+            voltage_range = f"from source ({source_range})"
         sense = "2-wire local" if request.sense_mode == "2wire" else "4-wire Kelvin"
         self.shared_configuration_label.setText(
             "Inherited from Keithley card · "
@@ -1363,10 +1367,6 @@ class KeithleyCharacterizationCard(QWidget):
         field.setProperty("characterizationField", True)
         editor.setMaximumWidth(85)
         field.range_pill.setMinimumWidth(120)
-        field.edit_button.setFixedWidth(68)
-        field.edit_button.setFixedHeight(30)
-        field.edit_button.setIcon(FluentIcon.EDIT)
-        field.edit_button.setText("Edit")
         return field
 
     def limit_values(self, key: str) -> tuple[object, object]:

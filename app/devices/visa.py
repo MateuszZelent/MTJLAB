@@ -245,11 +245,20 @@ class FakeVisaSession:
     read_termination: str | None = None
     write_termination: str | None = None
     closed: bool = False
+    _keithley_sim: object = field(default=None, init=False, repr=False)
 
     def write(self, command: str) -> None:
         if self.closed:
             raise DeviceError("The fake VISA session is closed.")
         self.writes.append(command)
+        if re.match(r"^smu[ab]\.", command):
+            self._keithley_state()._write(command)
+
+    def _keithley_state(self):
+        if self._keithley_sim is None:
+            from app.devices.simulators import KeithleySimulator
+            self._keithley_sim = KeithleySimulator()
+        return self._keithley_sim
 
     def query(self, command: str) -> str:
         if self.closed:
@@ -257,6 +266,14 @@ class FakeVisaSession:
         self.writes.append(command)
         response = self.responses.get(command)
         if response is None:
+            if command.startswith("print(") and "," in command and all(re.fullmatch(r"smu[ab]\.(source|measure)\.range[iv]", f.strip()) for f in command[6:-1].split(",")):
+                return "\t".join(self.query(f"print({field.strip()})") for field in command[6:-1].split(","))
+            if re.fullmatch(
+                r"print\(smu[ab]\.(source|measure)\."
+                r"(range[iv]|autorange[iv]|func|highc|delay|delayfactor)\)",
+                command,
+            ):
+                return self._keithley_state()._query(command)
             equality = re.match(
                 r"^print\(((smu[ab]\.(?:(?:source|measure)\.[A-Za-z0-9_]+|sense))"
                 r"\s*==\s*(smu[ab]\.[A-Z0-9_]+))\)$",
@@ -264,6 +281,11 @@ class FakeVisaSession:
             )
             if equality:
                 field, expected = equality.group(2), equality.group(3)
+                if (
+                    field.endswith(".measure.delay")
+                    and expected.endswith(".DELAY_AUTO")
+                ):
+                    return self._keithley_state()._query(command)
                 assignment = re.compile(
                     rf"^{re.escape(field)}\s*=\s*(.+)$", re.IGNORECASE
                 )

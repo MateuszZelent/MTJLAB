@@ -12,6 +12,7 @@ from app.devices.base import InstrumentSession
 from app.devices.simulation import SimulationContext
 from app.domain.errors import ConnectionError, DeviceError
 from app.settings.models import StationSettings
+from app.safety.keithley import KEITHLEY_2602A_CURRENT_RANGES, KEITHLEY_2602A_VOLTAGE_RANGES, selected_keithley_range
 
 _SCPI_NUMBER = r"[+-]?(?:\d+(?:\.\d*)?|\.\d+)(?:[eE][+-]?\d+)?"
 
@@ -494,6 +495,7 @@ class KeithleySimulator(_BaseSimulator):
             self.programmed.update(
                 {
                     f"{smu}.source.offmode": f"{smu}.OUTPUT_HIGH_Z",
+                    f"{smu}.source.highc": "0",
                     f"{smu}.source.func": f"{smu}.OUTPUT_DCAMPS",
                     f"{smu}.source.leveli": "0",
                     f"{smu}.source.levelv": "0",
@@ -502,12 +504,15 @@ class KeithleySimulator(_BaseSimulator):
                     f"{smu}.source.autorangei": f"{smu}.AUTORANGE_ON",
                     f"{smu}.source.autorangev": f"{smu}.AUTORANGE_ON",
                     f"{smu}.source.rangei": "0.1",
-                    f"{smu}.source.rangev": "20",
+                    f"{smu}.source.rangev": "0.1",
                     f"{smu}.measure.nplc": "1",
                     f"{smu}.measure.autorangev": f"{smu}.AUTORANGE_ON",
                     f"{smu}.measure.autorangei": f"{smu}.AUTORANGE_ON",
-                    f"{smu}.measure.rangev": "20",
+                    f"{smu}.measure.rangev": "0.1",
                     f"{smu}.measure.rangei": "0.1",
+                    f"{smu}.source.delay": "0",
+                    f"{smu}.measure.delay": f"{smu}.DELAY_AUTO",
+                    f"{smu}.measure.delayfactor": "1",
                     f"{smu}.sense": f"{smu}.SENSE_LOCAL",
                 }
             )
@@ -533,7 +538,18 @@ class KeithleySimulator(_BaseSimulator):
             command,
         )
         if assignment:
-            self.programmed[assignment.group(1)] = assignment.group(2)
+            field, value = assignment.groups()
+            self.programmed[field] = value
+            if re.search(r"\.range[iv]$", field):
+                ranges = KEITHLEY_2602A_CURRENT_RANGES if field.endswith("i") else KEITHLEY_2602A_VOLTAGE_RANGES
+                self.programmed[field] = str(selected_keithley_range(float(value), ranges))
+                self.programmed[field.replace(".range", ".autorange")] = f"{field[:4]}.AUTORANGE_OFF"
+            if ".source." in field:
+                for suffix, ranges in (("i", KEITHLEY_2602A_CURRENT_RANGES), ("v", KEITHLEY_2602A_VOLTAGE_RANGES)):
+                    smu = field[:4]
+                    if self.programmed.get(f"{smu}.source.autorange{suffix}") in ("1", f"{smu}.AUTORANGE_ON"):
+                        level = abs(float(self.programmed[f"{smu}.source.level{suffix}"]))
+                        self.programmed[f"{smu}.source.range{suffix}"] = str(selected_keithley_range(max(level, ranges[0]), ranges))
         mode = re.match(r"^(smu[ab])\.source\.func\s*=\s*\1\.(OUTPUT_DCAMPS|OUTPUT_DCVOLTS)$", command)
         if mode:
             self.mode[mode.group(1)] = "current" if mode.group(2) == "OUTPUT_DCAMPS" else "voltage"
@@ -559,6 +575,8 @@ class KeithleySimulator(_BaseSimulator):
             self.output[output.group(1)] = output.group(2) == "OUTPUT_ON"
 
     def _query(self, command: str) -> str:
+        if command.startswith("print(") and "," in command and all(re.fullmatch(r"smu[ab]\.(source|measure)\.range[iv]", f.strip()) for f in command[6:-1].split(",")):
+            return "\t".join(self._query(f"print({field.strip()})") for field in command[6:-1].split(","))
         if command == "*IDN?":
             return "KEITHLEY INSTRUMENTS,2602A,SIM000001,sim-1.0"
         if command == "print(errorqueue.count)":
@@ -596,7 +614,12 @@ class KeithleySimulator(_BaseSimulator):
             command,
         )
         if readback and readback.group(1) in self.programmed:
-            return self.programmed[readback.group(1)]
+            field = readback.group(1)
+            smu = field[:4]
+            suffix = "i" if self.mode[smu] == "current" else "v"
+            if field == f"{smu}.measure.range{suffix}":
+                return self.programmed[f"{smu}.source.range{suffix}"]
+            return self.programmed[field]
         measure_iv = re.match(r"^print\((smu[ab])\.measure\.iv\(\)\)$", command)
         if measure_iv:
             voltage, current = self._measured_iv(measure_iv.group(1))
@@ -642,6 +665,9 @@ class KeithleySimulator(_BaseSimulator):
         if self.noise_fraction:
             voltage *= 1.0 + self.noise_fraction * math.sin(index * 0.73 + 0.31)
             current *= 1.0 + self.noise_fraction * math.sin(index * 0.91 + 1.17)
+        for suffix, value, ranges in (("v", voltage, KEITHLEY_2602A_VOLTAGE_RANGES), ("i", current, KEITHLEY_2602A_CURRENT_RANGES)):
+            if self.programmed[f"{smu}.measure.autorange{suffix}"] in ("1", f"{smu}.AUTORANGE_ON"):
+                self.programmed[f"{smu}.measure.range{suffix}"] = str(selected_keithley_range(max(abs(value), ranges[0]), ranges))
         return voltage, current
 
 

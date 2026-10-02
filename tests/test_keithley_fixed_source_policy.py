@@ -95,7 +95,7 @@ def test_measure_only_has_no_source_range(channel):
     assert not request.source_autorange
 
 
-def test_source_selector_is_fixed_and_visible_at_desktop_size(tmp_path):
+def test_source_selector_is_fixed_and_visible_in_advanced_modal(tmp_path):
     app = QApplication.instance() or QApplication([])
     from pathlib import Path
 
@@ -111,7 +111,7 @@ def test_source_selector_is_fixed_and_visible_at_desktop_size(tmp_path):
     try:
         for channel, fixed in [("A", "10 mA"), ("B", "1 A")]:
             panel.load_snapshot(KeithleyConfigurationSnapshot(channel=channel, source_range=fixed))
-            panel.set_advanced_ranges_expanded(False)
+            panel.advanced_ranges_dialog.show()
             app.processEvents()
             assert not panel.source_autorange.isChecked()
             assert not panel.source_autorange.isEnabled()
@@ -119,17 +119,25 @@ def test_source_selector_is_fixed_and_visible_at_desktop_size(tmp_path):
             assert panel.source_range.width() > 30
             assert panel.source_range.isEnabled()
             assert panel.snapshot().source_range == fixed
-        assert panel.grab().save(str(tmp_path / "fixed-source-range.png"))
+        assert panel.advanced_ranges_dialog.grab().save(
+            str(tmp_path / "fixed-source-range-modal.png")
+        )
+        panel.advanced_ranges_dialog.hide()
+        app.processEvents()
+        assert panel.advanced_ranges_button.isVisible()
+        assert not panel.source_range.isVisible()
         settings = panel._settings
         settings.keithley.safety.channels["B"].defaults["source_autorange"] = True
         panel.set_settings(settings)
-        panel.set_advanced_ranges_expanded(False)
+        panel.advanced_ranges_dialog.show()
         app.processEvents()
         assert panel.source_autorange.isVisible()
         assert panel.source_autorange.isChecked()
         assert not panel.source_autorange.isEnabled()
         assert not panel.source_range.isVisible()
-        assert panel.grab().save(str(tmp_path / "settings-auto-indicator.png"))
+        assert panel.advanced_ranges_dialog.grab().save(
+            str(tmp_path / "settings-auto-indicator-modal.png")
+        )
     finally:
         panel.close()
         panel.deleteLater()

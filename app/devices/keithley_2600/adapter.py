@@ -32,6 +32,9 @@ from app.safety.keithley import (
     KEITHLEY_2602A_VOLTAGE_RANGES,
     KeithleySourceRequest,
     quantize_keithley_value,
+    coupled_measurement_suffix,
+    selected_keithley_range,
+    validate_keithley_range_pair,
     validate_source_range,
     validate_keithley_measurement,
     validate_keithley_source,
@@ -55,6 +58,7 @@ class KeithleyMeasurement:
     compliance_stop_required: bool = False
     source_level_si: float | None = None
     source_mode: Literal["current", "voltage"] | None = None
+    range_readback: dict[str, object] | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -75,6 +79,11 @@ class KeithleyChannelConfigurationReadback:
     measure_voltage_range_v: float
     measure_current_autorange: bool
     measure_current_range_a: float
+    # The instrument exposes delays separately from the application's
+    # point-settling wait. ``None`` means the instrument is using DELAY_AUTO.
+    source_delay_s: float = 0.0
+    measure_delay_s: float | None = None
+    measure_delay_factor: float = 1.0
 
 
 @dataclass(frozen=True, slots=True)
@@ -172,6 +181,7 @@ class KeithleyAdapter(DeviceAdapter):
         self._factory = session_factory or PyVisaSessionFactory()
         self._session: InstrumentSession | None = None
         self._last_request: dict[str, KeithleySourceRequest] = {}
+        self._range_readbacks: dict[str, dict[str, object]] = {}
         self._last_safe_request: dict[str, KeithleySourceRequest] = {}
         self._compliance_channels: set[Literal["A", "B"]] = set()
         self._compliance_warnings: set[Literal["A", "B"]] = set()
@@ -307,6 +317,7 @@ class KeithleyAdapter(DeviceAdapter):
                 self._identity = None
                 self._capabilities = None
                 self._last_request.clear()
+                self._range_readbacks.clear()
                 self._last_safe_request.clear()
                 self._compliance_channels.clear()
                 self._compliance_warnings.clear()
@@ -498,6 +509,7 @@ class KeithleyAdapter(DeviceAdapter):
         if default_stop:
             self._compliance_channels.update(self._compliance_warnings)
         self._last_request.clear()
+        self._range_readbacks.clear()
 
     def refresh_station_context(self, station: object) -> None:
         if not isinstance(station, StationSettings):
@@ -692,6 +704,9 @@ class KeithleyAdapter(DeviceAdapter):
                 f"{smu}.measure.autorangei",
                 (("off", "AUTORANGE_OFF"), ("on", "AUTORANGE_ON")),
             )
+            measure_delay_auto = self._query_boolean(
+                f"{smu}.measure.delay == {smu}.DELAY_AUTO"
+            )
             snapshots.append(
                 KeithleyChannelConfigurationReadback(
                     channel=channel,
@@ -717,6 +732,17 @@ class KeithleyAdapter(DeviceAdapter):
                     measure_current_autorange=measure_current_autorange == "on",
                     measure_current_range_a=self._query_finite_float(
                         f"{smu}.measure.rangei"
+                    ),
+                    source_delay_s=self._query_finite_float(
+                        f"{smu}.source.delay"
+                    ),
+                    measure_delay_s=(
+                        None
+                        if measure_delay_auto
+                        else self._query_finite_float(f"{smu}.measure.delay")
+                    ),
+                    measure_delay_factor=self._query_finite_float(
+                        f"{smu}.measure.delayfactor"
                     ),
                 )
             )
@@ -745,6 +771,18 @@ class KeithleyAdapter(DeviceAdapter):
         self._compliance_warnings.discard(request.channel)
         smu = self._smu(request.channel)
         session = self._require_session()
+        try:
+            if self._query_boolean(f"{smu}.source.highc"):
+                raise SafetyViolation(
+                    "Keithley high-C mode is not qualified for this range configuration; "
+                    "disable it through a qualified procedure before configuring."
+                )
+        except Exception:
+            if any(self._output_states.values()):
+                self.emergency_off()
+                if self._state is not DeviceState.UNKNOWN:
+                    self._state = DeviceState.FAULT
+            raise
         session.write(f"{smu}.source.output = {smu}.OUTPUT_OFF")
         self._output_states[request.channel] = False
         self._ensure_normal_output_off_mode(request.channel)
@@ -776,7 +814,20 @@ class KeithleyAdapter(DeviceAdapter):
     def _verify_applied_configuration(
         self, expected: KeithleySourceRequest, *, expected_output: bool = False
     ) -> None:
-        """Read back every programmed source and measurement-path parameter."""
+        """Verify configuration without leaving energized outputs on a readback fault."""
+        try:
+            self._verify_applied_configuration_fields(expected, expected_output=expected_output)
+        except Exception:
+            if expected_output or any(self._output_states.values()):
+                self.emergency_off()
+                if self._state is not DeviceState.UNKNOWN:
+                    self._state = DeviceState.FAULT
+            raise
+
+    def _verify_applied_configuration_fields(
+        self, expected: KeithleySourceRequest, *, expected_output: bool = False
+    ) -> None:
+        """Compare retained preferences separately from source-coupled readback."""
 
         session = self._require_session()
         smu = self._smu(expected.channel)
@@ -861,18 +912,7 @@ class KeithleyAdapter(DeviceAdapter):
             "AUTORANGE_ON" if expected.measure_current_autorange else "AUTORANGE_OFF",
             1 if expected.measure_current_autorange else 0,
         )
-        if expected.measure_voltage_range_si is not None:
-            selected_range(
-                f"{smu}.measure.rangev",
-                expected.measure_voltage_range_si,
-                self._MODEL_2602A_VOLTAGE_RANGES,
-            )
-        if expected.measure_current_range_si is not None:
-            selected_range(
-                f"{smu}.measure.rangei",
-                expected.measure_current_range_si,
-                self._MODEL_2602A_CURRENT_RANGES,
-            )
+        self._range_readbacks[expected.channel] = self._read_verified_ranges(expected)
         if expected.mode != "measure_only":
             suffix = "i" if expected.mode == "current" else "v"
             enum(
@@ -910,10 +950,105 @@ class KeithleyAdapter(DeviceAdapter):
                 + "; ".join(mismatches)
             )
 
+    def _read_verified_ranges(self, expected: KeithleySourceRequest) -> dict[str, object]:
+        session = self._require_session()
+        smu = self._smu(expected.channel)
+        mismatches: list[str] = []
+
+        def query(field: str) -> str:
+            return session.query(f"print({field})").strip()
+
+        hardware_mode = expected.mode
+        if hardware_mode == "measure_only":
+            function = query(f"{smu}.source.func").upper().rsplit(".", 1)[-1]
+            try:
+                numeric_function = float(function)
+            except ValueError:
+                numeric_function = None
+            if function == "OUTPUT_DCAMPS" or numeric_function == 0:
+                hardware_mode = "current"
+            elif function == "OUTPUT_DCVOLTS" or numeric_function == 1:
+                hardware_mode = "voltage"
+            else:
+                raise DeviceError(f"Unknown Keithley source function: {function!r}")
+        suffix = coupled_measurement_suffix(hardware_mode)
+        fields = (f"{smu}.source.range{suffix}", f"{smu}.measure.rangei", f"{smu}.measure.rangev")
+        response = session.query(f"print({', '.join(fields)})")
+        try:
+            source_range, current_range, voltage_range = (
+                float(v) for v in re.split(r"[,;\t\s]+", response.strip())
+            )
+        except (ValueError, TypeError) as exc:
+            raise DeviceError("Invalid Keithley range snapshot.") from exc
+        for value, available in (
+            (
+                source_range,
+                self._MODEL_2602A_CURRENT_RANGES
+                if suffix == "i"
+                else self._MODEL_2602A_VOLTAGE_RANGES,
+            ),
+            (current_range, self._MODEL_2602A_CURRENT_RANGES),
+            (voltage_range, self._MODEL_2602A_VOLTAGE_RANGES),
+        ):
+            nominal = selected_keithley_range(value, available)
+            if not math.isclose(value, nominal, rel_tol=1e-9, abs_tol=1e-12):
+                mismatches.append(f"non-nominal range readback {value:.12g}")
+        coupled_range = current_range if suffix == "i" else voltage_range
+        if not math.isclose(coupled_range, source_range, rel_tol=1e-9, abs_tol=1e-12):
+            mismatches.append(
+                f"{smu}.measure.range{suffix} {coupled_range:.12g} != source range {source_range:.12g}"
+            )
+        if expected.mode != "measure_only" and abs(expected.level_si) > source_range * (1 + 1e-12):
+            mismatches.append("source range does not cover configured level")
+        if (
+            expected.mode != "measure_only"
+            and not expected.source_autorange
+            and (expected.source_range_si is None or not math.isclose(
+                source_range, expected.source_range_si, rel_tol=1e-9, abs_tol=1e-12
+            ))
+        ):
+            mismatches.append("source range differs from configured fixed range")
+        for quantity, actual, preference, available in (
+            (
+                "i",
+                current_range,
+                expected.measure_current_range_si,
+                self._MODEL_2602A_CURRENT_RANGES,
+            ),
+            (
+                "v",
+                voltage_range,
+                expected.measure_voltage_range_si,
+                self._MODEL_2602A_VOLTAGE_RANGES,
+            ),
+        ):
+            if quantity != suffix and preference is not None:
+                nominal = selected_keithley_range(preference, available)
+                if not math.isclose(actual, nominal, rel_tol=1e-9, abs_tol=1e-12):
+                    mismatches.append(
+                        f"{smu}.measure.range{quantity} selected {actual:.12g}; expected hardware range {nominal:.12g}"
+                    )
+        validate_keithley_range_pair(
+            hardware_mode, source_range, voltage_range if suffix == "i" else current_range
+        )
+        if mismatches:
+            raise DeviceError("Keithley configuration readback mismatch: " + "; ".join(mismatches))
+        return {
+            "source_mode": hardware_mode,
+            "source_range_si": source_range,
+            "measure_current_range_a": current_range,
+            "measure_voltage_range_v": voltage_range,
+            "timestamp_epoch_s": time.time(),
+            "output_enabled": self._output_states[expected.channel],
+            "kind": "configuration_readback",
+        }
+
+    def last_range_readback(self, channel: Literal["A", "B"]) -> dict[str, object]:
+        """Last verified ranges, distinct from retained request preferences; no I/O."""
+        return dict(self._range_readbacks.get(channel, {}))
+
     @staticmethod
-    def _selected_hardware_range(
-        requested_value: float, available: tuple[float, ...]
-    ) -> float:
+    def _selected_hardware_range(requested_value: float, available: tuple[float, ...]) -> float:
         requested = abs(requested_value)
         for hardware_range in available:
             if requested <= hardware_range or math.isclose(
@@ -1030,24 +1165,13 @@ class KeithleyAdapter(DeviceAdapter):
         suffix = "i" if mode == "current" else "v"
         session = self._require_session()
         output_before = self._output_is_enabled(channel)
-        if updated.level_si == current.level_si:
-            if output_before != self._output_states[channel]:
-                self._fail_measurement_output_invariant(
-                    "Keithley OUTPUT state changed before a source-level update."
-                )
-            try:
-                self._verify_applied_configuration(
-                    current, expected_output=output_before
-                )
-            except Exception:
-                if output_before:
-                    self.emergency_off()
-                raise
-            self._output_states[channel] = output_before
-            self._update_aggregate_output_state()
-            return current.level_si
+        if output_before != self._output_states[channel]:
+            self._fail_measurement_output_invariant(
+                "Keithley OUTPUT state changed before a source-level update."
+            )
         try:
-            session.write(f"{smu}.source.level{suffix} = {updated.level_si:.12g}")
+            if updated.level_si != current.level_si:
+                session.write(f"{smu}.source.level{suffix} = {updated.level_si:.12g}")
             self._check_errors()
             actual = self._query_finite_float(f"{smu}.source.level{suffix}")
             output_after = self._output_is_enabled(channel)
@@ -1061,10 +1185,25 @@ class KeithleyAdapter(DeviceAdapter):
                 "Keithley OUTPUT state changed during a source-level update."
             )
         if not math.isclose(actual, updated.level_si, rel_tol=1e-9, abs_tol=1e-12):
+            self.emergency_off()
+            if self._state is not DeviceState.UNKNOWN:
+                self._state = DeviceState.FAULT
             raise DeviceError(
                 f"Keithley source-level readback {actual:.12g} does not match "
                 f"{updated.level_si:.12g} SI."
             )
+        # Only source AUTO can change the source range after a level update.
+        # Fixed-range operation needs no repeated full configuration readback.
+        if updated.source_autorange and updated.level_si != current.level_si:
+            try:
+                ranges = self._read_verified_ranges(updated)
+                ranges["kind"] = "source_level_update_readback"
+                self._range_readbacks[channel] = ranges
+            except Exception:
+                self.emergency_off()
+                if self._state is not DeviceState.UNKNOWN:
+                    self._state = DeviceState.FAULT
+                raise
         self._last_request[channel] = updated
         self._output_states[channel] = output_after
         self._update_aggregate_output_state()
@@ -1325,15 +1464,12 @@ class KeithleyAdapter(DeviceAdapter):
 
     @staticmethod
     def _measurement_range_and_sense_commands(smu: str, request: KeithleySourceRequest) -> list[str]:
-        commands = [
-            f"{smu}.measure.autorangev = {smu}.{'AUTORANGE_ON' if request.measure_voltage_autorange else 'AUTORANGE_OFF'}",
-            f"{smu}.measure.autorangei = {smu}.{'AUTORANGE_ON' if request.measure_current_autorange else 'AUTORANGE_OFF'}",
-            f"{smu}.sense = {smu}.{'SENSE_LOCAL' if request.sense_mode == '2wire' else 'SENSE_REMOTE'}",
-        ]
-        if request.measure_voltage_range_si is not None:
-            commands.append(f"{smu}.measure.rangev = {request.measure_voltage_range_si:.12g}")
-        if request.measure_current_range_si is not None:
-            commands.append(f"{smu}.measure.rangei = {request.measure_current_range_si:.12g}")
+        commands = [f"{smu}.sense = {smu}.{'SENSE_LOCAL' if request.sense_mode == '2wire' else 'SENSE_REMOTE'}"]
+        for suffix, value, auto in (("v", request.measure_voltage_range_si, request.measure_voltage_autorange),
+                                    ("i", request.measure_current_range_si, request.measure_current_autorange)):
+            if value is not None:
+                commands.append(f"{smu}.measure.range{suffix} = {value:.12g}")
+            commands.append(f"{smu}.measure.autorange{suffix} = {smu}.{'AUTORANGE_ON' if auto else 'AUTORANGE_OFF'}")
         return commands
 
     def last_source_request(
@@ -1369,14 +1505,9 @@ class KeithleyAdapter(DeviceAdapter):
                 f"Keithley {channel} OUTPUT changed outside the configured control path."
             )
         request = self.last_source_request(channel)
-        try:
-            self._verify_applied_configuration(
-                request, expected_output=expected_enabled
-            )
-        except Exception:
-            if observed:
-                self.emergency_off()
-            raise
+        self._verify_applied_configuration(
+            request, expected_output=expected_enabled
+        )
         if observed != expected_enabled:
             if observed:
                 self.emergency_off()
@@ -1644,6 +1775,8 @@ class KeithleyAdapter(DeviceAdapter):
             stop_required or compliance_latched,
             request.level_si if request is not None else None,
             request.mode if request is not None and request.mode in {"current", "voltage"} else None,
+            # No per-point range query; do not present a cached range as fresh.
+            None,
         )
 
     def _fail_measurement_output_invariant(self, message: str) -> None:

@@ -147,17 +147,28 @@ class MainWindow(FluentWindow):
             else (Path.cwd() / raw_output_dir).resolve()
         )
         legacy_db_path = output_dir / "inventory.db"
-        configured_catalogue_root = InventoryStore.catalogue_root_from_database(
-            legacy_db_path
-        )
-        if configured_catalogue_root is not None:
-            catalogue_root = configured_catalogue_root
-        elif raw_output_dir.is_absolute():
-            # Isolated test/custom profiles remain isolated instead of
-            # touching the user's default Documents/PyLab catalogue.
-            catalogue_root = output_dir
+        raw_catalogue_dir = str(
+            self._settings.storage.get("catalogue_directory", "") or ""
+        ).strip()
+        if raw_catalogue_dir:
+            configured_path = Path(raw_catalogue_dir).expanduser()
+            catalogue_root = (
+                configured_path
+                if configured_path.is_absolute()
+                else (self._repository.path.parent / configured_path).resolve()
+            )
         else:
-            catalogue_root = default_catalogue_root()
+            legacy_catalogue_root = InventoryStore.catalogue_root_from_database(
+                legacy_db_path
+            )
+            if legacy_catalogue_root is not None:
+                catalogue_root = legacy_catalogue_root
+            elif raw_output_dir.is_absolute():
+                # Isolated test/custom profiles remain isolated instead of
+                # touching the user's default Documents/PyLab catalogue.
+                catalogue_root = output_dir
+            else:
+                catalogue_root = default_catalogue_root()
         self.inventory_store = InventoryStore.open_for_catalogue_root(
             catalogue_root,
             legacy_db_path=legacy_db_path,
@@ -484,6 +495,9 @@ class MainWindow(FluentWindow):
             simulation=self._simulation,
         )
         self.inventory_page = SampleInventoryPage(self.inventory_store, self)
+        self.inventory_page.catalogue_root_changed.connect(
+            self._persist_catalogue_root
+        )
         self.inventory_page.active_target_changed.connect(self._on_active_sample_target_changed)
         self.inventory_page.open_result_requested.connect(self._open_inventory_result)
         self.recipe_page.change_target_requested.connect(lambda: self._navigate_to("inventory"))
@@ -1130,9 +1144,17 @@ class MainWindow(FluentWindow):
                 "DUT measured-value trip thresholds."
             )
         mapped = mappings[key]
+        labels = {
+            "source_current": "allowed source-current setting",
+            "source_voltage": "allowed source-voltage setting",
+            "current_compliance": "allowed current-compliance setting",
+            "voltage_compliance": "allowed voltage-compliance setting",
+            "point_settle_time": "allowed point settling time",
+            "max_abs_power": "maximum absolute power",
+        }
         path = ("devices", "keithley", "safety", "channels", channel, "lab_limits", mapped)
         return (
-            f"Keithley CH{channel} — {mapped.replace('_', ' ')}",
+            f"Keithley CH{channel} — {labels[mapped]}",
             path,
             key != "max_abs_power",
         )
@@ -1373,6 +1395,23 @@ class MainWindow(FluentWindow):
             self.settings_page.accept_external_snapshot(self._settings, loaded.raw)
         else:
             self.settings_page.reload()
+
+    def _persist_catalogue_root(self, root: str) -> None:
+        """Persist the catalogue locator outside the database it locates."""
+
+        resolved = str(Path(root).expanduser().resolve())
+        try:
+            loaded = self._repository.load()
+            loaded.raw.setdefault("storage", {})["catalogue_directory"] = resolved
+            self._settings = self._repository.save_raw(loaded.raw)
+        except ConfigurationError as exc:
+            self._log(f"Catalogue root is active but could not be saved: {exc}")
+            return
+        if self.settings_page._dirty:
+            self.settings_page.accept_external_snapshot(self._settings, loaded.raw)
+        else:
+            self.settings_page.reload()
+        self._log(f"Samples catalogue location saved: {resolved}")
 
     def _restore_workspace(self) -> None:
         settings = QSettings("LabControl", "LabControl")

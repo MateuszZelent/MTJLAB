@@ -9,9 +9,12 @@ from PySide6.QtCore import Qt
 from PySide6.QtGui import QTextOption
 from PySide6.QtWidgets import (
     QDialog,
+    QFrame,
     QGridLayout,
     QHBoxLayout,
     QHeaderView,
+    QScrollArea,
+    QSizePolicy,
     QStackedWidget,
     QTableWidgetItem,
     QVBoxLayout,
@@ -54,23 +57,23 @@ class ColumnLabelsEdit(PlainTextEdit):
 
 
 class RenumberRowsDialog(QDialog):
-    """Dialog allowing users to quickly shift or renumber all rows for a sample."""
+    """Resize a sample grid and optionally renumber its rows."""
 
     def __init__(self, sample: Sample, parent: QWidget | None = None) -> None:
         super().__init__(parent)
         self._sample = sample
-        self.setWindowTitle(f"Renumber Rows · {sample.name}")
-        self.setMinimumWidth(440)
+        self.setWindowTitle(f"Resize / Renumber Grid · {sample.name}")
+        self.setMinimumWidth(500)
         self.setModal(True)
 
         layout = QVBoxLayout(self)
         layout.setContentsMargins(20, 20, 20, 20)
         layout.setSpacing(14)
 
-        layout.addWidget(SubtitleLabel(f"Renumber Rows: {sample.name}", self))
+        layout.addWidget(SubtitleLabel(f"Resize Grid: {sample.name}", self))
         layout.addWidget(
             CaptionLabel(
-                "Change starting row number (e.g. from 1..10 to 20..30) while preserving existing device measurements and statuses.",
+                "Set the exact row and column counts. Existing cells keep their measurements and status where their coordinates remain valid.",
                 self,
             )
         )
@@ -84,41 +87,55 @@ class RenumberRowsDialog(QDialog):
         grid.setHorizontalSpacing(12)
         grid.setVerticalSpacing(10)
 
-        # Current row info
-        grid.addWidget(BodyLabel("Current Rows:", card), 0, 0)
+        # Current grid info
+        grid.addWidget(BodyLabel("Current grid:", card), 0, 0)
         first_r = sample.rows[0] if sample.rows else "1"
         last_r = sample.rows[-1] if sample.rows else "1"
-        curr_label = CaptionLabel(f"Row {first_r} to Row {last_r} ({len(sample.rows)} rows)", card)
+        curr_label = CaptionLabel(
+            f"{len(sample.rows)} rows × {len(sample.cols)} columns "
+            f"(row IDs {first_r}…{last_r})",
+            card,
+        )
         grid.addWidget(curr_label, 0, 1)
 
         # Start row
-        grid.addWidget(BodyLabel("Start Row Number *:", card), 1, 0)
+        grid.addWidget(BodyLabel("First row ID:", card), 1, 0)
         self.start_spin = SpinBox(card)
         self.start_spin.setRange(0, 5000)
-        default_start = 20 if first_r == "1" else (int(first_r) if first_r.isdigit() else 20)
+        default_start = int(first_r) if first_r.isdigit() else 1
         self.start_spin.setValue(default_start)
+        self.start_spin.setToolTip("Identifier assigned to the first row")
         grid.addWidget(self.start_spin, 1, 1)
 
         # End row
-        grid.addWidget(BodyLabel("End Row Number:", card), 2, 0)
+        grid.addWidget(BodyLabel("Last row ID:", card), 2, 0)
         self.end_spin = SpinBox(card)
-        self.end_spin.setRange(0, 5000)
         default_count = len(sample.rows) or 11
+        self.end_spin.setRange(default_start, default_start + 999)
         self.end_spin.setValue(default_start + default_count - 1)
+        self.end_spin.setToolTip("Changing this value updates the number of rows")
         grid.addWidget(self.end_spin, 2, 1)
 
         # Total count
-        grid.addWidget(BodyLabel("Total Rows Count:", card), 3, 0)
+        grid.addWidget(BodyLabel("Number of rows:", card), 3, 0)
         self.count_spin = SpinBox(card)
         self.count_spin.setRange(1, 1000)
         self.count_spin.setValue(default_count)
+        self.count_spin.setToolTip("Exact number of rows in the grid")
         grid.addWidget(self.count_spin, 3, 1)
 
+        grid.addWidget(BodyLabel("Number of columns:", card), 4, 0)
+        self.columns_spin = SpinBox(card)
+        self.columns_spin.setRange(1, 100)
+        self.columns_spin.setValue(len(sample.cols) or 1)
+        self.columns_spin.setToolTip("Exact number of columns in the grid")
+        grid.addWidget(self.columns_spin, 4, 1)
+
         # Optional prefix
-        grid.addWidget(BodyLabel("Row Prefix:", card), 4, 0)
+        grid.addWidget(BodyLabel("Row label prefix:", card), 5, 0)
         self.prefix_input = LineEdit(card)
         self.prefix_input.setPlaceholderText("Optional (e.g. Row, Strip, l)")
-        grid.addWidget(self.prefix_input, 4, 1)
+        grid.addWidget(self.prefix_input, 5, 1)
 
         card_layout.addLayout(grid)
 
@@ -127,6 +144,7 @@ class RenumberRowsDialog(QDialog):
         self.start_spin.valueChanged.connect(self._on_start_changed)
         self.end_spin.valueChanged.connect(self._on_end_changed)
         self.count_spin.valueChanged.connect(self._on_count_changed)
+        self.columns_spin.valueChanged.connect(self._update_preview)
 
         self.preview_label = CaptionLabel("", card)
         self.preview_label.setStyleSheet("font-weight: 500; color: #0098ff;")
@@ -140,17 +158,30 @@ class RenumberRowsDialog(QDialog):
         btn_box.addStretch(1)
         cancel_btn = PushButton("Cancel", self)
         cancel_btn.clicked.connect(self.reject)
-        apply_btn = PrimaryPushButton("Apply Renumbering", self, FluentIcon.SYNC)
-        apply_btn.clicked.connect(self.accept)
+        self.apply_button = PrimaryPushButton("Apply Grid Size", self, FluentIcon.SYNC)
+        self.apply_button.clicked.connect(self._accept_changes)
         btn_box.addWidget(cancel_btn)
-        btn_box.addWidget(apply_btn)
+        btn_box.addWidget(self.apply_button)
         layout.addLayout(btn_box)
+
+    def _accept_changes(self) -> None:
+        """Commit any value still being edited before closing the dialog."""
+        for control in (
+            self.start_spin,
+            self.end_spin,
+            self.count_spin,
+            self.columns_spin,
+        ):
+            control.interpretText()
+        self._update_preview()
+        self.done(QDialog.DialogCode.Accepted)
 
     def _on_start_changed(self, val: int) -> None:
         if self._syncing:
             return
         self._syncing = True
         try:
+            self.end_spin.setRange(val, val + 999)
             self.end_spin.setValue(val + self.count_spin.value() - 1)
             self._update_preview()
         finally:
@@ -178,17 +209,50 @@ class RenumberRowsDialog(QDialog):
         finally:
             self._syncing = False
 
-    def _update_preview(self) -> None:
+    def _update_preview(self, *_args: object) -> None:
         start = self.start_spin.value()
         end = self.end_spin.value()
         count = self.count_spin.value()
-        self.preview_label.setText(f"Result: Rows {start} through {end} ({count} rows total)")
+        columns = self.columns_spin.value()
+        self.preview_label.setText(
+            f"Result: {count} rows × {columns} columns = {count * columns} devices "
+            f"· row IDs {start}…{end}"
+        )
 
     def get_renumbered_sample(self) -> Sample:
+        return self.get_resized_sample()
+
+    def get_resized_sample(self) -> Sample:
         start = self.start_spin.value()
         count = self.count_spin.value()
         prefix = self.prefix_input.text().strip()
-        return self._sample.with_row_renumbering(start_row=start, count=count, row_prefix=prefix)
+        resized = self._sample.with_row_renumbering(
+            start_row=start,
+            count=count,
+            row_prefix=prefix,
+        )
+
+        requested_columns = self.columns_spin.value()
+        columns = list(self._sample.cols[:requested_columns])
+        used = set(columns)
+        next_number = 1
+        while len(columns) < requested_columns:
+            while str(next_number) in used:
+                next_number += 1
+            key = str(next_number)
+            columns.append(key)
+            used.add(key)
+            next_number += 1
+        column_labels = {
+            key: self._sample.col_labels.get(key, f"Col {key}")
+            for key in columns
+        }
+        return resized.with_structure(
+            rows=resized.rows,
+            row_labels=resized.row_labels,
+            cols=columns,
+            col_labels=column_labels,
+        )
 
 
 class SampleProgrammingDialog(QDialog):
@@ -218,9 +282,10 @@ class SampleProgrammingDialog(QDialog):
         is_edit = sample is not None
 
         self.setWindowTitle("Edit Sample Structure & Matrix" if is_edit else "New Sample & Grid Setup")
-        self.setMinimumWidth(840)
+        self.setMinimumWidth(780)
         self.setMinimumHeight(660)
         self.resize(890, 710)
+        self.setSizeGripEnabled(True)
         self.setModal(True)
 
         layout = QVBoxLayout(self)
@@ -232,7 +297,7 @@ class SampleProgrammingDialog(QDialog):
         layout.addWidget(SubtitleLabel(title_text, self))
         layout.addWidget(
             CaptionLabel(
-                "Configure sample metadata, device grid layout, and individual row and column dimensions.",
+                "Set the grid size and numbering here. Individual labels are available under Advanced Labels.",
                 self,
             )
         )
@@ -252,168 +317,188 @@ class SampleProgrammingDialog(QDialog):
         self.id_input.setPlaceholderText("e.g. INL-MTJ-2026-001, COFEB-WEDGE-A")
         meta_grid.addWidget(self.id_input, 0, 1)
 
-        meta_grid.addWidget(BodyLabel("Sample Name:", meta_card), 0, 2)
+        meta_grid.addWidget(BodyLabel("Sample Name:", meta_card), 1, 0)
         self.name_input = LineEdit(meta_card)
         self.name_input.setPlaceholderText("Human-readable title (e.g. CoFeB/MgO Wedge)")
-        meta_grid.addWidget(self.name_input, 0, 3)
+        meta_grid.addWidget(self.name_input, 1, 1)
 
-        meta_grid.addWidget(BodyLabel("Tags:", meta_card), 1, 0)
+        meta_grid.addWidget(BodyLabel("Tags:", meta_card), 2, 0)
         self.tags_input = LineEdit(meta_card)
         self.tags_input.setPlaceholderText("Comma-separated tags (e.g. CoFeB, MTJ, Wedge, 300K)")
-        meta_grid.addWidget(self.tags_input, 1, 1, 1, 3)
+        meta_grid.addWidget(self.tags_input, 2, 1)
 
-        meta_grid.addWidget(BodyLabel("Folder name:", meta_card), 2, 0)
+        meta_grid.addWidget(BodyLabel("Folder name:", meta_card), 3, 0)
         self.folder_name_input = LineEdit(meta_card)
         self.folder_name_input.setPlaceholderText(
             "Created automatically; you may rename it, e.g. 1_CoFeBWedge"
         )
-        meta_grid.addWidget(self.folder_name_input, 2, 1, 1, 3)
+        meta_grid.addWidget(self.folder_name_input, 3, 1)
 
-        meta_grid.addWidget(BodyLabel("Notes / Stack:", meta_card), 3, 0, Qt.AlignmentFlag.AlignTop)
+        meta_grid.addWidget(BodyLabel("Notes / Stack:", meta_card), 4, 0, Qt.AlignmentFlag.AlignTop)
         self.desc_input = PlainTextEdit(meta_card)
         self.desc_input.setPlaceholderText("Fabrication stack details, wafer position, lithography notes...")
         self.desc_input.setFixedHeight(54)
-        meta_grid.addWidget(self.desc_input, 3, 1, 1, 3)
+        meta_grid.addWidget(self.desc_input, 4, 1)
+        meta_grid.setColumnStretch(1, 1)
 
         meta_layout.addLayout(meta_grid)
-        layout.addWidget(meta_card)
+        self.meta_card = meta_card
 
         # Tabs for Grid Configuration
         self.tabs = SegmentedWidget(self)
         self.stack = QStackedWidget(self)
+        self.stack.setSizePolicy(
+            QSizePolicy.Policy.Ignored,
+            QSizePolicy.Policy.Preferred,
+        )
+        self.stack_scroll = QScrollArea(self)
+        self.stack_scroll.setWidgetResizable(True)
+        self.stack_scroll.setFrameShape(QFrame.Shape.NoFrame)
+        self.stack_scroll.setHorizontalScrollBarPolicy(
+            Qt.ScrollBarPolicy.ScrollBarAlwaysOff
+        )
+        self.stack_scroll.setWidget(self.stack)
         layout.addWidget(self.tabs)
-        layout.addWidget(self.stack, 1)
+        layout.addWidget(self.stack_scroll, 1)
 
-        # === Tab 1: Dimensions & Presets ===
+        # === Tab 1: Primary grid setup ===
         tab_generator = QWidget(self.stack)
+        tab_generator.setMinimumHeight(330)
         gen_vbox = QVBoxLayout(tab_generator)
         gen_vbox.setContentsMargins(0, 8, 0, 0)
         gen_vbox.setSpacing(10)
 
-        gen_card = SimpleCardWidget(tab_generator)
-        gen_card_layout = QVBoxLayout(gen_card)
-        gen_card_layout.setContentsMargins(16, 14, 16, 14)
-        gen_card_layout.setSpacing(12)
+        setup_layout = QVBoxLayout()
+        setup_layout.setSpacing(12)
 
-        gen_grid = QGridLayout()
-        gen_grid.setHorizontalSpacing(14)
-        gen_grid.setVerticalSpacing(10)
+        row_card = SimpleCardWidget(tab_generator)
+        self.row_setup_card = row_card
+        row_layout = QVBoxLayout(row_card)
+        row_layout.setContentsMargins(16, 14, 16, 14)
+        row_layout.setSpacing(10)
+        row_layout.addWidget(SubtitleLabel("Rows", row_card))
+        row_layout.addWidget(CaptionLabel("Choose how many rows exist and how their IDs are assigned.", row_card))
+        row_grid = QGridLayout()
+        row_grid.setHorizontalSpacing(12)
+        row_grid.setVerticalSpacing(10)
 
-        # Row 0: Rows Scheme & Prefix
-        gen_grid.addWidget(BodyLabel("Rows Scheme:", gen_card), 0, 0)
-        self.row_scheme = ComboBox(gen_card)
-        self.row_scheme.addItems(["1..N (1, 2, 3...)", "Custom Range (e.g. 20..30)", "Letters (A, B, C...)"])
-        self.row_scheme.currentIndexChanged.connect(self._on_row_scheme_changed)
-        gen_grid.addWidget(self.row_scheme, 0, 1)
-
-        gen_grid.addWidget(BodyLabel("Row Prefix:", gen_card), 0, 2)
-        self.row_label_prefix = LineEdit(gen_card)
-        self.row_label_prefix.setPlaceholderText("Optional label prefix (e.g. Strip, Row, l)")
-        gen_grid.addWidget(self.row_label_prefix, 0, 3)
-
-        # Row 1: Range & Count controls
-        gen_grid.addWidget(BodyLabel("Rows Range / Count:", gen_card), 1, 0)
-        row_range_box = QHBoxLayout()
-        row_range_box.setSpacing(8)
-
-        self.rows_count_label = CaptionLabel("Count:", gen_card)
-        self.rows_count = SpinBox(gen_card)
+        row_grid.addWidget(BodyLabel("Number of rows:", row_card), 0, 0)
+        self.rows_count_label = CaptionLabel("", row_card)
+        self.rows_count = SpinBox(row_card)
         self.rows_count.setRange(1, 500)
         self.rows_count.setValue(10)
-        self.rows_count.setFixedWidth(75)
+        row_grid.addWidget(self.rows_count, 0, 1)
 
-        self.row_start_label = CaptionLabel("From Row:", gen_card)
+        row_grid.addWidget(BodyLabel("Row ID mode:", row_card), 1, 0)
+        self.row_scheme = ComboBox(row_card)
+        self.row_scheme.addItems([
+            "Numbers starting at 1",
+            "Numbers starting at a chosen ID",
+            "Letters A, B, C…",
+        ])
+        self.row_scheme.currentIndexChanged.connect(self._on_row_scheme_changed)
+        row_grid.addWidget(self.row_scheme, 1, 1)
+
+        self.row_start_label = BodyLabel("First row ID:", row_card)
         self.row_start_label.setVisible(False)
-        self.row_start = SpinBox(gen_card)
+        self.row_start = SpinBox(row_card)
         self.row_start.setRange(0, 5000)
         self.row_start.setValue(20)
-        self.row_start.setFixedWidth(75)
         self.row_start.setVisible(False)
+        row_grid.addWidget(self.row_start_label, 2, 0)
+        row_grid.addWidget(self.row_start, 2, 1)
 
-        self.row_end_label = CaptionLabel("To Row:", gen_card)
+        self.row_end_label = CaptionLabel("", row_card)
         self.row_end_label.setVisible(False)
-        self.row_end = SpinBox(gen_card)
+        self.row_end = SpinBox(row_card)
         self.row_end.setRange(0, 5000)
         self.row_end.setValue(30)
-        self.row_end.setFixedWidth(75)
         self.row_end.setVisible(False)
+        self.row_label_prefix = LineEdit(row_card)
+        self.row_label_prefix.setPlaceholderText("Optional, e.g. Strip")
+        row_grid.addWidget(BodyLabel("Label prefix:", row_card), 3, 0)
+        row_grid.addWidget(self.row_label_prefix, 3, 1)
+        row_layout.addLayout(row_grid)
+        self.row_range_caption = CaptionLabel("", row_card)
+        row_layout.addWidget(self.row_range_caption)
+        row_layout.addStretch(1)
+        setup_layout.addWidget(row_card)
 
-        row_range_box.addWidget(self.rows_count_label)
-        row_range_box.addWidget(self.rows_count)
-        row_range_box.addWidget(self.row_start_label)
-        row_range_box.addWidget(self.row_start)
-        row_range_box.addWidget(self.row_end_label)
-        row_range_box.addWidget(self.row_end)
-        row_range_box.addStretch(1)
-        gen_grid.addLayout(row_range_box, 1, 1, 1, 3)
+        col_card = SimpleCardWidget(tab_generator)
+        self.column_setup_card = col_card
+        col_layout = QVBoxLayout(col_card)
+        col_layout.setContentsMargins(16, 14, 16, 14)
+        col_layout.setSpacing(10)
+        col_layout.addWidget(SubtitleLabel("Columns", col_card))
+        col_layout.addWidget(CaptionLabel("Choose the column count and optional device dimensions.", col_card))
+        col_grid = QGridLayout()
+        col_grid.setHorizontalSpacing(12)
+        col_grid.setVerticalSpacing(10)
 
-        # Row 2: Columns setup & Presets
-        gen_grid.addWidget(BodyLabel("Columns Setup:", gen_card), 2, 0)
-        col_box = QHBoxLayout()
-        col_box.setSpacing(8)
-        self.cols_count = SpinBox(gen_card)
+        col_grid.addWidget(BodyLabel("Number of columns:", col_card), 0, 0)
+        self.cols_count = SpinBox(col_card)
         self.cols_count.setRange(1, 100)
         self.cols_count.setValue(5)
-        self.cols_count.setFixedWidth(75)
+        col_grid.addWidget(self.cols_count, 0, 1)
 
-        self.col_scheme = ComboBox(gen_card)
-        self.col_scheme.addItems(["1..N (1, 2, 3...)", "Letters (A, B, C...)"])
+        col_grid.addWidget(BodyLabel("Column ID mode:", col_card), 1, 0)
+        self.col_scheme = ComboBox(col_card)
+        self.col_scheme.addItems(["Numbers 1, 2, 3…", "Letters A, B, C…"])
+        col_grid.addWidget(self.col_scheme, 1, 1)
 
-        col_box.addWidget(self.cols_count)
-        col_box.addWidget(self.col_scheme)
-        col_box.addStretch(1)
-        gen_grid.addLayout(col_box, 2, 1)
-
-        gen_grid.addWidget(BodyLabel("Preset:", gen_card), 2, 2)
-        self.col_presets = ComboBox(gen_card)
+        col_grid.addWidget(BodyLabel("Dimension preset:", col_card), 2, 0)
+        self.col_presets = ComboBox(col_card)
         self.col_presets.addItems(list(self._COLUMN_PRESETS.keys()))
         self.col_presets.currentIndexChanged.connect(self._on_col_preset_changed)
-        gen_grid.addWidget(self.col_presets, 2, 3)
+        col_grid.addWidget(self.col_presets, 2, 1)
 
-        # Row 3: Column dimension labels
-        gen_grid.addWidget(BodyLabel("Column Dimensions:", gen_card), 3, 0, Qt.AlignmentFlag.AlignTop)
-        col_labels_vbox = QVBoxLayout()
-        col_labels_vbox.setSpacing(4)
-        self.col_labels_input = ColumnLabelsEdit(gen_card)
-        self.col_labels_input.setPlaceholderText("e.g. 50 nm, 100 nm, 200 nm, 500 nm, 1 µm")
+        col_grid.addWidget(BodyLabel("Column labels:", col_card), 3, 0, Qt.AlignmentFlag.AlignTop)
+        self.col_labels_input = ColumnLabelsEdit(col_card)
+        self.col_labels_input.setPlaceholderText("e.g. 50 nm, 100 nm, 200 nm, 1 µm")
         self.col_labels_input.setFixedHeight(58)
-        col_labels_vbox.addWidget(self.col_labels_input)
-        col_labels_vbox.addWidget(
-            CaptionLabel(
-                "Comma-separated dimensions or labels assigned across columns 1 to N. Wraps automatically so all pillar labels remain fully visible.",
-                gen_card,
-            )
-        )
-        gen_grid.addLayout(col_labels_vbox, 3, 1, 1, 3)
+        col_grid.addWidget(self.col_labels_input, 3, 1)
+        col_layout.addLayout(col_grid)
+        col_layout.addWidget(CaptionLabel("Comma-separated labels are assigned from the first column onward.", col_card))
+        col_layout.addStretch(1)
+        setup_layout.addWidget(col_card)
+        gen_vbox.addLayout(setup_layout)
 
-        gen_card_layout.addLayout(gen_grid)
-
-        # Dynamic range caption
-        self.row_range_caption = CaptionLabel("", gen_card)
-        self.row_range_caption.setStyleSheet("color: #0098ff; font-weight: 500;")
-        self.row_range_caption.setVisible(False)
-        gen_card_layout.addWidget(self.row_range_caption)
-
-        apply_btn = PushButton("Apply Generator to Detailed Tables", gen_card, FluentIcon.SYNC)
-        apply_btn.setToolTip("Regenerate the fine-grained row and column lists below from these presets")
-        apply_btn.clicked.connect(self._apply_generator_to_tables)
-        gen_card_layout.addWidget(apply_btn, 0, Qt.AlignmentFlag.AlignRight)
-        gen_card_layout.addStretch(1)
-
-        gen_vbox.addWidget(gen_card)
+        result_card = SimpleCardWidget(self)
+        result_layout = QVBoxLayout(result_card)
+        result_layout.setContentsMargins(16, 12, 16, 12)
+        result_layout.setSpacing(4)
+        result_layout.addWidget(BodyLabel("Result", result_card))
+        self.grid_preview_label = SubtitleLabel("", result_card)
+        result_layout.addWidget(self.grid_preview_label)
+        self.grid_change_label = CaptionLabel("", result_card)
+        result_layout.addWidget(self.grid_change_label)
+        # Keep the outcome visible while users edit any tab; it is the primary
+        # feedback that the requested dimensions will actually be saved.
+        layout.addWidget(result_card)
+        gen_vbox.addStretch(1)
 
         self.tabs.addItem(
             "generatorTab",
-            "Dimensions && Presets",
+            "Grid Setup",
             onClick=lambda: self.stack.setCurrentIndex(0),
         )
         self.stack.addWidget(tab_generator)
 
         # === Tab 2: Detailed Rows & Columns Editor ===
         tab_detailed = QWidget(self.stack)
-        detailed_layout = QHBoxLayout(tab_detailed)
-        detailed_layout.setContentsMargins(0, 8, 0, 0)
+        tab_detailed.setMinimumHeight(780)
+        detailed_outer = QVBoxLayout(tab_detailed)
+        detailed_outer.setContentsMargins(0, 8, 0, 0)
+        detailed_outer.setSpacing(8)
+        detailed_outer.addWidget(
+            CaptionLabel(
+                "Optional: edit individual row and column IDs or labels. Grid size is controlled in Grid Setup.",
+                tab_detailed,
+            )
+        )
+        detailed_layout = QVBoxLayout()
         detailed_layout.setSpacing(12)
+        detailed_outer.addLayout(detailed_layout, 1)
 
         # --- Left Card: Rows Table ---
         rows_card = SimpleCardWidget(tab_detailed)
@@ -507,10 +592,29 @@ class SampleProgrammingDialog(QDialog):
 
         self.tabs.addItem(
             "detailedTab",
-            "Row && Column Tables",
+            "Advanced Labels",
             onClick=lambda: self.stack.setCurrentIndex(1),
         )
         self.stack.addWidget(tab_detailed)
+
+        # === Tab 3: Sample metadata ===
+        tab_details = QWidget(self.stack)
+        details_layout = QVBoxLayout(tab_details)
+        details_layout.setContentsMargins(0, 8, 0, 0)
+        details_layout.addWidget(
+            CaptionLabel(
+                "These fields describe the sample and its catalogue folder; they do not change the grid dimensions.",
+                tab_details,
+            )
+        )
+        details_layout.addWidget(self.meta_card)
+        details_layout.addStretch(1)
+        self.tabs.addItem(
+            "detailsTab",
+            "Sample Details",
+            onClick=lambda: self.stack.setCurrentIndex(2),
+        )
+        self.stack.addWidget(tab_details)
 
         # Default to tab 0 so main dimensions & presets are immediately editable
         self.tabs.setCurrentItem("generatorTab")
@@ -547,12 +651,32 @@ class SampleProgrammingDialog(QDialog):
             self._populate_from_sample(sample)
         else:
             self._apply_generator_to_tables()
+        self._update_row_range_caption()
 
     def _update_badges(self) -> None:
         if hasattr(self, "rows_badge"):
             self.rows_badge.setText(f"{self.rows_table.rowCount()} rows")
         if hasattr(self, "cols_badge"):
             self.cols_badge.setText(f"{self.cols_table.rowCount()} cols")
+        if hasattr(self, "grid_preview_label"):
+            rows = self.rows_table.rowCount()
+            columns = self.cols_table.rowCount()
+            self.grid_preview_label.setText(
+                f"{rows} rows × {columns} columns · {rows * columns} devices"
+            )
+            if self._existing_sample is None:
+                self.grid_change_label.setText("New sample grid")
+            else:
+                old_rows = len(self._existing_sample.rows)
+                old_columns = len(self._existing_sample.cols)
+                if (rows, columns) == (old_rows, old_columns):
+                    self.grid_change_label.setText(
+                        f"Current structure: {old_rows} × {old_columns}"
+                    )
+                else:
+                    self.grid_change_label.setText(
+                        f"Change: {old_rows} × {old_columns} → {rows} × {columns}"
+                    )
 
     def _on_generator_input_changed(self, *args: object) -> None:
         if getattr(self, "_syncing_from_sample", False):
@@ -564,12 +688,14 @@ class SampleProgrammingDialog(QDialog):
         is_custom = index == 1
         self.row_start_label.setVisible(is_custom)
         self.row_start.setVisible(is_custom)
-        self.row_end_label.setVisible(is_custom)
-        self.row_end.setVisible(is_custom)
-        self.row_range_caption.setVisible(is_custom)
+        # The last ID is derived from first ID + count; showing another input
+        # made it unclear which field controlled the structure.
+        self.row_end_label.setVisible(False)
+        self.row_end.setVisible(False)
+        self.row_range_caption.setVisible(True)
         if is_custom:
             self.row_end.setValue(self.row_start.value() + self.rows_count.value() - 1)
-            self._update_row_range_caption()
+        self._update_row_range_caption()
         self._on_generator_input_changed()
 
     def _on_row_start_changed(self, val: int) -> None:
@@ -612,7 +738,16 @@ class SampleProgrammingDialog(QDialog):
             start = self.row_start.value()
             end = self.row_end.value()
             count = self.rows_count.value()
-            self.row_range_caption.setText(f"→ Generating Rows {start} through {end} ({count} rows total)")
+            scheme = self.row_scheme.currentIndex()
+            if scheme == 0:
+                text = f"Row IDs: 1…{count}"
+            elif scheme == 1:
+                text = f"Row IDs: {start}…{end}"
+            else:
+                last_index = max(0, count - 1)
+                suffix = str(last_index // 26) if last_index >= 26 else ""
+                text = f"Row IDs: A…{string.ascii_uppercase[last_index % 26]}{suffix}"
+            self.row_range_caption.setText(text)
 
     def _on_col_preset_changed(self, index: int) -> None:
         key = self.col_presets.currentText()
@@ -852,6 +987,10 @@ class SampleProgrammingDialog(QDialog):
         if not sample_id:
             self.id_input.setFocus()
             return
+        if self.stack.currentIndex() == 0:
+            # Commit generator controls even when the final spin-box edit has
+            # not emitted valueChanged before the primary action is pressed.
+            self._apply_generator_to_tables()
         if self.rows_table.rowCount() == 0:
             self._on_add_row()
         if self.cols_table.rowCount() == 0:

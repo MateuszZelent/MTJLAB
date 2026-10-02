@@ -6,10 +6,11 @@ import os
 from pathlib import Path
 import tempfile
 import unittest
+from unittest.mock import patch
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
-from PySide6.QtWidgets import QApplication
+from PySide6.QtWidgets import QApplication, QDialog
 
 from app.inventory import ActiveSampleTarget, InventoryStore, Sample, SampleRunRecord
 from app.ui.inventory import (
@@ -105,6 +106,47 @@ class SampleInventoryUITests(unittest.TestCase):
         widget.cell_selected.connect(lambda r, c: clicked_coords.append((r, c)))
         widget.table.cellClicked.emit(1, 0)
         self.assertEqual(clicked_coords, [("2", "1")])
+
+    def test_require_double_check_state_persists_and_renders_purple(self) -> None:
+        sample = Sample(
+            sample_id="DOUBLE-CHECK",
+            name="Double Check Sample",
+            rows=("1",),
+            cols=("1",),
+        )
+        self.store.save_sample(sample)
+        page = SampleInventoryPage(self.store)
+        try:
+            page.show()
+            self.application.processEvents()
+
+            page._on_cell_selected("1", "1")
+            state_index = page.cell_state_combo.findData("require_double_check")
+            self.assertGreaterEqual(state_index, 0)
+            self.assertEqual(
+                page.cell_state_combo.itemText(state_index),
+                "Require double check",
+            )
+
+            page.cell_state_combo.setCurrentIndex(state_index)
+            self.application.processEvents()
+
+            saved = self.store.get_sample("DOUBLE-CHECK")
+            self.assertIsNotNone(saved)
+            assert saved is not None
+            self.assertEqual(saved.cell_state("1", "1"), "require_double_check")
+            self.assertIn("Tested: 1/1", page.stats_tested_label.text())
+
+            item = page.matrix_widget.table.item(0, 0)
+            self.assertIsNotNone(item)
+            assert item is not None
+            self.assertIn("REQUIRE DOUBLE CHECK", item.text())
+            self.assertEqual(item.background().color().red(), 126)
+            self.assertEqual(item.background().color().green(), 34)
+            self.assertEqual(item.background().color().blue(), 206)
+            self.assertEqual(item.background().color().alpha(), 90)
+        finally:
+            page.close()
 
     def test_sample_programming_dialog_generates_sample(self) -> None:
         dialog = SampleProgrammingDialog()
@@ -323,6 +365,136 @@ class SampleInventoryUITests(unittest.TestCase):
         self.assertEqual(renumbered.rows[-1], "30")
         # Check cell state preservation (old row 2 -> new row 21)
         self.assertEqual(renumbered.cell_state("21", "1"), "completed")
+
+    def test_resize_grid_dialog_applies_sixteen_by_ten_with_live_preview(self) -> None:
+        sample = Sample(
+            sample_id="GRID-RESIZE",
+            name="INL Grid",
+            rows=tuple(str(value) for value in range(19, 30)),
+            cols=tuple(str(value) for value in range(1, 11)),
+            device_states={"19,1": "completed"},
+        )
+        dialog = RenumberRowsDialog(sample=sample)
+        dialog.count_spin.setValue(16)
+        dialog.columns_spin.setValue(10)
+        dialog.show()
+        self.application.processEvents()
+
+        resized = dialog.get_resized_sample()
+
+        self.assertEqual(len(resized.rows), 16)
+        self.assertEqual(resized.rows[0], "19")
+        self.assertEqual(resized.rows[-1], "34")
+        self.assertEqual(len(resized.cols), 10)
+        self.assertEqual(resized.cell_state("19", "1"), "completed")
+        self.assertIn("16 rows × 10 columns", dialog.preview_label.text())
+        self.assertGreater(dialog.width(), 0)
+        self.assertGreater(dialog.height(), 0)
+        dialog.close()
+
+    def test_resize_grid_apply_button_accepts_the_dialog(self) -> None:
+        sample = Sample(
+            sample_id="GRID-APPLY",
+            name="Grid Apply",
+            rows=tuple(str(value) for value in range(19, 30)),
+            cols=tuple(str(value) for value in range(1, 11)),
+        )
+        dialog = RenumberRowsDialog(sample=sample)
+        dialog.count_spin.setValue(16)
+        dialog.show()
+        self.application.processEvents()
+
+        dialog.apply_button.click()
+        self.application.processEvents()
+
+        self.assertEqual(dialog.result(), QDialog.DialogCode.Accepted)
+        self.assertEqual(len(dialog.get_resized_sample().rows), 16)
+
+    def test_resize_grid_page_flow_rerenders_saved_matrix(self) -> None:
+        sample = self.store.save_sample(
+            Sample(
+                sample_id="GRID-PAGE",
+                name="Grid Page",
+                rows=tuple(str(value) for value in range(19, 30)),
+                cols=tuple(str(value) for value in range(1, 11)),
+            )
+        )
+        page = SampleInventoryPage(self.store)
+        page.show()
+        self.application.processEvents()
+        resized = sample.with_row_renumbering(start_row=19, count=16)
+
+        with patch("app.ui.inventory.page.RenumberRowsDialog") as dialog_type:
+            dialog = dialog_type.return_value
+            dialog.exec.return_value = QDialog.DialogCode.Accepted
+            dialog.get_resized_sample.return_value = resized
+            page._on_renumber_rows_requested()
+
+        stored = self.store.get_sample(sample.sample_id)
+        assert stored is not None
+        self.assertEqual(len(stored.rows), 16)
+        self.assertEqual(len(stored.cols), 10)
+        self.assertEqual(page.matrix_widget.table.rowCount(), 16)
+        self.assertEqual(page.matrix_widget.table.columnCount(), 10)
+        self.assertIn("160", page.stats_devices_label.text())
+        page.close()
+
+    def test_edit_structure_commits_generator_counts_on_save(self) -> None:
+        sample = Sample(
+            sample_id="EDIT-GRID",
+            name="Edit Grid",
+            rows=tuple(str(value) for value in range(19, 30)),
+            cols=("1", "2"),
+        )
+        dialog = SampleProgrammingDialog(sample=sample)
+        dialog.rows_count.blockSignals(True)
+        dialog.cols_count.blockSignals(True)
+        dialog.rows_count.setValue(16)
+        dialog.cols_count.setValue(10)
+        dialog.rows_count.blockSignals(False)
+        dialog.cols_count.blockSignals(False)
+        self.assertEqual(dialog.rows_table.rowCount(), 11)
+        self.assertEqual(dialog.cols_table.rowCount(), 2)
+
+        dialog._on_save()
+        updated = dialog.get_sample()
+
+        self.assertEqual(len(updated.rows), 16)
+        self.assertEqual(len(updated.cols), 10)
+        self.assertEqual(dialog.rows_table.rowCount(), 16)
+        self.assertEqual(dialog.cols_table.rowCount(), 10)
+        self.assertIn("160 devices", dialog.grid_preview_label.text())
+
+    def test_edit_structure_primary_controls_render_and_show_change_summary(self) -> None:
+        sample = Sample(
+            sample_id="EDIT-RENDER",
+            name="Edit Render",
+            rows=tuple(str(value) for value in range(19, 30)),
+            cols=tuple(str(value) for value in range(1, 11)),
+        )
+        dialog = SampleProgrammingDialog(sample=sample)
+        dialog.resize(900, 710)
+        dialog.show()
+        self.application.processEvents()
+
+        self.assertEqual(dialog.stack.currentIndex(), 0)
+        self.assertTrue(dialog.row_setup_card.isVisible())
+        self.assertTrue(dialog.column_setup_card.isVisible())
+        self.assertGreater(dialog.row_setup_card.geometry().width(), 250)
+        self.assertGreater(dialog.column_setup_card.geometry().width(), 250)
+        self.assertTrue(dialog.grid_preview_label.isVisible())
+        self.assertTrue(dialog.save_button.isVisible())
+
+        dialog.rows_count.setValue(16)
+        self.application.processEvents()
+        self.assertIn("16 rows × 10 columns", dialog.grid_preview_label.text())
+        self.assertIn("11 × 10 → 16 × 10", dialog.grid_change_label.text())
+
+        dialog.stack.setCurrentIndex(2)
+        self.application.processEvents()
+        self.assertTrue(dialog.meta_card.isVisible())
+        self.assertGreater(dialog.meta_card.geometry().height(), 150)
+        dialog.close()
 
     def test_programming_dialog_custom_range_rows(self) -> None:
         dialog = SampleProgrammingDialog()

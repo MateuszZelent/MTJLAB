@@ -9,12 +9,12 @@ from pydantic import ValidationError
 
 
 _TECHNICAL_NAMES = {
-    "measured_current_trip": "Measured current trip",
-    "measured_voltage_trip": "Measured voltage trip",
-    "source_current": "source current",
-    "source_voltage": "source voltage",
-    "current_compliance": "current compliance",
-    "voltage_compliance": "voltage compliance",
+    "measured_current_trip": "Emergency measured-current cutoff",
+    "measured_voltage_trip": "Emergency measured-voltage cutoff",
+    "source_current": "allowed source-current setting",
+    "source_voltage": "allowed source-voltage setting",
+    "current_compliance": "allowed current-compliance setting",
+    "voltage_compliance": "allowed voltage-compliance setting",
     "max_abs_power": "maximum absolute power",
     "point_settle_time": "point settling time",
 }
@@ -34,7 +34,7 @@ def _human_path(location: tuple[Any, ...]) -> str:
             index += 2
             continue
         if value == "lab_limits":
-            parts.append("Safety limits")
+            parts.append("Station safety boundaries")
         elif value not in {"safety"}:
             parts.append(value.replace("_", " ").title())
         index += 1
@@ -54,8 +54,9 @@ def _hint_for(message: str) -> str | None:
     lowered = message.lower()
     if "must contain the complete" in lowered or "must cover the maximum" in lowered:
         return (
-            "Reduce the source/compliance range, increase the corresponding measured "
-            "trip range, or select ‘Disable limit’ for the software limit you do not need."
+            "Reduce the allowed source/compliance setting, increase the corresponding "
+            "emergency measured-value cutoff, or select ‘Disable limit’ for the software "
+            "limit you do not need."
         )
     if "expected dimension" in lowered or "invalid value or unit" in lowered:
         return "Enter the value with an explicit unit, for example 10 mA or 67 mV."

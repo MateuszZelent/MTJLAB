@@ -88,6 +88,30 @@ from app.ui.settings_guidance import SettingsPath
 
 _LIMIT_VALIDATION_MESSAGE_ROLE = int(Qt.ItemDataRole.UserRole) + 101
 
+_SETTINGS_SECTION_LABELS = {
+    "defaults": "Startup form values (not safety limits)",
+}
+
+_KEITHLEY_STARTUP_VALUE_LABELS = {
+    "source_mode": "Initial source mode shown on the Keithley card",
+    "source_current": "Initial source current shown on the Keithley card",
+    "source_voltage": "Initial source voltage shown on the Keithley card",
+    "current_compliance": "Initial current compliance shown on the Keithley card",
+    "voltage_compliance": "Initial voltage compliance shown on the Keithley card",
+    "settling_time": "Initial settling time shown on the Keithley card",
+}
+
+_SAFETY_LIMIT_LABELS = {
+    "source_current": "Allowed source-current setting",
+    "source_voltage": "Allowed source-voltage setting",
+    "current_compliance": "Allowed current-compliance setting",
+    "voltage_compliance": "Allowed voltage-compliance setting",
+    "measured_current_trip": "Emergency measured-current cutoff (forces A+B OFF)",
+    "measured_voltage_trip": "Emergency measured-voltage cutoff (forces A+B OFF)",
+    "max_abs_power": "Maximum absolute power",
+    "point_settle_time": "Allowed point settling time",
+}
+
 
 class _FluentSettingsSections(QWidget):
     """Fluent route picker and page stack for the Settings workspace.
@@ -292,12 +316,14 @@ class SettingsPage(QWidget):
         limits_layout = QVBoxLayout(limits_page)
         limits_layout.setContentsMargins(18, 18, 18, 18)
         limits_layout.setSpacing(12)
-        limits_title = StrongBodyLabel("Safety limits")
+        limits_title = StrongBodyLabel("Station safety boundaries")
         limits_title.setObjectName("sectionTitle")
         limits_description = BodyLabel(
-            "Laboratory software boundaries. Enter values with units, for example "
-            "10 mA, 67 mV or 1 MHz. Disabling a limit does not disable immutable "
-            "immutable instrument limits."
+            "These are enforced station boundaries, not startup values. Source and "
+            "compliance rows constrain settings; emergency measured-value cutoffs trip "
+            "during readback and force both Keithley outputs OFF. Enter explicit units, "
+            "for example 10 mA, 67 mV or 1 MHz. Disabling a software boundary never "
+            "disables immutable instrument limits."
         )
         limits_description.setObjectName("muted")
         limits_description.setWordWrap(True)
@@ -336,7 +362,7 @@ class SettingsPage(QWidget):
         limits_layout.addWidget(limits_description)
         limits_layout.addWidget(limits_card, 1)
         self.limits_page = limits_page
-        self.tabs.addTab(limits_page, "Safety limits")
+        self.tabs.addTab(limits_page, "Safety boundaries")
         roles_page = QWidget()
         roles_page.setObjectName("settingsSpecialPage")
         roles_page.setProperty("stationSurface", "page")
@@ -716,7 +742,10 @@ class SettingsPage(QWidget):
 
     @staticmethod
     def _title(text: object) -> str:
-        return str(text).replace("_", " ").replace("-", " ").title()
+        key = str(text)
+        return _SETTINGS_SECTION_LABELS.get(
+            key, key.replace("_", " ").replace("-", " ").title()
+        )
 
     def _populate_form(self, name: str, data: Any, prefix: tuple[str | int, ...]) -> None:
         host = QWidget()
@@ -765,7 +794,14 @@ class SettingsPage(QWidget):
                 for key, nested in value.items():
                     if key == "lab_limits":
                         continue
-                    walk(nested, path + (str(key),), labels + (self._title(key),))
+                    child_label = self._title(key)
+                    if (
+                        name == "keithley"
+                        and "defaults" in path
+                        and str(key) in _KEITHLEY_STARTUP_VALUE_LABELS
+                    ):
+                        child_label = _KEITHLEY_STARTUP_VALUE_LABELS[str(key)]
+                    walk(nested, path + (str(key),), labels + (child_label,))
                 return
             if isinstance(value, list):
                 for index, nested in enumerate(value):
@@ -1293,7 +1329,7 @@ class SettingsPage(QWidget):
             row_layout.setSpacing(7)
             values_layout = QHBoxLayout()
             values_layout.setSpacing(10)
-            label_text = parameter_item.text().title() if parameter_item is not None else "Limit"
+            label_text = parameter_item.text() if parameter_item is not None else "Limit"
             if scope_item is not None and scope_item.text() != device.lower():
                 label_text = f"{label_text}  ·  {scope_item.text()}"
             label = BodyLabel(label_text)
@@ -1617,12 +1653,15 @@ class SettingsPage(QWidget):
             str(part) for part in path[1:-1] if str(part) not in {"safety", "lab_limits"}
         ]
         scope = " / ".join(scope_parts) or str(path[1])
-        parameter = str(path[-1]).replace("_", " ")
+        parameter_key = str(path[-1])
+        parameter = _SAFETY_LIMIT_LABELS.get(
+            parameter_key, parameter_key.replace("_", " ").capitalize()
+        )
         minimum = self._format_scalar(value.get("min"))
         maximum = self._format_scalar(value.get("max"))
         unit = self._range_unit(minimum, maximum)
         default = self._default_for_limit(path)
-        values = (scope, parameter, minimum, maximum, unit, default, "Station configuration")
+        values = (scope, parameter, minimum, maximum, unit, default, "Enforced station profile")
         for column, text in enumerate(values):
             item = QTableWidgetItem(text)
             if column in {2, 3}:
@@ -1648,12 +1687,15 @@ class SettingsPage(QWidget):
             str(part) for part in path[1:-1] if str(part) not in {"safety", "lab_limits"}
         ]
         scope = " / ".join(scope_parts) or str(path[1])
-        parameter = str(path[-1]).replace("_", " ")
+        parameter_key = str(path[-1])
+        parameter = _SAFETY_LIMIT_LABELS.get(
+            parameter_key, parameter_key.replace("_", " ").capitalize()
+        )
         # The value itself always carries its unit and may use a different SI
         # prefix after editing (for example 6700 uW -> 6.7 mW).  A duplicated
         # fixed suffix would incorrectly imply that the editor is unitless.
         unit = "explicit unit"
-        values = (scope, parameter, value, "—", unit, "—", "Station configuration")
+        values = (scope, parameter, value, "—", unit, "—", "Enforced station profile")
         for column, text in enumerate(values):
             item = QTableWidgetItem(text)
             if column == 2:
@@ -1909,7 +1951,13 @@ class SettingsPage(QWidget):
         if message == self._limit_validation_toast_message:
             return
         self._limit_validation_toast_message = message
-        show_toast(self, message, severity="error", timeout_ms=8_000, title="Safety limits")
+        show_toast(
+            self,
+            message,
+            severity="error",
+            timeout_ms=8_000,
+            title="Station safety boundaries",
+        )
 
     def _set_limit_validation(self, item: QTableWidgetItem, message: str | None) -> None:
         """Update error metadata without recursively re-entering itemChanged."""

@@ -2,9 +2,10 @@
 
 from __future__ import annotations
 
-from datetime import datetime, timezone
+import math
 import threading
 import time
+from datetime import datetime, timezone
 from typing import Any, Literal
 
 import numpy as np
@@ -24,7 +25,7 @@ from app.domain.quantities import (
     DIMENSION_VOLTAGE,
     parse_quantity,
 )
-from app.safety.keithley import validate_source_range, validate_keithley_source
+from app.safety.keithley import validate_keithley_source, validate_source_range
 from app.settings.models import StationSettings
 
 
@@ -101,10 +102,42 @@ class KeithleyCharacterizationRunner:
             "measure_current_autorange",
             "measure_current_range_si",
         )
+        numeric_fields = {
+            "compliance_si",
+            "nplc",
+            "settle_time_s",
+            "source_range_si",
+            "measure_voltage_range_si",
+            "measure_current_range_si",
+        }
+
+        def matches(name: str) -> bool:
+            requested = getattr(previous, name)
+            actual = getattr(applied, name)
+            if name not in numeric_fields:
+                return requested == actual
+            if requested is None or actual is None:
+                return requested is actual
+            requested_float = float(requested)
+            actual_float = float(actual)
+            if not (math.isfinite(requested_float) and math.isfinite(actual_float)):
+                return False
+            # The adapter quantizes physical values to instrument resolution
+            # before applying them.  Accept only representation-level float
+            # differences (for example 700 mV becoming 0.7000000000000001 SI
+            # before quantization and 0.7 SI afterwards), using the same
+            # tight tolerance as the adapter's hardware readback checks.
+            return math.isclose(
+                requested_float,
+                actual_float,
+                rel_tol=1e-9,
+                abs_tol=1e-12,
+            )
+
         mismatches = [
             name
             for name in shared_fields
-            if getattr(previous, name) != getattr(applied, name)
+            if not matches(name)
         ]
         if mismatches:
             raise SafetyViolation(
@@ -324,6 +357,7 @@ class KeithleyCharacterizationRunner:
                     timestamp_epoch=time.time(),
                     field_before=field_before,
                     field_after=field_after,
+                    range_readback=getattr(meas, "range_readback", None) if isinstance(getattr(meas, "range_readback", None), dict) else None,
                     valid=not (field_after is not None and field_after.compliance_active),
                 )
                 points.append(pt)

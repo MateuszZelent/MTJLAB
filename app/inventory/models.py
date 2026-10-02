@@ -7,6 +7,32 @@ from datetime import datetime, timezone
 from typing import Any, Mapping, Sequence
 
 
+# Keep the cell-state vocabulary in one place so the matrix, inspector and
+# context menus cannot drift apart.  Values are persisted as the stable key;
+# labels are presentation text only.
+SAMPLE_CELL_STATE_OPTIONS: tuple[tuple[str, str], ...] = (
+    ("untested", "Untested"),
+    ("completed", "Completed"),
+    ("good", "Good"),
+    ("measured", "Measured"),
+    ("require_double_check", "Require double check"),
+    ("burned", "Burned"),
+    ("shorted", "Shorted"),
+    ("open", "Open"),
+    ("degraded", "Degraded"),
+)
+SAMPLE_CELL_STATE_LABELS = dict(SAMPLE_CELL_STATE_OPTIONS)
+SAMPLE_CELL_TESTED_STATES = frozenset(
+    state for state, _label in SAMPLE_CELL_STATE_OPTIONS if state != "untested"
+)
+
+
+def sample_cell_state_label(state: str) -> str:
+    """Return readable text for a persisted cell-state key."""
+
+    return SAMPLE_CELL_STATE_LABELS.get(state, state.replace("_", " ").title())
+
+
 @dataclass(frozen=True, slots=True)
 class SampleAttachment:
     """An attached visual or document artifact for a sample (microscope photo, PDF layout)."""

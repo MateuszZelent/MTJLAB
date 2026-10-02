@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import os
 from pathlib import Path
+import shutil
 import tempfile
 import unittest
 import sqlite3
@@ -211,6 +213,150 @@ class InventoryStoreTests(unittest.TestCase):
         self.store.close()
         self.store = InventoryStore(new_root / "inventory.db")
         self.assertEqual(self.store.catalogue_root, new_root.resolve())
+
+    def test_move_catalogue_resumes_an_identical_partial_copy(self) -> None:
+        sample = self.store.save_sample(Sample(sample_id="RESUME", name="Resume"))
+        source_file = self.store.sample_directory(sample.sample_id) / "measurements" / "run.dat"
+        source_file.write_bytes(b"measurement")
+        new_root = self.root / "PartialCatalogue"
+        partial_file = new_root / sample.folder_name / "measurements" / "run.dat"
+        partial_file.parent.mkdir(parents=True)
+        partial_file.write_bytes(b"measurement")
+
+        self.store.move_catalogue(new_root)
+
+        self.assertEqual(partial_file.read_bytes(), b"measurement")
+        self.assertFalse(source_file.exists())
+        self.assertEqual(self.store.db_path, (new_root / "inventory.db").resolve())
+
+    def test_move_catalogue_does_not_overwrite_different_partial_data(self) -> None:
+        sample = self.store.save_sample(Sample(sample_id="CONFLICT", name="Conflict"))
+        source_file = self.store.sample_directory(sample.sample_id) / "measurements" / "run.dat"
+        source_file.write_bytes(b"source measurement")
+        new_root = self.root / "ConflictingCatalogue"
+        partial_file = new_root / sample.folder_name / "measurements" / "run.dat"
+        partial_file.parent.mkdir(parents=True)
+        partial_file.write_bytes(b"different measurement")
+
+        with self.assertRaisesRegex(FileExistsError, "files differ"):
+            self.store.move_catalogue(new_root)
+
+        self.assertEqual(source_file.read_bytes(), b"source measurement")
+        self.assertEqual(partial_file.read_bytes(), b"different measurement")
+        self.assertEqual(self.store.db_path, self.db_path.resolve())
+
+    def test_move_catalogue_replaces_only_an_empty_destination_database(self) -> None:
+        source_sample = self.store.save_sample(
+            Sample(sample_id="SOURCE", name="Source catalogue")
+        )
+        new_root = self.root / "EmptyCatalogue"
+        empty_store = InventoryStore(new_root / "inventory.db")
+        empty_store.close()
+
+        self.store.move_catalogue(new_root)
+
+        self.assertEqual(
+            [sample.sample_id for sample in self.store.list_samples()],
+            [source_sample.sample_id],
+        )
+        self.assertEqual(self.store.db_path, (new_root / "inventory.db").resolve())
+
+    def test_move_catalogue_never_replaces_a_populated_destination_database(self) -> None:
+        self.store.save_sample(Sample(sample_id="SOURCE", name="Source catalogue"))
+        new_root = self.root / "PopulatedCatalogue"
+        target_store = InventoryStore(new_root / "inventory.db")
+        target_store.save_sample(Sample(sample_id="TARGET", name="Target catalogue"))
+        target_store.close()
+
+        with self.assertRaisesRegex(FileExistsError, "inventory database"):
+            self.store.move_catalogue(new_root)
+
+        reopened = InventoryStore(new_root / "inventory.db")
+        try:
+            self.assertEqual(
+                [sample.sample_id for sample in reopened.list_samples()],
+                ["TARGET"],
+            )
+        finally:
+            reopened.close()
+
+    def test_move_catalogue_flattens_legacy_recursive_sample_folder(self) -> None:
+        sample = self.store.save_sample(Sample(sample_id="RECURSIVE", name="Recursive"))
+        sample_root = self.store.sample_directory(sample.sample_id)
+        malformed = (
+            sample_root
+            / "measurements"
+            / sample.folder_name
+            / "measurements"
+            / "Keithley_2600"
+            / "legacy.dat"
+        )
+        malformed.parent.mkdir(parents=True)
+        malformed.write_bytes(b"legacy measurement")
+        self.store.record_run(
+            SampleRunRecord(
+                sample_id=sample.sample_id,
+                sample_name=sample.name,
+                row="",
+                col="",
+                device_label="Keithley 2600",
+                run_path=str(malformed),
+                run_sha256="legacy",
+                created_at_utc="2026-09-09T12:00:00Z",
+                status="completed",
+                point_count=1,
+                spectrum_count=0,
+                recipe_name="legacy",
+            )
+        )
+        new_root = self.root / "RepairedCatalogue"
+
+        self.store.move_catalogue(new_root)
+
+        repaired = (
+            new_root
+            / sample.folder_name
+            / "measurements"
+            / "Keithley_2600"
+            / "legacy.dat"
+        )
+        repeated = new_root / sample.folder_name / "measurements" / sample.folder_name
+        self.assertEqual(repaired.read_bytes(), b"legacy measurement")
+        self.assertFalse(repeated.exists())
+        self.assertEqual(
+            self.store.list_runs_for_sample(sample.sample_id)[0].run_path,
+            str(repaired),
+        )
+
+    def test_move_directory_rejects_destination_inside_source(self) -> None:
+        source = self.root / "source"
+        source.mkdir()
+
+        with self.assertRaisesRegex(ValueError, "into itself"):
+            InventoryStore._move_directory(source, source / "nested")
+
+    @unittest.skipUnless(os.name == "nt", "Windows extended paths only")
+    def test_move_catalogue_supports_extended_length_windows_paths(self) -> None:
+        sample = self.store.save_sample(Sample(sample_id="LONG", name="Long paths"))
+        source_root = self.store.sample_directory(sample.sample_id)
+        deep = source_root / "measurements"
+        for index in range(5):
+            deep /= f"segment_{index}_" + ("x" * 42)
+        os.makedirs(InventoryStore._filesystem_path(deep), exist_ok=True)
+        source_file = deep / "measurement.dat"
+        with open(InventoryStore._filesystem_path(source_file), "wb") as stream:
+            stream.write(b"long path")
+        new_root = self.root / "LongCatalogue"
+
+        self.store.move_catalogue(new_root)
+
+        relative = source_file.relative_to(source_root)
+        migrated = new_root / sample.folder_name / relative
+        with open(InventoryStore._filesystem_path(migrated), "rb") as stream:
+            self.assertEqual(stream.read(), b"long path")
+        shutil.rmtree(
+            InventoryStore._filesystem_path(new_root / sample.folder_name)
+        )
 
     def test_catalogue_root_uses_existing_database_without_overwriting(self) -> None:
         self.store.save_sample(Sample(sample_id="SOURCE", name="Source sample"))

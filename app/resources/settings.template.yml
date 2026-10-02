@@ -75,6 +75,9 @@ execution:
 
 storage:
   output_directory: "./measurements"
+  # Absolute path persisted when the operator selects or moves the Samples catalogue.
+  # An empty value uses the platform default (Documents/PyLab).
+  catalogue_directory: ""
   filename_pattern: "{sample_id}_{coord}_{device}_{recipe}"
   primary_format: "hdf5"
   write_csv_summary: true

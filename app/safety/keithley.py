@@ -115,6 +115,32 @@ class KeithleySourceRequest:
     measure_current_range_si: float | None = None
 
 
+def coupled_measurement_suffix(mode: str) -> str | None:
+    """2600A Rev. E, 2-77: active measurement follows the source function."""
+    return {"current": "i", "voltage": "v"}.get(mode)
+
+
+def selected_keithley_range(value: float, ranges: tuple[float, ...]) -> float:
+    if not math.isfinite(value) or value <= 0:
+        raise SafetyViolation("Keithley range must be positive and finite.")
+    for item in ranges:
+        if value <= item or math.isclose(value, item, rel_tol=1e-12, abs_tol=0.0):
+            return item
+    raise SafetyViolation("Requested range exceeds the 2602A hardware maximum.")
+
+
+def validate_keithley_range_pair(
+    mode: str, source_range_si: float, independent_range_si: float
+) -> None:
+    """2600A Rev. E, 2-76: cross-function restrictions on 2602A ranges."""
+    if (mode == "voltage" and source_range_si > 6 and independent_range_si > 1) or (
+        mode == "current" and source_range_si > 1 and independent_range_si > 6
+    ):
+        raise SafetyViolation(
+            "2602A incompatible source/measurement ranges: 40 V permits at most 1 A; 3 A permits at most 6 V."
+        )
+
+
 def _range_check(name: str, value: float, lower: str, upper: str, dimension: str) -> None:
     _require_finite(name, value)
     minimum = parse_quantity(lower, dimension).si_value
@@ -251,16 +277,66 @@ def validate_keithley_source(channel: KeithleyChannelSettings, request: Keithley
         "measure voltage range",
         request.measure_voltage_autorange,
         request.measure_voltage_range_si,
-        voltage_required,
+        0.0 if request.mode == "voltage" else voltage_required,
         KEITHLEY_2602A_MAX_VOLTAGE_RANGE_V,
     )
     _validate_manual_range(
         "measure current range",
         request.measure_current_autorange,
         request.measure_current_range_si,
-        current_required,
+        0.0 if request.mode == "current" else current_required,
         KEITHLEY_2602A_MAX_CURRENT_RANGE_A,
     )
+
+    if request.mode != "measure_only":
+        source_ranges = KEITHLEY_2602A_CURRENT_RANGES if request.mode == "current" else KEITHLEY_2602A_VOLTAGE_RANGES
+        source_range = request.source_range_si or selected_keithley_range(max(abs(request.level_si), source_ranges[0]), source_ranges)
+        independent = request.measure_voltage_range_si if request.mode == "current" else request.measure_current_range_si
+        if independent is not None:
+            ranges = KEITHLEY_2602A_VOLTAGE_RANGES if request.mode == "current" else KEITHLEY_2602A_CURRENT_RANGES
+            validate_keithley_range_pair(request.mode, source_range, selected_keithley_range(independent, ranges))
+    if request.mode == "current" and limits.measured_voltage_trip.enabled:
+        _require_compliance_trip_headroom(
+            "voltage",
+            request.compliance_si,
+            limits.measured_voltage_trip.min,
+            limits.measured_voltage_trip.max,
+            DIMENSION_VOLTAGE,
+        )
+    elif request.mode == "voltage" and limits.measured_current_trip.enabled:
+        _require_compliance_trip_headroom(
+            "current",
+            request.compliance_si,
+            limits.measured_current_trip.min,
+            limits.measured_current_trip.max,
+            DIMENSION_CURRENT,
+        )
+
+
+def _require_compliance_trip_headroom(
+    quantity_name: str,
+    compliance_si: float,
+    trip_minimum: str,
+    trip_maximum: str,
+    dimension: str,
+) -> None:
+    """Keep a working compliance value strictly inside the bipolar trip boundary."""
+
+    minimum_si = parse_quantity(trip_minimum, dimension).si_value
+    maximum_si = parse_quantity(trip_maximum, dimension).si_value
+    magnitude_si = abs(compliance_si)
+    unit = "V" if dimension == DIMENSION_VOLTAGE else "A"
+    tolerance = max(abs(minimum_si), abs(maximum_si), magnitude_si, 1.0) * 1e-12
+    if (
+        -magnitude_si <= minimum_si + tolerance
+        or magnitude_si >= maximum_si - tolerance
+    ):
+        raise SafetyViolation(
+            f"{quantity_name.capitalize()} compliance {compliance_si:.9g} {unit} leaves no "
+            f"measurement-trip headroom inside [{minimum_si:.9g}, {maximum_si:.9g}] {unit}. "
+            "Reduce compliance or widen the emergency measured-value cutoff in Settings; "
+            "the source configuration was blocked before OUTPUT could be enabled."
+        )
 
 
 def _validate_manual_range(

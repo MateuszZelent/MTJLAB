@@ -5,8 +5,10 @@ from __future__ import annotations
 from collections.abc import Mapping
 import csv
 from datetime import datetime, timezone
+import hashlib
 import json
 import logging
+import os
 import re
 import shutil
 import sqlite3
@@ -82,6 +84,36 @@ class InventoryStore:
         configured = str(row[0] if row is not None else "").strip()
         return Path(configured).expanduser().resolve() if configured else None
 
+    @staticmethod
+    def database_is_empty_catalogue(db_path: str | Path) -> bool:
+        """Return true only for a valid catalogue database with no user records."""
+
+        path = Path(db_path).expanduser().resolve()
+        if not path.is_file():
+            return False
+        connection: sqlite3.Connection | None = None
+        try:
+            connection = sqlite3.connect(f"file:{path.as_posix()}?mode=ro", uri=True)
+            tables = {
+                str(row[0])
+                for row in connection.execute(
+                    "SELECT name FROM sqlite_master WHERE type = 'table';"
+                ).fetchall()
+            }
+            required = {"samples", "sample_runs", "sample_attachments"}
+            if not required.issubset(tables):
+                return False
+            return all(
+                connection.execute(f"SELECT COUNT(*) FROM {table};").fetchone()[0]
+                == 0
+                for table in required
+            )
+        except sqlite3.Error:
+            return False
+        finally:
+            if connection is not None:
+                connection.close()
+
     @classmethod
     def open_for_catalogue_root(
         cls,
@@ -122,6 +154,75 @@ class InventoryStore:
         return store
 
     @staticmethod
+    def _filesystem_path(path: Path) -> str:
+        """Return a Windows extended-length path without persisting its prefix."""
+
+        value = str(path)
+        if os.name != "nt" or value.startswith("\\\\?\\"):
+            return value
+        if value.startswith("\\\\"):
+            return f"\\\\?\\UNC\\{value[2:]}"
+        return f"\\\\?\\{value}"
+
+    @classmethod
+    def _files_equal(cls, first: Path, second: Path) -> bool:
+        first_fs = cls._filesystem_path(first)
+        second_fs = cls._filesystem_path(second)
+        if os.path.getsize(first_fs) != os.path.getsize(second_fs):
+            return False
+
+        def digest(path: str) -> bytes:
+            checksum = hashlib.sha256()
+            with open(path, "rb") as stream:
+                for block in iter(lambda: stream.read(1024 * 1024), b""):
+                    checksum.update(block)
+            return checksum.digest()
+
+        return digest(first_fs) == digest(second_fs)
+
+    @classmethod
+    def _move_file(
+        cls, source: Path, destination: Path, *, replace_existing: bool = False
+    ) -> None:
+        """Move one file safely across volumes and allow an identical retry."""
+
+        source_fs = cls._filesystem_path(source)
+        destination_fs = cls._filesystem_path(destination)
+        os.makedirs(cls._filesystem_path(destination.parent), exist_ok=True)
+
+        if os.path.exists(destination_fs):
+            if cls._files_equal(source, destination):
+                os.unlink(source_fs)
+                return
+            if not replace_existing:
+                raise FileExistsError(
+                    f"Cannot resume catalogue move; files differ: {destination}"
+                )
+
+        if os.path.splitdrive(str(source))[0].casefold() == os.path.splitdrive(
+            str(destination)
+        )[0].casefold():
+            os.replace(source_fs, destination_fs)
+            return
+
+        temporary = destination.with_name(
+            f".{destination.name}.inventory-move-{uuid.uuid4().hex}.tmp"
+        )
+        temporary_fs = cls._filesystem_path(temporary)
+        try:
+            shutil.copy2(source_fs, temporary_fs)
+            if not cls._files_equal(source, temporary):
+                raise OSError(f"Catalogue file verification failed: {source}")
+            os.replace(temporary_fs, destination_fs)
+            os.unlink(source_fs)
+        except Exception:
+            try:
+                os.unlink(temporary_fs)
+            except FileNotFoundError:
+                pass
+            raise
+
+    @staticmethod
     def _move_sqlite_bundle(source: Path, destination: Path) -> None:
         """Move a SQLite database and any journal sidecars without overwriting."""
 
@@ -148,12 +249,12 @@ class InventoryStore:
         try:
             for src, dst in pairs:
                 if src.exists():
-                    src.replace(dst)
+                    InventoryStore._move_file(src, dst)
                     moved.append((src, dst))
         except Exception:
             for src, dst in reversed(moved):
                 if dst.exists():
-                    dst.replace(src)
+                    InventoryStore._move_file(dst, src)
             raise
 
     def _switch_database(self, db_path: Path) -> None:
@@ -408,43 +509,122 @@ class InventoryStore:
         self._write_catalogue_root(target)
         return target
 
-    @staticmethod
-    def _move_directory(source: Path, destination: Path) -> None:
-        """Move a directory, merging only when the destination already exists."""
+    @classmethod
+    def _move_directory(cls, source: Path, destination: Path) -> None:
+        """Move a tree safely, merging identical files on a resumed move."""
 
         source = source.expanduser().resolve()
         destination = destination.expanduser().resolve()
         if source == destination or not source.is_dir():
             return
-
-        destination.parent.mkdir(parents=True, exist_ok=True)
-        if not destination.exists():
-            shutil.move(str(source), str(destination))
-            return
-
-        for child in source.iterdir():
-            child_destination = destination / child.name
-            if child.is_dir():
-                InventoryStore._move_directory(child, child_destination)
-            else:
-                if child_destination.exists():
-                    raise FileExistsError(
-                        f"Cannot move catalogue file; target already exists: {child_destination}"
-                    )
-                shutil.move(str(child), str(child_destination))
         try:
-            source.rmdir()
+            destination.relative_to(source)
+        except ValueError:
+            pass
+        else:
+            raise ValueError(
+                f"Cannot move a catalogue directory into itself: {source} -> {destination}"
+            )
+        cls._move_directory_contents(source, destination)
+
+    @classmethod
+    def _move_directory_contents(
+        cls,
+        source: Path,
+        destination: Path,
+        *,
+        sample_folder_name: str = "",
+        sample_destination: Path | None = None,
+        legacy_snapshot: bool = False,
+    ) -> None:
+        """Recursively move using extended paths and flatten legacy recursion."""
+
+        source_fs = cls._filesystem_path(source)
+        if not os.path.isdir(source_fs):
+            return
+        os.makedirs(cls._filesystem_path(destination), exist_ok=True)
+
+        with os.scandir(source_fs) as entries:
+            children = list(entries)
+        for child in children:
+            child_source = source / child.name
+            child_destination = destination / child.name
+            if child.is_symlink():
+                raise ValueError(
+                    f"Catalogue migration does not follow symbolic links: {child_source}"
+                )
+            if child.is_dir(follow_symlinks=False):
+                # Older versions could copy the sample root into its own
+                # measurements directory. Merge that snapshot back into the
+                # canonical root instead of reproducing the recursion.
+                if (
+                    sample_folder_name
+                    and child.name == sample_folder_name
+                    and source.name == "measurements"
+                    and sample_destination is not None
+                ):
+                    child_destination = sample_destination
+                    child_legacy_snapshot = True
+                else:
+                    child_legacy_snapshot = legacy_snapshot
+                cls._move_directory_contents(
+                    child_source,
+                    child_destination,
+                    sample_folder_name=sample_folder_name,
+                    sample_destination=sample_destination,
+                    legacy_snapshot=child_legacy_snapshot,
+                )
+            else:
+                is_generated_info = (
+                    sample_destination is not None
+                    and child_destination == sample_destination / "info.csv"
+                )
+                if is_generated_info and legacy_snapshot:
+                    os.unlink(cls._filesystem_path(child_source))
+                else:
+                    cls._move_file(
+                        child_source,
+                        child_destination,
+                        replace_existing=is_generated_info,
+                    )
+
+        try:
+            os.rmdir(source_fs)
         except OSError:
             # A concurrently-created file is safer to leave in place than to
             # delete as part of a best-effort catalogue move.
             pass
 
+    @classmethod
+    def _move_sample_directory(
+        cls, source: Path, destination: Path, sample_folder_name: str
+    ) -> None:
+        source = source.expanduser().resolve()
+        destination = destination.expanduser().resolve()
+        if source == destination or not source.is_dir():
+            return
+        try:
+            destination.relative_to(source)
+        except ValueError:
+            pass
+        else:
+            raise ValueError(
+                f"Cannot move a sample directory into itself: {source} -> {destination}"
+            )
+        cls._move_directory_contents(
+            source,
+            destination,
+            sample_folder_name=sample_folder_name,
+            sample_destination=destination,
+        )
+
     def move_catalogue(self, root: str | Path) -> Path:
         """Move this database and its indexed files to a new catalogue root.
 
         This is intentionally separate from :meth:`set_catalogue_root` and
-        must be called explicitly. The destination must be empty (or absent)
-        and an existing destination database is never overwritten.
+        must be called explicitly. A partial destination created by an
+        interrupted attempt can be resumed. A verified empty catalogue
+        database may be replaced; a database containing records never is.
         """
 
         target = Path(root).expanduser().resolve()
@@ -464,18 +644,40 @@ class InventoryStore:
                     "The destination catalogue cannot be inside the current catalogue."
                 )
 
-        if target_db.exists() or any(
-            Path(f"{target_db}{suffix}").exists()
-            for suffix in ("-wal", "-shm", "-journal")
-        ):
+        target_bundle = [
+            Path(f"{target_db}{suffix}")
+            for suffix in ("", "-wal", "-shm", "-journal")
+        ]
+        target_bundle_exists = any(path.exists() for path in target_bundle)
+        replace_empty_target_db = (
+            target_bundle_exists and self.database_is_empty_catalogue(target_db)
+        )
+        if target_bundle_exists and not replace_empty_target_db:
             raise FileExistsError(
                 f"The destination already contains an inventory database: {target_db}"
             )
-        if target != source_root and target.exists() and any(target.iterdir()):
-            raise FileExistsError(f"The destination catalogue is not empty: {target}")
+        samples = [
+            sample if sample.folder_name else self.save_sample(sample)
+            for sample in self.list_samples()
+        ]
+        allowed_partial_entries = {"attachments"} | {
+            sample.folder_name for sample in samples if sample.folder_name
+        }
+        if replace_empty_target_db:
+            allowed_partial_entries.update(path.name for path in target_bundle)
+        if target != source_root and target.exists():
+            unexpected = [
+                child.name
+                for child in target.iterdir()
+                if child.name not in allowed_partial_entries
+            ]
+            if unexpected:
+                raise FileExistsError(
+                    "The destination contains files unrelated to this catalogue: "
+                    + ", ".join(sorted(unexpected))
+                )
 
         target.mkdir(parents=True, exist_ok=True)
-        samples = self.list_samples()
         old_root = source_root
         legacy_attachments_dir = self.attachments_dir
         target_attachments_dir = target / "attachments"
@@ -485,9 +687,8 @@ class InventoryStore:
         ):
             self._move_directory(legacy_attachments_dir, target_attachments_dir)
 
+        path_rewrites: list[tuple[Path, Path, str, str]] = []
         for sample in samples:
-            if not sample.folder_name:
-                sample = self.save_sample(sample)
             destination = target / sample.folder_name
             sources: list[tuple[Path, Path]] = []
             if sample.folder_name:
@@ -514,8 +715,37 @@ class InventoryStore:
             for source, mapped_destination in sources:
                 if source.resolve() == mapped_destination.resolve() or not source.is_dir():
                     continue
-                self._rewrite_run_paths(source, mapped_destination, sample.sample_id)
-                self._move_directory(source, mapped_destination)
+                if mapped_destination == destination:
+                    self._move_sample_directory(
+                        source, mapped_destination, sample.folder_name
+                    )
+                else:
+                    self._move_directory(source, mapped_destination)
+                path_rewrites.append(
+                    (
+                        source,
+                        mapped_destination,
+                        sample.sample_id,
+                        sample.folder_name if mapped_destination == destination else "",
+                    )
+                )
+
+        # Keep the live database authoritative until every file has arrived.
+        # This prevents a failed copy from pointing records at missing files.
+        for source, mapped_destination, sample_id, sample_folder_name in path_rewrites:
+            self._rewrite_run_paths(
+                source,
+                mapped_destination,
+                sample_id,
+                sample_folder_name=sample_folder_name,
+            )
+
+        if replace_empty_target_db:
+            for path in target_bundle:
+                try:
+                    os.unlink(self._filesystem_path(path))
+                except FileNotFoundError:
+                    pass
 
         self._move_current_database(target_db)
         self._write_catalogue_root(target)
@@ -680,7 +910,12 @@ class InventoryStore:
                         )
 
     def _rewrite_run_paths(
-        self, source: Path, destination: Path, sample_id: str | None
+        self,
+        source: Path,
+        destination: Path,
+        sample_id: str | None,
+        *,
+        sample_folder_name: str = "",
     ) -> None:
         with self._lock:
             if sample_id is None:
@@ -700,6 +935,22 @@ class InventoryStore:
                         relative = path.resolve().relative_to(source.resolve())
                     except ValueError:
                         continue
+                    if sample_folder_name:
+                        parts = list(relative.parts)
+                        while True:
+                            recursive_index = next(
+                                (
+                                    index
+                                    for index in range(len(parts) - 1)
+                                    if parts[index] == "measurements"
+                                    and parts[index + 1] == sample_folder_name
+                                ),
+                                None,
+                            )
+                            if recursive_index is None:
+                                break
+                            del parts[recursive_index : recursive_index + 2]
+                        relative = Path(*parts)
                     updates[column] = str(destination / relative)
                 if updates:
                     assignments = ", ".join(f"{key} = ?" for key in updates)

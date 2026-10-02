@@ -16,7 +16,13 @@ from PySide6.QtWidgets import (
 )
 from qfluentwidgets import Action, FluentIcon, RoundMenu, SimpleCardWidget
 
-from app.inventory.models import ActiveSampleTarget, Sample, SampleRunRecord
+from app.inventory.models import (
+    ActiveSampleTarget,
+    SAMPLE_CELL_STATE_OPTIONS,
+    Sample,
+    SampleRunRecord,
+    sample_cell_state_label,
+)
 
 
 class SampleMatrixWidget(SimpleCardWidget):
@@ -47,6 +53,7 @@ class SampleMatrixWidget(SimpleCardWidget):
         "shorted": QColor(210, 15, 57, 75),     # crimson tint
         "open": QColor(223, 142, 29, 70),       # amber tint
         "degraded": QColor(136, 57, 239, 60),   # purple tint
+        "require_double_check": QColor(126, 34, 206, 90),  # review required
     }
 
     _ACTIVE_BG = QColor(30, 102, 245, 90)
@@ -138,7 +145,7 @@ class SampleMatrixWidget(SimpleCardWidget):
         elif state == "completed":
             lines.append("✔ COMPLETED")
         elif state != "untested":
-            lines.append(f"[{state.upper()}]")
+            lines.append(f"[{sample_cell_state_label(state).upper()}]")
 
         # Sweep / run count
         if run_count > 0:
@@ -149,7 +156,12 @@ class SampleMatrixWidget(SimpleCardWidget):
 
         font = item.font()
         font.setPointSize(8)
-        font.setBold(bool(is_active or state in {"burned", "completed"}))
+        font.setBold(
+            bool(
+                is_active
+                or state in {"burned", "completed", "require_double_check"}
+            )
+        )
         item.setFont(font)
 
         # Background color
@@ -416,6 +428,14 @@ class SampleMatrixWidget(SimpleCardWidget):
         )
         col_state_menu.addAction(
             Action(
+                "Require double check (Purple)",
+                triggered=lambda: self.col_state_change_requested.emit(
+                    col_key, "require_double_check"
+                ),
+            )
+        )
+        col_state_menu.addAction(
+            Action(
                 "🔥 Burned / Damaged (Light Red)",
                 triggered=lambda: self.col_state_change_requested.emit(col_key, "burned"),
             )
@@ -489,6 +509,14 @@ class SampleMatrixWidget(SimpleCardWidget):
             Action(
                 "✔ Measured (Light Green)",
                 triggered=lambda: self.row_state_change_requested.emit(row_key, "measured"),
+            )
+        )
+        row_state_menu.addAction(
+            Action(
+                "Require double check (Purple)",
+                triggered=lambda: self.row_state_change_requested.emit(
+                    row_key, "require_double_check"
+                ),
             )
         )
         row_state_menu.addAction(
@@ -599,6 +627,14 @@ class SampleMatrixWidget(SimpleCardWidget):
         )
         menu.addAction(
             Action(
+                f"Mark {count_desc} as Require double check (Purple)",
+                triggered=lambda: self._apply_batch_state(
+                    selected_coords, "require_double_check"
+                ),
+            )
+        )
+        menu.addAction(
+            Action(
                 FluentIcon.CANCEL,
                 f"🔥 Mark {count_desc} as Burned / Damaged (Light Red)",
                 triggered=lambda: self._apply_batch_state(selected_coords, "burned"),
@@ -608,14 +644,18 @@ class SampleMatrixWidget(SimpleCardWidget):
 
         state_menu = RoundMenu("More Device States", menu)
         state_menu.setIcon(FluentIcon.FLAG)
-        for state, label in (
-            ("untested", "Untested (Default)"),
-            ("good", "Good (Functional)"),
-            ("measured", "Measured (Light Green)"),
-            ("shorted", "Shorted (Defect)"),
-            ("open", "Open (Disconnected)"),
-            ("degraded", "Degraded / High Resistance"),
-        ):
+        state_menu_labels = {
+            "untested": "Untested (Default)",
+            "good": "Good (Functional)",
+            "measured": "Measured (Light Green)",
+            "shorted": "Shorted (Defect)",
+            "open": "Open (Disconnected)",
+            "degraded": "Degraded / High Resistance",
+        }
+        for state, default_label in SAMPLE_CELL_STATE_OPTIONS:
+            if state in {"completed", "burned", "require_double_check"}:
+                continue
+            label = state_menu_labels.get(state, default_label)
             state_menu.addAction(
                 Action(
                     label,

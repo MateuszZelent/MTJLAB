@@ -3,15 +3,24 @@ from __future__ import annotations
 from copy import deepcopy
 import os
 import unittest
-from unittest.mock import Mock
+from unittest.mock import Mock, patch
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
-from PySide6.QtCore import QSettings
+from PySide6.QtCore import Qt
+from PySide6.QtTest import QTest
 from PySide6.QtWidgets import QApplication
 
-from app.devices.keithley_2600.adapter import KeithleyAdapter, KeithleyMeasurement
-from app.devices.keithley_2600.ui.page import KeithleyPage, KeithleyPlotSettingsDialog
+from app.devices.keithley_2600.adapter import (
+    KeithleyAdapter,
+    KeithleyMeasurement,
+)
+from app.devices.keithley_2600.ui.page import (
+    DEFAULT_KEITHLEY_LIVE_INTERVAL_MS,
+    DEFAULT_KEITHLEY_PLOT_HISTORY_WINDOW_S,
+    KeithleyPage,
+    KeithleyPlotSettingsDialog,
+)
 from app.devices.keithley_2600.ui.twin_axis_plot import KeithleyTwinAxisPlotWidget
 from app.domain.errors import SafetyViolation
 from app.settings.models import StationSettings
@@ -47,6 +56,85 @@ class KeithleyDualPlotsTests(unittest.TestCase):
             self.assertEqual(len(plot.compliance_markers.getData()[0]), 0)
         finally:
             plot.close()
+
+    def test_keithley_default_history_and_live_refresh_timing(self) -> None:
+        settings_store = Mock()
+        settings_store.value.side_effect = lambda _key, default=None: default
+        with patch(
+            "app.devices.keithley_2600.ui.page.QSettings",
+            return_value=settings_store,
+        ):
+            page = KeithleyPage(Mock(), simulated_station_settings(loaded_settings()))
+        try:
+            page.resize(1360, 880)
+            page.show()
+            self.application.processEvents()
+
+            self.assertEqual(
+                page._history_window_s, DEFAULT_KEITHLEY_PLOT_HISTORY_WINDOW_S
+            )
+            self.assertEqual(
+                page.live_interval.value(), DEFAULT_KEITHLEY_LIVE_INTERVAL_MS
+            )
+            self.assertEqual(
+                page._live_timer.interval(), DEFAULT_KEITHLEY_LIVE_INTERVAL_MS
+            )
+            self.assertIn("Rolling 120 s history", page._history_notes["A"].text())
+            self.assertGreater(page.geometry().width(), 0)
+            self.assertGreater(page.geometry().height(), 0)
+        finally:
+            page.close()
+
+    def test_keithley_channel_switch_keeps_a_and_b_drafts_separate(self) -> None:
+        raw = deepcopy(simulated_station_settings(loaded_settings()).model_dump(mode="python"))
+        channels = raw["devices"]["keithley"]["safety"]["channels"]
+        channels["A"]["defaults"]["source_mode"] = "current"
+        channels["A"]["defaults"]["source_current"] = "1 mA"
+        channels["A"]["defaults"]["voltage_compliance"] = "670 mV"
+        channels["A"]["lab_limits"]["voltage_compliance"] = {
+            "min": "-650 mV",
+            "max": "670 mV",
+        }
+        channels["A"]["lab_limits"]["measured_voltage_trip"] = {
+            "min": "-701 mV",
+            "max": "701 mV",
+        }
+        channels["B"]["defaults"]["source_mode"] = "current"
+        channels["B"]["defaults"]["source_current"] = "0.1 mA"
+        channels["B"]["defaults"]["voltage_compliance"] = "700 mV"
+        channels["B"]["lab_limits"]["voltage_compliance"] = {
+            "min": "-700 mV",
+            "max": "700 mV",
+        }
+        channels["B"]["lab_limits"]["measured_voltage_trip"] = {
+            "min": "-705 mV",
+            "max": "705 mV",
+        }
+        settings = StationSettings.model_validate(raw)
+        page = KeithleyPage(Mock(), settings)
+        try:
+            page.resize(1360, 880)
+            page.show()
+            self.application.processEvents()
+
+            self.assertEqual(page.channel.currentText(), "B")
+            self.assertEqual(page.compliance.text(), "700 mV")
+            self.assertIn("-705 mV…705 mV", page.configuration_panel.safety_boundary_summary.text())
+
+            page.channel.setCurrentText("A")
+            self.application.processEvents()
+            self.assertEqual(page.compliance.text(), "670 mV")
+            self.assertIn("-701 mV…701 mV", page.configuration_panel.safety_boundary_summary.text())
+
+            page.compliance.setText("660 mV")
+            page.channel.setCurrentText("B")
+            self.application.processEvents()
+            self.assertEqual(page.compliance.text(), "700 mV")
+            page.channel.setCurrentText("A")
+            self.application.processEvents()
+            self.assertEqual(page.compliance.text(), "660 mV")
+        finally:
+            page.close()
 
     def test_twin_axis_plot_construction_and_data(self) -> None:
         iv_plot = KeithleyTwinAxisPlotWidget("A")
@@ -152,6 +240,7 @@ class KeithleyDualPlotsTests(unittest.TestCase):
         controller = Mock()
         page = KeithleyPage(controller, settings)
         try:
+            page.resize(1360, 880)
             page.show()
             self.application.processEvents()
 
@@ -204,7 +293,7 @@ class KeithleyDualPlotsTests(unittest.TestCase):
         finally:
             page.close()
 
-    def test_keithley_advanced_ranges_expand_collapse(self) -> None:
+    def test_keithley_advanced_ranges_open_in_modal(self) -> None:
         raw = deepcopy(simulated_station_settings(loaded_settings()).model_dump(mode="python"))
         settings = StationSettings.model_validate(raw)
         controller = Mock()
@@ -215,29 +304,36 @@ class KeithleyDualPlotsTests(unittest.TestCase):
 
             panel = page.configuration_panel
             self.assertFalse(panel._advanced_ranges_expanded)
-            self.assertIn("All AUTO", page.advanced_ranges_button.text())
-            self.assertFalse(page.keithley_form.isRowVisible(page.source_autorange))
-            self.assertFalse(page.keithley_form.isRowVisible(page.measure_voltage_autorange))
+            self.assertEqual(
+                page.advanced_ranges_button.text(), "Advanced source settings…"
+            )
+            self.assertFalse(page.source_range.isVisible())
+            self.assertFalse(page.measure_voltage_autorange.isVisible())
+            self.assertFalse(page.max_abs_power_field.isVisible())
 
-            page.advanced_ranges_button.click()
+            with patch.object(panel.advanced_ranges_dialog, "exec") as execute:
+                page.advanced_ranges_button.click()
+                execute.assert_called_once_with()
+
+            panel.advanced_ranges_dialog.show()
             self.application.processEvents()
-            self.assertTrue(panel._advanced_ranges_expanded)
-            self.assertEqual(page.advanced_ranges_button.text(), "Hide advanced range settings")
-            self.assertTrue(page.keithley_form.isRowVisible(page.source_autorange))
-            self.assertTrue(page.keithley_form.isRowVisible(page.measure_voltage_autorange))
+            self.assertGreater(panel.advanced_ranges_dialog.geometry().width(), 0)
+            self.assertGreater(panel.advanced_ranges_dialog.geometry().height(), 0)
+            self.assertTrue(page.source_autorange.isVisible())
+            self.assertTrue(page.measure_voltage_autorange.isVisible())
+            self.assertTrue(page.max_abs_power_field.isVisible())
 
             page.source_autorange.setChecked(False)
             self.application.processEvents()
             self.assertTrue(page.source_range.isEnabled())
+            self.assertIn("source", panel.advanced_ranges_summary.text())
+            self.assertIn("power", panel.advanced_ranges_summary.text())
 
-            page.advanced_ranges_button.click()
+            panel.advanced_ranges_dialog.close()
+            page.resize(760, 720)
             self.application.processEvents()
-            self.assertFalse(panel._advanced_ranges_expanded)
-            self.assertIn("Manual", page.advanced_ranges_button.text())
-
-            page.source_autorange.setChecked(True)
-            self.application.processEvents()
-            self.assertIn("All AUTO", page.advanced_ranges_button.text())
+            self.assertTrue(page.advanced_ranges_button.isVisible())
+            self.assertGreater(page.advanced_ranges_button.geometry().width(), 0)
 
         finally:
             page.close()
@@ -306,6 +402,172 @@ class KeithleyDualPlotsTests(unittest.TestCase):
             host.close()
             page.close()
 
+    def test_keithley_source_form_keeps_values_visible_in_narrow_splitter(self) -> None:
+        """The source form must not render outside its hidden horizontal scrollbar."""
+        settings = simulated_station_settings(loaded_settings())
+        page = KeithleyPage(Mock(), settings)
+        host = FluentPageHost(page)
+        try:
+            for width, height in ((1366, 880), (532, 700)):
+                host.resize(width, height)
+                host.show()
+                self.application.processEvents()
+
+                source_scroll = page.source_scroll
+                source_content = source_scroll.widget()
+                panel = page.configuration_panel
+                self.assertEqual(source_scroll.horizontalScrollBar().maximum(), 0)
+                self.assertLessEqual(source_content.width(), source_scroll.viewport().width())
+                self.assertLessEqual(panel.geometry().right(), source_content.width())
+
+                for field in (
+                    panel.level_field,
+                    panel.compliance_field,
+                    panel.limit_fields["settle"],
+                ):
+                    editor = field.editor
+                    self.assertTrue(field.isVisible())
+                    self.assertTrue(editor.isVisible())
+                    self.assertGreaterEqual(editor.width(), 140)
+                    self.assertGreaterEqual(
+                        editor.width(), editor.fontMetrics().horizontalAdvance(editor.text())
+                    )
+                    # Keep the Keithley safety action visually identical to
+                    # the shared Rigol/Anritsu LimitField control.
+                    self.assertEqual(field.edit_button.width(), 78)
+                    self.assertEqual(field.edit_button.height(), 30)
+                    self.assertEqual(field.edit_button.text(), "Edit")
+                    self.assertFalse(field.edit_button.icon().isNull())
+
+                for button in (
+                    page.apply_configuration_button,
+                    page.read_configuration_button,
+                    page.measure_selected_button,
+                ):
+                    self.assertLessEqual(button.geometry().right(), source_content.width())
+                    self.assertGreaterEqual(
+                        button.width(), button.fontMetrics().horizontalAdvance(button.text())
+                    )
+        finally:
+            host.close()
+            page.close()
+
+    def test_keithley_value_edit_keeps_caret_when_limits_refresh(self) -> None:
+        """Refreshing safety limits must not move the caret during A/B editing."""
+        settings = simulated_station_settings(loaded_settings())
+        page = KeithleyPage(Mock(), settings)
+        try:
+            page.resize(1366, 880)
+            page.show()
+            self.application.processEvents()
+
+            values = {
+                # Channel A has the narrower default source envelope in the
+                # test station profile; keep both edits inside their limits.
+                "A": ("100 uA", "10 uA"),
+                "B": ("10 mA", "1 mA"),
+            }
+            for channel in ("A", "B"):
+                page.channel.setCurrentText(channel)
+                page.mode.setCurrentText("current")
+                self.application.processEvents()
+
+                editor = page.level
+                original, after_backspace = values[channel]
+                editor.setText(original)
+                editor.setFocus()
+                editor.setCursorPosition(2)  # immediately after the zero
+
+                # This is the refresh path used after form callbacks and
+                # settings updates while the value editor can still be active.
+                page._refresh_keithley_limits()
+                self.assertEqual(editor.cursorPosition(), 2, channel)
+
+                QTest.keyClick(editor, Qt.Key.Key_Backspace)
+                self.application.processEvents()
+                self.assertEqual(editor.text(), after_backspace, channel)
+                self.assertEqual(editor.cursorPosition(), 1, channel)
+        finally:
+            page.close()
+
+    def test_keithley_readback_renders_hardware_timing_rows(self) -> None:
+        """Hardware delay readback is visible and remains read-only in the dialog."""
+        settings = simulated_station_settings(loaded_settings())
+        adapter = KeithleyAdapter(
+            settings, session_factory=SimulatedVisaFactory("keithley")
+        )
+        page = KeithleyPage(Mock(), settings)
+        dialog = None
+        try:
+            adapter.connect()
+            page._show_configuration_readback(adapter.read_configuration())
+            dialog = page._readback_dialog
+            self.assertIsNotNone(dialog)
+            assert dialog is not None
+            dialog.show()
+            self.application.processEvents()
+
+            self.assertGreater(dialog.table.width(), 0)
+            self.assertEqual(dialog.tabs.count(), 2)
+            self.assertEqual(
+                [dialog.tabs.tabText(index) for index in range(dialog.tabs.count())],
+                ["All parameters", "Set by PyLab"],
+            )
+            self.assertEqual(dialog.table.rowCount(), 16)
+            self.assertEqual(dialog.pylab_table.rowCount(), 12)
+            pylab_rows = {
+                dialog.pylab_table.item(row, 0).text()
+                for row in range(dialog.pylab_table.rowCount())
+            }
+            self.assertIn("Settling time", pylab_rows)
+            self.assertNotIn("Hardware source delay", pylab_rows)
+            self.assertNotIn("Hardware measure delay", pylab_rows)
+            self.assertNotIn("Measure delay factor", pylab_rows)
+            self.assertGreater(dialog.pylab_table.width(), 0)
+            rows = {
+                dialog.table.item(row, 0).text(): row
+                for row in range(dialog.table.rowCount())
+            }
+            expected = {
+                "Hardware source delay": ("0 s", "0 s"),
+                "Hardware measure delay": (
+                    "AUTO (range-dependent)",
+                    "AUTO (range-dependent)",
+                ),
+                "Measure delay factor": ("1", "1"),
+            }
+            for parameter, values in expected.items():
+                row = rows[parameter]
+                self.assertEqual(
+                    (dialog.table.item(row, 1).text(), dialog.table.item(row, 4).text()),
+                    values,
+                )
+                self.assertEqual(dialog.table.item(row, 2).text(), "Not controlled by form")
+                self.assertIsNone(dialog.table.cellWidget(row, 3))
+                self.assertIsNone(dialog.table.cellWidget(row, 6))
+
+            settling_row = next(
+                row
+                for row in range(dialog.pylab_table.rowCount())
+                if dialog.pylab_table.item(row, 0).text() == "Settling time"
+            )
+            self.assertEqual(
+                dialog.pylab_table.item(settling_row, 1).text(),
+                "APPLICATION ONLY",
+            )
+            self.assertIn("Form:", dialog.pylab_table.item(settling_row, 2).text())
+            self.assertIsNone(dialog.pylab_table.cellWidget(settling_row, 3))
+
+            dialog.tabs.setCurrentIndex(1)
+            self.application.processEvents()
+            self.assertTrue(dialog.pylab_table.isVisible())
+            self.assertFalse(dialog.table.isVisible())
+        finally:
+            if dialog is not None:
+                dialog.close()
+            page.close()
+            adapter.disconnect()
+
     def test_keithley_plot_settings_dialog_and_persistence(self) -> None:
         raw = deepcopy(simulated_station_settings(loaded_settings()).model_dump(mode="python"))
         settings = StationSettings.model_validate(raw)
@@ -327,20 +589,28 @@ class KeithleyDualPlotsTests(unittest.TestCase):
                 self.assertEqual(dialog.window_seconds(), float(preset_val))
 
             # Test setting history window directly on page
-            page.set_plot_history_window(45.0)
-            self.assertEqual(page._history_window_s, 45.0)
-            self.assertIn("Rolling 45 s history", page._history_notes["A"].text())
-            self.assertIn("Rolling 45 s history", page._history_notes["B"].text())
-            persisted = float(QSettings("LabControl", "LabControl").value("keithley/plot_history_window_s"))
-            self.assertEqual(persisted, 45.0)
+            settings_store = Mock()
+            persisted: dict[str, object] = {}
+            settings_store.setValue.side_effect = persisted.__setitem__
+            with patch(
+                "app.devices.keithley_2600.ui.page.QSettings",
+                return_value=settings_store,
+            ):
+                page.set_plot_history_window(45.0)
+                self.assertEqual(page._history_window_s, 45.0)
+                self.assertIn("Rolling 45 s history", page._history_notes["A"].text())
+                self.assertIn("Rolling 45 s history", page._history_notes["B"].text())
+                self.assertEqual(
+                    persisted["keithley/plot_history_window_s"], 45.0
+                )
 
-            # Test minimum 10s clamp
-            page.set_plot_history_window(3.0)
-            self.assertEqual(page._history_window_s, 10.0)
-            self.assertIn("Rolling 10 s history", page._history_notes["A"].text())
+                # Test minimum 10s clamp
+                page.set_plot_history_window(3.0)
+                self.assertEqual(page._history_window_s, 10.0)
+                self.assertIn("Rolling 10 s history", page._history_notes["A"].text())
 
-            # Reset back to default
-            page.set_plot_history_window(30.0)
+                # Reset back to default
+                page.set_plot_history_window(DEFAULT_KEITHLEY_PLOT_HISTORY_WINDOW_S)
         finally:
             page.close()
 

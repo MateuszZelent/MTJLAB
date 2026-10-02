@@ -193,6 +193,9 @@ class SimulatorTests(unittest.TestCase):
             all(channel.output_off_mode == "high_impedance" for channel in readback.channels)
         )
         self.assertTrue(all(channel.source_mode == "current" for channel in readback.channels))
+        self.assertTrue(all(channel.source_delay_s == 0.0 for channel in readback.channels))
+        self.assertTrue(all(channel.measure_delay_s is None for channel in readback.channels))
+        self.assertTrue(all(channel.measure_delay_factor == 1.0 for channel in readback.channels))
 
     def test_keithley_simulator_isolates_one_dut_and_measurement_restores_normal(
         self,

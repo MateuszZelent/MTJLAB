@@ -110,7 +110,9 @@ class SettingsRepositoryTests(unittest.TestCase):
             repository._atomic_dump(raw)
             original = path.read_bytes()
 
-            with self.assertRaisesRegex(ConfigurationError, "Measured current trip"):
+            with self.assertRaisesRegex(
+                ConfigurationError, "Emergency measured-current cutoff"
+            ):
                 repair_settings_file(path)
 
             self.assertEqual(path.read_bytes(), original)

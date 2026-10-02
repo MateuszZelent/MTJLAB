@@ -48,9 +48,12 @@ from qfluentwidgets import (
 
 from app.inventory.models import (
     ActiveSampleTarget,
+    SAMPLE_CELL_STATE_OPTIONS,
+    SAMPLE_CELL_TESTED_STATES,
     Sample,
     SampleAttachment,
     SampleRunRecord,
+    sample_cell_state_label,
 )
 from app.inventory.store import InventoryStore
 from app.ui.inventory.attachment_card import AttachmentCard
@@ -221,6 +224,7 @@ class SampleInventoryPage(QWidget):
     open_result_requested = Signal(str)     # run_path (.h5)
     status = Signal(str)
     samples_updated = Signal()
+    catalogue_root_changed = Signal(str)
 
     def __init__(
         self,
@@ -415,10 +419,10 @@ class SampleInventoryPage(QWidget):
         header_row1.addWidget(self.edit_structure_header_btn)
 
         self.renumber_rows_header_btn = PushButton(
-            "Renumber Rows...", self.sample_header_card, FluentIcon.SYNC
+            "Resize Grid...", self.sample_header_card, FluentIcon.SYNC
         )
         self.renumber_rows_header_btn.setToolTip(
-            "Quickly shift or renumber rows (e.g. from 1..10 to 20..30) while preserving measurements"
+            "Set row and column counts or renumber rows while preserving existing cell data"
         )
         self.renumber_rows_header_btn.clicked.connect(self._on_renumber_rows_requested)
         header_row1.addWidget(self.renumber_rows_header_btn)
@@ -547,10 +551,13 @@ class SampleInventoryPage(QWidget):
         form.addRow("Col Label:", self.col_label_input)
 
         self.cell_state_combo = ComboBox(inspector_scroll_content)
-        self.cell_state_combo.addItems([
-            "untested", "completed", "good", "measured", "burned", "shorted", "open", "degraded"
-        ])
-        self.cell_state_combo.currentTextChanged.connect(self._on_cell_state_combo_changed)
+        for state_key, state_label in SAMPLE_CELL_STATE_OPTIONS:
+            self.cell_state_combo.addItem(state_label, userData=state_key)
+        self.cell_state_combo.currentIndexChanged.connect(
+            lambda _index: self._on_cell_state_combo_changed(
+                self.cell_state_combo.currentData()
+            )
+        )
         form.addRow("State:", self.cell_state_combo)
         inspector_layout.addLayout(form)
 
@@ -761,6 +768,42 @@ class SampleInventoryPage(QWidget):
         selected = dialog.selected_root()
         if not str(selected).strip():
             return
+        selected = selected.expanduser().resolve()
+        target_db = selected / "inventory.db"
+        current_has_samples = bool(self.store.list_samples())
+        if not target_db.is_file():
+            answer = QMessageBox.warning(
+                self,
+                "Create Empty Samples Catalogue",
+                (
+                    f"No inventory.db exists in:\n{selected}\n\n"
+                    "Selecting this folder will create a new empty catalogue. "
+                    "It will not move the currently indexed samples.\n\n"
+                    "Use Move Catalogue if you want to relocate existing data."
+                ),
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.Cancel,
+                QMessageBox.StandardButton.Cancel,
+            )
+            if answer != QMessageBox.StandardButton.Yes:
+                return
+        elif (
+            current_has_samples
+            and target_db.resolve() != self.store.db_path.resolve()
+            and InventoryStore.database_is_empty_catalogue(target_db)
+        ):
+            answer = QMessageBox.warning(
+                self,
+                "Empty Samples Catalogue",
+                (
+                    f"The database in:\n{selected}\n\ncontains no samples. "
+                    "Opening it will show an empty Samples list and will not move "
+                    "the current catalogue.\n\nContinue anyway?"
+                ),
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.Cancel,
+                QMessageBox.StandardButton.Cancel,
+            )
+            if answer != QMessageBox.StandardButton.Yes:
+                return
         try:
             root = self.store.set_catalogue_root(selected)
         except Exception as exc:
@@ -773,6 +816,7 @@ class SampleInventoryPage(QWidget):
             )
             return
         self.catalogue_settings_btn.setToolTip(f"Samples catalogue root: {root}")
+        self.catalogue_root_changed.emit(str(root))
         self.refresh_samples()
         self.active_target_changed.emit(self.store.get_active_target())
         self.samples_updated.emit()
@@ -829,6 +873,7 @@ class SampleInventoryPage(QWidget):
             return
 
         self.catalogue_settings_btn.setToolTip(f"Samples catalogue root: {root}")
+        self.catalogue_root_changed.emit(str(root))
         self.refresh_samples()
         self.active_target_changed.emit(self.store.get_active_target())
         self.samples_updated.emit()
@@ -900,7 +945,7 @@ class SampleInventoryPage(QWidget):
         total = sample.total_cells()
         tested = sum(
             1 for state in sample.device_states.values()
-            if state in {"measured", "good", "completed", "burned", "shorted", "open", "degraded"}
+            if state in SAMPLE_CELL_TESTED_STATES
         )
         measured = sum(1 for state in sample.device_states.values() if state == "measured")
         completed = sum(1 for state in sample.device_states.values() if state == "completed")
@@ -974,9 +1019,23 @@ class SampleInventoryPage(QWidget):
         dialog = SampleProgrammingDialog(sample=self._current_sample, parent=self)
         if dialog.exec():
             updated = dialog.get_sample()
-            self.store.save_sample(updated)
-            self.status.emit(f"Sample {updated.sample_id} updated.")
+            saved = self.store.save_sample(updated)
+            self.status.emit(
+                f"Sample {saved.sample_id} updated to "
+                f"{len(saved.rows)} × {len(saved.cols)}."
+            )
             self.refresh_samples()
+            self._set_current_sample(saved)
+            InfoBar.success(
+                title="Sample Structure Updated",
+                content=(
+                    f"The grid now has {len(saved.rows)} rows × {len(saved.cols)} "
+                    f"columns ({saved.total_cells()} devices)."
+                ),
+                position=InfoBarPosition.TOP,
+                duration=3500,
+                parent=self,
+            )
 
     def _on_renumber_rows_requested(self) -> None:
         if self._current_sample is None:
@@ -984,21 +1043,43 @@ class SampleInventoryPage(QWidget):
         dialog = RenumberRowsDialog(sample=self._current_sample, parent=self)
         if dialog.exec():
             old_rows = list(self._current_sample.rows)
-            updated = dialog.get_renumbered_sample()
+            updated = dialog.get_resized_sample()
             new_rows = list(updated.rows)
             row_mapping = {old: new_rows[i] for i, old in enumerate(old_rows) if i < len(new_rows)}
-            self.store.remap_sample_rows(self._current_sample.sample_id, row_mapping)
-            self.store.save_sample(updated)
+            try:
+                # A pure resize (for example 11×10 → 16×10) does not require
+                # rewriting historical run coordinates. Avoid the redundant
+                # intermediate save of the old-sized grid in that common case.
+                if any(old != new for old, new in row_mapping.items()):
+                    self.store.remap_sample_rows(
+                        self._current_sample.sample_id,
+                        row_mapping,
+                    )
+                self.store.save_sample(updated)
+                saved = self.store.get_sample(updated.sample_id)
+                if saved is None:
+                    raise RuntimeError("The updated sample could not be read back from the catalogue.")
+            except Exception as exc:
+                InfoBar.error(
+                    title="Grid was not updated",
+                    content=str(exc),
+                    orient=Qt.Orientation.Horizontal,
+                    isClosable=True,
+                    position=InfoBarPosition.TOP,
+                    duration=-1,
+                    parent=self,
+                )
+                return
             self.status.emit(
-                f"Renumbered rows for {updated.name} to {updated.rows[0]}..{updated.rows[-1]}."
+                f"Resized {saved.name} to {len(saved.rows)} × {len(saved.cols)}."
             )
             self.refresh_samples()
-            self._set_current_sample(updated)
+            self._set_current_sample(saved)
             InfoBar.success(
-                title="Rows Renumbered",
+                title="Grid Updated",
                 content=(
-                    f"Sample '{updated.name}' rows renumbered to "
-                    f"{updated.rows[0]}..{updated.rows[-1]} ({len(updated.rows)} rows total)."
+                    f"Sample '{saved.name}' now has {len(saved.rows)} rows × "
+                    f"{len(saved.cols)} columns ({saved.total_cells()} devices)."
                 ),
                 orient=Qt.Orientation.Horizontal,
                 isClosable=True,
@@ -1070,7 +1151,7 @@ class SampleInventoryPage(QWidget):
 
     def _update_inspector_state_controls(self, state: str) -> None:
         self.cell_state_combo.blockSignals(True)
-        idx = self.cell_state_combo.findText(state)
+        idx = self.cell_state_combo.findData(state)
         if idx >= 0:
             self.cell_state_combo.setCurrentIndex(idx)
         else:
@@ -1097,7 +1178,9 @@ class SampleInventoryPage(QWidget):
         new_label = self.cell_label_input.text().strip()
         new_row_label = self.row_label_input.text().strip()
         new_col_label = self.col_label_input.text().strip()
-        new_state = self.cell_state_combo.currentText()
+        new_state = self.cell_state_combo.currentData()
+        if not isinstance(new_state, str):
+            new_state = "untested"
         new_notes = self.cell_notes_input.toPlainText().strip()
 
         updated = self._current_sample.with_cell_update(
@@ -1222,7 +1305,9 @@ class SampleInventoryPage(QWidget):
         self.matrix_widget.update_cell(row, col, state=new_state)
         self._refresh_stats(updated)
         self.store.save_sample(updated)
-        self.status.emit(f"Marked R{row}:C{col} as {new_state}.")
+        self.status.emit(
+            f"Marked R{row}:C{col} as {sample_cell_state_label(new_state)}."
+        )
 
     def _on_toggle_completed_clicked(self) -> None:
         if self._selected_cell is None or self._current_sample is None:
@@ -1240,8 +1325,10 @@ class SampleInventoryPage(QWidget):
         new_state = "untested" if current_state == "burned" else "burned"
         self._set_cell_state_fast(new_state)
 
-    def _on_cell_state_combo_changed(self, new_state: str) -> None:
+    def _on_cell_state_combo_changed(self, new_state: object) -> None:
         if self._selected_cell is None or self._current_sample is None:
+            return
+        if not isinstance(new_state, str):
             return
         row, col = self._selected_cell
         if self._current_sample.cell_state(row, col) != new_state:
@@ -1261,7 +1348,9 @@ class SampleInventoryPage(QWidget):
         if self._selected_cell == (row, col):
             self._update_inspector_state_controls(new_state)
         self.matrix_widget.select_cell(row, col)
-        self.status.emit(f"Marked R{row}:C{col} as {new_state}.")
+        self.status.emit(
+            f"Marked R{row}:C{col} as {sample_cell_state_label(new_state)}."
+        )
 
     def _on_batch_cell_state_change_requested(
         self, coords: list[tuple[str, str]], new_state: str
@@ -1277,7 +1366,9 @@ class SampleInventoryPage(QWidget):
             self._update_inspector_state_controls(new_state)
         if coords:
             self.matrix_widget.select_cell(coords[0][0], coords[0][1])
-        self.status.emit(f"Marked {len(coords)} devices as {new_state}.")
+        self.status.emit(
+            f"Marked {len(coords)} devices as {sample_cell_state_label(new_state)}."
+        )
 
     def _on_row_state_change_requested(self, row: str, new_state: str) -> None:
         if self._current_sample is None:

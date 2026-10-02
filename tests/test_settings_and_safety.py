@@ -148,9 +148,9 @@ class QuantityAndSafetyTests(unittest.TestCase):
         else:
             self.fail("Expected an inconsistent Keithley range to be rejected")
 
-        self.assertIn("Keithley → Channel A → Safety limits", message)
-        self.assertIn("Measured current trip", message)
-        self.assertIn("source current range", message)
+        self.assertIn("Keithley → Channel A → Station safety boundaries", message)
+        self.assertIn("Emergency measured-current cutoff", message)
+        self.assertIn("allowed source-current setting range", message)
         self.assertIn("How to fix", message)
         self.assertIn("Disable limit", message)
         self.assertNotIn("input_value", message)
@@ -415,6 +415,41 @@ class QuantityAndSafetyTests(unittest.TestCase):
                 stop_hz=float("inf"),
                 reference_level_dbm=0,
                 points=101,
+            )
+
+    def test_keithley_compliance_requires_headroom_inside_measurement_trip(self) -> None:
+        raw = deepcopy(SettingsRepository(SETTINGS_TEMPLATE).load().raw)
+        limits = raw["devices"]["keithley"]["safety"]["channels"]["B"]["lab_limits"]
+        limits["voltage_compliance"]["max"] = "70 mV"
+        channel = StationSettings.model_validate(raw).keithley.safety.channels["B"]
+
+        validate_keithley_source(
+            channel,
+            KeithleySourceRequest(
+                "B", "current", 1e-3, 69e-3, source_range_si=10e-3
+            ),
+        )
+        with self.assertRaisesRegex(SafetyViolation, "leaves no measurement-trip headroom"):
+            validate_keithley_source(
+                channel,
+                KeithleySourceRequest(
+                    "B", "current", 1e-3, 70e-3, source_range_si=10e-3
+                ),
+            )
+
+        asymmetric = deepcopy(raw)
+        asymmetric["devices"]["keithley"]["safety"]["channels"]["B"]["lab_limits"][
+            "measured_voltage_trip"
+        ]["min"] = "-67 mV"
+        asymmetric_channel = StationSettings.model_validate(
+            asymmetric
+        ).keithley.safety.channels["B"]
+        with self.assertRaisesRegex(SafetyViolation, "leaves no measurement-trip headroom"):
+            validate_keithley_source(
+                asymmetric_channel,
+                KeithleySourceRequest(
+                    "B", "current", 1e-3, 68e-3, source_range_si=10e-3
+                ),
             )
 
     def test_anritsu_rejects_point_counts_not_supported_by_hardware(self) -> None:

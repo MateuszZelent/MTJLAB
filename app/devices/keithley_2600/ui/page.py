@@ -28,7 +28,7 @@ from qfluentwidgets import (
     BodyLabel,
     CaptionLabel, CardWidget, CheckBox, ComboBox, PrimaryPushButton, PushButton,
     FluentIcon, ScrollArea, SimpleCardWidget, SpinBox, StrongBodyLabel, SwitchButton, TableWidget, TitleLabel,
-    TransparentPushButton, TransparentToolButton,
+    FlowLayout, TransparentPushButton, TransparentToolButton,
 )
 
 from app.devices.keithley_2600 import (
@@ -63,6 +63,23 @@ from app.devices.keithley_2600.ui.characterization_card import KeithleyCharacter
 from app.devices.keithley_2600.ui.twin_axis_plot import KeithleyTwinAxisPlotWidget
 from app.ui.recipes.fluent_dialog import FluentRecipeDialog
 from app.ui.workers import DeviceController
+
+
+DEFAULT_KEITHLEY_PLOT_HISTORY_WINDOW_S = 120.0
+DEFAULT_KEITHLEY_LIVE_INTERVAL_MS = 500
+KEITHLEY_MIN_VALUE_EDITOR_WIDTH = 140
+KEITHLEY_FORM_STACK_THRESHOLD = 720
+HARDWARE_TIMING_READBACK_PARAMETERS = frozenset(
+    {
+        "Hardware source delay",
+        "Hardware measure delay",
+        "Measure delay factor",
+    }
+)
+PYLAB_APPLICATION_ONLY_PARAMETERS = frozenset({"Settling time"})
+READBACK_DISPLAY_ONLY_PARAMETERS = (
+    HARDWARE_TIMING_READBACK_PARAMETERS | PYLAB_APPLICATION_ONLY_PARAMETERS
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -260,6 +277,14 @@ class KeithleyConfigurationPanel(CardWidget):
     ) -> None:
         super().__init__(parent)
         self.setObjectName("keithleyConfigurationPanel")
+        # This panel is also hosted in a narrow splitter/scroll viewport.  Do
+        # not let the form's preferred width become a hard horizontal minimum:
+        # QFormLayout can wrap the label above a field and keep the value
+        # editor usable instead of rendering the right-hand side off-screen.
+        self.setSizePolicy(
+            QSizePolicy.Policy.Ignored,
+            QSizePolicy.Policy.Preferred,
+        )
         self._settings = settings
         self.plan_mode = plan_mode
         self.limit_fields: dict[str, LimitField] = {}
@@ -276,6 +301,11 @@ class KeithleyConfigurationPanel(CardWidget):
         self.channel = ComboBox()
         self.channel.addItems(["A", "B"])
         self.channel.setCurrentText("B")
+        self.channel.setToolTip(
+            "Select which channel configuration draft is shown below. This does not "
+            "change either channel's OUTPUT state. Use the separate OUTPUT ON/OFF "
+            "controls to energize or disable a channel."
+        )
         self.mode = ComboBox()
         self.mode.addItems(["current", "voltage", "measure_only"])
         self.level = _line("1 mA")
@@ -311,13 +341,13 @@ class KeithleyConfigurationPanel(CardWidget):
         )
         self._advanced_ranges_expanded: bool = False
         self.advanced_ranges_button = TransparentPushButton(
-            "Show advanced range settings (All AUTO)", self
+            "Advanced source settings…", self
         )
-        self.advanced_ranges_button.setIcon(FluentIcon.CHEVRON_RIGHT_MED)
+        self.advanced_ranges_button.setIcon(FluentIcon.SETTING)
         self.advanced_ranges_button.setObjectName("keithleyAdvancedRangesToggle")
         self.advanced_ranges_button.setToolTip(
-            "Expand or collapse manual source and measurement range settings. "
-            "Keithley operates with full automatic ranging (AUTO) by default."
+            "Open source and measurement ranges in a separate modal. Opening this "
+            "window does not communicate with the instrument or change OUTPUT."
         )
         self.advanced_ranges_button.clicked.connect(self._toggle_advanced_ranges)
 
@@ -329,6 +359,52 @@ class KeithleyConfigurationPanel(CardWidget):
             self.measure_current_autorange,
             self.measure_current_range_field,
         )
+        self.advanced_ranges_dialog = StationDialog(self)
+        self.advanced_ranges_dialog.setWindowTitle(
+            "Keithley — advanced source settings"
+        )
+        self.advanced_ranges_dialog.resize(720, 520)
+        advanced_surface = self.advanced_ranges_dialog.use_modal_shell_content().surface
+        advanced_layout = self.advanced_ranges_dialog.modal_content_layout(spacing=10)
+        advanced_title = StrongBodyLabel("Advanced source and measurement settings")
+        advanced_title.setObjectName("sectionTitle")
+        advanced_layout.addWidget(advanced_title)
+        advanced_note = BodyLabel(
+            "These values configure ranges and acquisition behaviour for the selected "
+            "channel. Changes remain a draft until Apply settings is pressed; this "
+            "window never enables OUTPUT."
+        )
+        advanced_note.setObjectName("muted")
+        advanced_note.setWordWrap(True)
+        advanced_layout.addWidget(advanced_note)
+        advanced_form_host = QWidget(advanced_surface)
+        self.advanced_ranges_form = QFormLayout(advanced_form_host)
+        self.advanced_ranges_form.setContentsMargins(0, 0, 0, 0)
+        self.advanced_ranges_form.setHorizontalSpacing(12)
+        self.advanced_ranges_form.setVerticalSpacing(8)
+        self.advanced_ranges_form.setRowWrapPolicy(
+            QFormLayout.RowWrapPolicy.WrapLongRows
+        )
+        self.advanced_ranges_form.addRow("", self.source_autorange)
+        self.advanced_ranges_form.addRow("Source range", self.source_range_field)
+        self.advanced_ranges_form.addRow("", self.measure_voltage_autorange)
+        self.advanced_ranges_form.addRow(
+            "Measure V range", self.measure_voltage_range_field
+        )
+        self.advanced_ranges_form.addRow("", self.measure_current_autorange)
+        self.advanced_ranges_form.addRow(
+            "Measure I range", self.measure_current_range_field
+        )
+        advanced_layout.addWidget(advanced_form_host)
+        advanced_layout.addStretch(1)
+        advanced_done = PrimaryPushButton("Done", advanced_surface)
+        advanced_done.clicked.connect(self.advanced_ranges_dialog.accept)
+        advanced_layout.addWidget(advanced_done, 0, Qt.AlignmentFlag.AlignRight)
+
+        self.advanced_ranges_summary = CaptionLabel(self)
+        self.advanced_ranges_summary.setObjectName("keithleyAdvancedRangesSummary")
+        self.advanced_ranges_summary.setWordWrap(True)
+        self._advanced_power_field: LimitField | None = None
 
         self.measure_only_note = CaptionLabel(
             "Channel is in measure-only mode (read-only). Change Source mode to "
@@ -339,7 +415,7 @@ class KeithleyConfigurationPanel(CardWidget):
         self.measure_only_note.setObjectName("keithleyMeasureOnlyNote")
 
         for label, widget in (
-            ("Channel", self.channel),
+            ("Configure channel (not OUTPUT)", self.channel),
             ("Source mode", self.mode),
             ("", self.measure_only_note),
             ("Source current", self.level_field),
@@ -347,21 +423,15 @@ class KeithleyConfigurationPanel(CardWidget):
             ("NPLC", self.nplc_field),
             ("Settling time", self._bounded("settle", self.settle)),
             ("", self.advanced_ranges_button),
-            ("", self.source_autorange),
-            ("Current source range", self.source_range_field),
-            ("", self.measure_voltage_autorange),
-            (
-                "Measure V range (AUTO or value with unit)",
-                self.measure_voltage_range_field,
-            ),
-            ("", self.measure_current_autorange),
-            (
-                "Measure I range (AUTO or value with unit)",
-                self.measure_current_range_field,
-            ),
+            ("", self.advanced_ranges_summary),
         ):
             self.form.addRow(label, widget)
         layout.addLayout(self.form)
+        self.safety_boundary_summary = CaptionLabel(self)
+        self.safety_boundary_summary.setObjectName("keithleySafetyBoundarySummary")
+        self.safety_boundary_summary.setWordWrap(True)
+        self.safety_boundary_summary.setProperty("safetyWarning", False)
+        layout.addWidget(self.safety_boundary_summary)
         if plan_mode:
             note = BodyLabel(
                 "Plan editing is offline. Applying these values changes only the sweep document; "
@@ -377,19 +447,24 @@ class KeithleyConfigurationPanel(CardWidget):
         self.measure_current_autorange.toggled.connect(lambda _: self._update_ranges_summary())
         self.channel.currentTextChanged.connect(self.refresh_limits)
         self.mode.currentTextChanged.connect(self._update_mode_ui)
+        self.channel.currentTextChanged.connect(self._update_safety_boundary_summary)
+        self.mode.currentTextChanged.connect(self._update_safety_boundary_summary)
+        self.compliance.textChanged.connect(self._update_safety_boundary_summary)
         self._update_mode_ui()
+        self._update_safety_boundary_summary()
         self.set_advanced_ranges_expanded(False)
 
     def _bounded(self, key: str, editor: QWidget) -> LimitField:
         field = LimitField(editor, *self.limit_values(key), range_mode=True)
         field.setProperty("limitKey", key)
+        if isinstance(editor, QLineEdit):
+            # The source value is the primary operator control. Keep it
+            # readable even when the safety-range pill and edit action share
+            # the same row.
+            editor.setMinimumWidth(KEITHLEY_MIN_VALUE_EDITOR_WIDTH)
         for badge in (field.minimum, field.maximum):
             badge.setMinimumWidth(88)
             badge.setProperty("keithleyCompact", True)
-        field.edit_button.setFixedWidth(78)
-        field.edit_button.setFixedHeight(30)
-        field.edit_button.setIcon(FluentIcon.EDIT)
-        field.edit_button.setText("Edit")
         if key in {"source_range", "measure_voltage_range", "measure_current_range"}:
             field.edit_button.hide()
             field.setToolTip(
@@ -402,6 +477,23 @@ class KeithleyConfigurationPanel(CardWidget):
             )
         self.limit_fields[key] = field
         return field
+
+    def update_form_wrap_policy(self) -> None:
+        """Stack labels above value controls when this panel is narrow."""
+
+        if not hasattr(self, "form"):
+            return
+        policy = (
+            QFormLayout.RowWrapPolicy.WrapAllRows
+            if self.width() < KEITHLEY_FORM_STACK_THRESHOLD
+            else QFormLayout.RowWrapPolicy.WrapLongRows
+        )
+        if self.form.rowWrapPolicy() != policy:
+            self.form.setRowWrapPolicy(policy)
+
+    def resizeEvent(self, event: QResizeEvent) -> None:
+        super().resizeEvent(event)
+        self.update_form_wrap_policy()
 
     def limit_values(self, key: str) -> tuple[object, object]:
         limits = self._settings.keithley.safety.channels[
@@ -441,6 +533,68 @@ class KeithleyConfigurationPanel(CardWidget):
     def refresh_limits(self, *_args: object) -> None:
         for key, field in self.limit_fields.items():
             field.set_limits(*self.limit_values(key))
+        self._update_safety_boundary_summary()
+
+    def _update_safety_boundary_summary(self, *_args: object) -> None:
+        """Explain the three different voltage/current boundaries in one place."""
+
+        if not hasattr(self, "safety_boundary_summary"):
+            return
+        channel = self.channel.currentText()
+        mode = self.mode.currentText()
+        if mode == "measure_only":
+            self.safety_boundary_summary.setProperty("safetyWarning", False)
+            self.safety_boundary_summary.setText(
+                "Measure only: no working source compliance is programmed. Emergency "
+                "measured-value cutoffs from Settings still force A+B OUTPUT OFF."
+            )
+            self.safety_boundary_summary.style().unpolish(self.safety_boundary_summary)
+            self.safety_boundary_summary.style().polish(self.safety_boundary_summary)
+            return
+
+        limits = self._settings.keithley.safety.channels[channel].lab_limits
+        if mode == "current":
+            quantity = "voltage"
+            dimension = DIMENSION_VOLTAGE
+            allowed = limits.voltage_compliance
+            trip = limits.measured_voltage_trip
+        else:
+            quantity = "current"
+            dimension = DIMENSION_CURRENT
+            allowed = limits.current_compliance
+            trip = limits.measured_current_trip
+
+        warning = False
+        correction = ""
+        try:
+            working_si = abs(parse_quantity(self.compliance.text(), dimension).si_value)
+            trip_min_si = parse_quantity(trip.min, dimension).si_value
+            trip_max_si = parse_quantity(trip.max, dimension).si_value
+            tolerance = max(abs(trip_min_si), abs(trip_max_si), working_si, 1.0) * 1e-12
+            warning = trip.enabled and (
+                -working_si <= trip_min_si + tolerance
+                or working_si >= trip_max_si - tolerance
+            )
+            if warning:
+                required = format_quantity_auto(working_si, dimension)
+                correction = (
+                    f" To clear it, set both cutoff sides outside ±{required} "
+                    f"(minimum below -{required}, maximum above +{required}) or lower "
+                    "the working compliance."
+                )
+        except (ConfigurationError, ValueError):
+            warning = True
+
+        prefix = "WARNING — no trip headroom. " if warning else ""
+        self.safety_boundary_summary.setText(
+            f"{prefix}Working {quantity} compliance: {self.compliance.text().strip()} · "
+            f"allowed compliance setting: {allowed.min}…{allowed.max} · "
+            f"emergency measured-{quantity} cutoff: {trip.min}…{trip.max} "
+            f"(forces A+B OFF).{correction}"
+        )
+        self.safety_boundary_summary.setProperty("safetyWarning", warning)
+        self.safety_boundary_summary.style().unpolish(self.safety_boundary_summary)
+        self.safety_boundary_summary.style().polish(self.safety_boundary_summary)
 
     def _apply_source_autorange_policy(self, *_args: object) -> None:
         enabled = self._settings.keithley.safety.channels[self.channel.currentText()].defaults.get("source_autorange", False) is True
@@ -451,54 +605,58 @@ class KeithleyConfigurationPanel(CardWidget):
         self.source_range.setEnabled(not enabled)
 
     def _toggle_advanced_ranges(self) -> None:
-        self.set_advanced_ranges_expanded(not self._advanced_ranges_expanded)
+        self.update_advanced_ranges_visibility()
+        self.advanced_ranges_dialog.exec()
 
     def set_advanced_ranges_expanded(self, expanded: bool) -> None:
-        self._advanced_ranges_expanded = bool(expanded)
+        # Snapshot loading still calls this legacy entry point. Advanced
+        # controls remain in the modal and never expand into the main card.
+        del expanded
+        self._advanced_ranges_expanded = False
         self.update_advanced_ranges_visibility()
 
     def update_advanced_ranges_visibility(self) -> None:
         mode = self.mode.currentText()
         source_visible = mode != "measure_only"
-        if not self._advanced_ranges_expanded:
-            for widget in self._advanced_range_widgets:
-                self.form.setRowVisible(widget, False)
-        else:
-            self.form.setRowVisible(self.source_autorange, source_visible)
-            self.form.setRowVisible(self.source_range_field, source_visible)
-            self.form.setRowVisible(self.measure_voltage_autorange, True)
-            self.form.setRowVisible(self.measure_voltage_range_field, True)
-            self.form.setRowVisible(self.measure_current_autorange, True)
-            self.form.setRowVisible(self.measure_current_range_field, True)
-        self.form.setRowVisible(self.source_autorange, source_visible)
-        self.form.setRowVisible(self.source_range_field, source_visible and not self.source_autorange.isChecked())
+        self.advanced_ranges_form.setRowVisible(self.source_autorange, source_visible)
+        self.advanced_ranges_form.setRowVisible(
+            self.source_range_field,
+            source_visible and not self.source_autorange.isChecked(),
+        )
+        self.advanced_ranges_form.setRowVisible(self.measure_voltage_autorange, True)
+        self.advanced_ranges_form.setRowVisible(self.measure_voltage_range_field, True)
+        self.advanced_ranges_form.setRowVisible(self.measure_current_autorange, True)
+        self.advanced_ranges_form.setRowVisible(self.measure_current_range_field, True)
+        self._update_ranges_summary()
+
+    def add_advanced_power_field(self, field: LimitField) -> None:
+        """Move the page-only power guard into the advanced modal."""
+
+        self._advanced_power_field = field
+        self.advanced_ranges_form.addRow(
+            "Maximum source × compliance power", field
+        )
+        editor = field.editor
+        if hasattr(editor, "textChanged"):
+            editor.textChanged.connect(self._update_ranges_summary)
         self._update_ranges_summary()
 
     def _update_ranges_summary(self) -> None:
         src_auto = self.source_autorange.isChecked()
         v_auto = self.measure_voltage_autorange.isChecked()
         i_auto = self.measure_current_autorange.isChecked()
-        all_auto = src_auto and v_auto and i_auto
-        if not self._advanced_ranges_expanded:
-            self.advanced_ranges_button.setIcon(FluentIcon.CHEVRON_RIGHT_MED)
-            if all_auto:
-                self.advanced_ranges_button.setText(
-                    "Show advanced range settings (All AUTO)"
-                )
-            else:
-                manuals = []
-                if not src_auto:
-                    manuals.append(f"Source {self.source_range.text().strip()}")
-                if not v_auto:
-                    manuals.append(f"V {self.measure_voltage_range.text().strip()}")
-                if not i_auto:
-                    manuals.append(f"I {self.measure_current_range.text().strip()}")
-                self.advanced_ranges_button.setText(
-                    f"Show advanced range settings (Manual: {', '.join(manuals)})"
-                )
-        else:
-            self.advanced_ranges_button.setIcon(FluentIcon.CHEVRON_DOWN_MED)
-            self.advanced_ranges_button.setText("Hide advanced range settings")
+        self.advanced_ranges_button.setIcon(FluentIcon.SETTING)
+        self.advanced_ranges_button.setText("Advanced source settings…")
+        source = "AUTO" if src_auto else self.source_range.text().strip()
+        measure_v = "AUTO" if v_auto else self.measure_voltage_range.text().strip()
+        measure_i = "AUTO" if i_auto else self.measure_current_range.text().strip()
+        power = ""
+        if self._advanced_power_field is not None:
+            power = f" · power ≤ {self._advanced_power_field.editor.text().strip()}"
+        self.advanced_ranges_summary.setText(
+            f"Ranges: source {source} · measure V {measure_v} · "
+            f"measure I {measure_i}{power}"
+        )
 
     def _update_mode_ui(self, *_args: object) -> None:
         self._apply_source_autorange_policy()
@@ -514,14 +672,18 @@ class KeithleyConfigurationPanel(CardWidget):
             self.form.labelForField(self.compliance_field).setText(
                 "Voltage limit (compliance)"
             )
-            self.form.labelForField(self.source_range_field).setText("Current source range")
+            self.advanced_ranges_form.labelForField(self.source_range_field).setText(
+                "Current source range"
+            )
             self.source_range.set_standard_items(KEITHLEY_CURRENT_RANGES_TEXT)
         elif mode == "voltage":
             self.form.labelForField(self.level_field).setText("Source voltage")
             self.form.labelForField(self.compliance_field).setText(
                 "Current limit (compliance)"
             )
-            self.form.labelForField(self.source_range_field).setText("Voltage source range")
+            self.advanced_ranges_form.labelForField(self.source_range_field).setText(
+                "Voltage source range"
+            )
             self.source_range.set_standard_items(KEITHLEY_VOLTAGE_RANGES_TEXT)
         self.refresh_limits()
 
@@ -576,6 +738,7 @@ class KeithleyConfigurationPanel(CardWidget):
         self._apply_source_autorange_policy()
         self.update_advanced_ranges_visibility()
         self.refresh_limits()
+        self._update_safety_boundary_summary()
 
 
 class KeithleyNodeEditorDialog(FluentRecipeDialog):
@@ -1032,8 +1195,11 @@ class _KeithleyReadbackDialog(StationDialog):
         layout.addWidget(title)
         note = BodyLabel(
             "Read-only TSP queries were used for both channels. No setting or OUTPUT "
-            "state was changed. Settling time belongs to the application and is not "
-            "stored in the Keithley.",
+            "state was changed. The All parameters tab shows the complete device "
+            "snapshot; the Set by PyLab tab contains the form-controlled subset. "
+            "The form's Settling time is an "
+            "application wait, while the hardware exposes separate source/measure "
+            "delays and a measure-delay factor.",
             surface,
         )
         note.setWordWrap(True)
@@ -1076,33 +1242,6 @@ class _KeithleyReadbackDialog(StationDialog):
         self.range_guidance.setWordWrap(True)
         layout.addWidget(self.range_guidance)
 
-        self.table = TableWidget(surface)
-        self.table.setObjectName("keithleyReadbackTable")
-        self.table.setAccessibleName(
-            "Keithley hardware settings read from channels A and B"
-        )
-        self.table.setColumnCount(7)
-        self.table.setHorizontalHeaderLabels(
-            [
-                "Parameter",
-                "Hardware value\nChannel A",
-                "Form comparison\nChannel A",
-                "Action\nChannel A",
-                "Hardware value\nChannel B",
-                "Form comparison\nChannel B",
-                "Action\nChannel B",
-            ]
-        )
-        self.table.setSizePolicy(
-            QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding
-        )
-        self.table.setMinimumHeight(320)
-        self.table.setWordWrap(False)
-        self.table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
-        self.table.setSelectionMode(QAbstractItemView.SelectionMode.SingleSelection)
-        self.table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
-        self.table.setAlternatingRowColors(True)
-        self.table.verticalHeader().setVisible(False)
         values = {
             channel.channel: self._channel_values(channel)
             for channel in readback.channels
@@ -1121,86 +1260,70 @@ class _KeithleyReadbackDialog(StationDialog):
             "Active source range",
             "Sense mode",
             "NPLC",
+            "Hardware source delay",
+            "Hardware measure delay",
+            "Measure delay factor",
             "Measure V autorange",
             "Active measure V range",
             "Measure I autorange",
             "Active measure I range",
         )
-        self.table.setRowCount(len(rows))
-        self._status_cells: dict[tuple[str, str], QTableWidgetItem] = {}
-        for row, parameter in enumerate(rows):
-            self.table.setItem(row, 0, QTableWidgetItem(parameter))
-            for channel, value_column, status_column, button_column in (
-                ("A", 1, 2, 3),
-                ("B", 4, 5, 6),
-            ):
-                value = values[channel][parameter]
-                matches = self._values_match(
-                    parameter, values[channel], expected[channel]
-                )
-                value_item = QTableWidgetItem(value)
-                configured_value = expected[channel].get(parameter)
-                status_item = QTableWidgetItem(
-                    self._comparison_text(matches, configured_value)
-                )
-                colour = QColor("#168a45" if matches else "#c43b3b")
-                value_item.setForeground(colour)
-                status_item.setForeground(colour)
-                value_item.setToolTip(
-                    f"Read-only value returned by Keithley channel {channel}."
-                )
-                status_item.setToolTip(
-                    "Hardware value matches the current form configuration."
-                    if matches
-                    else (
-                        f"Current form value: {configured_value}"
-                        if configured_value
-                        else "This parameter is not controlled by the form."
-                    )
-                )
-                self.table.setItem(row, value_column, value_item)
-                self.table.setItem(row, status_column, status_item)
-                self._status_cells[(channel, parameter)] = status_item
-                if parameter in {"OUTPUT state", "OUTPUT OFF mode"}:
-                    action_item = QTableWidgetItem("—")
-                    action_item.setForeground(
-                        self.palette().color(QPalette.ColorRole.Mid)
-                    )
-                    action_item.setToolTip(
-                        f"{parameter} is safety-controlled and cannot be copied "
-                        "from the readback dialog."
-                    )
-                    self.table.setItem(row, button_column, action_item)
-                else:
-                    assign = PushButton("Use hardware value", self.table)
-                    assign.setMinimumWidth(142)
-                    assign.setToolTip(
-                        f"Copy the hardware value for {parameter} from channel "
-                        f"{channel} to the form."
-                    )
-                    assign.setAccessibleName(
-                        f"Use hardware value for {parameter} from Keithley channel "
-                        f"{channel}"
-                    )
-                    assign.clicked.connect(
-                        lambda _checked=False, ch=channel, key=parameter: (
-                            self._assign(ch, key)
-                        )
-                    )
-                    self.table.setCellWidget(row, button_column, assign)
-        header = self.table.horizontalHeader()
-        header.setDefaultAlignment(Qt.AlignmentFlag.AlignCenter)
-        header.setMinimumHeight(42)
-        header.setMinimumSectionSize(105)
-        header.setSectionResizeMode(0, QHeaderView.ResizeMode.Interactive)
-        header.resizeSection(0, 145)
-        for column in (1, 2, 4, 5):
-            header.setSectionResizeMode(column, QHeaderView.ResizeMode.Stretch)
-        for column in (3, 6):
-            header.setSectionResizeMode(column, QHeaderView.ResizeMode.Fixed)
-            header.resizeSection(column, 154)
-        self.table.resizeRowsToContents()
-        layout.addWidget(self.table, 1)
+        # The complete hardware snapshot and the form-controlled subset use
+        # the same table renderer.  Keeping both views in one dialog makes the
+        # distinction explicit without dropping read-only device diagnostics.
+        pylab_rows = tuple(
+            parameter
+            for parameter in rows
+            if any(parameter in channel_expected for channel_expected in expected.values())
+        )
+        pylab_rows += tuple(
+            parameter
+            for parameter in ("Settling time",)
+            if any(parameter in channel_expected for channel_expected in expected.values())
+        )
+        self._status_cells: dict[
+            tuple[str, str], list[QTableWidgetItem]
+        ] = {}
+        self.tabs = FluentTabView(surface)
+        self.tabs.setObjectName("keithleyReadbackTabs")
+        self.tabs.setAccessibleName("Keithley hardware readback views")
+
+        all_parameters_page = QWidget()
+        all_parameters_layout = QVBoxLayout(all_parameters_page)
+        all_parameters_layout.setContentsMargins(0, 0, 0, 0)
+        self.table = self._build_readback_table(
+            rows=rows,
+            values=values,
+            expected=expected,
+            parent=all_parameters_page,
+            object_name="keithleyReadbackTable",
+        )
+        all_parameters_layout.addWidget(self.table)
+        all_parameters_index = self.tabs.addTab(
+            all_parameters_page, "All parameters"
+        )
+        self.tabs.setTabToolTip(
+            all_parameters_index,
+            "Complete read-only snapshot returned by the Keithley channels.",
+        )
+
+        pylab_page = QWidget()
+        pylab_layout = QVBoxLayout(pylab_page)
+        pylab_layout.setContentsMargins(0, 0, 0, 0)
+        self.pylab_table = self._build_readback_table(
+            rows=pylab_rows,
+            values=values,
+            expected=expected,
+            parent=pylab_page,
+            object_name="keithleyPylabReadbackTable",
+        )
+        pylab_layout.addWidget(self.pylab_table)
+        pylab_index = self.tabs.addTab(pylab_page, "Set by PyLab")
+        self.tabs.setTabToolTip(
+            pylab_index,
+            "Only parameters represented and controlled by the PyLab form.",
+        )
+        layout.addWidget(self.tabs, 1)
 
         self.comparison_legend = CaptionLabel(
             "MATCH = hardware equals form · Form: ... = value currently in the form",
@@ -1235,6 +1358,141 @@ class _KeithleyReadbackDialog(StationDialog):
 
         self.table.setFocus()
 
+    def _build_readback_table(
+        self,
+        *,
+        rows: tuple[str, ...],
+        values: dict[str, dict[str, str]],
+        expected: dict[str, dict[str, str]],
+        parent: QWidget,
+        object_name: str,
+    ) -> TableWidget:
+        table = TableWidget(parent)
+        table.setObjectName(object_name)
+        table.setAccessibleName(
+            "Keithley hardware settings read from channels A and B"
+        )
+        table.setColumnCount(7)
+        table.setHorizontalHeaderLabels(
+            [
+                "Parameter",
+                "Hardware value\nChannel A",
+                "Form comparison\nChannel A",
+                "Action\nChannel A",
+                "Hardware value\nChannel B",
+                "Form comparison\nChannel B",
+                "Action\nChannel B",
+            ]
+        )
+        table.setSizePolicy(
+            QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding
+        )
+        table.setMinimumHeight(320)
+        table.setWordWrap(False)
+        table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
+        table.setSelectionMode(QAbstractItemView.SelectionMode.SingleSelection)
+        table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
+        table.setAlternatingRowColors(True)
+        table.verticalHeader().setVisible(False)
+        table.setRowCount(len(rows))
+        for row, parameter in enumerate(rows):
+            table.setItem(row, 0, QTableWidgetItem(parameter))
+            for channel, value_column, status_column, button_column in (
+                ("A", 1, 2, 3),
+                ("B", 4, 5, 6),
+            ):
+                value = values[channel][parameter]
+                matches = self._values_match(
+                    parameter, values[channel], expected[channel]
+                )
+                value_item = QTableWidgetItem(value)
+                configured_value = expected[channel].get(parameter)
+                status_item = QTableWidgetItem(
+                    self._comparison_text(matches, configured_value)
+                )
+                colour = (
+                    self.palette().color(QPalette.ColorRole.PlaceholderText)
+                    if parameter in READBACK_DISPLAY_ONLY_PARAMETERS
+                    else QColor("#168a45" if matches else "#c43b3b")
+                )
+                value_item.setForeground(colour)
+                status_item.setForeground(colour)
+                value_item.setToolTip(
+                    (
+                        "PyLab application value; this parameter is not returned by "
+                        "the Keithley hardware."
+                        if parameter in PYLAB_APPLICATION_ONLY_PARAMETERS
+                        else f"Read-only value returned by Keithley channel {channel}."
+                    )
+                )
+                status_item.setToolTip(
+                    "Hardware value matches the current form configuration."
+                    if matches
+                    else (
+                        f"Current form value: {configured_value}"
+                        if configured_value
+                        else "This parameter is not controlled by the form."
+                    )
+                )
+                table.setItem(row, value_column, value_item)
+                table.setItem(row, status_column, status_item)
+                self._status_cells.setdefault((channel, parameter), []).append(
+                    status_item
+                )
+                if (
+                    parameter in {"OUTPUT state", "OUTPUT OFF mode"}
+                    or parameter in READBACK_DISPLAY_ONLY_PARAMETERS
+                ):
+                    action_item = QTableWidgetItem("—")
+                    action_item.setForeground(
+                        self.palette().color(QPalette.ColorRole.Mid)
+                    )
+                    action_item.setToolTip(
+                        (
+                            "Settling time belongs to the PyLab application and is not "
+                            "stored or read from the Keithley."
+                            if parameter in PYLAB_APPLICATION_ONLY_PARAMETERS
+                            else (
+                                "Hardware timing is read-only in this dialog; the form's "
+                                "Settling time is an application-level wait."
+                            )
+                            if parameter in HARDWARE_TIMING_READBACK_PARAMETERS
+                            else f"{parameter} is safety-controlled and cannot be copied "
+                            "from the readback dialog."
+                        )
+                    )
+                    table.setItem(row, button_column, action_item)
+                else:
+                    assign = PushButton("Use hardware value", table)
+                    assign.setMinimumWidth(142)
+                    assign.setToolTip(
+                        f"Copy the hardware value for {parameter} from channel "
+                        f"{channel} to the form."
+                    )
+                    assign.setAccessibleName(
+                        f"Use hardware value for {parameter} from Keithley channel "
+                        f"{channel}"
+                    )
+                    assign.clicked.connect(
+                        lambda _checked=False, ch=channel, key=parameter: (
+                            self._assign(ch, key)
+                        )
+                    )
+                    table.setCellWidget(row, button_column, assign)
+        header = table.horizontalHeader()
+        header.setDefaultAlignment(Qt.AlignmentFlag.AlignCenter)
+        header.setMinimumHeight(42)
+        header.setMinimumSectionSize(105)
+        header.setSectionResizeMode(0, QHeaderView.ResizeMode.Interactive)
+        header.resizeSection(0, 145)
+        for column in (1, 2, 4, 5):
+            header.setSectionResizeMode(column, QHeaderView.ResizeMode.Stretch)
+        for column in (3, 6):
+            header.setSectionResizeMode(column, QHeaderView.ResizeMode.Fixed)
+            header.resizeSection(column, 154)
+        table.resizeRowsToContents()
+        return table
+
     @staticmethod
     def _comparison_text(matches: bool, configured_value: str | None) -> str:
         if matches:
@@ -1244,6 +1502,8 @@ class _KeithleyReadbackDialog(StationDialog):
         return "Not controlled by form"
 
     def _assign(self, channel: str, parameter: str) -> None:
+        if parameter in READBACK_DISPLAY_ONLY_PARAMETERS:
+            return
         self.assign_requested.emit(channel, parameter)
         if not getattr(self.parent(), "_last_assignment_succeeded", False):
             return
@@ -1256,8 +1516,7 @@ class _KeithleyReadbackDialog(StationDialog):
             "Measure I autorange": {"Measure I autorange", "Active measure I range"},
         }.get(parameter, {parameter})
         for assigned_parameter in dependent:
-            item = self._status_cells.get((channel, assigned_parameter))
-            if item is not None:
+            for item in self._status_cells.get((channel, assigned_parameter), ()):
                 item.setText("MATCH")
                 item.setForeground(QColor("#168a45"))
 
@@ -1265,11 +1524,15 @@ class _KeithleyReadbackDialog(StationDialog):
         self.assign_requested.emit("ALL", "ALL")
         if not getattr(self.parent(), "_last_assignment_succeeded", False):
             return
-        for (channel, parameter), item in self._status_cells.items():
-            if parameter in {"OUTPUT state", "OUTPUT OFF mode"}:
+        for (channel, parameter), items in self._status_cells.items():
+            if (
+                parameter in {"OUTPUT state", "OUTPUT OFF mode"}
+                or parameter in READBACK_DISPLAY_ONLY_PARAMETERS
+            ):
                 continue
-            item.setText("MATCH")
-            item.setForeground(QColor("#168a45"))
+            for item in items:
+                item.setText("MATCH")
+                item.setForeground(QColor("#168a45"))
 
     @classmethod
     def _snapshot_values(cls, snapshot: KeithleyConfigurationSnapshot) -> dict[str, str]:
@@ -1292,6 +1555,7 @@ class _KeithleyReadbackDialog(StationDialog):
             "Source mode": snapshot.source_mode.upper(),
             "Source level": quantity(snapshot.source_level, source_dimension),
             "Compliance limit": quantity(snapshot.compliance, compliance_dimension),
+            "Settling time": quantity(snapshot.settling_time, DIMENSION_TIME),
             "Source autorange": "ON" if snapshot.source_autorange else "OFF",
             "Active source range": (
                 "AUTO (device selects active range)"
@@ -1365,6 +1629,16 @@ class _KeithleyReadbackDialog(StationDialog):
             ),
             "Sense mode": "2-wire" if channel.sense_mode == "2wire" else "4-wire",
             "NPLC": f"{channel.nplc:.9g}",
+            "Hardware source delay": format_quantity_auto(
+                channel.source_delay_s, DIMENSION_TIME
+            ),
+            "Hardware measure delay": (
+                "AUTO (range-dependent)"
+                if channel.measure_delay_s is None
+                else format_quantity_auto(channel.measure_delay_s, DIMENSION_TIME)
+            ),
+            "Measure delay factor": f"{channel.measure_delay_factor:.9g}",
+            "Settling time": "APPLICATION ONLY",
             "Measure V autorange": (
                 "ON" if channel.measure_voltage_autorange else "OFF"
             ),
@@ -1602,11 +1876,14 @@ class KeithleyPage(QWidget):
         self._live_next_channel = "A"
         self._history_started_at = time.monotonic()
         history_settings = QSettings("LabControl", "LabControl")
-        saved_window = history_settings.value("keithley/plot_history_window_s", 30.0)
+        saved_window = history_settings.value(
+            "keithley/plot_history_window_s",
+            DEFAULT_KEITHLEY_PLOT_HISTORY_WINDOW_S,
+        )
         try:
             self._history_window_s = max(10.0, float(saved_window))
         except (TypeError, ValueError):
-            self._history_window_s = 30.0
+            self._history_window_s = DEFAULT_KEITHLEY_PLOT_HISTORY_WINDOW_S
         self._history_notes: dict[str, BodyLabel] = {}
         self._measurement_history: dict[str, list[dict[str, float]]] = {"A": [], "B": []}
         self.history_widgets: dict[str, dict[str, object]] = {}
@@ -1627,7 +1904,7 @@ class KeithleyPage(QWidget):
         self._compliance_edited_while_live: bool = False
         self._return_pressed_active: bool = False
         self._live_timer = QTimer(self)
-        self._live_timer.setInterval(1000)
+        self._live_timer.setInterval(DEFAULT_KEITHLEY_LIVE_INTERVAL_MS)
         self._live_timer.timeout.connect(self._request_live_measurement)
         self._live_level_timer = QTimer(self)
         self._live_level_timer.setSingleShot(True)
@@ -1684,7 +1961,7 @@ class KeithleyPage(QWidget):
         self.live_interval = SpinBox(hero)
         self.live_interval.setRange(100, 60_000)
         self.live_interval.setSingleStep(100)
-        self.live_interval.setValue(1000)
+        self.live_interval.setValue(DEFAULT_KEITHLEY_LIVE_INTERVAL_MS)
         self.live_interval.setSuffix(" ms")
         self.live_interval.setFixedWidth(132)
         self.live_interval.setToolTip(
@@ -1737,7 +2014,14 @@ class KeithleyPage(QWidget):
         source_layout = QVBoxLayout(source_tab)
         source_layout.setContentsMargins(8, 6, 8, 6)
         source_layout.setSpacing(6)
-        buttons = QHBoxLayout()
+        # The three action labels are intentionally kept intact at normal
+        # font sizes.  A plain horizontal layout made the source tab wider
+        # than its splitter viewport, which clipped the configuration values.
+        # FlowLayout wraps the last action when the source panel is narrow.
+        buttons = FlowLayout(needAni=False, isTight=True)
+        buttons.setContentsMargins(0, 0, 0, 0)
+        buttons.setHorizontalSpacing(6)
+        buttons.setVerticalSpacing(6)
         self.apply_configuration_button = PrimaryPushButton("Apply settings")
         self.read_configuration_button = PushButton("Read device…")
         measure = PushButton("Measure channel")
@@ -1787,9 +2071,7 @@ class KeithleyPage(QWidget):
         self.max_abs_power_field = self._keithley_bounded(
             "max_abs_power", self.max_abs_power
         )
-        self.keithley_form.addRow(
-            "Maximum source × compliance power", self.max_abs_power_field
-        )
+        self.configuration_panel.add_advanced_power_field(self.max_abs_power_field)
         workflow = CardWidget()
         workflow.setObjectName("keithleyOutputWorkflow")
         workflow_layout = QVBoxLayout(workflow)
@@ -1851,7 +2133,7 @@ class KeithleyPage(QWidget):
         source_layout.addStretch(1)
         source_scroll = self._scroll_widget(source_tab)
         source_tab.setSizePolicy(
-            QSizePolicy.Policy.Expanding,
+            QSizePolicy.Policy.Ignored,
             QSizePolicy.Policy.Preferred,
         )
         self.source_scroll = source_scroll
@@ -2351,6 +2633,11 @@ class KeithleyPage(QWidget):
                 snapshot.source_range,
             )
             return
+        # A Quick Controls update must never replace a value that the
+        # operator is currently editing in the device card.  The local draft
+        # is authoritative until focus leaves the editor.
+        if self.level.hasFocus():
+            return
         self._quick_control_projection = True
         try:
             self.level.setText(text)
@@ -2443,7 +2730,7 @@ class KeithleyPage(QWidget):
         compliance_dimension = (
             DIMENSION_VOLTAGE if active_mode == "current" else DIMENSION_CURRENT
         )
-        if source_level_si is not None:
+        if source_level_si is not None and not self.level.hasFocus():
             preferred_level_unit = self._extract_unit(self.level.text(), level_dimension) or (
                 "mA" if active_mode == "current" else "mV"
             )
@@ -2461,7 +2748,7 @@ class KeithleyPage(QWidget):
                     preferred_unit=preferred_level_unit,
                 )
             self.level.setText(text)
-        if compliance_si is not None:
+        if compliance_si is not None and not self.compliance.hasFocus():
             preferred_comp_unit = self._extract_unit(self.compliance.text(), compliance_dimension) or (
                 "mV" if active_mode == "current" else "mA"
             )
@@ -2594,11 +2881,7 @@ class KeithleyPage(QWidget):
             return
         self._workspace_compact = compact
         self.source_scroll.setMinimumWidth(0 if compact else 430)
-        self.keithley_form.setRowWrapPolicy(
-            QFormLayout.RowWrapPolicy.WrapAllRows
-            if compact
-            else QFormLayout.RowWrapPolicy.WrapLongRows
-        )
+        self.configuration_panel.update_form_wrap_policy()
         self.workspace_splitter.setOrientation(
             Qt.Orientation.Vertical if compact else Qt.Orientation.Horizontal
         )
@@ -4311,12 +4594,16 @@ class KeithleyPage(QWidget):
         if mode == "current":
             self.keithley_form.labelForField(self.level_field).setText("Source current")
             self.keithley_form.labelForField(self.compliance_field).setText("Voltage limit (compliance)")
-            self.keithley_form.labelForField(self.source_range_field).setText("Current source range")
+            self.configuration_panel.advanced_ranges_form.labelForField(
+                self.source_range_field
+            ).setText("Current source range")
             self.source_range.set_standard_items(KEITHLEY_CURRENT_RANGES_TEXT)
         elif mode == "voltage":
             self.keithley_form.labelForField(self.level_field).setText("Source voltage")
             self.keithley_form.labelForField(self.compliance_field).setText("Current limit (compliance)")
-            self.keithley_form.labelForField(self.source_range_field).setText("Voltage source range")
+            self.configuration_panel.advanced_ranges_form.labelForField(
+                self.source_range_field
+            ).setText("Voltage source range")
             self.source_range.set_standard_items(KEITHLEY_VOLTAGE_RANGES_TEXT)
         self.configuration_panel._apply_source_autorange_policy()
         self.measure_voltage_range.setEnabled(
@@ -4474,13 +4761,11 @@ class KeithleyPage(QWidget):
     def _keithley_bounded(self, key: str, editor: QWidget) -> LimitField:
         field = LimitField(editor, *self._keithley_limit_values(key), range_mode=True)
         field.setProperty("limitKey", key)
+        if isinstance(editor, QLineEdit):
+            editor.setMinimumWidth(KEITHLEY_MIN_VALUE_EDITOR_WIDTH)
         for badge in (field.minimum, field.maximum):
             badge.setMinimumWidth(88)
             badge.setProperty("keithleyCompact", True)
-        field.edit_button.setFixedWidth(78)
-        field.edit_button.setFixedHeight(30)
-        field.edit_button.setIcon(FluentIcon.EDIT)
-        field.edit_button.setText("Edit")
         if key in {"source_range", "measure_voltage_range", "measure_current_range"}:
             field.edit_button.hide()
             field.setToolTip(

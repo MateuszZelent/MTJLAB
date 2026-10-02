@@ -31,6 +31,7 @@ from PySide6.QtTest import QTest
 from app.domain.errors import ConfigurationError
 from app.domain.models import DeviceCapabilities
 from app.engine import ExecutionPlan, PlanAction
+from app.inventory import InventoryStore, Sample
 from app.inventory.models import ActiveSampleTarget
 from app.domain.quick_controls import QuickConfigureCommand
 from app.devices.discovery import DiscoveredInstrument
@@ -116,6 +117,57 @@ class MainWindowTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls) -> None:
         cls.application = QApplication.instance() or QApplication([])
+
+    def test_startup_opens_catalogue_from_independent_settings_locator(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            settings_path = root / "settings.yml"
+            write_engineer_settings(settings_path)
+            catalogue_root = root / "catalogue"
+            store = InventoryStore.open_for_catalogue_root(catalogue_root)
+            store.save_sample(Sample(sample_id="PERSISTED", name="Persisted sample"))
+            store.close()
+            repository = SettingsRepository(settings_path)
+            loaded = repository.load()
+            loaded.raw["storage"]["catalogue_directory"] = str(catalogue_root)
+            repository.save_raw(loaded.raw)
+
+            window = MainWindow(
+                settings_path,
+                simulation=True,
+                authenticated_username=TEST_ENGINEER,
+            )
+            try:
+                self.assertEqual(window.inventory_store.catalogue_root, catalogue_root)
+                self.assertEqual(
+                    [sample.sample_id for sample in window.inventory_store.list_samples()],
+                    ["PERSISTED"],
+                )
+            finally:
+                window.close()
+                self.application.processEvents()
+
+    def test_catalogue_change_signal_persists_startup_locator_immediately(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            settings_path = root / "settings.yml"
+            write_engineer_settings(settings_path)
+            window = MainWindow(
+                settings_path,
+                simulation=True,
+                authenticated_username=TEST_ENGINEER,
+            )
+            try:
+                selected = root / "selected-catalogue"
+                window.inventory_page.catalogue_root_changed.emit(str(selected))
+                persisted = SettingsRepository(settings_path).load().settings
+                self.assertEqual(
+                    persisted.storage["catalogue_directory"],
+                    str(selected.resolve()),
+                )
+            finally:
+                window.close()
+                self.application.processEvents()
 
     def test_rigol_basic_form_keeps_complete_values_per_channel(self) -> None:
         window = MainWindow(".config/settings.yml", simulation=True)
@@ -315,7 +367,7 @@ class MainWindowTests(unittest.TestCase):
                     "Anritsu",
                     "MOKE Box",
                     "Lake Shore 475",
-                    "Safety limits",
+                    "Safety boundaries",
                     "Access roles",
                     "Diagnostics",
                 ],
@@ -3566,6 +3618,9 @@ class MainWindowTests(unittest.TestCase):
                         measure_voltage_range_v=100e-3,
                         measure_current_autorange=False,
                         measure_current_range_a=1e-3,
+                        source_delay_s=0.003,
+                        measure_delay_s=None,
+                        measure_delay_factor=1.25,
                     ),
                     KeithleyChannelConfigurationReadback(
                         channel="B",
@@ -3582,6 +3637,9 @@ class MainWindowTests(unittest.TestCase):
                         measure_voltage_range_v=70e-3,
                         measure_current_autorange=True,
                         measure_current_range_a=10e-3,
+                        source_delay_s=0.007,
+                        measure_delay_s=0.011,
+                        measure_delay_factor=0.75,
                     ),
                 )
             )
@@ -3592,7 +3650,7 @@ class MainWindowTests(unittest.TestCase):
             assert dialog is not None
             self.assertFalse(dialog.isModal())
             self.assertEqual(dialog.windowModality(), Qt.WindowModality.NonModal)
-            self.assertEqual(dialog.table.rowCount(), 13)
+            self.assertEqual(dialog.table.rowCount(), 16)
             headers = [
                 dialog.table.horizontalHeaderItem(column).text()
                 for column in range(dialog.table.columnCount())
@@ -3622,6 +3680,16 @@ class MainWindowTests(unittest.TestCase):
             self.assertEqual(table_values["Source level"], ("500 uA", "10 mV"))
             self.assertEqual(table_values["Compliance limit"], ("50 mV", "1 mA"))
             self.assertEqual(table_values["Sense mode"], ("4-wire", "2-wire"))
+            self.assertEqual(
+                table_values["Hardware source delay"], ("3 ms", "7 ms")
+            )
+            self.assertEqual(
+                table_values["Hardware measure delay"],
+                ("AUTO (range-dependent)", "11 ms"),
+            )
+            self.assertEqual(
+                table_values["Measure delay factor"], ("1.25", "0.75")
+            )
             status_values = {
                 dialog.table.item(row, 0).text(): (
                     dialog.table.item(row, 2).text(),

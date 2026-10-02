@@ -71,6 +71,7 @@ class CharacterizationPoint:
     field_before: FieldLineObservation | None = None
     field_after: FieldLineObservation | None = None
     valid: bool = True
+    range_readback: dict[str, object] | None = None
 
 
 @dataclass(frozen=True, slots=True)

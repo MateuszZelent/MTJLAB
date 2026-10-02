@@ -1116,6 +1116,32 @@ class AdapterAndRunnerTests(unittest.TestCase):
         self.assertIn("smub.source.output = smub.OUTPUT_OFF", session.writes)
         self.assertEqual(adapter.state, DeviceState.FAULT)
 
+    def test_keithley_compliance_without_trip_headroom_sends_no_configuration(self) -> None:
+        raw = deepcopy(simulation_settings(approved=True).model_dump(mode="python"))
+        limits = raw["devices"]["keithley"]["safety"]["channels"]["B"]["lab_limits"]
+        limits["voltage_compliance"]["max"] = "70 mV"
+        settings = StationSettings.model_validate(raw)
+        session = FakeVisaSession(
+            responses={
+                "*IDN?": "KEITHLEY INSTRUMENTS,2602A,123456,1.0",
+                "print(errorqueue.count)": "0",
+            }
+        )
+        adapter = KeithleyAdapter(
+            settings, session_factory=FakeVisaSessionFactory(session)
+        )
+        adapter.connect()
+        traffic_before = list(session.writes)
+
+        with self.assertRaisesRegex(SafetyViolation, "no measurement-trip headroom"):
+            adapter.configure_source(
+                KeithleySourceRequest(
+                    "B", "current", 1e-3, 70e-3, source_range_si=10e-3
+                )
+            )
+
+        self.assertEqual(session.writes, traffic_before)
+
     def test_keithley_connect_is_read_only_and_reports_observed_output_state(self) -> None:
         session = FakeVisaSession(
             responses={
@@ -1763,7 +1789,7 @@ class AdapterAndRunnerTests(unittest.TestCase):
 
         configuration_traffic = session.writes[writes_before:]
         self.assertEqual(
-            configuration_traffic[0],
+            next(command for command in configuration_traffic if " = " in command),
             "smub.source.output = smub.OUTPUT_OFF",
         )
         self.assertIn(
@@ -1801,6 +1827,11 @@ class AdapterAndRunnerTests(unittest.TestCase):
         raw = deepcopy(self.settings.model_dump(mode="python"))
         raw["devices"]["keithley"]["safety"]["allow_output_enable"] = True
         raw["devices"]["keithley"]["safety"]["channels"]["A"]["enabled"] = True
+        # This readback test configures bipolar current compliance on channel B;
+        # qualify its emergency current cutoff for that working value.
+        raw["devices"]["keithley"]["safety"]["channels"]["B"]["lab_limits"][
+            "measured_current_trip"
+        ]["min"] = "-1.1 mA"
         settings = StationSettings.model_validate(raw)
         session = FakeVisaSession(
             responses={
@@ -1844,6 +1875,17 @@ class AdapterAndRunnerTests(unittest.TestCase):
             )
         )
         adapter.set_output("B", True)
+        session.responses.update(
+            {
+                "print(smua.source.delay)": "0.003",
+                "print(smua.measure.delay == smua.DELAY_AUTO)": "1",
+                "print(smua.measure.delayfactor)": "1.25",
+                "print(smub.source.delay)": "0.007",
+                "print(smub.measure.delay == smub.DELAY_AUTO)": "0",
+                "print(smub.measure.delay)": "0.011",
+                "print(smub.measure.delayfactor)": "0.75",
+            }
+        )
         traffic_start = len(session.writes)
 
         readback = adapter.read_configuration()
@@ -1852,6 +1894,16 @@ class AdapterAndRunnerTests(unittest.TestCase):
         self.assertTrue(read_traffic)
         self.assertTrue(all(command.startswith("print(") for command in read_traffic))
         self.assertFalse(any(" = " in command for command in read_traffic))
+        for timing_query in (
+            "print(smua.source.delay)",
+            "print(smua.measure.delay == smua.DELAY_AUTO)",
+            "print(smua.measure.delayfactor)",
+            "print(smub.source.delay)",
+            "print(smub.measure.delay == smub.DELAY_AUTO)",
+            "print(smub.measure.delay)",
+            "print(smub.measure.delayfactor)",
+        ):
+            self.assertIn(timing_query, read_traffic)
         channel_a, channel_b = readback.channels
         self.assertEqual(channel_a.channel, "A")
         self.assertFalse(channel_a.output_enabled)
@@ -1862,6 +1914,9 @@ class AdapterAndRunnerTests(unittest.TestCase):
         self.assertEqual(channel_a.source_range_si, 1e-3)
         self.assertEqual(channel_a.sense_mode, "4wire")
         self.assertEqual(channel_a.nplc, 0.5)
+        self.assertEqual(channel_a.source_delay_s, 0.003)
+        self.assertIsNone(channel_a.measure_delay_s)
+        self.assertEqual(channel_a.measure_delay_factor, 1.25)
         self.assertEqual(channel_b.channel, "B")
         self.assertTrue(channel_b.output_enabled)
         self.assertEqual(channel_b.output_off_mode, "normal")
@@ -1871,6 +1926,9 @@ class AdapterAndRunnerTests(unittest.TestCase):
         self.assertEqual(channel_b.source_range_si, 100e-3)
         self.assertEqual(channel_b.sense_mode, "2wire")
         self.assertEqual(channel_b.nplc, 2.0)
+        self.assertEqual(channel_b.source_delay_s, 0.007)
+        self.assertEqual(channel_b.measure_delay_s, 0.011)
+        self.assertEqual(channel_b.measure_delay_factor, 0.75)
         self.assertEqual(adapter.state, DeviceState.OUTPUT_ON)
 
     def test_keithley_manual_ramp_queries_actual_level_and_measures_each_step(self) -> None:

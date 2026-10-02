@@ -28,6 +28,8 @@ root:
       level: ${keithley.B.current}
       compliance: 67 mV
       nplc: 1.0
+      source_autorange: false
+      source_range: 1 A
     - id: rigol-high-level-sweep
       type: sweep
       target: rigol.1.high_level
@@ -55,47 +57,16 @@ root:
         type: acquire_spectrum
         trace: TRAC1
 
-  - id: sweep-a84d0e66
-    type: sweep
-    target: keithley.B.current
-    segments:
-    - start: 0 A
-      stop: 1 mA
-      points: 5
-      spacing: linear
+  - id: keithley-5499d1c4
+    type: sequence
+    text: Keithley 2600 — configuration required
+    device_module: keithley
+    label: Keithley 2600
+    configuration_required: true
     children:
-    - id: keithley-output-on-0f471398
-      type: set_keithley_output
-      channel: B
-      enabled: true
-    - id: output-off-bd1c5b2b
-      type: set_keithley_output
-      enabled: false
-      channel: B
-    - id: rigol-output-on-c4ed735f
-      type: enable_rigol_output
-      channel: 1
-    - id: output-off-b9f32145
-      type: set_rigol_output
-      enabled: false
-      channel: 1
-    - id: anritsu-sg-output-on-17843e11
-      type: enable_anritsu_sg_output
-    - id: output-off-b9565472
-      type: set_anritsu_sg_output
-      enabled: false
-    - id: configure-keithley-50527dd2
-      type: configure_keithley
-      channel: B
-      mode: current
-      level: ${keithley.B.current}
-      compliance: 67 mV
-      nplc: 1.0
-      settle_time: 100 ms
-      sense_mode: 2wire
-    - id: settle-wait-4003b8fb
-      type: wait
-      duration: 100 ms
+    - id: comment-1a090d83
+      type: comment
+      text: Drop nested devices or flow actions here
 finally:
 - id: rigol-ch1-off-finally
   type: set_rigol_output

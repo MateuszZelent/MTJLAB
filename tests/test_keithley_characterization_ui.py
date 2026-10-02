@@ -418,7 +418,7 @@ class KeithleyCharacterizationUiTests(unittest.TestCase):
 
             title, path, max_enabled = window._limit_edit_spec("keithley", char_page.start_level_field)
             self.assertIn("CHB", title)
-            self.assertIn("source current", title.lower())
+            self.assertIn("source current", title.lower().replace("-", " "))
             self.assertEqual(
                 path,
                 ("devices", "keithley", "safety", "channels", "B", "lab_limits", "source_current"),
@@ -428,7 +428,7 @@ class KeithleyCharacterizationUiTests(unittest.TestCase):
             # Test compliance
             title_comp, path_comp, _ = window._limit_edit_spec("keithley", char_page.compliance_field)
             self.assertIn("CHB", title_comp)
-            self.assertIn("voltage compliance", title_comp.lower())
+            self.assertIn("voltage compliance", title_comp.lower().replace("-", " "))
             self.assertEqual(
                 path_comp,
                 ("devices", "keithley", "safety", "channels", "B", "lab_limits", "voltage_compliance"),
@@ -493,7 +493,6 @@ class KeithleyCharacterizationUiTests(unittest.TestCase):
         """Verify that last chosen sample, device, operator, and area persist and are restored."""
         from pathlib import Path
         from tempfile import TemporaryDirectory
-        from PySide6.QtCore import QSettings
         from app.devices.keithley_2600.ui.characterization_card import KeithleyCharacterizationCard
         from app.inventory.models import Sample
         from app.inventory.store import InventoryStore
@@ -1017,7 +1016,7 @@ class KeithleyCharacterizationUiTests(unittest.TestCase):
         self.assertEqual(panel.nplc_field.range_pill._interval_text(), "[0.001 … 25]")
         self.assertEqual(panel.source_range_field.range_pill._interval_text(), "[> 0 … 3 A]")
 
-        # Widened Edit buttons
+        # Keithley uses the same Fluent Edit button as Rigol and Anritsu.
         self.assertEqual(panel.level_field.edit_button.width(), 78)
         self.assertEqual(panel.level_field.edit_button.height(), 30)
         self.assertEqual(panel.level_field.edit_button.text(), "Edit")
@@ -1035,6 +1034,7 @@ class KeithleyCharacterizationUiTests(unittest.TestCase):
         self.assertTrue(power_field.maximum.isHidden())
         self.assertEqual(power_field.edit_button.width(), 78)
         self.assertEqual(power_field.edit_button.height(), 30)
+        self.assertEqual(power_field.edit_button.text(), "Edit")
 
         # Interval text shows inequality min and power max
         self.assertEqual(power_field.range_pill._interval_text(), "[> 0 … 670 uW]")

@@ -42,6 +42,36 @@ from app.domain.quantities import (
 from app.domain.quick_controls import _QUANTITY, render_quantity_si_like
 
 
+def set_line_edit_text_preserving_edit_state(editor: QLineEdit, text: object) -> None:
+    """Update a line edit without stealing the operator's caret or selection.
+
+    ``QLineEdit.setText()`` moves the caret to the end even when the new text
+    is identical to the current text.  Limit validation runs from several
+    focus/editing callbacks, so re-applying an already valid value can make a
+    value change in the middle of the text land at the wrong position.
+    """
+
+    normalized_text = str(text)
+    if editor.text() == normalized_text:
+        return
+
+    had_focus = editor.hasFocus()
+    cursor_position = editor.cursorPosition()
+    selection_start = editor.selectionStart()
+    selection_length = len(editor.selectedText()) if selection_start >= 0 else 0
+
+    editor.setText(normalized_text)
+
+    if not had_focus:
+        return
+
+    editor.setCursorPosition(min(cursor_position, len(normalized_text)))
+    if selection_start >= 0:
+        start = min(selection_start, len(normalized_text))
+        length = min(selection_length, len(normalized_text) - start)
+        editor.setSelection(start, length)
+
+
 class SafetyRangePill(QWidget):
     """Compact graphical safety-range pill displaying interval [min … max] and live setpoint gauge."""
 
@@ -481,7 +511,9 @@ class LimitField(QWidget):
                 if isinstance(self.editor, QLineEdit) and self._last_valid is not None:
                     current = self.editor.text().strip()
                     if current and current.upper() != "AUTO":
-                        self.editor.setText(self._last_valid)
+                        set_line_edit_text_preserving_edit_state(
+                            self.editor, self._last_valid
+                        )
                         self._show_validation_warning(
                             f"Invalid value or unit. Restored the previous value: {self._last_valid}."
                         )
@@ -553,7 +585,7 @@ class LimitField(QWidget):
                             preferred_unit=preferred_unit,
                         )
                     )
-                self.editor.setText(normalized)
+                set_line_edit_text_preserving_edit_state(self.editor, normalized)
                 self._last_valid = normalized
         self._clear_validation_warning()
         return True
@@ -562,8 +594,9 @@ class LimitField(QWidget):
         if isinstance(self.editor, QSpinBox):
             self.editor.setValue(int(value))
         elif isinstance(self.editor, QLineEdit):
-            self.editor.setText(str(value))
-            self._last_valid = str(value)
+            normalized = str(value)
+            set_line_edit_text_preserving_edit_state(self.editor, normalized)
+            self._last_valid = normalized
 
 
 class LimitEditDialog(StationDialog):

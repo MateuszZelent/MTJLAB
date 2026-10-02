@@ -4,7 +4,9 @@ from __future__ import annotations
 
 import math
 import threading
+from dataclasses import replace
 from typing import Any
+
 import pytest
 
 from app.devices.keithley_2600 import KeithleySourceRequest
@@ -15,9 +17,43 @@ from app.devices.keithley_2600.characterization.models import (
 from app.devices.keithley_2600.characterization.runner import (
     KeithleyCharacterizationRunner,
 )
+from app.devices.simulators import simulated_station_settings
 from app.domain.errors import DeviceError, RunInterrupted, SafetyViolation
 from tests.helpers import loaded_settings
-from app.devices.simulators import simulated_station_settings
+
+
+def test_applied_configuration_accepts_si_float_representation_noise():
+    requested = KeithleySourceRequest(
+        channel="B",
+        mode="current",
+        level_si=0.0,
+        compliance_si=700 * 1e-3,
+        source_range_si=1.0,
+    )
+    applied = replace(requested, compliance_si=0.7)
+    assert requested.compliance_si != applied.compliance_si
+
+    KeithleyCharacterizationRunner.assert_applied_configuration_matches_request(
+        requested,
+        applied,
+    )
+
+
+def test_applied_configuration_rejects_real_compliance_mismatch():
+    requested = KeithleySourceRequest(
+        channel="B",
+        mode="current",
+        level_si=0.0,
+        compliance_si=0.7,
+        source_range_si=1.0,
+    )
+    applied = replace(requested, compliance_si=0.699)
+
+    with pytest.raises(SafetyViolation, match="compliance_si"):
+        KeithleyCharacterizationRunner.assert_applied_configuration_matches_request(
+            requested,
+            applied,
+        )
 
 
 class _MockKeithleyDevice:

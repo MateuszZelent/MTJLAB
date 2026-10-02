@@ -1082,6 +1082,10 @@ class RecipeRunner:
                 "measure_current_autorange": applied.measure_current_autorange,
                 "measure_current_range_si": applied.measure_current_range_si,
             }
+            range_reader = getattr(self._keithley, "last_range_readback", None)
+            range_readback = range_reader(request.channel) if callable(range_reader) else None
+            if isinstance(range_readback, dict):
+                self._active_safety_context[f"keithley.{request.channel}"]["range_readback"] = range_readback
             self._record_device_state(
                 "keithley", f"channel_{request.channel}", requested=request,
                 actual=self._active_safety_context[f"keithley.{request.channel}"],
