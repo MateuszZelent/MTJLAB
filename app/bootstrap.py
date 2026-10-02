@@ -6,6 +6,7 @@ from PySide6.QtCore import QObject
 
 from app.contracts import DeviceModuleRegistry
 from app.devices.registry import built_in_device_registry
+from app.devices.simulation import SimulationContext
 from app.settings.models import StationSettings
 from app.ui.workers import DeviceController
 
@@ -19,10 +20,12 @@ class StationComposition:
         *,
         simulation: bool,
         registry: DeviceModuleRegistry | None = None,
+        simulation_context: SimulationContext | None = None,
     ) -> None:
         self.settings = settings
         self.simulation = simulation
         self.registry = registry or built_in_device_registry()
+        self.simulation_context = simulation_context or SimulationContext(seed=0)
 
     def create_controller(self, key: str, parent: QObject) -> DeviceController:
         module = self.registry.get(key)
@@ -38,6 +41,7 @@ class StationComposition:
         return self.registry.get(key).create_adapter(
             settings or self.settings,
             simulation=self.simulation,
+            simulation_context=self.simulation_context,
         )
 
     def create_controllers(self, keys: tuple[str, ...], parent: QObject) -> dict[str, DeviceController]:

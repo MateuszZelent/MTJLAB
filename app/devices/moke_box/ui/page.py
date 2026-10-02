@@ -1,4 +1,4 @@
-"""Read-only manual diagnostics for the reconstructed MOKE Box protocol."""
+"""MOKE output control, independent calibration and read-only diagnostics."""
 
 from __future__ import annotations
 
@@ -16,13 +16,12 @@ from PySide6.QtWidgets import (
     QVBoxLayout,
     QWidget,
 )
-from qfluentwidgets import BodyLabel, CaptionLabel, CardWidget, CheckBox, ComboBox, PrimaryPushButton, PushButton, SpinBox, StrongBodyLabel, TitleLabel, isDarkTheme
+from qfluentwidgets import BodyLabel, CaptionLabel, CardWidget, CheckBox, ComboBox, PrimaryPushButton, PushButton, ScrollArea, SpinBox, StrongBodyLabel, TitleLabel, isDarkTheme
 from app.ui.dialogs import StationDialog
 
-from app.devices.moke_box.models import MokeHallVoltageReading, hall_field_from_voltage
+from app.devices.moke_box.models import MokeHallVoltageReading
 from app.domain.manual_metadata import ManualMetadataValue
 from app.domain.quantities import (
-    DIMENSION_MAGNETIC_FIELD,
     DIMENSION_TIME,
     DIMENSION_VOLTAGE,
     parse_quantity,
@@ -31,6 +30,7 @@ from app.settings.models import StationSettings
 from app.ui.design_system import plot_theme, tokens_for
 from app.ui.widgets import FluentTabView
 from app.ui.workers import DeviceController
+from app.devices.moke_box.ui.field_control import MokeFieldWorkflow
 
 
 class MokeHallLiveWindow(StationDialog):
@@ -108,9 +108,8 @@ class MokeHallLiveWindow(StationDialog):
         self.interval.blockSignals(False)
 
     def set_reading(self, reading: MokeHallVoltageReading) -> None:
-        field_t = hall_field_from_voltage(reading.voltage_v)
         self.voltage.setText(f"{reading.voltage_v:+.6f} V")
-        self.field.setText(f"{field_t * 1_000:+.3f} mT")
+        self.field.setText("Hall calibration required")
         self.status.setText(
             f"Updated {reading.timestamp_utc.astimezone().strftime('%H:%M:%S')} · "
             f"AD7734 0x{reading.raw_codes[0]:06X}"
@@ -125,9 +124,19 @@ class MokeHallLiveWindow(StationDialog):
 
 
 class MokeBoxPage(QWidget):
-    """Display every confirmed MOKE measurement path without actuator controls."""
+    """Host voltage control, calibration and confirmed MOKE diagnostics."""
 
     status = Signal(str)
+
+    owns_viewport = True
+
+    def heightForWidth(self, width: int) -> int:
+        # Long forms scroll inside the workspace. Their preferred height must
+        # not push the fixed Live/Apply controls outside the Fluent viewport.
+        return -1
+
+    def hasHeightForWidth(self) -> bool:
+        return False
 
     def __init__(
         self,
@@ -171,7 +180,7 @@ class MokeBoxPage(QWidget):
         heading = QVBoxLayout()
         title = TitleLabel("MOKE Box")
         title.setObjectName("pageTitle")
-        subtitle = CaptionLabel("Binary TCP diagnostics · confirmed four-byte records")
+        subtitle = CaptionLabel("Electromagnet control · Hall readout · field calibration")
         subtitle.setObjectName("muted")
         self.endpoint = BodyLabel()
         self.endpoint.setObjectName("mokeEndpoint")
@@ -197,8 +206,38 @@ class MokeBoxPage(QWidget):
         self.views = FluentTabView(self)
         self.views.setObjectName("mokeViews")
         self.views.addTab(self._build_vout_view(), "VOUT 0–7")
-        self.views.addTab(self._build_field_view(), "Hall field")
+        hall_scroll = ScrollArea(self)
+        hall_scroll.setWidgetResizable(True)
+        hall_scroll.setWidget(self._build_field_view())
+        self.views.addTab(hall_scroll, "Hall field")
+        self.field_workflow = MokeFieldWorkflow(self._controller, self._settings, self)
+        self.field_workflow.status.connect(self.status)
+        self.field_workflow.profile_changed.connect(self._field_profile_changed)
+        self.field_workflow.voltage_confirmed.connect(self._show_confirmed_voltage)
+        self.field_workflow.vout_overview_requested.connect(lambda: self.views.setCurrentIndex(0))
+        self.views.addTab(self.field_workflow.control_page, "Voltage control")
+        self.views.addTab(self.field_workflow.calibration_page, "Field calibration")
         outer.addWidget(self.views, 1)
+
+    def _show_confirmed_voltage(self, channel: int, voltage: float) -> None:
+        if channel in self.vout_values and math.isfinite(voltage):
+            self._last_vouts[channel] = voltage
+            self.vout_values[channel].setText(f"{voltage:+.6f} V")
+
+    def _field_profile_changed(self, profile):
+        if profile is not None:
+            self.protocol_badge.setText("SIMULATION · DAC CONTROL" if profile.simulation else "APPROVED DAC CONTROL")
+            self.safety_note.setText(
+                "Synthetic field calibration · no physical instruments are connected." if profile.simulation else
+                "Voltage programs Kepco current. Operator limits narrow the station envelope. "
+                "DAC zero does not confirm power-off or zero field."
+            )
+        else:
+            self.protocol_badge.setText("READ-ONLY")
+            self.safety_note.setText(
+                "Read-only connection. Voltage changes are locked: no approved control profile. "
+                "DAC readback does not confirm Kepco power-off."
+            )
 
     def _build_vout_view(self) -> QWidget:
         page = QWidget()
@@ -213,6 +252,7 @@ class MokeBoxPage(QWidget):
         title = StrongBodyLabel("Eight-channel DAC readback")
         title.setObjectName("sectionTitle")
         hint = CaptionLabel("One read-only request returns channels D0…D7 and validates every checksum.")
+        hint.setWordWrap(True)
         hint.setObjectName("muted")
         copy.addWidget(title)
         copy.addWidget(hint)
@@ -403,6 +443,7 @@ class MokeBoxPage(QWidget):
 
     def set_settings(self, settings: StationSettings) -> None:
         self._settings = settings
+        self.field_workflow.set_settings(settings)
         profile = settings.moke_box
         for combo, configured, in_seconds in (
             (self.sample_interval, profile.live_interval, False),
@@ -421,6 +462,11 @@ class MokeBoxPage(QWidget):
             self.safety_note.setText(
                 "Configuration incomplete. Set the TCP endpoint and explicitly qualify the reconstructed protocol in Station settings. "
                 "No connection will be opened until then."
+            )
+        elif profile.allow_vout_control:
+            self.safety_note.setText(
+                "Approved software control profile. Arm a bounded plan before applying voltage. "
+                "DAC zero confirms the control signal; Kepco power and coil current require independent evidence."
             )
         else:
             self.safety_note.setText(
@@ -540,6 +586,7 @@ class MokeBoxPage(QWidget):
 
     def _result(self, operation: str, result: object) -> None:
         if operation == "connect":
+            self.endpoint.setText(f"Endpoint  {getattr(result, 'resource', 'connected')}")
             self.status.emit("MOKE Box connected and verified by read-only VOUT response")
             return
         if operation == "read_vouts" and isinstance(result, dict):
@@ -557,9 +604,7 @@ class MokeBoxPage(QWidget):
             self._set_measurement_controls(True)
 
     def _show_hall_reading(self, result: MokeHallVoltageReading) -> None:
-        self.field_values["hall1_field"].setText(
-            f"{hall_field_from_voltage(result.voltage_v):+.9f} T"
-        )
+        self.field_values["hall1_field"].setText("Hall calibration required")
         self.field_values["hall1_voltage"].setText(f"{result.voltage_v:+.6f} V")
         self.field_values["hall1_stddev"].setText(f"{result.stddev_v:.6g} V")
         for suffix in ("field", "voltage", "stddev"):
@@ -582,7 +627,7 @@ class MokeBoxPage(QWidget):
             self._hall_live_window.set_reading(result)
 
     def manual_metadata_values(self) -> tuple[ManualMetadataValue, ...]:
-        """Return confirmed read-only MOKE Hall and VOUT values."""
+        """Return the latest confirmed MOKE Hall and VOUT values."""
 
         values: list[ManualMetadataValue] = []
 
@@ -636,14 +681,6 @@ class MokeBoxPage(QWidget):
                 dimension=DIMENSION_VOLTAGE,
                 source="last confirmed MOKE Hall readback",
             )
-            add(
-                "moke_box.hall1.field_t",
-                "MOKE Hall 1 · derived field",
-                "T",
-                hall_field_from_voltage(reading.voltage_v),
-                dimension=DIMENSION_MAGNETIC_FIELD,
-                source="derived from last confirmed MOKE Hall readback",
-            )
         return tuple(values)
 
     def apply_execution_event(
@@ -654,6 +691,14 @@ class MokeBoxPage(QWidget):
         _output_status: Mapping[str, str],
     ) -> None:
         """Render runner-confirmed Hall readings in the normal page and plot."""
+        if event_name == "action_finished" and event.get("kind") == "update_moke_voltage":
+            record = device_state.get("voltage_control")
+            actual = record.get("actual") if isinstance(record, Mapping) else None
+            if isinstance(actual, Mapping):
+                voltage = self._execution_number(actual.get("actual_v"))
+                if voltage is not None:
+                    self.field_workflow.show_execution_voltage(actual.get("channel"), voltage, actual.get("calibration_snapshot"))
+            return
         if event_name == "action_started" and event.get("kind") == "measure_moke_hall":
             self.field_status.setText(
                 "Run Engine is reading the Hall channel; waiting for a validated response."
@@ -700,6 +745,7 @@ class MokeBoxPage(QWidget):
 
     def set_execution_controlled(self, controlled: bool) -> None:
         self.execution_badge.setVisible(controlled)
+        self.field_workflow.set_execution_controlled(controlled)
 
     def _prune_history(self, now: datetime) -> None:
         cutoff = now - timedelta(seconds=self._selected_value(self.history_window))
@@ -737,11 +783,16 @@ class MokeBoxPage(QWidget):
         self.status.emit(f"MOKE Box {operation} failed: {error}")
 
     def _state_changed(self, state: str) -> None:
-        self._set_measurement_controls(state == "verified" and self._pending_operation is None)
+        available = state == "verified" or (
+            state == "unknown" and self.field_workflow._connected and not self.field_workflow.busy
+        )
+        self._set_measurement_controls(available and self._pending_operation is None)
         if state == "verified" and self._pending_operation is None:
             self.field_status.setText("Ready. Start with one Hall-voltage sample.")
         elif state == "disconnected":
             self.field_status.setText("Connect MOKE Box to enable the Hall-voltage read.")
+        elif state == "unknown" and available:
+            self.field_status.setText("Kepco power/current state is unknown. The connected DAC/Hall readback remains available.")
         elif state in {"fault", "unknown"}:
             self.field_status.setText("The previous MOKE session is no longer usable. Reconnect before reading Hall voltage.")
         if state in {"fault", "unknown", "disconnected"}:
@@ -758,6 +809,9 @@ class MokeBoxPage(QWidget):
             self._hall_live_window.live.setEnabled(enabled)
 
     def closeEvent(self, event: object) -> None:
+        if not self.field_workflow.prepare_application_shutdown():
+            event.ignore()
+            return
         self.stop_live("Live Hall readout stopped because the MOKE page closed.")
         if self._hall_live_window is not None:
             self._hall_live_window.close()

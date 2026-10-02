@@ -979,6 +979,12 @@ def simulated_station_settings(settings: StationSettings) -> StationSettings:
     """
 
     raw = settings.model_dump(mode="python")
+    moke = raw["devices"]["moke_box"]
+    moke.update(enabled=True, protocol_qualified=True, endpoint="SIM::MOKE::INSTR",
+                allow_vout_control=True, allowed_vout_channels=(moke["voltage_control"]["channel"],))
+    moke["voltage_control"].update(approved=True, binding_id="SIM::MOKE::COIL",
+                                 qualification_reference="simulation-only")
+    raw["devices"]["lakeshore_gaussmeter"].update(enabled=True, resource="SIM::LAKESHORE::INSTR")
     raw["devices"]["rigol"]["connection"]["resource"] = "SIM::RIGOL::INSTR"
     raw["devices"]["rigol"]["identity"]["require_serial_match"] = False
     raw["devices"]["rigol"]["identity"]["expected_serial"] = None

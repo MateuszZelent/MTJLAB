@@ -19,6 +19,7 @@ class QuantityError(ValueError):
 
 
 DIMENSION_VOLTAGE: Final = "voltage"
+DIMENSION_VOLTAGE_SLEW: Final = "voltage_slew"
 DIMENSION_CURRENT: Final = "current"
 DIMENSION_POWER: Final = "power"
 DIMENSION_FREQUENCY: Final = "frequency"
@@ -42,6 +43,8 @@ _UNITS: Final[dict[str, UnitDefinition]] = {
     "mv": UnitDefinition(DIMENSION_VOLTAGE, 1e-3, "mV"),
     "uv": UnitDefinition(DIMENSION_VOLTAGE, 1e-6, "uV"),
     "kv": UnitDefinition(DIMENSION_VOLTAGE, 1e3, "kV"),
+    "v/s": UnitDefinition(DIMENSION_VOLTAGE_SLEW, 1.0, "V/s"),
+    "mv/s": UnitDefinition(DIMENSION_VOLTAGE_SLEW, 1e-3, "mV/s"),
     "a": UnitDefinition(DIMENSION_CURRENT, 1.0, "A"),
     "ma": UnitDefinition(DIMENSION_CURRENT, 1e-3, "mA"),
     "ua": UnitDefinition(DIMENSION_CURRENT, 1e-6, "uA"),
@@ -184,6 +187,7 @@ def quantity_range(
 
 _AUTO_DISPLAY_UNITS: Final[dict[str, tuple[str, ...]]] = {
     DIMENSION_VOLTAGE: ("kV", "V", "mV", "uV"),
+    DIMENSION_VOLTAGE_SLEW: ("V/s", "mV/s"),
     DIMENSION_CURRENT: ("A", "mA", "uA", "nA"),
     DIMENSION_POWER: ("W", "mW", "uW", "nW"),
     DIMENSION_FREQUENCY: ("GHz", "MHz", "kHz", "Hz"),

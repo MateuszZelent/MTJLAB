@@ -9,6 +9,7 @@ from app.devices.moke_box.protocol import (
     MokeResponseType,
     MokeTarget,
     encode_voltage,
+    decode_voltage,
 )
 from app.devices.simulation import SimulationContext
 from app.domain.errors import ConnectionError, DeviceError
@@ -17,7 +18,9 @@ from app.domain.errors import ConnectionError, DeviceError
 class SimulatedMokeBoxTransport:
     """Implement the qualified binary subset without opening a socket."""
 
-    def __init__(self, context: SimulationContext) -> None:
+    def __init__(self, context: SimulationContext, *, field_channel: int = 2) -> None:
+        self._context = context
+        self._field_channel = field_channel
         self._random = context.random_stream("moke_box", "hall")
         self._connected = False
         self._pending = b""
@@ -48,13 +51,15 @@ class SimulatedMokeBoxTransport:
             requested = command.value_u16
             if requested != 1:
                 raise DeviceError("MOKE simulation supports one Hall sample per request.")
-            voltage = self._random.uniform(-0.25, 0.25)
+            voltage = self._context.magnet.field_t() / 0.04 + self._random.gauss(0, 0.00001)
             signed = int(round(max(-1.0, min(1.0, voltage / 10.0)) * 0x7FFFFF))
             self._pending = MokeAd7734Frame(
                 MokeTarget.MAIN_BOX, 0, signed + 0x800000
             ).encode()
         elif command.record_type == MokeCommandType.SET_VOUT:
-            self._vouts[command.channel] = max(-10.0, min(10.0, command.value_u16 / 3276.7 - 10.0))
+            self._vouts[command.channel] = decode_voltage(command.msb, command.lsb)
+            if command.channel == self._field_channel:
+                self._context.magnet.set_voltage(self._vouts[command.channel])
         elif command.record_type != MokeCommandType.SET_GAIN:
             raise DeviceError(f"MOKE simulation does not support command {command.record_type!r}.")
 

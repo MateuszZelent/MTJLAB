@@ -36,7 +36,10 @@ class MokeGain(IntEnum):
 
 
 def checksum(header: int, msb: int, lsb: int) -> int:
-    return (header + 2 * msb + 4 * lsb) & 0xFF
+    # The protocol uses bitwise parity, not addition with carries. The live
+    # non-zero AD5362 record 12 82 8f 2a distinguishes the two algorithms;
+    # all-zero VOUT replies cannot do so.
+    return (header ^ (msb << 1) ^ (lsb << 2)) & 0xFF
 
 
 def make_header(target: int, record_type: int, channel: int) -> int:
@@ -66,8 +69,13 @@ class MokeFrame:
         if len(raw) != 4:
             raise DeviceError(f"MOKE record must have 4 bytes, received {len(raw)}.")
         header, msb, lsb, received_checksum = raw
-        if received_checksum != checksum(header, msb, lsb):
-            raise DeviceError("MOKE checksum mismatch; transport stream is unsafe to continue.")
+        expected_checksum = checksum(header, msb, lsb)
+        if received_checksum != expected_checksum:
+            raise DeviceError(
+                f"MOKE checksum mismatch: record={raw.hex(' ')}, "
+                f"expected=0x{expected_checksum:02X}, received=0x{received_checksum:02X}; "
+                "transport stream is unsafe to continue."
+            )
         return cls((header >> 6) & 0x03, (header >> 3) & 0x07, header & 0x07, msb, lsb)
 
 

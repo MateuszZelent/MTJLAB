@@ -14,10 +14,11 @@ from enum import Enum
 from app.devices.anritsu_ms2830a.adapter import AnritsuAdapter, SpectrumTrace
 from app.devices.keithley_2600.adapter import KeithleyAdapter
 from app.devices.moke_box.adapter import MokeBoxAdapter
-from app.devices.moke_box.models import hall_field_from_voltage
+from app.devices.moke_box.calibration import MokeCalibration
+from app.safety.moke_box import MokeVoltagePlan
 from app.devices.lakeshore_475.adapter import LakeShore475Adapter
 from app.devices.rigol_dg1000z.adapter import RigolAdapter
-from app.domain.errors import DeviceError, ExecutionError
+from app.domain.errors import ConfigurationError, DeviceError, ExecutionError
 from app.domain.models import ApplicationState, DeviceState, MeasurementPoint
 from app.engine.compiler import ExecutionPlan, PlanAction, required_devices_for_actions
 from app.engine.policy import ExecutionPolicy
@@ -94,6 +95,9 @@ class RecipeRunner:
         self._keithley = keithley
         self._anritsu = anritsu
         self._moke_box = moke_box
+        self._moke_voltage_plan: MokeVoltagePlan | None = None
+        self._moke_calibration: MokeCalibration | None = None
+        self._moke_owns_output = False
         self._lakeshore = lakeshore
         self._writer = writer
         self._on_event = on_event or (lambda _name, _data: None)
@@ -182,6 +186,9 @@ class RecipeRunner:
         self._anritsu_sg_output_active = False
         self._last_safe_boundary_points = stored_points
         self._watchdog_timed_out.clear()
+        self._moke_voltage_plan = None
+        self._moke_calibration = None
+        self._moke_owns_output = False
         self._reference_trace = None
         self._reference_index = None
         self._semantic_confirmations = {}
@@ -413,7 +420,7 @@ class RecipeRunner:
                 )
             if not self._safe_shutdown():
                 raise ExecutionError("Safe shutdown was not confirmed for every instrument.")
-            self._state = ApplicationState.SAFE
+            self._state = ApplicationState.UNKNOWN if self._moke_owns_output else ApplicationState.SAFE
             self._emit("run_completed", {"completed_actions": completed, "stored_points": stored})
             self._writer.close("completed")
             return RunResult(self._state, completed, stored)
@@ -543,6 +550,10 @@ class RecipeRunner:
             return self._rigol
         if "keithley" in action.kind:
             return self._keithley
+        if "moke" in action.kind:
+            return self._moke_box
+        if "lakeshore" in action.kind:
+            return self._lakeshore
         if "anritsu" in action.kind or action.kind in {
             "acquire_reference",
             "acquire_spectrum",
@@ -908,7 +919,7 @@ class RecipeRunner:
         )
         shutdown_ok = self._safe_shutdown()
         if cleanup_ok and shutdown_ok:
-            self._state = ApplicationState.SAFE
+            self._state = ApplicationState.UNKNOWN if self._moke_owns_output else ApplicationState.SAFE
             self._emit_after_fault("run_aborted", {"completed_actions": completed, "stored_points": stored})
             self._writer.close("aborted")
             return RunResult(self._state, completed, stored, reason)
@@ -1282,12 +1293,74 @@ class RecipeRunner:
                 requested={"channel": result.channel},
                 actual=result,
             )
+        elif action.kind == "configure_moke_box":
+            if self._moke_box is None:
+                raise ExecutionError("MOKE voltage control requires an available adapter.")
+            self._moke_voltage_plan = payload["plan"]
+            self._moke_calibration = payload.get("calibration")
+            self._moke_box.configure_voltage_plan(self._moke_voltage_plan)
+            self._active_safety_context["moke_box"] = {
+                "channel": self._moke_voltage_plan.channel,
+                "minimum_v": self._moke_voltage_plan.minimum_v,
+                "maximum_v": self._moke_voltage_plan.maximum_v,
+                "profile_fingerprint": self._moke_voltage_plan.profile_fingerprint,
+                "calibration_id": self._moke_calibration.calibration_id if self._moke_calibration else None,
+                "calibration_snapshot": self._jsonable(self._moke_calibration) if self._moke_calibration else None,
+                "field_source": "calibrated_branch_curves" if self._moke_calibration else "uncalibrated",
+                "conditioning_verified": False,
+            }
+            self._record_device_state("moke_box", "voltage_control", requested=payload,
+                                      actual=self._active_safety_context["moke_box"])
+        elif action.kind == "arm_moke_voltage":
+            if self._moke_box is None or payload["plan"] != self._moke_voltage_plan:
+                raise ExecutionError("MOKE arm permission does not match its prepared plan.")
+            if not self.outputs_forced_off:
+                self._moke_box.arm_voltage_plan(payload["plan"])
+                self._moke_owns_output = True
+                self._output_status["moke_box.field"] = "unknown"
+        elif action.kind == "update_moke_voltage":
+            if self._moke_box is None or self._moke_voltage_plan is None:
+                raise ExecutionError("Prepare the MOKE voltage trajectory before applying a point.")
+            target = float(payload["voltage_v"])
+            if self.outputs_forced_off:
+                # Suppressed trajectory points are never passed to SET_VOUT.
+                actual = self._moke_box.read_vouts()[int(payload["channel"])]
+                applied = self._moke_voltage_plan.applied_voltage(target)
+            else:
+                result = self._moke_box.ramp_vout(int(payload["channel"]), target, cancel=self._stop_requested)
+                actual, applied = result.actual_v, result.applied_v
+            measurements["moke_box.vout_voltage_v"] = actual
+            context = self._active_safety_context["moke_box"]
+            context.update(requested_v=target, applied_v=applied, actual_v=actual,
+                           mutation_suppressed=self.outputs_forced_off)
+            for direction in ("ascending", "descending"):
+                key = f"moke_box.field_estimated_{direction}_t"
+                measurements.pop(key, None)
+                if self._moke_calibration is not None:
+                    try:
+                        branch = getattr(self._moke_calibration, direction)
+                        measurements[key] = branch.estimate(actual)
+                    except ConfigurationError:
+                        context["field_validity"] = "outside_calibrated_range"
+                    else:
+                        context["field_validity"] = "branch_predictions_history_unverified"
+            self._record_device_state("moke_box", "voltage_control", requested=payload, actual=context)
+        elif action.kind == "stop_moke_voltage":
+            if self._moke_box is None:
+                raise ExecutionError("MOKE DAC shutdown requires an available adapter.")
+            if not self.outputs_forced_off:
+                result = self._moke_box.stop_vout()
+                self._moke_owns_output = True
+                if not result.safe_target_confirmed:
+                    raise ExecutionError("MOKE DAC zero was not confirmed.")
+                self._record_device_state("moke_box", "dac_shutdown", requested={}, actual=result)
+                self._output_status["moke_box.field"] = "unknown"
+            self._moke_voltage_plan = None
         elif action.kind == "measure_moke_hall":
             if self._moke_box is None:
                 raise ExecutionError("MOKE Hall measurement was requested but MOKE Box is unavailable.")
             result = self._moke_box.read_hall_voltage()
             measurements["moke_box.hall1_voltage_v"] = result.voltage_v
-            measurements["moke_box.hall1_field_t"] = hall_field_from_voltage(result.voltage_v)
             measurements["moke_box.hall1_stddev_v"] = result.stddev_v
             measurements["moke_box.hall1_raw_ad7734"] = float(result.raw_codes[0])
             self._record_device_state(
@@ -1296,7 +1369,6 @@ class RecipeRunner:
                 requested={"sample_count": 1},
                 actual={
                     "voltage_v": result.voltage_v,
-                    "field_t": measurements["moke_box.hall1_field_t"],
                     "stddev_v": result.stddev_v,
                     "samples": result.samples,
                     "raw_ad7734": result.raw_codes[0],
@@ -1596,10 +1668,13 @@ class RecipeRunner:
             "rigol": self._rigol,
             "anritsu": self._anritsu,
         }
+        if self._moke_owns_output and self._moke_box is not None:
+            devices["moke_box"] = self._moke_box
         default_actions = {
             "keithley": "keithley.outputs_off",
             "rigol": "rigol.outputs_off",
             "anritsu": "anritsu.rf_off_and_abort",
+            "moke_box": "moke_box.dac_zero_or_unknown",
         }
         shutdown_scope = set(self._output_guard_devices())
         actions = self._safe_shutdown_actions or tuple(
@@ -1617,13 +1692,14 @@ class RecipeRunner:
                         flush()
                 else:
                     name = action.split(".", 1)[0]
+                    if name == "moke_box" and not self._moke_owns_output:
+                        self._emit_after_fault("shutdown_action_finished", {
+                            "action": action, "mutation_suppressed": True,
+                        })
+                        continue
                     device = devices[name]
                     attempted_devices.add(name)
-                    device.emergency_off()
-                    if device.state is DeviceState.UNKNOWN:
-                        raise ExecutionError(
-                            "The instrument did not confirm a safe state."
-                        )
+                    self._shutdown_owned_device(name, device)
             except Exception as exc:
                 confirmed = False
                 self._emit_after_fault(
@@ -1631,7 +1707,7 @@ class RecipeRunner:
                     {"action": action, "error": str(exc)},
                 )
             else:
-                if action != "storage.flush_checkpoint":
+                if action != "storage.flush_checkpoint" and name != "moke_box":
                     self._confirm_device_outputs_off(name)
                 self._emit_after_fault("shutdown_action_finished", {"action": action})
         # A malformed manually-created plan must not be able to omit OFF for a
@@ -1642,11 +1718,7 @@ class RecipeRunner:
         for name in sorted(fallback_scope - attempted_devices):
             action = default_actions[name]
             try:
-                devices[name].emergency_off()
-                if devices[name].state is DeviceState.UNKNOWN:
-                    raise ExecutionError(
-                        "The instrument did not confirm a safe state."
-                    )
+                self._shutdown_owned_device(name, devices[name])
             except Exception as exc:
                 confirmed = False
                 self._emit_after_fault(
@@ -1654,8 +1726,25 @@ class RecipeRunner:
                     {"action": action, "error": str(exc), "fallback": True},
                 )
             else:
-                self._confirm_device_outputs_off(name)
+                if name != "moke_box":
+                    self._confirm_device_outputs_off(name)
         return confirmed
+
+    def _shutdown_owned_device(self, name, device) -> None:
+        if name == "moke_box":
+            result = device.stop_vout()
+            self._record_device_state("moke_box", "dac_shutdown", requested={}, actual=result)
+            self._output_status["moke_box.field"] = "unknown"
+            self._emit_after_fault("moke_dac_shutdown", {
+                "dac_zero_confirmed": result.safe_target_confirmed,
+                "kepco_power_state": "unknown", "actual_v": result.actual_v,
+            })
+            if not result.safe_target_confirmed:
+                raise ExecutionError("MOKE programming-signal zero was not confirmed.")
+            return
+        device.emergency_off()
+        if device.state is DeviceState.UNKNOWN:
+            raise ExecutionError("The instrument did not confirm a safe state.")
 
     @staticmethod
     def _compliance_channels(measurements: dict[str, float]) -> tuple[str, ...]:
@@ -1733,6 +1822,10 @@ class RecipeRunner:
                 low = context.get("low_level_v")
                 if isinstance(high, (int, float)) and isinstance(low, (int, float)):
                     return (float(high) + float(low)) / 2.0
+        elif len(parts) == 3 and parts[0] == "moke_box" and parts[2] == "voltage":
+            context = self._active_safety_context.get("moke_box")
+            if context is not None and parts[1] == f"vout{context.get('channel')}":
+                field = "actual_v"
         elif parts == ["anritsu", "spectrum", "start_frequency"]:
             context = self._active_safety_context.get("anritsu")
             field = "start_hz"

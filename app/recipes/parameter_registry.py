@@ -43,6 +43,14 @@ class QuickControlDescriptor:
 
 
 _DESCRIPTORS: Final[tuple[ParameterDescriptor, ...]] = (
+    *tuple(
+        ParameterDescriptor(
+            f"moke_box.vout{channel}.voltage", "moke_box", "MOKE Box",
+            f"VOUT {channel} programming voltage", "MOKE Box", f"VOUT {channel} · programming voltage",
+            DIMENSION_VOLTAGE, "V",
+        )
+        for channel in range(8)
+    ),
     ParameterDescriptor(
         "keithley.A.level", "keithley", "Keithley 2602A",
         "Keithley A level", "Keithley", "Channel A · source current",
@@ -207,6 +215,7 @@ def legacy_ui_parameter_definitions() -> tuple[dict[str, str], ...]:
                 "anritsu.spectrum.start_frequency",
                 "anritsu.spectrum.stop_frequency",
                 "anritsu.spectrum.reference_level",
+                *(f"moke_box.vout{channel}.voltage" for channel in range(8)),
             )
         )
     }

@@ -9,9 +9,9 @@ from __future__ import annotations
 import math
 from typing import Any, Literal
 
-from pydantic import BaseModel, ConfigDict, Field, model_validator
+from pydantic import BaseModel, ConfigDict, Field, StrictInt, model_validator
 
-from app.domain.errors import ConfigurationError
+from app.domain.errors import ConfigurationError, SafetyViolation
 from app.domain.quantities import (
     DIMENSION_CURRENT,
     DIMENSION_DB,
@@ -21,6 +21,7 @@ from app.domain.quantities import (
     DIMENSION_RESISTANCE,
     DIMENSION_TIME,
     DIMENSION_VOLTAGE,
+    DIMENSION_VOLTAGE_SLEW,
     format_quantity_auto,
     parse_quantity,
 )
@@ -521,6 +522,48 @@ class AnritsuSettings(StrictModel):
         return self
 
 
+class MokeVoltageControlSettings(StrictModel):
+    """Physical output qualification; saving these fields never arms a session."""
+
+    approved: bool = False
+    binding_id: str = ""
+    qualification_reference: str = ""
+    channel: int = Field(default=2, ge=0, le=7, strict=True)
+    kepco_model: str = "BOP 72-6M"
+    kepco_mode: Literal["current"] = "current"
+    minimum: str = "-1 V"
+    maximum: str = "1 V"
+    safe_target: str = "0 V"
+    maximum_step: str = "50 mV"
+    maximum_slew: str = "1 V/s"
+    step_interval: str = "50 ms"
+    ramp_timeout: str = "30 s"
+    minimum_settling_time: str = "2 s"
+
+    @model_validator(mode="after")
+    def validate_envelope(self) -> "MokeVoltageControlSettings":
+        from app.safety.moke_box import MokeControlProfile
+
+        try:
+            MokeControlProfile(
+                self.channel, self.binding_id or "unqualified",
+                parse_quantity(self.minimum, DIMENSION_VOLTAGE).si_value,
+                parse_quantity(self.maximum, DIMENSION_VOLTAGE).si_value,
+                parse_quantity(self.safe_target, DIMENSION_VOLTAGE).si_value,
+                parse_quantity(self.maximum_step, DIMENSION_VOLTAGE).si_value,
+                parse_quantity(self.maximum_slew, DIMENSION_VOLTAGE_SLEW).si_value,
+                parse_quantity(self.step_interval, DIMENSION_TIME).si_value,
+                parse_quantity(self.ramp_timeout, DIMENSION_TIME).si_value,
+                self.qualification_reference or "unqualified",
+                minimum_settling_s=parse_quantity(self.minimum_settling_time, DIMENSION_TIME).si_value,
+            )
+        except SafetyViolation as exc:
+            raise ValueError(str(exc)) from exc
+        if self.approved and (not self.binding_id.strip() or not self.qualification_reference.strip()):
+            raise ValueError("MOKE output approval requires a physical binding and qualification reference")
+        return self
+
+
 class MokeBoxSettings(StrictModel):
     """MOKE Box profile; output control stays fail-closed until qualified."""
 
@@ -531,7 +574,10 @@ class MokeBoxSettings(StrictModel):
     expected_model: str | None = None
     protocol_qualified: bool = False
     allow_vout_control: bool = False
-    allowed_vout_channels: tuple[int, ...] = ()
+    allowed_vout_channels: tuple[StrictInt, ...] = ()
+    voltage_control: MokeVoltageControlSettings = Field(default_factory=MokeVoltageControlSettings)
+    calibration_directory: str = "calibrations/moke_box"
+    active_calibration_id: str | None = None
     live_interval: str = "1 s"
     plot_refresh_interval: str = "500 ms"
     history_window: str = "60 s"
@@ -546,10 +592,16 @@ class MokeBoxSettings(StrictModel):
             raise ValueError("MOKE Box plot_refresh_interval must be at least 100 ms")
         if parse_quantity(self.history_window, DIMENSION_TIME).si_value < 60:
             raise ValueError("MOKE Box history_window must be at least 1 minute")
-        if self.allow_vout_control or self.allowed_vout_channels:
-            raise ValueError("MOKE Box is read-only; VOUT control permissions are forbidden")
+        if (self.allow_vout_control or self.allowed_vout_channels) and not (
+            self.enabled and self.protocol_qualified and self.endpoint
+            and self.allow_vout_control and self.voltage_control.approved
+            and self.allowed_vout_channels == (self.voltage_control.channel,)
+        ):
+            raise ValueError("MOKE Box remains read-only without qualified, approved single-channel output control")
         if any(channel not in range(8) for channel in self.allowed_vout_channels):
             raise ValueError("MOKE VOUT channels must be in 0..7")
+        if not self.calibration_directory.strip():
+            raise ValueError("MOKE calibration directory cannot be empty")
         return self
 
 

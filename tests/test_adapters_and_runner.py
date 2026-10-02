@@ -31,7 +31,7 @@ from app.devices.rigol_dg1000z import (
 )
 from app.devices.rigol_dg1000z.module import _dispatch as dispatch_rigol
 from app.devices.simulators import RigolSimulator
-from app.devices.moke_box.models import MokeHallVoltageReading, hall_field_from_voltage
+from app.devices.moke_box.models import MokeHallVoltageReading
 from app.devices.lakeshore_475.models import (
     FieldUnit, GaussmeterReading, GaussmeterSnapshot, MeasurementMode,
 )
@@ -129,6 +129,9 @@ class HallProbe:
     reading: MokeHallVoltageReading
     reads: int = 0
 
+    def io_timeout(self, _timeout_s: float):
+        return nullcontext()
+
     def read_hall_voltage(self) -> MokeHallVoltageReading:
         self.reads += 1
         return self.reading
@@ -138,6 +141,9 @@ class HallProbe:
 class LakeShoreProbe:
     reading: GaussmeterReading
     reads: int = 0
+
+    def io_timeout(self, _timeout_s: float):
+        return nullcontext()
 
     def read_measurement(self) -> GaussmeterReading:
         self.reads += 1
@@ -354,10 +360,7 @@ class AdapterAndRunnerTests(unittest.TestCase):
         point, trace = writer.points[0]
         self.assertIsNone(trace)
         self.assertAlmostEqual(point.measurements["moke_box.hall1_voltage_v"], voltage_v)
-        self.assertAlmostEqual(
-            point.measurements["moke_box.hall1_field_t"],
-            hall_field_from_voltage(voltage_v),
-        )
+        self.assertNotIn("moke_box.hall1_field_t", point.measurements)
 
     def test_lakeshore_action_stores_read_only_measurement_checkpoint(self) -> None:
         snapshot = GaussmeterSnapshot("2", MeasurementMode.RMS, "2", FieldUnit.TESLA, "0", True, "40", datetime.now(timezone.utc))

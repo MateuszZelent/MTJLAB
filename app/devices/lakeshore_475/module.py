@@ -9,6 +9,7 @@ from app.devices.lakeshore_475.models import GaussmeterConfig
 from app.devices.lakeshore_475.simulator import simulated_475_session
 from app.devices.lakeshore_475.ui import LakeShore475Page
 from app.devices.visa import FakeVisaSessionFactory
+from app.devices.simulation import SimulationContext
 from app.domain.errors import ConfigurationError
 from app.domain.quantities import DIMENSION_TIME, parse_quantity
 from app.settings.models import StationSettings
@@ -50,6 +51,17 @@ def _dispatch(adapter: DeviceAdapter, operation: str, _payload: object) -> objec
     return method()
 
 
+def _simulation_adapter(settings: StationSettings, context: SimulationContext) -> DeviceAdapter:
+    session = simulated_475_session()
+    stream = context.random_stream("lakeshore", "moke_reference")
+    session.responses["RDGFIELD?"] = lambda _command: f"{context.magnet.field_t() + stream.gauss(0, 1e-6):.12g}"
+    return LakeShore475Adapter(
+        GaussmeterConfig(resource="SIM::LAKESHORE::INSTR"),
+        session_factory=FakeVisaSessionFactory(session),
+        official_model_factory=lambda connection: connection,
+    )
+
+
 def _page(controller: object, settings: StationSettings) -> object:
     return LakeShore475Page(controller, settings)  # type: ignore[arg-type]
 
@@ -61,6 +73,7 @@ MODULE = DeviceModule(
     settings_key="lakeshore_gaussmeter",
     execution_state_key="lakeshore",
     adapter_factory=_adapter,
+    simulation_adapter_factory=_simulation_adapter,
     dispatch=_dispatch,
     capabilities=frozenset({"field_reading", "dc", "rms", "peak", "read_only"}),
     enabled_by_default=False,

@@ -1,5 +1,13 @@
 # MOKE-Box / BOKE-Box — rekonstrukcja protokołu komunikacyjnego
 
+> **Aktualizacja 2026-10-02:** źródła, profile i kalibracje wymagają rozróżnienia
+> wersji oraz jednostek. Bieżące ustalenia, ograniczenia dowodów i korekty:
+> [przegląd inżynieryjny](MOKE_BOX_ENGINEERING_REVIEW_2026-10-02.md).
+> Sterowanie i kalibrację wdrażamy według
+> [planu wykonawczego](../superpowers/plans/2026-10-02-moke-box-voltage-control-and-field-calibration.md).
+> Historyczne opisy ADC16/batch, limitów i korekcji nie zastępują kwalifikacji
+> konkretnego urządzenia ani nowego kontraktu kalibracji.
+
 Data analizy: 2026-07-18  
 Status: specyfikacja odtworzona z kodu LabVIEW; niezweryfikowana jeszcze na fizycznym MOKE-Box  
 Zakres źródeł: `docs/External_libraries/MOKE-Box_in_progress/project`
@@ -109,7 +117,7 @@ channel =  HEADER & 0x07
 ### 4.2. Suma kontrolna i payload AD7734
 
 ```text
-CHECKSUM = (HEADER + 2*MSB + 4*LSB) & 0xFF
+CHECKSUM = (HEADER ^ (MSB << 1) ^ (LSB << 2)) & 0xFF
 ```
 
 VI wykonuje pośrednie konwersje do `U8`, lecz wynik jest równoważny sumie modulo 256.
@@ -133,8 +141,8 @@ Przykład:
 
 ```text
 HEADER=0x38, MSB=0x00, LSB=0x64
-CHECKSUM=(0x38 + 2*0x00 + 4*0x64) mod 256 = 0xC8
-ramka: 38 00 64 C8
+CHECKSUM=(0x38 ^ (0x00 << 1) ^ (0x64 << 2)) & 0xFF = 0xA8
+ramka: 38 00 64 A8
 ```
 
 ## 5. Przestrzeń adresowa i typy
@@ -296,9 +304,9 @@ HEADER  = 0x10 + channel
 Przykłady dla kanału 2:
 
 ```text
--1 V: 12 73 33 C4
+-1 V: 12 73 33 38
  0 V: 12 80 00 12
-+1 V: 12 8C CD 5E
++1 V: 12 8C CD 3E
 ```
 
 `set_VOUTn_timed.vi` nie definiuje nowej komendy. Generuje serię tych samych ramek, zmieniając napięcie krokami `0,05 V` co `25 ms`, czyli nominalnie `2 V/s`.
@@ -352,7 +360,7 @@ HEADER  = 0x38
 Przykład dla `N=100`:
 
 ```text
-38 00 64 C8
+38 00 64 A8
 ```
 
 ### 7.6. Reset i typy nieużywane
@@ -627,7 +635,7 @@ from __future__ import annotations
 
 
 def checksum(header: int, msb: int, lsb: int) -> int:
-    return (header + 2 * msb + 4 * lsb) & 0xFF
+    return (header ^ (msb << 1) ^ (lsb << 2)) & 0xFF
 
 
 def make_header(target: int, command_type: int, channel: int) -> int:

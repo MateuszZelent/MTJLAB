@@ -325,12 +325,12 @@ class RecipePage(QWidget):
         self._recipe_parameter_definitions = (
             self._device_registry.recipe_parameter_definitions()
         )
-        if settings.moke_box.enabled:
+        if settings.moke_box.enabled and (settings.moke_box.allow_vout_control or (settings.moke_box.endpoint or "").startswith("SIM::MOKE")):
             self._recipe_parameter_definitions = tuple(
                 (*self._recipe_parameter_definitions,)
                 + tuple(
                     item for item in _SWEEPABLE_PARAMETERS
-                    if item["target"].startswith("moke_box.")
+                    if item["target"] == f"moke_box.vout{settings.moke_box.voltage_control.channel}.voltage"
                 )
             )
         self._settings = settings
@@ -1279,8 +1279,8 @@ class RecipePage(QWidget):
         acquisition = group("Acquisition", "4")
         action(
             acquisition,
-            "MOKE Hall (V + field)",
-            "Read Hall 1 voltage and store the derived base-polynomial field at this sweep point. Read-only; no VOUT or gain command.",
+            "Measure MOKE Hall voltage",
+            "Store confirmed Hall 1 voltage, standard deviation and raw ADC code at this sweep point. Read-only acquisition.",
             "moke_box",
             QStyle.StandardPixmap.SP_DialogApplyButton,
             lambda: self._library_add_basic("measure_moke_hall"),
@@ -6570,11 +6570,12 @@ class RecipePage(QWidget):
                 "points": int(defaults.get("sweep_points", 1001)),
             }
         if target.startswith("moke_box."):
-            return {
-                "id": self._new_node_id("configure-moke-box"),
-                "type": "configure_moke_box",
-                "field_target": value,
-            }
+            channel = int(target.split(".")[1].removeprefix("vout"))
+            profile = self._settings.moke_box.voltage_control
+            return self._moke_control_sequence(channel, {
+                "id": self._new_node_id("moke-voltage"), "type": "update_moke_voltage",
+                "channel": channel, "voltage": value,
+            }, profile.minimum_voltage, profile.maximum_voltage)
         field = target.rsplit(".", 1)[1]
         defaults = self._settings.anritsu.safety.defaults
         return {
@@ -6686,6 +6687,20 @@ class RecipePage(QWidget):
     ) -> dict[str, object]:
         target = definition["target"]
         node_id = self._new_node_id("sweep")
+        if target.startswith("moke_box."):
+            channel = int(target.split(".")[1].removeprefix("vout"))
+            values = tuple(point.si_value for point in generate_sweep_points(segments, "voltage"))
+            minimum, maximum = min(values), max(values)
+            if minimum == maximum:
+                profile = self._settings.moke_box.voltage_control
+                minimum = parse_quantity(profile.minimum_voltage, "voltage").si_value
+                maximum = parse_quantity(profile.maximum_voltage, "voltage").si_value
+            return self._moke_control_sequence(channel, {
+                "id": node_id, "type": "sweep", "target": target,
+                "segments": segments, "children": [
+                    {"id": self._new_node_id("moke-checkpoint"), "type": "checkpoint",
+                     "label": "Confirmed MOKE voltage"}],
+            }, f"{minimum:.12g} V", f"{maximum:.12g} V")
         if target.startswith("keithley."):
             _device, channel, mode = target.split(".")
             channel_settings = self._settings.keithley.safety.channels[channel]
@@ -6730,12 +6745,6 @@ class RecipePage(QWidget):
                 "reference_level": "${" + target + "}" if field == "reference_level" else defaults.get("reference_level", "0 dBm"),
                 "points": int(defaults.get("sweep_points", 1001)),
             }
-        elif target.startswith("moke_box."):
-            child = {
-                "id": self._new_node_id("configure-moke-box"),
-                "type": "configure_moke_box",
-                "field_target": "${" + target + "}",
-            }
         else:
             field = target.rsplit(".", 1)[1]
             defaults = self._settings.anritsu.safety.defaults
@@ -6769,6 +6778,21 @@ class RecipePage(QWidget):
             "target": target,
             "segments": segments,
             "children": children,
+        }
+
+    def _moke_control_sequence(self, channel, node, minimum, maximum):
+        """Keep explicit configuration and arming before generated DAC updates."""
+        if channel != self._settings.moke_box.voltage_control.channel:
+            raise ConfigurationError("Select the qualified MOKE electromagnet output channel.")
+        return {
+            "id": self._new_node_id("moke-control"), "type": "sequence",
+            "children": [
+                {"id": self._new_node_id("configure-moke"), "type": "configure_moke_box",
+                 "channel": channel, "minimum_voltage": minimum, "maximum_voltage": maximum},
+                {"id": self._new_node_id("arm-moke"), "type": "arm_moke_voltage"},
+                node,
+                {"id": self._new_node_id("zero-moke"), "type": "stop_moke_voltage"},
+            ],
         }
 
     def _delete_selected_node(self) -> None:

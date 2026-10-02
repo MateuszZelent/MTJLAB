@@ -11,7 +11,7 @@ from app.devices.moke_box.adapter import MokeBoxAdapter
 from app.devices.moke_box.models import MokeBoxConfig, hall_field_from_voltage
 from app.devices.moke_box.simulator import SimulatedMokeBoxTransport
 from app.devices.simulation import SimulationContext
-from app.domain.errors import DeviceError
+from app.domain.errors import ConnectionError, DeviceError
 
 
 class MokeProtocolTests(unittest.TestCase):
@@ -27,9 +27,10 @@ class MokeProtocolTests(unittest.TestCase):
                 encode_voltage(invalid)
 
     def test_confirmed_command_vectors(self) -> None:
-        self.assertEqual(set_vout(2, 1), bytes.fromhex("128CCD5E"))
+        self.assertEqual(set_vout(2, 1), bytes.fromhex("128CCD3E"))
+        self.assertEqual(set_vout(2, -1), bytes.fromhex("12733338"))
         self.assertEqual(readback_vout(), bytes.fromhex("18000018"))
-        self.assertEqual(request_samples(100), bytes.fromhex("380064C8"))
+        self.assertEqual(request_samples(100), bytes.fromhex("380064A8"))
         self.assertEqual(set_hall_gains(10, 100), bytes.fromhex("0809001A"))
         self.assertEqual(set_kerr_gain(MokeTarget.KERR0, 100), bytes.fromhex("4802004C"))
         self.assertEqual(set_kerr_gain(MokeTarget.KERR1, 1000), bytes.fromhex("8803008E"))
@@ -42,6 +43,45 @@ class MokeProtocolTests(unittest.TestCase):
     def test_decoder_rejects_bad_checksum(self) -> None:
         with self.assertRaises(DeviceError):
             MokeFrame.decode(bytes.fromhex("D28000D3"))
+
+    def test_live_nonzero_vout_reply_connects_without_mutating_outputs(self) -> None:
+        # Literal bytes from the operator's connection-error screenshot.
+        # Do not generate this oracle using the codec under test.
+        reply = bytes.fromhex(
+            "10 80 00 10 11 80 00 11 12 82 8f 2a 13 80 00 13 "
+            "14 80 00 14 15 80 00 15 16 80 00 16 17 80 00 17"
+        )
+        transport = _BinaryTransport(reply + reply)
+        adapter = MokeBoxAdapter(MokeBoxConfig("127.0.0.1:10001"), transport)
+        adapter.connect()
+        values = adapter.read_vouts()
+        self.assertAlmostEqual(values[2], 6550 / 32767)
+        self.assertTrue(all(value == 0 for channel, value in values.items() if channel != 2))
+        self.assertEqual(transport.sent, [bytes.fromhex("18000018")] * 2)
+        self.assertEqual(MokeFrame.decode(reply[8:12]).encode(), bytes.fromhex("12828f2a"))
+
+    def test_additive_checksum_is_rejected_for_nonzero_record(self) -> None:
+        with self.assertRaisesRegex(DeviceError, "expected=0x2A, received=0x52"):
+            MokeFrame.decode(bytes.fromhex("12828f52"))
+
+    def test_set_vout_encodes_live_nonzero_register_with_parity(self) -> None:
+        # Independent oracle from the same physical reply: SET uses this header.
+        self.assertEqual(set_vout(2, 0.2), bytes.fromhex("12828f2a"))
+
+    def test_failed_connection_retains_full_reply_and_closes_without_output_write(self) -> None:
+        reply = bytes.fromhex("10800011") + _vout_response()[4:]
+        transport = _BinaryTransport(reply)
+        transport.closed = False
+        transport.close = lambda: setattr(transport, "closed", True)
+        adapter = MokeBoxAdapter(MokeBoxConfig("127.0.0.1:10001"), transport)
+        with self.assertRaises(ConnectionError) as failure:
+            adapter.connect()
+        message = str(failure.exception)
+        self.assertIn(reply.hex(" "), message)
+        self.assertIn("expected=0x10, received=0x11", message)
+        self.assertEqual(transport.sent, [readback_vout()])
+        self.assertTrue(transport.closed)
+        self.assertFalse(adapter.connected)
 
     def test_live_ad7734_frame_uses_24_bit_payload_not_checksum(self) -> None:
         frame = MokeAd7734Frame.decode(bytes.fromhex("087EBA1C"))

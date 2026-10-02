@@ -50,6 +50,8 @@ from app.safety.rigol_current import (
     validate_rigol_waveform,
 )
 from app.settings.models import StationSettings
+from app.safety.moke_box import MokeVoltagePlan, control_profile_from_settings
+from app.storage.moke_calibration_store import MokeCalibrationRepository
 
 
 _REFERENCE_RE: Final = re.compile(r"^\$\{([A-Za-z0-9_.-]+)}$")
@@ -92,7 +94,7 @@ def required_devices_for_actions(actions: Iterable[PlanAction]) -> frozenset[str
             required.add("keithley")
         if "anritsu" in action.kind or action.kind in {"acquire_reference", "acquire_spectrum"}:
             required.add("anritsu")
-        if action.kind == "measure_moke_hall":
+        if action.kind == "measure_moke_hall" or "moke" in action.kind:
             required.add("moke_box")
         if action.kind == "measure_lakeshore_field":
             required.add("lakeshore_gaussmeter")
@@ -190,6 +192,9 @@ class RecipeCompiler:
                 action.kind in {"configure_anritsu", "configure_anritsu_sg"}
                 for action in actions
             )
+        if binding.device_module == "moke_box":
+            return any(action.kind == "configure_moke_box"
+                       and f"vout{action.payload['profile'].channel}" == channel for action in actions)
         return False
 
     def _semantic_axis_action(
@@ -281,6 +286,7 @@ class RecipeCompiler:
         self._visit(recipe.root, {}, actions)
         for node in recipe.finally_nodes:
             self._visit(node, {}, actions, is_finally=True)
+        self._prepare_moke_trajectories(actions)
         self._validate_reference_flow(actions)
         self._validate_device_state_flow(actions)
         self._validate_keithley_range_flow(actions)
@@ -303,7 +309,9 @@ class RecipeCompiler:
             total_points = max(total_points, semantic_points)
         total_spectra = sum(action.kind == "acquire_spectrum" for action in actions)
         required_devices = required_devices_for_actions(actions)
-        safe_shutdown_actions = self._safe_shutdown_actions(required_devices)
+        safe_shutdown_actions = self._safe_shutdown_actions(
+            required_devices, moke_output=any(action.kind in {"arm_moke_voltage", "update_moke_voltage", "stop_moke_voltage"}
+                                             for action in actions))
         canonical = json.dumps(
             {
                 "actions": [
@@ -343,6 +351,45 @@ class RecipeCompiler:
             dict(recipe.dut_limits),
             elab_upload_config,
         )
+
+    @staticmethod
+    def _prepare_moke_trajectories(actions: list[PlanAction]) -> None:
+        """Bind every expanded voltage point to one immutable arm permission."""
+        configured = None
+        arm = None
+        targets: list[float] = []
+
+        def finish():
+            if configured is None:
+                return
+            if not targets or arm is None:
+                raise ConfigurationError("MOKE voltage configuration requires arm_moke_voltage and voltage targets.")
+            profile = configured.payload["profile"]
+            plan = MokeVoltagePlan(profile.fingerprint, profile.channel,
+                                   configured.payload["minimum_v"], configured.payload["maximum_v"], tuple(targets))
+            plan.validate(profile)
+            configured.payload["plan"] = plan
+            arm.payload["plan"] = plan
+
+        for action in actions:
+            if action.kind == "configure_moke_box":
+                finish()
+                configured, arm, targets = action, None, []
+            elif action.kind == "arm_moke_voltage":
+                if configured is None or arm is not None:
+                    raise ConfigurationError("MOKE arm requires exactly one preceding voltage configuration.")
+                arm = action
+            elif action.kind == "update_moke_voltage":
+                if configured is None or arm is None:
+                    raise ConfigurationError("MOKE voltage update requires configuration followed by explicit arm.")
+                if action.payload["channel"] != configured.payload["profile"].channel:
+                    raise SafetyViolation("MOKE voltage update channel differs from the configured physical binding.")
+                action.payload["ramp_timeout_s"] = configured.payload["profile"].ramp_timeout_s
+                targets.append(action.payload["voltage_v"])
+            elif action.kind == "stop_moke_voltage":
+                finish()
+                configured, arm, targets = None, None, []
+        finish()
 
     def _validate_keithley_range_flow(self, actions: list[PlanAction]) -> None:
         """Check expanded legacy level updates against each channel's fixed range."""
@@ -485,7 +532,7 @@ class RecipeCompiler:
             )
         )
 
-    def _safe_shutdown_actions(self, required_devices: frozenset[str]) -> tuple[str, ...]:
+    def _safe_shutdown_actions(self, required_devices: frozenset[str], *, moke_output: bool = False) -> tuple[str, ...]:
         allowed = {
             "keithley.outputs_off": "keithley",
             "rigol.outputs_off": "rigol",
@@ -514,6 +561,8 @@ class RecipeCompiler:
             "rigol": "rigol.outputs_off",
             "anritsu": "anritsu.rf_off_and_abort",
         }
+        if moke_output:
+            result.append("moke_box.dac_zero_or_unknown")
         # A normal measurement owns the complete station and therefore keeps
         # the station-wide shutdown invariant.  A dry run never enables an
         # output; it is intentionally scoped to the devices referenced by the
@@ -857,11 +906,6 @@ class RecipeCompiler:
                     self._active_axis_path = previous_path
                     self._active_axis_context = previous_context
             return
-        if node.type == "configure_moke_box":
-            raise ConfigurationError(
-                f"{node.id}: MOKE field sweeps require a hardware-qualified field "
-                "transfer function. The reconstructed protocol only confirms raw VOUT."
-            )
         if node.type == "repeat":
             for index in range(int(node.data["count"])):
                 self._check_cancelled()
@@ -2216,6 +2260,46 @@ class RecipeCompiler:
         action_kind = node.type
         if node.type == "configure_rigol":
             payload = self._compile_rigol(data)
+        elif node.type == "configure_moke_box":
+            unknown = set(data) - {"channel", "minimum_voltage", "maximum_voltage", "calibration_id"}
+            if unknown:
+                raise ConfigurationError(f"{node.id}: unsupported MOKE voltage configuration fields: {sorted(unknown)}.")
+            simulation = bool((self._settings.moke_box.endpoint or "").startswith("SIM::MOKE"))
+            profile = control_profile_from_settings(self._settings, simulation=simulation)
+            channel = data.get("channel")
+            if type(channel) is not int or channel != profile.channel:
+                raise SafetyViolation(f"{node.id}: MOKE configuration requires the qualified VOUT channel.")
+            minimum = parse_quantity(data.get("minimum_voltage"), DIMENSION_VOLTAGE).si_value
+            maximum = parse_quantity(data.get("maximum_voltage"), DIMENSION_VOLTAGE).si_value
+            MokeVoltagePlan(profile.fingerprint, channel, minimum, maximum, (minimum,)).validate(profile)
+            repository = MokeCalibrationRepository(self._settings.moke_box.calibration_directory)
+            selected = data.get("calibration_id", self._settings.moke_box.active_calibration_id)
+            calibration = repository.load(selected) if selected else repository.active(
+                profile_fingerprint=profile.fingerprint, simulation=profile.simulation)
+            if calibration is not None and (
+                calibration.context.profile_fingerprint != profile.fingerprint
+                or calibration.context.simulation != profile.simulation
+            ):
+                raise ConfigurationError("MOKE calibration snapshot does not match the configured output profile.")
+            payload = {"profile": profile, "minimum_v": minimum, "maximum_v": maximum, "calibration": calibration}
+        elif node.type == "arm_moke_voltage":
+            if data or is_finally:
+                raise ConfigurationError("arm_moke_voltage has no mutable parameters and cannot be a finally action.")
+            payload = {}
+        elif node.type == "update_moke_voltage":
+            if is_finally:
+                raise ConfigurationError("Use stop_moke_voltage in finally; normal voltage updates cannot be cleanup actions.")
+            channel = data.get("channel")
+            if type(channel) is not int or channel not in range(8):
+                raise ConfigurationError("MOKE voltage update requires integer channel 0..7.")
+            value = parse_quantity(data.get("voltage"), DIMENSION_VOLTAGE).si_value
+            payload = {"channel": channel, "voltage_v": value}
+        elif node.type == "stop_moke_voltage":
+            if data:
+                raise ConfigurationError("stop_moke_voltage uses the qualified safe target and accepts no parameters.")
+            simulation = bool((self._settings.moke_box.endpoint or "").startswith("SIM::MOKE"))
+            profile = control_profile_from_settings(self._settings, simulation=simulation)
+            payload = {"ramp_timeout_s": profile.ramp_timeout_s}
         elif node.type == "configure_rigol_output":
             channel = int(data.get("channel", 0))
             if channel not in {1, 2}:
@@ -2416,13 +2500,14 @@ class RecipeCompiler:
             raise ConfigurationError(f"{node.id}: unsupported action type {node.type!r}.")
         if is_finally:
             safe_finally_actions = {
+                "stop_moke_voltage",
                 "ramp_keithley_to_zero",
                 "set_rigol_output",
                 "set_keithley_output",
                 "set_anritsu_sg_output",
             }
             if node.type not in safe_finally_actions:
-                raise SafetyViolation("The finally section may contain only a Keithley ramp or output-off action.")
+                raise SafetyViolation("The finally section may contain only an approved ramp to zero or output-off action.")
             if node.type in {
                 "set_rigol_output",
                 "set_keithley_output",

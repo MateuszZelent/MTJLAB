@@ -8,6 +8,8 @@ import math
 import statistics
 from typing import Mapping
 
+from app.safety.moke_box import MokeControlProfile
+
 
 @dataclass(frozen=True, slots=True)
 class MokeBoxConfig:
@@ -16,16 +18,21 @@ class MokeBoxConfig:
     expected_model: str | None = None
     allow_vout_control: bool = False
     allowed_vout_channels: tuple[int, ...] = ()
+    control_profile: MokeControlProfile | None = None
 
     def __post_init__(self) -> None:
         if not self.endpoint.strip():
             raise ValueError("MOKE endpoint cannot be empty.")
-        if self.timeout_s <= 0:
+        if not math.isfinite(self.timeout_s) or self.timeout_s <= 0:
             raise ValueError("MOKE timeout must be positive.")
         if any(channel not in range(8) for channel in self.allowed_vout_channels):
             raise ValueError("MOKE VOUT channels must be in 0..7.")
         if len(set(self.allowed_vout_channels)) != len(self.allowed_vout_channels):
             raise ValueError("MOKE VOUT channels must not be duplicated.")
+        if self.control_profile is not None and (
+            not self.allow_vout_control or self.allowed_vout_channels != (self.control_profile.channel,)
+        ):
+            raise ValueError("MOKE control profile must bind exactly one authorized VOUT channel.")
 
 
 @dataclass(frozen=True, slots=True)

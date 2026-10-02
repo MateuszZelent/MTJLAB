@@ -25,6 +25,7 @@ from PySide6.QtWidgets import (
 )
 
 from app.domain.quantities import QuantityError, parse_quantity
+from app.domain.quick_controls import step_quantity_text
 
 
 _NUMERIC_VALUE_RE = re.compile(
@@ -89,7 +90,17 @@ class PrecisionArrowStepper(QObject):
             return True
 
         direction = 1 if event.key() == Qt.Key.Key_Up else -1
-        stepped_text = _step_text(watched.text(), direction)
+        integer_step = watched.property("precisionIntegerStep")
+        if integer_step:
+            try:
+                dimension = parse_quantity(watched.text()).dimension
+                stepped_text, _ = step_quantity_text(
+                    watched.text(), dimension, direction, integer_step=integer_step
+                )
+            except ValueError:
+                return False
+        else:
+            stepped_text = _step_text(watched.text(), direction)
         if stepped_text is None:
             return False
 

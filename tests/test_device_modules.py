@@ -205,14 +205,14 @@ class DeviceModuleTests(unittest.TestCase):
             },
         )
         self.assertEqual(
-            built_in_device_registry().get("moke_box").recipe_extension.parameter_definitions,
-            (),
+            {item["target"] for item in built_in_device_registry().get("moke_box").recipe_extension.parameter_definitions},
+            {f"moke_box.vout{channel}.voltage" for channel in range(8)},
         )
 
     def test_moke_module_exposes_only_qualified_read_operations(self) -> None:
         self.assertEqual(
             MOKE_MODULE.capabilities,
-            frozenset({"read_only", "vout_readback", "hall_voltage_readback"}),
+            frozenset({"qualified_voltage_control", "field_calibration", "vout_readback", "hall_voltage_readback"}),
         )
         adapter = MokeBoxAdapter(MokeBoxConfig(endpoint="moke://sim"), _MokeTransport())
         for operation in (
@@ -224,7 +224,7 @@ class DeviceModuleTests(unittest.TestCase):
             "ramp_vout",
         ):
             with self.subTest(operation=operation):
-                with self.assertRaisesRegex(ValueError, "Unsupported"):
+                with self.assertRaisesRegex(ValueError, "Unsupported|MOKE ramp requires"):
                     MOKE_MODULE.dispatch(adapter, operation, {})
 
     def test_moke_profile_rejects_every_output_control_permission(self) -> None:

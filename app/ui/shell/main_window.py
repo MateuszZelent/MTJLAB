@@ -326,6 +326,15 @@ class MainWindow(FluentWindow):
         self.anritsu_page = self._device_pages["anritsu"]
         self.moke_box_page = self._device_pages["moke_box"]
         self.lakeshore_gaussmeter_page = self._device_pages["lakeshore_gaussmeter"]
+        self.moke_box_page.field_workflow.bind_reference(
+            self._controllers["lakeshore_gaussmeter"], simulation=self._simulation,
+            authorize=self._authorize_moke_workflow,
+            pause_live=lambda: (
+                self.moke_box_page.stop_live("Live Hall paused for field control/calibration."),
+                self.lakeshore_gaussmeter_page.stop_live("Live reference paused for field calibration."),
+            ),
+        )
+        self.moke_box_page.field_workflow.busy_changed.connect(lambda _busy: self._refresh_safety_strip())
         self.anritsu_page.set_manual_archive_context(
             metadata_provider=self._manual_spectrum_metadata_values,
             device_idn_provider=self._manual_spectrum_device_idn,
@@ -1012,10 +1021,21 @@ class MainWindow(FluentWindow):
 
     def _refresh_safety_strip(self) -> None:
         active_outputs = sum(state == "output_on" for state in self._device_states.values())
+        unknown_outputs = sum(
+            state in {"unknown", "fault"}
+            for device, state in self._device_states.items()
+            if device != "lakeshore_gaussmeter"
+        )
+        # A valid DAC reply verifies communication, never Kepco power-off.
+        moke_state = self._device_states.get("moke_box")
+        moke_power_uncertain = moke_state not in {None, "disconnected"} or self.moke_box_page.field_workflow.busy
+        if moke_power_uncertain and moke_state not in {"unknown", "fault"}:
+            unknown_outputs += 1
         self.safety_strip.update_snapshot(
             StationSafetySnapshot(
                 ready=self.dashboard.evaluate_readiness().ready,
                 active_outputs=active_outputs,
+                unknown_outputs=unknown_outputs,
                 simulation=self._simulation,
                 actor=self._access.identity.username,
                 roles=tuple(sorted(role.value for role in self._access.identity.roles)),
@@ -1660,6 +1680,8 @@ class MainWindow(FluentWindow):
 
         if device in self._leased_run_devices and operation not in {
             "emergency_off",
+            "stop_vout",
+            "disarm_voltage_plan",
             "recover_from_compliance",
             "set_compliance_policy",
         }:
@@ -1676,6 +1698,8 @@ class MainWindow(FluentWindow):
             "ramp_to_zero",
             "stop_live",
             "disconnect",
+            "stop_vout",
+            "disarm_voltage_plan",
         }:
             return
         if operation == "set_signal_generator_output" and not bool(payload):
@@ -1695,6 +1719,7 @@ class MainWindow(FluentWindow):
             if not bool(enabled):
                 return
         energizing_operations = {
+            "arm_voltage_plan", "arm_field_calibration", "ramp_vout", "start_field_calibration",
             "configure",
             "configure_output",
             "configure_modulation",
@@ -1728,6 +1753,7 @@ class MainWindow(FluentWindow):
         if self._audit_healthy:
             return
         energizing = operation in {
+            "arm_voltage_plan", "arm_field_calibration", "ramp_vout", "start_field_calibration",
             "trigger_sweep",
             "trigger_burst",
             "ramp_to_level",
@@ -1754,6 +1780,14 @@ class MainWindow(FluentWindow):
                 "The durable audit log is unavailable. OUTPUT ON is locked; "
                 "OUTPUT OFF and E-STOP remain available."
             )
+
+    def _authorize_moke_workflow(self, operation: str, payload: object) -> None:
+        self._guard_manual_operation("moke_box", operation, payload)
+        self._audit_record(
+            "MOKE field workflow authorized", category="device",
+            event_type=operation, context={"device": "moke_box", "request": payload}, critical=True,
+        )
+        self._assert_audit_ready_for_run()
 
     def _assert_audit_ready_for_run(self) -> None:
         if not self._audit_healthy:
@@ -3812,6 +3846,11 @@ class MainWindow(FluentWindow):
         # is not delivered when the application window closes. Ask it before
         # persisting workspace state or beginning the shutdown sequence.
         if not self.recipe_page.confirm_close():
+            event.ignore()
+            return
+        if not self.moke_box_page.field_workflow.prepare_application_shutdown():
+            self._navigate_to("moke_box")
+            self.moke_box_page.views.setCurrentIndex(3)
             event.ignore()
             return
         if not self.keithley_page.characterization_card.prepare_application_shutdown():

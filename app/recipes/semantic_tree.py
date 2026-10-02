@@ -337,6 +337,8 @@ def _parameter_tail(target: str) -> str:
 
 def _axis_slug(target: str) -> str:
     parts = target.split(".")
+    if len(parts) == 3 and parts[0] == "moke_box" and parts[-1] == "voltage":
+        return "output-voltage"
     if len(parts) >= 3 and parts[0] == "keithley":
         name = parts[-1]
         if name in {"current", "voltage"}:
@@ -369,6 +371,8 @@ def _canonical_parameter_id(target: str) -> str:
     """Map a canonical target to the provider's stable control identity."""
 
     parts = target.split(".")
+    if len(parts) == 3 and parts[0] == "moke_box" and parts[-1] == "voltage":
+        return "output.voltage"
     if len(parts) >= 3 and parts[0] == "keithley":
         return {
             "current": "source.level",

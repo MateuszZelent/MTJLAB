@@ -12,6 +12,7 @@ from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Mapping, Protocol, runtime_checkable
 
 from app.devices.base import DeviceAdapter
+from app.devices.simulation import SimulationContext
 from app.settings.models import StationSettings
 
 if TYPE_CHECKING:
@@ -72,6 +73,7 @@ class DeviceModule:
     settings_key: str | None
     adapter_factory: AdapterFactory
     dispatch: OperationDispatcher
+    simulation_adapter_factory: Callable[[StationSettings, SimulationContext], DeviceAdapter] | None = None
     execution_state_key: str | None = None
     capabilities: frozenset[str] = field(default_factory=frozenset)
     enabled_by_default: bool = True
@@ -83,7 +85,10 @@ class DeviceModule:
         """Key used by Run Engine snapshots for this module."""
         return self.execution_state_key or self.key
 
-    def create_adapter(self, settings: StationSettings, *, simulation: bool) -> DeviceAdapter:
+    def create_adapter(self, settings: StationSettings, *, simulation: bool,
+                       simulation_context: SimulationContext | None = None) -> DeviceAdapter:
+        if simulation and simulation_context is not None and self.simulation_adapter_factory is not None:
+            return self.simulation_adapter_factory(settings, simulation_context)
         return self.adapter_factory(settings, simulation)
 
     def create_page(self, controller: object, settings: StationSettings) -> object:
@@ -159,7 +164,7 @@ class DeviceModuleRegistry:
 
         providers = {
             module.key: module.recipe_extension.sweep_provider
-            for module in self.enabled_modules()
+            for module in self.all_modules()
             if module.recipe_extension is not None
             and module.recipe_extension.sweep_provider is not None
         }

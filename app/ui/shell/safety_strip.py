@@ -19,6 +19,7 @@ class StationSafetySnapshot:
     simulation: bool
     actor: str
     roles: tuple[str, ...]
+    unknown_outputs: int = 0
 
 
 class StationSafetyStrip(QWidget):
@@ -153,12 +154,16 @@ class StationSafetyStrip(QWidget):
             "safetyState", "ready" if snapshot.ready else "danger"
         )
         self.outputs.setText(
-            "Outputs off"
+            f"{snapshot.active_outputs} on · {snapshot.unknown_outputs} unknown"
+            if snapshot.unknown_outputs and snapshot.active_outputs
+            else "Outputs unknown"
+            if snapshot.unknown_outputs
+            else "Outputs off"
             if snapshot.active_outputs == 0
             else f"{snapshot.active_outputs} outputs active"
         )
         self.outputs.setProperty(
-            "outputState", "off" if snapshot.active_outputs == 0 else "active"
+            "outputState", "unknown" if snapshot.unknown_outputs else "off" if snapshot.active_outputs == 0 else "active"
         )
         self.mode.setText("SIMULATION" if snapshot.simulation else "HARDWARE")
         roles = ", ".join(snapshot.roles) or "no role"

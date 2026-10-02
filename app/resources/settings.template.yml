@@ -444,6 +444,24 @@ devices:
     protocol_qualified: false
     allow_vout_control: false
     allowed_vout_channels: []
+    voltage_control:
+      approved: false
+      binding_id: ''
+      qualification_reference: ''
+      channel: 2
+      kepco_model: BOP 72-6M
+      kepco_mode: current
+      minimum: -1 V
+      maximum: 1 V
+      safe_target: 0 V
+      maximum_step: 50 mV
+      maximum_slew: 1 V/s
+      step_interval: 50 ms
+      ramp_timeout: 30 s
+      # Starting value only: qualify the actual coil response on the station.
+      minimum_settling_time: 2 s
+    calibration_directory: calibrations/moke_box
+    active_calibration_id:
     live_interval: 1 s
     plot_refresh_interval: 500 ms
     history_window: 60 s

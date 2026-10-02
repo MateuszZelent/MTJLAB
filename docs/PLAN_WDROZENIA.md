@@ -1,5 +1,15 @@
 # Masterplan aplikacji do sterowania stanowiskiem pomiarowym
 
+Aktualizacja 2026-10-02: do zakresu dodano sterowanie napięciem MOKE-Box→Kepco,
+limity operatora i zakładkę kalibracji pola Lake Shore. Obowiązuje
+[szczegółowy plan S0–S9](superpowers/plans/2026-10-02-moke-box-voltage-control-and-field-calibration.md)
+oparty na [ponownej analizie źródeł i kalibracji](raports/MOKE_BOX_ENGINEERING_REVIEW_2026-10-02.md).
+Status tego rozszerzenia: V1 wdrożone programowo, weryfikacja symulacyjna;
+fizyczne sterowanie pozostaje domyślnie zablokowane do kwalifikacji toru.
+[Instrukcja operatora i dowody UI](raports/MOKE_BOX_IMPLEMENTATION_AND_OPERATOR_GUIDE_2026-10-02.md).
+Sterowanie obejmuje Live/Apply i osobne oczekiwanie po rampie (początkowo 2 s
+według oszacowania operatora); parametry czasu wymagają pomiaru na stanowisku.
+
 ## 1. Decyzja architektoniczna
 
 Pierwszą wersję produkcyjną należy wykonać jako aplikację desktopową w **Pythonie i PySide6 (Qt 6)**. Logika urządzeń, bezpieczeństwa, receptur i zapisu danych musi pozostać całkowicie niezależna od GUI. Dzięki temu w przyszłości można dodać interfejs webowy bez przepisywania sterowników.
@@ -37,6 +47,13 @@ Aplikacja ma jednocześnie obsługiwać:
 5. receptury z wielopoziomowymi sweepami;
 6. zapis widma i wartości liczbowych dla każdego punktu;
 7. limity laboratoryjne, blokady wyjść, zatrzymanie awaryjne i pełny audyt.
+
+Rozszerzenie MOKE-Box (2026-10-02): ograniczone sterowanie analogowym U_DAC
+do zasilacza elektromagnesu, napięciowe sweepy, nowa zakładka kalibracji DC
+z Lake Shore i B przewidywane obok U. Kalibracja rozdziela gałęzie histerezy,
+przechowuje surowe dane i obowiązuje tylko dla określonego toru/geometrii.
+Zadane B oraz regulator Hall feedback są osobnymi późniejszymi etapami.
+Napięcie DAC nie jest napięciem/prądem cewki, a zero DAC nie dowodzi zero B.
 
 Nazwę „Keithley 2062A” z opisu należy potwierdzić z wynikiem `*IDN?`. Repozytorium i API wskazują na rodzinę **2600**, najprawdopodobniej **2602A**. Do czasu potwierdzenia profil pozostaje `unverified`, a wyjścia są zablokowane.
 

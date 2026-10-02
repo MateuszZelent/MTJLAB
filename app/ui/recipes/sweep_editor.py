@@ -28,6 +28,8 @@ from app.ui.design_system import effective_theme, plot_theme, tokens_for
 from app.ui.recipes.fluent_dialog import FluentRecipeDialog
 from app.safety.quick_controls import QuickControlSafetyBound, quick_control_safety_bounds
 from app.settings.models import StationSettings
+from app.safety.moke_box import control_profile_from_settings
+from app.storage.moke_calibration_store import MokeCalibrationRepository
 
 
 class SeamlessRoiCellDelegate(QStyledItemDelegate):
@@ -159,6 +161,10 @@ class SweepGeneratorDialog(FluentRecipeDialog):
         self.preview = BodyLabel("Add an interval to generate points.", self.plot_panel)
         self.preview.setWordWrap(True)
         right_layout.addWidget(self.preview)
+        self.field_preview = CaptionLabel(self.plot_panel)
+        self.field_preview.setWordWrap(True)
+        self.field_preview.setVisible(str(definition.get("target", "")).startswith("moke_box."))
+        right_layout.addWidget(self.field_preview)
         self.splitter.addWidget(self.plot_panel)
         self.splitter.setStretchFactor(0, 2)
         self.splitter.setStretchFactor(1, 3)
@@ -189,6 +195,14 @@ class SweepGeneratorDialog(FluentRecipeDialog):
         while owner is not None:
             settings = getattr(owner, "_settings", None)
             if isinstance(settings, StationSettings):
+                if str(self.definition.get("target", "")).startswith("moke_box."):
+                    simulation = (settings.moke_box.endpoint or "").startswith("SIM::MOKE")
+                    try:
+                        profile = control_profile_from_settings(settings, simulation=simulation)
+                    except RuntimeError:
+                        return None
+                    return QuickControlSafetyBound(profile.minimum_v, profile.maximum_v,
+                                                   f"{profile.minimum_v:g} V", f"{profile.maximum_v:g} V")
                 return quick_control_safety_bounds(settings).get(
                     str(self.definition.get("target", ""))
                 )
@@ -602,6 +616,37 @@ class SweepGeneratorDialog(FluentRecipeDialog):
             f"last {format_quantity_auto(points[-1].si_value, self.definition['dimension'])}"
         )
         self.create_button.setEnabled(True)
+        self._refresh_field_preview(points)
+
+    def _refresh_field_preview(self, points):
+        if not str(self.definition.get("target", "")).startswith("moke_box."):
+            return
+        owner = self.parentWidget()
+        while owner is not None:
+            settings = getattr(owner, "_settings", None)
+            if isinstance(settings, StationSettings):
+                try:
+                    profile = control_profile_from_settings(settings, simulation=(settings.moke_box.endpoint or "").startswith("SIM::MOKE"))
+                    repository = MokeCalibrationRepository(settings.moke_box.calibration_directory)
+                    model = repository.load(settings.moke_box.active_calibration_id) if settings.moke_box.active_calibration_id else repository.active(
+                        profile_fingerprint=profile.fingerprint, simulation=profile.simulation)
+                    if model is None:
+                        self.field_preview.setText("Calculated field: no active calibration. Voltage sweep remains available.")
+                        return
+                    if model.context.profile_fingerprint != profile.fingerprint or model.context.simulation != profile.simulation:
+                        raise ConfigurationError("Calibration does not match the output profile.")
+                    from app.devices.moke_box.protocol import decode_voltage, encode_voltage
+                    descriptions = []
+                    for label, value in (("First", points[0].si_value), ("Last", points[-1].si_value)):
+                        msb, lsb = encode_voltage(value)
+                        applied = decode_voltage(msb, lsb)
+                        up, down = model.ascending.estimate(applied), model.descending.estimate(applied)
+                        descriptions.append(f"{label}: {value:g} V → B↑ {up * 1000:+.6g} mT / B↓ {down * 1000:+.6g} mT")
+                    self.field_preview.setText("\n".join(descriptions) + "\nBranch predictions assume calibrated conditioning history.")
+                except (RuntimeError, ValueError, OSError) as exc:
+                    self.field_preview.setText(f"Calculated field unavailable: {exc}")
+                return
+            owner = owner.parentWidget()
 
     def accept(self) -> None:
         try:

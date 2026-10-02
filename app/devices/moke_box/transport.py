@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import socket
 import time
+from contextlib import contextmanager
+import math
 
 from app.domain.errors import ConnectionError
 
@@ -12,6 +14,21 @@ class MokeBoxTcpTransport:
     def __init__(self) -> None:
         self._socket: socket.socket | None = None
         self._timeout_s: float | None = None
+
+    @contextmanager
+    def io_timeout(self, timeout_s: float):
+        if not math.isfinite(timeout_s) or timeout_s <= 0 or self._socket is None:
+            raise ConnectionError("MOKE I/O deadline requires a connected transport and positive timeout.")
+        previous = self._timeout_s
+        connection = self._socket
+        self._timeout_s = min(previous or timeout_s, timeout_s)
+        connection.settimeout(self._timeout_s)
+        try:
+            yield
+        finally:
+            if self._socket is connection:
+                self._timeout_s = previous
+                connection.settimeout(previous)
 
     def connect(self, endpoint: str, timeout_s: float) -> None:
         host, separator, port_text = endpoint.rpartition(":")

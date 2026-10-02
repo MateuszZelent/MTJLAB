@@ -42,7 +42,7 @@ class QuickConfigureCommand:
     configuration: object
 
 
-def quantity_step_si(text: str, dimension: str) -> float:
+def quantity_step_si(text: str, dimension: str, *, integer_step: str | None = None) -> float:
     """Return the SI step represented by the last written decimal place."""
 
     match = _QUANTITY.fullmatch(text)
@@ -55,7 +55,7 @@ def quantity_step_si(text: str, dimension: str) -> float:
         raise ValueError(f"Invalid numeric value {numeric_text!r}.") from exc
     if not number.is_finite():
         raise ValueError("Quick-control value must be finite.")
-    quantum = _written_quantum(match)
+    quantum = _quantity_quantum(match, dimension, integer_step)
     unit_scale = parse_quantity(f"1 {match.group('unit')}", dimension).si_value
     return float(abs(quantum) * Decimal(str(unit_scale)))
 
@@ -66,6 +66,7 @@ def step_quantity_text(
     direction: int,
     *,
     multiplier: Decimal = Decimal(1),
+    integer_step: str | None = None,
 ) -> tuple[str, float]:
     """Step a quantity while preserving its written decimal precision and unit."""
 
@@ -80,7 +81,7 @@ def step_quantity_text(
     except InvalidOperation as exc:
         raise ValueError(f"Invalid numeric value {number_text!r}.") from exc
     try:
-        quantum = _written_quantum(match)
+        quantum = _quantity_quantum(match, dimension, integer_step)
         updated = number + Decimal(direction) * quantum * multiplier
         unit = match.group("unit").strip()
         rendered_number = _render_written_number(
@@ -136,6 +137,19 @@ def render_quantity_si_like(
         extra_quantum=boundary_quantum,
     )
     return f"{rendered} {unit}"
+
+
+def _quantity_quantum(match: re.Match[str], dimension: str, integer_step: str | None) -> Decimal:
+    """Use an optional explicit-unit default for plain integer drafts only."""
+    if integer_step and not match.group("exponent") and not any(
+        separator in match.group("mantissa") for separator in (".", ",")
+    ):
+        step_si = parse_quantity(integer_step, dimension).si_value
+        if step_si <= 0:
+            raise ValueError("Integer step must be positive.")
+        scale = parse_quantity(f"1 {match.group('unit')}", dimension).si_value
+        return Decimal(str(step_si)) / Decimal(str(scale))
+    return _written_quantum(match)
 
 
 def _written_quantum(match: re.Match[str]) -> Decimal:

@@ -49,7 +49,7 @@ class _RunAccess:
 
     @staticmethod
     def safe(operation, args, kwargs):
-        if operation in {"emergency_off", "confirm_output_off"}:
+        if operation in {"emergency_off", "confirm_output_off", "stop_vout", "disarm_voltage_plan"}:
             return True
         if operation in {"set_output", "set_output_group"}:
             enabled = args[1] if len(args) > 1 else kwargs.get("enabled")
@@ -479,6 +479,9 @@ class DeviceController(QObject):
         self._thread.start()
 
     def call(self, operation: str, payload: object = None) -> None:
+        if operation in {"emergency_off", "stop_vout"}:
+            # Reach a leased workflow immediately, before this queued transport call.
+            self._run_access.interrupted.set()
         if self._operation_guard is not None:
             try:
                 self._operation_guard(operation, payload)

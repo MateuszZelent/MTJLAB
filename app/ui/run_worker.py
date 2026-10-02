@@ -18,8 +18,7 @@ from app.bootstrap import StationComposition
 from app.devices.anritsu_ms2830a import AnritsuAdapter
 from app.devices.keithley_2600 import KeithleyAdapter
 from app.devices.moke_box import MokeBoxAdapter
-from app.devices.moke_box.models import MokeBoxConfig
-from app.devices.moke_box.simulator import SimulatedMokeBoxTransport
+from app.devices.moke_box.module import create_simulated_moke_adapter
 from app.devices.lakeshore_475 import LakeShore475Adapter
 from app.devices.rigol_dg1000z import RigolAdapter
 from app.devices.simulators import SimulatedVisaFactory
@@ -356,10 +355,7 @@ class RunWorker(QObject):
                 candidate = self._adapter_for_run(
                     "moke_box",
                     lambda: (
-                        MokeBoxAdapter(
-                            MokeBoxConfig(endpoint="SIM::MOKE::INSTR", expected_model="MOKE SIM"),
-                            SimulatedMokeBoxTransport(simulation_context),
-                        )
+                        create_simulated_moke_adapter(simulation_context, self._settings)
                         if simulation_context is not None
                         else StationComposition(self._settings, simulation=False).create_adapter("moke_box")
                     ),
@@ -375,7 +371,7 @@ class RunWorker(QObject):
                 candidate = self._adapter_for_run(
                     "lakeshore_gaussmeter",
                     lambda: StationComposition(
-                        self._settings, simulation=self._simulation
+                        self._settings, simulation=self._simulation, simulation_context=simulation_context
                     ).create_adapter("lakeshore_gaussmeter"),
                 )
                 if (
