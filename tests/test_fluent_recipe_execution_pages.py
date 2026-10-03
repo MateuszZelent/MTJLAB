@@ -5,6 +5,7 @@ import unittest
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import Mock
+from tempfile import TemporaryDirectory
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
@@ -31,6 +32,7 @@ from app.devices.registry import built_in_device_registry
 from app.ui.measurement_tree import MeasurementTreeView
 from app.ui.recipes import SweepGeneratorDialog
 from tests.helpers import simulation_settings
+from app.settings import SettingsRepository
 
 
 class FluentRecipeAndExecutionPageTests(unittest.TestCase):
@@ -593,7 +595,15 @@ finally:
             self.application.processEvents()
 
     def test_sweep_workspace_and_roi_dialog_retheme_together(self) -> None:
-        window = MainWindow(".config/settings.yml", simulation=True)
+        temporary = TemporaryDirectory(dir="scratch")
+        self.addCleanup(temporary.cleanup)
+        root = Path(temporary.name)
+        settings_path = root / "settings.yml"
+        raw = simulation_settings().model_dump(mode="json")
+        raw["storage"]["output_directory"] = str(root / "measurements")
+        raw["storage"]["catalogue_directory"] = str(root / "catalogue")
+        SettingsRepository(settings_path).save_raw(raw)
+        window = MainWindow(settings_path, simulation=True)
         dialog = None
         try:
             window.resize(1440, 900)

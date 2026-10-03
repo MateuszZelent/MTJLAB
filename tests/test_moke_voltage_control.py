@@ -52,6 +52,46 @@ def mutations(transport):
             if MokeFrame.decode(raw).record_type == MokeCommandType.SET_VOUT]
 
 
+@pytest.mark.parametrize("initial", [0.4, -0.4])
+def test_dac_zero_ramps_monotonically_with_physical_step_and_slew_limits(initial):
+    adapter, transport, profile = controlled_adapter(simulation=False, minimum_settling_s=0)
+    plan = plan_for(profile, targets=(initial,))
+    adapter.configure_voltage_plan(plan)
+    adapter.arm_voltage_plan(plan)
+    start = adapter.ramp_vout(2, initial).actual_v
+    transport.sent.clear()
+    began = time.monotonic()
+    result = adapter.stop_vout()
+    elapsed = time.monotonic() - began
+    voltages = [decode_voltage(frame.msb, frame.lsb) for frame in mutations(transport)]
+    assert len(voltages) > 1  # No direct jump to zero.
+    assert voltages[-1] == 0
+    previous = start
+    for voltage in voltages:
+        assert abs(voltage) < abs(previous)
+        assert abs(voltage - previous) <= profile.maximum_step_v
+        previous = voltage
+    assert elapsed >= abs(start) / profile.maximum_slew_v_s
+    assert all(frame.channel == 2 for frame in mutations(transport))
+    assert result.safe_target_confirmed and result.actual_v == 0
+    assert adapter.read_vouts()[2] == 0
+
+
+def test_dac_zero_write_failure_never_reports_zero_or_retries_the_write():
+    adapter, transport, profile = controlled_adapter()
+    plan = plan_for(profile, targets=(0.4,))
+    adapter.configure_voltage_plan(plan)
+    adapter.arm_voltage_plan(plan)
+    adapter.ramp_vout(2, 0.4)
+    transport.sent.clear()
+    transport.fail_next_write = True
+    with pytest.raises(DeviceError):
+        adapter.stop_vout()
+    assert len(mutations(transport)) == 1
+    assert not adapter.safe_target_confirmed
+    assert adapter.state is DeviceState.UNKNOWN
+
+
 class LaggedReadbackTransport(RecordingTransport):
     """A SET is processed only after a few complete, stale readback responses."""
 

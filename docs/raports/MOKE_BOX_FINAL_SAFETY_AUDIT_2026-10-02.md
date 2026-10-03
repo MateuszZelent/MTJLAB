@@ -386,3 +386,89 @@ i 4 podtesty zaliczone w 146.76 s. Ostrzeżenia pochodzą z użycia przestarzał
 testów. Pokazanie pełnego okna Fluent, normalny i węższy panel, ręczne Apply,
 Live OFF, błędne dane, zmiany profilu, STOP, kalibracja i odczyt read-only
 pozostają objęte tym zestawem.
+
+## Integracja Sweeps, pozostałych modułów i eLab
+
+Sprawdzono pełne okno Fluent 1360×880: parametr `moke_box.vout2.voltage`
+występuje raz na liście generatora i tworzy widoczną oś drzewa, trzy punkty,
+konfigurację, uzbrojenie oraz końcowe wyzerowanie. Lista korzysta z rozszerzenia
+zarejestrowanego modułu i filtruje kanały według zatwierdzonego powiązania.
+Zrzut `scratch/moke-sweeps-tree.png` obejrzano; test sprawdza również położenie
+wiersza osi w widocznym obszarze strony, po przewinięciu formularza.
+
+Nowy test wykonuje wspólny pomiar MOKE, Keithley B i Lake Shore w jednym
+SimulationContext. Każdy z trzech punktów HDF5 zawiera potwierdzone napięcie
+DAC, napięcie Hall, pomiar SMU i zmierzone pole referencyjne. Zapis przechodzi
+walidację thaTEC z `require_pythat=True`. Odczyt wykresu potwierdza oś napięcia
+w V i pole Lake Shore w T. Etykiety predykcji MOKE zachowują T i informację,
+że są oszacowaniem, wraz z kierunkiem gałęzi kalibracji.
+
+Test używa rzeczywistego zamkniętego HDF5/CSV i atrapy klienta eLab:
+przekazuje oba załączniki, zachowuje identyczne bajty HDF5, liczbę punktów
+i skrót planu w opisie oraz nie powtarza wysyłki przy drugim wywołaniu.
+Nie wykonano zewnętrznej publikacji. Potwierdzenia ręcznej rampy, sweepu
+i wyzerowania synchronizują odczyty strony oraz wartości do zapisu ręcznego.
+Opis akcji Hall nie obiecuje nieobecnego pola wyliczonego z wielomianu.
+
+Zestaw sześciu plików MOKE/eLab: 107 testów i 4 podtesty zaliczone w 181.14 s.
+Po końcowej poprawce jednostek dodatkowy test wspólnego pomiaru zaliczony;
+po wzmocnieniu geometrii końcowy test pełnego okna zaliczony w 29.23 s.
+Ruff E4/E7/E9/F dla app/tests przechodzi; pełny lint nadal zgłasza 1217
+dotychczasowych problemów. Integracja oprogramowania jest zweryfikowana
+w symulacji; wspólny fizyczny pomiar i rzeczywisty serwer eLab nie były
+przedmiotem tych testów.
+
+## Uzupełnienie ścieżki modułu MOKE w bibliotece Sweeps
+
+Poprzedni audyt generatora nie obejmował dodawania modułu z biblioteki.
+Po wskazaniu tej luki dodano blok Devices / MOKE Box (kliknięcie i drop),
+otwierający rzeczywisty modal kanału i generatora napięcia. Modal pokazuje
+VOUT 0–7; zgodnie z pojedynczym zatwierdzonym powiązaniem stacji tylko
+kwalifikowany kanał jest dostępny do zapisu. Pozostałe kanały pozostają
+zablokowane, bez domyślnego rozszerzania uprawnienia na inne wyjścia.
+
+Wygenerowana sekwencja jest teraz węzłem urządzenia MOKE, a edycja ustawień
+otwiera ten sam modal i zachowuje identyfikatory, dzieci sweepu oraz dodatkowe
+metadane, w tym powiązanie kalibracji. Obsłużono także edycję stałego napięcia;
+naprawiono odwołania do nieistniejących minimum_voltage/maximum_voltage w
+modelu ustawień oraz ścieżkę generatora ze stałą wartością. Moduł bez
+konfiguracji jest odrzucany przez kompilator. Biblioteka udostępnia MOKE DAC
+ZERO do Finally, w tym przez drop; informacja nie utożsamia zera DAC z OFF Kepco.
+
+Test pełnego okna otwiera i zatwierdza prawdziwe modale, sprawdza anulowanie,
+ponowną edycję, zachowanie dzieci/ID, fixed value, akcję Finally i kompilację.
+Sprawdzono jasny modal 1180×700 i ciemny 980×680 oraz ich zrzuty. Poprawiono
+odświeżanie motywu podczas show i wysokości tabeli/wykresu w wąskim układzie,
+aby podsumowanie i podgląd kalibracji pozostały w obszarze panelu.
+
+Nowa regresja awarii pomiaru Keithley potwierdza faulted HDF5, brak punktów,
+potwierdzone zero MOKE i OUTPUT OFF Keithley. Szerszy zestaw pięciu plików:
+114 testów oraz 6 podtestów zaliczone. Końcowe regresje modala, fixed value,
+geometrii, stałej wartości i wspólnego pomiaru zaliczone po dodatkowych
+poprawkach; 4 regresje motywu istniejących edytorów również zaliczone.
+Test motywu pełnego okna przeniesiono do tymczasowej konfiguracji/katalogu,
+ponieważ dotychczas próbował pisać do rzeczywistej bazy katalogu tylko do odczytu.
+Ruff E4/E7/E9/F przechodzi. Testy dotyczą symulacji i lokalnego klienta eLab;
+nie wykonano fizycznych zmian napięcia ani publikacji danych na serwerze.
+
+## 2026-10-03: kontrola przycisku zerowania w Voltage control
+
+Prześledzono `_zero` → worker/stop → `stop_vout` → `_ramp` → SET/readback.
+Przycisk wyłącza Live i usuwa oczekujący cel; przy zajętym workerze żąda
+przerwania, po którym następuje kwalifikowana rampa do zera. Zerowanie
+ignoruje wcześniejsze żądanie anulowania, ale zachowuje deadline profilu.
+
+Dodano regresje z początkowym +0.4 V i -0.4 V, `simulation=False` na
+atrapowym transporcie: więcej niż jeden krok, monotoniczne dojście do 0,
+każdy krok ≤50 mV, rzeczywisty czas nie krótszy niż |Vstart|/(1 V/s),
+wyłącznie kwalifikowany kanał, odczyt końcowy 0 V. Test utraty zapisu
+potwierdza jeden SET bez ponowienia, UNKNOWN i brak potwierdzenia zera.
+Test prawdziwego panelu klika zero przed wysłaniem oczekującego celu Live,
+czeka na zakończenie i dodatkowo 700 ms: Live OFF, brak oczekującej operacji,
+VOUT2 nadal 0 i metadane ręczne 0 V.
+
+28 testów adaptera zaliczone; 18 wybranych regresji zerowania, anulowania
+i panelu zaliczone. Ruff E4/E7/E9/F dla obu plików testowych przechodzi.
+Nie zmieniano kodu sterowania ani nie wysyłano komend do fizycznego sprzętu.
+Potwierdzone zero DAC pozostaje odrębne od potwierdzenia prądu, pola i
+Kepco OUTPUT OFF: tej ostatniej komendy ten przycisk nie realizuje.

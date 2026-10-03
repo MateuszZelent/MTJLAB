@@ -302,6 +302,7 @@ class RecipePage(QWidget):
     settings_issue_requested = Signal(object)
     operator_row_role = int(Qt.ItemDataRole.UserRole) + 17
     _FINALLY_ACTION_TYPES = {
+        "stop_moke_voltage",
         "ramp_keithley_to_zero",
         "set_keithley_output",
         "set_rigol_output",
@@ -325,13 +326,19 @@ class RecipePage(QWidget):
         self._recipe_parameter_definitions = (
             self._device_registry.recipe_parameter_definitions()
         )
-        if settings.moke_box.enabled and (settings.moke_box.allow_vout_control or (settings.moke_box.endpoint or "").startswith("SIM::MOKE")):
-            self._recipe_parameter_definitions = tuple(
-                (*self._recipe_parameter_definitions,)
-                + tuple(
-                    item for item in _SWEEPABLE_PARAMETERS
-                    if item["target"] == f"moke_box.vout{settings.moke_box.voltage_control.channel}.voltage"
-                )
+        moke_control_available = settings.moke_box.enabled and (
+            settings.moke_box.allow_vout_control
+            or (settings.moke_box.endpoint or "").startswith("SIM::MOKE")
+        )
+        qualified_moke_target = f"moke_box.vout{settings.moke_box.voltage_control.channel}.voltage"
+        self._recipe_parameter_definitions = tuple(
+            item for item in self._recipe_parameter_definitions
+            if not item["target"].startswith("moke_box.")
+        )
+        if moke_control_available:
+            self._recipe_parameter_definitions += tuple(
+                item for item in self._device_registry.get("moke_box").recipe_extension.parameter_definitions
+                if item["target"] == qualified_moke_target
             )
         self._settings = settings
         self._keithley_snapshot_provider = None
@@ -1200,7 +1207,13 @@ class RecipePage(QWidget):
             target_layout.addWidget(button)
             self._library_action_buttons.append(button)
 
-        devices = group("Devices", "4")
+        devices = group("Devices", "5")
+        action(
+            devices, "MOKE Box", "Configure output channel and programming voltage sweep", "moke_box",
+            QStyle.StandardPixmap.SP_ComputerIcon,
+            lambda: self._library_add_device("moke_box"),
+            drag_kind="device:moke_box",
+        )
         action(
             devices, "Keithley 2600", "Source-measure unit module", "keithley",
             QStyle.StandardPixmap.SP_DriveHDIcon,
@@ -1314,7 +1327,13 @@ class RecipePage(QWidget):
             drag_kind="flow:acquire_spectrum",
         )
 
-        safety = group("Safe shutdown", "7")
+        safety = group("Safe shutdown", "8")
+        action(
+            safety, "MOKE DAC ZERO", "Confirm zero programming voltage in Finally; Kepco power state remains unknown", "moke_box",
+            QStyle.StandardPixmap.SP_MediaStop,
+            lambda: self._library_add_output_off("stop_moke_voltage"),
+            drag_kind="safety:moke_zero",
+        )
         action(
             safety,
             "Keithley A OUTPUT OFF",
@@ -1521,6 +1540,13 @@ class RecipePage(QWidget):
                 else:
                     button.setToolTip(str(button.property("libraryDescription")))
             elif button.property("deviceKind") == "moke_box":
+                if button.text() == "MOKE Box":
+                    control_available = any(item["target"].startswith("moke_box.")
+                                            for item in self._recipe_parameter_definitions)
+                    button.setEnabled(moke_enabled and control_available)
+                    button.setToolTip(str(button.property("libraryDescription")) if button.isEnabled() else
+                                      "Configure an enabled MOKE Box and approve its output channel in station settings.")
+                    continue
                 button.setEnabled(moke_enabled)
                 if not moke_enabled:
                     button.setToolTip(
@@ -1716,6 +1742,8 @@ class RecipePage(QWidget):
             "type": kind,
             "enabled": False,
         }
+        if kind == "stop_moke_voltage":
+            node.pop("enabled")
         if channel is not None:
             node["channel"] = channel
         if parent_id is not None and parent_id != "__finally__":
@@ -1767,6 +1795,7 @@ class RecipePage(QWidget):
         index: int | None = None,
     ) -> None:
         labels = {
+            "moke_box": "MOKE Box",
             "keithley": "Keithley 2600",
             "rigol": "Rigol DG1032Z",
             "anritsu": "Anritsu MS2830A",
@@ -1782,6 +1811,21 @@ class RecipePage(QWidget):
                 "Cannot add device",
                 "Finally accepts only ramp-to-zero and OUTPUT OFF safety actions.",
             )
+            return
+        if device == "moke_box":
+            channel = self._settings.moke_box.voltage_control.channel
+            definition = next((item for item in self._recipe_parameter_definitions
+                               if item["target"] == f"moke_box.vout{channel}.voltage"), None)
+            if definition is None:
+                raise ConfigurationError("MOKE voltage control requires an approved station output channel.")
+            dialog = SweepGeneratorDialog(dict(definition), self)
+            if dialog.exec() != QDialog.DialogCode.Accepted:
+                return
+            node = self._sweep_node_from_generator(dict(definition), dialog.segment_data())
+            node.update(device_module="moke_box", label="MOKE Box", text=f"MOKE Box · VOUT {channel}")
+            source = add_recipe_node(self._builder_source(), parent_id=parent_id,
+                                     branch=branch, index=index, node=node)
+            self._apply_builder_source(source, "Added configured MOKE Box", selected_node_id=str(node["id"]))
             return
         if device == "anritsu_sg":
             node = {
@@ -1886,6 +1930,10 @@ class RecipePage(QWidget):
                 )
                 return True
             if category == "safety":
+                if kind == "moke_zero":
+                    self._library_add_output_off("stop_moke_voltage", parent_id=parent_id,
+                                                 branch=branch, index=index)
+                    return True
                 if kind in {"keithley_a_off", "keithley_b_off"}:
                     self._library_add_output_off(
                         "set_keithley_output",
@@ -4865,12 +4913,70 @@ class RecipePage(QWidget):
             )
         return None
 
+    def _edit_moke_module_node(self, node: RecipeNode) -> None:
+        sweeps = [child for child in node.children if child.type == "sweep"]
+        fixed = [child for child in node.children if child.type == "update_moke_voltage"]
+        if not sweeps and len(fixed) == 1:
+            child = fixed[0]
+            channel = int(child.data["channel"])
+            target = f"moke_box.vout{channel}.voltage"
+            definition = next((item for item in self._recipe_parameter_definitions if item["target"] == target), None)
+            if definition is None:
+                raise ConfigurationError("Restore the approved MOKE channel before editing this module.")
+            dialog = FixedValueDialog(dict(definition), self)
+            dialog.value.setText(str(child.data["voltage"]))
+            if dialog.exec() != QDialog.DialogCode.Accepted:
+                return
+            replacement = self._node_to_mapping(child)
+            replacement["voltage"] = dialog.value.text().strip()
+            source = replace_recipe_node(self._builder_source(), node_id=child.id, node=replacement)
+            self._apply_builder_source(source, "Updated fixed MOKE voltage", selected_node_id=node.id)
+            return
+        if len(sweeps) != 1:
+            raise ConfigurationError("MOKE module must contain one programming-voltage sweep.")
+        sweep = sweeps[0]
+        target = str(sweep.data.get("target", ""))
+        definition = next((item for item in self._recipe_parameter_definitions if item["target"] == target), None)
+        if definition is None:
+            raise ConfigurationError("Reconnect or restore the approved MOKE channel before editing this module.")
+        segments = sweep.data.get("segments") or [{
+            key: sweep.data[key] for key in ("start", "stop", "points", "spacing") if key in sweep.data
+        }]
+        dialog = SweepGeneratorDialog(dict(definition), self, initial_segments=list(segments))
+        if dialog.exec() != QDialog.DialogCode.Accepted:
+            return
+        generated = self._sweep_node_from_generator(dict(definition), dialog.segment_data())
+        replacement = self._node_to_mapping(node)
+        updates = {child["type"]: child for child in generated["children"]}
+        children = []
+        for child in node.children:
+            if child.type in updates:
+                updated = self._node_to_mapping(child)
+                updated.update(updates[child.type])
+                updated["id"] = child.id
+                if child.type == "sweep":
+                    for legacy_field in ("start", "stop", "points", "spacing"):
+                        updated.pop(legacy_field, None)
+                    updated["children"] = [self._node_to_mapping(item) for item in child.children]
+                children.append(updated)
+            else:
+                children.append(self._node_to_mapping(child))
+        replacement["children"] = children
+        source = replace_recipe_node(self._builder_source(), node_id=node.id, node=replacement)
+        self._apply_builder_source(source, "Updated MOKE channel voltage sweep", selected_node_id=node.id)
+
     def _edit_selected_device_settings(self) -> None:
         node = self._selected_recipe_node()
         if not isinstance(node, RecipeNode):
             QMessageBox.information(
                 self, "Device settings", "Select a device or its sweep axis first."
             )
+            return
+        if node.data.get("device_module") == "moke_box":
+            try:
+                self._edit_moke_module_node(node)
+            except (ConfigurationError, ValueError) as exc:
+                QMessageBox.warning(self, "MOKE Box settings", str(exc))
             return
         if node.data.get("device_module") == "keithley":
             self._edit_keithley_module_node(node)
@@ -6575,7 +6681,7 @@ class RecipePage(QWidget):
             return self._moke_control_sequence(channel, {
                 "id": self._new_node_id("moke-voltage"), "type": "update_moke_voltage",
                 "channel": channel, "voltage": value,
-            }, profile.minimum_voltage, profile.maximum_voltage)
+            }, profile.minimum, profile.maximum)
         field = target.rsplit(".", 1)[1]
         defaults = self._settings.anritsu.safety.defaults
         return {
@@ -6693,8 +6799,8 @@ class RecipePage(QWidget):
             minimum, maximum = min(values), max(values)
             if minimum == maximum:
                 profile = self._settings.moke_box.voltage_control
-                minimum = parse_quantity(profile.minimum_voltage, "voltage").si_value
-                maximum = parse_quantity(profile.maximum_voltage, "voltage").si_value
+                minimum = parse_quantity(profile.minimum, "voltage").si_value
+                maximum = parse_quantity(profile.maximum, "voltage").si_value
             return self._moke_control_sequence(channel, {
                 "id": node_id, "type": "sweep", "target": target,
                 "segments": segments, "children": [
@@ -6786,6 +6892,8 @@ class RecipePage(QWidget):
             raise ConfigurationError("Select the qualified MOKE electromagnet output channel.")
         return {
             "id": self._new_node_id("moke-control"), "type": "sequence",
+            "device_module": "moke_box", "label": f"MOKE Box · VOUT {channel}",
+            "channel": channel,
             "children": [
                 {"id": self._new_node_id("configure-moke"), "type": "configure_moke_box",
                  "channel": channel, "minimum_voltage": minimum, "maximum_voltage": maximum},

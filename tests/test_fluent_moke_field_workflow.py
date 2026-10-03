@@ -23,6 +23,8 @@ from app.devices.moke_box.models import MokeBoxConfig
 from app.devices.moke_box.protocol import MokeCommandType, MokeFrame, decode_voltage
 from app.devices.moke_box.simulator import SimulatedMokeBoxTransport
 from app.devices.simulation import SimulationContext
+from app.devices.simulators import simulated_station_settings
+from app.ui.recipes.page import RecipePage
 from app.devices.moke_box.ui.voltage_history import MokeVoltageHistory
 from app.settings.models import StationSettings
 from app.settings import SettingsRepository
@@ -33,6 +35,8 @@ from app.ui.shell import MainWindow
 from app.ui.workers import DeviceController
 from app.ui.design_system import apply_application_theme
 from app.ui.common.precision_stepper import install_precision_arrow_stepper
+from app.ui.recipes.sweep_editor import SweepGeneratorDialog
+from app.ui.recipes.common_dialogs import FixedValueDialog
 from tests.helpers import loaded_settings
 from tests.test_main_window import TEST_ENGINEER, write_engineer_settings
 
@@ -249,6 +253,35 @@ def test_sweep_confirmed_voltage_updates_manual_export_without_device_query(work
     assert exported["moke_box.vout.2_v"].value_si == 0.19989623706778162
     assert page.vout_values[2].text() == "+0.199896 V"
     assert controllers["moke_box"].adapter_for_run().read_vouts()[2] == before
+    page.apply_execution_event(
+        "moke_dac_shutdown", {},
+        {"dac_shutdown": {"actual": {"channel": 2, "actual_v": 0.0, "safe_target_confirmed": True}}}, {},
+    )
+    exported = {value.key: value for value in page.manual_metadata_values()}
+    assert exported["moke_box.vout.2_v"].value_si == 0
+
+
+def test_zero_button_cancels_pending_live_target_and_keeps_confirmed_zero(workspace, application):
+    _, page, controllers, _ = workspace
+    workflow = page.field_workflow
+    page.views.setCurrentIndex(2)
+    workflow.target.setText("400 mV")
+    workflow.set_button.click()
+    wait_for(application, lambda: not workflow.busy and workflow.live_control_switch.isEnabled())
+    assert controllers["moke_box"].adapter_for_run().read_vouts()[2] == pytest.approx(0.4, abs=0.001)
+    workflow.live_control_switch.setChecked(True)
+    workflow.target.setText("-300 mV")
+    assert workflow._live_pending
+    workflow.zero_button.click()
+    wait_for(application, lambda: not workflow.busy)
+    QTest.qWait(700)
+    assert not workflow.live_control_switch.isChecked()
+    assert not workflow._live_pending
+    assert not workflow.busy
+    assert controllers["moke_box"].adapter_for_run().read_vouts()[2] == 0
+    assert "DAC zero confirmed" in workflow.manual_status.text()
+    assert "unknown" in workflow.manual_status.text()
+    assert {value.key: value.value_si for value in page.manual_metadata_values()}["moke_box.vout.2_v"] == 0
 
 
 def test_live_voltage_debounces_edits_and_applies_slider_without_apply(workspace, application):
@@ -763,6 +796,7 @@ def test_full_fluent_shell_binds_control_calibration_and_voltage_sweep(applicati
     repository.save_raw(raw)
     window = MainWindow(settings_path, simulation=True, authenticated_username=TEST_ENGINEER)
     try:
+        window.recipe_page.path.setText(str(tmp_path / "draft.yml"))
         window.resize(1360, 880)
         window.show()
         window._navigate_to("keithley")
@@ -799,8 +833,111 @@ def test_full_fluent_shell_binds_control_calibration_and_voltage_sweep(applicati
         assert reference.layout().contentsMargins() == copied.layout().contentsMargins()
         assert type(workflow.live_control_switch) is type(window.keithley_page.live_control_switch)
         definition = {"target": "moke_box.vout2.voltage", "dimension": "voltage"}
+        from PySide6.QtCore import QTimer
+        modal_observations = []
+
+        class AcceptedMokeDialog(SweepGeneratorDialog):
+            def __init__(self, definition, parent, **kwargs):
+                super().__init__(definition, parent, initial_segments=kwargs.get("initial_segments") or
+                                 [{"start": "-0.5 V", "stop": "0.5 V", "points": 3}])
+
+            def exec(self):
+                if modal_observations:
+                    self.resize(980, 680)
+                    apply_application_theme(application, "dark")
+                def accept_visible():
+                    assert self.isVisible()
+                    assert self.channel_selector.count() == 8
+                    assert self.channel_selector.currentData() == 2
+                    assert [item.isEnabled for item in self.channel_selector.items] == [False, False, True, False, False, False, False, False]
+                    assert self.channel_selector.width() > 100
+                    assert self.rect().contains(self.channel_selector.mapTo(self, self.channel_selector.rect().center()))
+                    assert self.rect().contains(self.create_button.mapTo(self, self.create_button.rect().center()))
+                    assert self.plot_panel.rect().contains(self.preview.geometry())
+                    assert self.plot_panel.rect().contains(self.field_preview.geometry())
+                    modal_observations.append(self.channel_selector.currentData())
+                    assert self.grab().save(str(tmp_path / f"moke-sweep-modal-{len(modal_observations)}.png"))
+                    self.accept()
+                QTimer.singleShot(200, accept_visible)
+                result = super().exec()
+                apply_application_theme(application, "light")
+                return result
+
+        empty_source = yaml.safe_dump({"schema_version": 1, "name": "MOKE library", "root":
+                                       {"id": "main", "type": "sequence", "children": []}})
+        window.recipe_page._apply_builder_source(empty_source, "New integration draft")
+        with patch("app.ui.recipes.page.SweepGeneratorDialog.exec", return_value=QDialog.DialogCode.Rejected):
+            window.recipe_page._library_add_device("moke_box", parent_id="main", branch="children", index=0)
+        assert window.recipe_page._builder_source() == empty_source
+        with patch("app.ui.recipes.page.SweepGeneratorDialog", AcceptedMokeDialog):
+            window.recipe_page._library_add_device("moke_box", parent_id="main", branch="children", index=0)
+            library_recipe = parse_recipe_text(window.recipe_page._builder_source())
+            module_node = library_recipe.root.children[0]
+            assert module_node.data["device_module"] == "moke_box"
+            before_children = [child.id for child in module_node.children]
+            window.recipe_page._edit_moke_module_node(module_node)
+            edited = parse_recipe_text(window.recipe_page._builder_source()).root.children[0]
+            assert [child.id for child in edited.children] == before_children
+            assert [child.id for child in edited.children[2].children] == [child.id for child in module_node.children[2].children]
+        assert modal_observations == [2, 2]
+        library_plan = RecipeCompiler(window._settings).compile(parse_recipe_text(window.recipe_page._builder_source()))
+        assert library_plan.total_points == 3
+        assert library_plan.required_devices == frozenset({"moke_box"})
+        assert window.recipe_page._drop_library_block("safety:moke_zero", "__finally__", "children", 0)
+        safety_recipe = parse_recipe_text(window.recipe_page._builder_source())
+        assert safety_recipe.finally_nodes[0].type == "stop_moke_voltage"
+        fixed_definition = dict(next(item for item in window.recipe_page._recipe_parameter_definitions
+                                     if item["target"] == "moke_box.vout2.voltage"))
+        fixed_dialog = FixedValueDialog(fixed_definition, window.recipe_page)
+        fixed_dialog.value.setText("100 mV")
+        assert fixed_dialog.channel_selector.currentData() == 2
+        fixed_node = window.recipe_page._fixed_node_from_dialog(fixed_definition, fixed_dialog)
+        fixed_dialog.close()
+        fixed_source = yaml.safe_dump({"schema_version": 1, "name": "Fixed MOKE", "root": fixed_node})
+        window.recipe_page._apply_builder_source(fixed_source, "Fixed MOKE integration")
+        fixed_recipe = parse_recipe_text(fixed_source)
+        with patch("app.ui.recipes.page.FixedValueDialog.exec", return_value=QDialog.DialogCode.Accepted):
+            window.recipe_page._edit_moke_module_node(fixed_recipe.root)
+        fixed_plan = RecipeCompiler(window._settings).compile(parse_recipe_text(window.recipe_page._builder_source()))
+        assert [action.kind for action in fixed_plan.actions] == [
+            "configure_moke_box", "arm_moke_voltage", "update_moke_voltage", "stop_moke_voltage"]
+        assert fixed_plan.actions[2].payload["voltage_v"] == 0.1
         node = window.recipe_page._sweep_node_from_generator(
             definition, [{"start": "-0.5 V", "stop": "0.5 V", "points": 3}])
+        moke_definitions = [item for item in window.recipe_page._recipe_parameter_definitions
+                            if item["target"].startswith("moke_box.")]
+        assert [item["target"] for item in moke_definitions] == ["moke_box.vout2.voltage"]
+        window._navigate_to("sweeps")
+        tree_source = yaml.safe_dump({"schema_version": 1, "name": "MOKE tree integration", "root": node})
+        window.recipe_page._apply_builder_source(tree_source, "MOKE integration test")
+        # This test owns the temporary draft; acknowledge discarding it on close.
+        window.recipe_page._close_discard_confirmed = True
+        tree = window.recipe_page.measurement_tree
+        tree.expandAll()
+        application.processEvents()
+        axes = [item for item in window.recipe_page.tree_model.tree.by_id.values()
+                if item.axis is not None and item.axis.device_module == "moke_box"]
+        assert axes
+        axis = axes[0]
+        assert axis.axis.target == "moke_box.vout2.voltage"
+        assert axis.axis.parameter_id == "output.voltage"
+        index = window.recipe_page.tree_model.index_for_semantic_id(axis.semantic_id)
+        window.navigation_routes["sweeps"].scroll_area.ensureWidgetVisible(tree)
+        page_scroll = window.navigation_routes["sweeps"].scroll_area
+        page_scroll.verticalScrollBar().setValue(page_scroll.verticalScrollBar().maximum())
+        tree.scrollTo(index)
+        QTest.qWait(300)
+        assert tree.isVisibleTo(window)
+        assert tree.width() > 200 and tree.height() > 200
+        assert tree.visualRect(index).intersects(tree.viewport().rect())
+        axis_rect = tree.visualRect(index)
+        assert page_scroll.viewport().rect().contains(
+            tree.viewport().mapTo(page_scroll.viewport(), axis_rect.center()))
+        assert window.grab().save(str(tmp_path / "moke-sweeps-tree.png"))
+        tree_plan = RecipeCompiler(window._settings).compile(parse_recipe_text(tree_source))
+        assert tree_plan.total_points == 3
+        assert tree_plan.required_devices == frozenset({"moke_box"})
+        window._navigate_to("moke_box")
         document = {"schema_version": 1, "name": "Generated MOKE sweep", "root": node}
         plan = RecipeCompiler(window._settings).compile(parse_recipe_text(yaml.safe_dump(document)))
         assert plan.actions[0].kind == "configure_moke_box"
@@ -840,8 +977,29 @@ def test_full_fluent_shell_binds_control_calibration_and_voltage_sweep(applicati
         workflow.zero_button.click()
         wait_for(application, lambda: not workflow.busy)
     finally:
+        window.recipe_page._close_discard_confirmed = True
         window.close()
         application.processEvents()
+
+
+def test_single_point_moke_generator_uses_station_envelope(application, tmp_path):
+    raw = simulated_station_settings(loaded_settings()).model_dump(mode="python")
+    raw["devices"]["moke_box"]["calibration_directory"] = str(tmp_path / "calibrations")
+    settings = StationSettings.model_validate(raw)
+    page = RecipePage(settings)
+    try:
+        definition = dict(next(item for item in page._recipe_parameter_definitions
+                               if item["target"] == "moke_box.vout2.voltage"))
+        node = page._sweep_node_from_generator(definition, [{"value": "200 mV"}])
+        recipe = parse_recipe_text(yaml.safe_dump({"schema_version": 1, "name": "One MOKE point", "root": node}))
+        plan = RecipeCompiler(settings).compile(recipe)
+        assert plan.total_points == 1
+        assert plan.actions[0].payload["plan"].targets_v == (0.2,)
+        assert plan.actions[0].payload["plan"].minimum_v == -1
+        assert plan.actions[0].payload["plan"].maximum_v == 1
+    finally:
+        page._close_discard_confirmed = True
+        page.close()
 
 
 @pytest.mark.parametrize("width,height,theme", [(1360, 880, "light"), (980, 880, "dark")])

@@ -253,6 +253,11 @@ class Hdf5SeriesReader:
     @staticmethod
     def _format_channel_label(channel_name: str) -> tuple[str, str]:
         c = channel_name.lower()
+        if c.startswith("moke_box.") and c.endswith("_t"):
+            direction = "ascending" if "ascending" in c else "descending"
+            return f"Estimated magnetic field ({direction})", "T"
+        if c.startswith("lakeshore.") and c.endswith("_t"):
+            return "Measured magnetic field", "T"
         if "field" in c or "magnet" in c or c.endswith("_b") or c.endswith("_h"):
             return "Magnetic Field (B)", "Oe"
         if "resistance" in c or c == "r":

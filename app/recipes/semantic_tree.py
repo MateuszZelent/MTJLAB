@@ -318,6 +318,9 @@ def _device_prefix(node: RecipeNode) -> str | None:
     configuration = configuration if isinstance(configuration, Mapping) else data
     module = str(data.get("device_module", ""))
     node_type = node.type
+    if module == "moke_box" or node_type == "configure_moke_box":
+        channel = configuration.get("channel")
+        return f"MOKE Box VOUT {channel}" if channel is not None else "MOKE Box"
     if module == "keithley" or node_type.startswith("configure_keithley"):
         channel = str(configuration.get("channel", data.get("channel", ""))).upper()
         return f"Keithley {channel}" if channel in {"A", "B"} else "Keithley"
@@ -364,6 +367,8 @@ def _binding_device_prefix(binding: SweepAxisBinding, recipe_nodes: Mapping[str,
         return f"Rigol CH{binding.endpoint}"
     if binding.device_module == "anritsu":
         return "Anritsu"
+    if binding.device_module == "moke_box":
+        return f"MOKE Box {binding.endpoint.upper()}"
     return binding.endpoint
 
 

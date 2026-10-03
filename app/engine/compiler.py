@@ -785,6 +785,11 @@ class RecipeCompiler:
             raise SafetyViolation("The expanded-action limit was exceeded.")
         if node.type == "sequence":
             device_module = node.data.get("device_module")
+            if device_module == "moke_box" and (
+                node.data.get("configuration_required")
+                or not any(child.type == "configure_moke_box" for child in node.children)
+            ):
+                raise ConfigurationError(f"{node.id}: MOKE Box configuration is incomplete.")
             if (
                 device_module in {"keithley", "rigol", "anritsu", "anritsu_sg"}
                 and node.data.get("operation") != "configure_selected_parameters"

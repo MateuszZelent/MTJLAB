@@ -691,6 +691,16 @@ class MokeBoxPage(QWidget):
         _output_status: Mapping[str, str],
     ) -> None:
         """Render runner-confirmed Hall readings in the normal page and plot."""
+        if event_name == "moke_dac_shutdown" or (
+            event_name == "action_finished" and event.get("kind") == "stop_moke_voltage"
+        ):
+            record = device_state.get("dac_shutdown")
+            actual = record.get("actual") if isinstance(record, Mapping) else None
+            if isinstance(actual, Mapping) and actual.get("safe_target_confirmed") is True:
+                voltage = self._execution_number(actual.get("actual_v"))
+                if voltage is not None:
+                    self.field_workflow.show_execution_voltage(actual.get("channel"), voltage)
+            return
         if event_name == "action_finished" and event.get("kind") == "update_moke_voltage":
             record = device_state.get("voltage_control")
             actual = record.get("actual") if isinstance(record, Mapping) else None

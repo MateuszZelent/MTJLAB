@@ -83,6 +83,23 @@ class SweepGeneratorDialog(FluentRecipeDialog):
         )
         heading.setWordWrap(True)
         layout.addWidget(heading)
+        if str(definition.get("target", "")).startswith("moke_box."):
+            self.channel_selector = ComboBox(surface)
+            self.channel_selector.setAccessibleName("MOKE output channel")
+            channel = int(definition["target"].split(".")[1].removeprefix("vout"))
+            # Channel changes require a matching station output binding.
+            # Show every physical output, but only the qualified one is writable.
+            for candidate in range(8):
+                self.channel_selector.addItem(f"VOUT {candidate}", userData=candidate)
+                if candidate != channel:
+                    self.channel_selector.setItemEnabled(candidate, False)
+            self.channel_selector.setCurrentIndex(channel)
+            layout.addWidget(BodyLabel("Output channel", surface))
+            layout.addWidget(self.channel_selector)
+            channel_note = CaptionLabel(
+                "Only the channel approved in station settings can control the electromagnet.", surface)
+            channel_note.setWordWrap(True)
+            layout.addWidget(channel_note)
         self._safety_bound = self._resolve_safety_bound()
         self.safety_limits = CaptionLabel("", surface)
         self.safety_limits.setObjectName("sweepSafetyLimits")
@@ -242,7 +259,7 @@ class SweepGeneratorDialog(FluentRecipeDialog):
     def _resolved_plot_theme(self) -> str:
         application = QApplication.instance()
         if application is not None:
-            for property_name in ("activeTheme", "stationAppliedTheme"):
+            for property_name in ("stationAppliedTheme", "activeTheme"):
                 active = application.property(property_name)
                 if str(active).lower() in {"light", "dark"}:
                     return str(active).lower()
@@ -357,8 +374,12 @@ class SweepGeneratorDialog(FluentRecipeDialog):
             self.segment_panel.setMinimumWidth(0)
             self.segments.setMinimumWidth(0)
             self.plot_panel.setMinimumWidth(0)
+            self.segments.setMinimumHeight(90)
+            self.plot.setMinimumHeight(110)
             self.splitter.setSizes([260, 350])
         else:
+            self.segments.setMinimumHeight(190)
+            self.plot.setMinimumHeight(280)
             self.segment_panel.setMinimumWidth(600)
             self.segments.setMinimumWidth(580)
             self.plot_panel.setMinimumWidth(420)
@@ -395,6 +416,13 @@ class SweepGeneratorDialog(FluentRecipeDialog):
         super().resizeEvent(event)
         if hasattr(self, "splitter"):
             self._update_responsive_layout()
+
+    def showEvent(self, event) -> None:
+        super().showEvent(event)
+        # A modal may be constructed before the application changes theme.
+        # Refresh token-based table/plot colors when it becomes visible.
+        if hasattr(self, "plot_theme"):
+            self._set_plot_theme(self._resolved_plot_theme())
 
     def changeEvent(self, event: QEvent) -> None:
         super().changeEvent(event)

@@ -576,13 +576,22 @@ class FixedValueDialog(FluentRecipeDialog):
         self.setWindowTitle(f"Fixed value — {definition['label']}")
         surface = self.use_modal_shell_content().surface
         layout = self.modal_content_layout(spacing=10)
-        layout.addWidget(
-            BodyLabel(
-                "This node configures one value at its position in the tree. It does not "
-                "create a measurement axis or enable an output."
-            )
-        )
+        is_moke = str(definition.get("target", "")).startswith("moke_box.")
+        layout.addWidget(BodyLabel(
+            "This node applies one programming voltage through the approved MOKE ramp and then confirms DAC zero."
+            if is_moke else
+            "This node configures one value at its position in the tree. It does not create a measurement axis or enable an output."
+        ))
         form = QFormLayout()
+        if is_moke:
+            channel = int(definition["target"].split(".")[1].removeprefix("vout"))
+            self.channel_selector = ComboBox(surface)
+            for candidate in range(8):
+                self.channel_selector.addItem(f"VOUT {candidate}", userData=candidate)
+                self.channel_selector.setItemEnabled(candidate, candidate == channel)
+            self.channel_selector.setCurrentIndex(channel)
+            self.channel_selector.setAccessibleName("MOKE output channel")
+            form.addRow("Approved output channel", self.channel_selector)
         self.value = LineEdit(surface)
         self.value.setText(_sweep_default(definition["dimension"])[0])
         form.addRow(definition["label"], self.value)
