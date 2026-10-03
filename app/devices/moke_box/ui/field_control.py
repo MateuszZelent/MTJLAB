@@ -116,6 +116,57 @@ class MokeFieldWorkflow(QObject):
     busy_changed = Signal(bool)
     vout_overview_requested = Signal()
     voltage_confirmed = Signal(int, float)
+    quick_draft_changed = Signal(str, str)
+    quick_failed = Signal(str)
+    quick_bounds_changed = Signal()
+
+    def quick_control_bounds(self):
+        """Expose the qualified channel and operator envelope without I/O."""
+        if (self._profile is None or not self._connected
+                or self._selected_channel() != self._profile.channel):
+            return None
+        minimum = max(self._profile.minimum_v, self._voltage(self.configuration_panel.minimum_text))
+        maximum = min(self._profile.maximum_v, self._voltage(self.configuration_panel.maximum_text))
+        if minimum >= maximum:
+            return None
+        return self._profile.channel, f"{minimum:.12g} V", f"{maximum:.12g} V"
+
+    def quick_control_draft(self):
+        return f"moke_box.vout{self._selected_channel()}.voltage", self.target.text()
+
+    def refresh_quick_values(self):
+        if self._connected and not self.busy and not self._external_controlled:
+            self.vout_overview_requested.emit()
+
+    def set_quick_control_draft(self, target: str, text: str):
+        if target != f"moke_box.vout{self._selected_channel()}.voltage":
+            return
+        if self.busy or self._external_controlled:
+            return
+        parse_quantity(text, DIMENSION_VOLTAGE)
+        previous = self.target.blockSignals(True)
+        self.target.setText(text)
+        self.target.blockSignals(previous)
+        # A shared draft must not schedule a second live ramp.
+        self._target_changed()
+
+    def request_quick_voltage(self, target: str, text: str):
+        """Use the same authorized, reserved worker as manual Apply voltage."""
+        if self.busy or self._external_controlled:
+            raise ConfigurationError("MOKE Box is busy or reserved by a recipe.")
+        if (not self._connected or self._profile is None
+                or target != f"moke_box.vout{self._profile.channel}.voltage"
+                or self._selected_channel() != self._profile.channel):
+            raise ConfigurationError("Select the connected, qualified MOKE output channel on its card.")
+        voltage = parse_quantity(text, DIMENSION_VOLTAGE).si_value
+        self._manual_voltage_plan((voltage,))  # Validate before changing the shared draft.
+        self.set_quick_control_draft(target, text)
+        self._start_manual()
+
+    def request_quick_zero(self):
+        if not self._connected or self._profile is None or self._external_controlled:
+            raise ConfigurationError("MOKE zero ramp is unavailable; check connection and reservation.")
+        self._zero()
 
     def __init__(self, controller: DeviceController, settings: StationSettings, parent: QWidget):
         super().__init__(parent)
@@ -351,6 +402,13 @@ class MokeFieldWorkflow(QObject):
             self.target.setText(render_quantity_si_like(self.target.text(), DIMENSION_VOLTAGE, voltage, preferred_unit="mV"))
 
     def _target_changed(self, *_args):
+        try:
+            parse_quantity(self.target.text(), DIMENSION_VOLTAGE)
+        except ValueError:
+            pass
+        else:
+            self.quick_draft_changed.emit(
+                f"moke_box.vout{self._selected_channel()}.voltage", self.target.text())
         try:
             voltage = self._voltage(self.target)
             if self._slider_mapping is not None:
@@ -862,6 +920,7 @@ class MokeFieldWorkflow(QObject):
             self.field_readout.setText(f"Predicted field unavailable: {exc}")
 
     def _failed(self, message):
+        self.quick_failed.emit(message)
         self._disable_live()
         self._manual_envelope = None
         self._manual_plan = self._calibration_request = None
@@ -955,6 +1014,7 @@ class MokeFieldWorkflow(QObject):
         self._refresh_controls()
 
     def _refresh_controls(self, *_args):
+        self.quick_bounds_changed.emit()
         if not hasattr(self, "activate_button"):
             return
         ready = self._connected and self._profile is not None and not self.busy and not self._external_controlled

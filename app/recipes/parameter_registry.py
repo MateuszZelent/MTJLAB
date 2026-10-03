@@ -256,6 +256,14 @@ SWEEPABLE_PARAMETERS: Final[tuple[dict[str, str], ...]] = legacy_ui_parameter_de
 QUICK_CONTROL_DESCRIPTORS: Final[tuple[QuickControlDescriptor, ...]] = (
     *tuple(
         QuickControlDescriptor(
+            f"moke_box.vout{channel}.voltage", "moke_box",
+            f"MOKE Box VOUT {channel} · programming voltage",
+            DIMENSION_VOLTAGE, "0.000 V", f"moke_box.vout{channel}",
+        )
+        for channel in range(8)
+    ),
+    *tuple(
+        QuickControlDescriptor(
             f"keithley.{channel}.{mode}",
             "keithley",
             f"Keithley {channel} · {mode.title()}",

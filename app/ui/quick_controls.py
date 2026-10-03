@@ -202,6 +202,8 @@ class QuickControlCoordinator(QObject):
     ) -> None:
         super().__init__(parent)
         self._controllers = controllers
+        self._moke_workflow = None
+        self._moke_active_target: str | None = None
         self._bounds: dict[str, tuple[float, float]] = {}
         self._bound_texts: dict[str, tuple[str, str]] = {}
         self._bound_objects: dict[str, QuickControlSafetyBound] = {}
@@ -284,6 +286,20 @@ class QuickControlCoordinator(QObject):
             return
         self.publish_draft(target, text, source="quick_controls")
         device = descriptor.device_module
+        if device == "moke_box":
+            if self._moke_workflow is None or self.bound(target) is None:
+                self.state_changed.emit(target, "rejected", "Connect a qualified MOKE output profile.")
+                return
+            if self._moke_active_target is not None:
+                self.state_changed.emit(target, "rejected", "Wait for the MOKE ramp and settling to finish.")
+                return
+            self._moke_active_target = target
+            self.state_changed.emit(target, "applying", "Ramping DAC, then waiting for settling")
+            try:
+                self._moke_workflow.request_quick_voltage(target, text)
+            except (ValueError, RuntimeError) as exc:
+                self._moke_failed(str(exc))
+            return
         if not self._device_can_apply(device):
             self.state_changed.emit(
                 target,
@@ -311,9 +327,72 @@ class QuickControlCoordinator(QObject):
             for target, bound in resolved.items()
         }
         self._bound_objects = resolved
+        self._sync_moke_bounds()
         for targets in self._adopt_readback_targets.values():
             targets.clear()
         self.bounds_changed.emit()
+
+    def bind_moke_workflow(self, workflow) -> None:
+        """Share the page's qualified ramp lifecycle rather than create another writer."""
+        self._moke_workflow = workflow
+        workflow.quick_draft_changed.connect(
+            lambda target, text: self.publish_draft(target, text, source="moke_card"))
+        self.draft_changed.connect(
+            lambda target, text, source: workflow.set_quick_control_draft(target, text)
+            if source == "quick_controls" and target.startswith("moke_box.") else None)
+        workflow.quick_bounds_changed.connect(self._sync_moke_bounds)
+        workflow.voltage_confirmed.connect(self._moke_confirmed)
+        workflow.quick_failed.connect(self._moke_failed)
+        workflow.busy_changed.connect(self._moke_busy_changed)
+        target, text = workflow.quick_control_draft()
+        self.publish_draft(target, text, source="moke_card")
+        self._sync_moke_bounds()
+
+    def _sync_moke_bounds(self, *_args) -> None:
+        for mapping in (self._bounds, self._bound_texts, self._bound_objects):
+            for target in tuple(mapping):
+                if target.startswith("moke_box."):
+                    del mapping[target]
+        if self._moke_workflow is not None:
+            envelope = self._moke_workflow.quick_control_bounds()
+            if envelope is not None:
+                channel, minimum, maximum = envelope
+                lower = parse_quantity(minimum, "voltage").si_value
+                upper = parse_quantity(maximum, "voltage").si_value
+                target = f"moke_box.vout{channel}.voltage"
+                bound = QuickControlSafetyBound(lower, upper, minimum, maximum)
+                self._bounds[target] = (lower, upper)
+                self._bound_texts[target] = (minimum, maximum)
+                self._bound_objects[target] = bound
+        self.bounds_changed.emit()
+
+    def _moke_confirmed(self, channel: int, voltage: float) -> None:
+        target = f"moke_box.vout{channel}.voltage"
+        self.confirmed_snapshot(target, voltage)
+        self.value_read.emit(target, voltage)
+
+    def _moke_failed(self, message: str) -> None:
+        if self._moke_active_target is not None:
+            target = self._moke_active_target
+            self._moke_active_target = None
+            self.state_changed.emit(target, "rejected", message)
+
+    def _moke_busy_changed(self, busy: bool) -> None:
+        if not busy and self._moke_active_target is not None:
+            target = self._moke_active_target
+            self._moke_active_target = None
+            self.state_changed.emit(target, "ready", "DAC readback confirmed; settling completed")
+
+    def stop_moke_voltage(self) -> None:
+        if self._moke_workflow is not None:
+            try:
+                self._moke_workflow.request_quick_zero()
+            except (ValueError, RuntimeError) as exc:
+                for target in self._selected_moke_targets():
+                    self.state_changed.emit(target, "rejected", str(exc))
+
+    def _selected_moke_targets(self):
+        return (target for target in self._draft_texts if target.startswith("moke_box."))
 
     def draft_text(self, target: str) -> str | None:
         return self._draft_texts.get(target)
@@ -424,11 +503,17 @@ class QuickControlCoordinator(QObject):
         return value_si, False, ""
 
     def refresh(self) -> None:
+        if self._moke_workflow is not None:
+            self._moke_workflow.refresh_quick_values()
         for device in self._inflight:
             if self._device_can_apply(device):
                 self._controllers[device].call("quick_readback")
 
     def cancel_all(self, reason: str = "Cancelled") -> None:
+        if self._moke_active_target is not None:
+            self.state_changed.emit(self._moke_active_target, "unknown", reason)
+            self._moke_active_target = None
+            self._moke_workflow.stop()
         for targets in self._adopt_readback_targets.values():
             targets.clear()
         for device, pending in self._pending.items():
@@ -1424,6 +1509,10 @@ class QuickControlsWindow(FluentWidget):
                     "Keithley source",
                     "Channel source levels with the same safety envelope as the card.",
                 ),
+                "moke_box": (
+                    "MOKE Box",
+                    "Programming voltage · qualified ramp and settling from the MOKE card.",
+                ),
             }
             for target in self._selected:
                 descriptor = QUICK_CONTROLS_BY_TARGET[target]
@@ -1452,6 +1541,11 @@ class QuickControlsWindow(FluentWidget):
                 group_hint.setObjectName("muted")
                 group_hint.setWordWrap(True)
                 group_layout.addWidget(group_hint)
+                if device == "moke_box":
+                    zero = PushButton("Stop / ramp DAC to zero", group_card)
+                    zero.setToolTip("Returns the qualified DAC to zero; does not confirm Kepco power-off.")
+                    zero.clicked.connect(self._coordinator.stop_moke_voltage)
+                    group_layout.addWidget(zero)
                 for target in group_targets:
                     descriptor = QUICK_CONTROLS_BY_TARGET[target]
                     row = QuickControlRow(descriptor, self._coordinator, group_card)
@@ -1485,6 +1579,10 @@ class QuickControlsWindow(FluentWidget):
 
     def choose_controls(self) -> None:
         picker = QuickControlPicker(self._selected, self._selected_outputs, self)
+        for target, checkbox in picker.checkboxes.items():
+            if target.startswith("moke_box.") and self._coordinator.bound(target) is None:
+                checkbox.setEnabled(False)
+                checkbox.setToolTip("Connect a qualified MOKE output profile to use this channel.")
         if picker.exec() == QDialog.DialogCode.Accepted:
             self.set_targets(picker.selected_targets())
             self.set_output_targets(picker.selected_output_targets())

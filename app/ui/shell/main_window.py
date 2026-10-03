@@ -398,6 +398,7 @@ class MainWindow(FluentWindow):
             ),
         )
         self.quick_controls_window = QuickControlsWindow(self.quick_control_coordinator, self)
+        self.quick_control_coordinator.bind_moke_workflow(self.moke_box_page.field_workflow)
         self.quick_controls_window.restore_workspace()
         self.quick_controls_window.output_requested.connect(self._request_quick_control_output)
         self.quick_controls_window.output_group_requested.connect(
