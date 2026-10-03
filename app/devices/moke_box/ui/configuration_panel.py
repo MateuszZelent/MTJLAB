@@ -14,6 +14,7 @@ from app.domain.quantities import DIMENSION_VOLTAGE, parse_quantity
 from app.safety.moke_box import MokeVoltagePlan
 from app.ui.common import line_edit
 from app.ui.widgets import LimitEditDialog, LimitField
+from app.ui.widgets.quantity_step_selector import VoltageStepSelector
 
 
 class MokeVoltageConfigurationPanel(CardWidget):
@@ -42,22 +43,24 @@ class MokeVoltageConfigurationPanel(CardWidget):
         self.channel.setCurrentIndex(2)
         self.channel.setToolTip("Select the output configuration draft. Selecting a channel does not change its voltage.")
         self.level = line_edit("0 mV")
-        self.level.setProperty("precisionIntegerStep", "100 mV")
-        self.level.setToolTip("Up/Down: 100 mV for integer values; otherwise the last written decimal place (0.00 V: 10 mV). Live OFF requires Apply voltage.")
+        self.level.setProperty("precisionStep", "1 mV")
+        self.level.setToolTip("Up/Down use the selected Step (default 1 mV). Live OFF requires Apply voltage.")
         self.level.setAccessibleName("Programming voltage")
-        self.level_field = LimitField(self.level, self.minimum_text, self.maximum_text, range_mode=True)
+        self.voltage_step = VoltageStepSelector(self)
+        self.level_field = LimitField(self.level, self.minimum_text, self.maximum_text,
+                                     range_mode=True, editor_accessory=self.voltage_step)
         self.level_field.setProperty("limitKey", "level")
         self.level.setMinimumWidth(140)
         for badge in (self.level_field.minimum, self.level_field.maximum):
             badge.setMinimumWidth(88)
             badge.setProperty("keithleyCompact", True)
         self.level_field.edit_requested.connect(self.edit_limits)
-        self.calculated_field = CaptionLabel("Calculated field: no active calibration", self)
+        self.calculated_field = StrongBodyLabel("Calculated field: no active calibration", self)
         self.calculated_field.setWordWrap(True)
+        self.calculated_field.hide()  # The workflow hosts this readout in the adjacent field column.
         for label, widget in (
             ("Configure channel (not OUTPUT)", self.channel),
             ("Source voltage", self.level_field),
-            ("Calculated field", self.calculated_field),
         ):
             self.form.addRow(label, widget)
         layout.addLayout(self.form)

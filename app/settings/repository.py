@@ -110,6 +110,22 @@ class SettingsRepository:
         # comments and ordering remain intact, while new devices and newly
         # introduced nested fields arrive without per-device migration code.
         defaults = self._template_raw()
+        # Channel defaults must follow this station's primary output, which can
+        # differ from the template's VOUT2. Never merge a second profile for it.
+        from app.settings.models import MokeVoltageControlSettings
+
+        devices = raw.get("devices", {})
+        moke = devices.get("moke_box", {}) if isinstance(devices, dict) else {}
+        if isinstance(moke, dict) and isinstance(moke.get("voltage_control", {}), dict):
+            primary = moke.get("voltage_control", {}).get(
+                "channel", defaults["devices"]["moke_box"]["voltage_control"]["channel"])
+            defaults["devices"]["moke_box"]["channel_profiles"] = {
+                str(channel): MokeVoltageControlSettings(
+                    channel=channel, binding_id=f"unconnected-test-VOUT{channel}",
+                    kepco_model="Unconnected DAC test output", kepco_mode="dac_test",
+                ).model_dump(mode="python")
+                for channel in range(8) if channel != primary
+            }
         defaults_added = self._merge_missing_defaults(raw, defaults)
         known_issues_repaired = self.repair_known_issues(raw)
         safety_limits_narrowed = self.repair_legacy_keithley_limits(raw, defaults)

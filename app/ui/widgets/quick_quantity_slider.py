@@ -6,14 +6,15 @@ from dataclasses import dataclass
 from decimal import Decimal, ROUND_FLOOR, ROUND_HALF_UP
 import math
 
-from PySide6.QtCore import Qt, Signal
-from PySide6.QtWidgets import QHBoxLayout, QVBoxLayout, QWidget
+from PySide6.QtCore import QEvent, Qt, Signal
+from PySide6.QtWidgets import QApplication, QHBoxLayout, QVBoxLayout, QWidget
 from qfluentwidgets import CaptionLabel, LineEdit, Slider, StrongBodyLabel
 
 from app.domain.quick_controls import (
     _QUANTITY,
     quantity_step_si,
     render_quantity_si_like,
+    step_quantity_text,
 )
 from app.domain.quantities import format_quantity_auto, parse_quantity
 from app.recipes.parameter_registry import QuickControlDescriptor
@@ -80,6 +81,10 @@ class QuantitySliderMapping:
 
     def position_for_value(self, value_si: float) -> int:
         value_si = min(max(float(value_si), self.minimum_si), self.maximum_si)
+        if value_si == self.minimum_si:
+            return 0
+        if value_si == self.maximum_si:
+            return self.maximum_position
         if self.uses_exact_steps:
             position = int(
                 (
@@ -128,6 +133,7 @@ class QuickQuantitySlider(QWidget):
         descriptor: QuickControlDescriptor,
         editor: LineEdit | None = None,
         show_title: bool = True,
+        editor_accessory: QWidget | None = None,
         parent: QWidget | None = None,
     ) -> None:
         super().__init__(parent)
@@ -136,6 +142,9 @@ class QuickQuantitySlider(QWidget):
         self._bound: QuickControlSafetyBound | None = None
         self._mapping: QuantitySliderMapping | None = None
         self._step_si = 1.0
+        self._step_text = None
+        self._editor_accessory = editor_accessory
+        self._display_extent_si = None
         self._syncing = False
         self.last_committed_text = descriptor.default_text
 
@@ -154,6 +163,8 @@ class QuickQuantitySlider(QWidget):
         self.value.setAccessibleName(f"{descriptor.label} value")
         self.value.setMinimumWidth(0)
         value_row.addWidget(self.value)
+        if editor_accessory is not None:
+            value_row.addWidget(editor_accessory)
         layout.addLayout(value_row)
 
         self.slider = Slider(self)
@@ -162,6 +173,7 @@ class QuickQuantitySlider(QWidget):
         self.slider.setToolTip(
             "Drag to change the draft. The card and Quick Controls stay synchronized."
         )
+        self.slider.installEventFilter(self)
         layout.addWidget(self.slider)
 
         bounds_row = QHBoxLayout()
@@ -184,6 +196,12 @@ class QuickQuantitySlider(QWidget):
     @property
     def step_si(self) -> float:
         return self._step_si
+
+    def set_step_text(self, text: str) -> None:
+        if parse_quantity(text, self.descriptor.dimension).si_value <= 0:
+            raise ValueError("Quantity step must be positive.")
+        self._step_text = text
+        self.set_value_text(self.value.text())
 
     def set_bounds(self, bound: QuickControlSafetyBound) -> None:
         self._bound = bound
@@ -208,10 +226,21 @@ class QuickQuantitySlider(QWidget):
         self.maximum_label.setText("MAX  —")
         self.slider.setEnabled(False)
 
+    def set_readback_display_extent(self, value_si: float) -> None:
+        """Display an initial out-of-range reading without extending safety bounds."""
+        if not math.isfinite(value_si):
+            raise ValueError("Slider readback extent must be finite.")
+        self._display_extent_si = value_si
+        self._syncing = True
+        try:
+            self._rebuild_mapping()
+        finally:
+            self._syncing = False
+
     def set_value_text(self, text: str) -> None:
         try:
             parsed = parse_quantity(text, self.descriptor.dimension)
-            step_si = quantity_step_si(text, self.descriptor.dimension)
+            step_si = quantity_step_si(text, self.descriptor.dimension, step_text=self._step_text)
         except ValueError:
             self.value.setText(text)
             self._mapping = None
@@ -259,7 +288,7 @@ class QuickQuantitySlider(QWidget):
             return
         try:
             parsed = parse_quantity(text, self.descriptor.dimension)
-            self._step_si = quantity_step_si(text, self.descriptor.dimension)
+            self._step_si = quantity_step_si(text, self.descriptor.dimension, step_text=self._step_text)
         except ValueError:
             self.slider.setEnabled(False)
             return
@@ -274,7 +303,16 @@ class QuickQuantitySlider(QWidget):
 
     def _rebuild_mapping(self) -> None:
         bound = self._bound
+        minimum = None if bound is None else bound.minimum_si
+        maximum = None if bound is None else bound.maximum_si
+        if bound is not None and self._display_extent_si is not None:
+            minimum = min(minimum, self._display_extent_si)
+            maximum = max(maximum, self._display_extent_si)
         try:
+            mapping_step_si = self._step_si
+            if self._step_text is not None and bound is not None:
+                # A keyboard increment must not coarsen the displayed DAC value.
+                mapping_step_si = (maximum - minimum) / 10000
             logarithmic = (
                 self.descriptor.dimension == "frequency"
                 and bound is not None
@@ -284,9 +322,9 @@ class QuickQuantitySlider(QWidget):
                 None
                 if bound is None
                 else QuantitySliderMapping(
-                    bound.minimum_si,
-                    bound.maximum_si,
-                    self._step_si,
+                    minimum,
+                    maximum,
+                    mapping_step_si,
                     logarithmic=logarithmic,
                 )
             )
@@ -297,11 +335,17 @@ class QuickQuantitySlider(QWidget):
             return
         self.slider.setEnabled(True)
         self.slider.setRange(0, self._mapping.maximum_position)
+        if self._step_text is not None:
+            positions = max(1, round(self._step_si / self._mapping.step_si))
+            self.slider.setSingleStep(positions)
+            self.slider.setPageStep(positions * 10)
 
     def _slider_changed(self, position: int) -> None:
         if self._syncing or self._mapping is None:
             return
         value_si = self._mapping.value_for_position(position)
+        if self._display_extent_si is not None and self._bound is not None:
+            value_si = min(max(value_si, self._bound.minimum_si), self._bound.maximum_si)
         try:
             text = render_quantity_si_like(
                 self.value.text(), self.descriptor.dimension, value_si
@@ -315,7 +359,30 @@ class QuickQuantitySlider(QWidget):
             self._syncing = False
         self.draft_value_changed.emit(self.target, text)
 
+    def eventFilter(self, watched, event):
+        if watched is getattr(self, "slider", None) and self._step_text is not None and event.type() == QEvent.Type.KeyPress:
+            direction = {Qt.Key.Key_Up: 1, Qt.Key.Key_Right: 1, Qt.Key.Key_Down: -1, Qt.Key.Key_Left: -1}.get(event.key())
+            if direction is not None and watched.isEnabled() and self._bound is not None:
+                try:
+                    text, value_si = step_quantity_text(self.value.text(), self.descriptor.dimension, direction,
+                                                        step_text=self._step_text)
+                    bounded_si = min(max(value_si, self._bound.minimum_si), self._bound.maximum_si)
+                    if bounded_si != value_si:
+                        text = render_quantity_si_like(text, self.descriptor.dimension, bounded_si)
+                    self.set_value_text(text)
+                    self.draft_value_changed.emit(self.target, text)
+                except ValueError:
+                    pass
+                event.accept()
+                return True
+        return super().eventFilter(watched, event)
+
     def _commit(self) -> None:
+        focus = QApplication.focusWidget()
+        if self._editor_accessory is not None and focus is not None and (
+            focus is self._editor_accessory or self._editor_accessory.isAncestorOf(focus)
+        ):
+            return  # Selecting a step is a local preference, not a voltage commit.
         try:
             parse_quantity(self.value.text(), self.descriptor.dimension)
         except ValueError:

@@ -14,7 +14,7 @@ from app.domain.errors import ConfigurationError
 from app.domain.quantities import DIMENSION_TIME, parse_quantity
 from app.settings.models import StationSettings
 from app.recipes.parameter_registry import parameter_definitions_for_module
-from app.safety.moke_box import MokeControlProfile, MokeVoltagePlan, control_profile_from_settings
+from app.safety.moke_box import MokeControlProfile, MokeVoltagePlan, control_profile_from_settings, additional_control_profiles_from_settings
 from app.devices.moke_box.sweep_provider import PROVIDER
 
 
@@ -27,10 +27,11 @@ def create_simulated_moke_adapter(
         2, "SIM::MOKE::COIL", -1, 1, 0, 0.05, 1, 0.05, 30, "simulation-only", True,
         "SIM::MOKE::INSTR",
     )
+    additional = additional_control_profiles_from_settings(settings, simulation=True) if settings is not None else ()
     return MokeBoxAdapter(
         MokeBoxConfig(endpoint="SIM::MOKE::INSTR", expected_model="MOKE SIM",
-                      allow_vout_control=True, allowed_vout_channels=(profile.channel,),
-                      control_profile=profile),
+                      allow_vout_control=True, allowed_vout_channels=(profile.channel, *(test.channel for test in additional)),
+                      control_profile=profile, additional_control_profiles=additional),
         SimulatedMokeBoxTransport(context or SimulationContext(seed=0), field_channel=profile.channel),
     )
 
@@ -58,6 +59,7 @@ def _adapter(settings: StationSettings, simulation: bool) -> DeviceAdapter:
             allow_vout_control=profile.allow_vout_control,
             allowed_vout_channels=profile.allowed_vout_channels,
             control_profile=control_profile_from_settings(settings) if profile.allow_vout_control else None,
+            additional_control_profiles=additional_control_profiles_from_settings(settings) if profile.allow_vout_control else (),
         ),
         MokeBoxTcpTransport(),
     )

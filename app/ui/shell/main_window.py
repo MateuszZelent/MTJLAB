@@ -3514,6 +3514,10 @@ class MainWindow(FluentWindow):
             profile["protocol_qualified"] = True
             profile["allow_vout_control"] = False
             profile["allowed_vout_channels"] = []
+            profile["test_vout_channels"] = []
+            profile["voltage_control"]["approved"] = False
+            for channel_profile in profile.get("channel_profiles", {}).values():
+                channel_profile["approved"] = False
             settings = self._repository.save_raw(raw)
         except Exception as exc:
             QMessageBox.critical(self, "MOKE Box assignment not saved", str(exc))

@@ -8,6 +8,7 @@ from PySide6.QtCore import Qt, Signal
 from PySide6.QtGui import QBrush, QColor, QFont, QMouseEvent, QPainter, QPen
 from PySide6.QtWidgets import (
     QFormLayout,
+    QApplication,
     QHBoxLayout,
     QLineEdit,
     QSpinBox,
@@ -294,9 +295,11 @@ class LimitField(QWidget):
         maximum: object = None,
         *,
         range_mode: bool = True,
+        editor_accessory: QWidget | None = None,
     ) -> None:
         super().__init__()
         self.editor = editor
+        self._editor_accessory = editor_accessory
         self._minimum_value = minimum
         self._maximum_value = maximum
         self._range_mode = range_mode
@@ -309,6 +312,11 @@ class LimitField(QWidget):
         if isinstance(editor, QLineEdit):
             editor.setMinimumWidth(65)
         row.addWidget(editor, 1)
+        if editor_accessory is not None:
+            row.addWidget(editor_accessory)
+            layout.addLayout(row)
+            row = QHBoxLayout()
+            row.setSpacing(6)
         self.minimum = BodyLabel()
         self.maximum = BodyLabel()
         for label in (self.minimum, self.maximum):
@@ -486,6 +494,12 @@ class LimitField(QWidget):
 
     def validate_and_clamp(self) -> bool:
         """Clamp a field on focus loss, while final safety validation remains authoritative."""
+
+        focus = QApplication.focusWidget()
+        if self._editor_accessory is not None and focus is not None and not self.editor.property("precisionArrowStepInProgress") and (
+            focus is self._editor_accessory or self._editor_accessory.isAncestorOf(focus)
+        ):
+            return True  # Choosing the keyboard step must not rewrite the setpoint.
 
         if isinstance(self.editor, QSpinBox):
             minimum = self._minimum_value if isinstance(self._minimum_value, int) else None

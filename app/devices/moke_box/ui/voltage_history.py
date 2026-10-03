@@ -1,4 +1,4 @@
-"""Confirmed DAC history and explicitly labelled calibration predictions."""
+"""Independent operator requests, confirmed DAC samples and field predictions."""
 
 from __future__ import annotations
 
@@ -8,8 +8,8 @@ from collections import deque
 
 import pyqtgraph as pg
 from PySide6.QtCore import QTimer, Qt
-from PySide6.QtWidgets import QVBoxLayout, QWidget
-from qfluentwidgets import CaptionLabel, isDarkTheme, qconfig
+from PySide6.QtWidgets import QHBoxLayout, QVBoxLayout, QWidget
+from qfluentwidgets import CaptionLabel, ComboBox, isDarkTheme, qconfig
 
 from app.domain.errors import ConfigurationError
 from app.ui.design_system import plot_theme, tokens_for
@@ -18,23 +18,36 @@ from app.ui.design_system import plot_theme, tokens_for
 class MokeVoltageHistory(QWidget):
     WINDOW_S = 180.0
 
-    def __init__(self, parent=None):
+    def __init__(self, parent=None, *, window_s=180.0):
         super().__init__(parent)
         self.setObjectName("mokeVoltageHistory")
         self._origin = time.monotonic()
         self._model_id = None
-        self.points = deque(maxlen=2000)
+        self._window_s = window_s
+        self.points = deque(maxlen=6000)
+        self.requested_points = deque(maxlen=6000)
         layout = QVBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
+        window_row = QHBoxLayout()
+        window_row.addWidget(CaptionLabel("Show last", self))
+        self.window_selector = ComboBox(self)
+        for seconds in (10, 30, 60, 180):
+            self.window_selector.addItem(f"{seconds} s", userData=float(seconds))
+        self.window_selector.setCurrentIndex(self.window_selector.findData(float(window_s)))
+        self.window_selector.setToolTip("Display window; history retains the last 3 minutes.")
+        self.window_selector.currentIndexChanged.connect(self._window_changed)
+        window_row.addWidget(self.window_selector)
+        window_row.addStretch()
+        layout.addLayout(window_row)
         self.plot = pg.PlotWidget(self)
         self.plot.setMinimumSize(240, 240)
         self.plot.setMenuEnabled(False)
         self.plot.showGrid(x=True, y=True, alpha=0.18)
         self.plot.setLabel("bottom", "Time relative to now", units="s")
         self.plot.setMouseEnabled(x=False, y=True)
-        self.plot.setXRange(-self.WINDOW_S, 0, padding=0)
+        self.plot.setXRange(-self._window_s, 0, padding=0)
         self.plot.enableAutoRange(axis="x", enable=False)
-        self.plot.setLabel("left", "Confirmed voltage", units="V")
+        self.plot.setLabel("left", "Voltage", units="V")
         self.item = self.plot.getPlotItem()
         self.item.showAxis("right")
         self.item.setLabel("right", "Calculated field", units="T")
@@ -44,6 +57,7 @@ class MokeVoltageHistory(QWidget):
         self.field_view.setXLink(self.item)
         self.item.vb.sigResized.connect(self._sync_geometry)
         self.voltage_curve = self.plot.plot(symbol="o", symbolSize=4)
+        self.requested_curve = self.plot.plot(connect="finite", stepMode="left")
         self.ascending_curve = pg.PlotDataItem(connect="finite")
         self.descending_curve = pg.PlotDataItem(connect="finite")
         self.field_view.addItem(self.ascending_curve)
@@ -52,18 +66,22 @@ class MokeVoltageHistory(QWidget):
         self.legend = CaptionLabel(self)
         self.legend.setWordWrap(True)
         layout.addWidget(self.legend)
-        note = CaptionLabel("Samples are confirmed DAC readings. Field curves are calibration predictions.", self)
+        note = CaptionLabel("Requested: operator draft, including unapplied edits. DAC: confirmed readings only. B: predictions from confirmed DAC.", self)
         note.setWordWrap(True)
         layout.addWidget(note)
         qconfig.themeChanged.connect(self.apply_theme)
         self.apply_theme()
         self._window_timer = QTimer(self)
-        self._window_timer.setInterval(250)
+        self._window_timer.setInterval(50)
         self._window_timer.timeout.connect(self._refresh_visible_window)
         self._window_timer.start()
 
     def showEvent(self, event):
         super().showEvent(event)
+        self._refresh_window()
+
+    def _window_changed(self, _index):
+        self._window_s = self.window_selector.currentData()
         self._refresh_window()
 
     def _refresh_visible_window(self):
@@ -75,6 +93,15 @@ class MokeVoltageHistory(QWidget):
         cutoff_s = now_s - self.WINDOW_S
         while self.points and self.points[0][0] < cutoff_s:
             self.points.popleft()
+        while self.requested_points and self.requested_points[0][0] < cutoff_s:
+            self.requested_points.popleft()
+        if self.requested_points:
+            stamps, values = zip(*self.requested_points, strict=True)
+            # Hold the latest draft to "now". Confirmed readings remain discrete
+            # samples and are never extended to suggest a fresh measurement.
+            self.requested_curve.setData([*[stamp - now_s for stamp in stamps], 0], [*values, values[-1]])
+        else:
+            self.requested_curve.clear()
         if self.points:
             elapsed, voltages, ascending, descending = zip(*self.points, strict=True)
             relative_s = [stamp_s - now_s for stamp_s in elapsed]
@@ -84,7 +111,7 @@ class MokeVoltageHistory(QWidget):
         else:
             for curve in (self.voltage_curve, self.ascending_curve, self.descending_curve):
                 curve.clear()
-        self.plot.setXRange(-self.WINDOW_S, 0, padding=0)
+        self.plot.setXRange(-self._window_s, 0, padding=0)
         self._sync_geometry()
 
     def _sync_geometry(self):
@@ -99,23 +126,31 @@ class MokeVoltageHistory(QWidget):
             self.item.getAxis(axis).setTextPen(pg.mkPen(palette.axes))
         self.voltage_curve.setPen(pg.mkPen(palette.measurement, width=2))
         self.voltage_curve.setSymbolBrush(pg.mkBrush(palette.measurement))
+        self.requested_curve.setPen(pg.mkPen(palette.reference, width=2, style=Qt.PenStyle.DotLine))
         self.ascending_curve.setPen(pg.mkPen(palette.axes, width=2))
         self.descending_curve.setPen(pg.mkPen(palette.axes, width=2, style=Qt.PenStyle.DashLine))
-        self.legend.setText("Voltage · coloured     B↑ · solid     B↓ · dashed")
+        self.legend.setText("Requested V · dotted     Confirmed DAC · solid + dots\nB↑ · solid     B↓ · dashed")
 
     def clear(self):
         self.points.clear()
+        self.requested_points.clear()
         self._origin = time.monotonic()
-        for curve in (self.voltage_curve, self.ascending_curve, self.descending_curve):
+        for curve in (self.voltage_curve, self.requested_curve, self.ascending_curve, self.descending_curve):
             curve.clear()
-        self.plot.setXRange(-self.WINDOW_S, 0, padding=0)
+        self.plot.setXRange(-self._window_s, 0, padding=0)
+
+    def append_requested(self, voltage_v):
+        """A draft is never a DAC measurement or a basis for field prediction."""
+        value = voltage_v if voltage_v is not None and math.isfinite(voltage_v) else float("nan")
+        self.requested_points.append((time.monotonic() - self._origin, value))
+        # The timer draws at a fixed cadence; editor events never redraw plots.
 
     def append(self, voltage_v, model=None):
         if not math.isfinite(voltage_v):
             return
         identity = model.calibration_id if model is not None else None
         if identity != self._model_id:
-            self.clear()
+            self.points.clear()
             self._model_id = identity
         up = down = float("nan")
         if model is not None:
@@ -125,9 +160,7 @@ class MokeVoltageHistory(QWidget):
             except (ValueError, ConfigurationError):
                 pass
         self.points.append((time.monotonic() - self._origin, voltage_v, up, down))
-        if self.isVisible():
-            self._refresh_window()
-        else:
+        if not self.isVisible():
             # Calibration reports points while this page is hidden. Keep the
             # history, but let showEvent draw after the plot has real geometry.
             cutoff_s = time.monotonic() - self._origin - self.WINDOW_S

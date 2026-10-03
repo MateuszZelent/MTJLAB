@@ -79,7 +79,7 @@ class MokeProtocolTests(unittest.TestCase):
         message = str(failure.exception)
         self.assertIn(reply.hex(" "), message)
         self.assertIn("expected=0x10, received=0x11", message)
-        self.assertEqual(transport.sent, [readback_vout()])
+        self.assertEqual(transport.sent, [readback_vout(), readback_vout()])
         self.assertTrue(transport.closed)
         self.assertFalse(adapter.connected)
 

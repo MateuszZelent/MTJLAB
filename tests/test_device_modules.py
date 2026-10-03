@@ -260,7 +260,7 @@ class DeviceModuleTests(unittest.TestCase):
         self.assertEqual(len(bridge), 1)
         self.assertIn("RDGFIELD?", session.writes)
         self.assertTrue(set(session.writes) <= {
-            "*IDN?", "UNIT?", "RDGMODE?", "RANGE?", "AUTO?", "TYPE?", "RDGFIELD?",
+            "*IDN?", "UNIT?", "RDGMODE?", "RANGE?", "AUTO?", "TYPE?", "RDGFIELD?", "OPST?",
         })
 
     def test_lakeshore_connect_is_idempotent_after_identity_verification(self) -> None:

@@ -56,6 +56,7 @@ from app.domain.quick_controls import (
     _QUANTITY,
     QuickControlCommand,
     QuickSetpoint,
+    quantity_step_si,
     render_quantity_si_like,
     step_quantity_text,
 )
@@ -70,6 +71,7 @@ from app.settings.models import StationSettings
 from app.ui.dialogs import StationCardWidget, StationDialog, StationModalShell
 from app.ui.design_system.tokens import tokens_for
 from app.ui.widgets.quick_quantity_slider import QuickQuantitySlider
+from app.ui.widgets.quantity_step_selector import VoltageStepSelector
 from app.ui.workers import DeviceController
 
 
@@ -192,6 +194,7 @@ class QuickControlCoordinator(QObject):
     bounds_changed = Signal()
     draft_changed = Signal(str, str, str)
     confirmed_changed = Signal(str, float)
+    step_changed = Signal(str, str)
 
     def __init__(
         self,
@@ -212,6 +215,7 @@ class QuickControlCoordinator(QObject):
             for descriptor in QUICK_CONTROL_DESCRIPTORS
         }
         self._confirmed_values: dict[str, float] = {}
+        self._step_texts: dict[str, str] = {}
         self._dirty_drafts: set[str] = set()
         self._adopt_readback_targets: dict[str, set[str]] = {
             "rigol": set(),
@@ -290,7 +294,7 @@ class QuickControlCoordinator(QObject):
             if self._moke_workflow is None or self.bound(target) is None:
                 self.state_changed.emit(target, "rejected", "Connect a qualified MOKE output profile.")
                 return
-            if self._moke_active_target is not None:
+            if self._moke_active_target is not None and not self._moke_workflow.can_update_live_target(target):
                 self.state_changed.emit(target, "rejected", "Wait for the MOKE ramp and settling to finish.")
                 return
             self._moke_active_target = target
@@ -341,12 +345,33 @@ class QuickControlCoordinator(QObject):
             lambda target, text, source: workflow.set_quick_control_draft(target, text)
             if source == "quick_controls" and target.startswith("moke_box.") else None)
         workflow.quick_bounds_changed.connect(self._sync_moke_bounds)
+        workflow.quick_step_changed.connect(self.set_step_text)
         workflow.voltage_confirmed.connect(self._moke_confirmed)
         workflow.quick_failed.connect(self._moke_failed)
         workflow.busy_changed.connect(self._moke_busy_changed)
-        target, text = workflow.quick_control_draft()
-        self.publish_draft(target, text, source="moke_card")
+        for target, text in workflow.quick_control_drafts().items():
+            self.publish_draft(target, text, source="moke_card")
+        for channel in range(8):
+            self.set_step_text(f"moke_box.vout{channel}.voltage", workflow.voltage_step_text(channel))
+        for channel, voltage_v in workflow.confirmed_voltages.items():
+            self._moke_confirmed(channel, voltage_v)
         self._sync_moke_bounds()
+
+    def step_text(self, target):
+        return self._step_texts.get(target, "1 mV")
+
+    def set_step_text(self, target, text):
+        descriptor = QUICK_CONTROLS_BY_TARGET[target]
+        if descriptor.device_module != "moke_box":
+            raise ValueError("Explicit voltage steps are available for MOKE controls.")
+        quantity_step_si("0 V", descriptor.dimension, step_text=text)
+        if self._step_texts.get(target) == text:
+            return
+        self._step_texts[target] = text
+        if self._moke_workflow is not None:
+            channel = int(target.split(".")[1].removeprefix("vout"))
+            self._moke_workflow.set_voltage_step(channel, text)
+        self.step_changed.emit(target, text)
 
     def _sync_moke_bounds(self, *_args) -> None:
         for mapping in (self._bounds, self._bound_texts, self._bound_objects):
@@ -354,8 +379,10 @@ class QuickControlCoordinator(QObject):
                 if target.startswith("moke_box."):
                     del mapping[target]
         if self._moke_workflow is not None:
-            envelope = self._moke_workflow.quick_control_bounds()
-            if envelope is not None:
+            for channel_index in range(8):
+                envelope = self._moke_workflow.quick_control_bounds(channel_index)
+                if envelope is None:
+                    continue
                 channel, minimum, maximum = envelope
                 lower = parse_quantity(minimum, "voltage").si_value
                 upper = parse_quantity(maximum, "voltage").si_value
@@ -378,6 +405,8 @@ class QuickControlCoordinator(QObject):
             self.state_changed.emit(target, "rejected", message)
 
     def _moke_busy_changed(self, busy: bool) -> None:
+        if not busy and self._moke_workflow.has_pending_live_target:
+            return  # A newer authorized draft is awaiting the next transaction.
         if not busy and self._moke_active_target is not None:
             target = self._moke_active_target
             self._moke_active_target = None
@@ -385,11 +414,13 @@ class QuickControlCoordinator(QObject):
 
     def stop_moke_voltage(self) -> None:
         if self._moke_workflow is not None:
+            target, _ = self._moke_workflow.quick_control_draft()
+            self._moke_active_target = target
+            self.state_changed.emit(target, "applying", "Turning off selected output; waiting for DAC zero readback")
             try:
                 self._moke_workflow.request_quick_zero()
             except (ValueError, RuntimeError) as exc:
-                for target in self._selected_moke_targets():
-                    self.state_changed.emit(target, "rejected", str(exc))
+                self._moke_failed(str(exc))
 
     def _selected_moke_targets(self):
         return (target for target in self._draft_texts if target.startswith("moke_box."))
@@ -727,6 +758,11 @@ class QuickControlRow(StationCardWidget):
         self.decrease = PushButton("−", self)
         self.value = QuantityStepEdit(self)
         self.value.setText(descriptor.default_text)
+        self.voltage_step = None
+        if descriptor.device_module == "moke_box":
+            self.voltage_step = VoltageStepSelector(self)
+            self.voltage_step.set_step_text(coordinator.step_text(descriptor.target))
+            self.voltage_step.step_changed.connect(lambda text: coordinator.set_step_text(descriptor.target, text))
         self.increase = PushButton("+", self)
         self.decrease.setFixedWidth(38)
         self.increase.setFixedWidth(38)
@@ -740,10 +776,13 @@ class QuickControlRow(StationCardWidget):
             descriptor=descriptor,
             editor=self.value,
             show_title=False,
+            editor_accessory=self.voltage_step,
             parent=self,
         )
         controls.addWidget(self.slider, 1)
         controls.addWidget(self.increase)
+        if self.voltage_step is not None:
+            self.slider.set_step_text(coordinator.step_text(descriptor.target))
         layout.addLayout(controls)
         # Keep the old aggregate label as a non-visual readout for callers
         # that inspected it; the visible Fluent slider renders MIN and MAX
@@ -752,6 +791,15 @@ class QuickControlRow(StationCardWidget):
         self.limits.setObjectName("quickControlLimitsCompat")
         self.limits.setVisible(False)
         layout.addWidget(self.limits)
+        self.confirmed_dac = None
+        self._initial_dac_display_ready = False
+        if descriptor.device_module == "moke_box":
+            self.confirmed_dac = CaptionLabel("Confirmed DAC: — V", self)
+            self.confirmed_dac.setWordWrap(True)
+            self.confirmed_dac.setObjectName("mokeQuickConfirmedDac")
+            layout.addWidget(self.confirmed_dac)
+            if descriptor.target in coordinator._confirmed_values:
+                self.set_confirmed_dac(coordinator._confirmed_values[descriptor.target])
         self.refresh_limits()
         self.status = CaptionLabel("Ready · draft stays synchronized with the device card", self)
         self.status.setObjectName("muted")
@@ -777,8 +825,22 @@ class QuickControlRow(StationCardWidget):
     def set_value_text(self, text: str) -> None:
         self.slider.set_value_text(text)
 
+    def set_step_text(self, text: str) -> None:
+        if self.voltage_step is not None:
+            self.voltage_step.set_step_text(text)
+            self.slider.set_step_text(text)
+
     def set_value_si(self, value_si: float) -> None:
         self.slider.set_value_si(value_si)
+
+    def set_confirmed_dac(self, value_si: float) -> None:
+        if self.confirmed_dac is not None:
+            if not self._initial_dac_display_ready:
+                self._initial_dac_display_ready = True
+                self.slider.set_readback_display_extent(value_si)
+            bound = self._coordinator.bound(self.descriptor.target)
+            outside = bound is not None and not bound.minimum_si <= value_si <= bound.maximum_si
+            self.confirmed_dac.setText(f"Confirmed DAC: {value_si:+.6f} V" + (" · outside working range" if outside else ""))
 
     def _draft_changed(self, target: str, text: str) -> None:
         self._coordinator.publish_draft(target, text, source="quick_controls")
@@ -794,6 +856,7 @@ class QuickControlRow(StationCardWidget):
                 self.descriptor.dimension,
                 direction,
                 multiplier=Decimal(multiplier),
+                step_text=self._coordinator.step_text(self.descriptor.target) if self.voltage_step is not None else None,
             )
             bounded_si, limited, detail = self._coordinator.bound_value(
                 self.descriptor.target, value_si
@@ -1187,6 +1250,8 @@ class QuickControlsWindow(FluentWidget):
         coordinator.state_changed.connect(self._state_changed)
         coordinator.draft_changed.connect(self._draft_changed)
         coordinator.value_read.connect(self._value_read)
+        coordinator.confirmed_changed.connect(self._confirmed_changed)
+        coordinator.step_changed.connect(self._step_changed)
         coordinator.bounds_changed.connect(self._refresh_limits)
 
     def _repair_title_bar_window_actions(self) -> None:
@@ -1542,8 +1607,8 @@ class QuickControlsWindow(FluentWidget):
                 group_hint.setWordWrap(True)
                 group_layout.addWidget(group_hint)
                 if device == "moke_box":
-                    zero = PushButton("Stop / ramp DAC to zero", group_card)
-                    zero.setToolTip("Returns the qualified DAC to zero; does not confirm Kepco power-off.")
+                    zero = PushButton("Turn off selected output", group_card)
+                    zero.setToolTip("Zeros the VOUT selected on the MOKE control page; emergency stop covers all approved outputs. DAC zero does not confirm Kepco power-off.")
                     zero.clicked.connect(self._coordinator.stop_moke_voltage)
                     group_layout.addWidget(zero)
                 for target in group_targets:
@@ -1601,7 +1666,19 @@ class QuickControlsWindow(FluentWidget):
         row = self._rows.get(target)
         if row is None:
             return
+        if target.startswith("moke_box."):
+            return  # DAC telemetry must never move the operator's draft slider.
         row.set_value_si(value_si)
+
+    def _confirmed_changed(self, target: str, value_si: float) -> None:
+        row = self._rows.get(target)
+        if row is not None:
+            row.set_confirmed_dac(value_si)
+
+    def _step_changed(self, target: str, text: str) -> None:
+        row = self._rows.get(target)
+        if row is not None:
+            row.set_step_text(text)
 
     def _refresh_limits(self) -> None:
         for row in self._rows.values():

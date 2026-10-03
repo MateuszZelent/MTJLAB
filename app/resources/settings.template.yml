@@ -444,6 +444,7 @@ devices:
     protocol_qualified: false
     allow_vout_control: false
     allowed_vout_channels: []
+    test_vout_channels: []
     voltage_control:
       approved: false
       binding_id: ''
@@ -462,6 +463,112 @@ devices:
       minimum_settling_time: 2 s
     calibration_directory: calibrations/moke_box
     active_calibration_id:
+    channel_profiles:
+      '0':
+        approved: false
+        binding_id: unconnected-test-VOUT0
+        qualification_reference: ''
+        channel: 0
+        kepco_model: Unconnected DAC test output
+        kepco_mode: dac_test
+        minimum: -1 V
+        maximum: 1 V
+        safe_target: 0 V
+        maximum_step: 50 mV
+        maximum_slew: 1 V/s
+        step_interval: 50 ms
+        ramp_timeout: 30 s
+        minimum_settling_time: 2 s
+      '1':
+        approved: false
+        binding_id: unconnected-test-VOUT1
+        qualification_reference: ''
+        channel: 1
+        kepco_model: Unconnected DAC test output
+        kepco_mode: dac_test
+        minimum: -1 V
+        maximum: 1 V
+        safe_target: 0 V
+        maximum_step: 50 mV
+        maximum_slew: 1 V/s
+        step_interval: 50 ms
+        ramp_timeout: 30 s
+        minimum_settling_time: 2 s
+      '3':
+        approved: false
+        binding_id: unconnected-test-VOUT3
+        qualification_reference: ''
+        channel: 3
+        kepco_model: Unconnected DAC test output
+        kepco_mode: dac_test
+        minimum: -1 V
+        maximum: 1 V
+        safe_target: 0 V
+        maximum_step: 50 mV
+        maximum_slew: 1 V/s
+        step_interval: 50 ms
+        ramp_timeout: 30 s
+        minimum_settling_time: 2 s
+      '4':
+        approved: false
+        binding_id: unconnected-test-VOUT4
+        qualification_reference: ''
+        channel: 4
+        kepco_model: Unconnected DAC test output
+        kepco_mode: dac_test
+        minimum: -1 V
+        maximum: 1 V
+        safe_target: 0 V
+        maximum_step: 50 mV
+        maximum_slew: 1 V/s
+        step_interval: 50 ms
+        ramp_timeout: 30 s
+        minimum_settling_time: 2 s
+      '5':
+        approved: false
+        binding_id: unconnected-test-VOUT5
+        qualification_reference: ''
+        channel: 5
+        kepco_model: Unconnected DAC test output
+        kepco_mode: dac_test
+        minimum: -1 V
+        maximum: 1 V
+        safe_target: 0 V
+        maximum_step: 50 mV
+        maximum_slew: 1 V/s
+        step_interval: 50 ms
+        ramp_timeout: 30 s
+        minimum_settling_time: 2 s
+      '6':
+        approved: false
+        binding_id: unconnected-test-VOUT6
+        qualification_reference: ''
+        channel: 6
+        kepco_model: Unconnected DAC test output
+        kepco_mode: dac_test
+        minimum: -1 V
+        maximum: 1 V
+        safe_target: 0 V
+        maximum_step: 50 mV
+        maximum_slew: 1 V/s
+        step_interval: 50 ms
+        ramp_timeout: 30 s
+        minimum_settling_time: 2 s
+      '7':
+        approved: false
+        binding_id: unconnected-test-VOUT7
+        qualification_reference: ''
+        channel: 7
+        kepco_model: Unconnected DAC test output
+        kepco_mode: dac_test
+        minimum: -1 V
+        maximum: 1 V
+        safe_target: 0 V
+        maximum_step: 50 mV
+        maximum_slew: 1 V/s
+        step_interval: 50 ms
+        ramp_timeout: 30 s
+        minimum_settling_time: 2 s
     live_interval: 1 s
     plot_refresh_interval: 500 ms
     history_window: 60 s

@@ -530,7 +530,7 @@ class MokeVoltageControlSettings(StrictModel):
     qualification_reference: str = ""
     channel: int = Field(default=2, ge=0, le=7, strict=True)
     kepco_model: str = "BOP 72-6M"
-    kepco_mode: Literal["current"] = "current"
+    kepco_mode: Literal["current", "dac_test"] = "current"
     minimum: str = "-1 V"
     maximum: str = "1 V"
     safe_target: str = "0 V"
@@ -555,6 +555,7 @@ class MokeVoltageControlSettings(StrictModel):
                 parse_quantity(self.step_interval, DIMENSION_TIME).si_value,
                 parse_quantity(self.ramp_timeout, DIMENSION_TIME).si_value,
                 self.qualification_reference or "unqualified",
+                kepco_model=self.kepco_model, kepco_mode=self.kepco_mode,
                 minimum_settling_s=parse_quantity(self.minimum_settling_time, DIMENSION_TIME).si_value,
             )
         except SafetyViolation as exc:
@@ -575,7 +576,9 @@ class MokeBoxSettings(StrictModel):
     protocol_qualified: bool = False
     allow_vout_control: bool = False
     allowed_vout_channels: tuple[StrictInt, ...] = ()
+    test_vout_channels: tuple[StrictInt, ...] = ()
     voltage_control: MokeVoltageControlSettings = Field(default_factory=MokeVoltageControlSettings)
+    channel_profiles: dict[str, MokeVoltageControlSettings] = Field(default_factory=dict)
     calibration_directory: str = "calibrations/moke_box"
     active_calibration_id: str | None = None
     live_interval: str = "1 s"
@@ -592,13 +595,33 @@ class MokeBoxSettings(StrictModel):
             raise ValueError("MOKE Box plot_refresh_interval must be at least 100 ms")
         if parse_quantity(self.history_window, DIMENSION_TIME).si_value < 60:
             raise ValueError("MOKE Box history_window must be at least 1 minute")
+        if self.voltage_control.kepco_mode != "current":
+            raise ValueError("Primary field calibration output must bind a Kepco in current mode")
+        for key, profile in self.channel_profiles.items():
+            if key != str(profile.channel) or profile.channel == self.voltage_control.channel:
+                raise ValueError("MOKE channel profile key must match its channel and not duplicate the primary output")
+        authorized = {self.voltage_control.channel} | {
+            profile.channel for profile in self.channel_profiles.values() if profile.approved}
+        approved_tests = {profile.channel for profile in self.channel_profiles.values()
+                          if profile.approved and profile.kepco_mode == "dac_test"}
+        if self.allow_vout_control and set(self.test_vout_channels) != approved_tests:
+            raise ValueError("MOKE test channel list must match approved independent DAC test profiles")
+        for channel in self.test_vout_channels:
+            profile = self.channel_profiles.get(str(channel))
+            if profile is None or not profile.approved or profile.kepco_mode != "dac_test":
+                raise ValueError("MOKE test output requires its own approved DAC test profile")
         if (self.allow_vout_control or self.allowed_vout_channels) and not (
             self.enabled and self.protocol_qualified and self.endpoint
             and self.allow_vout_control and self.voltage_control.approved
-            and self.allowed_vout_channels == (self.voltage_control.channel,)
+            and set(self.allowed_vout_channels) == authorized
         ):
-            raise ValueError("MOKE Box remains read-only without qualified, approved single-channel output control")
-        if any(channel not in range(8) for channel in self.allowed_vout_channels):
+            raise ValueError("MOKE Box remains read-only without qualified, approved output control with explicit test-channel bindings")
+        if (len(set(self.allowed_vout_channels)) != len(self.allowed_vout_channels)
+                or len(set(self.test_vout_channels)) != len(self.test_vout_channels)
+                or self.voltage_control.channel in self.test_vout_channels
+                or (self.test_vout_channels and not self.allow_vout_control)):
+            raise ValueError("MOKE test channels must be distinct, approved and separate from the coil output")
+        if any(channel not in range(8) for channel in (*self.allowed_vout_channels, *self.test_vout_channels)):
             raise ValueError("MOKE VOUT channels must be in 0..7")
         if not self.calibration_directory.strip():
             raise ValueError("MOKE calibration directory cannot be empty")

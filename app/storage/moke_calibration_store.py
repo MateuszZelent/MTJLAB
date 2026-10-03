@@ -12,6 +12,8 @@ import uuid
 from dataclasses import asdict
 from pathlib import Path
 
+import h5py
+
 from app.devices.moke_box.calibration import (
     CalibrationPoint,
     CalibrationRequest,
@@ -69,7 +71,35 @@ class MokeCalibrationRepository:
             raise ConfigurationError(f"Could not read MOKE calibration: {exc}") from exc
         if model.calibration_id != calibration_id:
             raise ConfigurationError("MOKE calibration content hash does not match its identity.")
+        self._validate_raw_run(model)
         return model
+
+    def _validate_raw_run(self, model: MokeCalibration) -> None:
+        if not isinstance(model.raw_run_id, str) or re.fullmatch(r"[0-9a-f]{32}", model.raw_run_id) is None:
+            raise ConfigurationError("Invalid MOKE calibration raw-run identity.")
+        path = self.directory / "runs" / f"{model.raw_run_id}.h5"
+        try:
+            # Hash and inspect the same open file; never trust a detached model alone.
+            with path.open("rb") as stream:
+                digest = hashlib.file_digest(stream, "sha256").hexdigest()
+                if digest != model.raw_sha256:
+                    raise ConfigurationError("MOKE calibration raw HDF5 hash does not match its model.")
+                stream.seek(0)
+                with h5py.File(stream, "r") as raw:
+                    run = raw["run"]
+                    if (run.attrs.get("status") != "completed"
+                            or run.attrs.get("measurement_kind") != "moke_field_calibration"
+                            or int(raw.attrs.get("measurement running", 1)) != 0):
+                        raise ConfigurationError("MOKE calibration raw run is not completed.")
+                    request = json.loads(run["settings_yaml"].asstr()[()])
+                    if request["context"] != asdict(model.context):
+                        raise ConfigurationError("MOKE calibration raw context does not match its model.")
+                    names = list(raw["events/name"].asstr()[:])
+                    finished = json.loads(raw["events/message"].asstr()[names.index("calibration_finished")])
+                    if finished.get("status") != "completed" or finished.get("dac_zero_confirmed") is not True:
+                        raise ConfigurationError("MOKE calibration raw run has no confirmed final DAC zero.")
+        except (OSError, KeyError, ValueError, TypeError) as exc:
+            raise ConfigurationError(f"Could not verify MOKE calibration raw HDF5: {exc}") from exc
 
     def list_ids(self) -> tuple[str, ...]:
         return tuple(sorted(path.stem for path in (self.directory / "profiles").glob("*.json")

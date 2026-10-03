@@ -19,5 +19,7 @@ def simulated_475_session(*, field: float = 0.0, unit_code: str = "2", mode_code
             "TYPE?": "40",
             "RDGFRQ?": "60",
             "RDGPEAK?": f"{-abs(field):.12g},{abs(field):.12g}",
+            "OPST?": "0",
+            "OPSTR?": "4",  # A new simulated conversion is available on each poll.
         }
     )

@@ -19,6 +19,7 @@ class MokeBoxConfig:
     allow_vout_control: bool = False
     allowed_vout_channels: tuple[int, ...] = ()
     control_profile: MokeControlProfile | None = None
+    additional_control_profiles: tuple[MokeControlProfile, ...] = ()
 
     def __post_init__(self) -> None:
         if not self.endpoint.strip():
@@ -29,10 +30,13 @@ class MokeBoxConfig:
             raise ValueError("MOKE VOUT channels must be in 0..7.")
         if len(set(self.allowed_vout_channels)) != len(self.allowed_vout_channels):
             raise ValueError("MOKE VOUT channels must not be duplicated.")
-        if self.control_profile is not None and (
-            not self.allow_vout_control or self.allowed_vout_channels != (self.control_profile.channel,)
-        ):
-            raise ValueError("MOKE control profile must bind exactly one authorized VOUT channel.")
+        profiles = (() if self.control_profile is None else (self.control_profile,)) + self.additional_control_profiles
+        if self.additional_control_profiles and self.control_profile is None:
+            raise ValueError("Additional MOKE profiles require a primary output profile.")
+        if profiles and (not self.allow_vout_control
+                         or len({profile.channel for profile in profiles}) != len(profiles)
+                         or set(self.allowed_vout_channels) != {profile.channel for profile in profiles}):
+            raise ValueError("MOKE control profiles must bind every authorized VOUT channel exactly once.")
 
 
 @dataclass(frozen=True, slots=True)

@@ -10,6 +10,7 @@ import hashlib
 import json
 import math
 from dataclasses import asdict, dataclass
+from threading import Lock
 from typing import TYPE_CHECKING
 
 from app.domain.errors import SafetyViolation
@@ -48,7 +49,7 @@ class MokeControlProfile:
             raise SafetyViolation("MOKE VOUT channel must be an integer in 0..7.")
         if not self.binding_id.strip() or not self.qualification_reference.strip():
             raise SafetyViolation("MOKE control requires a binding and qualification reference.")
-        if self.kepco_mode != "current" or not self.kepco_model.strip():
+        if self.kepco_mode not in {"current", "dac_test"} or not self.kepco_model.strip():
             raise SafetyViolation("This MOKE control profile requires an identified Kepco in current mode.")
         for name in ("minimum_v", "maximum_v", "safe_v", "maximum_step_v",
                      "maximum_slew_v_s", "step_interval_s", "ramp_timeout_s", "minimum_settling_s"):
@@ -129,7 +130,68 @@ class MokeVoltageResult:
     safe_target_confirmed: bool = False
 
 
-def control_profile_from_settings(settings: StationSettings, *, simulation: bool = False) -> MokeControlProfile:
+class MokeLiveTargets:
+    """One replaceable target, bounded by an immutable authorized envelope.
+
+    This mailbox carries data only. The instrument owner consumes it between
+    confirmed steps; publishing never touches the transport or waits for I/O.
+    """
+
+    def __init__(self, plan: MokeVoltagePlan):
+        self._envelope = (plan.profile_fingerprint, plan.channel, plan.minimum_v,
+                          plan.maximum_v, plan.settling_s)
+        self._lock = Lock()
+        self._pending = None
+        self._closed = False
+
+    @property
+    def envelope(self):
+        return self._envelope
+
+    def publish(self, plan: MokeVoltagePlan) -> bool:
+        envelope = (plan.profile_fingerprint, plan.channel, plan.minimum_v,
+                    plan.maximum_v, plan.settling_s)
+        if envelope != self.envelope or len(plan.targets_v) != 1:
+            raise SafetyViolation("Live target cannot change the authorized MOKE envelope.")
+        plan.applied_voltage(plan.targets_v[0])
+        with self._lock:
+            if self._closed:
+                return False
+            self._pending = plan
+            return True
+
+    def take(self) -> MokeVoltagePlan | None:
+        with self._lock:
+            pending, self._pending = self._pending, None
+            return pending
+
+    def discard(self) -> None:
+        with self._lock:
+            self._pending = None
+
+    def close(self) -> None:
+        with self._lock:
+            self._closed = True
+
+
+@dataclass(frozen=True, slots=True)
+class MokeRampProgress:
+    """Confirmed DAC sample; field and power-off are not inferred from it."""
+
+    channel: int
+    initial_v: float
+    target_v: float
+    actual_v: float
+    elapsed_s: float
+    phase: str
+
+    @property
+    def fraction(self) -> float:
+        distance = abs(self.target_v - self.initial_v)
+        return 1.0 if distance == 0 else max(0.0, min(1.0, 1 - abs(self.target_v - self.actual_v) / distance))
+
+
+def control_profile_from_settings(settings: StationSettings, *, simulation: bool = False, channel: int | None = None) -> MokeControlProfile:
     """Single conversion of explicit-unit settings into the runtime envelope."""
     from app.domain.quantities import (
         DIMENSION_TIME,
@@ -138,15 +200,22 @@ def control_profile_from_settings(settings: StationSettings, *, simulation: bool
         parse_quantity,
     )
 
+    if channel is not None and (type(channel) is not int or channel not in range(8)):
+        raise SafetyViolation("MOKE channel must be an integer in 0..7.")
     device = settings.moke_box
     envelope = device.voltage_control
+    primary = channel is None or channel == envelope.channel
+    if not primary:
+        envelope = device.channel_profiles.get(str(channel))
+        if envelope is None or not envelope.approved:
+            raise SafetyViolation("MOKE channel has no approved independent output profile.")
     if not simulation and not (device.enabled and device.protocol_qualified and device.endpoint
                                and device.allow_vout_control and envelope.approved
-                               and device.allowed_vout_channels == (envelope.channel,)):
+                               and envelope.channel in device.allowed_vout_channels):
         raise SafetyViolation("MOKE physical voltage output is not qualified and approved.")
     return MokeControlProfile(
         envelope.channel,
-        "SIM::MOKE::COIL" if simulation else envelope.binding_id,
+        ("SIM::MOKE::COIL" if primary else f"SIM::MOKE::VOUT{envelope.channel}") if simulation else envelope.binding_id,
         parse_quantity(envelope.minimum, DIMENSION_VOLTAGE).si_value,
         parse_quantity(envelope.maximum, DIMENSION_VOLTAGE).si_value,
         parse_quantity(envelope.safe_target, DIMENSION_VOLTAGE).si_value,
@@ -161,3 +230,9 @@ def control_profile_from_settings(settings: StationSettings, *, simulation: bool
         envelope.kepco_mode,
         parse_quantity(envelope.minimum_settling_time, DIMENSION_TIME).si_value,
     )
+
+
+def additional_control_profiles_from_settings(settings: StationSettings, *, simulation: bool = False) -> tuple[MokeControlProfile, ...]:
+    """Each authorized output has its own independently validated settings."""
+    return tuple(control_profile_from_settings(settings, simulation=simulation, channel=profile.channel)
+                 for profile in settings.moke_box.channel_profiles.values() if profile.approved)

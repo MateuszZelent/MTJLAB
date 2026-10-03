@@ -124,9 +124,17 @@ def test_voltage_history_prunes_on_append_and_keeps_full_window_after_clear(appl
         assert not history.points
         assert history.item.vb.viewRange()[0] == pytest.approx([-180, 0])
         history.append(0.3)
+        QTest.qWait(80)  # Rendering is paced independently of incoming samples.
         assert history.voltage_curve.xData == pytest.approx([0])
     finally:
         history.close()
+
+
+def observe_voltage_completions(workflow):
+    """Count completed operations independently of their intermediate DAC samples."""
+    workflow._test_voltage_completions = []
+    workflow.status.connect(lambda message: workflow._test_voltage_completions.append(message)
+                            if message == "MOKE field workflow completed" and workflow._running_kind == "voltage" else None)
 
 
 @pytest.fixture
@@ -149,7 +157,9 @@ def workspace(application, tmp_path):
     for controller in controllers.values():
         controller.call("connect")
     workflow = page.field_workflow
-    wait_for(application, lambda: workflow._profile is not None and workflow._reference_connected)
+    observe_voltage_completions(workflow)
+    wait_for(application, lambda: workflow._profile is not None and workflow._reference_connected
+             and len(workflow._initialized_voltage_channels) == 8)
     yield host, page, controllers, tmp_path
     workflow.stop() if workflow.busy else None
     wait_for(application, lambda: not workflow.busy)
@@ -174,7 +184,12 @@ def test_fluent_control_and_calibration_render_with_visible_geometry(workspace, 
         assert host.height() == height
         assert child.isVisible()
         assert child.width() > 500 and child.height() > 300
-        assert child.parent() is page.views.stack
+        if index == 2:
+            assert child.parent() is page._control_slot
+            assert page._control_slot.parent() is page.views.stack
+            assert page._control_slot.layout().indexOf(child) >= 0
+        else:
+            assert child.parent() is page.views.stack
         if index == 2:
             assert workflow.live_control_switch.isVisibleTo(host)
             assert workflow.live_control_switch.width() > 80
@@ -220,7 +235,7 @@ def test_manual_control_range_permission_slider_and_zero_use_one_controller_leas
     workflow.set_button.click()
     wait_for(application, lambda: not workflow.busy)
     assert abs(controllers["moke_box"].adapter_for_run().read_vouts()[2] - 0.3) < 0.001
-    assert len(workflow.voltage_history.points) == 2
+    assert len(workflow._test_voltage_completions) == 2
     workflow.configuration_panel.set_operator_limits("-0.4 V", "0.5 V")
     assert workflow.set_button.isEnabled()
     workflow.target.setText("2 V")
@@ -230,7 +245,7 @@ def test_manual_control_range_permission_slider_and_zero_use_one_controller_leas
     workflow.channel_selector.setCurrentIndex(3)
     assert not workflow.live_control_switch.isEnabled()
     assert not workflow.set_button.isEnabled()
-    assert not workflow.voltage_history.points
+    assert [point[1] for point in workflow.voltage_history.points] == [workflow._last_voltages[3]]
     workflow.channel_selector.setCurrentIndex(2)
     assert workflow.set_button.isEnabled()
     workflow.zero_button.click()
@@ -289,24 +304,26 @@ def test_live_voltage_debounces_edits_and_applies_slider_without_apply(workspace
     workflow = page.field_workflow
     page.views.setCurrentIndex(2)
     assert not workflow.live_control_switch.isChecked()
+    initial_samples = len(workflow.voltage_history.points)
     workflow.live_control_switch.setChecked(True)
     assert workflow._manual_envelope is not None
     QTest.qWait(550)
-    assert not workflow.voltage_history.points  # Enabling Live does not send the old draft.
+    assert len(workflow.voltage_history.points) == initial_samples  # Live ON sends no old draft.
+    assert not workflow._test_voltage_completions
     assert controllers["moke_box"].adapter_for_run().read_vouts()[2] == 0
     for text in ("100 mV", "200 mV", "300 mV"):
         workflow.target.setText(text)
         QTest.qWait(80)
     assert not workflow.busy
     assert controllers["moke_box"].adapter_for_run().read_vouts()[2] == 0
-    wait_for(application, lambda: len(workflow.voltage_history.points) == 1 and not workflow.busy)
+    wait_for(application, lambda: len(workflow._test_voltage_completions) == 1 and not workflow.busy)
     assert abs(controllers["moke_box"].adapter_for_run().read_vouts()[2] - 0.3) < 0.001
     # No release or Apply is required while Live is ON.
     workflow.voltage_slider.setValue(7000)
-    wait_for(application, lambda: len(workflow.voltage_history.points) == 2 and not workflow.busy)
+    wait_for(application, lambda: len(workflow._test_voltage_completions) == 2 and not workflow.busy)
     assert abs(controllers["moke_box"].adapter_for_run().read_vouts()[2] - 0.2) < 0.001
     QTest.qWait(550)
-    assert len(workflow.voltage_history.points) == 2  # Completion does not resubmit.
+    assert len(workflow._test_voltage_completions) == 2  # Completion does not resubmit.
 
 
 def test_apply_validates_current_settings_and_authorization_without_separate_arm(workspace, application):
@@ -382,12 +399,12 @@ def test_moke_voltage_arrows_preserve_units_precision_and_live_apply(workspace, 
     install_precision_arrow_stepper(application)
     assert workflow.target.text() == "0 mV"
     for draft, increased, decreased in (
-        ("0 mV", "100 mV", "0 mV"),
-        ("0 V", "0.1 V", "0.0 V"),
-        ("0.00 V", "0.01 V", "0.00 V"),
-        ("0,00 V", "0,01 V", "0,00 V"),
-        ("0.00 mV", "0.01 mV", "0.00 mV"),
-        ("1e-2 V", "2e-2 V", "1e-2 V"),
+        ("0 mV", "1 mV", "0 mV"),
+        ("0 V", "0.001 V", "0.000 V"),
+        ("0.00 V", "0.001 V", "0.000 V"),
+        ("0,00 V", "0,001 V", "0,000 V"),
+        ("0.00 mV", "1.00 mV", "0.00 mV"),
+        ("1e-2 V", "1.1e-2 V", "1.0e-2 V"),
     ):
         workflow.target.setText(draft)
         QTest.keyClick(workflow.target, Qt.Key.Key_Up)
@@ -396,21 +413,21 @@ def test_moke_voltage_arrows_preserve_units_precision_and_live_apply(workspace, 
         assert workflow.target.text() == decreased
     workflow.target.setText("0 mV")
     QTest.keyClick(workflow.voltage_slider, Qt.Key.Key_Right)
-    assert workflow.target.text() == "100 mV"
+    assert workflow.target.text() == "1 mV"
     QTest.qWait(550)
     assert controllers["moke_box"].adapter_for_run().read_vouts()[2] == 0
     workflow.set_button.click()
     wait_for(application, lambda: not workflow.busy)
-    assert controllers["moke_box"].adapter_for_run().read_vouts()[2] == pytest.approx(0.1, abs=0.001)
+    assert controllers["moke_box"].adapter_for_run().read_vouts()[2] == pytest.approx(0.001, abs=0.0002)
     workflow.target.setText("0.00 V")
     workflow.live_control_switch.setChecked(True)
     QTest.keyClick(workflow.target, Qt.Key.Key_Up)
-    wait_for(application, lambda: len(workflow.voltage_history.points) == 2 and not workflow.busy)
-    assert controllers["moke_box"].adapter_for_run().read_vouts()[2] == pytest.approx(0.01, abs=0.001)
+    wait_for(application, lambda: len(workflow._test_voltage_completions) == 2 and not workflow.busy)
+    assert controllers["moke_box"].adapter_for_run().read_vouts()[2] == pytest.approx(0.001, abs=0.0002)
     workflow.target.setText("0.5 V")
     QTest.keyClick(workflow.target, Qt.Key.Key_Up)
-    assert workflow.target.text() == "0.5 V"  # Shared Keithley range editor clamps at MAX.
-    wait_for(application, lambda: len(workflow.voltage_history.points) == 3 and not workflow.busy)
+    assert workflow.target.text() == "0.500 V"  # Selected 1 mV step clamps at MAX.
+    wait_for(application, lambda: len(workflow._test_voltage_completions) == 3 and not workflow.busy)
     assert controllers["moke_box"].adapter_for_run().read_vouts()[2] == pytest.approx(0.5, abs=0.001)
     workflow.target.setText("2 V")
     QTest.qWait(550)
@@ -422,13 +439,15 @@ def test_moke_voltage_arrows_preserve_units_precision_and_live_apply(workspace, 
 def test_live_off_and_invalid_drafts_cancel_pending_voltage(workspace, application):
     _, page, controllers, _ = workspace
     workflow = page.field_workflow
+    initial_samples = len(workflow.voltage_history.points)
     workflow.live_control_switch.setChecked(True)
     for invalid in ("2 V", "nan V", "100 mA", ""):
         workflow.target.setText("100 mV")
         workflow.target.setText(invalid)
         QTest.qWait(550)
         assert not workflow.busy
-        assert not workflow.voltage_history.points
+        assert len(workflow.voltage_history.points) == initial_samples
+        assert not workflow._test_voltage_completions
         assert not workflow.set_button.isEnabled()
     workflow.target.setText("200 mV")
     assert workflow._live_timer.isActive()
@@ -510,7 +529,7 @@ def test_live_keeps_only_latest_draft_while_one_worker_waits(workspace, applicat
             workflow.live_control_switch.setChecked(False)
         release.set()
         count = 1 if disable_live else 2
-        wait_for(application, lambda: not workflow.busy and len(workflow.voltage_history.points) == count)
+        wait_for(application, lambda: not workflow.busy and len(workflow._test_voltage_completions) == count)
         QTest.qWait(550)
         assert requests == ([0.1] if disable_live else [0.1, 0.2])
     actual = adapter.read_vouts()[2]
@@ -570,7 +589,7 @@ def test_live_mouse_drag_survives_worker_start_finish_and_readback(workspace, ap
             assert host.grab().save(str(tmp_path / f"moke-live-held-slider-{theme}.png"))
             assert not disabled_inputs, "A Live refresh disabled the pressed control mid-gesture"
             release.set()
-            wait_for(application, lambda: not workflow.busy and len(workflow.voltage_history.points) == 1)
+            wait_for(application, lambda: not workflow.busy and len(workflow._test_voltage_completions) == 1)
             # Keep the mouse pressed through completion and the profile/readback update.
             latest_target = move_handle(0.7)
             assert first_target < latest_target < middle_target
@@ -666,7 +685,7 @@ def test_live_completion_preserves_saved_calibration_selection_and_review(worksp
     workflow.clear_history_button.click()
     workflow.live_control_switch.setChecked(True)
     workflow.target.setText("100 mV")
-    wait_for(application, lambda: not workflow.busy and len(workflow.voltage_history.points) == 1)
+    wait_for(application, lambda: not workflow.busy and len(workflow._test_voltage_completions) == 1)
     QTest.qWait(300)  # Include the queued get_control_profile reply after completion.
     assert workflow.saved_models.currentData() == selected
     assert workflow._review_model.calibration_id == reviewed_id
@@ -720,7 +739,7 @@ def test_coupled_calibration_reviews_activates_and_previews_field(workspace, app
         workflow.set_button.click()
         wait_for(application, lambda: not workflow.busy and workflow.set_button.isEnabled())
     assert expected_preview != workflow.field_readout.text()
-    assert len(workflow.voltage_history.points) == 4
+    assert len(workflow._test_voltage_completions) == 4
     assert all(abs(point[2]) < 1 for point in workflow.voltage_history.points)
     apply_application_theme(application, "light")
     host.resize(1360, 880)
@@ -777,8 +796,8 @@ def test_copied_keithley_edit_button_changes_operator_range_without_hardware_wri
     assert workflow.set_button.isEnabled()
     assert controllers["moke_box"].adapter_for_run().read_vouts()[2] == 0
     assert not hasattr(workflow.configuration_panel, "mode")
-    labels = [workflow.configuration_panel.form.itemAt(row, workflow.configuration_panel.form.ItemRole.LabelRole).widget().text()
-              for row in range(workflow.configuration_panel.form.rowCount())]
+    labels = [item.widget().text() for row in range(workflow.configuration_panel.form.rowCount())
+              if (item := workflow.configuration_panel.form.itemAt(row, workflow.configuration_panel.form.ItemRole.LabelRole)) is not None]
     assert "Source mode" not in labels
     workflow.read_voltage_button.click()
     wait_for(application, lambda: bool(workflow.voltage_history.points))
@@ -809,7 +828,8 @@ def test_full_fluent_shell_binds_control_calibration_and_voltage_sweep(applicati
         window.moke_box_page.views.setCurrentIndex(2)
         for key in ("moke_box", "lakeshore_gaussmeter"):
             window._controllers[key].call("connect")
-        wait_for(application, lambda: workflow._profile is not None and workflow._reference_connected)
+        wait_for(application, lambda: workflow._profile is not None and workflow._reference_connected
+                 and len(workflow._initialized_voltage_channels) == 8)
         assert workflow.control_page.isVisibleTo(window)
         assert workflow.channel_selector.isVisibleTo(window)
         assert workflow.voltage_history.isVisibleTo(window)
@@ -961,6 +981,7 @@ def test_full_fluent_shell_binds_control_calibration_and_voltage_sweep(applicati
         workflow.activate_button.click()
         assert workflow._active_model is not None
         window.moke_box_page.views.setCurrentIndex(2)
+        observe_voltage_completions(workflow)
         workflow.target.setText("100 mV")
         assert workflow.set_button.isEnabled()
         workflow.set_button.click()
@@ -969,7 +990,7 @@ def test_full_fluent_shell_binds_control_calibration_and_voltage_sweep(applicati
         assert "B↓" in workflow.field_readout.text()
         workflow.live_control_switch.setChecked(True)
         workflow.target.setText("250 mV")
-        wait_for(application, lambda: len(workflow.voltage_history.points) == 2 and not workflow.busy)
+        wait_for(application, lambda: len(workflow._test_voltage_completions) == 2 and not workflow.busy)
         assert abs(window._controllers["moke_box"].adapter_for_run().read_vouts()[2] - 0.25) < 0.001
         paint_end = time.monotonic() + 0.25
         wait_for(application, lambda: time.monotonic() >= paint_end)

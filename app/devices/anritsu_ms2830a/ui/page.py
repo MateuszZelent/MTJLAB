@@ -20,7 +20,7 @@ from PySide6.QtGui import QCloseEvent, QResizeEvent
 from PySide6.QtWidgets import (
     QComboBox, QDialog, QDialogButtonBox,
     QFormLayout, QFrame, QGridLayout, QHBoxLayout, QLabel, QLineEdit,
-    QProgressBar, QSplitter, QSpinBox,
+    QLayout, QProgressBar, QSplitter, QSpinBox,
     QSizePolicy, QToolButton, QVBoxLayout, QWidget,
 )
 from qfluentwidgets import (
@@ -98,6 +98,28 @@ class AnritsuPageState(StrEnum):
     ERROR = "error"
 
 
+def _finish_spectrum_form(form: QFormLayout) -> None:
+    """Keep Fluent editors at their natural height, including in scroll hosts."""
+    form.setSizeConstraint(QLayout.SizeConstraint.SetMinimumSize)
+    form.setVerticalSpacing(10)
+    form.setHorizontalSpacing(16)
+    form.setLabelAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter)
+    form.setRowWrapPolicy(QFormLayout.RowWrapPolicy.WrapLongRows)
+    for row in range(form.rowCount()):
+        item = form.itemAt(row, QFormLayout.ItemRole.LabelRole)
+        label = item.widget() if item else None
+        if isinstance(label, QLabel) and not isinstance(label, BodyLabel):
+            fluent_label = BodyLabel(label.text(), form.parentWidget())
+            fluent_label.setMinimumWidth(fluent_label.sizeHint().width())
+            form.replaceWidget(label, fluent_label)
+            label.hide()
+            label.deleteLater()
+        field = form.itemAt(row, QFormLayout.ItemRole.FieldRole)
+        if field and field.widget():
+            widget = field.widget()
+            widget.setMinimumHeight(widget.sizeHint().height())
+
+
 class AnritsuSpectrumConfigurationPanel(CardWidget):
     """Shared, hardware-neutral spectrum setup for manual and plan hosts."""
 
@@ -172,6 +194,8 @@ class AnritsuSpectrumConfigurationPanel(CardWidget):
         vbw_layout.addWidget(self.vbw, 1)
         form.addRow("VBW", vbw_layout)
 
+        _finish_spectrum_form(form)
+        layout.setSizeConstraint(QLayout.SizeConstraint.SetMinimumSize)
         layout.addLayout(form)
         if plan_mode:
             note = BodyLabel(
@@ -411,6 +435,8 @@ class AnritsuAdvancedSpectrumPanel(CardWidget):
         self.sweep_time = _line("100 ms")
         form.addRow("Sweep-time mode", self.sweep_time_mode)
         form.addRow("Sweep time", self.sweep_time)
+
+        _finish_spectrum_form(form)
 
         self.refresh_detector_choices(hardware_options)
         self.set_hardware_options(hardware_options)
@@ -1128,6 +1154,7 @@ class AnritsuPage(QWidget):
         left_layout = QVBoxLayout(left_panel)
         left_layout.setContentsMargins(8, 8, 8, 8)
         left_layout.setSpacing(10)
+        left_layout.setSizeConstraint(QLayout.SizeConstraint.SetMinimumSize)
         self.setup_card = CardWidget(left_panel)
         self.setup_card.setObjectName("anritsuSetupCard")
         self.setup_card.setProperty("stationSurface", "card")
@@ -1203,6 +1230,7 @@ class AnritsuPage(QWidget):
         )
         refresh_form = QFormLayout()
         refresh_form.addRow("Live refresh interval", self.refresh)
+        _finish_spectrum_form(refresh_form)
         setup_layout.addLayout(refresh_form)
         self.hardware_option_info = BodyLabel()
         self.hardware_range_info = BodyLabel()
@@ -1654,6 +1682,9 @@ class AnritsuPage(QWidget):
         if self._workspace_compact == compact:
             return
         self._workspace_compact = compact
+        self.control_scroll.setMinimumHeight(180 if compact else 0)
+        self.spectrum_plot.setMinimumHeight(180 if compact else 300)
+        self.spectrogram_plot.setMinimumHeight(180 if compact else 300)
         self.workspace_splitter.setOrientation(
             Qt.Orientation.Vertical if compact else Qt.Orientation.Horizontal
         )
@@ -1736,12 +1767,25 @@ class AnritsuPage(QWidget):
         return tab
 
     def _build_advanced_spectrum_dialog(self) -> QDialog:
-        dialog = StationDialog(self)
+        dialog = StationDialog(self, resizable=True)
         dialog.setWindowTitle("Anritsu advanced Spectrum settings")
         dialog.setModal(False)
-        dialog.resize(620, 470)
+        dialog.resize(720, 780)
+        dialog.setMinimumSize(540, 460)
         surface = dialog.use_modal_shell_content().surface
-        layout = dialog.modal_content_layout(spacing=10)
+        outer = dialog.modal_content_layout(spacing=12)
+        scroll = ScrollArea(surface)
+        scroll.setObjectName("anritsuAdvancedSettingsScroll")
+        scroll.setWidgetResizable(True)
+        scroll.setFrameShape(QFrame.Shape.NoFrame)
+        scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        content = QWidget()
+        layout = QVBoxLayout(content)
+        layout.setContentsMargins(4, 4, 12, 4)
+        layout.setSpacing(16)
+        layout.setSizeConstraint(QLayout.SizeConstraint.SetMinimumSize)
+        scroll.setWidget(content)
+        outer.addWidget(scroll, 1)
         explanation = BodyLabel(
             "These controls change bandwidth, detector and the RF input path. Readback is "
             "always available as an explicit diagnostic action. Apply remains locked until "
@@ -1788,7 +1832,7 @@ class AnritsuPage(QWidget):
         actions.addWidget(self.advanced_apply_button)
         actions.addStretch(1)
         actions.addWidget(close_button)
-        layout.addLayout(actions)
+        outer.addLayout(actions)
         self.advanced_read_button.clicked.connect(self.read_advanced_spectrum)
         self.advanced_apply_button.clicked.connect(self.configure_advanced_spectrum)
         close_button.clicked.connect(dialog.hide)

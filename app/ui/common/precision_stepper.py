@@ -91,11 +91,12 @@ class PrecisionArrowStepper(QObject):
 
         direction = 1 if event.key() == Qt.Key.Key_Up else -1
         integer_step = watched.property("precisionIntegerStep")
-        if integer_step:
+        step_text = watched.property("precisionStep")
+        if integer_step or step_text:
             try:
                 dimension = parse_quantity(watched.text()).dimension
                 stepped_text, _ = step_quantity_text(
-                    watched.text(), dimension, direction, integer_step=integer_step
+                    watched.text(), dimension, direction, integer_step=integer_step, step_text=step_text
                 )
             except ValueError:
                 return False

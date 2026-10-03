@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import statistics
+import math
 from collections.abc import Callable
 from dataclasses import asdict
 from threading import Event
@@ -16,7 +17,6 @@ from qfluentwidgets import (
     CardWidget,
     CheckBox,
     ComboBox,
-    FlowLayout,
     LineEdit,
     PrimaryPushButton,
     ProgressBar,
@@ -38,14 +38,14 @@ from app.devices.moke_box.calibration_runner import (
 from app.devices.moke_box.ui.voltage_history import MokeVoltageHistory
 from app.devices.moke_box.ui.configuration_panel import MokeVoltageConfigurationPanel
 from app.domain.errors import ConfigurationError
-from app.domain.quick_controls import quantity_step_si, render_quantity_si_like
+from app.domain.quick_controls import quantity_step_si, render_quantity_si_like, step_quantity_text
 from app.domain.quantities import (
     DIMENSION_MAGNETIC_FIELD,
     DIMENSION_TIME,
     DIMENSION_VOLTAGE,
     parse_quantity,
 )
-from app.safety.moke_box import MokeControlProfile, MokeVoltagePlan, MokeVoltageResult, control_profile_from_settings
+from app.safety.moke_box import MokeControlProfile, MokeVoltagePlan, MokeVoltageResult, MokeRampProgress, MokeLiveTargets, control_profile_from_settings, additional_control_profiles_from_settings
 from app.settings.models import StationSettings
 from app.storage.moke_calibration_store import MokeCalibrationRepository
 from app.ui.design_system import plot_theme, tokens_for
@@ -56,14 +56,16 @@ from app.ui.widgets.quick_quantity_slider import QuantitySliderMapping
 
 class MokeFieldWorker(QObject):
     progress = Signal(object)
+    voltage_progress = Signal(object)
     succeeded = Signal(object)
     failed = Signal(str)
     finished = Signal()
 
-    def __init__(self, kind, request, leases, directory, cancel):
+    def __init__(self, kind, request, leases, directory, cancel, live_targets=None):
         super().__init__()
         self.kind, self.request = kind, request
         self.leases, self.directory, self.cancel = leases, directory, cancel
+        self.live_targets = live_targets
 
     @Slot()
     def run(self):
@@ -75,30 +77,37 @@ class MokeFieldWorker(QObject):
                 result = MokeCalibrationRunner(
                     moke, self.leases["lakeshore_gaussmeter"], self.directory,
                     cancel=self.cancel, interruption_events=interrupts,
-                    progress=self.progress.emit,
+                    progress=self.progress.emit, voltage_progress=self.voltage_progress.emit,
                 ).run(self.request, armed=True)
             elif self.kind == "zero":
-                profile = moke.get_control_profile()
+                profile = moke.get_control_profile(self.request)
                 with moke.io_timeout(profile.ramp_timeout_s + 5):
-                    result = moke.stop_vout()
+                    result = moke.stop_vout(self.request, progress=self.voltage_progress.emit)
             else:
                 plan = self.request
                 if cancel.is_set():
                     raise ConfigurationError("MOKE manual operation was cancelled before arming.")
                 moke.configure_voltage_plan(plan)
                 moke.arm_voltage_plan(plan)
-                profile = moke.get_control_profile()
+                profile = moke.get_control_profile(plan.channel)
                 with moke.io_timeout(profile.ramp_timeout_s + 5):
-                    result = moke.ramp_vout(plan.channel, plan.targets_v[0], cancel=cancel)
+                    result = moke.ramp_vout(plan.channel, plan.targets_v[0], cancel=cancel,
+                                           progress=self.voltage_progress.emit, live_targets=self.live_targets)
             self.succeeded.emit(result)
         except Exception as exc:  # noqa: BLE001 - report failure after attempting qualified cleanup
-            try:
-                moke.emergency_off()
-            except Exception:  # noqa: BLE001 - report the primary workflow failure
-                self.failed.emit(f"{exc}; emergency shutdown also failed")
-            else:
+            if self.kind == "calibration":
+                # Runner owns cleanup after mutation. Failed preflight must leave DAC untouched.
                 self.failed.emit(str(exc))
+            else:
+                try:
+                    moke.emergency_off()
+                except Exception:  # noqa: BLE001 - report the primary workflow failure
+                    self.failed.emit(f"{exc}; emergency shutdown also failed")
+                else:
+                    self.failed.emit(str(exc))
         finally:
+            if self.live_targets is not None:
+                self.live_targets.close()
             for lease in reversed(tuple(self.leases.values())):
                 try:
                     lease.release()
@@ -117,47 +126,104 @@ class MokeFieldWorkflow(QObject):
     vout_overview_requested = Signal()
     voltage_confirmed = Signal(int, float)
     quick_draft_changed = Signal(str, str)
+    quick_step_changed = Signal(str, str)
     quick_failed = Signal(str)
     quick_bounds_changed = Signal()
+    floating_requested = Signal()
 
-    def quick_control_bounds(self):
-        """Expose the qualified channel and operator envelope without I/O."""
-        if (self._profile is None or not self._connected
-                or self._selected_channel() != self._profile.channel):
+    def _manual_profile(self, channel=None):
+        if self._profile is None:
             return None
-        minimum = max(self._profile.minimum_v, self._voltage(self.configuration_panel.minimum_text))
-        maximum = min(self._profile.maximum_v, self._voltage(self.configuration_panel.maximum_text))
+        channel = self._selected_channel() if channel is None else channel
+        if channel == self._profile.channel:
+            return self._profile
+        for profile in additional_control_profiles_from_settings(self._settings, simulation=self._simulation):
+            if profile.channel == channel:
+                return profile
+        return None
+
+    def quick_control_bounds(self, channel=None):
+        """Expose the qualified channel and operator envelope without I/O."""
+        profile = self._manual_profile(channel)
+        if profile is None or not self._connected:
+            return None
+        if profile.channel == self._selected_channel():
+            lo, hi = self.configuration_panel.minimum_text, self.configuration_panel.maximum_text
+        else:
+            lo, hi, _, _ = self._channel_drafts.get(profile.channel, self._default_channel_draft(profile))
+        minimum = max(profile.minimum_v, self._voltage(lo))
+        maximum = min(profile.maximum_v, self._voltage(hi))
         if minimum >= maximum:
             return None
-        return self._profile.channel, f"{minimum:.12g} V", f"{maximum:.12g} V"
+        return profile.channel, f"{minimum:.12g} V", f"{maximum:.12g} V"
 
     def quick_control_draft(self):
         return f"moke_box.vout{self._selected_channel()}.voltage", self.target.text()
 
+    def quick_control_drafts(self):
+        drafts = {f"moke_box.vout{channel}.voltage": values[3]
+                  for channel, values in self._channel_drafts.items()}
+        target, text = self.quick_control_draft()
+        drafts[target] = text
+        return drafts
+
+    def voltage_step_text(self, channel):
+        return self._channel_steps.get(channel, "1 mV")
+
+    def set_voltage_step(self, channel, text):
+        if channel not in range(8):
+            raise ValueError("MOKE channel must be 0 through 7.")
+        quantity_step_si("0 V", DIMENSION_VOLTAGE, step_text=text)
+        changed = self.voltage_step_text(channel) != text
+        self._channel_steps[channel] = text
+        if channel == self._selected_channel():
+            self.configuration_panel.voltage_step.set_step_text(text)
+            self.target.setProperty("precisionStep", text)
+            self._update_voltage_slider_step()
+        if changed:
+            self.quick_step_changed.emit(f"moke_box.vout{channel}.voltage", text)
+
+    @property
+    def confirmed_voltages(self):
+        return dict(self._last_voltages)
+
     def refresh_quick_values(self):
         if self._connected and not self.busy and not self._external_controlled:
-            self.vout_overview_requested.emit()
+            self._controller.call("read_vouts")
 
     def set_quick_control_draft(self, target: str, text: str):
         if target != f"moke_box.vout{self._selected_channel()}.voltage":
             return
-        if self.busy or self._external_controlled:
+        if self._external_controlled or (self.busy and self._running_kind != "voltage"):
             return
         parse_quantity(text, DIMENSION_VOLTAGE)
         previous = self.target.blockSignals(True)
+        self._edited_voltage_channels.add(self._selected_channel())
         self.target.setText(text)
         self.target.blockSignals(previous)
-        # A shared draft must not schedule a second live ramp.
-        self._target_changed()
+        # Live uses the same replaceable target and the same transport owner.
+        self._target_changed(text) if self.live_control_switch.isChecked() else self._target_changed()
+
+    def can_update_live_target(self, target: str) -> bool:
+        return (self.busy and self._running_kind == "voltage" and self._connected
+                and not self._external_controlled and self.live_control_switch.isChecked()
+                and target == f"moke_box.vout{self._selected_channel()}.voltage")
 
     def request_quick_voltage(self, target: str, text: str):
         """Use the same authorized, reserved worker as manual Apply voltage."""
+        if self.can_update_live_target(target):
+            voltage = parse_quantity(text, DIMENSION_VOLTAGE).si_value
+            self._manual_voltage_plan((voltage,))
+            self.set_quick_control_draft(target, text)
+            self._submit_live_target()
+            return
         if self.busy or self._external_controlled:
             raise ConfigurationError("MOKE Box is busy or reserved by a recipe.")
-        if (not self._connected or self._profile is None
-                or target != f"moke_box.vout{self._profile.channel}.voltage"
-                or self._selected_channel() != self._profile.channel):
-            raise ConfigurationError("Select the connected, qualified MOKE output channel on its card.")
+        channels = [channel for channel in range(8) if target == f"moke_box.vout{channel}.voltage"]
+        if not self._connected or not channels or self._manual_profile(channels[0]) is None:
+            raise ConfigurationError("MOKE output channel has no approved binding.")
+        parse_quantity(text, DIMENSION_VOLTAGE)
+        self.channel_selector.setCurrentIndex(self.channel_selector.findData(channels[0]))
         voltage = parse_quantity(text, DIMENSION_VOLTAGE).si_value
         self._manual_voltage_plan((voltage,))  # Validate before changing the shared draft.
         self.set_quick_control_draft(target, text)
@@ -174,6 +240,12 @@ class MokeFieldWorkflow(QObject):
         self._reference: DeviceController | None = None
         self._settings = settings
         self._profile: MokeControlProfile | None = None
+        self._channel_drafts = {}
+        self._channel_steps = {}
+        self._initialized_voltage_channels = set()
+        self._edited_voltage_channels = set()
+        self._slider_readback_extents = {}
+        self._draft_channel = settings.moke_box.voltage_control.channel
         self._reference_identity = None
         self._simulation = False
         self._thread: QThread | None = None
@@ -183,6 +255,7 @@ class MokeFieldWorkflow(QObject):
         self._manual_plan = None
         self._manual_envelope = None
         self._slider_mapping = None
+        self._syncing_slider = False
         self._last_voltages = {}
         self._calibration_request = None
         self._last_result: CalibrationRunResult | None = None
@@ -195,6 +268,10 @@ class MokeFieldWorkflow(QObject):
         self._external_controlled = False
         self._input_controls = []
         self._live_pending = False
+        self._live_targets = None
+        self._last_requested_v = None
+        self._quick_bounds_signature = None
+        self._history_visible = True
         self._live_timer = QTimer(self)
         self._live_timer.setSingleShot(True)
         self._live_timer.setInterval(400)
@@ -210,6 +287,10 @@ class MokeFieldWorkflow(QObject):
     @property
     def busy(self) -> bool:
         return self._thread is not None
+
+    @property
+    def has_pending_live_target(self) -> bool:
+        return self._live_pending and self.live_control_switch.isChecked()
 
     def bind_reference(self, reference: DeviceController, *, simulation: bool,
                        authorize: Callable[[str, object], None] | None,
@@ -279,14 +360,20 @@ class MokeFieldWorkflow(QObject):
             "Live ON: valid voltage changes are applied automatically after 400 ms. "
             "Live OFF: use Apply voltage. Enabling Live approves the selected range without sending a voltage.")
         self.live_control_switch.checkedChanged.connect(self._live_control_toggled)
-        source_layout.addWidget(self.live_control_switch)
+        control_header = QHBoxLayout()
+        control_header.addWidget(self.live_control_switch)
+        control_header.addStretch()
+        self.open_floating_button = PushButton("Open floating controls", source_pane)
+        self.open_floating_button.setAccessibleName("Open MOKE voltage controls in a floating window")
+        self.open_floating_button.clicked.connect(self.floating_requested)
+        control_header.addWidget(self.open_floating_button)
+        source_layout.addLayout(control_header)
         source_layout.addWidget(source_scroll, 1)
         action_footer = CardWidget(source_pane)
         source_layout.addWidget(action_footer)
-        buttons = FlowLayout(needAni=False, isTight=True)
+        buttons = QHBoxLayout()
         buttons.setContentsMargins(0, 0, 0, 0)
-        buttons.setHorizontalSpacing(6)
-        buttons.setVerticalSpacing(6)
+        buttons.setSpacing(6)
         self.read_configuration_button = PushButton("Read all VOUT", source_tab)
         self.read_configuration_button.setToolTip("Open the VOUT 0–7 table and read all DAC registers. This does not change an output or measure Kepco current.")
         self.read_voltage_button = PushButton("Read selected VOUT", source_tab)
@@ -303,6 +390,8 @@ class MokeFieldWorkflow(QObject):
         self.profile_label = self.configuration_panel.profile_summary
         self.field_readout = self.configuration_panel.calculated_field
         self.target = self.configuration_panel.level
+        self.configuration_panel.voltage_step.step_changed.connect(
+            lambda text: self.set_voltage_step(self._selected_channel(), text))
         self._input_controls.append(self.target)
         self.target.textChanged.connect(self._target_changed)
         self.target.returnPressed.connect(self._submit_live_target)
@@ -313,14 +402,19 @@ class MokeFieldWorkflow(QObject):
         self.voltage_slider.setToolTip("Live ON: automatically apply voltage. Live OFF: select a voltage, then click Apply voltage.")
         self.voltage_slider.valueChanged.connect(self._slider_changed)
         self.voltage_slider.sliderReleased.connect(self._submit_live_target)
+        self.voltage_slider.installEventFilter(self)
         self._input_controls.append(self.voltage_slider)
         self.configuration_panel.form.insertRow(2, "Voltage slider", self.voltage_slider)
+        self.initial_readback_note = CaptionLabel("", source_tab)
+        self.initial_readback_note.setWordWrap(True)
+        self.initial_readback_note.hide()
+        self.configuration_panel.form.insertRow(3, self.initial_readback_note)
         self.manual_settling = line_edit("2 s")
         self.manual_settling.setAccessibleName("Voltage settling time")
         self.manual_settling.setToolTip("Wait after the final DAC readback before allowing the next target. Must be at least the station minimum; elapsed time does not confirm field stability.")
         self.manual_settling.textChanged.connect(self._revoke_arm)
         self._input_controls.append(self.manual_settling)
-        self.configuration_panel.form.insertRow(3, "Settling time", self.manual_settling)
+        self.configuration_panel.form.insertRow(4, "Settling time", self.manual_settling)
         workflow = CardWidget(source_tab)
         workflow.setObjectName("mokeOutputWorkflow")
         workflow_layout = QVBoxLayout(workflow)
@@ -330,15 +424,25 @@ class MokeFieldWorkflow(QObject):
         workflow_layout.addWidget(self.manual_status)
         note = CaptionLabel("Programming voltage controls Kepco current. DAC zero does not confirm power-off or zero field.", workflow)
         note.setWordWrap(True)
+        self.output_note = note
         workflow_layout.addWidget(note)
         actions = QHBoxLayout(action_footer)
         actions.setContentsMargins(8, 5, 8, 5)
         self.set_button = PrimaryPushButton("Apply voltage", action_footer)
-        self.zero_button = PushButton("Ramp DAC to zero", action_footer)
+        self.zero_button = PushButton("Turn off field", action_footer)
         actions.addWidget(self.set_button)
         actions.addWidget(self.zero_button)
         self.voltage_readout = StrongBodyLabel("Confirmed DAC: — V", workflow)
         workflow_layout.addWidget(self.voltage_readout)
+        self.ramp_status = CaptionLabel("", workflow)
+        self.ramp_status.setWordWrap(True)
+        self.ramp_status.hide()
+        workflow_layout.addWidget(self.ramp_status)
+        self.ramp_progress_bar = ProgressBar(workflow)
+        self.ramp_progress_bar.setRange(0, 1000)
+        self.ramp_progress_bar.setValue(0)
+        self.ramp_progress_bar.hide()
+        workflow_layout.addWidget(self.ramp_progress_bar)
         content.addWidget(workflow)
         self.set_button.clicked.connect(self._start_manual)
         self.zero_button.clicked.connect(self._zero)
@@ -346,20 +450,53 @@ class MokeFieldWorkflow(QObject):
         self.read_voltage_button.clicked.connect(lambda: self._controller.call("read_vouts"))
         content.addStretch(1)
         self.workspace_splitter.addWidget(source_pane)
-        history_card, history_layout = self._card(page, "Voltage / field · last 3 minutes")
+        field_scroll, field_column, field_layout = self._scroll_page(page)
+        field_scroll.setObjectName("mokeFieldPanel")
+        field_column.setObjectName("mokeFieldColumn")
+        field_column.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred)
+        field_layout.setContentsMargins(0, 0, 0, 0)
+        field_layout.setSpacing(6)
+        self.field_card, field_content = self._card(field_column, "Magnetic field · B(U)")
+        self.field_heading = field_content.itemAt(0).widget()
+        self.field_card.setObjectName("mokeCalibratedFieldCard")
+        field_content.addWidget(self.field_readout)
+        self.field_readout.show()
+        self.field_basis = CaptionLabel("Voltage draft: — V", self.field_card)
+        self.field_basis.setWordWrap(True)
+        field_content.addWidget(self.field_basis)
+        field_note = CaptionLabel(
+            "B↑ and B↓ are predictions from the activated calibration branches. "
+            "They assume the recorded full-range conditioning, rather than verified current field history. "
+            "This is not a live Lake Shore measurement. Review and activate a saved calibration to show predictions.",
+            self.field_card)
+        field_note.setWordWrap(True)
+        field_content.addWidget(field_note)
+        self.field_note = field_note
+        self.compact_field_note = CaptionLabel("Predictions from saved calibration; not a live Hall measurement.", self.field_card)
+        self.compact_field_note.setWordWrap(True)
+        self.compact_field_note.hide()
+        field_content.addWidget(self.compact_field_note)
+        field_layout.addWidget(self.field_card)
+        history_card, history_layout = self._card(field_column, "Voltage / field · live history")
+        self.history_card = history_card
         history_layout.setContentsMargins(7, 6, 7, 6)
         history_layout.setSpacing(4)
-        self.voltage_history = MokeVoltageHistory(history_card)
+        self.voltage_history = MokeVoltageHistory(history_card, window_s=30.0)
         history_layout.addWidget(self.voltage_history, 1)
         history_actions = QHBoxLayout()
         self.clear_history_button = PushButton("Clear history", history_card)
         self.clear_history_button.clicked.connect(self.voltage_history.clear)
         history_actions.addWidget(self.clear_history_button)
         history_layout.addLayout(history_actions)
-        self.workspace_splitter.addWidget(history_card)
+        field_layout.addWidget(history_card, 1)
+        self.workspace_splitter.addWidget(field_scroll)
         self.workspace_splitter.setStretchFactor(0, 3)
         self.workspace_splitter.setStretchFactor(1, 7)
         self.workspace_splitter.setSizes([450, 910])
+        self._source_content = content
+        self._field_layout = field_layout
+        self._field_scroll = field_scroll
+        self._history_visible = True
         self._sync_slider()
         return page
 
@@ -368,14 +505,129 @@ class MokeFieldWorkflow(QObject):
         self._controller.call("read_vouts")
 
     def eventFilter(self, watched, event):
-        if event.type() == QEvent.Type.Resize and hasattr(self, "workspace_splitter"):
-            self.workspace_splitter.setOrientation(Qt.Orientation.Vertical if watched.width() < 720 else Qt.Orientation.Horizontal)
+        if watched is getattr(self, "voltage_slider", None) and event.type() == QEvent.Type.KeyPress:
+            direction = {Qt.Key.Key_Up: 1, Qt.Key.Key_Right: 1, Qt.Key.Key_Down: -1, Qt.Key.Key_Left: -1}.get(event.key())
+            if direction is not None and watched.isEnabled():
+                try:
+                    text, voltage_v = step_quantity_text(self.target.text(), DIMENSION_VOLTAGE, direction,
+                                                         step_text=self.target.property("precisionStep"))
+                    bounded_v = min(max(voltage_v, self._voltage(self.configuration_panel.minimum_text)),
+                                    self._voltage(self.configuration_panel.maximum_text))
+                    if bounded_v != voltage_v:
+                        text = render_quantity_si_like(text, DIMENSION_VOLTAGE, bounded_v)
+                    self.target.setText(text)
+                except ValueError:
+                    pass
+                event.accept()
+                return True
+        if watched is getattr(self, "control_page", None) and event.type() == QEvent.Type.Resize:
+            self._update_workspace_orientation(watched.width())
         return super().eventFilter(watched, event)
+
+    def _update_workspace_orientation(self, width, *, reset_sizes=False):
+        orientation = Qt.Orientation.Vertical if self._history_visible and width < 640 else Qt.Orientation.Horizontal
+        if hasattr(self, "compact_field_note"):
+            expanded_note = self._history_visible and width >= 800
+            self.field_note.setVisible(expanded_note)
+            self.compact_field_note.setVisible(not expanded_note)
+        if orientation != self.workspace_splitter.orientation() or reset_sizes:
+            self.workspace_splitter.setOrientation(orientation)
+            # A narrow stacked panel needs most of the height for its controls.
+            # Reusing the wide layout's proportions hides the voltage editor.
+            sizes = [650, 350] if orientation == Qt.Orientation.Vertical else [450, 910]
+            self.workspace_splitter.setSizes(sizes)
+
+    def set_history_visible(self, visible: bool):
+        """Rearrange the same controls; plot toggling never communicates with hardware."""
+        if visible == self._history_visible:
+            return
+        self._history_visible = visible
+        if visible:
+            self._source_content.removeWidget(self.field_card)
+            self._field_layout.insertWidget(0, self.field_card)
+        else:
+            self._field_layout.removeWidget(self.field_card)
+            self._source_content.insertWidget(3, self.field_card)
+        self.field_note.setVisible(visible)
+        self.field_heading.setVisible(visible)
+        self.compact_field_note.setVisible(not visible)
+        self.history_card.setVisible(visible)
+        self._field_scroll.setVisible(visible)
+        self.field_card.show()
+        self._update_workspace_orientation(self.control_page.width(), reset_sizes=True)
 
     def _selected_channel(self):
         return self.channel_selector.currentData()
 
+    def _default_channel_draft(self, profile):
+        lo, hi = max(-.5, profile.minimum_v), min(.5, profile.maximum_v)
+        if lo >= hi:
+            lo, hi = profile.minimum_v, profile.maximum_v
+        return f"{lo:g} V", f"{hi:g} V", f"{profile.minimum_settling_s:g} s", "0 mV"
+
+    def _channel_defaults(self, channel):
+        profile = self._manual_profile(channel)
+        if profile is not None:
+            return self._default_channel_draft(profile)
+        setting = (self._settings.moke_box.voltage_control if channel == self._settings.moke_box.voltage_control.channel
+                   else self._settings.moke_box.channel_profiles.get(str(channel)))
+        if setting is None:
+            return "-0.5 V", "0.5 V", "2 s", "0 mV"
+        lo = max(-.5, self._voltage(setting.minimum))
+        hi = min(.5, self._voltage(setting.maximum))
+        if lo >= hi:
+            lo, hi = self._voltage(setting.minimum), self._voltage(setting.maximum)
+        return f"{lo:g} V", f"{hi:g} V", setting.minimum_settling_time, "0 mV"
+
+    def _adopt_initial_voltages(self, values):
+        """Initialize each untouched channel once, without authorizing or writing it."""
+        selected_changed = False
+        for channel, voltage_v in values.items():
+            if channel in self._initialized_voltage_channels or not math.isfinite(voltage_v):
+                continue
+            self._initialized_voltage_channels.add(channel)
+            if channel in self._edited_voltage_channels:
+                continue
+            if channel == self._selected_channel():
+                lo, hi, settling, draft = (self.configuration_panel.minimum_text,
+                    self.configuration_panel.maximum_text, self.manual_settling.text(), self.target.text())
+            else:
+                lo, hi, settling, draft = self._channel_drafts.get(channel, self._channel_defaults(channel))
+            try:
+                text = render_quantity_si_like(draft, DIMENSION_VOLTAGE, voltage_v, preferred_unit="mV")
+                # Do not round an acquired value to a coarse operator edit precision.
+                if self._voltage(text) != voltage_v:
+                    text = f"{voltage_v:.17g} V"
+            except ValueError:
+                text = f"{voltage_v:.17g} V"
+            self._channel_drafts[channel] = (lo, hi, settling, text)
+            self._slider_readback_extents[channel] = voltage_v
+            if channel == self._selected_channel():
+                previous = self.target.blockSignals(True)
+                self.target.setText(text)
+                self.target.blockSignals(previous)
+                selected_changed = True
+            self.quick_draft_changed.emit(f"moke_box.vout{channel}.voltage", text)
+        if selected_changed:
+            self._sync_slider()
+
     def _channel_changed(self, *_args):
+        self._disable_live()
+        if hasattr(self, "manual_settling"):
+            self._channel_drafts[self._draft_channel] = (
+                self.configuration_panel.minimum_text, self.configuration_panel.maximum_text,
+                self.manual_settling.text(), self.target.text())
+            self._draft_channel = self._selected_channel()
+            self.set_voltage_step(self._selected_channel(), self.voltage_step_text(self._selected_channel()))
+            profile = self._manual_profile()
+            self.configuration_panel.profile = profile
+            lo, hi, settling, target = self._channel_drafts.get(
+                self._selected_channel(), self._channel_defaults(self._selected_channel()))
+            for editor, text in ((self.manual_settling, settling), (self.target, target)):
+                previous = editor.blockSignals(True)
+                editor.setText(text)
+                editor.blockSignals(previous)
+            self.configuration_panel.set_operator_limits(lo, hi)
         self._revoke_arm()
         if hasattr(self, "voltage_history"):
             self.voltage_history.clear()
@@ -384,24 +636,56 @@ class MokeFieldWorkflow(QObject):
             if voltage is not None:
                 self._record_voltage(voltage)
             self._preview_target()
+        self._refresh_profile_summary()
+
+    def _refresh_profile_summary(self):
+        profile = self._manual_profile()
+        if profile is None:
+            self.profile_label.setText("Read-only output: no approved binding.")
+            return
+        purpose = "Unconnected DAC test output" if profile.kepco_mode == "dac_test" else "Kepco coil output"
+        self.output_note.setText(
+            "Unconnected DAC test output. Its voltage does not represent the coil field."
+            if profile.kepco_mode == "dac_test" else
+            "Programming voltage controls Kepco current. DAC zero does not confirm power-off or zero field.")
+        self.profile_label.setText(
+            f"VOUT{profile.channel} - {purpose}\n"
+            f"Station {profile.minimum_v:g} to {profile.maximum_v:g} V; ramp <= {profile.maximum_slew_v_s:g} V/s\n"
+            f"{profile.binding_id}" + (" (SIMULATION)" if profile.simulation else ""))
 
     def _sync_slider(self, *_args):
         try:
             minimum = self._voltage(self.configuration_panel.minimum_text)
             maximum = self._voltage(self.configuration_panel.maximum_text)
+            existing_v = self._slider_readback_extents.get(self._selected_channel())
+            outside = existing_v is not None and not minimum <= existing_v <= maximum
+            self.initial_readback_note.setVisible(outside)
+            if outside:
+                self.initial_readback_note.setText(
+                    f"Initial DAC {existing_v:+.6g} V is outside the working range. "
+                    "The slider displays this value; new targets stay within the working limits.")
+                minimum, maximum = min(minimum, existing_v), max(maximum, existing_v)
             self._slider_mapping = QuantitySliderMapping(minimum, maximum, (maximum - minimum) / 10000)
-            self.voltage_slider.setRange(0, self._slider_mapping.maximum_position)
+            self._syncing_slider = True
+            try:
+                self.voltage_slider.setRange(0, self._slider_mapping.maximum_position)
+            finally:
+                self._syncing_slider = False
             self._target_changed()
         except (ValueError, RuntimeError):
             self._slider_mapping = None
             self.voltage_slider.setEnabled(False)
 
     def _slider_changed(self, position):
-        if self._slider_mapping is not None:
+        if self._slider_mapping is not None and not self._syncing_slider:
             voltage = self._slider_mapping.value_for_position(position)
+            voltage = min(max(voltage, self._voltage(self.configuration_panel.minimum_text)),
+                          self._voltage(self.configuration_panel.maximum_text))
             self.target.setText(render_quantity_si_like(self.target.text(), DIMENSION_VOLTAGE, voltage, preferred_unit="mV"))
 
     def _target_changed(self, *_args):
+        if _args:
+            self._edited_voltage_channels.add(self._selected_channel())
         try:
             parse_quantity(self.target.text(), DIMENSION_VOLTAGE)
         except ValueError:
@@ -412,26 +696,46 @@ class MokeFieldWorkflow(QObject):
         try:
             voltage = self._voltage(self.target)
             if self._slider_mapping is not None:
-                step_v = quantity_step_si(self.target.text(), DIMENSION_VOLTAGE,
-                                          integer_step=self.target.property("precisionIntegerStep"))
-                self.voltage_slider.setSingleStep(max(1, round(step_v / self._slider_mapping.step_si)))
-                self.voltage_slider.blockSignals(True)
-                self.voltage_slider.setValue(self._slider_mapping.position_for_value(voltage))
-                self.voltage_slider.blockSignals(False)
+                self._update_voltage_slider_step()
+                self._syncing_slider = True
+                try:
+                    self.voltage_slider.setValue(self._slider_mapping.position_for_value(voltage))
+                finally:
+                    self._syncing_slider = False
             self._manual_plan = self._manual_voltage_plan((voltage,))
         except (ValueError, RuntimeError):
             self._manual_plan = None
         self._preview_target()
+        try:
+            requested_v = self._voltage(self.target)
+        except ValueError:
+            requested_v = None
+        if requested_v != self._last_requested_v:
+            self._last_requested_v = requested_v
+            self.voltage_history.append_requested(requested_v)
         self._refresh_controls()
         if _args and self.live_control_switch.isChecked():
-            self._live_timer.stop()
             self._live_pending = self._manual_plan is not None
-            if self._live_pending:
+            if self._live_targets is not None:
+                self._live_targets.discard()  # Never execute an obsolete debounced draft.
+            if self._live_pending and not self._live_timer.isActive():
                 self._live_timer.start()
+            elif not self._live_pending:
+                self._live_timer.stop()
+
+    def _update_voltage_slider_step(self):
+        if self._slider_mapping is not None:
+            step_v = quantity_step_si("0 V", DIMENSION_VOLTAGE,
+                                      step_text=self.target.property("precisionStep"))
+            positions = max(1, round(step_v / self._slider_mapping.step_si))
+            self.voltage_slider.setSingleStep(positions)
+            self.voltage_slider.setPageStep(positions * 10)
 
     def _disable_live(self):
         self._live_timer.stop()
         self._live_pending = False
+        if self._live_targets is not None:
+            self._live_targets.discard()
         self.live_control_switch.blockSignals(True)
         self.live_control_switch.setChecked(False)
         self.live_control_switch.blockSignals(False)
@@ -439,6 +743,8 @@ class MokeFieldWorkflow(QObject):
     def _live_control_toggled(self, enabled):
         self._live_timer.stop()
         self._live_pending = False
+        if self._live_targets is not None:
+            self._live_targets.discard()
         if enabled:
             if self.busy or self._external_controlled or not self._connected:
                 self._disable_live()
@@ -457,7 +763,17 @@ class MokeFieldWorkflow(QObject):
         if not self.live_control_switch.isChecked() or not self._live_pending:
             return
         if self.busy:
-            return  # Keep only the latest draft; never run two output workers.
+            if self._live_targets is not None and self._manual_plan is not None:
+                try:
+                    self._approve("ramp_vout", self._manual_plan)
+                    accepted = self._live_targets.publish(self._manual_plan)
+                    self.manual_status.setText(
+                        "Live target updated; waiting for confirmed DAC in the background." if accepted else
+                        "Latest Live target queued; current DAC confirmation is finishing.")
+                except (ValueError, RuntimeError) as exc:
+                    self._failed(str(exc))
+                    self._cancel.set()
+            return  # Keep the latest draft until completion proves it was consumed.
         self._live_pending = False
         if self._connected and not self._external_controlled and self._manual_envelope is not None:
             self._start_manual()
@@ -467,10 +783,11 @@ class MokeFieldWorkflow(QObject):
             return
         try:
             voltage = self._voltage(self.target)
-            if self._profile is not None and self._selected_channel() == self._profile.channel:
+            if self._manual_profile() is not None:
                 voltage = self._manual_voltage_plan((voltage,)).applied_voltage(voltage)
             self.show_field_preview(voltage)
         except (ValueError, RuntimeError):
+            self.field_basis.setText("Voltage draft: invalid or outside the permitted range")
             self.field_readout.setText("Calculated field: enter a valid voltage")
 
     def _record_voltage(self, voltage):
@@ -489,6 +806,7 @@ class MokeFieldWorkflow(QObject):
         self._last_voltages[channel] = voltage_v
         self.voltage_confirmed.emit(channel, voltage_v)
         self.voltage_readout.setText(f"Confirmed DAC: {voltage_v:+.6f} V")
+        self.field_basis.setText(f"Runner-confirmed DAC: {voltage_v:+.6g} V")
         model = MokeCalibration.from_document(calibration_document) if isinstance(calibration_document, dict) else None
         self.voltage_history.append(voltage_v, model)
         if model is None:
@@ -496,7 +814,7 @@ class MokeFieldWorkflow(QObject):
             return
         try:
             up, down = model.ascending.estimate(voltage_v), model.descending.estimate(voltage_v)
-            self.field_readout.setText(f"Calculated field: B↑ {up * 1000:+.6g} mT · B↓ {down * 1000:+.6g} mT. Conditioning history unverified.")
+            self.field_readout.setText(f"B↑ {up * 1000:+.6g} mT\nB↓ {down * 1000:+.6g} mT")
         except ConfigurationError as exc:
             self.field_readout.setText(f"Calculated field unavailable: {exc}")
 
@@ -612,6 +930,10 @@ class MokeFieldWorkflow(QObject):
         if self.busy:
             self.stop()
         self._settings = settings
+        self._channel_drafts.clear()
+        self._initialized_voltage_channels.clear()
+        self._slider_readback_extents.clear()
+        self._draft_channel = settings.moke_box.voltage_control.channel
         self.manual_settling.setText(settings.moke_box.voltage_control.minimum_settling_time)
         self._manual_envelope = None
         self._manual_plan = self._calibration_request = None
@@ -621,6 +943,7 @@ class MokeFieldWorkflow(QObject):
         self._profile = None
         if self._connected:
             self._controller.call("get_control_profile")
+            self._controller.call("read_vouts")
         self._refresh_controls()
 
     def _revoke_arm(self, *_args):
@@ -636,9 +959,11 @@ class MokeFieldWorkflow(QObject):
             return "Connect MOKE Box to read DAC values. Voltage control requires a qualified station profile."
         if self._profile is None:
             return "Connected for readout only. Live, Apply voltage and DAC zero are locked: no approved voltage-control profile. Qualify the Kepco connection and limits in the station profile before enabling control."
+        if self._manual_profile() is None:
+            return "This output has no approved binding and remains read-only."
         if self._selected_channel() != self._profile.channel:
-            return f"Voltage control is qualified only for VOUT {self._profile.channel}. Other channels remain read-only."
-        return "Set voltage and click Apply voltage. The current min/max and settling time are validated automatically. Live applies subsequent voltage edits automatically."
+            return f"VOUT{self._selected_channel()}: unconnected DAC test output. Voltage limits and ramps apply; field calibration belongs to VOUT{self._profile.channel}."
+        return "Apply voltage sets the draft. Live automatically applies valid edits within the working range."
 
     def _revoke_calibration(self, *_args):
         self._calibration_request = None
@@ -648,21 +973,25 @@ class MokeFieldWorkflow(QObject):
         return parse_quantity(widget if isinstance(widget, str) else widget.text(), DIMENSION_VOLTAGE).si_value
 
     def _manual_voltage_plan(self, targets):
+        profile = self._manual_profile()
+        if profile is None:
+            raise ConfigurationError("This output has no approved binding.")
         settling_s = parse_quantity(self.manual_settling.text(), DIMENSION_TIME).si_value
-        if self._profile is not None and settling_s < self._profile.minimum_settling_s:
+        if settling_s < profile.minimum_settling_s:
             raise ConfigurationError("Settling time must be at least the qualified station minimum.")
-        return self._make_plan(self.configuration_panel.minimum_text, self.configuration_panel.maximum_text, targets, settling_s=settling_s)
+        return self._make_plan(self.configuration_panel.minimum_text, self.configuration_panel.maximum_text, targets, settling_s=settling_s, profile=profile)
 
     def _operator_limits_changed(self, *_args):
         self._revoke_arm()
         self._sync_slider()
 
-    def _make_plan(self, minimum, maximum, targets, *, settling_s=0.0):
+    def _make_plan(self, minimum, maximum, targets, *, settling_s=0.0, profile=None):
         if self._profile is None:
             raise ConfigurationError("Connect a qualified output profile first.")
-        plan = MokeVoltagePlan(self._profile.fingerprint, self._profile.channel,
+        profile = self._profile if profile is None else profile
+        plan = MokeVoltagePlan(profile.fingerprint, profile.channel,
                                self._voltage(minimum), self._voltage(maximum), tuple(targets), settling_s)
-        plan.validate(self._profile)
+        plan.validate(profile)
         return plan
 
     def _approve(self, kind, request):
@@ -673,7 +1002,7 @@ class MokeFieldWorkflow(QObject):
 
     def _prepare_manual(self):
         try:
-            if not self._connected or self._profile is None or self._selected_channel() != self._profile.channel:
+            if not self._connected or self._manual_profile() is None:
                 raise ConfigurationError("This channel is read-only. Select the qualified Kepco output channel.")
             plan = self._manual_voltage_plan((self._voltage(self.target),))
             self._approve("arm_voltage_plan", plan)
@@ -695,6 +1024,8 @@ class MokeFieldWorkflow(QObject):
             self._start_job("voltage", plan)
 
     def _make_calibration_request(self):
+        if self._profile is not None and self._selected_channel() != self._profile.channel:
+            raise ConfigurationError(f"Select coil VOUT{self._profile.channel} for field calibration.")
         if self._reference_identity is None or self._profile is None:
             raise ConfigurationError("Connect both MOKE-Box and Lake Shore first.")
         lo, hi = self._voltage(self.cal_minimum), self._voltage(self.cal_maximum)
@@ -737,11 +1068,20 @@ class MokeFieldWorkflow(QObject):
 
     def _zero(self):
         self._disable_live()
+        self._edited_voltage_channels.add(self._selected_channel())
         self._manual_envelope = None
+        try:
+            zero_text = render_quantity_si_like(self.target.text(), DIMENSION_VOLTAGE, 0, preferred_unit="mV")
+        except ValueError:
+            zero_text = "0 V"  # Invalid drafts must never prevent shutdown.
+        previous = self.target.blockSignals(True)
+        self.target.setText(zero_text)
+        self.target.blockSignals(previous)
+        self._target_changed()  # Display the zero request; actual voltage still comes only from readback.
         if self.busy:
             self.stop()
         elif self._profile is not None:
-            self._start_job("zero", None)
+            self._start_job("zero", self._selected_channel())
 
     def _start_job(self, kind, request):
         if self.busy or self._external_controlled:
@@ -775,19 +1115,26 @@ class MokeFieldWorkflow(QObject):
             self.progress_bar.setMaximum(2 * len(request.plan.targets_v) * request.repetitions)
         self._thread = QThread(self)
         self._running_kind = kind
-        self._worker = MokeFieldWorker(kind, request, leases, self._settings.moke_box.calibration_directory, self._cancel)
+        self._live_targets = MokeLiveTargets(request) if kind == "voltage" and self.live_control_switch.isChecked() else None
+        self._worker = MokeFieldWorker(kind, request, leases, self._settings.moke_box.calibration_directory,
+                                       self._cancel, self._live_targets)
         self._worker.moveToThread(self._thread)
         self._thread.started.connect(self._worker.run)
         self._worker.progress.connect(self._progress)
+        self._worker.voltage_progress.connect(self._voltage_progress)
         self._worker.succeeded.connect(self._succeeded)
         self._worker.failed.connect(self._failed)
         self._worker.finished.connect(self._thread.quit)
         self._worker.finished.connect(self._worker.deleteLater)
         self._thread.finished.connect(self._job_finished)
         self.manual_status.setText("Returning DAC to zero…" if kind == "zero" else (
-            f"Ramping voltage, then waiting {max(request.settling_s, self._profile.minimum_settling_s):g} s for settling…"
+            f"Ramping voltage, then waiting {max(request.settling_s, self._manual_profile().minimum_settling_s):g} s for settling…"
             if kind == "voltage" else "Applying armed voltage trajectory…"))
         self.calibration_status.setText("Calibration running…" if kind == "calibration" else self.calibration_status.text())
+        self.ramp_status.setText("Waiting for DAC readback...")
+        self.ramp_status.show()
+        self.ramp_progress_bar.setValue(0)
+        self.ramp_progress_bar.show()
         self._refresh_controls()
         self.busy_changed.emit(True)
         self._thread.start()
@@ -811,9 +1158,11 @@ class MokeFieldWorkflow(QObject):
     def _job_finished(self):
         thread = self._thread
         kind = self._running_kind
+        self.ramp_progress_bar.hide()
         self._worker = None
         self._running_kind = None
         self._thread = None
+        self._live_targets = None
         self.busy_changed.emit(False)
         if thread is not None:
             thread.deleteLater()
@@ -826,6 +1175,23 @@ class MokeFieldWorkflow(QObject):
         self._target_changed()
         if self._live_pending and self.live_control_switch.isChecked():
             self._live_timer.start()
+
+    def _voltage_progress(self, sample):
+        if not isinstance(sample, MokeRampProgress) or not self.busy:
+            return
+        self._last_voltages[sample.channel] = sample.actual_v
+        if sample.channel != self._selected_channel():
+            self.voltage_confirmed.emit(sample.channel, sample.actual_v)
+            return
+        self._record_voltage(sample.actual_v)
+        percent = round(100 * sample.fraction)
+        phase = {"zeroing": "Turning off", "ramping": "Changing voltage", "settling": "Settling"}[sample.phase]
+        self.ramp_status.setText(
+            f"{phase} VOUT{sample.channel}: {sample.actual_v:+.6f} V -> {sample.target_v:+.6g} V "
+            f"({percent}%, {sample.elapsed_s:.1f} s)")
+        self.ramp_progress_bar.setValue(round(1000 * sample.fraction))
+        self.ramp_progress_bar.show()
+        self.ramp_status.show()
 
     def _progress(self, point):
         self._record_voltage(point.actual_v)
@@ -848,8 +1214,21 @@ class MokeFieldWorkflow(QObject):
                 f"Raw data: {result.path}\nModel: {model.calibration_id}")
             self.calibration_status.setText("Calibration saved. DAC zero confirmed; Kepco power/current state remains unknown.")
             self._record_voltage(0.0)
+            self.ramp_status.setText("Calibration completed; DAC zero confirmed. Actual field and Kepco power-off are not verified.")
         elif isinstance(result, MokeVoltageResult):
+            if self._running_kind == "voltage" and self.live_control_switch.isChecked():
+                try:
+                    self._live_pending = self._manual_plan is not None and self._voltage(self.target) != result.requested_v
+                except ValueError:
+                    self._live_pending = False
+                if not self._live_pending:
+                    self._live_timer.stop()
             self._record_voltage(result.actual_v)
+            self.ramp_status.setText(
+                "DAC zero confirmed. Actual field and Kepco power-off are not verified."
+                if result.safe_target_confirmed and self._manual_profile().kepco_mode == "current" else
+                "Output at zero: DAC readback confirmed." if result.safe_target_confirmed else
+                "Target voltage confirmed; settling completed.")
             self.manual_status.setText(
                 "DAC zero confirmed. Kepco power/current state remains unknown." if result.safe_target_confirmed else
                 f"Requested {result.requested_v:+.6g} V · applied {result.applied_v:+.6g} V · readback confirmed.")
@@ -879,18 +1258,30 @@ class MokeFieldWorkflow(QObject):
         if self._profile is None:
             return
         repository = MokeCalibrationRepository(self._settings.moke_box.calibration_directory)
+        rejected = []
         for identity in repository.list_ids():
-            model = repository.load(identity)
+            try:
+                model = repository.load(identity)
+            except ConfigurationError as exc:
+                rejected.append(f"{identity[:10]}: {exc}")
+                continue
             if model.context.profile_fingerprint == self._profile.fingerprint and model.context.simulation == self._profile.simulation:
                 self.saved_models.addItem(f"{model.created_utc[:19]} · {identity[:10]}", userData=identity)
         index = self.saved_models.findData(selected)
         if index >= 0:
             self.saved_models.setCurrentIndex(index)
+        if rejected:
+            message = f"Rejected {len(rejected)} saved calibration(s). {rejected[0]}"
+            self.calibration_status.setText(message)
+            self.status.emit(message)
 
     def _load_model(self):
         identity = self.saved_models.currentData()
         if not identity or self.busy:
             return
+        self._review_model = None
+        self.reviewed.setChecked(False)
+        self._refresh_controls()
         try:
             model = MokeCalibrationRepository(self._settings.moke_box.calibration_directory).load(identity)
             if self._profile is None or model.context.profile_fingerprint != self._profile.fingerprint:
@@ -907,19 +1298,23 @@ class MokeFieldWorkflow(QObject):
             self._failed(str(exc))
 
     def show_field_preview(self, voltage_v):
-        if self._active_model is None or self._profile is None or self._selected_channel() != self._profile.channel:
+        self.field_basis.setText(f"Voltage draft (DAC quantized): {voltage_v:+.6g} V")
+        if self._profile is not None and self._selected_channel() != self._profile.channel:
+            self.field_readout.setText(f"Field calibration belongs to coil VOUT{self._profile.channel}; no field prediction for this output.")
+            return
+        if self._active_model is None or self._profile is None:
             self.field_readout.setText("Predicted field: no active calibration")
             return
         try:
             up = self._active_model.ascending.estimate(voltage_v)
             down = self._active_model.descending.estimate(voltage_v)
-            self.field_readout.setText(
-                f"Calculated field: B↑ {up * 1000:+.6g} mT · B↓ {down * 1000:+.6g} mT. "
-                "Prediction assumes recorded full-range conditioning; current field is not measured here.")
+            self.field_readout.setText(f"B↑ {up * 1000:+.6g} mT\nB↓ {down * 1000:+.6g} mT")
         except (ConfigurationError, ValueError) as exc:
             self.field_readout.setText(f"Predicted field unavailable: {exc}")
 
     def _failed(self, message):
+        if self.busy:
+            self.ramp_status.setText(f"Operation failed or interrupted: {message}\nDisplayed voltage is the last confirmed readback.")
         self.quick_failed.emit(message)
         self._disable_live()
         self._manual_envelope = None
@@ -932,12 +1327,14 @@ class MokeFieldWorkflow(QObject):
     def _device_result(self, operation, result):
         if operation == "connect":
             self._connected = True
+            self._initialized_voltage_channels.clear()
             self._controller.call("get_control_profile")
+            self._controller.call("read_vouts")
         elif operation == "get_control_profile":
             previous_profile = self._profile
             previously_qualified = self._profile is not None
             self._profile = result if isinstance(result, MokeControlProfile) else None
-            self.configuration_panel.profile = self._profile
+            self.configuration_panel.profile = self._manual_profile()
             if self._profile is not None:
                 try:
                     expected = control_profile_from_settings(self._settings, simulation=self._simulation)
@@ -954,7 +1351,10 @@ class MokeFieldWorkflow(QObject):
                     self._target_changed()
                     return
                 if not previously_qualified:
+                    previous = self.channel_selector.blockSignals(True)
                     self.channel_selector.setCurrentIndex(profile.channel)
+                    self.channel_selector.blockSignals(previous)
+                    self._channel_changed()
                 self.profile_label.setText(
                     f"{'SIMULATION · ' if profile.simulation else ''}VOUT {profile.channel} · "
                     f"station {profile.minimum_v:g}…{profile.maximum_v:g} V · {profile.binding_id}\n"
@@ -962,6 +1362,7 @@ class MokeFieldWorkflow(QObject):
                     + (" · simulated hardware waits are skipped" if profile.simulation else ""))
                 if not previously_qualified:
                     self.manual_status.setText(self._control_disabled_reason())
+                self._active_model = None
                 try:
                     self._active_model = MokeCalibrationRepository(self._settings.moke_box.calibration_directory).active(
                         profile_fingerprint=profile.fingerprint, simulation=profile.simulation)
@@ -972,9 +1373,14 @@ class MokeFieldWorkflow(QObject):
             else:
                 self._revoke_arm()
                 self.profile_label.setText("Read-only · no approved voltage-control profile.")
+            self._refresh_profile_summary()
             self.profile_changed.emit(self._profile)
         elif operation == "read_vouts" and isinstance(result, dict):
             self._last_voltages.update(result)
+            self._adopt_initial_voltages(result)
+            for channel, voltage_v in result.items():
+                if channel != self._selected_channel():
+                    self.voltage_confirmed.emit(channel, voltage_v)
             voltage = result.get(self._selected_channel())
             if voltage is not None:
                 self._record_voltage(voltage)
@@ -1014,33 +1420,41 @@ class MokeFieldWorkflow(QObject):
         self._refresh_controls()
 
     def _refresh_controls(self, *_args):
-        self.quick_bounds_changed.emit()
+        # Bounds do not change with a draft or DAC telemetry. Rebuilding every
+        # QuickControls slider here interrupts gestures and floods layout work.
+        bounds_signature = tuple(self.quick_control_bounds(channel) for channel in range(8))
+        if bounds_signature != self._quick_bounds_signature:
+            self._quick_bounds_signature = bounds_signature
+            self.quick_bounds_changed.emit()
         if not hasattr(self, "activate_button"):
             return
         ready = self._connected and self._profile is not None and not self.busy and not self._external_controlled
-        manual_ready = ready and self._selected_channel() == self._profile.channel
+        manual_ready = ready and self._manual_profile() is not None and self._selected_channel() in self._initialized_voltage_channels
         self.live_control_switch.setEnabled(manual_ready or (self.busy and self.live_control_switch.isChecked()))
         self.set_button.setEnabled(manual_ready and self._manual_plan is not None)
         self.read_voltage_button.setEnabled(self._connected and not self.busy and not self._external_controlled)
         self.read_configuration_button.setEnabled(self.read_voltage_button.isEnabled())
-        self.zero_button.setEnabled(self._connected and self._profile is not None and not self._external_controlled)
+        profile = self._manual_profile()
+        self.zero_button.setText("Turn off field" if profile is not None and profile.kepco_mode == "current" else "Turn off output")
+        self.zero_button.setEnabled(self._connected and profile is not None and not self._external_controlled
+                                   and self._running_kind != "zero")
         reason = self._control_disabled_reason()
         for button in (self.set_button, self.zero_button, self.live_control_switch):
             if not button.isEnabled():
                 button.setToolTip("Operation in progress or reserved by a recipe." if self.busy or self._external_controlled else reason)
             else:
-                button.setToolTip("Apply edits automatically after debounce and the previous ramp/settling completes." if button is self.live_control_switch else
-                                  "Ramp the qualified DAC to zero; this does not confirm Kepco power-off." if button is self.zero_button else
+                button.setToolTip("Keep editing while DAC confirmation runs in the background. Only the latest valid target is applied." if button is self.live_control_switch else
+                                  f"Ramp selected VOUT{self._selected_channel()} to zero; this does not confirm Kepco power-off." if button is self.zero_button else
                                   "Send the draft target through the approved voltage ramp.")
-        calibration_ready = ready and self._reference_connected
+        calibration_ready = ready and self._reference_connected and self._selected_channel() == self._profile.channel and self._profile.channel in self._initialized_voltage_channels
         self.arm_calibration_button.setEnabled(calibration_ready)
         self.start_calibration_button.setEnabled(calibration_ready and self._calibration_request is not None)
         self.stop_button.setEnabled(self.busy)
         self.activate_button.setEnabled(ready and self._review_model is not None and self.reviewed.isChecked())
         self.load_model_button.setEnabled(ready and self.saved_models.count() > 0)
         self.saved_models.setEnabled(ready)
-        live_draft = self.busy and self._running_kind == "voltage" and self.live_control_switch.isChecked()
-        editable = (not self.busy or live_draft) and not self._external_controlled
+        live_draft = self.busy and self._running_kind == "voltage"
+        editable = (not self.busy or live_draft) and not self._external_controlled and self._manual_profile() is not None
         # Set each input directly to its final state. Disabling a pressed
         # slider/active editor and then re-enabling it interrupts the gesture.
         for control in self._input_controls:

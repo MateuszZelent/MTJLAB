@@ -31,6 +31,7 @@ from app.ui.design_system import plot_theme, tokens_for
 from app.ui.widgets import FluentTabView
 from app.ui.workers import DeviceController
 from app.devices.moke_box.ui.field_control import MokeFieldWorkflow
+from app.devices.moke_box.ui.floating_controls import MokeFloatingControlsWindow
 
 
 class MokeHallLiveWindow(StationDialog):
@@ -161,6 +162,9 @@ class MokeBoxPage(QWidget):
         self._history: deque[MokeHallVoltageReading] = deque()
         self._plot_dirty = False
         self._hall_live_window: MokeHallLiveWindow | None = None
+        self._control_window: MokeFloatingControlsWindow | None = None
+        self._control_placeholder = None
+        self._floating_history_visible = True
         self._build()
         controller.result.connect(self._result)
         controller.error.connect(self._error)
@@ -215,9 +219,80 @@ class MokeBoxPage(QWidget):
         self.field_workflow.profile_changed.connect(self._field_profile_changed)
         self.field_workflow.voltage_confirmed.connect(self._show_confirmed_voltage)
         self.field_workflow.vout_overview_requested.connect(lambda: self.views.setCurrentIndex(0))
-        self.views.addTab(self.field_workflow.control_page, "Voltage control")
+        self._control_slot = QWidget(self)
+        slot_layout = QVBoxLayout(self._control_slot)
+        slot_layout.setContentsMargins(0, 0, 0, 0)
+        slot_layout.addWidget(self.field_workflow.control_page)
+        self.field_workflow.floating_requested.connect(self._toggle_floating_controls)
+        self.views.addTab(self._control_slot, "Voltage control")
         self.views.addTab(self.field_workflow.calibration_page, "Field calibration")
         outer.addWidget(self.views, 1)
+
+    def _toggle_floating_controls(self):
+        if self._control_window is not None:
+            self._dock_controls()
+            return
+        workflow = self.field_workflow
+        self._control_slot.layout().removeWidget(workflow.control_page)
+        placeholder = CardWidget(self._control_slot)
+        placeholder.setObjectName("mokeFloatingControlsPlaceholder")
+        layout = QVBoxLayout(placeholder)
+        layout.setContentsMargins(18, 16, 18, 16)
+        layout.addWidget(StrongBodyLabel("Voltage control is open in a floating window", placeholder))
+        note = BodyLabel("The same voltage controls and history remain active in that window.", placeholder)
+        note.setWordWrap(True)
+        layout.addWidget(note)
+        focus = PushButton("Show floating window", placeholder)
+        focus.clicked.connect(self._show_floating_controls)
+        restore = PushButton("Dock panel", placeholder)
+        restore.clicked.connect(self._dock_controls)
+        layout.addWidget(focus)
+        layout.addWidget(restore)
+        layout.addStretch(1)
+        self._control_slot.layout().addWidget(placeholder)
+        self._control_placeholder = placeholder
+        window = MokeFloatingControlsWindow(workflow.control_page, self,
+                                           show_history=self._floating_history_visible)
+        self._control_window = window
+        window.closed.connect(lambda: self._dock_controls(close_window=False))
+        window.history_changed.connect(self._floating_history_changed)
+        workflow.open_floating_button.setText("Dock panel")
+        workflow.open_floating_button.setAccessibleName("Dock MOKE controls to the main page")
+        workflow.open_floating_button.hide()  # The floating footer already provides Dock panel.
+        workflow.set_history_visible(self._floating_history_visible)
+        self._show_floating_controls()
+
+    def _show_floating_controls(self):
+        if self._control_window is not None:
+            self._control_window.show()
+            self._control_window.raise_()
+            self._control_window.activateWindow()
+
+    def _floating_history_changed(self, visible):
+        self._floating_history_visible = visible
+        self.field_workflow.set_history_visible(visible)
+        if self._control_window is not None and not self._control_window.isMaximized():
+            self._control_window.resize(1120 if visible else 540, self._control_window.height())
+
+    def _dock_controls(self, _checked=False, *, close_window=True):
+        window, self._control_window = self._control_window, None
+        if window is None:
+            return
+        panel = self.field_workflow.control_page
+        window.panel_layout.removeWidget(panel)
+        self.field_workflow.set_history_visible(True)
+        self._control_slot.layout().addWidget(panel)
+        panel.show()
+        if self._control_placeholder is not None:
+            self._control_slot.layout().removeWidget(self._control_placeholder)
+            self._control_placeholder.deleteLater()
+            self._control_placeholder = None
+        self.field_workflow.open_floating_button.setText("Open floating controls")
+        self.field_workflow.open_floating_button.show()
+        self.field_workflow.open_floating_button.setAccessibleName("Open MOKE voltage controls in a floating window")
+        if close_window:
+            window.close()
+        window.deleteLater()
 
     def _show_confirmed_voltage(self, channel: int, voltage: float) -> None:
         if channel in self.vout_values and math.isfinite(voltage):
@@ -825,4 +900,5 @@ class MokeBoxPage(QWidget):
         self.stop_live("Live Hall readout stopped because the MOKE page closed.")
         if self._hall_live_window is not None:
             self._hall_live_window.close()
+        self._dock_controls()
         super().closeEvent(event)  # type: ignore[arg-type]

@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import math
 import time
+from contextlib import contextmanager
+from dataclasses import replace
 from datetime import datetime, timezone
 from typing import Protocol
 
@@ -19,13 +21,15 @@ from app.devices.lakeshore_475.models import (
     field_unit_from_code,
     measurement_mode_from_code,
     parse_measurement_mode_response,
+    parse_operation_status_response,
+    validate_operation_status,
 )
 from app.devices.visa import PyVisaSessionFactory
-from app.domain.errors import ConnectionError, DeviceError, SafetyViolation
+from app.domain.errors import ConnectionError, DeviceError, RunInterrupted, SafetyViolation
 from app.domain.models import DeviceCapabilities, DeviceIdentity, DeviceState
 
 
-_ALLOWED_QUERIES = frozenset({"*IDN?", "UNIT?", "RDGMODE?", "RANGE?", "AUTO?", "TYPE?", "RDGFIELD?", "RDGFRQ?", "RDGPEAK?"})
+_ALLOWED_QUERIES = frozenset({"*IDN?", "UNIT?", "RDGMODE?", "RANGE?", "AUTO?", "TYPE?", "RDGFIELD?", "RDGFRQ?", "RDGPEAK?", "OPST?", "OPSTR?"})
 
 
 class _OfficialModelFactory(Protocol):
@@ -38,12 +42,41 @@ class _ReadOnlyConnection:
     def __init__(self, session: InstrumentSession) -> None:
         self._session = session
         self._last_command_at: float | None = None
+        self._deadline_s: float | None = None
+        self._cancel = None
+
+    @contextmanager
+    def operation(self, *, deadline_s: float | None = None, cancel=None):
+        if deadline_s is not None and not math.isfinite(deadline_s):
+            raise ValueError("Lake Shore deadline must be finite.")
+        previous_deadline, previous_cancel = self._deadline_s, self._cancel
+        if deadline_s is not None:
+            self._deadline_s = deadline_s if previous_deadline is None else min(previous_deadline, deadline_s)
+        if cancel is not None:
+            self._cancel = cancel
+        try:
+            self._checkpoint()
+            yield
+        finally:
+            self._deadline_s, self._cancel = previous_deadline, previous_cancel
+
+    def _checkpoint(self):
+        if self._cancel is not None and self._cancel.is_set():
+            raise RunInterrupted("Lake Shore acquisition was stopped.")
+        if self._deadline_s is not None and time.monotonic() >= self._deadline_s:
+            raise TimeoutError("Lake Shore acquisition exceeded its deadline.")
 
     def _wait_for_slot(self) -> None:
         if self._last_command_at is not None:
             remaining = 0.05 - (time.monotonic() - self._last_command_at)
             if remaining > 0:
-                time.sleep(remaining)
+                if self._deadline_s is not None:
+                    remaining = min(remaining, max(0, self._deadline_s - time.monotonic()))
+                if self._cancel is not None:
+                    self._cancel.wait(remaining)
+                else:
+                    time.sleep(remaining)
+        self._checkpoint()
         self._last_command_at = time.monotonic()
 
     def query(self, command: str) -> str:
@@ -51,7 +84,16 @@ class _ReadOnlyConnection:
         if normalized not in _ALLOWED_QUERIES:
             raise SafetyViolation(f"Lake Shore read-only proxy rejected query {command!r}.")
         self._wait_for_slot()
-        return self._session.query(normalized)
+        previous_timeout = self._session.timeout
+        try:
+            if self._deadline_s is not None:
+                remaining_ms = max(1, math.floor((self._deadline_s - time.monotonic()) * 1000))
+                self._session.timeout = min(previous_timeout, remaining_ms)
+            response = self._session.query(normalized)
+            self._checkpoint()
+            return response
+        finally:
+            self._session.timeout = previous_timeout
 
     def write(self, command: str) -> None:
         raise SafetyViolation(f"Lake Shore read-only proxy rejected write {command!r}.")
@@ -187,6 +229,20 @@ class LakeShore475Adapter(DeviceAdapter):
         if self._session is not None:
             self._state = DeviceState.VERIFIED
 
+    @contextmanager
+    def io_timeout(self, timeout_s: float):
+        with super().io_timeout(timeout_s):
+            with self._require_connection().operation(deadline_s=time.monotonic() + timeout_s):
+                yield
+
+    def _operation_status(self) -> int:
+        try:
+            code = parse_operation_status_response(self._require_connection().query("OPST?"))
+            validate_operation_status(code)
+            return code
+        except ValueError as exc:
+            raise DeviceError(str(exc)) from exc
+
     @staticmethod
     def _numeric(response: str, command: str) -> float:
         try:
@@ -206,9 +262,18 @@ class LakeShore475Adapter(DeviceAdapter):
         name = "Oersted" if unit is FieldUnit.OERSTED else "A/m"
         raise DeviceError(f"Lake Shore {name} readings cannot be safely converted to tesla.")
 
-    def read_snapshot(self) -> GaussmeterSnapshot:
+    def read_snapshot(self, *, deadline_s: float | None = None, cancel=None) -> GaussmeterSnapshot:
+        try:
+            with self._require_connection().operation(deadline_s=deadline_s, cancel=cancel):
+                return self._read_snapshot()
+        except (DeviceError, TimeoutError):
+            self._state = DeviceState.FAULT
+            raise
+
+    def _read_snapshot(self) -> GaussmeterSnapshot:
         connection = self._require_connection()
         try:
+            status_code = self._operation_status()
             mode_response = connection.query("RDGMODE?").strip()
             (
                 mode_code,
@@ -234,6 +299,7 @@ class LakeShore475Adapter(DeviceAdapter):
                 rms_filter_mode_code=rms_filter_mode_code,
                 peak_mode_code=peak_mode_code,
                 peak_display_code=peak_display_code,
+                operation_status_code=status_code,
             )
         except (DeviceError, ValueError) as exc:
             self._cached_snapshot = None
@@ -249,15 +315,45 @@ class LakeShore475Adapter(DeviceAdapter):
             self.read_snapshot()
         assert self._cached_snapshot is not None
         try:
+            self._operation_status()
             raw = self._numeric(connection.query("RDGFIELD?"), "RDGFIELD?")
             field_t = self._tesla(raw, self._cached_snapshot.unit)
+            self._operation_status()
             self._state = DeviceState.VERIFIED
             return field_t
         except DeviceError:
             self._state = DeviceState.FAULT
             raise
 
-    def read_measurement(self, use_cached_snapshot: bool = False) -> GaussmeterReading:
+    def read_measurement(self, use_cached_snapshot: bool = False, *, require_fresh: bool = False,
+                         deadline_s: float | None = None, cancel=None) -> GaussmeterReading:
+        if require_fresh and (use_cached_snapshot or deadline_s is None):
+            raise ValueError("Fresh Lake Shore acquisition requires uncached configuration and a deadline.")
+        connection = self._require_connection()
+        try:
+            with connection.operation(deadline_s=deadline_s, cancel=cancel):
+                event_code = None
+                self._operation_status()
+                if require_fresh:
+                    # OPSTR? clears only the diagnostic event register, never settings or outputs.
+                    # Drain previous events, then wait for a conversion occurring after this call.
+                    parse_operation_status_response(connection.query("OPSTR?"))
+                    while True:
+                        self._operation_status()
+                        event_code = parse_operation_status_response(connection.query("OPSTR?"))
+                        validate_operation_status(event_code)
+                        if event_code & 4:
+                            break
+                reading = self._read_measurement(use_cached_snapshot)
+                self._operation_status()
+                return replace(reading, operation_event_code=event_code)
+        except (DeviceError, ValueError, TimeoutError) as exc:
+            self._state = DeviceState.FAULT
+            if isinstance(exc, ValueError):
+                raise DeviceError(str(exc)) from exc
+            raise
+
+    def _read_measurement(self, use_cached_snapshot: bool) -> GaussmeterReading:
         connection = self._require_connection()
         try:
             if use_cached_snapshot and self._cached_snapshot is not None:
@@ -306,9 +402,11 @@ class LakeShore475Adapter(DeviceAdapter):
                     reading = GaussmeterReading.now(mode=snapshot.mode, unit=snapshot.unit, snapshot=snapshot, negative_peak_t=self._tesla(values[0], snapshot.unit), positive_peak_t=self._tesla(values[1], snapshot.unit))
                 end_mode = parse_measurement_mode_response(
                     connection.query("RDGMODE?").strip()
-                )[0]
+                )
                 end_unit = connection.query("UNIT?").strip()
-                if end_mode == snapshot.mode_code and end_unit == snapshot.unit_code:
+                start_mode = (snapshot.mode_code, snapshot.dc_resolution_code, snapshot.rms_filter_mode_code,
+                              snapshot.peak_mode_code, snapshot.peak_display_code)
+                if end_mode == start_mode and end_unit == snapshot.unit_code:
                     self._state = DeviceState.VERIFIED
                     return reading
             raise DeviceError("Lake Shore unit or mode changed during both measurement attempts.")

@@ -30,6 +30,23 @@ _UNIT_CODES = {
 _MODE_CODES = {"1": MeasurementMode.DC, "2": MeasurementMode.RMS, "3": MeasurementMode.PEAK}
 
 
+def parse_operation_status_response(value: str) -> int:
+    """Model 475 operation condition/event register, documented bits 0–6."""
+    text = value.strip()
+    if not text.isdecimal() or not 0 <= int(text) <= 127:
+        raise ValueError(f"Invalid Lake Shore operational status {value!r}.")
+    return int(text)
+
+
+def validate_operation_status(code: int | None) -> None:
+    if type(code) is not int or not 0 <= code <= 127:
+        raise ValueError("Lake Shore operational status is missing or invalid.")
+    faults = [(1, "no probe"), (2, "field overload"), (8, "alarm"), (64, "instrument calibration error")]
+    reasons = [description for mask, description in faults if code & mask]
+    if reasons:
+        raise ValueError(f"Lake Shore operational status {code}: {', '.join(reasons)}.")
+
+
 def field_unit_from_code(value: str) -> FieldUnit:
     try:
         return _UNIT_CODES[value.strip()]
@@ -103,6 +120,7 @@ class GaussmeterSnapshot:
     rms_filter_mode_code: str = ""
     peak_mode_code: str = ""
     peak_display_code: str = ""
+    operation_status_code: int | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -115,6 +133,7 @@ class GaussmeterReading:
     frequency_hz: float | None = None
     negative_peak_t: float | None = None
     positive_peak_t: float | None = None
+    operation_event_code: int | None = None
 
     def __post_init__(self) -> None:
         values = (self.field_t, self.frequency_hz, self.negative_peak_t, self.positive_peak_t)
