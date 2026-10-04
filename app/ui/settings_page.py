@@ -1925,6 +1925,8 @@ class SettingsPage(QWidget):
 
     @staticmethod
     def _set_validation_state(widget: QWidget, state: str) -> None:
+        if (widget.property("validationState") or "") == state:
+            return
         widget.setProperty("validationState", state)
         widget.style().unpolish(widget)
         widget.style().polish(widget)
@@ -2170,8 +2172,14 @@ class SettingsPage(QWidget):
         try:
             local_draft = self._apply_tree_values()
             local_changed_paths = self._changed_leaf_paths(self._persisted_raw, local_draft)
+            removed_paths = set()
             for path in local_changed_paths:
-                if self._is_source_autorange_path(path) and self._get_path(local_draft, path) is True and path not in self._source_autorange_acknowledged:
+                try:
+                    local_value = self._get_path(local_draft, path)
+                except KeyError:
+                    removed_paths.add(path)
+                    continue
+                if self._is_source_autorange_path(path) and local_value is True and path not in self._source_autorange_acknowledged:
                     if silent:
                         raise AuthorizationError("Source AUTO requires explicit operator confirmation in Settings.")
                     if not self._confirm_source_autorange(path):
@@ -2203,6 +2211,13 @@ class SettingsPage(QWidget):
                 # leaves onto the newest document under one repository lock.
                 draft = deepcopy(latest)
                 for path in local_changed_paths:
+                    if path in removed_paths:
+                        try:
+                            parent = self._get_path(draft, path[:-1])
+                        except KeyError:
+                            continue
+                        parent.pop(path[-1], None)
+                        continue
                     self._set_path(
                         draft,
                         path,

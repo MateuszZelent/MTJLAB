@@ -1,6 +1,7 @@
 """Exercise cleanup through user controls and the real asynchronous worker."""
 
 import os
+from dataclasses import replace
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
@@ -11,7 +12,7 @@ from unittest.mock import MagicMock, patch
 
 import numpy as np
 import pytest
-from PySide6.QtCore import Qt, QTimer
+from PySide6.QtCore import QEventLoop, Qt, QTimer
 from PySide6.QtGui import QFont, QFontDatabase
 from PySide6.QtTest import QTest
 from PySide6.QtWidgets import QApplication
@@ -58,7 +59,7 @@ def wait_for_analysis(application, page):
         application.processEvents()
         if page._cleanup_result is not None and not page._analysis_controller.busy:
             return page._cleanup_result
-        QTest.qWait(10)
+        time.sleep(.01)
     pytest.fail(f"Cleanup did not complete: {page.analysis_status.text()}")
 
 
@@ -89,7 +90,8 @@ def test_cleanup_follows_reference_subtraction_without_selecting_source(applicat
         assert analysis.values == cleanup.values
         curve = page.spectrum_plot._curves["Analysis"]
         assert curve.isVisible()
-        assert not page.spectrum_plot._curves["Processed"].isVisible()
+        assert page.overlay_analysis_source.isChecked()
+        assert page.spectrum_plot._curves["Processed"].isVisible()
         np.testing.assert_allclose(curve.getData()[1], cleanup.values)
         assert page.signal_analysis_card.isVisible() and page.signal_analysis_card.width() > 300
         assert page.spectrum_plot.isVisible() and page.spectrum_plot.height() > 100
@@ -130,7 +132,9 @@ def test_processed_stationary_rejection_receives_processed_history(application, 
     page.analysis_source.setCurrentIndex(page.analysis_source.findData("processed"))
     page._spectrogram_buffer.clear()
     for index in range(6):
-        page._spectrogram_buffer.append(raw, now=float(index))
+        # Distinct completed frames; replaying one object must not inflate
+        # either the temporal average or the stationary-line evidence.
+        page._spectrogram_buffer.append(replace(raw), now=float(index))
     page.cleanup_filters["emi_reject"].setChecked(True)
     cleanup = wait_for_analysis(application, page)
     assert cleanup.unit == "dB"
@@ -221,6 +225,7 @@ def test_live_pipeline_applies_results_when_worker_is_slower_than_frames(applica
     page._invalidate_analysis_results()
     frames = []
     applied = []
+    loop = QEventLoop()
 
     def slow_pipeline(*args, **kwargs):
         time.sleep(.08)
@@ -231,18 +236,22 @@ def test_live_pipeline_applies_results_when_worker_is_slower_than_frames(applica
         frames.append(page._display_revision)
         if page._cleanup_result is not None:
             applied.append(page._applied_analysis_generation)
+        if len(frames) >= 12 and len(set(applied)) >= 2:
+            loop.quit()
 
     timer = QTimer()
     timer.setInterval(20)
     timer.timeout.connect(next_frame)
+    deadline = QTimer()
+    deadline.setSingleShot(True)
+    deadline.timeout.connect(loop.quit)
     try:
         with patch("app.devices.anritsu_ms2830a.ui.analysis_worker.clean_spectrum_pipeline", side_effect=slow_pipeline):
             timer.start()
-            deadline = time.monotonic() + .6
-            while time.monotonic() < deadline:
-                application.processEvents()
-                QTest.qWait(5)
+            deadline.start(2_000)
+            loop.exec()
             timer.stop()
+            deadline.stop()
             wait_for_analysis(application, page)
         assert len(frames) >= 10
         assert len(set(applied)) >= 2
@@ -250,6 +259,7 @@ def test_live_pipeline_applies_results_when_worker_is_slower_than_frames(applica
         assert "Analyzing" not in page.analysis_status.text()
     finally:
         timer.stop()
+        deadline.stop()
 
 
 def test_live_reports_worker_failure_even_when_newer_frame_is_queued(application, page):

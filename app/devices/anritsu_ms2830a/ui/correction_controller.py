@@ -488,11 +488,14 @@ class _CorrectionWorker(QObject):
             raise ValueError("Correction ingest requires a typed envelope and raw trace.")
         if not np.array_equal(trace.frequencies_hz, self._processor.context.frequencies_hz):
             raise ValueError("Raw trace frequency grid differs from its acquisition context.")
+        processing_started = time.perf_counter()
         accepted = self._processor.ingest(envelope, trace.powers_dbm)
         result = self._processor.snapshot()
         if result is not None and (not accepted or result.frame_id != envelope.frame_id):
             result = None
+        processing_duration_s = time.perf_counter() - processing_started
         index = self._writer.point_count
+        commit_started = time.perf_counter()
         self._writer.append(
             MeasurementPoint(index, {}, {}, metadata={
                 "frame_id": envelope.frame_id, "segment_id": envelope.segment_id,
@@ -502,6 +505,7 @@ class _CorrectionWorker(QObject):
             processed_unit="W" if result is not None else None,
             processing_operation="signed_reference" if result is not None else "none",
         )
+        commit_duration_s = time.perf_counter() - commit_started
         # Publish only after the raw/corrected checkpoint has committed. This
         # is the same immutable result already computed for storage; drawing
         # remains controlled by the GUI's independent render timer.
@@ -513,6 +517,8 @@ class _CorrectionWorker(QObject):
             "reference_count": self._processor.calibration_count,
             "quality": str(self._processor.quality), "accepted": accepted,
             "committed_point_count": self._writer.point_count,
+            "processing_duration_s": processing_duration_s,
+            "commit_duration_s": commit_duration_s,
             "view": CorrectionViewSnapshot(result, trace) if result is not None else None,
         }
 

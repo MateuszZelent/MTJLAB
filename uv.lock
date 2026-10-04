@@ -702,12 +702,18 @@ dependencies = [
     { name = "pyvisa-py" },
     { name = "reportlab" },
     { name = "ruamel-yaml" },
+    { name = "scipy", version = "1.17.1", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.12'" },
+    { name = "scipy", version = "1.18.1", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version >= '3.12'" },
 ]
 
 [package.optional-dependencies]
 dev = [
     { name = "pytest" },
     { name = "ruff" },
+]
+qualification = [
+    { name = "scipy", version = "1.17.1", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.12'" },
+    { name = "scipy", version = "1.18.1", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version >= '3.12'" },
 ]
 
 [package.metadata]
@@ -727,8 +733,10 @@ requires-dist = [
     { name = "reportlab", specifier = ">=4.2,<5" },
     { name = "ruamel-yaml", specifier = ">=0.18" },
     { name = "ruff", marker = "extra == 'dev'", specifier = ">=0.6" },
+    { name = "scipy", specifier = ">=1.16.1,<2" },
+    { name = "scipy", marker = "extra == 'qualification'", specifier = ">=1.16.1,<2" },
 ]
-provides-extras = ["dev"]
+provides-extras = ["dev", "qualification"]
 
 [[package]]
 name = "lakeshore"

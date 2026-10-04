@@ -28,6 +28,7 @@ from app.domain.quantities import (
 )
 from app.ui.design_system import plot_theme, tokens_for
 from app.ui.widgets import SpectrumPlotWidget
+from .spectrum_controls import format_plot_amplitude, parse_plot_amplitude
 
 
 class SpectrumWorkbench(SpectrumPlotWidget):
@@ -205,20 +206,10 @@ class SpectrumWorkbench(SpectrumPlotWidget):
         return value
 
     def _amplitude(self, text: str) -> float:
-        if self.amplitude_unit in {"dBm", "dB"}:
-            dimension = DIMENSION_DBM if self.amplitude_unit == "dBm" else DIMENSION_DB
-            value = parse_quantity(text, dimension).si_value
-        elif self.amplitude_unit == "linear ratio":
-            # The source labels linear ratios explicitly; they have no SI prefix.
-            value = float(text.removesuffix("linear ratio").strip())
-        else:
-            raise ValueError(f"Unsupported amplitude unit: {self.amplitude_unit}.")
-        if not math.isfinite(value):
-            raise ValueError("Amplitude limits must be finite.")
-        return value
+        return parse_plot_amplitude(text, self.amplitude_unit)
 
     def _format_amplitude(self, value: float) -> str:
-        return f"{value:.9g} {self.amplitude_unit}"
+        return format_plot_amplitude(value, self.amplitude_unit)
 
     def set_trace_unit(self, name: str, unit: str) -> None:
         if self._trace_units.get(name, unit) != unit and name == self._hold_source:

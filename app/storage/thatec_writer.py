@@ -511,11 +511,16 @@ class ThatecHdf5Writer:
         self._processed_unit = unit
         row_name = self._allocate_row()
         self._processed_spectrum_row = row_name
-        label = (
-            "Spectrum raw-reference"
-            if operation == "difference_db"
-            else f"Spectrum processed {operation}"
-        )
+        if operation == "difference_db":
+            label = "Spectrum raw-reference"
+        elif operation.startswith("display_"):
+            # Display provenance includes per-frame counts, model identities
+            # and JSON parameters. Keep it in the control key and private
+            # per-point attributes, never in a NetCDF variable name. A stable
+            # label also remains accurate as the rolling window fills.
+            label = "Spectrum display preview"
+        else:
+            label = f"Spectrum processed {operation}"
         self._definition.create_dataset(
             row_name,
             data=self._table(

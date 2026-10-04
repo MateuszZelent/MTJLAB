@@ -2,38 +2,66 @@
 
 from __future__ import annotations
 
-from dataclasses import asdict, replace
-from datetime import datetime, timezone
-import json
-from pathlib import Path
 import time
+from dataclasses import replace
+from datetime import datetime, timezone
+from pathlib import Path
 
 import numpy as np
-from PySide6.QtCore import QTimer, Qt, Signal
+from PySide6.QtCore import Qt, QTimer, Signal
 from PySide6.QtWidgets import QFrame, QGridLayout, QHBoxLayout, QSplitter, QVBoxLayout, QWidget
 from qfluentwidgets import (
-    BodyLabel, CaptionLabel, CardWidget, CheckBox, ComboBox, LineEdit,
-    Action, IndeterminateProgressBar, PrimaryPushButton, ProgressBar, PushButton, RoundMenu,
-    ScrollArea, SpinBox, SplitPushButton, StrongBodyLabel,
+    Action,
+    BodyLabel,
+    CaptionLabel,
+    CardWidget,
+    CheckBox,
+    ComboBox,
+    IndeterminateProgressBar,
+    LineEdit,
+    PrimaryPushButton,
+    ProgressBar,
+    PushButton,
+    RoundMenu,
+    ScrollArea,
+    SpinBox,
+    SplitPushButton,
+    StrongBodyLabel,
 )
 
+from app.devices.anritsu_ms2830a.acquisition_context import spectrum_configuration_fingerprint
 from app.devices.anritsu_ms2830a.adapter import (
-    AdvancedSpectrumSnapshot, AnritsuFullConfigurationReadback, SpectrumTrace,
+    AdvancedSpectrumSnapshot,
+    AnritsuFullConfigurationReadback,
+    SpectrumTrace,
 )
 from app.domain.quantities import DIMENSION_TIME, parse_quantity
-from app.domain.spectrum_decisions import SpectrumDecisionOperation, SpectrumProcessingChange
-from app.domain.spectrum_finalization import SpectrumFinalizationBatchRequest, SpectrumFinalizationResumeRequest
 from app.domain.spectrum_correction import (
-    BackgroundProfile, CorrectedSpectrumFrame, SpectrumAcquisitionContext,
-    SpectrumFrameEnvelope, SpectrumFrameRole, SweepEvidence,
+    BackgroundProfile,
+    CorrectedSpectrumFrame,
+    SpectrumAcquisitionContext,
+    SpectrumFrameEnvelope,
+    SpectrumFrameRole,
+    SweepEvidence,
 )
-from app.domain.spectrum_interleaved import InterleavedSpectrumConfig, SpectrumOperatorStateConfirmation
-from app.spectrum.interleaved_acquisition import InterleavedPhase, InterleavedSpectrumAcquisition
+from app.domain.spectrum_decisions import SpectrumDecisionOperation, SpectrumProcessingChange
+from app.domain.spectrum_finalization import (
+    SpectrumFinalizationBatchRequest,
+    SpectrumFinalizationResumeRequest,
+)
+from app.domain.spectrum_interleaved import (
+    InterleavedSpectrumConfig,
+    SpectrumOperatorStateConfirmation,
+)
 from app.settings.models import StationSettings
+from app.spectrum.interleaved_acquisition import InterleavedPhase, InterleavedSpectrumAcquisition
 from app.ui.dialogs import StationFileDialog
 from app.ui.widgets import NotificationBanner, SpectrumPlotWidget
+
 from .correction_controller import (
-    CorrectionSessionRequest, CorrectionViewSnapshot, SpectrumCorrectionController,
+    CorrectionSessionRequest,
+    CorrectionViewSnapshot,
+    SpectrumCorrectionController,
     SpectrumFinalizationRequest,
     SpectrumInterferenceImportRequest,
 )
@@ -61,6 +89,7 @@ class SpectrumCorrectionWorkspace(QWidget):
     display_changed = Signal(object, object, str)
     availability_changed = Signal()
     recording_finished = Signal(str, bool)
+    profile_load_finished = Signal(bool, str)
 
     def __init__(self, settings: StationSettings, *, single_sweep_available: bool,
                  simulation_mode: bool | None = None, parent=None):
@@ -96,6 +125,8 @@ class SpectrumCorrectionWorkspace(QWidget):
         self._last_rejection_message = ""
         self._kind = "signal"
         self._expected_device: str | None = None
+        self._sweep_requested_at = None
+        self._live_timings_s = {}
         self._full: AnritsuFullConfigurationReadback | None = None
         self._advanced: AdvancedSpectrumSnapshot | None = None
         self._context: SpectrumAcquisitionContext | None = None
@@ -260,7 +291,7 @@ class SpectrumCorrectionWorkspace(QWidget):
         self.load_interference = PushButton("Load model calibration…", controls)
         self.load_interference.setAccessibleName("Load interference calibration from a measurement archive")
         self.clear_interference = PushButton("Use mean background", controls)
-        self.interference_status = CaptionLabel("Next recording: mean reference subtraction.", controls)
+        self.interference_status = CaptionLabel("Background processing: mean reference subtraction.", controls)
         self.interference_status.setWordWrap(True)
         grid.addWidget(BodyLabel("Background model", controls), 13, 0)
         grid.addWidget(self.interference_mode, 13, 1)
@@ -530,6 +561,8 @@ class SpectrumCorrectionWorkspace(QWidget):
         self._result_archive_path = None
         self._latest_raw = None
         self._final_profiles = ()
+        self._sweep_requested_at = None
+        self._live_timings_s.clear()
         self._dirty_view = False
         self.frame_label.setText("Waiting for the first spectrum of this recording.")
         self.display_changed.emit(None, None, self.frame_label.text())
@@ -562,6 +595,8 @@ class SpectrumCorrectionWorkspace(QWidget):
 
     def _request(self, operation):
         self._expected_device = operation
+        if operation == "single_sweep":
+            self._sweep_requested_at = time.perf_counter()
         self.request_device.emit(operation, "TRAC1" if operation == "single_sweep" else None)
 
     def handle_result(self, operation: str, result: object) -> bool:
@@ -587,6 +622,9 @@ class SpectrumCorrectionWorkspace(QWidget):
                 self._message("Starting recording: waiting for the first completed analyzer sweep…")
                 self._request("single_sweep")
             elif operation == "single_sweep" and isinstance(result, SpectrumTrace):
+                if self._sweep_requested_at is not None:
+                    self._live_timings_s["Sweep and transfer"] = time.perf_counter() - self._sweep_requested_at
+                    self._sweep_requested_at = None
                 if result.sweep_evidence != SweepEvidence.QUALIFIED_SINGLE_SWEEP:
                     raise ValueError("No proof of a new, completed quantitative sweep.")
                 if self._context is None:
@@ -634,14 +672,7 @@ class SpectrumCorrectionWorkspace(QWidget):
 
     def _configuration_fingerprint(self):
         assert self._full is not None and self._advanced is not None
-        full = asdict(self._full)
-        # The sweep method is explicitly SINGLE in this workspace; switching
-        # from continuous front-panel display does not change the input path.
-        full.pop("continuous_sweep", None)
-        return json.dumps({
-            "device_idn": self._device_idn, "full": full, "advanced": asdict(self._advanced),
-            "sweep_method": "qualified_single", "trace": "TRAC1",
-        }, sort_keys=True, allow_nan=False)
+        return spectrum_configuration_fingerprint(self._full, self._advanced, self._device_idn)
 
     def _ingest(self, trace):
         assert self._context is not None
@@ -678,6 +709,9 @@ class SpectrumCorrectionWorkspace(QWidget):
             if pending is not None:
                 self._ingest(pending)
         elif operation == "frame":
+            for label, key in (("Correction", "processing_duration_s"), ("Saving", "commit_duration_s")):
+                if key in result:
+                    self._live_timings_s[label] = result[key]
             self._committed_count = result['committed_point_count']
             view = result.get("view")
             if isinstance(view, CorrectionViewSnapshot):
@@ -807,6 +841,7 @@ class SpectrumCorrectionWorkspace(QWidget):
             self._dirty_view = True
             self.set_available(self._allowed)
             self._message("Profile loaded; actual settings will be checked before signal acquisition.")
+            self.profile_load_finished.emit(True, "Background profile loaded.")
         elif operation == "export_profile":
             self._profile_io_busy = False
             self.recording_activity.stop()
@@ -991,17 +1026,6 @@ class SpectrumCorrectionWorkspace(QWidget):
                 else:
                     self._cpu.stop_session("aborted")
 
-    def cancel_waiting_sweep(self):
-        """Cancel a sweep held by the background readback gate, with no VISA work in flight."""
-        if not self._running or self._expected_device != "single_sweep":
-            return
-        self._expected_device = None
-        self._stopping = True
-        if self._context is None:
-            self._processed("stop", None)
-        else:
-            self._cpu.stop_session("aborted")
-
     def _processing_cancelled(self, operation):
         if operation not in {"finalize", "finalize_batch", "resume_batch"}:
             return
@@ -1028,6 +1052,8 @@ class SpectrumCorrectionWorkspace(QWidget):
             self.progress.hide()
             self._message(f"{action} failed: {error}")
             self.set_available(self._allowed)
+            if operation == "import_profile":
+                self.profile_load_finished.emit(False, str(error))
             return
         self._expected_device = None
         self._recording_failed = True
@@ -1054,6 +1080,15 @@ class SpectrumCorrectionWorkspace(QWidget):
         self.recording_finished.emit(self._kind, False)
 
     def _receive_committed_view(self, view: CorrectionViewSnapshot):
+        previous = self._latest_result
+        if previous is not None and self._latest_raw is view.source_raw:
+            # Status polling republishes an immutable snapshot even when no
+            # new sweep has committed. Quality transitions still invalidate
+            # the view, including a reference becoming stale while waiting.
+            fields = ("context_id", "segment_id", "frame_id", "processing_generation",
+                      "count", "completed_at_s", "quality", "final", "reference_age_s")
+            if all(getattr(previous, name) == getattr(view.corrected, name) for name in fields):
+                return
         first_corrected_frame = self._latest_result is None and view.corrected is not None
         self._result_archive_path = self._archive_path
         self._latest_raw = view.source_raw
@@ -1064,6 +1099,18 @@ class SpectrumCorrectionWorkspace(QWidget):
         # bounded preview refresh rate; freeze still defers drawing.
         if first_corrected_frame:
             self._render()
+
+    def live_performance_text(self):
+        if not self._live_timings_s:
+            return "Live timing measurements become available after the first committed sweep."
+        return "Latest committed sweep:\n" + "\n".join(
+            f"{label}: {duration_s * 1000:.1f} ms" for label, duration_s in self._live_timings_s.items()
+        )
+
+    def showEvent(self, event):
+        super().showEvent(event)
+        self._dirty_view = True
+        self._render()
 
     def _tick(self):
         if (self._running and not self._stopping and self._kind == "signal" and self._context is not None
@@ -1084,30 +1131,30 @@ class SpectrumCorrectionWorkspace(QWidget):
             self._reset_plot_on_render = False
             self._corrected_auto_range_pending = True
         raw = self._latest_raw
-        if raw is not None:
+        if raw is not None and self.raw_plot.isVisible():
             self.raw_plot.set_trace("Raw", raw.frequencies_hz, raw.powers_dbm, primary=True)
         profile, ctx = self._profile, self._context
-        if profile is not None and ctx is not None and profile.context_id == ctx.context_id:
+        if (self.raw_plot.isVisible() and profile is not None and ctx is not None
+                and profile.context_id == ctx.context_id):
             references = self._final_profiles or (profile,)
             for index, reference in enumerate(references):
                 name = ("Reference before" if index == 0 else "Reference after") if self._final_profiles else "Reference"
                 self.raw_plot.set_trace(name, ctx.frequencies_hz, 10 * np.log10(reference.mean_w) + 30)
         if self._latest_result is not None and ctx is not None:
             result = self._latest_result
-            plot = self.corrected_plot.plot
-            if plot.getAxis("bottom").logMode or plot.getAxis("left").logMode:
-                plot.setLogMode(x=False, y=False)
-                self._corrected_auto_range_pending = True
-            self.corrected_plot.set_title("Reference correction — final block" if result.final
-                                          else "Reference correction — provisional")
             paused = self._running and self._interleaved is not None and self._interleaved.waiting_role is not None
-            if paused:
-                self.corrected_plot.set_title("Previous SIGNAL block — acquisition paused")
-            self.corrected_plot.set_trace("Signed residual", ctx.frequencies_hz,
-                                          result.values_w, primary=True)
-            if self._corrected_auto_range_pending:
-                self.corrected_plot.auto_range()
-                self._corrected_auto_range_pending = False
+            if self.corrected_plot.isVisible():
+                plot = self.corrected_plot.plot
+                if plot.getAxis("bottom").logMode or plot.getAxis("left").logMode:
+                    plot.setLogMode(x=False, y=False)
+                    self._corrected_auto_range_pending = True
+                self.corrected_plot.set_title("Previous SIGNAL block — acquisition paused" if paused else
+                    "Reference correction — final block" if result.final else "Reference correction — provisional")
+                self.corrected_plot.set_trace("Signed residual", ctx.frequencies_hz,
+                                              result.values_w, primary=True)
+                if self._corrected_auto_range_pending:
+                    self.corrected_plot.auto_range()
+                    self._corrected_auto_range_pending = False
             self.frame_label.setText(
                 ("Previous SIGNAL block · acquisition paused · " if paused else "")
                 + f"{result.quality.value} · frame {result.frame_id} · {result.count} sweeps"
@@ -1140,19 +1187,19 @@ class SpectrumCorrectionWorkspace(QWidget):
     def _interference_selection_changed(self, *_args):
         calibration = self.interference_mode.currentData()
         if calibration is None:
-            self.interference_status.setText("Next recording: mean reference subtraction.")
+            self.interference_status.setText("Background processing: mean reference subtraction.")
         else:
             self.interference_status.setText(
-                f"Next recording: {calibration.model_id} · {calibration.basis_w.shape[1]} components. "
+                f"Background processing: {calibration.model_id} · {calibration.basis_w.shape[1]} components. "
                 "Fit uses qualified control regions; uncertainty remains unqualified."
             )
         self.set_available(self._allowed)
 
-    def _load_interference(self):
+    def _load_interference(self, dialog_parent=None):
         if self._running or self._profile_io_busy or self._profile is None or self._context is None:
             return
         path, _ = StationFileDialog.getOpenFileName(
-            self, "Load interference calibrations from an archive", "", "HDF5 measurement (*.h5 *.hdf5)",
+            dialog_parent or self, "Load interference calibrations from an archive", "", "HDF5 measurement (*.h5 *.hdf5)",
         )
         if not path:
             return
@@ -1173,13 +1220,21 @@ class SpectrumCorrectionWorkspace(QWidget):
         path, _filter = StationFileDialog.getOpenFileName(self, "Load background profile", "", "HDF5 (*.h5)")
         if not path:
             return
+        self.load_background_profile(Path(path))
+
+    def load_background_profile(self, path: Path):
+        if self._running or self._profile_io_busy:
+            raise RuntimeError("Stop recording and wait for the current profile operation before loading a background.")
         self._profile_io_busy = True
         self.recording_title.setText("Loading background profile…")
         self.recording_activity.show()
         self.recording_activity.start()
         self._message(f"Reading background profile: {path}")
         self.set_available(self._allowed)
-        self._cpu.load_profile(Path(path))
+        try:
+            self._cpu.load_profile(Path(path))
+        except (ValueError, BufferError) as exc:
+            self._failed("import_profile", str(exc))
 
     def _finalize_dialog(self):
         if self._running or self._profile_io_busy:
@@ -1338,7 +1393,7 @@ class SpectrumCorrectionWorkspace(QWidget):
         dialog.setWindowModality(Qt.WindowModality.WindowModal)
         dialog.show()
 
-    def _open_model_training(self):
+    def _open_model_training(self, dialog_parent=None):
         if self._running or self._profile_io_busy:
             return
         if self._training_dialog is not None:
@@ -1346,7 +1401,7 @@ class SpectrumCorrectionWorkspace(QWidget):
             return
         from .training_dialog import SpectrumTrainingDialog
 
-        dialog = SpectrumTrainingDialog(self)
+        dialog = SpectrumTrainingDialog(dialog_parent or self)
         self._training_dialog = dialog
 
         def finished(_result):
@@ -1358,7 +1413,7 @@ class SpectrumCorrectionWorkspace(QWidget):
         dialog.setWindowModality(Qt.WindowModality.WindowModal)
         dialog.show()
 
-    def _open_model_validation(self):
+    def _open_model_validation(self, dialog_parent=None):
         if self._running or self._profile_io_busy:
             return
         if self._validation_dialog is not None:
@@ -1366,7 +1421,7 @@ class SpectrumCorrectionWorkspace(QWidget):
             return
         from .validation_dialog import SpectrumValidationDialog
 
-        dialog = SpectrumValidationDialog(self)
+        dialog = SpectrumValidationDialog(dialog_parent or self)
         self._validation_dialog = dialog
 
         def finished(_result):
@@ -1378,7 +1433,7 @@ class SpectrumCorrectionWorkspace(QWidget):
         dialog.setWindowModality(Qt.WindowModality.WindowModal)
         dialog.show()
 
-    def _open_reference_diagnostics(self):
+    def _open_reference_diagnostics(self, dialog_parent=None):
         if self._running or self._profile_io_busy:
             return
         if self._diagnostic_dialog is not None:
@@ -1386,7 +1441,9 @@ class SpectrumCorrectionWorkspace(QWidget):
             return
         from .diagnostic_dialog import SpectrumDiagnosticDialog
 
-        dialog = SpectrumDiagnosticDialog(self)
+        dialog = SpectrumDiagnosticDialog(dialog_parent or self)
+        if self._archive_path is not None and self._profile is not None and self._kind == "reference":
+            dialog.reference.setText(str(self._archive_path))
         self._diagnostic_dialog = dialog
 
         def finished(_result):

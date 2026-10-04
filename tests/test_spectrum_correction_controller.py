@@ -33,7 +33,7 @@ def wait_until(application, predicate, timeout=8):
     deadline = time.monotonic() + timeout
     while not predicate() and time.monotonic() < deadline:
         application.processEvents()
-        time.sleep(0.002)
+        time.sleep(0.01)
     application.processEvents()
     assert predicate(), "Worker did not complete the expected operation"
 
@@ -86,6 +86,7 @@ def test_worker_archives_reference_then_signed_frames_in_order(tmp_path):
                 context, i, reference + [1e-10, -1e-10, 2e-10],
             )))
             assert ack["committed_point_count"] == index + 1
+            assert ack["processing_duration_s"] > 0 and ack["commit_duration_s"] > 0
             assert isinstance(ack["view"], CorrectionViewSnapshot)
             assert ack["view"].corrected.frame_id == index
             assert ack["view"].source_raw.acquired_at_utc.timestamp() == 100 + index

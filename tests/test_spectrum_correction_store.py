@@ -308,3 +308,41 @@ def test_tiny_power_units_and_spectral_dimensions_are_distinct():
         parse_quantity("3 nW*Hz", DIMENSION_POWER)
     with pytest.raises(QuantityError):
         parse_quantity("3 nW", DIMENSION_POWER_DENSITY)
+
+
+@pytest.mark.parametrize("status", ["completed", "faulted", "incomplete"])
+def test_loading_recorded_background_requires_completed_archive(tmp_path, status):
+    context, profile = fixture_profile()
+    path = tmp_path / "recorded-background.h5"
+    writer = Hdf5RunWriter(path, recipe_source="schema_version: 1\nname: Recorded background\nsteps: []\n",
+                           settings_source="fixture: true\n", plan_hash=context.context_id, device_idn={},
+                           run_attributes={"spectrum_correction_schema": "spectrum-correction-v1"})
+    writer.store_background_profile(context, profile)
+    raw, _, _ = signal_fixture(context, profile)
+    writer.append(MeasurementPoint(0, {}, {}), raw)
+    writer.close("completed")
+    if status != "completed":
+        with h5py.File(path, "r+") as archive:
+            archive["run"].attrs["status"] = status
+    before = path.read_bytes()
+    if status == "completed":
+        read_context, read_profile = BackgroundProfileHdf5Store.load(path)
+        assert read_context.context_id == context.context_id
+        assert read_profile.content_hash == profile.content_hash
+    else:
+        with pytest.raises(ExecutionError, match="completed"):
+            BackgroundProfileHdf5Store.load(path)
+    assert path.read_bytes() == before
+
+
+def test_loading_archive_with_multiple_backgrounds_requires_explicit_profile_export(tmp_path):
+    context, profile = fixture_profile()
+    path = tmp_path / "multiple-backgrounds.h5"
+    writer = Hdf5RunWriter(path, recipe_source="schema_version: 1\nname: Interleaved background\nsteps: []\n",
+                           settings_source="fixture: true\n", plan_hash=context.context_id, device_idn={},
+                           run_attributes={"spectrum_correction_schema": "spectrum-correction-v1"})
+    writer.store_background_profile(context, profile)
+    writer.store_background_profile(context, replace(profile, profile_id="another-background"))
+    writer.close("completed")
+    with pytest.raises(ExecutionError, match="exactly one background"):
+        BackgroundProfileHdf5Store.load(path)

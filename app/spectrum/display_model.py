@@ -99,6 +99,10 @@ def build_display_state(
     analysis_unit: str = "dBm",
     analysis_source_key: str | None = None,
     analysis_method: str | None = None,
+    analysis_input_values: tuple[float, ...] | None = None,
+    analysis_source_snapshot: SpectrumDisplayTrace | None = None,
+    analysis_input_provenance: tuple[str, ...] = (),
+    analysis_modes: tuple[str, ...] | None = None,
 ) -> SpectrumDisplayState:
     """Derive all visible traces and a stable analysis selection.
 
@@ -142,23 +146,39 @@ def build_display_state(
                 )
 
     if analysis_values is not None and analysis_source_key:
+        if analysis_source_snapshot is not None and analysis_source_snapshot.key == analysis_source_key:
+            candidates = [analysis_source_snapshot if trace.key == analysis_source_key else trace for trace in candidates]
         source = next((trace for trace in candidates if trace.key == analysis_source_key), None)
         if source is not None and len(analysis_values) == len(source.frequencies_hz):
+            background = "background" in analysis_input_provenance
+            digital_filters = analysis_modes is None or any(mode not in {"background", "power_average"} for mode in analysis_modes)
+            input_label = "Raw − background" if background else source.label
+            if "power_average" in analysis_input_provenance:
+                input_label = "Power average − background" if background else "Power average" if source.key == "raw" else f"Power average · {source.label}"
+            if (analysis_input_values is not None and analysis_unit != source.unit
+                    and len(analysis_input_values) == len(source.frequencies_hz) and digital_filters):
+                candidates.append(SpectrumDisplayTrace(
+                    key=f"correction:{analysis_source_key}", label=input_label,
+                    frequencies_hz=source.frequencies_hz, values=analysis_input_values,
+                    unit=analysis_unit, frame_id=source.frame_id,
+                    provenance=(*source.provenance, *analysis_input_provenance, "before DSP"),
+                ))
             candidates.append(
                 SpectrumDisplayTrace(
                     key=f"analysis:{analysis_source_key}",
-                    label=(f"Analysis ({analysis_source_key})" if not analysis_method else f"Analysis · {analysis_method}"),
+                    label=f"Filtered · {input_label}" if digital_filters else input_label,
                     frequencies_hz=source.frequencies_hz,
                     values=tuple(float(value) for value in analysis_values),
                     unit=analysis_unit,
-                    frame_id=frame_id,
-                    provenance=(*source.provenance, "analysis", analysis_method or ""),
+                    frame_id=source.frame_id,
+                    provenance=(*source.provenance, *analysis_input_provenance, "analysis", analysis_method or ""),
                 )
             )
 
     traces = tuple(trace for trace in candidates if visible.get(trace.key, True))
     by_key = MappingProxyType({trace.key: trace for trace in traces})
-    priority = ("processed", "averaged", "reference", "raw")
+    priority = (*[trace.key for trace in traces if trace.key.startswith("analysis:")],
+                "processed", "averaged", "reference", "raw")
     primary_key = next((key for key in priority if key in by_key), None)
     selected_key = preferred_key if preferred_key in by_key else primary_key
     return SpectrumDisplayState(

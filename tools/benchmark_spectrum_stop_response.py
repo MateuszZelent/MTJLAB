@@ -110,13 +110,14 @@ def _stop_cycle(application, settings, directory, *, index, points, frames_befor
         host = MainWindow(settings_path, simulation=True)
         page = host.anritsu_page
         workspace = page.correction_workspace
-        workspace.request_device.disconnect(page._controller.call)
+        workspace.request_device.disconnect(page._request_correction_device)
         page._set_page_state(AnritsuPageState.IDLE)
         host.resize(1500, 950)
         host._navigate_to("anritsu")
         page.analysis_tabs.setCurrentIndex(0)
-        page.current_spectrum_view.setCurrentIndex(page.current_spectrum_view.findData("background"))
-        stop_button, feedback_widget = page.current_stop_corrected, page.current_stop_corrected
+        page._open_recording_setup()
+        page.recording_tabs.setCurrentIndex(1)
+        stop_button, feedback_widget = workspace.stop, workspace.recording_title
     else:
         workspace = SpectrumCorrectionWorkspace(settings, single_sweep_available=True, simulation_mode=True)
         host = workspace

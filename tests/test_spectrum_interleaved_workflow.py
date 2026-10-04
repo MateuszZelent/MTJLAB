@@ -357,14 +357,15 @@ def test_main_background_action_uses_the_selected_interleaved_policy(tmp_path, m
         page.show()
         application.processEvents()
         page._set_page_state(AnritsuPageState.IDLE)
-        page.current_spectrum_view.setCurrentIndex(page.current_spectrum_view.findData("background"))
+        page._open_recording_setup()
+        page.recording_tabs.setCurrentIndex(1)
         workspace = page.correction_workspace
         workspace.reference_state.setText("REF sample state reported by operator")
         workspace.signal_state.setText("SIGNAL sample state reported by operator")
-        assert "alternating REF / SIGNAL" in getattr(page, start_action).text()
-        getattr(page, start_action).click()
+        assert page.live.text() == "Start Live" and page.single.text() == "Acquire once"
+        workspace.acquire_interleaved.click()
         application.processEvents()
-        assert page.analysis_tabs.currentIndex() == 2 and workspace.running
+        assert page.analysis_tabs.currentIndex() == 0 and workspace.running
         assert workspace._interleaved.phase == InterleavedPhase.WAIT_REFERENCE
         assert workspace.confirm_interleaved_state.isVisible()
         assert workspace.confirm_interleaved_state.width() > 50

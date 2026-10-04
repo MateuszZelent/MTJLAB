@@ -19,6 +19,8 @@ def _adapter(settings: StationSettings, simulation: bool) -> DeviceAdapter:
 def _dispatch(adapter: DeviceAdapter, operation: str, payload: object) -> object:
     if not isinstance(adapter, AnritsuAdapter):
         raise TypeError("Anritsu module received an incompatible adapter.")
+    if operation.startswith("read_background_filter_configuration:"):
+        return adapter.read_full_configuration(), adapter.read_advanced_spectrum_configuration()
     actions = {
         "read_configuration": adapter.read_current_configuration,
         "read_advanced_spectrum": adapter.read_advanced_spectrum_configuration,

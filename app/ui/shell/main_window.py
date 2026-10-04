@@ -328,7 +328,6 @@ class MainWindow(FluentWindow):
             lambda: self._navigate_to("keithley_characterization")
         )
         self.anritsu_page = self._device_pages["anritsu"]
-        self.anritsu_page.set_background_output_controller(self._controllers["keithley"])
         self.anritsu_page.correction_workspace.set_simulation_mode(self._simulation)
         self.moke_box_page = self._device_pages["moke_box"]
         self.lakeshore_gaussmeter_page = self._device_pages["lakeshore_gaussmeter"]
@@ -906,7 +905,11 @@ class MainWindow(FluentWindow):
     def _navigate_to(self, route: str) -> None:
         target = self.navigation_routes[route]
         nav_item = self.navigationInterface.widget(target.objectName())
-        if nav_item is not None and getattr(nav_item, "treeParent", None) is not None:
+        if (
+            (not self.isVisible() or not self.navigationInterface.panel.isCollapsed())
+            and nav_item is not None
+            and getattr(nav_item, "treeParent", None) is not None
+        ):
             p = nav_item.treeParent
             while p:
                 if hasattr(p, "setExpanded") and not p.isExpanded:
@@ -1459,7 +1462,15 @@ class MainWindow(FluentWindow):
         route = str(settings.value("main_window/current_route", "overview"))
         if route not in self.navigation_routes:
             route = "overview"
-        self._navigate_to(route)
+        # Restore the initial page as layout state. Fluent's entrance transition
+        # otherwise starts on the hidden host's provisional geometry and keeps
+        # moving it while show/restoreGeometry are laying out the native window.
+        animate = self.stackedWidget.isAnimationEnabled()
+        self.stackedWidget.setAnimationEnabled(False)
+        try:
+            self._navigate_to(route)
+        finally:
+            self.stackedWidget.setAnimationEnabled(animate)
 
     def _save_workspace(self) -> None:
         settings = QSettings("LabControl", "LabControl")
@@ -3193,6 +3204,7 @@ class MainWindow(FluentWindow):
         # unsaved form edits before their device-specific persistence runs.
         try:
             rigol_defaults = self.rigol_page.settings_defaults()
+            preview_defaults = self.anritsu_page.preview_settings_snapshot()
             anritsu_defaults = (
                 self.anritsu_page.configuration_panel.configuration_snapshot(),
                 self.anritsu_page.advanced_configuration_panel.settings_snapshot(),
@@ -3242,6 +3254,7 @@ class MainWindow(FluentWindow):
             generator["default_power"] = f"{signal_generator.power_dbm:.9g} dBm"
             acquisition = raw["devices"]["anritsu"]["acquisition"]
             acquisition["application_average_count"] = average_count
+            raw["devices"]["anritsu"]["preview"] = preview_defaults
             acquisition["live_refresh_interval"] = format_quantity_auto(
                 refresh_ms / 1000, DIMENSION_TIME
             )
@@ -3320,10 +3333,11 @@ class MainWindow(FluentWindow):
             self._active_keithley_defaults = None
         self._log("SAVE SETTINGS: station profile transaction completed")
         self.safety_strip.save_settings.setText("SAVED")
-        QTimer.singleShot(
-            1_500,
-            lambda: self.safety_strip.save_settings.setText("SAVE SETTINGS"),
-        )
+        save_feedback = QTimer(self.safety_strip.save_settings)
+        save_feedback.setSingleShot(True)
+        save_feedback.timeout.connect(lambda: self.safety_strip.save_settings.setText("SAVE SETTINGS"))
+        save_feedback.timeout.connect(save_feedback.deleteLater)
+        save_feedback.start(1_500)
 
     def _start_keithley_defaults_save(self) -> None:
         if self._keithley_defaults_in_flight:
@@ -3755,17 +3769,36 @@ class MainWindow(FluentWindow):
         application = QApplication.instance()
         if application is not None:
             applied_theme = apply_application_theme(application, self._configured_theme_mode)
-            self._apply_navigation_surface(applied_theme.tokens.surface)
-        if (
+        panel = self.navigationInterface.panel
+        # A native resize during geometry restoration can start a collapse.
+        # expand(useAni=False) does not stop that animation in QFluent 1.11.2:
+        # its next frame can overwrite the new width with the old 48 px target.
+        panel.expandAni.stop()
+        for item in panel.items.values():
+            animation = getattr(item.widget, "expandAni", None)
+            if animation is not None:
+                animation.stop()
+        expanded = (
             self._navigation_expanded_preference
             and self.width() >= self._navigation_expand_threshold
-        ):
+        )
+        if expanded:
             self.navigationInterface.expand(useAni=False)
+        else:
+            # collapse() has no non-animated overload. Complete the native
+            # Fluent transition before paint, including its compact item state.
+            panel.collapse()
+            panel.expandAni.setCurrentTime(panel.expandAni.duration())
         # Fluent recalculates a navigation tree's size hint while its parent
         # panel is laid out. Re-toggling here prevents child rows from keeping
-        # their pre-layout geometry and overlapping the group heading.
+        # their pre-layout geometry and overlapping the group heading. A compact
+        # rail uses Fluent's device flyout, never expanded, clipped child rows.
         self.apparatus_navigation_item.setExpanded(False, ani=False)
-        self.apparatus_navigation_item.setExpanded(True, ani=False)
+        if expanded:
+            self.apparatus_navigation_item.setExpanded(True, ani=False)
+        if application is not None:
+            self._apply_navigation_surface(applied_theme.tokens.surface)
+        self.hBoxLayout.activate()
         QTimer.singleShot(0, self._capture_apparatus_required_height)
 
     def resizeEvent(self, event: QResizeEvent) -> None:
@@ -3779,6 +3812,8 @@ class MainWindow(FluentWindow):
         """Prevent QFluent's expanded tree from overlapping sibling routes."""
 
         if not hasattr(self, "_apparatus_required_height"):
+            return
+        if self.navigationInterface.panel.isCollapsed():
             return
         short = self.navigationInterface.panel.height() < self._apparatus_required_height
         if short and self.apparatus_navigation_item.isExpanded:
@@ -3950,7 +3985,8 @@ class MainWindow(FluentWindow):
         except Exception as exc:
             self._log(f"Manual spectrum archive close warning: {exc}")
         self.anritsu_page._analysis_controller.close()
-        self.anritsu_page._background_analysis_controller.close()
+        self.anritsu_page._background_config_timer.stop()
+        self.anritsu_page._spectrogram_analysis_controller.close()
         if not DeviceController.close_all(self._controllers.values()):
             self._audit_record(
                 "Application close delayed: background device threads did not terminate cleanly within timeout",

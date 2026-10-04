@@ -76,7 +76,7 @@ class ManualSpectrumWriterTests(unittest.TestCase):
             resumed.close()
 
             summary = Hdf5RunReader.summary(path)
-            self.assertEqual(summary.status, "incomplete")
+            self.assertEqual(summary.status, "aborted")
             self.assertEqual(summary.point_count, 2)
             self.assertEqual(summary.spectrum_count, 2)
             points = Hdf5RunReader.points(path)

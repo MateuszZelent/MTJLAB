@@ -3148,7 +3148,7 @@ class MainWindowTests(unittest.TestCase):
             anritsu.reference_operation.setCurrentIndex(1)
             anritsu._refresh_spectrum_display()
 
-            self.assertIn("Reference Level differs", anritsu.info.text())
+            self.assertIn("reference level differs", anritsu.info.text().lower())
             self.assertEqual(anritsu.spectrum_plot.trace_point_count("Processed"), 0)
         finally:
             window.close()
@@ -3304,12 +3304,12 @@ class MainWindowTests(unittest.TestCase):
             ):
                 anritsu.read_once()
                 anritsu._error(
-                    "acquire_fresh_trace",
+                    "single_sweep",
                     "Anritsu returned the documented -999.0 "
                     "unmeasured/error sentinel for 10001 of 10001 trace points",
                 )
 
-            anritsu._controller.call.assert_called_once_with("acquire_fresh_trace", "TRAC1")
+            anritsu._controller.call.assert_called_once_with("single_sweep", "TRAC1")
             single_shot.assert_called_once()
             self.assertFalse(anritsu._fetch_pending)
             self.assertEqual(anritsu._page_state, AnritsuPageState.IDLE)
@@ -3384,7 +3384,7 @@ class MainWindowTests(unittest.TestCase):
             window.close()
             self.application.processEvents()
 
-    def test_anritsu_read_once_passively_queries_current_trace(self) -> None:
+    def test_anritsu_acquire_once_starts_a_single_sweep_and_keeps_raw_preview(self) -> None:
         window = MainWindow(".config/settings.yml", simulation=True)
         try:
             anritsu = window.anritsu_page
@@ -3398,9 +3398,9 @@ class MainWindowTests(unittest.TestCase):
             anritsu._controller.call.assert_not_called()
             anritsu.single.click()
 
-            anritsu._controller.call.assert_called_once_with("acquire_fresh_trace", "TRAC1")
+            anritsu._controller.call.assert_called_once_with("single_sweep", "TRAC1")
             self.assertTrue(anritsu._fetch_pending)
-            anritsu._result("acquire_fresh_trace", first)
+            anritsu._result("single_sweep", first)
             self.assertIs(anritsu._latest_trace, first)
             self.assertFalse(anritsu._fetch_pending)
             first_preview = diagnostics.raw_text.toPlainText()
@@ -3411,8 +3411,8 @@ class MainWindowTests(unittest.TestCase):
             anritsu._controller.call.reset_mock()
             anritsu.single.click()
 
-            anritsu._controller.call.assert_called_once_with("acquire_fresh_trace", "TRAC1")
-            anritsu._result("acquire_fresh_trace", second)
+            anritsu._controller.call.assert_called_once_with("single_sweep", "TRAC1")
+            anritsu._result("single_sweep", second)
             self.assertIs(anritsu._latest_trace, second)
             self.assertEqual(anritsu.spectrum_plot._traces["Raw"][0].tolist(), [3e6, 4e6])
             self.assertEqual(anritsu.spectrum_plot._traces["Raw"][1].tolist(), [-30.0, -20.0])
@@ -3485,7 +3485,8 @@ class MainWindowTests(unittest.TestCase):
             diagnostics.resize(560, 420)
             self.application.processEvents()
             self.assertGreater(diagnostics.raw_text.width(), 300)
-            self.assertGreater(diagnostics.raw_text.height(), 150)
+            self.assertGreater(diagnostics.raw_text.height(), 100)
+            self.assertTrue(diagnostics.rect().contains(diagnostics.raw_text.mapTo(diagnostics, diagnostics.raw_text.rect().bottomRight())))
             anritsu._timer.stop()
         finally:
             dialog = window.anritsu_page._trace_diagnostics_dialog
@@ -3898,8 +3899,8 @@ class MainWindowTests(unittest.TestCase):
             anritsu = window.anritsu_page
             anritsu._controller.call = Mock()
             reference = SpectrumTrace(
-                (1e6, 2e6, 3e6),
-                (-50.0, -40.0, -30.0),
+                (1e6, 2e6, 3e6, 4e6, 5e6),
+                (-50.0, -40.0, -30.0, -40.0, -50.0),
                 datetime.now(timezone.utc),
                 "REF",
             )
@@ -3907,13 +3908,13 @@ class MainWindowTests(unittest.TestCase):
             anritsu.capture_current_reference()
             first = SpectrumTrace(
                 reference.frequencies_hz,
-                (-45.0, -35.0, -25.0),
+                (-45.0, -35.0, -25.0, -35.0, -45.0),
                 datetime.now(timezone.utc),
                 "TRAC1",
             )
             second = SpectrumTrace(
                 reference.frequencies_hz,
-                (-40.0, -30.0, -20.0),
+                (-40.0, -30.0, -20.0, -30.0, -40.0),
                 datetime.now(timezone.utc),
                 "TRAC1",
             )
@@ -3923,13 +3924,16 @@ class MainWindowTests(unittest.TestCase):
             raw = anritsu._spectrogram_matrix(source="raw", window_s=30)
             self.assertIsNotNone(raw)
             assert raw is not None
-            self.assertEqual(raw[2].shape, (1, 3))
+            self.assertEqual(raw[2].shape, (1, 5))
             self.assertEqual(raw[3], "dBm")
 
-            processed = anritsu._spectrogram_matrix(source="processed", window_s=60)
+            anritsu.reference_operation.setCurrentIndex(anritsu.reference_operation.findData("difference_db"))
+            anritsu._spectrogram_matrix(source="current", window_s=60)
+            self.assertTrue(wait_for_ui(lambda: anritsu._spectrogram_filter_outcome is not None))
+            processed = anritsu._spectrogram_matrix(source="current", window_s=60)
             self.assertIsNotNone(processed)
             assert processed is not None
-            self.assertEqual(processed[2].tolist(), [[5.0, 5.0, 5.0], [10.0, 10.0, 10.0]])
+            self.assertEqual(processed[2].tolist(), [[5.0]*5, [10.0]*5])
             self.assertEqual(processed[3], "dB")
             anritsu._refresh_spectrogram_display()
             anritsu._show_trace(second)
@@ -3937,7 +3941,7 @@ class MainWindowTests(unittest.TestCase):
 
             anritsu._spectrogram_buffer.clear()
             for index in range(anritsu._spectrogram_buffer.MAX_ROWS + 100):
-                anritsu._spectrogram_buffer.append(first, now=200.0 + index * 0.11)
+                anritsu._spectrogram_buffer.append(replace(first), now=200.0 + index * 0.11)
             self.assertLessEqual(
                 anritsu._spectrogram_buffer.row_count,
                 anritsu._spectrogram_buffer.MAX_ROWS,
@@ -4416,7 +4420,7 @@ class MainWindowTests(unittest.TestCase):
             window.close()
             self.application.processEvents()
 
-    def test_anritsu_floating_spectrogram_shares_window_and_raw_processed_selection(self) -> None:
+    def test_anritsu_floating_spectrogram_shares_window_and_current_correction(self) -> None:
         window = MainWindow(".config/settings.yml", simulation=True)
         try:
             window.resize(1360, 880)
@@ -4449,31 +4453,35 @@ class MainWindowTests(unittest.TestCase):
                 self.assertLessEqual(right, floating.rect().right())
 
             floating.window_span.setCurrentIndex(floating.window_span.findData(120))
-            floating.source.setCurrentIndex(floating.source.findData("processed"))
+            floating.source.setCurrentIndex(floating.source.findData("current"))
             self.assertEqual(anritsu.spectrogram_window_span.currentData(), 120)
-            self.assertEqual(anritsu.spectrogram_source.currentData(), "processed")
-            self.assertIn("requires", floating.status.text())
+            self.assertEqual(anritsu.spectrogram_source.currentData(), "current")
 
             reference = SpectrumTrace(
-                (1e6, 2e6),
-                (-50.0, -40.0),
+                (1e6, 2e6, 3e6, 4e6, 5e6),
+                (-50.0, -40.0, -40.0, -45.0, -50.0),
                 datetime.now(timezone.utc),
                 "REF",
             )
             anritsu._latest_trace = reference
             anritsu.capture_current_reference()
+            anritsu.reference_operation.setCurrentIndex(anritsu.reference_operation.findData("difference_db"))
             frame = SpectrumTrace(
                 reference.frequencies_hz,
-                (-40.0, -25.0),
+                (-40.0, -25.0, -25.0, -35.0, -40.0),
                 datetime.now(timezone.utc),
                 "TRAC1",
             )
             anritsu._spectrogram_buffer.append(frame, now=100.0)
             anritsu._refresh_spectrogram_display()
-            self.assertIn("Processed", floating.status.text())
+            deadline = time.monotonic() + 3
+            while anritsu._spectrogram_filter_outcome is None and time.monotonic() < deadline:
+                self.application.processEvents()
+                QTest.qWait(10)
+            self.assertIn("Reference difference_db", floating.status.text())
             self.assertEqual(
                 floating.spectrogram.image.image.tolist(),
-                [[10.0, 15.0]],
+                [[10.0, 15.0, 15.0, 10.0, 10.0]],
             )
 
             anritsu.spectrogram_source.setCurrentIndex(anritsu.spectrogram_source.findData("raw"))
@@ -4499,7 +4507,7 @@ class MainWindowTests(unittest.TestCase):
             assert floating is not None
             self.assertEqual(floating.windowModality(), Qt.WindowModality.NonModal)
             self.assertTrue(floating.modal_shell.surface.isVisibleTo(floating))
-            self.assertIs(floating.spectrum.parentWidget(), floating.modal_shell.surface)
+            self.assertTrue(floating.modal_shell.surface.isAncestorOf(floating.spectrum))
             self.assertGreater(floating.spectrum.width(), 0)
             self.assertGreater(floating.spectrum.height(), 0)
 
@@ -4517,7 +4525,7 @@ class MainWindowTests(unittest.TestCase):
         try:
             anritsu = window.anritsu_page
             anritsu._controller.call = Mock()
-            anritsu.average_count.setValue(2)
+            anritsu.reference_average_count.setValue(2)
             first = SpectrumTrace((1e6, 2e6), (-10.0, -20.0), datetime.now(timezone.utc), "TRAC1")
             second = SpectrumTrace((1e6, 2e6), (0.0, -20.0), datetime.now(timezone.utc), "TRAC1")
 
@@ -4817,6 +4825,10 @@ class MainWindowTests(unittest.TestCase):
                 window.anritsu_page.sg_power.setText("-20 dBm")
                 window.anritsu_page.average_count.setValue(321)
                 window.anritsu_page.refresh.setValue(750)
+                window.anritsu_page._analysis_parameters_applied(replace(
+                    window.anritsu_page._analysis_parameters, temporal_average_frames=16,
+                    temporal_max_gap_s=45., narrow_protected_regions_hz=((450e6, 510e6),),
+                    peak_measure_filtered=True))
 
                 window._save_all_settings()
 
@@ -4842,6 +4854,10 @@ class MainWindowTests(unittest.TestCase):
                 )
                 self.assertEqual(acquisition["application_average_count"], 321)
                 self.assertEqual(acquisition["live_refresh_interval"], "750 ms")
+                preview = SettingsRepository(path).load().raw["devices"]["anritsu"]["preview"]
+                self.assertEqual(preview["average_frames"], 16)
+                self.assertEqual(preview["reset_gap"], "45 s")
+                self.assertEqual(preview["protected_bands"], [["450 MHz", "510 MHz"]])
             finally:
                 window.close()
                 self.application.processEvents()
@@ -4864,6 +4880,9 @@ class MainWindowTests(unittest.TestCase):
                 self.assertEqual(restarted.anritsu_page.sg_power.text(), "-20 dBm")
                 self.assertEqual(restarted.anritsu_page.average_count.value(), 321)
                 self.assertEqual(restarted.anritsu_page.refresh.value(), 750)
+                self.assertEqual(restarted.anritsu_page.correction_controls.power_average.currentData(), 16)
+                self.assertEqual(restarted.anritsu_page._analysis_parameters.narrow_protected_regions_hz, ((450e6, 510e6),))
+                self.assertTrue(restarted.anritsu_page._analysis_parameters.peak_measure_filtered)
             finally:
                 restarted.close()
                 self.application.processEvents()

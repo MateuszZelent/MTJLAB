@@ -11,11 +11,15 @@ from dataclasses import dataclass
 
 import numpy as np
 from numpy.typing import ArrayLike
-from app.domain.spectrum_interference import SpectrumInterferenceCalibration
 
 from app.domain.spectrum_correction import (
-    FloatVector, SpectrumFrameEnvelope, SpectrumFrameRole, immutable_vector,
+    FloatVector,
+    SpectrumFrameEnvelope,
+    SpectrumFrameRole,
+    immutable_vector,
 )
+from app.domain.spectrum_interference import SpectrumInterferenceCalibration
+
 from .streaming_statistics import finite_vector
 
 
@@ -122,6 +126,19 @@ class ReferenceInterferenceModel:
                 raise ValueError("Fitting from a signal requires independently qualified control regions.")
         elif envelope.role != SpectrumFrameRole.REFERENCE:
             raise ValueError("Transitions and unknown states cannot update nuisance coefficients.")
+        return self._fit_values(powers_w)
+
+    def fit_preview(self, powers_w: ArrayLike) -> InterferenceFit:
+        """Evaluate a passive display without inventing sweep-completion evidence.
+
+        Reference training and independently qualified signal-free controls
+        remain mandatory. A preview fit never qualifies uncertainty.
+        """
+        if not self.signal_control_regions_qualified:
+            raise ValueError("Preview model requires independently qualified signal control regions.")
+        return self._fit_values(powers_w)
+
+    def _fit_values(self, powers_w: ArrayLike) -> InterferenceFit:
         values = finite_vector(powers_w, size=self.baseline_w.size)
         if np.any(values <= 0):
             raise ValueError("Nuisance fit input must be positive acquired watts.")

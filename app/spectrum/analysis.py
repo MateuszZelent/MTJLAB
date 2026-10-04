@@ -10,10 +10,14 @@ as dBm.
 from __future__ import annotations
 
 import math
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import Sequence
 
 import numpy as np
+
+from app.domain.spectrum_correction import BackgroundProfile, SpectrumAcquisitionContext
+from .processing import frequency_grids_match
+from .streaming_statistics import dbm_to_w
 
 
 @dataclass(frozen=True, slots=True)
@@ -29,6 +33,36 @@ class SpectrumAnalysisParameters:
     narrow_max_width_hz: float = 6e6
     narrow_threshold_sigma: float = 6.0
     narrow_protected_regions_hz: tuple[tuple[float, float], ...] = ()
+    peak_min_width_hz: float = 0.0
+    peak_max_width_hz: float = 0.0
+    peak_min_distance_hz: float = 0.0
+    peak_min_snr_sigma: float = 6.0
+    peak_min_prominence_sigma: float = 3.0
+    peak_polarity: str = "positive"
+    temporal_average_frames: int = 1
+    temporal_max_gap_s: float = 30.0
+    peak_measure_filtered: bool = False
+
+    def __post_init__(self) -> None:
+        if type(self.temporal_average_frames) is not int or not 1 <= self.temporal_average_frames <= 64:
+            raise ValueError("Power averaging requires 1 to 64 received frames.")
+        if not math.isfinite(self.temporal_max_gap_s) or self.temporal_max_gap_s <= 0:
+            raise ValueError("Averaging reset gap must be a positive finite time.")
+        if len(self.narrow_protected_regions_hz) > 32 or any(
+            not (math.isfinite(low) and math.isfinite(high) and 0 <= low < high)
+            for low, high in self.narrow_protected_regions_hz
+        ):
+            raise ValueError("Provide at most 32 ordered, finite protected frequency bands.")
+        widths = (self.peak_min_width_hz, self.peak_max_width_hz, self.peak_min_distance_hz)
+        if any(not math.isfinite(value) or value < 0 for value in widths):
+            raise ValueError("Peak widths and separation must be finite nonnegative frequencies.")
+        if self.peak_max_width_hz and self.peak_max_width_hz < self.peak_min_width_hz:
+            raise ValueError("Maximum peak width must be at least the minimum width.")
+        if self.peak_polarity not in {"positive", "negative", "both"}:
+            raise ValueError("Unsupported peak polarity.")
+        if any(not math.isfinite(value) or value <= 0
+               for value in (self.peak_min_snr_sigma, self.peak_min_prominence_sigma)):
+            raise ValueError("Linear peak thresholds must be positive finite noise multiples.")
 
 
 @dataclass(frozen=True, slots=True)
@@ -48,6 +82,7 @@ class SpectrumPeak:
     fit_fwhm_hz: float | None
     fit_rmse_db: float | None
     amplitude_unit: str = "dBm"
+    contrast_unit: str = "dB"
 
 
 @dataclass(frozen=True, slots=True)
@@ -60,6 +95,9 @@ class SpectrumCleanupResult:
     modified_bin_indices: tuple[int, ...] = ()
     removed_peak_indices: tuple[int, ...] = ()
     notes: tuple[str, ...] = ()
+    input_values: tuple[float, ...] | None = None
+    input_provenance: tuple[str, ...] = ()
+    applied_modes: tuple[str, ...] = ()
 
     @property
     def values(self) -> tuple[float, ...]:
@@ -276,7 +314,8 @@ def clean_spectrum_values(
         return SpectrumCleanupResult(result.values, result.noise_scale, (),
             "Narrow-peak rejection (display only)", unit, result.modified_indices,
             result.peak_indices, result.notes)
-    sigma = _linear_noise_sigma(values) if unit == "W" else robust_noise_sigma_db(values)
+    linear = unit not in {"dBm", "dB"}
+    sigma = _linear_noise_sigma(values) if linear else robust_noise_sigma_db(values)
     mode = mode.lower()
     if mode == "raw":
         return SpectrumCleanupResult(values, sigma, (), "Raw (no processing)", unit)
@@ -292,7 +331,7 @@ def clean_spectrum_values(
     )
     if mode == "denoise":
         cleaned = (bilateral_denoise_linear(values, window=params.denoise_window)
-                   if unit == "W" else bilateral_denoise_dbm(values, window=params.denoise_window))
+                   if linear else bilateral_denoise_dbm(values, window=params.denoise_window))
         method = "Edge-preserving bilateral denoise"
     elif mode == "emi_reject":
         cleaned = suppress_stationary_lines_dbm(values, interference)
@@ -314,8 +353,9 @@ def clean_spectrum_values(
     return SpectrumCleanupResult(tuple(cleaned), sigma, interference, method, unit, notes=notes)
 
 
-SPECTRUM_FILTER_ORDER = ("narrow_reject", "emi_reject", "denoise")
+SPECTRUM_FILTER_ORDER = ("background", "narrow_reject", "emi_reject", "denoise")
 SPECTRUM_FILTER_LABELS = {
+    "background": "Background subtraction",
     "narrow_reject": "Narrow-peak rejection",
     "emi_reject": "Stationary-line rejection",
     "denoise": "Edge-preserving denoise",
@@ -330,6 +370,9 @@ def clean_spectrum_pipeline(
     history: Sequence[Sequence[float]] = (),
     parameters: SpectrumAnalysisParameters | None = None,
     frequencies_hz: Sequence[float] | None = None,
+    background_profile: BackgroundProfile | None = None,
+    background_context: SpectrumAcquisitionContext | None = None,
+    background_model=None,
 ) -> SpectrumCleanupResult:
     """Compose display filters in a stable order, preserving units and raw input.
 
@@ -344,13 +387,49 @@ def clean_spectrum_pipeline(
     if unknown:
         raise ValueError(f"Unsupported spectrum filters: {sorted(unknown)!r}.")
     original = tuple(float(value) for value in values)
-    result = clean_spectrum_values(original, unit=unit, mode="raw", parameters=parameters)
     methods: list[str] = []
+    applied_modes: list[str] = []
+    if "background" in selected:
+        if unit != "dBm":
+            raise ValueError("Background subtraction requires an absolute dBm input; the residual is signed W.")
+        if background_profile is None or background_context is None:
+            raise ValueError("Record or load a background profile before enabling Background.")
+        if background_profile.context_id != background_context.context_id:
+            raise ValueError("Background profile does not match its acquisition context.")
+        if not background_context.settings_verified:
+            raise ValueError("Background analyzer settings have not been verified.")
+        if frequencies_hz is None or not frequency_grids_match(frequencies_hz, background_context.frequencies_hz):
+            raise ValueError("Background frequency grid differs from the current spectrum.")
+        if len(original) != len(background_profile.mean_w):
+            raise ValueError("Background point count differs from the current spectrum.")
+        if background_model is not None and (
+            background_model.context_id != background_context.context_id
+            or not np.array_equal(background_model.baseline_w, background_profile.mean_w)
+        ):
+            raise ValueError("Background model does not match the active background context and baseline.")
+        power = dbm_to_w(original)
+        background = background_profile.mean_w if background_model is None else background_model.fit_preview(power).background_w
+        original = tuple(power - background)
+        unit = "W"
+        methods.append(f"Background subtraction [{background_profile.profile_id}] (signed W, display only)")
+        applied_modes.append("background")
+    result = clean_spectrum_values(original, unit=unit, mode="raw", parameters=parameters)
     notes: list[str] = []
+    protected = np.zeros(len(original), dtype=bool)
+    regions = (parameters or SpectrumAnalysisParameters()).narrow_protected_regions_hz
+    if regions:
+        if frequencies_hz is None or len(frequencies_hz) != len(original):
+            raise ValueError("Signal protection requires the matching frequency axis.")
+        axis = np.asarray(frequencies_hz)
+        for low, high in regions:
+            protected |= (axis >= low) & (axis <= high)
+        notes.append(f"Signal protection: {int(protected.sum())} bins unchanged by display filters.")
+    if "background" in selected and not background_profile.signal_free_qualified:
+        notes.append("Signal absence and uncertainty remain unqualified; display preview only.")
     interference: set[int] = set()
     removed: set[int] = set()
     for mode in SPECTRUM_FILTER_ORDER:
-        if mode not in selected:
+        if mode not in selected or mode == "background":
             continue
         if mode == "emi_reject" and unit not in {"dBm", "dB"}:
             notes.append(f"Stationary-line rejection requires dB or dBm; source unit is {unit}.")
@@ -363,20 +442,33 @@ def clean_spectrum_pipeline(
         except ValueError as exc:
             notes.append(f"{SPECTRUM_FILTER_LABELS[mode]} unavailable: {exc}")
             continue
+        if np.any(protected):
+            restored = np.asarray(stage.values).copy()
+            restored[protected] = np.asarray(original)[protected]
+            stage = replace(stage, values_dbm=tuple(restored),
+                stationary_interference_indices=tuple(i for i in stage.stationary_interference_indices if not protected[i]),
+                removed_peak_indices=tuple(i for i in stage.removed_peak_indices if not protected[i]))
         result = stage
+        applied_modes.append(mode)
         methods.append(result.method)
         notes.extend(result.notes)
         interference.update(result.stationary_interference_indices)
         removed.update(result.removed_peak_indices)
+    if any(mode in selected for mode in ("narrow_reject", "emi_reject")):
+        notes.append("Outlier thresholds are heuristic scales, not detection confidence or measurement uncertainty.")
+    if "narrow_reject" in selected and not regions:
+        notes.append("No protected signal bands: real narrow resonances can be removed.")
     modified = tuple(
         index
         for index, (before, after) in enumerate(zip(original, result.values, strict=True))
         if before != after
     )
     return SpectrumCleanupResult(
-        result.values, (_linear_noise_sigma(original) if unit == "W" else robust_noise_sigma_db(original)), tuple(sorted(interference)),
+        result.values, (_linear_noise_sigma(original) if unit not in {"dBm", "dB"} else robust_noise_sigma_db(original)), tuple(sorted(interference)),
         " → ".join(methods) if methods else result.method, unit,
-        modified, tuple(sorted(removed)), tuple(notes),
+        modified, tuple(sorted(removed)), tuple(notes), original,
+        ("background", background_profile.profile_id, background_profile.content_hash, background_profile.context_id)
+        if "background" in selected else (), tuple(applied_modes),
     )
 
 
@@ -466,6 +558,67 @@ def _fit_peak_shape(
     return best[1], best[2], best[3], best[0]
 
 
+def _width_allowed(width_hz: float | None, parameters: SpectrumAnalysisParameters) -> bool:
+    if not parameters.peak_min_width_hz and not parameters.peak_max_width_hz:
+        return True
+    return width_hz is not None and width_hz >= parameters.peak_min_width_hz and (
+        not parameters.peak_max_width_hz or width_hz <= parameters.peak_max_width_hz)
+
+
+def _detect_linear_peaks(
+    frequencies: np.ndarray, values: np.ndarray, parameters: SpectrumAnalysisParameters,
+    unit: str, descending: bool,
+) -> tuple[SpectrumPeak, ...]:
+    """Signed linear extrema: thresholds in noise multiples, geometry in Hz."""
+    from scipy.signal import find_peaks, peak_widths
+
+    detection = _gaussian_detection_trace(np.asarray(bilateral_denoise_linear(values, window=11)))
+    sigma = max(_linear_noise_sigma(values), np.finfo(float).tiny)
+    candidates: list[SpectrumPeak] = []
+    signs = (1, -1) if parameters.peak_polarity == "both" else (
+        -1 if parameters.peak_polarity == "negative" else 1,)
+    bins = np.arange(values.size)
+    for sign in signs:
+        oriented = sign * detection
+        indices, properties = find_peaks(oriented, prominence=parameters.peak_min_prominence_sigma * sigma)
+        if not indices.size:
+            continue
+        widths = peak_widths(oriented, indices, rel_height=.5,
+                            prominence_data=(properties["prominences"], properties["left_bases"], properties["right_bases"]))
+        for row, index in enumerate(indices):
+            prominence = float(properties["prominences"][row])
+            baseline = float(detection[index] - sign * prominence)
+            snr = float(sign * (values[index] - baseline) / sigma)
+            if snr < parameters.peak_min_snr_sigma:
+                continue
+            left = float(np.interp(widths[2][row], bins, frequencies))
+            right = float(np.interp(widths[3][row], bins, frequencies))
+            width_hz = right - left
+            if not _width_allowed(width_hz, parameters):
+                continue
+            center, _ = _quadratic_center(frequencies, oriented, int(index))
+            candidates.append(SpectrumPeak(
+                index=int(values.size - 1 - index if descending else index), frequency_hz=float(center),
+                amplitude_dbm=float(values[index]), noise_floor_dbm=baseline,
+                snr_db=snr, prominence_db=prominence / sigma,
+                left_half_power_hz=left, right_half_power_hz=right, fwhm_hz=width_hz,
+                q_factor=float(center / width_hz) if width_hz > 0 else None,
+                fit_model="not fitted", fit_center_hz=None, fit_fwhm_hz=None, fit_rmse_db=None,
+                amplitude_unit=unit, contrast_unit="σ",
+            ))
+    candidates.sort(key=lambda peak: peak.snr_db, reverse=True)
+    accepted: list[SpectrumPeak] = []
+    automatic_distance = float(np.median(np.diff(frequencies))) * max(1, values.size // 500)
+    minimum_distance = parameters.peak_min_distance_hz or automatic_distance
+    for peak in candidates:
+        if any(abs(peak.frequency_hz - other.frequency_hz) < minimum_distance for other in accepted):
+            continue
+        accepted.append(peak)
+        if len(accepted) >= max(1, parameters.peak_max_count):
+            break
+    return tuple(accepted)
+
+
 def detect_spectrum_peaks(
     frequencies_hz: Sequence[float],
     values_dbm: Sequence[float],
@@ -483,6 +636,9 @@ def detect_spectrum_peaks(
         max_peaks = parameters.peak_max_count
         fit = parameters.peak_fit_models
     frequencies, values = _finite_vectors(frequencies_hz, values_dbm)
+    if unit not in {"dBm", "dB"}:
+        return _detect_linear_peaks(frequencies, values, parameters or SpectrumAnalysisParameters(
+            peak_max_count=max_peaks), unit, frequencies_hz[0] > frequencies_hz[-1])
     detection_values = _gaussian_detection_trace(
         np.asarray(bilateral_denoise_dbm(values, window=11), dtype=float)
     )
@@ -534,6 +690,8 @@ def detect_spectrum_peaks(
             if left_hz is not None and right_hz is not None and right_hz > left_hz
             else None
         )
+        if parameters is not None and not _width_allowed(fwhm_hz, parameters):
+            continue
         fit_model, fit_center, fit_width, fit_rmse = (
             _fit_peak_shape(frequencies, values, int(index), fwhm_hz)
             if fit and unit == "dBm"
@@ -572,7 +730,10 @@ def detect_spectrum_peaks(
     minimum_distance = max(1, values.size // 500)
     for peak in measured:
         if any(
-            abs(peak.index - existing.index) < minimum_distance
+            (parameters is not None and parameters.peak_min_distance_hz > 0
+             and abs(peak.frequency_hz - existing.frequency_hz) < parameters.peak_min_distance_hz)
+            or ((parameters is None or parameters.peak_min_distance_hz == 0)
+                and abs(peak.index - existing.index) < minimum_distance)
             or abs(peak.frequency_hz - existing.frequency_hz)
             < 0.5
             * max(

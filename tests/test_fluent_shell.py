@@ -394,7 +394,7 @@ class MainWindowFluentShellTests(unittest.TestCase):
                         rows.append((route, top, top + row_widget.height() - 1))
                 return sorted(rows, key=lambda row: row[1])
 
-            window.resize(900, 600)
+            window.resize(1360, 600)
             window.show()
             self.application.processEvents()
             self.application.processEvents()
@@ -404,7 +404,7 @@ class MainWindowFluentShellTests(unittest.TestCase):
                 all(first[2] < second[1] for first, second in zip(compact_rows, compact_rows[1:]))
             )
 
-            window.resize(900, 880)
+            window.resize(1360, 880)
             self.application.processEvents()
             self.application.processEvents()
             self.assertTrue(window.apparatus_navigation_item.isExpanded)

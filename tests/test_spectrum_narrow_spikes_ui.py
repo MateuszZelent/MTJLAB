@@ -102,22 +102,24 @@ def test_live_processed_db_source_filters_new_frames_and_preserves_raw(applicati
             while (page._cleanup_result is None or not page._cleanup_result.removed_peak_indices
                     or page._analysis_controller.busy) and time.monotonic() < deadline:
                 application.processEvents()
-                QTest.qWait(10)
+                time.sleep(.005)
             cleanup = page._cleanup_result
-            assert cleanup is not None and cleanup.unit == "dB"
+            assert cleanup is not None and cleanup.unit == "dB", (
+                page.analysis_status.text(), page._analysis_error, page._analysis_generation,
+                page._invalidated_before_generation, page._analysis_source_key)
             assert 500 in cleanup.removed_peak_indices
             assert abs(cleanup.values[500] - broad[500]) < .2
             assert page._latest_trace is raw and page._reference_trace is reference
             assert raw.powers_dbm[500] == pytest.approx(-80 + broad[500] + amplitude)
             assert "bins replaced" in page.analysis_status.text()
             assert page.spectrum_plot._curves["Analysis"].isVisible()
-        page.highlight_peaks.setChecked(True)
+        page.highlight_replacements.setChecked(True)
         page._sync_peak_markers()
-        assert page.spectrum_plot.peak_markers.points()
-        assert "replacements" in page.highlight_peaks.text()
+        assert len(page.spectrum_plot.replacement_markers.points()) > 0
+        assert page.highlight_peaks.text() == "Markers"
         selected = []
         page.spectrum_plot.peak_selected.connect(selected.append)
-        page.spectrum_plot._peak_marker_clicked(None, [page.spectrum_plot.peak_markers.points()[0]], None)
+        page.spectrum_plot._peak_marker_clicked(None, [page.spectrum_plot.replacement_markers.points()[0]], None)
         assert not selected  # A replacement is not an unrelated detected peak.
         assert page.spectrum_plot.width() > 300 and page.spectrum_plot.height() > 100
         output = Path("artifacts/spectrum-narrow-spikes")

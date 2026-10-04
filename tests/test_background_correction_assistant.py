@@ -9,7 +9,7 @@ from unittest.mock import MagicMock
 
 import h5py
 import pytest
-from PySide6.QtCore import QObject, QTimer, Signal
+from PySide6.QtCore import QTimer
 from PySide6.QtGui import QFont, QFontDatabase
 from PySide6.QtTest import QTest
 from PySide6.QtWidgets import QApplication
@@ -21,23 +21,6 @@ from app.devices.simulators import SimulatedVisaFactory
 from app.ui.design_system import apply_application_theme
 from tests.helpers import simulation_settings
 from tests.test_spectrum_correction_controller import wait_until
-
-
-class OutputProbe(QObject):
-    result = Signal(str, object)
-    error = Signal(str, str)
-
-    def __init__(self, parent=None):
-        super().__init__(parent)
-        self.is_connected = True
-        self.states = {"A": False, "B": False}
-        self.calls = []
-        self.failure = None
-
-    def call(self, operation, payload=None):
-        self.calls.append(operation)
-        states, failure = self.states.copy(), self.failure
-        QTimer.singleShot(0, lambda: self.error.emit(operation, failure) if failure else self.result.emit(operation, states))
 
 
 @pytest.fixture
@@ -62,7 +45,6 @@ def setup(tmp_path):
     controller = MagicMock()
     controller.is_connected = True
     page = AnritsuPage(controller, settings, single_sweep_available=True)
-    page.set_background_output_controller(OutputProbe(page))
     page.correction_workspace.set_simulation_mode(True)
     errors, requests = [], []
 
@@ -93,51 +75,51 @@ def setup(tmp_path):
 
 
 @pytest.mark.parametrize("start_live", [False, True])
-def test_guided_background_then_corrected_live_is_automatic_and_archived(setup, start_live):
+def test_background_setup_returns_to_main_and_live_starts_only_on_request(setup, start_live):
     app, page, requests, errors = setup
     page.resize(1500, 900)
     page.show()
     if start_live:
         page.live.click()
         wait_until(app, lambda: page._timer.isActive())
-    page.auto_background_button.click()
+    page.correction_controls.configure_background.click()
     dialog = page._background_assistant
     assert dialog is not None and dialog.isVisible()
-    dialog.next.click()
-    assert dialog.phase == "setup"  # Missing physical-state evidence sends no new commands.
-    wait_until(app, lambda: dialog.next.isEnabled())
+    assert dialog.next.isEnabled()
+    path = dialog.reference_path
     before = len(requests)
     dialog.next.click()
-    wait_until(app, lambda: dialog.phase in {"restore", "failed"}, timeout=15)
+    wait_until(app, lambda: page._background_assistant is None or bool(errors), timeout=15)
     assert not errors, errors
-    assert dialog.phase == "restore"
     assert not page.correction_workspace.running
-    assert dialog.reference_path.exists()
+    assert not page._timer.isActive()
+    assert page.cleanup_filters["background"].isChecked()
+    assert page.analysis_tabs.currentIndex() == 0
+    assert page.live.text() == "Start Live" and page.live.isEnabled()
+    assert path.exists()
     if start_live:
         assert requests[before] == "stop_live"
     assert "read_full_configuration" in requests[before:]
     assert "single_sweep" in requests[before:]
+    assert "start_live" not in requests[before:]
+    with h5py.File(path, "r") as archive:
+        assert len(archive["points"]) >= 3
     count = len(requests)
-    QTest.qWait(50)
-    assert len(requests) == count  # Await explicit restoration; do not measure the background as SIGNAL.
-    dialog.next.click()
-    wait_until(app, lambda: page._background_assistant is None or bool(errors), timeout=15)
-    assert not errors, errors
-    assert page.correction_workspace.running
-    assert page.current_spectrum_view.currentData() == "background"
-    assert page._background_display is not None
-    assert page.correction_workspace.mode.currentData() == "ema_preview"
-    signal_path = page.correction_workspace._archive_path
-    page.correction_workspace.stop_acquisition()
-    wait_until(app, lambda: not page.correction_workspace.running, timeout=15)
-    with h5py.File(signal_path, "r") as archive:
-        assert len(archive["points"]) > 0
+    QTest.qWait(80)
+    assert not any(operation in {"single_sweep", "start_live"} for operation in requests[count:])
     assert not any(operation in {"configure", "set_signal_generator_output"} for operation in requests)
+    assert "source output states not checked" in page.correction_workspace._profile.reference_state
+    page.live.click()
+    wait_until(app, lambda: page._timer.isActive())
+    assert requests[-1] == "start_live"
+    assert not page.correction_workspace.running
+    page.live.click()
+    wait_until(app, lambda: not page._timer.isActive() and not page._live_transition_pending)
 
 
 def test_cancelled_background_does_not_start_corrected_live(setup):
     app, page, _requests, _errors = setup
-    page.auto_background_button.click()
+    page.correction_controls.configure_background.click()
     dialog = page._background_assistant
     wait_until(app, lambda: dialog.next.isEnabled())
     dialog.next.click()
@@ -149,15 +131,72 @@ def test_cancelled_background_does_not_start_corrected_live(setup):
     assert not page.correction_workspace.acquire_signal.isEnabled()
 
 
+@pytest.mark.parametrize("source_state", ["disconnected", "on", "off"])
+def test_background_is_independent_of_keithley_and_sends_no_source_commands(setup, source_state):
+    from app.devices.keithley_2600 import KeithleyAdapter
+    from app.devices.keithley_2600.module import MODULE as KEITHLEY_MODULE
+    from app.ui.workers import DeviceController
+
+    app, page, _requests, errors = setup
+    adapter = KeithleyAdapter(simulation_settings(), session_factory=SimulatedVisaFactory("keithley"))
+    controller = DeviceController(adapter, dispatcher=KEITHLEY_MODULE.dispatch)
+    completed, failed = [], []
+    controller.result.connect(lambda operation, result: completed.append(operation))
+    controller.error.connect(lambda operation, message: failed.append((operation, message)))
+    session = None
+    try:
+        if source_state != "disconnected":
+            controller.call("connect")
+            wait_until(app, lambda: "connect" in completed)
+            session = adapter._require_session()
+            if source_state == "on":
+                session.write("smua.source.leveli = 1e-9")
+                session.write("smua.source.output = 1")
+                session.write("smub.source.output = 1")
+            before = session.commands.copy()
+        page.correction_controls.configure_background.click()
+        dialog = page._background_assistant
+        assert dialog.next.isEnabled()
+        assert not hasattr(dialog, "output_status") and not hasattr(dialog, "recheck")
+        assert not hasattr(page, "_background_output_controller")
+        dialog.next.click()
+        wait_until(app, lambda: dialog.phase in {"ready", "failed"}, timeout=15)
+        assert dialog.phase == "ready"
+        assert not errors and not failed
+        assert completed == ([] if source_state == "disconnected" else ["connect"])
+        if session is not None:
+            assert session.commands == before  # No queries, output changes or setpoint writes.
+        assert page.correction_workspace._profile is not None
+        assert "source output states not checked" in page.correction_workspace._profile.reference_state
+    finally:
+        controller.close()
+
+
+def test_background_does_not_add_a_keithley_off_gate_to_normal_permission_checks():
+    from types import SimpleNamespace
+
+    from app.security import Permission
+    from app.ui.shell.main_window import MainWindow
+
+    station = SimpleNamespace(
+        _leased_run_devices=set(), _audit_healthy=True, _require_permission=MagicMock(),
+        anritsu_page=SimpleNamespace(_background_assistant=SimpleNamespace(phase="collecting")),
+    )
+    for operation, payload in (("set_output", ("A", True)), ("set_output_group", (("A", "B"), True)), ("quick_setpoint", None)):
+        MainWindow._guard_manual_operation(station, "keithley", operation, payload)
+        station._require_permission.assert_called_with(
+            Permission.OPERATE_OUTPUT, f"manual instrument operation {operation}", audit=True)
+    MainWindow._guard_manual_operation(station, "keithley", "set_output", ("A", False))
+
+
 def test_failed_recollection_does_not_reuse_old_background(setup):
     app, page, requests, _errors = setup
-    page.auto_background_button.click()
+    page.correction_controls.configure_background.click()
     first = page._background_assistant
     wait_until(app, lambda: first.next.isEnabled())
     first.next.click()
-    wait_until(app, lambda: first.phase == "restore", timeout=15)
+    wait_until(app, lambda: first.phase == "ready", timeout=15)
     previous_profile = page.correction_workspace._profile
-    first.reject()
     app.processEvents()
     requests.clear()
 
@@ -166,7 +205,7 @@ def test_failed_recollection_does_not_reuse_old_background(setup):
         QTimer.singleShot(0, lambda: page._error(operation, "Injected connection failure"))
 
     page._controller.call.side_effect = fail_request
-    page.auto_background_button.click()
+    page.correction_controls.configure_background.click()
     dialog = page._background_assistant
     wait_until(app, lambda: dialog.next.isEnabled())
     dialog.next.click()
@@ -174,7 +213,7 @@ def test_failed_recollection_does_not_reuse_old_background(setup):
     assert page.correction_workspace._profile is previous_profile
     assert requests == ["read_full_configuration"]
     assert not dialog.next.isEnabled()
-    assert not dialog.signal_path.exists()
+    assert not list(dialog.directory.glob("corrected_live_*.h5"))
     assert "Injected connection failure" in dialog.status.text()
 
 
@@ -182,7 +221,7 @@ def test_cancel_while_pausing_live_cannot_start_background_after_stop_confirmati
     app, page, requests, _errors = setup
     page.live.click()
     wait_until(app, lambda: page._timer.isActive())
-    page.auto_background_button.click()
+    page.correction_controls.configure_background.click()
     dialog = page._background_assistant
     wait_until(app, lambda: dialog.next.isEnabled())
     before = len(requests)
@@ -199,7 +238,7 @@ def test_cancel_while_pausing_live_cannot_start_background_after_stop_confirmati
 def test_assistant_renders_and_cancel_before_start_sends_no_commands(setup, theme, size):
     app, page, requests, _errors = setup
     apply_application_theme(app, theme)
-    page.auto_background_button.click()
+    page.correction_controls.configure_background.click()
     dialog = page._background_assistant
     dialog.resize(*size)
     QTest.qWait(60)
@@ -212,3 +251,103 @@ def test_assistant_renders_and_cancel_before_start_sends_no_commands(setup, them
     app.processEvents()
     assert not requests
     assert page._background_assistant is None
+
+
+@pytest.mark.parametrize("source_kind", ["recording", "export"])
+def test_modal_loads_saved_background_without_new_sweeps_and_applies_shared_filter(setup, source_kind):
+    from app.storage.background_profile_store import BackgroundProfileHdf5Store
+    app, page, requests, errors = setup
+    page.correction_controls.configure_background.click()
+    original = page._background_assistant
+    original.next.click()
+    wait_until(app, lambda: original.phase == "ready", timeout=15)
+    workspace = page.correction_workspace
+    expected_profile = workspace._profile
+    path = original.reference_path
+    if source_kind == "export":
+        path = path.with_name("exported-background.h5")
+        BackgroundProfileHdf5Store.save(path, workspace._context, expected_profile)
+    app.processEvents()
+    workspace._profile = None
+    workspace._context = None
+    requests.clear()
+    page._open_background_setup()
+    dialog = page._background_assistant
+    dialog.background_source.setCurrentIndex(dialog.background_source.findData("load"))
+    assert not dialog.next.isEnabled()
+    dialog.profile_path.setText(str(path))
+    assert dialog.next.isEnabled()
+    dialog.next.click()
+    wait_until(app, lambda: dialog.phase == "ready", timeout=15)
+    assert not errors
+    # Enabling the imported filter may verify settings through read-only queries.
+    assert all(operation.startswith("read_background_filter_configuration:") for operation in requests)
+    assert workspace._profile.content_hash == expected_profile.content_hash
+    assert not workspace.running
+    assert not list(dialog.directory.glob("corrected_live_*.h5"))
+    wait_until(app, lambda: page._background_assistant is None)
+    assert page.cleanup_filters["background"].isChecked()
+    assert page.analysis_tabs.currentIndex() == 0
+    assert not page._timer.isActive()
+    assert not workspace.running
+    assert not any(operation == "single_sweep" for operation in requests)
+
+
+def test_modal_failed_import_is_retryable_and_never_starts_acquisition(setup, tmp_path):
+    app, page, requests, errors = setup
+    page.correction_controls.configure_background.click()
+    dialog = page._background_assistant
+    dialog.background_source.setCurrentIndex(dialog.background_source.findData("load"))
+    path = tmp_path / "invalid-background.h5"
+    path.write_bytes(b"not an HDF5 archive")
+    dialog.profile_path.setText(str(path))
+    dialog.next.click()
+    wait_until(app, lambda: dialog.phase == "setup" and bool(errors))
+    assert "Could not load" in dialog.status.text()
+    assert dialog.next.isEnabled() and dialog.form.isEnabled()
+    assert not page.cleanup_filters["background"].isChecked()
+    assert not requests and not page.correction_workspace.running
+    assert page.correction_workspace._profile is None
+    dialog.background_source.setCurrentIndex(dialog.background_source.findData("record"))
+    dialog.next.click()
+    wait_until(app, lambda: dialog.phase == "ready", timeout=15)
+    assert page.correction_workspace._profile is not None
+
+
+def test_cancelled_import_cannot_start_live_or_apply_filter(setup):
+    app, page, requests, _ = setup
+    page.correction_controls.configure_background.click()
+    dialog = page._background_assistant
+    dialog.background_source.setCurrentIndex(dialog.background_source.findData("load"))
+    dialog.profile_path.setText("a-background.h5")
+    page.correction_workspace.load_background_profile = MagicMock()
+    dialog.next.click()
+    assert dialog.phase == "loading"
+    dialog.reject()
+    page.correction_workspace.profile_load_finished.emit(True, "Late completion")
+    app.processEvents()
+    assert not requests and not page.correction_workspace.running
+    assert not page.cleanup_filters["background"].isChecked()
+    assert page._background_assistant is None
+
+
+@pytest.mark.parametrize("theme,size", [("light", (620, 620)), ("dark", (440, 420))])
+def test_load_choice_renders_without_overlap_at_normal_and_narrow_size(setup, theme, size):
+    app, page, requests, _ = setup
+    apply_application_theme(app, theme)
+    page.correction_controls.configure_background.click()
+    dialog = page._background_assistant
+    dialog.background_source.setCurrentIndex(dialog.background_source.findData("load"))
+    dialog.resize(*size)
+    QTest.qWait(80)
+    app.processEvents()
+    assert dialog.load_fields.isVisible() and not dialog.record_fields.isVisible()
+    assert dialog.profile_path.isVisible() and dialog.choose_profile.isVisible()
+    assert not dialog.profile_path.geometry().intersects(dialog.choose_profile.geometry())
+    for control in (dialog.cancel, dialog.next, dialog.background_source):
+        assert dialog.rect().contains(control.mapTo(dialog, control.rect().bottomRight()))
+    artifacts = Path("artifacts/background-assistant")
+    artifacts.mkdir(parents=True, exist_ok=True)
+    assert dialog.grab().save(str(artifacts / f"load-{theme}-{size[0]}.png"))
+    dialog.reject()
+    assert not requests

@@ -27,104 +27,6 @@ from app.devices.anritsu_ms2830a.ui.correction_card import StationFileDialog
 from app.storage.finalized_spectrum_store import replay_finalized_artifact
 
 
-@pytest.mark.parametrize("start_action", ["live", "single"])
-def test_main_background_live_action_records_and_displays_corrected_sweeps(tmp_path, monkeypatch, start_action):
-    from unittest.mock import MagicMock
-    from app.devices.anritsu_ms2830a.ui.page import AnritsuPage, AnritsuPageState
-
-    application = QApplication.instance() or QApplication([])
-    settings = simulation_settings()
-    settings = settings.model_copy(update={"devices": settings.devices.model_copy(update={
-        "anritsu": settings.anritsu.model_copy(update={
-            "spectrum_correction": settings.anritsu.spectrum_correction.model_copy(update={
-                "calibration_min_sweeps": 3,
-            }),
-        }),
-    })})
-    adapter = AnritsuAdapter(settings, session_factory=SimulatedVisaFactory("anritsu"))
-    adapter.connect()
-    controller = MagicMock()
-    controller.is_connected = True
-    controller.visa_address = "SIM::ANRITSU"
-    page = AnritsuPage(controller, settings, single_sweep_available=True)
-    workspace = page.correction_workspace
-    errors, requests = [], []
-    signal_count = 0
-
-    def request(operation, payload=None):
-        def deliver():
-            nonlocal signal_count
-            try:
-                requests.append(operation)
-                result = MODULE.dispatch(adapter, operation, payload)
-                if operation == "single_sweep" and workspace._kind == "signal":
-                    signal_count += 1
-                    if signal_count == 4:
-                        page.current_stop_corrected.click()
-                        assert page.current_stop_corrected.text() == "Stopping recording…"
-                        assert not page.current_stop_corrected.isEnabled()
-                        assert page.live.text() == "Stopping recording…"
-                page._result(operation, result)
-            except Exception as exc:
-                errors.append(str(exc))
-                workspace.handle_error(operation, str(exc))
-        QTimer.singleShot(0, deliver)
-
-    controller.call.side_effect = request
-    workspace._cpu.failed.connect(lambda *args: errors.append(args))
-    try:
-        page.resize(1500, 900)
-        page.show()
-        page._set_page_state(AnritsuPageState.IDLE)
-        page.current_spectrum_view.setCurrentIndex(page.current_spectrum_view.findData("background"))
-        workspace.freeze.setChecked(True)
-        assert page.current_resume_background_preview.isVisible()
-        assert "Preview is frozen" in page.background_current_empty_text.text()
-        page.current_resume_background_preview.click()
-        assert not workspace.freeze.isChecked()
-        getattr(page, start_action).click()
-        assert page.analysis_tabs.currentIndex() == 2
-        assert "Enter the background reference state" in workspace.state_label.text()
-        assert not requests and not workspace.running
-        assert page.single.text() == "Record background…"
-        assert page.live.text() == "Record background…"
-        page.analysis_tabs.setCurrentIndex(0)
-        workspace.reference_state.setText("simulated control; no signal qualification")
-        workspace.duration.setText("1 ms")
-        workspace.start_acquisition("reference", tmp_path / "reference.h5")
-        wait_until(application, lambda: not workspace.running or bool(errors), timeout=15)
-        assert not errors and workspace._profile is not None
-        page._render_current_background()
-        assert page.current_record_corrected.isEnabled() and page.live.isEnabled()
-        assert "Background ready" in page.background_current_empty_text.text()
-        assert page.single.text() == "Record corrected spectra…"
-        monkeypatch.setattr(StationFileDialog, "getSaveFileName",
-                            lambda *args: (str(tmp_path / "corrected.h5"), ""))
-        getattr(page, start_action).click()
-        assert workspace.running
-        assert page.live.text() == "Stop recording" and page.live.isEnabled()
-        assert "Starting corrected spectrum recording" in page.background_current_empty_text.text()
-        wait_until(application, lambda: not workspace.running or bool(errors), timeout=15)
-        wait_until(application, lambda: page._background_display is not None or bool(errors), timeout=5)
-        assert not errors and signal_count == 4
-        assert "start_live" not in requests
-        assert "fetch_current_trace_fast" not in requests
-        assert page.background_current_plot.isVisible()
-        assert not page.background_current_empty.isVisible()
-        assert "Raw − background" in page.background_current_plot._traces
-        assert "4 sweeps" in page.background_current_status.text()
-        assert "corrected.h5" in page.background_current_status.text()
-        assert page.live.text() == "Record corrected spectra…"
-        assert not page.current_stop_corrected.isEnabled()
-        page.current_spectrum_view.setCurrentIndex(page.current_spectrum_view.findData("legacy"))
-        application.processEvents()
-        assert page.single.text() == "Acquire once"
-    finally:
-        page.close()
-        adapter.disconnect()
-        application.processEvents()
-
-
 @pytest.mark.parametrize("use_interference", [False, True])
 def test_reference_then_signal_archives_every_completed_sweep_and_replays(tmp_path, use_interference):
     application = QApplication.instance() or QApplication([])
@@ -349,7 +251,8 @@ def test_shell_propagates_runtime_mode_to_correction_workspace_with_isolated_cat
     try:
         window.show()
         window._navigate_to("anritsu")
-        window.anritsu_page.analysis_tabs.setCurrentIndex(2)
+        window.anritsu_page._open_recording_setup()
+        window.anritsu_page.recording_tabs.setCurrentIndex(1)
         application.processEvents()
         workspace = window.anritsu_page.correction_workspace
         assert workspace.simulation_mode is True
@@ -428,6 +331,9 @@ def test_offline_finalization_action_runs_worker_and_displays_final_block(tmp_pa
         assert workspace._profile_io_busy and not workspace.finalize_button.isEnabled()
         wait_until(application, lambda: not workspace._profile_io_busy or bool(errors), timeout=15)
         assert not errors and not device_requests
+        workspace.resize(1000, 800)
+        workspace.show()
+        application.processEvents()
         workspace._render()
         assert workspace._latest_result.final and "final block" in workspace.frame_label.text()
         assert workspace._result_archive_path == destination

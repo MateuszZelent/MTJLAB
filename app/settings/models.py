@@ -567,6 +567,37 @@ class AnritsuAdvancedSpectrumSettings(StrictModel):
         return self
 
 
+class SpectrumPreviewSettings(StrictModel):
+    """Display processing defaults; saving these never configures an instrument."""
+
+    average_frames: int = Field(default=1, ge=1, le=64, strict=True)
+    reset_gap: str = "30 s"
+    protected_bands: list[tuple[str, str]] = Field(default_factory=list, max_length=32)
+    measure_filtered_peaks: bool = False
+
+    @model_validator(mode="after")
+    def validate_preview(self):
+        if parse_quantity(self.reset_gap, DIMENSION_TIME).si_value <= 0:
+            raise ValueError("Preview reset gap must be positive.")
+        for lower, upper in self.protected_bands:
+            low = parse_quantity(lower, DIMENSION_FREQUENCY).si_value
+            high = parse_quantity(upper, DIMENSION_FREQUENCY).si_value
+            if not 0 <= low < high:
+                raise ValueError("Protected signal bands must be nonnegative and ordered.")
+        return self
+
+    def analysis_parameters(self):
+        from app.spectrum.analysis import SpectrumAnalysisParameters
+
+        return SpectrumAnalysisParameters(
+            temporal_average_frames=self.average_frames,
+            temporal_max_gap_s=parse_quantity(self.reset_gap, DIMENSION_TIME).si_value,
+            narrow_protected_regions_hz=tuple(tuple(parse_quantity(value, DIMENSION_FREQUENCY).si_value
+                                                    for value in band) for band in self.protected_bands),
+            peak_measure_filtered=self.measure_filtered_peaks,
+        )
+
+
 class AnritsuSettings(StrictModel):
     enabled: bool
     display_name: str
@@ -575,6 +606,7 @@ class AnritsuSettings(StrictModel):
     safety: AnritsuSafety
     acquisition: AnritsuAcquisitionSettings = Field(default_factory=AnritsuAcquisitionSettings)
     spectrum_correction: SpectrumCorrectionSettings = Field(default_factory=SpectrumCorrectionSettings)
+    preview: SpectrumPreviewSettings = Field(default_factory=SpectrumPreviewSettings)
     signal_generator: AnritsuSignalGeneratorSettings = Field(
         default_factory=AnritsuSignalGeneratorSettings
     )

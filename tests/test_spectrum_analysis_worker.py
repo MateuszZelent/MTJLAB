@@ -73,17 +73,19 @@ class SpectrumAnalysisWorkerTests(unittest.TestCase):
         controller = SpectrumAnalysisController()
         outcomes: list[object] = []
         controller.result.connect(outcomes.append)
+        snapshot = ("recorded frame", 17)
         request = SpectrumAnalysisRequest(
             generation=4,
             frequencies_hz=(1.0, 2.0, 3.0, 4.0, 5.0),
             powers_dbm=(-80.0, -79.0, -30.0, -79.0, -80.0),
             mode="raw",
             history_dbm=(),
-            detect_peaks=False,
+            detect_peaks=True,
             source_key="processed",
             frame_id=17,
             source_unit="dB",
             provenance=("raw", "reference", "difference_db"),
+            source_snapshot=snapshot,
         )
         try:
             controller.submit(request)
@@ -98,6 +100,9 @@ class SpectrumAnalysisWorkerTests(unittest.TestCase):
             self.assertEqual(outcome.source_unit, "dB")
             self.assertEqual(outcome.provenance, ("raw", "reference", "difference_db"))
             self.assertEqual(outcome.cleanup.unit, "dB")
+            self.assertIs(outcome.source_snapshot, snapshot)
+            self.assertIsNotNone(outcome.peaks)
+            self.assertGreater(outcome.processing_duration_s, 0)
         finally:
             controller.close()
 

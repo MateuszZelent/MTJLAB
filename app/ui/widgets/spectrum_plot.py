@@ -51,6 +51,8 @@ class SpectrumPlotWidget(QWidget):
         )
         self._traces: dict[str, tuple[np.ndarray, np.ndarray]] = {}
         self._curves: dict[str, pg.PlotDataItem] = {}
+        self._legend_labels: dict[str, str] = {}
+        self._plot_title: str | None = None
         self._token_owned_primary_curves: set[str] = set()
         self._hold_source: str | None = None
         self._max_hold: np.ndarray | None = None
@@ -137,6 +139,8 @@ class SpectrumPlotWidget(QWidget):
         )
         self.plot.addItem(self.peak_markers)
         self.peak_markers.sigClicked.connect(self._peak_marker_clicked)
+        self.replacement_markers = pg.ScatterPlotItem(size=7, symbol="x", pxMode=True)
+        self.plot.addItem(self.replacement_markers)
         self.compliance_markers = pg.ScatterPlotItem(
             size=10,
             symbol="d",
@@ -171,7 +175,9 @@ class SpectrumPlotWidget(QWidget):
         self.plot.setLabel("left", y, units=y_unit)
 
     def set_title(self, title: str) -> None:
-        self.plot.setTitle(title)
+        if title != self._plot_title:
+            self._plot_title = title
+            self.plot.setTitle(title)
 
     def set_preferred_height(self, height: int | None) -> None:
         self._preferred_height = height
@@ -196,11 +202,15 @@ class SpectrumPlotWidget(QWidget):
             item = self.plot.getAxis(axis)
             item.setPen(pg.mkPen(palette.axes))
             item.setTextPen(pg.mkPen(palette.axes))
+        legend = self.plot.getPlotItem().legend
+        if legend is not None:
+            legend.setLabelTextColor(palette.axes)
         self.crosshair_x.setPen(pg.mkPen(palette.grid, width=1))
         self.crosshair_y.setPen(pg.mkPen(palette.grid, width=1))
         self.marker.setPen(pg.mkPen(palette.reference, width=2))
         self.delta_marker.setPen(pg.mkPen(palette.reference, width=2))
         self._style_peak_markers()
+        self.replacement_markers.setPen(pg.mkPen(palette.reference))
         tokens = tokens_for(theme)
         danger_color = tokens.danger
         self.compliance_markers.setPen(pg.mkPen(danger_color, width=1.5))
@@ -227,6 +237,7 @@ class SpectrumPlotWidget(QWidget):
         visible: bool = True,
         primary: bool = False,
         show_points: bool = False,
+        legend_label: str | None = None,
     ) -> None:
         caller_supplied_color = color is not None
         token_owned_primary = not caller_supplied_color and primary
@@ -240,6 +251,7 @@ class SpectrumPlotWidget(QWidget):
         finite = np.isfinite(x_values) & np.isfinite(y_values)
         x_values, y_values = x_values[finite], y_values[finite]
         self._traces[name] = (x_values, y_values)
+        self._legend_labels[name] = legend_label or name
         line_width = self._trace_line_width(name)
         curve = self._curves.get(name)
         if curve is None:
@@ -277,13 +289,17 @@ class SpectrumPlotWidget(QWidget):
         legend = plot_item.legend
         if legend is None:
             return
-        in_legend = any(label.text == name for _, label in tuple(legend.items))
+        entry = next((label for sample, label in tuple(legend.items) if sample.item is curve), None)
         if visible:
-            if not in_legend:
-                legend.addItem(curve, name)
+            text = self._legend_labels.get(name, name)
+            if entry is None:
+                legend.addItem(curve, text)
+            elif entry.text != text:
+                entry.setText(text, color=legend.opts["labelTextColor"], size=legend.opts["labelTextSize"])
+                legend.updateSize()
         else:
-            if in_legend:
-                legend.removeItem(name)
+            if entry is not None:
+                legend.removeItem(curve)
         if len(legend.items) == 0:
             legend.hide()
         else:
@@ -295,6 +311,20 @@ class SpectrumPlotWidget(QWidget):
         if curve is not None:
             curve.setVisible(visible)
             self._sync_legend(name, curve, visible)
+
+    def set_legend_order(self, names: list[str]) -> None:
+        """Keep the processing stages in order when comparison curves return."""
+        legend = self.plot.getPlotItem().legend
+        if legend is None:
+            return
+        entries = [(sample.item, label.text) for sample, label in tuple(legend.items)]
+        positions = {self._curves[name]: index for index, name in enumerate(names) if name in self._curves}
+        ordered = sorted(entries, key=lambda entry: positions.get(entry[0], len(positions)))
+        if ordered == entries:
+            return
+        legend.clear()
+        for curve, label in ordered:
+            legend.addItem(curve, label)
 
     def changeEvent(self, event: QEvent) -> None:  # noqa: N802 - Qt override
         super().changeEvent(event)
@@ -309,6 +339,7 @@ class SpectrumPlotWidget(QWidget):
 
     def clear_trace(self, name: str) -> None:
         self._traces.pop(name, None)
+        self._legend_labels.pop(name, None)
         self._token_owned_primary_curves.discard(name)
         curve = self._curves.get(name)
         if curve is not None:
@@ -330,6 +361,7 @@ class SpectrumPlotWidget(QWidget):
         self.marker.hide()
         self.delta_marker.hide()
         self.clear_peak_markers()
+        self.clear_replacement_markers()
         self.clear_compliance_points()
         self._last_mouse_x = None
         self._last_readout_position = None
@@ -390,6 +422,17 @@ class SpectrumPlotWidget(QWidget):
     def clear_peak_markers(self) -> None:
         self.peak_markers.clear()
         self._selected_peak_index = None
+
+    def set_replacement_markers(self, frequencies_hz: object, amplitudes: object) -> None:
+        frequencies = np.asarray(frequencies_hz, dtype=float)
+        values = np.asarray(amplitudes, dtype=float)
+        if frequencies.ndim != 1 or values.ndim != 1 or frequencies.size != values.size:
+            raise ValueError("Replacement marker coordinates must be equally-sized vectors.")
+        finite = np.isfinite(frequencies) & np.isfinite(values)
+        self.replacement_markers.setData(frequencies[finite], values[finite])
+
+    def clear_replacement_markers(self) -> None:
+        self.replacement_markers.clear()
 
     def select_peak_marker(self, index: int | None) -> None:
         self._selected_peak_index = index

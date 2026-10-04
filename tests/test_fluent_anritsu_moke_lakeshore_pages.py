@@ -343,7 +343,7 @@ class FluentAnritsuAndMokePageTests(unittest.TestCase):
 
     def test_anritsu_manual_archive_panel_and_modal_are_rendered_and_operable(self) -> None:
         self.window._navigate_to("anritsu")
-        self.window.anritsu_page.toggle_acquisition_controls.click()
+        self.window.anritsu_page.record_spectra.click()
         self.application.processEvents()
 
         page = self.window.anritsu_page
@@ -515,6 +515,8 @@ class FluentAnritsuAndMokePageTests(unittest.TestCase):
             page._apply_manual_save_options(second_options)
             page.save_manual_spectrum.click()
 
+            self.assertTrue(second_path.exists(), page.manual_save_status.text())
+
             self.assertEqual(Hdf5RunReader.summary(first_path).point_count, 1)
             self.assertEqual(Hdf5RunReader.summary(second_path).point_count, 1)
 
@@ -580,6 +582,8 @@ class FluentAnritsuAndMokePageTests(unittest.TestCase):
         for checkbox in page.cleanup_filters.values():
             self.assertIsInstance(checkbox, CheckBox)
         self.assertIsInstance(page.open_peak_table, PrimaryPushButton)
+        page.compact_plot_settings.click()
+        self.application.processEvents()
         self.assertTrue(page.signal_analysis_card.isVisibleTo(self.window))
         self.assertEqual(host.scroll_area.horizontalScrollBar().maximum(), 0)
 
@@ -685,7 +689,7 @@ class FluentAnritsuAndMokePageTests(unittest.TestCase):
         self.assertEqual(page.setup_card.property("stationSurface"), "card")
         self.assertEqual(page.processing_card.property("stationSurface"), "card")
         self.assertEqual(page.spectrum_plot.property("stationSurface"), "raised")
-        self.assertIn("border: 1px solid palette(mid)", page.setup_card.styleSheet())
+        self.assertIsInstance(page.setup_card, CardWidget)
         self.assertEqual(
             page.setup_card.palette().color(QPalette.ColorRole.Mid).name(),
             tokens.border,

@@ -6,14 +6,14 @@ it is not a physical power FWHM when that domain is dB. No temporal history,
 training, FFT, hardware access or claim of identifying interference is used.
 """
 
-from dataclasses import dataclass
 import math
-from typing import Sequence
+from collections.abc import Sequence
+from dataclasses import dataclass
 
 import numpy as np
+from scipy.ndimage import median_filter
 
 from app.domain.quantities import DIMENSION_FREQUENCY, format_quantity_auto
-
 
 _MAX_WINDOW_BINS = 257
 
@@ -28,13 +28,13 @@ class NarrowSpikeResult:
 
 
 def _median(values, window):
-    """Fixed-window chunks: at most 512 * 257 doubles per median call."""
-    radius = window // 2
-    frames = np.lib.stride_tricks.sliding_window_view(np.pad(values, radius, mode="edge"), window)
-    result = np.empty(values.size)
-    for first in range(0, values.size, 512):
-        result[first:first + 512] = np.median(frames[first:first + 512], axis=1)
-    return result
+    """Native sliding rank filter; preserve the centered odd-window median.
+
+    Nearest-edge extension matches the former padded NumPy windows exactly.
+    SciPy's 1-D implementation maintains the moving rank instead of copying
+    and partitioning every overlapping window (three passes per spectrum).
+    """
+    return median_filter(values, size=window, mode="nearest")
 
 
 def _crossing(x, y, center, boundary, level, direction):

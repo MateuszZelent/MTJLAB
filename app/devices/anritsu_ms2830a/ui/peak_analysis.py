@@ -47,7 +47,7 @@ class PeakTableDialog(StationDialog):
         "#",
         "Frequency",
         "Amplitude",
-        "SNR",
+        "Contrast",
         "Prominence",
         "FWHM",
         "Q",
@@ -116,8 +116,8 @@ class PeakTableDialog(StationDialog):
                 str(row + 1),
                 _frequency(peak.frequency_hz),
                 f"{peak.amplitude_dbm:.5g} {getattr(peak, 'amplitude_unit', 'dBm')}",
-                f"{peak.snr_db:.4g} dB",
-                f"{peak.prominence_db:.4g} dB",
+                f"{peak.snr_db:.4g} {peak.contrast_unit}",
+                f"{peak.prominence_db:.4g} {peak.contrast_unit}",
                 _frequency(peak.fit_fwhm_hz or peak.fwhm_hz),
                 "—" if peak.q_factor is None else f"{peak.q_factor:.6g}",
                 peak.fit_model,
@@ -182,7 +182,7 @@ class PeakTrackingWindow(StationDialog):
         self.setWindowFlag(Qt.WindowType.WindowStaysOnTopHint, True)
         self.setModal(False)
         self.resize(760, 500)
-        self.setMinimumSize(500, 360)
+        self.setMinimumSize(500, 380)
         self._times_s: deque[float] = deque(maxlen=2400)
         self._frequencies_hz: deque[float] = deque(maxlen=2400)
         self._amplitudes_dbm: deque[float] = deque(maxlen=2400)

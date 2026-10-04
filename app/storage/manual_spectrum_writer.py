@@ -183,7 +183,9 @@ class ManualSpectrumArchive:
         self._path = None
         self._frequency_grid = None
         if writer is not None:
-            writer.close("incomplete")
+            # This is an explicit operator stop with committed checkpoints.
+            # Keep it resumable and importable; "incomplete" denotes a crash.
+            writer.close("aborted")
 
     def _open_for(
         self, path: Path, mode: ManualSpectrumSaveMode

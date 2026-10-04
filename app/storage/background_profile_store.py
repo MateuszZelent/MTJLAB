@@ -58,12 +58,19 @@ class BackgroundProfileHdf5Store:
     def load(cls, path: str | Path) -> tuple[SpectrumAcquisitionContext, BackgroundProfile]:
         try:
             with h5py.File(path, "r") as file:
-                if (
-                    file["run"].attrs.get("background_schema") != cls.SCHEMA
-                    or file["run"].attrs.get("status") != "completed"
-                ):
+                run = file["run"].attrs
+                if run.get("status") != "completed":
                     raise ExecutionError("File is not a completed background-profile artifact.")
-                profile_id = str(file["run"].attrs["profile_id"])
+                if run.get("background_schema") == cls.SCHEMA:
+                    profile_id = str(run["profile_id"])
+                elif (run.get("background_schema") is None
+                        and run.get("spectrum_correction_schema") == "spectrum-correction-v1"):
+                    profiles = file["spectrum_processing_v1/profiles"]
+                    if len(profiles) != 1:
+                        raise ExecutionError("Choose an archive with exactly one background, or export the desired profile separately.")
+                    profile_id = next(iter(profiles))
+                else:
+                    raise ExecutionError("File is not a supported background-profile artifact or spectrum correction archive.")
                 return read_profile(file[f"spectrum_processing_v1/profiles/{profile_id}"])
         except (OSError, KeyError) as exc:
             raise ExecutionError(f"Cannot read background profile: {exc}") from exc

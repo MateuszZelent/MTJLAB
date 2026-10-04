@@ -8,7 +8,7 @@ from unittest.mock import MagicMock
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 import numpy as np
-from PySide6.QtCore import QEvent
+from PySide6.QtCore import QEvent, QPoint
 from PySide6.QtTest import QTest
 from PySide6.QtWidgets import QApplication, QWidget
 from qfluentwidgets import isDarkTheme
@@ -350,7 +350,7 @@ class SpectrumPlotAndFloatingFixesTests(unittest.TestCase):
         page = AnritsuPage(controller, settings, single_sweep_available=True)
         try:
             self.assertTrue(hasattr(page, "configure_analysis"))
-            self.assertEqual(page.configure_analysis.text(), "Parameters…")
+            self.assertEqual(page.configure_analysis.text(), "Filter settings…")
             self.assertIsNone(page._analysis_settings_dialog)
 
             # Open settings dialog
@@ -358,6 +358,7 @@ class SpectrumPlotAndFloatingFixesTests(unittest.TestCase):
             self.assertIsNotNone(page._analysis_settings_dialog)
             dialog = page._analysis_settings_dialog
             self.assertTrue(dialog.isVisible())
+            self.assertEqual(dialog.section, "filters")
 
             # Apply new parameters through dialog
             new_params = SpectrumAnalysisParameters(denoise_window=13)
@@ -545,16 +546,16 @@ class SpectrumPlotAndFloatingFixesTests(unittest.TestCase):
             legend = page.spectrum_plot.plot.getPlotItem().legend
             self.assertIsNotNone(legend)
             legend_names = [label.text for _, label in legend.items]
-            self.assertIn("Processed", legend_names)
-            self.assertNotIn("Raw", legend_names)
+            self.assertIn("Processed [dB]", legend_names)
+            self.assertNotIn("Raw [dBm]", legend_names)
 
             # Check Raw -> Processed should be unchecked, Raw checked
             page.show_raw.setChecked(True)
             self.assertTrue(page.show_raw.isChecked())
             self.assertFalse(page.show_processed.isChecked())
             legend_names = [label.text for _, label in legend.items]
-            self.assertIn("Raw", legend_names)
-            self.assertNotIn("Processed", legend_names)
+            self.assertIn("Raw [dBm]", legend_names)
+            self.assertNotIn("Processed [dB]", legend_names)
             # Unit must be dBm, Y label Amplitude, Y range around [-80, -70]
             self.assertEqual(page._active_spectrum_unit, "dBm")
             y_range = page.spectrum_plot.plot.getViewBox().viewRange()[1]
@@ -566,8 +567,8 @@ class SpectrumPlotAndFloatingFixesTests(unittest.TestCase):
             self.assertTrue(page.show_processed.isChecked())
             self.assertFalse(page.show_raw.isChecked())
             legend_names = [label.text for _, label in legend.items]
-            self.assertIn("Processed", legend_names)
-            self.assertNotIn("Raw", legend_names)
+            self.assertIn("Processed [dB]", legend_names)
+            self.assertNotIn("Raw [dBm]", legend_names)
             self.assertEqual(page._active_spectrum_unit, "dB")
 
             # Unchecking all traces (including Analysis) must fallback to Raw so plot is never blank
@@ -591,24 +592,25 @@ class SpectrumPlotAndFloatingFixesTests(unittest.TestCase):
                 QTest.qWait(50)
                 QApplication.processEvents()
                 controls = [*page.cleanup_filters.values(), page.configure_analysis,
-                            page.open_peak_table, page.toggle_analysis_details]
+                            page.open_peak_table, page.toggle_analysis_details, page.overlay_analysis_source]
+                rectangles = [widget.rect().translated(widget.mapTo(page, QPoint())) for widget in controls]
                 for index, widget in enumerate(controls):
-                    self.assertTrue(widget.isVisible())
-                    self.assertTrue(page.filter_strip.rect().contains(widget.geometry()))
-                    for other in controls[index + 1:]:
-                        self.assertFalse(widget.geometry().intersects(other.geometry()))
+                    self.assertTrue(widget.isVisibleTo(page))
+                    self.assertTrue(page.rect().contains(rectangles[index]))
+                    for other in rectangles[index + 1:]:
+                        self.assertFalse(rectangles[index].intersects(other))
             page.resize(760, 550)
             QTest.qWait(50)
             page.toggle_analysis_details.click()
             QTest.qWait(50)
-            details = [page.auto_peak_detection, page.highlight_peaks, page.overlay_analysis_source,
-                       page.analyze_peaks, page.clear_spectra_plot_button, page.analysis_status,
-                       page.open_peak_table]
+            details = [page.analysis_source,
+                       page.analyze_peaks, page.clear_spectra_plot_button, page.analysis_status]
+            rectangles = [widget.rect().translated(widget.mapTo(page.analysis_details, QPoint())) for widget in details]
             for index, widget in enumerate(details):
-                self.assertTrue(widget.isVisible())
-                self.assertTrue(page.analysis_details.rect().contains(widget.geometry()))
-                for other in details[index + 1:]:
-                    self.assertFalse(widget.geometry().intersects(other.geometry()))
+                self.assertTrue(widget.isVisibleTo(page.analysis_details))
+                self.assertTrue(page.analysis_details.rect().contains(rectangles[index]))
+                for other in rectangles[index + 1:]:
+                    self.assertFalse(rectangles[index].intersects(other))
             page.analysis_details_flyout.close()
         finally:
             page.close()

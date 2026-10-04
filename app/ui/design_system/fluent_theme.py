@@ -9,11 +9,13 @@ from PySide6.QtWidgets import QApplication, QDialog, QLabel, QPushButton, QWidge
 from qfluentwidgets import (
     CaptionLabel,
     CardWidget,
+    FluentStyleSheet,
     Theme,
     isDarkTheme,
     qconfig,
     setTheme,
 )
+from qframelesswindow import TitleBarButton
 
 from app.ui.common.precision_stepper import install_precision_arrow_stepper
 
@@ -118,6 +120,10 @@ class _DialogThemeFilter(QObject):
     def eventFilter(self, watched: QObject, event: QEvent) -> bool:
         if event.type() == QEvent.Type.Show and isinstance(watched, QWidget):
             self._track_shown_widget(watched)
+            # A theme can change while this widget is hidden (including the
+            # shell during startup). Commit its Fluent background before paint;
+            # a delayed hover animation must not retain the previous theme.
+            _settle_fluent_background(watched)
             _apply_station_control_style(watched, self._tokens)
         elif (
             event.type() == QEvent.Type.DynamicPropertyChange
@@ -217,19 +223,20 @@ def _settle_fluent_background_animations(application: QApplication) -> None:
             continue
         if not visible:
             continue
-        animation = getattr(widget, "backgroundColorAni", None)
-        normal_background = getattr(widget, "_normalBackgroundColor", None)
-        set_background = getattr(widget, "setBackgroundColor", None)
-        if (
-            animation is None
-            or not hasattr(widget, "bgColorObject")
-            or not callable(normal_background)
-            or not callable(set_background)
-        ):
-            continue
-        animation.stop()
-        set_background(normal_background())
-        widget.update()
+        _settle_fluent_background(widget)
+
+
+def _settle_fluent_background(widget: QWidget) -> None:
+    if not _has_fluent_background_animation(widget):
+        return
+    widget.backgroundColorAni.stop()
+    background = (
+        widget._normalBackgroundColor()
+        if widget.isEnabled()
+        else widget._disabledBackgroundColor()
+    )
+    widget.setBackgroundColor(background)
+    widget.update()
 
 
 def _has_fluent_background_animation(widget: QWidget) -> bool:
@@ -264,6 +271,11 @@ def _apply_station_control_style(widget: QWidget, tokens: ThemeTokens) -> None:
     # can repolish controls after that point (notably hidden Settings routes),
     # so the palette and semantic surfaces must be reasserted on every global
     # theme application and Show event.
+    if isinstance(widget, TitleBarButton):
+        # Hidden FluentTitleBar children can retain cached qproperty colours
+        # from their construction theme. Give the buttons the native Fluent
+        # stylesheet directly, as FluentWidgetTitleBar already does.
+        FluentStyleSheet.FLUENT_WINDOW.apply(widget)
     if isinstance(widget, QDialog):
         widget.setStyleSheet(dialog_qss(tokens))
     _apply_station_surface(widget, tokens)
