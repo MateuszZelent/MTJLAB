@@ -31,3 +31,7 @@ class ConnectionError(DeviceError):
 
 class ExecutionError(LabControlError):
     """A compiled measurement plan cannot continue safely."""
+
+
+class ProcessingCancelled(ExecutionError):
+    """An operator canceled offline processing at a checked boundary."""

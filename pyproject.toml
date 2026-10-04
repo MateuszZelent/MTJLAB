@@ -26,6 +26,7 @@ dependencies = [
 
 [project.optional-dependencies]
 dev = ["pytest>=8.0", "ruff>=0.6"]
+qualification = ["scipy>=1.15,<2"]
 
 [project.scripts]
 lab-control = "app.main:main"

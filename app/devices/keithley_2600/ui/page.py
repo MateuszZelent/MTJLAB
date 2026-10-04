@@ -2026,7 +2026,7 @@ class KeithleyPage(QWidget):
         self.read_configuration_button = PushButton("Read device…")
         measure = PushButton("Measure channel")
         self.measure_selected_button = measure
-        self.output_toggle = PushButton("OUTPUT OFF")
+        self.output_toggle = PushButton("OUTPUT OFF", self)
         self.output_toggle.setCheckable(True)
         self.output_toggle.setObjectName("outputOffButton")
         self.output_toggle.setVisible(False)
@@ -2076,7 +2076,7 @@ class KeithleyPage(QWidget):
         workflow.setObjectName("keithleyOutputWorkflow")
         workflow_layout = QVBoxLayout(workflow)
         workflow_layout.setContentsMargins(7, 5, 7, 5)
-        self.output_readiness = BodyLabel()
+        self.output_readiness = BodyLabel(self)
         self.output_readiness.setWordWrap(True)
         self.output_readiness.setObjectName("keithleyInterlockStatus")
         self.output_readiness.setToolTip(
@@ -2128,7 +2128,7 @@ class KeithleyPage(QWidget):
             ramp_panel.setSizePolicy(
                 QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Ignored
             )
-        self.readout = BodyLabel()
+        self.readout = BodyLabel(self)
         self.readout.hide()
         source_layout.addStretch(1)
         source_scroll = self._scroll_widget(source_tab)

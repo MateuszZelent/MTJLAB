@@ -7,6 +7,7 @@ import math
 from typing import Any
 
 import pyqtgraph as pg
+from app.ui.widgets.plot_ownership import create_plot_widget
 from PySide6.QtCore import QEvent, QTimer, Qt
 from PySide6.QtGui import QBrush, QColor, QPalette
 from PySide6.QtWidgets import (
@@ -166,7 +167,7 @@ class SweepGeneratorDialog(FluentRecipeDialog):
         self.plot_panel.setMinimumWidth(0)
         right_layout = QVBoxLayout(self.plot_panel)
         right_layout.setContentsMargins(6, 0, 0, 0)
-        self.plot = pg.PlotWidget()
+        self.plot = create_plot_widget()
         self.plot.setMinimumHeight(280)
         self.plot_theme = self._resolved_plot_theme()
         self._apply_table_theme()

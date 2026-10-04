@@ -11,6 +11,7 @@ from collections.abc import Callable
 from typing import Any
 
 import pyqtgraph as pg
+from app.ui.widgets.plot_ownership import create_plot_widget
 from PySide6.QtCore import QSettings, QSize, Qt, QUrl, Signal, Slot
 from PySide6.QtGui import QDesktopServices
 from PySide6.QtWidgets import (
@@ -453,7 +454,7 @@ class KeithleyCharacterizationCard(QWidget):
         theme_tokens = tokens_for("dark" if isDarkTheme() else "light")
         theme = plot_theme(theme_tokens)
 
-        self.plot_widget = pg.PlotWidget()
+        self.plot_widget = create_plot_widget()
         self.plot_widget.setBackground(theme.background)
         self.plot_widget.showGrid(x=True, y=True, alpha=0.25)
         self.plot_widget.setLabel("bottom", "Demanded level [SI]")

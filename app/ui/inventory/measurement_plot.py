@@ -5,6 +5,7 @@ from __future__ import annotations
 from typing import Sequence
 
 import pyqtgraph as pg
+from app.ui.widgets.plot_ownership import create_plot_widget, own_signal_proxy
 from PySide6.QtCore import Qt, Signal
 from PySide6.QtGui import QColor
 from PySide6.QtWidgets import (
@@ -111,7 +112,7 @@ class MeasurementPlotWidget(QWidget):
         self.stack.addWidget(empty_card)
 
         # Plot Widget
-        self.plot = pg.PlotWidget()
+        self.plot = create_plot_widget()
         self.plot.setBackground(None)
         self.plot.showGrid(x=True, y=True, alpha=0.2)
         self.plot.setMenuEnabled(False)
@@ -139,6 +140,7 @@ class MeasurementPlotWidget(QWidget):
         self._mouse_proxy = pg.SignalProxy(
             self.plot.scene().sigMouseMoved, rateLimit=30, slot=self._on_mouse_moved
         )
+        own_signal_proxy(self._mouse_proxy, self)
 
         self.stack.addWidget(self.plot)
         layout.addWidget(self.stack, 1)

@@ -678,7 +678,7 @@ class AnritsuAcquisitionEditorDialog(FluentRecipeDialog):
         self.average_count.setRange(1, 9999)
         self.average_count.setValue(int(node.data.get("average_count", 1)))
         self.average_count.setToolTip(
-            "Complete spectra are averaged in linear mW, never directly in dBm."
+            "Every complete raw sweep is archived. Spectra are averaged in linear mW, never directly in dBm."
         )
         form.addRow("Average complete spectra", self.average_count)
         self.reference_operation = ComboBox(surface)

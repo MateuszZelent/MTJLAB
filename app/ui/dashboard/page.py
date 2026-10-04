@@ -1,11 +1,11 @@
-"""Station dashboard page independent of the application shell."""
+"""Coordinator for the visible station overview and discovery pages."""
 
 from __future__ import annotations
 
 import ipaddress
+import time
 
-from PySide6.QtCore import Qt, Signal
-from PySide6.QtGui import QResizeEvent
+from PySide6.QtCore import QEvent, QObject, Qt, Signal
 from PySide6.QtWidgets import (
     QGridLayout,
     QHBoxLayout,
@@ -55,7 +55,8 @@ from app.ui.discovery_worker import MokeIdentificationWorker, TcpDiscoveryWorker
 from app.ui.dialogs import StationDialog, StationMessageBox as QMessageBox
 
 
-class DashboardPage(QWidget):
+class StationDashboardController(QObject):
+    """Own discovery tasks while Fluent hosts own the two rendered pages."""
     emergency_requested = Signal()
     assignments_requested = Signal(object)
     moke_assignment_requested = Signal(str)
@@ -87,7 +88,7 @@ class DashboardPage(QWidget):
         self._assignment_allowed = True
         self._compiled_plan = None
         self._plan_estimate = None
-        self.overview_page = QWidget(self)
+        self.overview_page = QWidget(parent)
         self.overview_page.setProperty("stationSurface", "page")
         overview_layout = QVBoxLayout(self.overview_page)
         overview_layout.setContentsMargins(0, 0, 0, 0)
@@ -139,7 +140,8 @@ class DashboardPage(QWidget):
         self.checklist.setWordWrap(True)
         overview_layout.addWidget(self.checklist)
         overview_layout.addStretch(1)
-        self.discovery_page = QWidget(self)
+        self.discovery_page = QWidget(parent)
+        self.discovery_page.installEventFilter(self)
         self.discovery_page.setProperty("stationSurface", "page")
         discovery_layout = QVBoxLayout(self.discovery_page)
         discovery_layout.setContentsMargins(24, 20, 24, 24)
@@ -381,9 +383,24 @@ class DashboardPage(QWidget):
         self.discovery_stack.setCurrentWidget(pages[route])
         self.discovery_pivot.setCurrentItem(route)
 
-    def resizeEvent(self, event: QResizeEvent) -> None:
-        super().resizeEvent(event)
-        self._layout_tcp_controls(compact=event.size().width() < 980)
+    def eventFilter(self, watched, event) -> bool:  # noqa: N802 - Qt override
+        if watched is self.discovery_page and event.type() == QEvent.Type.Resize:
+            self._layout_tcp_controls(compact=event.size().width() < 980)
+        return super().eventFilter(watched, event)
+
+    def shutdown(self, *, wait_ms: int = 50) -> bool:
+        """Request cooperative cancellation; never destroy a running thread."""
+        if wait_ms < 0:
+            raise ValueError("Discovery shutdown wait must be non-negative.")
+        workers = tuple(worker for worker in (
+            self._discovery_worker, self._tcp_discovery_worker, self._moke_identification_worker,
+        ) if worker is not None and worker.isRunning())
+        if self._tcp_discovery_worker is not None and self._tcp_discovery_worker.isRunning():
+            self._tcp_discovery_worker.request_stop()
+        for worker in workers:
+            worker.requestInterruption()
+        deadline = time.monotonic() + wait_ms / 1000
+        return all(worker.wait(max(0, int((deadline - time.monotonic()) * 1000))) for worker in workers)
 
     def _layout_tcp_controls(self, *, compact: bool) -> None:
         if getattr(self, "_tcp_controls_compact", None) == compact:
@@ -676,7 +693,7 @@ class DashboardPage(QWidget):
         if scan_is_non_private:
             scan_scope = f"{network}–{range_end}" if range_end else network
             answer = QMessageBox.warning(
-                self,
+                self.discovery_page,
                 "Confirm TCP/IP scan",
                 f"{scan_scope} is not an RFC1918 private range. It may still be your "
                 "campus or company LAN, but scanning it makes TCP connection attempts "
@@ -789,7 +806,7 @@ class DashboardPage(QWidget):
         except ValueError:
             return
         answer = QMessageBox.warning(
-            self,
+            self.discovery_page,
             "Confirm MOKE read-only identification",
             "Identification sends only the documented Readback VOUT frame (18 00 00 18); "
             "it does not set or ramp any output. However, the reconstructed documentation "
@@ -894,7 +911,7 @@ class DashboardPage(QWidget):
         tx_bytes: bytes,
         rx_bytes: bytes,
     ) -> None:
-        dialog = StationDialog(self)
+        dialog = StationDialog(self.discovery_page)
         dialog.setObjectName("mokeProtocolTraceDialog")
         dialog.setWindowTitle(f"MOKE protocol test — {endpoint}")
         dialog.setMinimumSize(680, 460)

@@ -1355,6 +1355,10 @@ class KeithleyAdapter(DeviceAdapter):
         self._output_states.update(states)
         return states
 
+    def read_output_states(self) -> dict[Literal["A", "B"], bool]:
+        """Query both physical outputs without configuring or switching them."""
+        return self._read_output_states()
+
     def _disable_channel_and_verify(self, channel: Literal["A", "B"]) -> None:
         """Command and confirm OFF for one channel; escalate only if uncertain."""
 

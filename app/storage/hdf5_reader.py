@@ -17,6 +17,15 @@ from app.domain.errors import ExecutionError
 from app.spectrum import peak_preserving_indices
 
 
+def iter_recipe_spectrum_sweeps(path):
+    """Read committed raw recipe sources one sweep at a time, including interrupted blocks."""
+    import h5py
+    from .recipe_spectrum_store import iter_recipe_sweeps
+
+    with h5py.File(path, "r") as file:
+        yield from iter_recipe_sweeps(file)
+
+
 @dataclass(frozen=True, slots=True)
 class RunSummary:
     path: Path
@@ -97,6 +106,132 @@ class StoredEvent:
 
 
 class Hdf5RunReader:
+    @staticmethod
+    def finalized_spectrum_blocks(path: str | Path):
+        import h5py
+        from .finalized_spectrum_codec import read_finalized
+
+        with h5py.File(path, "r") as file:
+            root = file.get("spectrum_processing_v1/finalized_blocks")
+            if root is None:
+                return ()
+            blocks = tuple(read_finalized(root[name]) for name in sorted(root))
+            for block, indices in blocks:
+                from .spectrum_correction_codec import read_envelope, read_profile
+
+                for identity, _weight in block.result.profile_weights:
+                    key = f"spectrum_processing_v1/profiles/{identity}"
+                    if key not in file:
+                        raise ExecutionError("Finalized block lost its reference profile.")
+                    context, _profile = read_profile(file[key])
+                    if context.context_id != block.result.context_id:
+                        raise ExecutionError("Finalized reference context is corrupted.")
+                for index, frame_id in zip(indices, block.source_frame_ids):
+                    key = f"points/{index}"
+                    if key not in file or not file[key].attrs.get("complete", False):
+                        raise ExecutionError("Finalized block references an uncommitted raw checkpoint.")
+                    envelope = read_envelope(file[f"spectra/{index}"])
+                    if envelope is None or not envelope.complete or (
+                        envelope.frame_id != frame_id or envelope.context_id != block.result.context_id
+                        or envelope.segment_id != block.result.segment_id or envelope.role.value != "signal"
+                    ):
+                        raise ExecutionError("Finalized block source identity is corrupted.")
+            return blocks
+
+    @staticmethod
+    def spectrum_correction(path: str | Path, index: int):
+        """Read a full-resolution signed result from a committed raw checkpoint."""
+        import h5py
+        from .spectrum_correction_codec import read_corrected
+
+        with h5py.File(path, "r") as file:
+            key = f"spectra/{index}/correction_v1"
+            if key not in file:
+                return None
+            point_key = f"points/{index}"
+            if point_key not in file or not file[point_key].attrs.get("complete", False):
+                raise ExecutionError("Spectrum correction belongs to an uncommitted checkpoint.")
+            result = read_corrected(file[key])
+            if result.interference_model_id is not None:
+                from .spectrum_interference_codec import read_interference_calibration, validate_interference_result
+                from .spectrum_correction_codec import read_profile
+
+                model_key = f"spectrum_processing_v1/interference_models/{result.interference_model_id}"
+                if model_key not in file:
+                    raise ExecutionError("Correction result lost its interference model.")
+                calibration = read_interference_calibration(file[model_key])
+                validate_interference_result(result, calibration)
+                for profile_id, content_hash in calibration.source_profiles:
+                    source_key = f"spectrum_processing_v1/profiles/{profile_id}"
+                    if source_key not in file:
+                        raise ExecutionError("Correction model lost its reference profile.")
+                    context, profile = read_profile(file[source_key])
+                    if context.context_id != calibration.context.context_id or profile.content_hash != content_hash:
+                        raise ExecutionError("Correction model reference dependency is corrupted.")
+            return result
+
+    @staticmethod
+    def spectrum_acquisition(path: str | Path, index: int):
+        import h5py
+        from .spectrum_correction_codec import read_envelope
+
+        with h5py.File(path, "r") as file:
+            key = f"spectra/{index}"
+            if key not in file:
+                return None
+            point_key = f"points/{index}"
+            if point_key not in file or not file[point_key].attrs.get("complete", False):
+                raise ExecutionError("Spectrum envelope belongs to an uncommitted checkpoint.")
+            return read_envelope(file[key])
+
+    @staticmethod
+    def background_profiles(path: str | Path):
+        import h5py
+        from .spectrum_correction_codec import read_profile
+
+        with h5py.File(path, "r") as file:
+            root = file.get("spectrum_processing_v1/profiles")
+            if root is None:
+                return ()
+            return tuple(read_profile(root[name]) for name in sorted(root))
+
+    @staticmethod
+    def interference_calibrations(path: str | Path, *, model_id: str | None = None):
+        """Read committed models and verify their embedded reference dependencies."""
+        import h5py
+        from .spectrum_correction_codec import read_profile
+        from .spectrum_interference_codec import read_interference_calibration
+
+        with h5py.File(path, "r") as file:
+            if file["run"].attrs.get("interference_calibration_schema") == "reference-trained-calibration-v1" and (
+                file["run"].attrs.get("status") != "completed"
+            ):
+                raise ExecutionError("Reference-trained calibration artifact is not completed.")
+            root = file.get("spectrum_processing_v1/interference_models")
+            if root is None:
+                if model_id is not None:
+                    raise ExecutionError("Requested interference model is absent.")
+                return ()
+            if model_id is not None:
+                from .spectrum_correction_codec import safe_record_id
+
+                safe_record_id(model_id)
+                if model_id not in root:
+                    raise ExecutionError("Requested interference model is absent.")
+            names = (model_id,) if model_id is not None else sorted(root)
+            calibrations = tuple(read_interference_calibration(root[name]) for name in names)
+            if any(calibration.model_id != name for name, calibration in zip(names, calibrations, strict=True)):
+                raise ExecutionError("Interference model key differs from its recorded identity.")
+            for calibration in calibrations:
+                for profile_id, content_hash in calibration.source_profiles:
+                    key = f"spectrum_processing_v1/profiles/{profile_id}"
+                    if key not in file:
+                        raise ExecutionError("Interference calibration lost its reference profile.")
+                    context, profile = read_profile(file[key])
+                    if context.context_id != calibration.context.context_id or profile.content_hash != content_hash:
+                        raise ExecutionError("Interference reference dependency is corrupted.")
+            return calibrations
+
     """Read schema-version-1 HDF5 runs without ever modifying them."""
 
     @staticmethod
@@ -221,12 +356,13 @@ class Hdf5RunReader:
 
     @staticmethod
     def summary_from_open_file(path: Path, file: Any, run: Any) -> RunSummary:
+        committed_names = Hdf5RunReader._committed_point_names(file)
         return RunSummary(
             path=path,
             created_at_utc=Hdf5RunReader._extract_timestamp(path, run),
             status=Hdf5RunReader._attribute_text(run.attrs.get("status")) or "incomplete",
-            point_count=len(file.get("points", {})),
-            spectrum_count=len(file.get("spectra", {})),
+            point_count=len(committed_names),
+            spectrum_count=sum(name in file.get("spectra", {}) for name in committed_names),
             plan_sha256=Hdf5RunReader._attribute_text(run.attrs.get("plan_sha256")),
             application_version=Hdf5RunReader._attribute_text(run.attrs.get("application_version")),
             operator=Hdf5RunReader._extract_operator(run),
@@ -250,7 +386,7 @@ class Hdf5RunReader:
                 return ()
             spectra = file.get("spectra", {})
             result: list[StoredPoint] = []
-            for name in Hdf5RunReader._numeric_names(points):
+            for name in Hdf5RunReader._committed_point_names(file):
                 group = points[name]
                 result.append(
                     StoredPoint(
@@ -276,6 +412,7 @@ class Hdf5RunReader:
             spectra = file.get("spectra")
             if spectra is None or str(index) not in spectra:
                 return 0
+            Hdf5RunReader._require_committed_spectrum(file, index)
             group = spectra[str(index)]
             frequency = group.get("frequency_hz")
             power = group.get("power_dbm")
@@ -299,6 +436,7 @@ class Hdf5RunReader:
             spectra = file.get("spectra")
             if spectra is None or str(index) not in spectra:
                 return None
+            Hdf5RunReader._require_committed_spectrum(file, index)
             group = spectra[str(index)]
             try:
                 frequencies = tuple(float(value) for value in group["frequency_hz"][:])
@@ -482,6 +620,25 @@ class Hdf5RunReader:
             return h5py.File(Path(path), "r")
         except OSError as exc:
             raise ExecutionError(f"Cannot read HDF5 file {Path(path).name}: {exc}") from exc
+
+    @staticmethod
+    def _committed_point_names(file: Any) -> tuple[str, ...]:
+        """Expose the contiguous committed prefix, excluding interrupted work."""
+        points = file.get("points")
+        if points is None:
+            return ()
+        names: list[str] = []
+        for name in Hdf5RunReader._numeric_names(points):
+            if int(name) != len(names) or not bool(points[name].attrs.get("complete", False)):
+                break
+            names.append(name)
+        return tuple(names)
+
+    @staticmethod
+    def _require_committed_spectrum(file: Any, index: int) -> None:
+        point = file.get(f"points/{index}")
+        if point is None or not bool(point.attrs.get("complete", False)):
+            raise ExecutionError(f"Spectrum {index} belongs to an uncommitted checkpoint.")
 
     @staticmethod
     def _require_group(file: Any, name: str) -> Any:

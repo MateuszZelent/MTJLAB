@@ -4,7 +4,8 @@
 inline card it occupies no layout space: messages are rendered by QFluent's
 overlay layer and therefore never move a page's controls or plots.
 """
-from __future__ import annotations
+
+from __future__ import annotations
 
 from PySide6.QtWidgets import QSizePolicy, QWidget
 from qfluentwidgets import InfoBar, InfoBarPosition
@@ -90,3 +91,13 @@ class NotificationBanner(QWidget):
             severity=severity,
             timeout_ms=timeout_ms,
         )
+
+    def clear_message(self) -> None:
+        """Dismiss obsolete feedback when the user fixes an input or leaves."""
+        active_bar, self._active_bar = self._active_bar, None
+        self.last_message = self.last_severity = ""
+        if active_bar is not None:
+            try:
+                active_bar.close()
+            except RuntimeError:
+                pass  # A timed notification may already have been deleted.

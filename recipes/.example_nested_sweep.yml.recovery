@@ -1,82 +1,39 @@
 schema_version: 1
-name: Keithley B current × Rigol CH1 high level × Anritsu spectrum
-
-# Safe, executable 100 × 20 example. It deliberately contains no OUTPUT ON
-# action, so compiling or simulating it cannot energise a source.
+name: MOKE 0 x Keithley B x Keithley A
 root:
-  id: sequence-main
+  id: root
   type: sequence
   children:
-  - id: anritsu-spectrum-setup
-    type: configure_anritsu
-    start_frequency: 1 MHz
-    stop_frequency: 10 MHz
-    reference_level: 0 dBm
-    points: 1001
-  - id: keithley-current-sweep
-    type: sweep
-    target: keithley.B.current
-    start: 1 mA
-    stop: 10 mA
-    points: 100
-    spacing: linear
-    children:
-    - id: keithley-b-config
-      type: configure_keithley
-      channel: B
-      mode: current
-      level: ${keithley.B.current}
-      compliance: 67 mV
-      nplc: 1.0
-      source_autorange: false
-      source_range: 1 A
-    - id: rigol-high-level-sweep
+    - {id: analyzer, type: configure_anritsu, start_frequency: '1 MHz', stop_frequency: '2 MHz', reference_level: '0 dBm', points: 101}
+    - {id: a-config, type: configure_keithley, channel: A, mode: current, level: '0.2 mA', compliance: '20 mV', source_range: '10 mA'}
+    - {id: b-config, type: configure_keithley, channel: B, mode: current, level: '-80 mA', compliance: '20 mV', source_range: '100 mA'}
+    - {id: a-on, type: set_keithley_output, channel: A, enabled: true}
+    - {id: b-on, type: set_keithley_output, channel: B, enabled: true}
+    - {id: moke-config, type: configure_moke_box, channel: 0, minimum_voltage: '0 mV', maximum_voltage: '100 mV'}
+    - {id: moke-arm, type: arm_moke_voltage}
+    - id: moke-axis
       type: sweep
-      target: rigol.1.high_level
-      start: 1 mV
-      stop: 3 mV
-      points: 20
-      spacing: linear
+      target: moke_box.vout0.voltage
+      start: '0 mV'
+      stop: '100 mV'
+      points: 2
       children:
-      - id: rigol-ch1-config
-        type: configure_rigol
-        channel: 1
-        waveform: SQU
-        frequency: 1 kHz
-        high_level: ${rigol.1.high_level}
-        low_level: -1 mV
-        output_load: HIGHZ
-        dut_min_impedance: 50 ohm
-      - id: wait-for-settle
-        type: wait
-        duration: 100 ms
-      - id: measure-keithley-b
-        type: measure_keithley
-        channel: B
-      - id: acquire-spectrum
-        type: acquire_spectrum
-        trace: TRAC1
-
-  - id: keithley-5499d1c4
-    type: sequence
-    text: Keithley 2600 — configuration required
-    device_module: keithley
-    label: Keithley 2600
-    configuration_required: true
-    children:
-    - id: comment-1a090d83
-      type: comment
-      text: Drop nested devices or flow actions here
-finally:
-- id: rigol-ch1-off-finally
-  type: set_rigol_output
-  channel: 1
-  enabled: false
-- id: keithley-b-ramp-zero-finally
-  type: ramp_keithley_to_zero
-  channel: B
-  deadline: 10 s
-- id: keithley-b-off-finally
-  type: set_keithley_output
-  channel: B
-  enabled: false
+        - id: b-axis
+          type: sweep
+          target: keithley.B.current
+          start: '-80 mA'
+          stop: '80 mA'
+          points: 3
+          children:
+            - id: a-axis
+              type: sweep
+              target: keithley.A.current
+              start: '0.2 mA'
+              stop: '1.4 mA'
+              points: 3
+              children:
+                - {id: settle, type: wait, duration: '3 s'}
+                - {id: measure-a, type: measure_keithley, channel: A}
+                - {id: measure-b, type: measure_keithley, channel: B}
+                - {id: hall, type: measure_moke_hall, checkpoint: false}
+                - {id: spectrum, type: acquire_spectrum, average_count: 1}

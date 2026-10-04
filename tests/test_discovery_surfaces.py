@@ -7,6 +7,8 @@ from qfluentwidgets import BodyLabel, CaptionLabel, CardWidget, SegmentedWidget,
 
 from app.ui.dashboard.discovery_surfaces import SavedInstrumentsView, TcpDiscoveryResultsView
 from app.ui.shell import MainWindow
+from tests.shell_test_isolation import isolated_shell_persistence as isolated_shell_persistence
+from tests.shell_test_isolation import shell_qt_application as shell_qt_application
 
 
 class DiscoverySurfaceTests(unittest.TestCase):

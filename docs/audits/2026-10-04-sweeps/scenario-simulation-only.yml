@@ -1,0 +1,42 @@
+# Synthetic audit scenario. NOT a hardware-ready recipe.
+# Frequency, compliance and range settings are test fixtures.
+# 2 x 3 x 3 points; user has not specified real axis steps.
+schema_version: 1
+name: audit-probe
+root:
+  id: root
+  type: sequence
+  children:
+    - {id: analyzer, type: configure_anritsu, start_frequency: '1 MHz', stop_frequency: '2 MHz', reference_level: '0 dBm', points: 101}
+    - {id: a-config, type: configure_keithley, channel: A, mode: current, level: '0.2 mA', compliance: '20 mV', source_range: '10 mA'}
+    - {id: b-config, type: configure_keithley, channel: B, mode: current, level: '-80 mA', compliance: '20 mV', source_range: '100 mA'}
+    - {id: a-on, type: set_keithley_output, channel: A, enabled: true}
+    - {id: b-on, type: set_keithley_output, channel: B, enabled: true}
+    - {id: moke-config, type: configure_moke_box, channel: 0, minimum_voltage: '0 mV', maximum_voltage: '100 mV'}
+    - {id: moke-arm, type: arm_moke_voltage}
+    - id: moke-axis
+      type: sweep
+      target: moke_box.vout0.voltage
+      start: '0 mV'
+      stop: '100 mV'
+      points: 2
+      children:
+        - id: b-axis
+          type: sweep
+          target: keithley.B.current
+          start: '-80 mA'
+          stop: '80 mA'
+          points: 3
+          children:
+            - id: a-axis
+              type: sweep
+              target: keithley.A.current
+              start: '0.2 mA'
+              stop: '1.4 mA'
+              points: 3
+              children:
+                - {id: settle, type: wait, duration: '3 s'}
+                - {id: measure-a, type: measure_keithley, channel: A}
+                - {id: measure-b, type: measure_keithley, channel: B}
+                - {id: hall, type: measure_moke_hall, checkpoint: false}
+                - {id: spectrum, type: acquire_spectrum, average_count: 1}

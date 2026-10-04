@@ -4,13 +4,14 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 
-from PySide6.QtCore import QObject, QThread, Qt, Signal, Slot
+from PySide6.QtCore import QObject, Qt, QThread, Signal, Slot
 
 from app.spectrum import (
     SpectrumAnalysisParameters,
     SpectrumCleanupResult,
     SpectrumPeak,
     clean_spectrum_dbm,
+    clean_spectrum_pipeline,
     clean_spectrum_values,
     detect_spectrum_peaks,
 )
@@ -21,7 +22,7 @@ class SpectrumAnalysisRequest:
     generation: int
     frequencies_hz: tuple[float, ...]
     powers_dbm: tuple[float, ...]
-    mode: str
+    mode: str | tuple[str, ...]
     history_dbm: tuple[tuple[float, ...], ...]
     detect_peaks: bool
     source_key: str = "raw"
@@ -31,6 +32,7 @@ class SpectrumAnalysisRequest:
     parameters: SpectrumAnalysisParameters = field(
         default_factory=SpectrumAnalysisParameters
     )
+    source_snapshot: object = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -42,6 +44,8 @@ class SpectrumAnalysisOutcome:
     frame_id: int = 0
     source_unit: str = "dBm"
     provenance: tuple[str, ...] = ()
+    frequencies_hz: tuple[float, ...] = ()
+    source_snapshot: object = None
 
 
 class _SpectrumAnalysisWorker(QObject):
@@ -54,12 +58,19 @@ class _SpectrumAnalysisWorker(QObject):
             self.failed.emit(-1, "Invalid spectrum-analysis request.")
             return
         try:
-            if request.source_unit == "dBm":
+            if isinstance(request.mode, tuple):
+                cleanup = clean_spectrum_pipeline(
+                    request.powers_dbm, unit=request.source_unit, modes=request.mode,
+                    history=request.history_dbm, parameters=request.parameters,
+                    frequencies_hz=request.frequencies_hz,
+                )
+            elif request.source_unit == "dBm":
                 cleanup = clean_spectrum_dbm(
                     request.powers_dbm,
                     mode=request.mode,
                     history_dbm=request.history_dbm,
                     parameters=request.parameters,
+                    frequencies_hz=request.frequencies_hz,
                 )
             else:
                 cleanup = clean_spectrum_values(
@@ -68,10 +79,12 @@ class _SpectrumAnalysisWorker(QObject):
                     mode=request.mode,
                     history_dbm=request.history_dbm,
                     parameters=request.parameters,
+                    frequencies_hz=request.frequencies_hz,
                 )
             peaks: tuple[SpectrumPeak, ...] | None = (
                 detect_spectrum_peaks(
                     request.frequencies_hz,
+                    request.source_snapshot,
                     cleanup.values_dbm,
                     fit=request.source_unit == "dBm",
                     unit=request.source_unit,
@@ -89,6 +102,7 @@ class _SpectrumAnalysisWorker(QObject):
                     request.frame_id,
                     request.source_unit,
                     request.provenance,
+                    request.frequencies_hz,
                 )
             )
         except Exception as exc:

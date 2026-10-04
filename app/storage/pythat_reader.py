@@ -15,7 +15,7 @@ class PyThatRunData:
 
 
 def read_pythat_run_data(path: str | Path) -> PyThatRunData:
-    """Open the public measurement tree, without using private HDF5 groups."""
+    """Open the public tree after the bridge checks our checkpoint contract."""
 
     tree = open_measurement_tree(path)
     return PyThatRunData(

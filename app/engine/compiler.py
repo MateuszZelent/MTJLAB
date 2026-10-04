@@ -2411,12 +2411,11 @@ class RecipeCompiler:
             payload = {
                 "trace": validate_anritsu_trace_name(str(data.get("trace", "TRAC1"))),
             }
-            try:
-                average_count = int(data.get("average_count", 1))
-            except (TypeError, ValueError) as exc:
+            average_count = data.get("average_count", 1)
+            if type(average_count) is not int:
                 raise ConfigurationError(
                     f"{node.id}: average_count must be an integer."
-                ) from exc
+                )
             if not 1 <= average_count <= 9999:
                 raise SafetyViolation(
                     f"{node.id}: average_count must be in the range 1..9999."

@@ -4,8 +4,8 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
-from PySide6.QtCore import Signal
-from PySide6.QtGui import QResizeEvent
+from PySide6.QtCore import QEvent, Signal
+from PySide6.QtGui import QFont, QFontMetrics, QResizeEvent
 from PySide6.QtWidgets import QGridLayout, QSizePolicy, QWidget
 from qfluentwidgets import BodyLabel, PrimaryPushButton, PushButton
 
@@ -22,6 +22,30 @@ class StationSafetySnapshot:
     unknown_outputs: int = 0
 
 
+class _EmergencyStopButton(PrimaryPushButton):
+    """Reserve room for the bold emergency caption in the Fluent layout."""
+
+    def __init__(self, text: str, parent: QWidget) -> None:
+        super().__init__(parent=parent)
+        self.setText(text)
+
+    def _reserve_caption_width(self) -> None:
+        font = QFont(self.font())
+        font.setWeight(QFont.Weight.Bold)
+        # Fluent horizontal padding plus the station emergency border.
+        caption_width = QFontMetrics(font).horizontalAdvance(self.text()) + 32
+        self.setMinimumWidth(max(184, caption_width))
+
+    def setText(self, text: str) -> None:  # noqa: N802 - Qt override
+        super().setText(text)
+        self._reserve_caption_width()
+
+    def changeEvent(self, event: QEvent) -> None:  # noqa: N802 - Qt override
+        super().changeEvent(event)
+        if event.type() in {QEvent.Type.FontChange, QEvent.Type.StyleChange}:
+            self._reserve_caption_width()
+
+
 class StationSafetyStrip(QWidget):
     """Display station safety state and immediately request an E-STOP."""
 
@@ -36,11 +60,11 @@ class StationSafetyStrip(QWidget):
         self.outputs = BodyLabel()
         self.mode = BodyLabel()
         self.actor = BodyLabel()
-        self.estop = PrimaryPushButton("E-STOP  |  ALL OUTPUTS OFF", self)
+        self.estop = _EmergencyStopButton("E-STOP  |  ALL OUTPUTS OFF", self)
         self.estop.setObjectName("stationEmergencyStopButton")
         self.estop.setProperty("visualPriority", "high")
         self.estop.setProperty("controlState", "emergency")
-        self.estop.setMinimumSize(184, 36)
+        self.estop.setMinimumHeight(36)
         self.save_settings = PushButton("SAVE SETTINGS")
         self.save_settings.setAccessibleName("Save pending station settings")
         self.save_settings.setToolTip(
@@ -112,6 +136,17 @@ class StationSafetyStrip(QWidget):
             self._layout.setColumnStretch(column, 0)
         self._layout.setHorizontalSpacing(6 if mode == "narrow" else 12)
         if mode == "narrow":
+            self.estop.setText("E-STOP | ALL OFF")
+            self._layout.addWidget(self.readiness, 0, 0)
+            self._layout.addWidget(self.outputs, 0, 1)
+            self._layout.addWidget(self.estop, 1, 0, 1, 2)
+            self._layout.addWidget(self.save_settings, 2, 0, 1, 2)
+            self._layout.addWidget(self.mode, 3, 0)
+            self._layout.addWidget(self.actor, 3, 1)
+            self._layout.setColumnStretch(0, 1)
+            self._layout.setColumnStretch(1, 1)
+        elif mode == "compact":
+            self.estop.setText("E-STOP  |  ALL OUTPUTS OFF")
             self._layout.addWidget(self.readiness, 0, 0)
             self._layout.addWidget(self.outputs, 0, 1)
             self._layout.addWidget(self.save_settings, 1, 0)
@@ -119,19 +154,9 @@ class StationSafetyStrip(QWidget):
             self._layout.addWidget(self.mode, 2, 0)
             self._layout.addWidget(self.actor, 2, 1)
             self._layout.setColumnStretch(0, 1)
-            self._layout.setColumnStretch(1, 1)
-        elif mode == "compact":
-            self._layout.addWidget(self.readiness, 0, 0)
-            self._layout.addWidget(self.outputs, 0, 1)
-            self._layout.addWidget(self.save_settings, 0, 2)
-            self._layout.addWidget(self.estop, 0, 3)
-            self._layout.addWidget(self.mode, 1, 0)
-            self._layout.addWidget(self.actor, 1, 1, 1, 3)
-            self._layout.setColumnStretch(0, 1)
-            self._layout.setColumnStretch(1, 1)
-            self._layout.setColumnStretch(2, 2)
-            self._layout.setColumnStretch(3, 2)
+            self._layout.setColumnStretch(1, 2)
         else:
+            self.estop.setText("E-STOP  |  ALL OUTPUTS OFF")
             self._layout.addWidget(self.readiness, 0, 0)
             self._layout.addWidget(self.outputs, 0, 1)
             self._layout.addWidget(self.mode, 0, 2)
@@ -144,6 +169,11 @@ class StationSafetyStrip(QWidget):
             self._layout.setColumnStretch(3, 3)
             self._layout.setColumnStretch(4, 0)
             self._layout.setColumnStretch(5, 1)
+        # A resize can switch from one to several rows while the parent layout
+        # still holds the previous height. Reserve the new rows before paint.
+        self._layout.invalidate()
+        self.setMinimumHeight(self._layout.minimumSize().height())
+        self.updateGeometry()
 
     def update_snapshot(self, snapshot: StationSafetySnapshot) -> None:
         """Synchronously render ``snapshot`` without performing station actions."""
@@ -168,6 +198,8 @@ class StationSafetyStrip(QWidget):
         self.mode.setText("SIMULATION" if snapshot.simulation else "HARDWARE")
         roles = ", ".join(snapshot.roles) or "no role"
         self.actor.setText(f"{snapshot.actor or 'anonymous'} · {roles}")
+        for widget in (self.readiness, self.outputs, self.mode, self.actor):
+            widget.setToolTip(widget.text())
 
         for widget in (self.readiness, self.outputs):
             widget.style().unpolish(widget)

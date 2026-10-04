@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from dataclasses import replace
+
 from PySide6.QtCore import Qt, Signal
 from PySide6.QtGui import QCloseEvent
 from PySide6.QtWidgets import (
@@ -16,6 +18,7 @@ from qfluentwidgets import (
     CardWidget,
     CheckBox,
     DoubleSpinBox,
+    LineEdit,
     PrimaryPushButton,
     PushButton,
     ScrollArea,
@@ -26,6 +29,7 @@ from qfluentwidgets import (
 )
 
 from app.spectrum import SpectrumAnalysisParameters
+from app.domain.quantities import DIMENSION_FREQUENCY, format_quantity_auto, parse_quantity
 from app.ui.dialogs import StationDialog
 
 
@@ -129,6 +133,52 @@ class SpectrumAnalysisSettingsDialog(StationDialog):
         cards_layout = QVBoxLayout(scroll_content)
         cards_layout.setContentsMargins(0, 4, 6, 4)
         cards_layout.setSpacing(10)
+
+        narrow_card = CardWidget(scroll_content)
+        narrow_layout = QVBoxLayout(narrow_card)
+        narrow_layout.setContentsMargins(0, 10, 0, 10)
+        narrow_layout.setSpacing(4)
+        narrow_header = QWidget(narrow_card)
+        narrow_header_layout = QVBoxLayout(narrow_header)
+        narrow_header_layout.setContentsMargins(16, 0, 16, 4)
+        narrow_header_layout.addWidget(StrongBodyLabel("Narrow-peak rejection", narrow_header))
+        hint = CaptionLabel(
+            "Replaces isolated positive and negative spikes by local background. Width is measured "
+            "at half local prominence in the selected trace. A narrow real signal can also be removed; "
+            "protect its full band including tails and an RBW margin.", narrow_header)
+        hint.setWordWrap(True)
+        narrow_header_layout.addWidget(hint)
+        narrow_layout.addWidget(narrow_header)
+        self.narrow_width = LineEdit(narrow_card)
+        self.narrow_width.setFixedWidth(150)
+        self.narrow_width.setAccessibleName("Maximum narrow-peak width")
+        self.narrow_width.setText(format_quantity_auto(self._initial_parameters.narrow_max_width_hz, DIMENSION_FREQUENCY))
+        narrow_layout.addWidget(_create_setting_row("Maximum peak width", "Explicit frequency, e.g. 6 MHz.", self.narrow_width, narrow_card))
+        self.narrow_threshold = DoubleSpinBox(narrow_card)
+        self.narrow_threshold.setRange(3, 30)
+        self.narrow_threshold.setSingleStep(.5)
+        self.narrow_threshold.setDecimals(1)
+        self.narrow_threshold.setSuffix(" ×")
+        self.narrow_threshold.setFixedWidth(150)
+        self.narrow_threshold.setValue(self._initial_parameters.narrow_threshold_sigma)
+        narrow_layout.addWidget(_create_setting_row("Outlier threshold", "Robust local noise scale; higher means fewer replacements.", self.narrow_threshold, narrow_card))
+        self.narrow_protect = CheckBox("Protect band", narrow_card)
+        self.narrow_protect.setFixedWidth(150)
+        regions = self._initial_parameters.narrow_protected_regions_hz
+        self.narrow_protect.setChecked(bool(regions))
+        narrow_layout.addWidget(_create_setting_row("Keep signal band unchanged", "Whole spikes touching this band are preserved.", self.narrow_protect, narrow_card))
+        self.narrow_protected_start = LineEdit(narrow_card)
+        self.narrow_protected_stop = LineEdit(narrow_card)
+        for control, value, name in ((self.narrow_protected_start, regions[0][0] if regions else 1e9, "Protected band start"),
+                                     (self.narrow_protected_stop, regions[0][1] if regions else 2e9, "Protected band stop")):
+            control.setFixedWidth(150)
+            control.setText(format_quantity_auto(value, DIMENSION_FREQUENCY))
+            control.setAccessibleName(name)
+            control.setEnabled(bool(regions))
+            self.narrow_protect.toggled.connect(control.setEnabled)
+        narrow_layout.addWidget(_create_setting_row("Protected band start", "Frequency including lower signal tails and margin.", self.narrow_protected_start, narrow_card))
+        narrow_layout.addWidget(_create_setting_row("Protected band stop", "Frequency including upper signal tails and margin.", self.narrow_protected_stop, narrow_card))
+        cards_layout.addWidget(narrow_card)
 
         # ── Card 1: Denoise (Bilateral Filter) ──────────────────────────────
         denoise_card = CardWidget(scroll_content)
@@ -376,6 +426,13 @@ class SpectrumAnalysisSettingsDialog(StationDialog):
         bottom_layout.setSpacing(10)
 
         bottom_layout.addWidget(_create_separator(bottom_container))
+        self.validation_error = CaptionLabel("", bottom_container)
+        self.validation_error.setWordWrap(True)
+        self.validation_error.hide()
+        bottom_layout.addWidget(self.validation_error)
+        for editor in (self.narrow_width, self.narrow_protected_start, self.narrow_protected_stop):
+            editor.textChanged.connect(lambda _text: self.validation_error.hide())
+        self.narrow_protect.toggled.connect(lambda _checked: self.validation_error.hide())
 
         buttons_row = QHBoxLayout()
         buttons_row.setContentsMargins(0, 0, 0, 0)
@@ -414,10 +471,24 @@ class SpectrumAnalysisSettingsDialog(StationDialog):
         self.peak_prominence.setValue(defaults.peak_min_prominence_db)
         self.peak_max_count.setValue(defaults.peak_max_count)
         self.peak_fit_models.setChecked(defaults.peak_fit_models)
+        self.narrow_width.setText(format_quantity_auto(defaults.narrow_max_width_hz, DIMENSION_FREQUENCY))
+        self.narrow_threshold.setValue(defaults.narrow_threshold_sigma)
+        self.narrow_protect.setChecked(False)
+        self.validation_error.hide()
 
     def get_parameters(self) -> SpectrumAnalysisParameters:
         win = self._sanitize_window(self.denoise_window.value())
-        return SpectrumAnalysisParameters(
+        width_hz = parse_quantity(self.narrow_width.text(), DIMENSION_FREQUENCY).si_value
+        if width_hz <= 0:
+            raise ValueError("Maximum peak width must be positive, e.g. 6 MHz.")
+        regions = ()
+        if self.narrow_protect.isChecked():
+            lower = parse_quantity(self.narrow_protected_start.text(), DIMENSION_FREQUENCY).si_value
+            upper = parse_quantity(self.narrow_protected_stop.text(), DIMENSION_FREQUENCY).si_value
+            if not 0 <= lower < upper:
+                raise ValueError("Protected band start must be nonnegative and smaller than stop.")
+            regions = ((lower, upper), *self._initial_parameters.narrow_protected_regions_hz[1:])
+        return replace(self._initial_parameters,
             denoise_window=win,
             emi_threshold_db=float(self.emi_threshold.value()),
             emi_max_std_db=float(self.emi_max_std.value()),
@@ -426,10 +497,18 @@ class SpectrumAnalysisSettingsDialog(StationDialog):
             peak_min_prominence_db=float(self.peak_prominence.value()),
             peak_max_count=int(self.peak_max_count.value()),
             peak_fit_models=bool(self.peak_fit_models.isChecked()),
+            narrow_max_width_hz=width_hz,
+            narrow_threshold_sigma=float(self.narrow_threshold.value()),
+            narrow_protected_regions_hz=regions,
         )
 
     def _apply(self) -> None:
-        params = self.get_parameters()
+        try:
+            params = self.get_parameters()
+        except ValueError as exc:
+            self.validation_error.setText(str(exc))
+            self.validation_error.show()
+            return
         self.parameters_applied.emit(params)
         self.accept()
 

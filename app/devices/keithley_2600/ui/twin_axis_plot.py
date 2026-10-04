@@ -7,6 +7,7 @@ from typing import Sequence
 
 import numpy as np
 import pyqtgraph as pg
+from app.ui.widgets.plot_ownership import create_plot_widget, own_viewbox_menu
 from PySide6.QtCore import QEvent, QSize
 from PySide6.QtWidgets import QHBoxLayout, QSizePolicy, QVBoxLayout, QWidget
 from qfluentwidgets import CaptionLabel, isDarkTheme
@@ -57,7 +58,7 @@ class KeithleyTwinAxisPlotWidget(QWidget):
         layout.addLayout(header)
 
         # Main plot widget
-        self.plot = pg.PlotWidget()
+        self.plot = create_plot_widget()
         self.plot.setBackground(None)
         self.plot.showGrid(x=True, y=True, alpha=0.18)
         self.plot.setMenuEnabled(False)
@@ -71,6 +72,7 @@ class KeithleyTwinAxisPlotWidget(QWidget):
 
         # Secondary ViewBox for the right axis (Current)
         self.p2 = pg.ViewBox()
+        own_viewbox_menu(self.p2, self.plot)
         self.p1.scene().addItem(self.p2)
         self.p1.getAxis("right").linkToView(self.p2)
         self.p2.setXLink(self.p1)

@@ -10,6 +10,7 @@ from typing import Any
 
 import numpy as np
 import pyqtgraph as pg
+from app.ui.widgets.plot_ownership import create_plot_widget, own_plot_item_menus, own_signal_proxy
 from pyqtgraph.exporters import ImageExporter, SVGExporter
 from PySide6.QtCore import QRectF, QSize, QThreadPool, Signal
 from PySide6.QtGui import QResizeEvent, QShowEvent
@@ -156,7 +157,7 @@ class HeatmapPlotWidget(QWidget):
         layout.addLayout(toolbar)
 
         # --- Plot ---
-        self.plot = pg.PlotWidget()
+        self.plot = create_plot_widget()
         self.plot.setBackground(None)
         self.plot.showGrid(x=True, y=True, alpha=0.18)
         self.plot.setLabel("bottom", "Frequency", units="Hz")
@@ -186,6 +187,7 @@ class HeatmapPlotWidget(QWidget):
             label="Amplitude (dBm)",
         )
         self.color_bar.setImageItem(self.image_item, insert_in=self.plot.getPlotItem())
+        own_plot_item_menus(self.color_bar, self.plot)
 
         layout.addWidget(self.plot, 1)
 
@@ -202,6 +204,7 @@ class HeatmapPlotWidget(QWidget):
         self._mouse_proxy = pg.SignalProxy(
             self.plot.scene().sigMouseMoved, rateLimit=30, slot=self._mouse_moved
         )
+        own_signal_proxy(self._mouse_proxy, self)
         self.plot.scene().sigMouseClicked.connect(self._mouse_clicked)
         self.colormap_combo.currentTextChanged.connect(self._apply_colormap)
         self.apply_theme(self._theme_name)

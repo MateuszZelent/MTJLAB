@@ -1,0 +1,1507 @@
+{
+  "scope": "simulator only; waits replaced by recorder in Cartesian test",
+  "source_head": "c6697e2cee78277cd9125e8cc2a9e63c64ccc4a4 plus pre-existing working tree changes",
+  "plan_actions": 123,
+  "points": 18,
+  "spectra": 18,
+  "estimate": {
+    "nominal_duration_s": 60.33317999999987,
+    "retry_upper_duration_s": 80.40817999999987,
+    "uncompressed_hdf5_bytes": 1631544,
+    "csv_bytes": 18432,
+    "checkpoints": 18,
+    "spectra": 18,
+    "spectrum_values": 3636,
+    "warnings": [
+      "The plan contains OUTPUT ON actions and requires explicit DUT and cabling review."
+    ]
+  },
+  "archive_bytes": 3292542,
+  "status": "completed",
+  "public_schema": {},
+  "checkpoint_samples": [
+    {
+      "index": 0,
+      "setpoints_json": {
+        "keithley.A.current": 0.0002,
+        "keithley.B.current": -0.08,
+        "moke_box.vout0.voltage": 0.0
+      },
+      "measurements_json": {
+        "keithley.A.compliance_detected": 0.0,
+        "keithley.A.compliance_stop_required": 0.0,
+        "keithley.A.current_a": 0.0002,
+        "keithley.A.measurement_path_connected": 1.0,
+        "keithley.A.output_enabled": 1.0,
+        "keithley.A.power_w": 4.0000000000000003e-07,
+        "keithley.A.voltage_v": 0.002,
+        "keithley.B.compliance_detected": 1.0,
+        "keithley.B.compliance_stop_required": 0.0,
+        "keithley.B.current_a": -0.002,
+        "keithley.B.measurement_path_connected": 1.0,
+        "keithley.B.output_enabled": 1.0,
+        "keithley.B.power_w": 4e-05,
+        "keithley.B.voltage_v": -0.02,
+        "moke_box.hall1_raw_ad7734": 8391743.0,
+        "moke_box.hall1_stddev_v": 0.0,
+        "moke_box.hall1_voltage_v": 0.0037372116729273404,
+        "moke_box.vout_voltage_v": 0.0
+      },
+      "metadata_json": {
+        "applied_si": 0.0002,
+        "axis_context": {
+          "active_setpoints_si": {
+            "keithley.A.current": 0.0002,
+            "keithley.B.current": -0.08,
+            "moke_box.vout0.voltage": 0.0
+          },
+          "axis_id": "a-axis",
+          "loop_path": [
+            "moke-axis",
+            "b-axis",
+            "a-axis"
+          ],
+          "point_count": 3,
+          "point_index": 0,
+          "stage_index": 0,
+          "value_si": 0.0002
+        },
+        "axis_id": "a-axis",
+        "checkpoint_label": "spectrum",
+        "checkpoint_operation_id": "spectrum",
+        "execution_mode": "measurement",
+        "loop_path": [
+          "moke-axis",
+          "b-axis",
+          "a-axis"
+        ],
+        "monotonic_s": 2234390.8695543,
+        "output_guard_devices": [
+          "keithley",
+          "rigol",
+          "anritsu"
+        ],
+        "outputs_forced_off": false,
+        "plan_node": "spectrum",
+        "point_index": 0,
+        "raw_recipe_sweep_indices": [
+          0
+        ],
+        "readback_si": null,
+        "reference_index": null,
+        "requested_si": 0.0002,
+        "safety_context": {
+          "anritsu": {
+            "instrument_mode": "SPECT",
+            "points": 101,
+            "reference_level_dbm": 0.0,
+            "start_hz": 1000000.0,
+            "stop_hz": 2000000.0
+          },
+          "keithley.A": {
+            "compliance_si": 0.02,
+            "measure_current_autorange": true,
+            "measure_current_range_si": null,
+            "measure_voltage_autorange": true,
+            "measure_voltage_range_si": null,
+            "mode": "current",
+            "nplc": 1.0,
+            "output_enabled": true,
+            "range_readback": {
+              "kind": "configuration_readback",
+              "measure_current_range_a": 0.01,
+              "measure_voltage_range_v": 0.1,
+              "output_enabled": false,
+              "source_mode": "current",
+              "source_range_si": 0.01,
+              "timestamp_epoch_s": 1791128286.2690504
+            },
+            "sense_mode": "2wire",
+            "settle_time_s": 0.0,
+            "source_autorange": false,
+            "source_level_si": 0.0002,
+            "source_range_si": 0.01
+          },
+          "keithley.B": {
+            "compliance_si": 0.02,
+            "measure_current_autorange": true,
+            "measure_current_range_si": null,
+            "measure_voltage_autorange": true,
+            "measure_voltage_range_si": null,
+            "mode": "current",
+            "nplc": 1.0,
+            "output_enabled": true,
+            "range_readback": {
+              "kind": "configuration_readback",
+              "measure_current_range_a": 0.1,
+              "measure_voltage_range_v": 0.1,
+              "output_enabled": false,
+              "source_mode": "current",
+              "source_range_si": 0.1,
+              "timestamp_epoch_s": 1791128286.2743058
+            },
+            "sense_mode": "2wire",
+            "settle_time_s": 0.0,
+            "source_autorange": false,
+            "source_level_si": -0.08,
+            "source_range_si": 0.1
+          },
+          "moke_box": {
+            "actual_v": 0.0,
+            "applied_v": 0.0,
+            "calibration_id": null,
+            "calibration_snapshot": null,
+            "channel": 0,
+            "conditioning_verified": false,
+            "field_source": "uncalibrated",
+            "maximum_v": 0.1,
+            "minimum_v": 0.0,
+            "mutation_suppressed": false,
+            "profile_fingerprint": "46de2add0dab0aacb8a97c8471e95aacef2a72aea64175ad46573660d1d8e16c",
+            "requested_v": 0.0
+          }
+        },
+        "semantic_operation_id": "spectrum",
+        "spectrum_average_count": 1,
+        "spectrum_processing": "none",
+        "stage_index": 0,
+        "verification": "readback"
+      },
+      "device_states_json": {
+        "anritsu": {
+          "spectrum": {
+            "actual": {
+              "instrument_mode": "SPECT",
+              "points": 101,
+              "reference_level_dbm": 0.0,
+              "start_hz": 1000000.0,
+              "stop_hz": 2000000.0
+            },
+            "requested": {
+              "points": 101,
+              "rbw_auto": true,
+              "rbw_hz": null,
+              "reference_level_dbm": 0.0,
+              "start_hz": 1000000.0,
+              "stop_hz": 2000000.0,
+              "trace": "TRAC1",
+              "vbw_auto": true,
+              "vbw_hz": null,
+              "vbw_mode": "VID"
+            }
+          }
+        },
+        "keithley": {
+          "channel_A": {
+            "actual": {
+              "compliance_si": 0.02,
+              "measure_current_autorange": true,
+              "measure_current_range_si": null,
+              "measure_voltage_autorange": true,
+              "measure_voltage_range_si": null,
+              "mode": "current",
+              "nplc": 1.0,
+              "output_enabled": true,
+              "range_readback": {
+                "kind": "configuration_readback",
+                "measure_current_range_a": 0.01,
+                "measure_voltage_range_v": 0.1,
+                "output_enabled": false,
+                "source_mode": "current",
+                "source_range_si": 0.01,
+                "timestamp_epoch_s": 1791128286.2690504
+              },
+              "sense_mode": "2wire",
+              "settle_time_s": 0.0,
+              "source_autorange": false,
+              "source_level_si": 0.0002,
+              "source_range_si": 0.01
+            },
+            "requested": {
+              "applied_si": 0.0002,
+              "channel": "A",
+              "level_si": 0.0002,
+              "mode": "current",
+              "requested_si": 0.0002,
+              "target": "keithley.A.current"
+            }
+          },
+          "channel_B": {
+            "actual": {
+              "compliance_si": 0.02,
+              "measure_current_autorange": true,
+              "measure_current_range_si": null,
+              "measure_voltage_autorange": true,
+              "measure_voltage_range_si": null,
+              "mode": "current",
+              "nplc": 1.0,
+              "output_enabled": true,
+              "range_readback": {
+                "kind": "configuration_readback",
+                "measure_current_range_a": 0.1,
+                "measure_voltage_range_v": 0.1,
+                "output_enabled": false,
+                "source_mode": "current",
+                "source_range_si": 0.1,
+                "timestamp_epoch_s": 1791128286.2743058
+              },
+              "sense_mode": "2wire",
+              "settle_time_s": 0.0,
+              "source_autorange": false,
+              "source_level_si": -0.08,
+              "source_range_si": 0.1
+            },
+            "requested": {
+              "applied_si": -0.08,
+              "channel": "B",
+              "level_si": -0.08,
+              "mode": "current",
+              "requested_si": -0.08,
+              "target": "keithley.B.current"
+            }
+          },
+          "measurement_A": {
+            "actual": {
+              "channel": "A",
+              "compliance_detected": false,
+              "compliance_stop_required": false,
+              "current_a": 0.0002,
+              "measurement_path_connected": true,
+              "output_enabled": true,
+              "power_w": 4.0000000000000003e-07,
+              "range_readback": null,
+              "source_level_si": 0.0002,
+              "source_mode": "current",
+              "voltage_v": 0.002
+            },
+            "requested": {
+              "channel": "A"
+            }
+          },
+          "measurement_B": {
+            "actual": {
+              "channel": "B",
+              "compliance_detected": true,
+              "compliance_stop_required": false,
+              "current_a": -0.002,
+              "measurement_path_connected": true,
+              "output_enabled": true,
+              "power_w": 4e-05,
+              "range_readback": null,
+              "source_level_si": -0.08,
+              "source_mode": "current",
+              "voltage_v": -0.02
+            },
+            "requested": {
+              "channel": "B"
+            }
+          }
+        },
+        "moke_box": {
+          "hall_readback": {
+            "actual": {
+              "raw_ad7734": 8391743,
+              "samples": 1,
+              "stddev_v": 0.0,
+              "timestamp_utc": "2026-10-04T15:38:06.335094+00:00",
+              "voltage_v": 0.0037372116729273404
+            },
+            "requested": {
+              "sample_count": 1
+            }
+          },
+          "voltage_control": {
+            "actual": {
+              "actual_v": 0.0,
+              "applied_v": 0.0,
+              "calibration_id": null,
+              "calibration_snapshot": null,
+              "channel": 0,
+              "conditioning_verified": false,
+              "field_source": "uncalibrated",
+              "maximum_v": 0.1,
+              "minimum_v": 0.0,
+              "mutation_suppressed": false,
+              "profile_fingerprint": "46de2add0dab0aacb8a97c8471e95aacef2a72aea64175ad46573660d1d8e16c",
+              "requested_v": 0.0
+            },
+            "requested": {
+              "applied_si": 0.0,
+              "channel": 0,
+              "ramp_timeout_s": 30.0,
+              "requested_si": 0.0,
+              "target": "moke_box.vout0.voltage",
+              "voltage_v": 0.0
+            }
+          }
+        }
+      },
+      "spectrum_attributes": {
+        "acquired_at_utc": "2026-10-04T15:38:06.341197+00:00",
+        "configuration_generation": "0",
+        "sweep_evidence": "unknown",
+        "trace_name": "TRAC1"
+      },
+      "raw_source_metadata": {
+        "acquired_at_s": 1791128286.341197,
+        "average_count": 1,
+        "average_index": 0,
+        "checkpoint_count_at_capture": 0,
+        "completed_at_s": 1791128286.340912,
+        "configuration_generation": 1,
+        "evidence": "qualified_single_sweep",
+        "execution_id": "7cd54f33-bc36-48f6-938a-d28ee6b562c0",
+        "ordinal": 0,
+        "recipe_node_id": "spectrum",
+        "role": "signal",
+        "setpoints_si": [
+          [
+            "keithley.A.current",
+            0.0002
+          ],
+          [
+            "keithley.B.current",
+            -0.08
+          ],
+          [
+            "moke_box.vout0.voltage",
+            0.0
+          ]
+        ],
+        "started_at_s": 1791128286.340778,
+        "sweep_id": "1"
+      }
+    },
+    {
+      "index": 1,
+      "setpoints_json": {
+        "keithley.A.current": 0.0008,
+        "keithley.B.current": -0.08,
+        "moke_box.vout0.voltage": 0.0
+      },
+      "measurements_json": {
+        "keithley.A.compliance_detected": 0.0,
+        "keithley.A.compliance_stop_required": 0.0,
+        "keithley.A.current_a": 0.0008,
+        "keithley.A.measurement_path_connected": 1.0,
+        "keithley.A.output_enabled": 1.0,
+        "keithley.A.power_w": 6.4000000000000006e-06,
+        "keithley.A.voltage_v": 0.008,
+        "keithley.B.compliance_detected": 1.0,
+        "keithley.B.compliance_stop_required": 0.0,
+        "keithley.B.current_a": -0.002,
+        "keithley.B.measurement_path_connected": 1.0,
+        "keithley.B.output_enabled": 1.0,
+        "keithley.B.power_w": 4e-05,
+        "keithley.B.voltage_v": -0.02,
+        "moke_box.hall1_raw_ad7734": 8391765.0,
+        "moke_box.hall1_stddev_v": 0.0,
+        "moke_box.hall1_voltage_v": 0.0037634377197549008
+      },
+      "metadata_json": {
+        "applied_si": 0.0007999999999999999,
+        "axis_context": {
+          "active_setpoints_si": {
+            "keithley.A.current": 0.0007999999999999999,
+            "keithley.B.current": -0.08,
+            "moke_box.vout0.voltage": 0.0
+          },
+          "axis_id": "a-axis",
+          "loop_path": [
+            "moke-axis",
+            "b-axis",
+            "a-axis"
+          ],
+          "point_count": 3,
+          "point_index": 1,
+          "stage_index": 0,
+          "value_si": 0.0007999999999999999
+        },
+        "axis_id": "a-axis",
+        "checkpoint_label": "spectrum",
+        "checkpoint_operation_id": "spectrum",
+        "execution_mode": "measurement",
+        "loop_path": [
+          "moke-axis",
+          "b-axis",
+          "a-axis"
+        ],
+        "monotonic_s": 2234391.0640284,
+        "output_guard_devices": [
+          "keithley",
+          "rigol",
+          "anritsu"
+        ],
+        "outputs_forced_off": false,
+        "plan_node": "spectrum",
+        "point_index": 1,
+        "raw_recipe_sweep_indices": [
+          1
+        ],
+        "readback_si": null,
+        "reference_index": null,
+        "requested_si": 0.0007999999999999999,
+        "safety_context": {
+          "anritsu": {
+            "instrument_mode": "SPECT",
+            "points": 101,
+            "reference_level_dbm": 0.0,
+            "start_hz": 1000000.0,
+            "stop_hz": 2000000.0
+          },
+          "keithley.A": {
+            "compliance_si": 0.02,
+            "measure_current_autorange": true,
+            "measure_current_range_si": null,
+            "measure_voltage_autorange": true,
+            "measure_voltage_range_si": null,
+            "mode": "current",
+            "nplc": 1.0,
+            "output_enabled": true,
+            "range_readback": {
+              "kind": "configuration_readback",
+              "measure_current_range_a": 0.01,
+              "measure_voltage_range_v": 0.1,
+              "output_enabled": false,
+              "source_mode": "current",
+              "source_range_si": 0.01,
+              "timestamp_epoch_s": 1791128286.2690504
+            },
+            "sense_mode": "2wire",
+            "settle_time_s": 0.0,
+            "source_autorange": false,
+            "source_level_si": 0.0008,
+            "source_range_si": 0.01
+          },
+          "keithley.B": {
+            "compliance_si": 0.02,
+            "measure_current_autorange": true,
+            "measure_current_range_si": null,
+            "measure_voltage_autorange": true,
+            "measure_voltage_range_si": null,
+            "mode": "current",
+            "nplc": 1.0,
+            "output_enabled": true,
+            "range_readback": {
+              "kind": "configuration_readback",
+              "measure_current_range_a": 0.1,
+              "measure_voltage_range_v": 0.1,
+              "output_enabled": false,
+              "source_mode": "current",
+              "source_range_si": 0.1,
+              "timestamp_epoch_s": 1791128286.2743058
+            },
+            "sense_mode": "2wire",
+            "settle_time_s": 0.0,
+            "source_autorange": false,
+            "source_level_si": -0.08,
+            "source_range_si": 0.1
+          },
+          "moke_box": {
+            "actual_v": 0.0,
+            "applied_v": 0.0,
+            "calibration_id": null,
+            "calibration_snapshot": null,
+            "channel": 0,
+            "conditioning_verified": false,
+            "field_source": "uncalibrated",
+            "maximum_v": 0.1,
+            "minimum_v": 0.0,
+            "mutation_suppressed": false,
+            "profile_fingerprint": "46de2add0dab0aacb8a97c8471e95aacef2a72aea64175ad46573660d1d8e16c",
+            "requested_v": 0.0
+          }
+        },
+        "semantic_operation_id": "spectrum",
+        "spectrum_average_count": 1,
+        "spectrum_processing": "none",
+        "stage_index": 0,
+        "verification": "readback"
+      },
+      "device_states_json": {
+        "anritsu": {
+          "spectrum": {
+            "actual": {
+              "instrument_mode": "SPECT",
+              "points": 101,
+              "reference_level_dbm": 0.0,
+              "start_hz": 1000000.0,
+              "stop_hz": 2000000.0
+            },
+            "requested": {
+              "points": 101,
+              "rbw_auto": true,
+              "rbw_hz": null,
+              "reference_level_dbm": 0.0,
+              "start_hz": 1000000.0,
+              "stop_hz": 2000000.0,
+              "trace": "TRAC1",
+              "vbw_auto": true,
+              "vbw_hz": null,
+              "vbw_mode": "VID"
+            }
+          }
+        },
+        "keithley": {
+          "channel_A": {
+            "actual": {
+              "compliance_si": 0.02,
+              "measure_current_autorange": true,
+              "measure_current_range_si": null,
+              "measure_voltage_autorange": true,
+              "measure_voltage_range_si": null,
+              "mode": "current",
+              "nplc": 1.0,
+              "output_enabled": true,
+              "range_readback": {
+                "kind": "configuration_readback",
+                "measure_current_range_a": 0.01,
+                "measure_voltage_range_v": 0.1,
+                "output_enabled": false,
+                "source_mode": "current",
+                "source_range_si": 0.01,
+                "timestamp_epoch_s": 1791128286.2690504
+              },
+              "sense_mode": "2wire",
+              "settle_time_s": 0.0,
+              "source_autorange": false,
+              "source_level_si": 0.0008,
+              "source_range_si": 0.01
+            },
+            "requested": {
+              "applied_si": 0.0008,
+              "channel": "A",
+              "level_si": 0.0008,
+              "mode": "current",
+              "requested_si": 0.0007999999999999999,
+              "target": "keithley.A.current"
+            }
+          },
+          "channel_B": {
+            "actual": {
+              "compliance_si": 0.02,
+              "measure_current_autorange": true,
+              "measure_current_range_si": null,
+              "measure_voltage_autorange": true,
+              "measure_voltage_range_si": null,
+              "mode": "current",
+              "nplc": 1.0,
+              "output_enabled": true,
+              "range_readback": {
+                "kind": "configuration_readback",
+                "measure_current_range_a": 0.1,
+                "measure_voltage_range_v": 0.1,
+                "output_enabled": false,
+                "source_mode": "current",
+                "source_range_si": 0.1,
+                "timestamp_epoch_s": 1791128286.2743058
+              },
+              "sense_mode": "2wire",
+              "settle_time_s": 0.0,
+              "source_autorange": false,
+              "source_level_si": -0.08,
+              "source_range_si": 0.1
+            },
+            "requested": {
+              "applied_si": -0.08,
+              "channel": "B",
+              "level_si": -0.08,
+              "mode": "current",
+              "requested_si": -0.08,
+              "target": "keithley.B.current"
+            }
+          },
+          "measurement_A": {
+            "actual": {
+              "channel": "A",
+              "compliance_detected": false,
+              "compliance_stop_required": false,
+              "current_a": 0.0008,
+              "measurement_path_connected": true,
+              "output_enabled": true,
+              "power_w": 6.4000000000000006e-06,
+              "range_readback": null,
+              "source_level_si": 0.0008,
+              "source_mode": "current",
+              "voltage_v": 0.008
+            },
+            "requested": {
+              "channel": "A"
+            }
+          },
+          "measurement_B": {
+            "actual": {
+              "channel": "B",
+              "compliance_detected": true,
+              "compliance_stop_required": false,
+              "current_a": -0.002,
+              "measurement_path_connected": true,
+              "output_enabled": true,
+              "power_w": 4e-05,
+              "range_readback": null,
+              "source_level_si": -0.08,
+              "source_mode": "current",
+              "voltage_v": -0.02
+            },
+            "requested": {
+              "channel": "B"
+            }
+          }
+        },
+        "moke_box": {
+          "hall_readback": {
+            "actual": {
+              "raw_ad7734": 8391765,
+              "samples": 1,
+              "stddev_v": 0.0,
+              "timestamp_utc": "2026-10-04T15:38:06.531499+00:00",
+              "voltage_v": 0.0037634377197549008
+            },
+            "requested": {
+              "sample_count": 1
+            }
+          },
+          "voltage_control": {
+            "actual": {
+              "actual_v": 0.0,
+              "applied_v": 0.0,
+              "calibration_id": null,
+              "calibration_snapshot": null,
+              "channel": 0,
+              "conditioning_verified": false,
+              "field_source": "uncalibrated",
+              "maximum_v": 0.1,
+              "minimum_v": 0.0,
+              "mutation_suppressed": false,
+              "profile_fingerprint": "46de2add0dab0aacb8a97c8471e95aacef2a72aea64175ad46573660d1d8e16c",
+              "requested_v": 0.0
+            },
+            "requested": {
+              "applied_si": 0.0,
+              "channel": 0,
+              "ramp_timeout_s": 30.0,
+              "requested_si": 0.0,
+              "target": "moke_box.vout0.voltage",
+              "voltage_v": 0.0
+            }
+          }
+        }
+      },
+      "spectrum_attributes": {
+        "acquired_at_utc": "2026-10-04T15:38:06.538186+00:00",
+        "configuration_generation": "0",
+        "sweep_evidence": "unknown",
+        "trace_name": "TRAC1"
+      },
+      "raw_source_metadata": {
+        "acquired_at_s": 1791128286.538186,
+        "average_count": 1,
+        "average_index": 0,
+        "checkpoint_count_at_capture": 1,
+        "completed_at_s": 1791128286.537912,
+        "configuration_generation": 1,
+        "evidence": "qualified_single_sweep",
+        "execution_id": "7cd54f33-bc36-48f6-938a-d28ee6b562c0",
+        "ordinal": 1,
+        "recipe_node_id": "spectrum",
+        "role": "signal",
+        "setpoints_si": [
+          [
+            "keithley.A.current",
+            0.0007999999999999999
+          ],
+          [
+            "keithley.B.current",
+            -0.08
+          ],
+          [
+            "moke_box.vout0.voltage",
+            0.0
+          ]
+        ],
+        "started_at_s": 1791128286.537777,
+        "sweep_id": "2"
+      }
+    },
+    {
+      "index": 9,
+      "setpoints_json": {
+        "keithley.A.current": 0.0002,
+        "keithley.B.current": -0.08,
+        "moke_box.vout0.voltage": 0.09949034089175085
+      },
+      "measurements_json": {
+        "keithley.A.compliance_detected": 0.0,
+        "keithley.A.compliance_stop_required": 0.0,
+        "keithley.A.current_a": 0.0002,
+        "keithley.A.measurement_path_connected": 1.0,
+        "keithley.A.output_enabled": 1.0,
+        "keithley.A.power_w": 4.0000000000000003e-07,
+        "keithley.A.voltage_v": 0.002,
+        "keithley.B.compliance_detected": 1.0,
+        "keithley.B.compliance_stop_required": 0.0,
+        "keithley.B.current_a": -0.002,
+        "keithley.B.measurement_path_connected": 1.0,
+        "keithley.B.output_enabled": 1.0,
+        "keithley.B.power_w": 4e-05,
+        "keithley.B.voltage_v": -0.02,
+        "moke_box.hall1_raw_ad7734": 8433499.0,
+        "moke_box.hall1_stddev_v": 0.0,
+        "moke_box.hall1_voltage_v": 0.053514248551636764,
+        "moke_box.vout_voltage_v": 0.09949034089175085
+      },
+      "metadata_json": {
+        "applied_si": 0.0002,
+        "axis_context": {
+          "active_setpoints_si": {
+            "keithley.A.current": 0.0002,
+            "keithley.B.current": -0.08,
+            "moke_box.vout0.voltage": 0.1
+          },
+          "axis_id": "a-axis",
+          "loop_path": [
+            "moke-axis",
+            "b-axis",
+            "a-axis"
+          ],
+          "point_count": 3,
+          "point_index": 0,
+          "stage_index": 0,
+          "value_si": 0.0002
+        },
+        "axis_id": "a-axis",
+        "checkpoint_label": "spectrum",
+        "checkpoint_operation_id": "spectrum",
+        "execution_mode": "measurement",
+        "loop_path": [
+          "moke-axis",
+          "b-axis",
+          "a-axis"
+        ],
+        "monotonic_s": 2234391.6917415,
+        "output_guard_devices": [
+          "keithley",
+          "rigol",
+          "anritsu"
+        ],
+        "outputs_forced_off": false,
+        "plan_node": "spectrum",
+        "point_index": 0,
+        "raw_recipe_sweep_indices": [
+          9
+        ],
+        "readback_si": null,
+        "reference_index": null,
+        "requested_si": 0.0002,
+        "safety_context": {
+          "anritsu": {
+            "instrument_mode": "SPECT",
+            "points": 101,
+            "reference_level_dbm": 0.0,
+            "start_hz": 1000000.0,
+            "stop_hz": 2000000.0
+          },
+          "keithley.A": {
+            "compliance_si": 0.02,
+            "measure_current_autorange": true,
+            "measure_current_range_si": null,
+            "measure_voltage_autorange": true,
+            "measure_voltage_range_si": null,
+            "mode": "current",
+            "nplc": 1.0,
+            "output_enabled": true,
+            "range_readback": {
+              "kind": "configuration_readback",
+              "measure_current_range_a": 0.01,
+              "measure_voltage_range_v": 0.1,
+              "output_enabled": false,
+              "source_mode": "current",
+              "source_range_si": 0.01,
+              "timestamp_epoch_s": 1791128286.2690504
+            },
+            "sense_mode": "2wire",
+            "settle_time_s": 0.0,
+            "source_autorange": false,
+            "source_level_si": 0.0002,
+            "source_range_si": 0.01
+          },
+          "keithley.B": {
+            "compliance_si": 0.02,
+            "measure_current_autorange": true,
+            "measure_current_range_si": null,
+            "measure_voltage_autorange": true,
+            "measure_voltage_range_si": null,
+            "mode": "current",
+            "nplc": 1.0,
+            "output_enabled": true,
+            "range_readback": {
+              "kind": "configuration_readback",
+              "measure_current_range_a": 0.1,
+              "measure_voltage_range_v": 0.1,
+              "output_enabled": false,
+              "source_mode": "current",
+              "source_range_si": 0.1,
+              "timestamp_epoch_s": 1791128286.2743058
+            },
+            "sense_mode": "2wire",
+            "settle_time_s": 0.0,
+            "source_autorange": false,
+            "source_level_si": -0.08,
+            "source_range_si": 0.1
+          },
+          "moke_box": {
+            "actual_v": 0.09949034089175085,
+            "applied_v": 0.09979552598651081,
+            "calibration_id": null,
+            "calibration_snapshot": null,
+            "channel": 0,
+            "conditioning_verified": false,
+            "field_source": "uncalibrated",
+            "maximum_v": 0.1,
+            "minimum_v": 0.0,
+            "mutation_suppressed": false,
+            "profile_fingerprint": "46de2add0dab0aacb8a97c8471e95aacef2a72aea64175ad46573660d1d8e16c",
+            "requested_v": 0.1
+          }
+        },
+        "semantic_operation_id": "spectrum",
+        "spectrum_average_count": 1,
+        "spectrum_processing": "none",
+        "stage_index": 0,
+        "verification": "readback"
+      },
+      "device_states_json": {
+        "anritsu": {
+          "spectrum": {
+            "actual": {
+              "instrument_mode": "SPECT",
+              "points": 101,
+              "reference_level_dbm": 0.0,
+              "start_hz": 1000000.0,
+              "stop_hz": 2000000.0
+            },
+            "requested": {
+              "points": 101,
+              "rbw_auto": true,
+              "rbw_hz": null,
+              "reference_level_dbm": 0.0,
+              "start_hz": 1000000.0,
+              "stop_hz": 2000000.0,
+              "trace": "TRAC1",
+              "vbw_auto": true,
+              "vbw_hz": null,
+              "vbw_mode": "VID"
+            }
+          }
+        },
+        "keithley": {
+          "channel_A": {
+            "actual": {
+              "compliance_si": 0.02,
+              "measure_current_autorange": true,
+              "measure_current_range_si": null,
+              "measure_voltage_autorange": true,
+              "measure_voltage_range_si": null,
+              "mode": "current",
+              "nplc": 1.0,
+              "output_enabled": true,
+              "range_readback": {
+                "kind": "configuration_readback",
+                "measure_current_range_a": 0.01,
+                "measure_voltage_range_v": 0.1,
+                "output_enabled": false,
+                "source_mode": "current",
+                "source_range_si": 0.01,
+                "timestamp_epoch_s": 1791128286.2690504
+              },
+              "sense_mode": "2wire",
+              "settle_time_s": 0.0,
+              "source_autorange": false,
+              "source_level_si": 0.0002,
+              "source_range_si": 0.01
+            },
+            "requested": {
+              "applied_si": 0.0002,
+              "channel": "A",
+              "level_si": 0.0002,
+              "mode": "current",
+              "requested_si": 0.0002,
+              "target": "keithley.A.current"
+            }
+          },
+          "channel_B": {
+            "actual": {
+              "compliance_si": 0.02,
+              "measure_current_autorange": true,
+              "measure_current_range_si": null,
+              "measure_voltage_autorange": true,
+              "measure_voltage_range_si": null,
+              "mode": "current",
+              "nplc": 1.0,
+              "output_enabled": true,
+              "range_readback": {
+                "kind": "configuration_readback",
+                "measure_current_range_a": 0.1,
+                "measure_voltage_range_v": 0.1,
+                "output_enabled": false,
+                "source_mode": "current",
+                "source_range_si": 0.1,
+                "timestamp_epoch_s": 1791128286.2743058
+              },
+              "sense_mode": "2wire",
+              "settle_time_s": 0.0,
+              "source_autorange": false,
+              "source_level_si": -0.08,
+              "source_range_si": 0.1
+            },
+            "requested": {
+              "applied_si": -0.08,
+              "channel": "B",
+              "level_si": -0.08,
+              "mode": "current",
+              "requested_si": -0.08,
+              "target": "keithley.B.current"
+            }
+          },
+          "measurement_A": {
+            "actual": {
+              "channel": "A",
+              "compliance_detected": false,
+              "compliance_stop_required": false,
+              "current_a": 0.0002,
+              "measurement_path_connected": true,
+              "output_enabled": true,
+              "power_w": 4.0000000000000003e-07,
+              "range_readback": null,
+              "source_level_si": 0.0002,
+              "source_mode": "current",
+              "voltage_v": 0.002
+            },
+            "requested": {
+              "channel": "A"
+            }
+          },
+          "measurement_B": {
+            "actual": {
+              "channel": "B",
+              "compliance_detected": true,
+              "compliance_stop_required": false,
+              "current_a": -0.002,
+              "measurement_path_connected": true,
+              "output_enabled": true,
+              "power_w": 4e-05,
+              "range_readback": null,
+              "source_level_si": -0.08,
+              "source_mode": "current",
+              "voltage_v": -0.02
+            },
+            "requested": {
+              "channel": "B"
+            }
+          }
+        },
+        "moke_box": {
+          "hall_readback": {
+            "actual": {
+              "raw_ad7734": 8433499,
+              "samples": 1,
+              "stddev_v": 0.0,
+              "timestamp_utc": "2026-10-04T15:38:07.159630+00:00",
+              "voltage_v": 0.053514248551636764
+            },
+            "requested": {
+              "sample_count": 1
+            }
+          },
+          "voltage_control": {
+            "actual": {
+              "actual_v": 0.09949034089175085,
+              "applied_v": 0.09979552598651081,
+              "calibration_id": null,
+              "calibration_snapshot": null,
+              "channel": 0,
+              "conditioning_verified": false,
+              "field_source": "uncalibrated",
+              "maximum_v": 0.1,
+              "minimum_v": 0.0,
+              "mutation_suppressed": false,
+              "profile_fingerprint": "46de2add0dab0aacb8a97c8471e95aacef2a72aea64175ad46573660d1d8e16c",
+              "requested_v": 0.1
+            },
+            "requested": {
+              "applied_si": 0.10010071108127079,
+              "channel": 0,
+              "ramp_timeout_s": 30.0,
+              "requested_si": 0.1,
+              "target": "moke_box.vout0.voltage",
+              "voltage_v": 0.1
+            }
+          }
+        }
+      },
+      "spectrum_attributes": {
+        "acquired_at_utc": "2026-10-04T15:38:07.165962+00:00",
+        "configuration_generation": "0",
+        "sweep_evidence": "unknown",
+        "trace_name": "TRAC1"
+      },
+      "raw_source_metadata": {
+        "acquired_at_s": 1791128287.165962,
+        "average_count": 1,
+        "average_index": 0,
+        "checkpoint_count_at_capture": 9,
+        "completed_at_s": 1791128287.165693,
+        "configuration_generation": 1,
+        "evidence": "qualified_single_sweep",
+        "execution_id": "7cd54f33-bc36-48f6-938a-d28ee6b562c0",
+        "ordinal": 9,
+        "recipe_node_id": "spectrum",
+        "role": "signal",
+        "setpoints_si": [
+          [
+            "keithley.A.current",
+            0.0002
+          ],
+          [
+            "keithley.B.current",
+            -0.08
+          ],
+          [
+            "moke_box.vout0.voltage",
+            0.1
+          ]
+        ],
+        "started_at_s": 1791128287.165571,
+        "sweep_id": "10"
+      }
+    },
+    {
+      "index": 17,
+      "setpoints_json": {
+        "keithley.A.current": 0.0014,
+        "keithley.B.current": 0.08,
+        "moke_box.vout0.voltage": 0.09949034089175085
+      },
+      "measurements_json": {
+        "keithley.A.compliance_detected": 0.0,
+        "keithley.A.compliance_stop_required": 0.0,
+        "keithley.A.current_a": 0.0014,
+        "keithley.A.measurement_path_connected": 1.0,
+        "keithley.A.output_enabled": 1.0,
+        "keithley.A.power_w": 1.96e-05,
+        "keithley.A.voltage_v": 0.014,
+        "keithley.B.compliance_detected": 1.0,
+        "keithley.B.compliance_stop_required": 0.0,
+        "keithley.B.current_a": 0.002,
+        "keithley.B.measurement_path_connected": 1.0,
+        "keithley.B.output_enabled": 1.0,
+        "keithley.B.power_w": 4e-05,
+        "keithley.B.voltage_v": 0.02,
+        "moke_box.hall1_raw_ad7734": 8433508.0,
+        "moke_box.hall1_stddev_v": 0.0,
+        "moke_box.hall1_voltage_v": 0.05352497738897531
+      },
+      "metadata_json": {
+        "applied_si": 0.0014,
+        "axis_context": {
+          "active_setpoints_si": {
+            "keithley.A.current": 0.0014,
+            "keithley.B.current": 0.08,
+            "moke_box.vout0.voltage": 0.1
+          },
+          "axis_id": "a-axis",
+          "loop_path": [
+            "moke-axis",
+            "b-axis",
+            "a-axis"
+          ],
+          "point_count": 3,
+          "point_index": 2,
+          "stage_index": 0,
+          "value_si": 0.0014
+        },
+        "axis_id": "a-axis",
+        "checkpoint_label": "spectrum",
+        "checkpoint_operation_id": "spectrum",
+        "execution_mode": "measurement",
+        "loop_path": [
+          "moke-axis",
+          "b-axis",
+          "a-axis"
+        ],
+        "monotonic_s": 2234392.2603372,
+        "output_guard_devices": [
+          "keithley",
+          "rigol",
+          "anritsu"
+        ],
+        "outputs_forced_off": false,
+        "plan_node": "spectrum",
+        "point_index": 2,
+        "raw_recipe_sweep_indices": [
+          17
+        ],
+        "readback_si": null,
+        "reference_index": null,
+        "requested_si": 0.0014,
+        "safety_context": {
+          "anritsu": {
+            "instrument_mode": "SPECT",
+            "points": 101,
+            "reference_level_dbm": 0.0,
+            "start_hz": 1000000.0,
+            "stop_hz": 2000000.0
+          },
+          "keithley.A": {
+            "compliance_si": 0.02,
+            "measure_current_autorange": true,
+            "measure_current_range_si": null,
+            "measure_voltage_autorange": true,
+            "measure_voltage_range_si": null,
+            "mode": "current",
+            "nplc": 1.0,
+            "output_enabled": true,
+            "range_readback": {
+              "kind": "configuration_readback",
+              "measure_current_range_a": 0.01,
+              "measure_voltage_range_v": 0.1,
+              "output_enabled": false,
+              "source_mode": "current",
+              "source_range_si": 0.01,
+              "timestamp_epoch_s": 1791128286.2690504
+            },
+            "sense_mode": "2wire",
+            "settle_time_s": 0.0,
+            "source_autorange": false,
+            "source_level_si": 0.0014,
+            "source_range_si": 0.01
+          },
+          "keithley.B": {
+            "compliance_si": 0.02,
+            "measure_current_autorange": true,
+            "measure_current_range_si": null,
+            "measure_voltage_autorange": true,
+            "measure_voltage_range_si": null,
+            "mode": "current",
+            "nplc": 1.0,
+            "output_enabled": true,
+            "range_readback": {
+              "kind": "configuration_readback",
+              "measure_current_range_a": 0.1,
+              "measure_voltage_range_v": 0.1,
+              "output_enabled": false,
+              "source_mode": "current",
+              "source_range_si": 0.1,
+              "timestamp_epoch_s": 1791128286.2743058
+            },
+            "sense_mode": "2wire",
+            "settle_time_s": 0.0,
+            "source_autorange": false,
+            "source_level_si": 0.08,
+            "source_range_si": 0.1
+          },
+          "moke_box": {
+            "actual_v": 0.09949034089175085,
+            "applied_v": 0.09979552598651081,
+            "calibration_id": null,
+            "calibration_snapshot": null,
+            "channel": 0,
+            "conditioning_verified": false,
+            "field_source": "uncalibrated",
+            "maximum_v": 0.1,
+            "minimum_v": 0.0,
+            "mutation_suppressed": false,
+            "profile_fingerprint": "46de2add0dab0aacb8a97c8471e95aacef2a72aea64175ad46573660d1d8e16c",
+            "requested_v": 0.1
+          }
+        },
+        "semantic_operation_id": "spectrum",
+        "spectrum_average_count": 1,
+        "spectrum_processing": "none",
+        "stage_index": 0,
+        "verification": "readback"
+      },
+      "device_states_json": {
+        "anritsu": {
+          "spectrum": {
+            "actual": {
+              "instrument_mode": "SPECT",
+              "points": 101,
+              "reference_level_dbm": 0.0,
+              "start_hz": 1000000.0,
+              "stop_hz": 2000000.0
+            },
+            "requested": {
+              "points": 101,
+              "rbw_auto": true,
+              "rbw_hz": null,
+              "reference_level_dbm": 0.0,
+              "start_hz": 1000000.0,
+              "stop_hz": 2000000.0,
+              "trace": "TRAC1",
+              "vbw_auto": true,
+              "vbw_hz": null,
+              "vbw_mode": "VID"
+            }
+          }
+        },
+        "keithley": {
+          "channel_A": {
+            "actual": {
+              "compliance_si": 0.02,
+              "measure_current_autorange": true,
+              "measure_current_range_si": null,
+              "measure_voltage_autorange": true,
+              "measure_voltage_range_si": null,
+              "mode": "current",
+              "nplc": 1.0,
+              "output_enabled": true,
+              "range_readback": {
+                "kind": "configuration_readback",
+                "measure_current_range_a": 0.01,
+                "measure_voltage_range_v": 0.1,
+                "output_enabled": false,
+                "source_mode": "current",
+                "source_range_si": 0.01,
+                "timestamp_epoch_s": 1791128286.2690504
+              },
+              "sense_mode": "2wire",
+              "settle_time_s": 0.0,
+              "source_autorange": false,
+              "source_level_si": 0.0014,
+              "source_range_si": 0.01
+            },
+            "requested": {
+              "applied_si": 0.0014,
+              "channel": "A",
+              "level_si": 0.0014,
+              "mode": "current",
+              "requested_si": 0.0014,
+              "target": "keithley.A.current"
+            }
+          },
+          "channel_B": {
+            "actual": {
+              "compliance_si": 0.02,
+              "measure_current_autorange": true,
+              "measure_current_range_si": null,
+              "measure_voltage_autorange": true,
+              "measure_voltage_range_si": null,
+              "mode": "current",
+              "nplc": 1.0,
+              "output_enabled": true,
+              "range_readback": {
+                "kind": "configuration_readback",
+                "measure_current_range_a": 0.1,
+                "measure_voltage_range_v": 0.1,
+                "output_enabled": false,
+                "source_mode": "current",
+                "source_range_si": 0.1,
+                "timestamp_epoch_s": 1791128286.2743058
+              },
+              "sense_mode": "2wire",
+              "settle_time_s": 0.0,
+              "source_autorange": false,
+              "source_level_si": 0.08,
+              "source_range_si": 0.1
+            },
+            "requested": {
+              "applied_si": 0.08,
+              "channel": "B",
+              "level_si": 0.08,
+              "mode": "current",
+              "requested_si": 0.08,
+              "target": "keithley.B.current"
+            }
+          },
+          "measurement_A": {
+            "actual": {
+              "channel": "A",
+              "compliance_detected": false,
+              "compliance_stop_required": false,
+              "current_a": 0.0014,
+              "measurement_path_connected": true,
+              "output_enabled": true,
+              "power_w": 1.96e-05,
+              "range_readback": null,
+              "source_level_si": 0.0014,
+              "source_mode": "current",
+              "voltage_v": 0.014
+            },
+            "requested": {
+              "channel": "A"
+            }
+          },
+          "measurement_B": {
+            "actual": {
+              "channel": "B",
+              "compliance_detected": true,
+              "compliance_stop_required": false,
+              "current_a": 0.002,
+              "measurement_path_connected": true,
+              "output_enabled": true,
+              "power_w": 4e-05,
+              "range_readback": null,
+              "source_level_si": 0.08,
+              "source_mode": "current",
+              "voltage_v": 0.02
+            },
+            "requested": {
+              "channel": "B"
+            }
+          }
+        },
+        "moke_box": {
+          "hall_readback": {
+            "actual": {
+              "raw_ad7734": 8433508,
+              "samples": 1,
+              "stddev_v": 0.0,
+              "timestamp_utc": "2026-10-04T15:38:07.726254+00:00",
+              "voltage_v": 0.05352497738897531
+            },
+            "requested": {
+              "sample_count": 1
+            }
+          },
+          "voltage_control": {
+            "actual": {
+              "actual_v": 0.09949034089175085,
+              "applied_v": 0.09979552598651081,
+              "calibration_id": null,
+              "calibration_snapshot": null,
+              "channel": 0,
+              "conditioning_verified": false,
+              "field_source": "uncalibrated",
+              "maximum_v": 0.1,
+              "minimum_v": 0.0,
+              "mutation_suppressed": false,
+              "profile_fingerprint": "46de2add0dab0aacb8a97c8471e95aacef2a72aea64175ad46573660d1d8e16c",
+              "requested_v": 0.1
+            },
+            "requested": {
+              "applied_si": 0.10010071108127079,
+              "channel": 0,
+              "ramp_timeout_s": 30.0,
+              "requested_si": 0.1,
+              "target": "moke_box.vout0.voltage",
+              "voltage_v": 0.1
+            }
+          }
+        }
+      },
+      "spectrum_attributes": {
+        "acquired_at_utc": "2026-10-04T15:38:07.734178+00:00",
+        "configuration_generation": "0",
+        "sweep_evidence": "unknown",
+        "trace_name": "TRAC1"
+      },
+      "raw_source_metadata": {
+        "acquired_at_s": 1791128287.734178,
+        "average_count": 1,
+        "average_index": 0,
+        "checkpoint_count_at_capture": 17,
+        "completed_at_s": 1791128287.733901,
+        "configuration_generation": 1,
+        "evidence": "qualified_single_sweep",
+        "execution_id": "7cd54f33-bc36-48f6-938a-d28ee6b562c0",
+        "ordinal": 17,
+        "recipe_node_id": "spectrum",
+        "role": "signal",
+        "setpoints_si": [
+          [
+            "keithley.A.current",
+            0.0014
+          ],
+          [
+            "keithley.B.current",
+            0.08
+          ],
+          [
+            "moke_box.vout0.voltage",
+            0.1
+          ]
+        ],
+        "started_at_s": 1791128287.733293,
+        "sweep_id": "18"
+      }
+    }
+  ],
+  "events": 523,
+  "safe_resume_boundaries": 0,
+  "first_spectrum_operation_order": [
+    "configure_anritsu",
+    "configure_keithley",
+    "configure_keithley",
+    "set_keithley_output",
+    "set_keithley_output",
+    "configure_moke_box",
+    "arm_moke_voltage",
+    "update_moke_voltage",
+    "update_keithley_level",
+    "update_keithley_level",
+    "wait",
+    "measure_keithley",
+    "measure_keithley",
+    "measure_moke_hall",
+    "acquire_spectrum"
+  ],
+  "public_axes": [
+    {
+      "definition": {
+        "device name": "MOKE Box",
+        "control name": "VOUT 0 programming voltage (V)",
+        "dimensions": "0",
+        "data type": "11",
+        "tree indent level": "0",
+        "function": "scalar control",
+        "start": "0.000000000000E+00",
+        "stop": "1.000000000000E-01",
+        "steps": "2",
+        "equation": "x"
+      },
+      "values": [
+        0.0,
+        0.1
+      ]
+    },
+    {
+      "definition": {
+        "device name": "Keithley 2602A",
+        "control name": "Keithley B current (A)",
+        "dimensions": "0",
+        "data type": "11",
+        "tree indent level": "1",
+        "function": "scalar control",
+        "start": "-8.000000000000E-02",
+        "stop": "8.000000000000E-02",
+        "steps": "3",
+        "equation": "x"
+      },
+      "values": [
+        -0.08,
+        0.0,
+        0.08
+      ]
+    },
+    {
+      "definition": {
+        "device name": "Keithley 2602A",
+        "control name": "Keithley A current (A)",
+        "dimensions": "0",
+        "data type": "11",
+        "tree indent level": "2",
+        "function": "scalar control",
+        "start": "2.000000000000E-04",
+        "stop": "1.400000000000E-03",
+        "steps": "3",
+        "equation": "x"
+      },
+      "values": [
+        0.0002,
+        0.0007999999999999999,
+        0.0014
+      ]
+    }
+  ]
+}

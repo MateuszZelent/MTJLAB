@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import datetime, timezone
 import hashlib
 import math
@@ -17,6 +17,7 @@ from app.devices.anritsu_ms2830a.hardware import (
 from app.devices.visa import PyVisaSessionFactory
 from app.domain.errors import ConnectionError, DeviceError, SafetyViolation
 from app.domain.models import DeviceCapabilities, DeviceIdentity, DeviceState
+from app.domain.spectrum_correction import SweepEvidence
 from app.domain.quantities import DIMENSION_TIME, parse_quantity
 from app.safety.anritsu import (
     ANRITSU_SWEEP_POINT_COUNTS,
@@ -127,6 +128,11 @@ class SpectrumTrace:
     powers_dbm: tuple[float, ...]
     acquired_at_utc: datetime
     trace_name: str
+    sweep_evidence: SweepEvidence = SweepEvidence.UNKNOWN
+    sweep_id: str | None = None
+    acquisition_started_at_utc: datetime | None = None
+    acquisition_completed_at_utc: datetime | None = None
+    configuration_generation: int = 0
 
 
 @dataclass(frozen=True, slots=True)
@@ -232,6 +238,8 @@ class AnritsuAdapter(DeviceAdapter):
         self._sg_output_enabled = False
         self._options_query_failed = False
         self._cached_grid: tuple[float, float, int, tuple[float, ...]] | None = None
+        self._configuration_generation = 0
+        self._acquisition_sequence = 0
 
     @classmethod
     def _read_hardware_options(cls, session: InstrumentSession) -> tuple[bool, tuple[str, ...]]:
@@ -890,6 +898,8 @@ class AnritsuAdapter(DeviceAdapter):
         )
         self._assert_advanced_firmware_qualified()
         session = self._require_session()
+        self._configuration_generation += 1
+        self._cached_grid = None
         has_preamp = bool(ANRITSU_PREAMPLIFIER_OPTIONS.intersection(options))
         detector = normalize_anritsu_detector(config.detector)
         vbw_mode = config.vbw_mode.strip().lower()
@@ -997,6 +1007,8 @@ class AnritsuAdapter(DeviceAdapter):
             points=config.points,
         )
         session = self._require_session()
+        self._configuration_generation += 1
+        self._cached_grid = None
         self._enter_spectrum_mode_with_rf_off()
         session.write(f"FREQ:STAR {config.start_hz:.12g}HZ")
         session.write(f"FREQ:STOP {config.stop_hz:.12g}HZ")
@@ -1165,9 +1177,20 @@ class AnritsuAdapter(DeviceAdapter):
         """Synchronise, then fetch one trace that belongs to this checkpoint."""
 
         trace = validate_anritsu_trace_name(trace)
+        started = datetime.now(timezone.utc)
         self.start_single_sweep()
         self.wait_complete()
-        return self.fetch_trace(trace)
+        completed = datetime.now(timezone.utc)
+        result = self.fetch_trace(trace)
+        self._acquisition_sequence += 1
+        return replace(
+            result,
+            sweep_evidence=SweepEvidence.QUALIFIED_SINGLE_SWEEP,
+            sweep_id=str(self._acquisition_sequence),
+            acquisition_started_at_utc=started,
+            acquisition_completed_at_utc=completed,
+            configuration_generation=self._configuration_generation,
+        )
 
     def fetch_trace(self, trace: str = "TRAC1") -> SpectrumTrace:
         """Read one trace for a validated recipe/single-sweep workflow."""
@@ -1226,6 +1249,10 @@ class AnritsuAdapter(DeviceAdapter):
             )
         if points < 2:
             raise DeviceError("Anritsu returned fewer than two trace points.")
+        if not all(math.isfinite(value) for value in (start_hz, stop_hz, *values)):
+            raise DeviceError("Anritsu returned NaN or infinity in the binary trace.")
+        if start_hz < 0 or stop_hz <= start_hz:
+            raise DeviceError("Anritsu returned an invalid binary frequency grid.")
         invalid_points = sum(value <= -998.0 for value in values)
         if invalid_points:
             raise DeviceError(
@@ -1249,6 +1276,7 @@ class AnritsuAdapter(DeviceAdapter):
             powers_dbm=values,
             acquired_at_utc=datetime.now(timezone.utc),
             trace_name=trace,
+            configuration_generation=self._configuration_generation,
         )
 
     def acquire_fresh_trace(

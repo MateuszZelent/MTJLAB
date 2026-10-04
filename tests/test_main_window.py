@@ -58,6 +58,8 @@ from app.ui.design_system import tokens_for
 from qfluentwidgets import CardWidget, ComboBox, PlainTextEdit
 from app.ui.widgets import LimitEditDialog
 from tests.helpers import SETTINGS_TEMPLATE
+from tests.shell_test_isolation import isolated_shell_persistence as isolated_shell_persistence
+from tests.shell_test_isolation import shell_qt_application as shell_qt_application
 
 
 TEST_ENGINEER = "LAB\\test-engineer"
@@ -3951,8 +3953,7 @@ class MainWindowTests(unittest.TestCase):
             anritsu = window.anritsu_page
             anritsu._controller.call = Mock()
             trace = synthetic_anritsu_peaks()
-            mode = anritsu.cleanup_mode.findData("denoise")
-            anritsu.cleanup_mode.setCurrentIndex(mode)
+            anritsu.cleanup_filters["denoise"].setChecked(True)
 
             anritsu._show_trace(trace)
 
@@ -3965,6 +3966,8 @@ class MainWindowTests(unittest.TestCase):
                 anritsu._cleanup_result.values_dbm,
                 trace.powers_dbm,
             )
+            self.assertFalse(anritsu.spectrum_plot._curves["Raw"].isVisible())
+            anritsu.overlay_analysis_source.setChecked(True)
             self.assertEqual(
                 anritsu.spectrum_plot._traces["Raw"][1].tolist(),
                 list(trace.powers_dbm),
@@ -4346,6 +4349,7 @@ class MainWindowTests(unittest.TestCase):
                 self.assertEqual(anritsu.analysis_source.currentData(), "processed")
                 self.assertTrue(submit.call_args)
                 self.assertEqual(submit.call_args.args[0].source_key, "processed")
+                anritsu.show_raw.setChecked(True)
                 anritsu.analysis_source.setCurrentIndex(
                     anritsu.analysis_source.findData("raw")
                 )

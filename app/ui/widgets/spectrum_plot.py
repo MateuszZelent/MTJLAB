@@ -15,10 +15,11 @@ from PySide6.QtWidgets import (
     QVBoxLayout,
     QWidget,
 )
-from qfluentwidgets import BodyLabel, TransparentPushButton, isDarkTheme
+from qfluentwidgets import BodyLabel, FlowLayout, TransparentPushButton, isDarkTheme
 from app.ui.dialogs import StationFileDialog as QFileDialog
 
 from app.ui.design_system import plot_theme, tokens_for
+from app.ui.widgets.plot_ownership import create_plot_widget, own_signal_proxy
 
 
 class SpectrumPlotWidget(QWidget):
@@ -33,12 +34,16 @@ class SpectrumPlotWidget(QWidget):
         *,
         legend: bool = True,
         compact_toolbar: bool = False,
+        responsive_toolbar: bool = False,
         preferred_height: int | None = None,
+        csv_value_column: str = "value",
+        plot_widget_factory=None,
     ) -> None:
         super().__init__(parent)
         self.setObjectName("spectrumPlot")
         self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
         self._compact_toolbar = compact_toolbar
+        self._csv_value_column = csv_value_column
         self._preferred_height = (
             preferred_height
             if preferred_height is not None
@@ -53,6 +58,7 @@ class SpectrumPlotWidget(QWidget):
         self._marker_x: float | None = None
         self._x_label = "Frequency"
         self._x_unit = "Hz"
+        self._y_unit = "dBm"
         self._theme_name = "dark" if isDarkTheme() else "light"
         self._user_curve_visibility: dict[str, bool] = {}
         self.toolbar_buttons: list[TransparentPushButton] = []
@@ -60,8 +66,13 @@ class SpectrumPlotWidget(QWidget):
         root = QVBoxLayout(self)
         root.setContentsMargins(0, 0, 0, 0)
         root.setSpacing(4)
-        toolbar = QHBoxLayout()
-        toolbar.setSpacing(4)
+        toolbar = FlowLayout() if responsive_toolbar else QHBoxLayout()
+        if responsive_toolbar:
+            toolbar.setContentsMargins(0, 0, 0, 0)
+            toolbar.setHorizontalSpacing(4)
+            toolbar.setVerticalSpacing(4)
+        else:
+            toolbar.setSpacing(4)
         actions = (
             ("Reset", "Reset zoom and show all finite data", self.auto_range),
             ("Peak", "Move the primary marker to the highest visible point", self.peak_search),
@@ -81,13 +92,14 @@ class SpectrumPlotWidget(QWidget):
             button.clicked.connect(callback)
             self.toolbar_buttons.append(button)
             toolbar.addWidget(button)
-        toolbar.addStretch(1)
+        if not responsive_toolbar:
+            toolbar.addStretch(1)
         self.readout = BodyLabel("X: —   Y: —")
         self.readout.setObjectName("plotReadout")
         toolbar.addWidget(self.readout)
         root.addLayout(toolbar)
 
-        self.plot = pg.PlotWidget()
+        self.plot = create_plot_widget(factory=plot_widget_factory)
         self.plot.setBackground(None)
         self.plot.showGrid(x=True, y=True, alpha=0.18)
         self.plot.setLabel("bottom", "Frequency", units="Hz")
@@ -138,6 +150,7 @@ class SpectrumPlotWidget(QWidget):
         self._mouse_proxy = pg.SignalProxy(
             self.plot.scene().sigMouseMoved, rateLimit=30, slot=self._mouse_moved
         )
+        own_signal_proxy(self._mouse_proxy, self)
         self.marker.sigPositionChanged.connect(self._marker_changed)
         self.delta_marker.sigPositionChanged.connect(self._marker_changed)
         self.apply_theme(self._theme_name)
@@ -152,6 +165,7 @@ class SpectrumPlotWidget(QWidget):
     ) -> None:
         self._x_label = x
         self._x_unit = x_unit
+        self._y_unit = y_unit
         self._last_readout_position = None
         self.plot.setLabel("bottom", x, units=x_unit)
         self.plot.setLabel("left", y, units=y_unit)
@@ -194,7 +208,7 @@ class SpectrumPlotWidget(QWidget):
         for name in self._token_owned_primary_curves:
             curve = self._curves.get(name)
             if curve is not None:
-                curve.setPen(pg.mkPen(palette.measurement, width=1.6))
+                curve.setPen(pg.mkPen(palette.measurement, width=self._trace_line_width(name)))
         for name, color in (
             ("Max hold", tokens_for(theme).danger),
             ("Min hold", tokens_for(theme).success),
@@ -226,14 +240,15 @@ class SpectrumPlotWidget(QWidget):
         finite = np.isfinite(x_values) & np.isfinite(y_values)
         x_values, y_values = x_values[finite], y_values[finite]
         self._traces[name] = (x_values, y_values)
+        line_width = self._trace_line_width(name)
         curve = self._curves.get(name)
         if curve is None:
-            curve = self.plot.plot(name=name, pen=pg.mkPen(color, width=1.6))
+            curve = self.plot.plot(name=name, pen=pg.mkPen(color, width=line_width))
             curve.setDownsampling(auto=True, method="peak")
             curve.setClipToView(True)
             self._curves[name] = curve
-        elif token_owned_primary:
-            curve.setPen(pg.mkPen(color, width=1.6))
+        elif token_owned_primary or caller_supplied_color or curve.opts["pen"].widthF() != line_width:
+            curve.setPen(pg.mkPen(color, width=line_width))
         if token_owned_primary:
             self._token_owned_primary_curves.add(name)
         elif caller_supplied_color:
@@ -250,6 +265,12 @@ class SpectrumPlotWidget(QWidget):
         if primary or self._hold_source is None:
             self._hold_source = name
             self._update_holds(x_values, y_values)
+
+    def _trace_line_width(self, name: str) -> float:
+        # A one-pixel pen enables Qt's fast path for dense scientific traces.
+        # Full-resolution arrays, extrema, markers and exports remain intact.
+        data = self._traces.get(name)
+        return 1.0 if data is not None and data[0].size > 2000 else 1.6
 
     def _sync_legend(self, name: str, curve: pg.PlotDataItem, visible: bool) -> None:
         plot_item = self.plot.getPlotItem()
@@ -345,6 +366,8 @@ class SpectrumPlotWidget(QWidget):
         self,
         frequencies_hz: object,
         amplitudes: object,
+        *,
+        interactive: bool = True,
     ) -> None:
         frequencies = np.asarray(frequencies_hz, dtype=float)
         values = np.asarray(amplitudes, dtype=float)
@@ -352,12 +375,14 @@ class SpectrumPlotWidget(QWidget):
             raise ValueError("Peak marker frequencies and amplitudes must be equally-sized vectors.")
         finite = np.isfinite(frequencies) & np.isfinite(values)
         spots = [
-            {"pos": (float(frequency), float(value)), "data": int(index)}
+            {"pos": (float(frequency), float(value)), "data": int(index) if interactive else None}
             for index, (frequency, value) in enumerate(
                 zip(frequencies[finite], values[finite], strict=True)
             )
         ]
         self.peak_markers.setData(spots)
+        if not interactive:
+            self._selected_peak_index = None
         if self._selected_peak_index is not None and self._selected_peak_index >= len(spots):
             self._selected_peak_index = None
         self._style_peak_markers()
@@ -388,6 +413,8 @@ class SpectrumPlotWidget(QWidget):
     def _peak_marker_clicked(self, _item: object, points: list[object], _event: object) -> None:
         if not points:
             return
+        if points[0].data() is None:
+            return  # Replacement locations are informational, not peak-table rows.
         index = int(points[0].data())
         self.select_peak_marker(index)
         self.peak_selected.emit(index)
@@ -419,7 +446,10 @@ class SpectrumPlotWidget(QWidget):
             self.status_changed.emit("Reset unavailable: no visible finite trace data.")
             return
         x_range = self._stable_data_range(x_values)
-        y_range = self._stable_data_range(y_values)
+        y_range = self._stable_data_range(
+            y_values, zero_margin=1e-15 if self._y_unit == "W" else 1.0,
+            constant_relative=self._y_unit == "W",
+        )
         if x_range is None or y_range is None:
             self.status_changed.emit("Reset unavailable: no visible finite trace data.")
             return
@@ -428,7 +458,8 @@ class SpectrumPlotWidget(QWidget):
         view_box.setRange(xRange=x_range, yRange=y_range, padding=0)
 
     @staticmethod
-    def _stable_data_range(values: np.ndarray) -> tuple[float, float] | None:
+    def _stable_data_range(values: np.ndarray, *, zero_margin: float = 1.0,
+                           constant_relative: bool = False) -> tuple[float, float] | None:
         """Return a fixed five-percent margin around finite values."""
 
         finite = values[np.isfinite(values)]
@@ -436,8 +467,10 @@ class SpectrumPlotWidget(QWidget):
             return None
         lower = float(np.min(finite))
         upper = float(np.max(finite))
-        if np.isclose(lower, upper, rtol=0.0, atol=1e-15):
-            margin = max(abs(lower) * 0.05, 1.0)
+        if lower == upper:
+            margin = abs(lower) * 0.05 if lower != 0 else zero_margin
+            if not constant_relative:
+                margin = max(margin, zero_margin)
         else:
             margin = (upper - lower) * 0.05
         return lower - margin, upper + margin
@@ -508,7 +541,7 @@ class SpectrumPlotWidget(QWidget):
             x_header = self._x_label.lower().replace(" ", "_")
             if self._x_unit:
                 x_header += f"_{self._x_unit}"
-            writer.writerow(["trace", x_header, "value"])
+            writer.writerow(["trace", x_header, self._csv_value_column])
             for name, x_values, y_values in visible:
                 writer.writerows(zip([name] * x_values.size, x_values, y_values, strict=True))
 

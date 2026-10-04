@@ -134,6 +134,9 @@ class ThatecRunReader:
             raise ExecutionError("THATEC checkpoint cannot be negative.")
         scale: tuple[float, ...] = ()
         with ThatecRunReader._open(Path(path)) as file:
+            limit = ThatecRunReader._committed_row_limit(file, row_id)
+            if limit is not None and checkpoint >= limit:
+                raise ExecutionError(f"THATEC checkpoint {checkpoint} is not committed.")
             try:
                 data = file[f"measurement/{row_id}/data"]
             except KeyError as exc:
@@ -165,7 +168,8 @@ class ThatecRunReader:
             data = group["data"]
             if data.ndim != 1:
                 raise ExecutionError(f"THATEC row {row_id} is not scalar.")
-            return data[:], group.get("timestamp", ())[:]
+            limit = ThatecRunReader._committed_row_limit(file, row_id)
+            return data[:limit], group.get("timestamp", ())[:limit]
 
     @staticmethod
     def spectrum_slice(
@@ -276,6 +280,11 @@ class ThatecRunReader:
     def _rows_from_open_file(file: Any) -> dict[str, ThatecRow]:
         scan = ThatecRunReader._require_group(file, "scan_definition")
         measurement = ThatecRunReader._require_group(file, "measurement")
+        committed_count = None
+        if "run" in file and "points" in file:
+            from .hdf5_reader import Hdf5RunReader
+
+            committed_count = len(Hdf5RunReader._committed_point_names(file))
         rows: dict[str, ThatecRow] = {}
         for name in sorted(scan):
             if not name.startswith("row_"):
@@ -291,6 +300,10 @@ class ThatecRunReader:
                 shape = tuple(int(size) for size in group["data"].shape)
                 timestamp_count = int(len(group.get("timestamp", ())))
                 metadata = ThatecRunReader._pairs(group["metadata"]) if "metadata" in group else ()
+                limit = ThatecRunReader._committed_row_limit(file, name, committed_count=committed_count)
+                if limit is not None and shape:
+                    shape = (min(shape[0], limit), *shape[1:])
+                    timestamp_count = min(timestamp_count, limit)
             rows[name] = ThatecRow(
                 id=name,
                 device_name=values.get("device name", ""),
@@ -303,6 +316,29 @@ class ThatecRunReader:
                 metadata=metadata,
             )
         return rows
+
+    @staticmethod
+    def _committed_row_limit(file: Any, row_id: str, *, committed_count: int | None = None) -> int | None:
+        """Apply our checkpoint contract only to our marked transactional rows.
+
+        External thaTEC axes and measurements retain their public semantics.
+        Frequency axes in our own archives also remain independent of count.
+        """
+        if "run" not in file or "points" not in file:
+            return None
+        definition = file.get(f"scan_definition/{row_id}")
+        if definition is None:
+            return None
+        role = dict(ThatecRunReader._pairs(definition)).get("lab control role")
+        if role not in {"setpoint", "measurement", "spectrum", "spectrum_processed"} and not (
+            row_id == "row_00" and bool(file.attrs.get("lab_control_dynamic_checkpoint_axis", False))
+        ):
+            return None
+        if committed_count is not None:
+            return committed_count
+        from .hdf5_reader import Hdf5RunReader
+
+        return len(Hdf5RunReader._committed_point_names(file))
 
     @staticmethod
     def _devices_from_open_file(file: Any) -> tuple[ThatecDevice, ...]:

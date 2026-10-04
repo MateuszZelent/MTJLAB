@@ -51,6 +51,7 @@ def test_anritsu_forms_render_without_overlap(size, theme):
     try:
         page.resize(*size)
         page.show()
+        page.toggle_acquisition_controls.click()
         application.processEvents()
         panel = page.configuration_panel
         assert panel.isVisible()

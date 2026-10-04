@@ -359,7 +359,7 @@ class RunMonitorPage(QWidget):
         # The semantic Fluent model/view is the sole execution procedure tree.
         # Small item-based tables below remain flat state manifests; they do
         # not reconstruct recipe structure or own execution progress.
-        self.tree_model = MeasurementTreeModel()
+        self.tree_model = MeasurementTreeModel(parent=self)
         self.tree_model.unknown_semantic_state.connect(
             self._report_unknown_semantic_operation
         )

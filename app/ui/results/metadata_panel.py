@@ -85,7 +85,7 @@ class _FluentMetadataSections(QWidget):
         if self._navigation_sync_pending:
             return
         self._navigation_sync_pending = True
-        QTimer.singleShot(0, self._sync_navigation_mode)
+        QTimer.singleShot(0, self, self._sync_navigation_mode)
 
     def _sync_navigation_mode(self) -> None:
         self._navigation_sync_pending = False

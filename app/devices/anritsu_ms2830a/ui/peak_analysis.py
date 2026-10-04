@@ -5,6 +5,7 @@ from __future__ import annotations
 from collections import deque
 
 import pyqtgraph as pg
+from app.ui.widgets.plot_ownership import create_plot_widget
 from PySide6.QtCore import QEvent, Qt, Signal
 from PySide6.QtGui import QCloseEvent
 from PySide6.QtWidgets import (
@@ -205,7 +206,7 @@ class PeakTrackingWindow(StationDialog):
         summary.addWidget(self.amplitude)
         summary.addStretch(1)
         layout.addLayout(summary)
-        self.plot = pg.PlotWidget(surface)
+        self.plot = create_plot_widget(surface)
         self.plot.setObjectName("anritsuPeakTrackingPlot")
         self.plot.setLabel("bottom", "Elapsed time", units="s")
         self.plot.setLabel("left", "Frequency", units="Hz")

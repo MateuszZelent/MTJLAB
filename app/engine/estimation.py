@@ -7,6 +7,7 @@ import math
 
 from app.domain.errors import ConfigurationError
 from app.domain.quantities import DIMENSION_FREQUENCY, DIMENSION_TIME, parse_quantity
+from app.domain.recipe_spectrum import MAX_RECIPE_SWEEP_JSON_BYTES
 from app.engine.compiler import ExecutionPlan
 from app.settings.models import StationSettings
 
@@ -61,6 +62,7 @@ class PlanEstimator:
         nominal = 0.0
         latest_spectrum_points = int(self._settings.anritsu.safety.defaults.get("sweep_points", 1001))
         spectrum_values = 0
+        spectrum_extra_bytes = 0
         retryable_operations = 0
         energized = False
         warnings: list[str] = []
@@ -89,14 +91,28 @@ class PlanEstimator:
                 retryable_operations += 1
             elif action.kind in {"acquire_reference", "acquire_spectrum"}:
                 average_count = int(action.payload.get("average_count", 1))
+                # Each individual raw source is durable in addition to the
+                # public averaged spectrum/reference representation.
+                spectrum_values += average_count * latest_spectrum_points
+                # Raw power is counted above. Each source also retains its
+                # own grid, bounded provenance JSON and HDF5 object overhead.
+                spectrum_extra_bytes += average_count * (
+                    latest_spectrum_points * 8 + MAX_RECIPE_SWEEP_JSON_BYTES + 8192
+                )
                 nominal += average_count * (
                     self._spectrum_base_s
                     + latest_spectrum_points / self._transfer_rate
                 )
                 if action.kind == "acquire_spectrum":
                     spectrum_values += latest_spectrum_points
+                    # Private mean grid plus the public copy of its power.
+                    spectrum_extra_bytes += 2 * latest_spectrum_points * 8
                     if action.payload.get("store_processed", False):
                         spectrum_values += latest_spectrum_points
+                        spectrum_extra_bytes += latest_spectrum_points * 8
+                else:
+                    # A reference mean retains its own Hz and dBm arrays.
+                    spectrum_extra_bytes += 2 * latest_spectrum_points * 8 + average_count * 8
                 retryable_operations += average_count
                 if average_count > 1:
                     warnings.append(
@@ -125,6 +141,7 @@ class PlanEstimator:
             + len(plan.actions) * 512
             + plan.total_points * 2048
             + spectrum_values * 8
+            + spectrum_extra_bytes
         )
         if spectrum_values:
             hdf5_bytes += latest_spectrum_points * 8

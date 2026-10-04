@@ -35,6 +35,8 @@ from tests.test_main_window import (
     wait_for_ui,
     write_engineer_settings,
 )
+from tests.shell_test_isolation import isolated_shell_persistence as isolated_shell_persistence
+from tests.shell_test_isolation import shell_qt_application as shell_qt_application
 
 
 class FluentLakeShorePageTests(unittest.TestCase):
@@ -341,6 +343,7 @@ class FluentAnritsuAndMokePageTests(unittest.TestCase):
 
     def test_anritsu_manual_archive_panel_and_modal_are_rendered_and_operable(self) -> None:
         self.window._navigate_to("anritsu")
+        self.window.anritsu_page.toggle_acquisition_controls.click()
         self.application.processEvents()
 
         page = self.window.anritsu_page
@@ -573,7 +576,9 @@ class FluentAnritsuAndMokePageTests(unittest.TestCase):
         host = self.window.navigation_routes["anritsu"]
 
         self.assertIsInstance(page.signal_analysis_card, CardWidget)
-        self.assertIsInstance(page.cleanup_mode, ComboBox)
+        self.assertTrue(page.cleanup_filters)
+        for checkbox in page.cleanup_filters.values():
+            self.assertIsInstance(checkbox, CheckBox)
         self.assertIsInstance(page.open_peak_table, PrimaryPushButton)
         self.assertTrue(page.signal_analysis_card.isVisibleTo(self.window))
         self.assertEqual(host.scroll_area.horizontalScrollBar().maximum(), 0)

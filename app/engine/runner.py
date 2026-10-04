@@ -20,6 +20,8 @@ from app.devices.lakeshore_475.adapter import LakeShore475Adapter
 from app.devices.rigol_dg1000z.adapter import RigolAdapter
 from app.domain.errors import ConfigurationError, DeviceError, ExecutionError
 from app.domain.models import ApplicationState, DeviceState, MeasurementPoint
+from app.domain.recipe_spectrum import RecipeSpectrumSweep
+from app.domain.spectrum_correction import SpectrumFrameRole
 from app.engine.compiler import ExecutionPlan, PlanAction, required_devices_for_actions
 from app.engine.policy import ExecutionPolicy
 from app.spectrum import (
@@ -72,6 +74,7 @@ class _AcquiredSpectrum:
     processed_unit: str | None = None
     processing_operation: str = "none"
     reference_index: int | None = None
+    source_sweep_indices: tuple[int, ...] = ()
 
 
 class RecipeRunner:
@@ -358,6 +361,9 @@ class RecipeRunner:
                                 if acquisition is not None
                                 else 1
                             ),
+                            "raw_recipe_sweep_indices": (
+                                acquisition.source_sweep_indices if acquisition is not None else ()
+                            ),
                             "reference_index": (
                                 acquisition.reference_index
                                 if acquisition is not None
@@ -421,8 +427,10 @@ class RecipeRunner:
             if not self._safe_shutdown():
                 raise ExecutionError("Safe shutdown was not confirmed for every instrument.")
             self._state = ApplicationState.UNKNOWN if self._moke_owns_output else ApplicationState.SAFE
-            self._emit("run_completed", {"completed_actions": completed, "stored_points": stored})
+            completion = self._emit("run_completed", {"completed_actions": completed, "stored_points": stored,
+                                                       "storage_validation_pending": True}, notify=False)
             self._writer.close("completed")
+            self._on_event("run_completed", {**completion, "storage_validation_pending": False})
             return RunResult(self._state, completed, stored)
         except Exception as exc:
             if self._stop_requested.is_set() and not self._watchdog_timed_out.is_set():
@@ -464,8 +472,8 @@ class RecipeRunner:
             )
             self._safe_shutdown()
             self._state = ApplicationState.FAULT
-            self._writer.close("faulted")
-            return RunResult(self._state, completed, stored, str(exc))
+            error = self._close_after_error("faulted", str(exc))
+            return RunResult(self._state, completed, stored, error)
         finally:
             self._stop_watchdog()
 
@@ -921,12 +929,33 @@ class RecipeRunner:
         if cleanup_ok and shutdown_ok:
             self._state = ApplicationState.UNKNOWN if self._moke_owns_output else ApplicationState.SAFE
             self._emit_after_fault("run_aborted", {"completed_actions": completed, "stored_points": stored})
-            self._writer.close("aborted")
-            return RunResult(self._state, completed, stored, reason)
+            error = self._close_after_error("aborted", reason)
+            return RunResult(self._state, completed, stored, error)
         self._state = ApplicationState.FAULT
         self._emit_after_fault("run_fault", {"error": "Safe stop was not confirmed: " + reason})
-        self._writer.close("faulted")
-        return RunResult(self._state, completed, stored, reason)
+        error = self._close_after_error("faulted", reason)
+        return RunResult(self._state, completed, stored, error)
+
+    def _close_after_error(self, status: str, reason: str) -> str:
+        """Retain the original fault when closing/validation also fails."""
+        try:
+            self._writer.close(status)
+        except Exception as exc:
+            self._state = ApplicationState.FAULT
+            original_reason = reason
+            reason += f"\nArchive close failed: {exc}"
+            # The HDF5 handle may already be closed. Report to the UI/audit
+            # callback without attempting another write to that handle.
+            try:
+                self._on_event("storage_close_failed", {
+                    "error": str(exc), "original_error": original_reason,
+                    "correlation_id": self._correlation_id,
+                    "timestamp_utc": datetime.now(timezone.utc).isoformat(),
+                    "state_snapshot": self._runtime_state_snapshot(),
+                })
+            except Exception:
+                pass
+        return reason
 
     def _run_pending_finally(
         self,
@@ -1413,15 +1442,18 @@ class RecipeRunner:
                 },
             )
         elif action.kind == "acquire_reference":
-            average_count = int(payload.get("average_count", 1))
-            reference = self._acquire_averaged_spectrum(
+            average_count = payload.get("average_count", 1)
+            block = self._acquire_averaged_spectrum(
                 payload["trace"],
                 average_count,
+                action=action, role=SpectrumFrameRole.REFERENCE,
             )
+            reference = block.raw
             stored_reference_index = self._writer.store_reference(
                 reference,
                 kind="single" if average_count == 1 else "averaged",
                 average_count=average_count,
+                source_sweep_indices=block.source_sweep_indices,
             )
             self._reference_trace = reference
             self._reference_index = (
@@ -1437,6 +1469,7 @@ class RecipeRunner:
                     "average_count": average_count,
                     "reference_index": self._reference_index,
                     "acquired_at_utc": reference.acquired_at_utc.isoformat(),
+                    "raw_recipe_sweep_indices": block.source_sweep_indices,
                 },
             )
             self._emit_spectrum_preview(
@@ -1445,11 +1478,13 @@ class RecipeRunner:
                 preview_kind="reference",
             )
         elif action.kind == "acquire_spectrum":
-            average_count = int(payload.get("average_count", 1))
-            trace = self._acquire_averaged_spectrum(
+            average_count = payload.get("average_count", 1)
+            block = self._acquire_averaged_spectrum(
                 payload["trace"],
                 average_count,
+                action=action, role=SpectrumFrameRole.SIGNAL,
             )
+            trace = block.raw
             operation = str(payload.get("reference_operation", "none"))
             processed: tuple[float, ...] | None = None
             processed_unit: str | None = None
@@ -1482,6 +1517,7 @@ class RecipeRunner:
                 processed_unit=processed_unit,
                 processing_operation=operation,
                 reference_index=self._reference_index,
+                source_sweep_indices=block.source_sweep_indices,
             )
         elif action.kind == "checkpoint":
             pass
@@ -1520,15 +1556,32 @@ class RecipeRunner:
         self,
         trace_name: str,
         average_count: int,
-    ) -> SpectrumTrace:
+        *, action: PlanAction, role: SpectrumFrameRole,
+    ) -> _AcquiredSpectrum:
         """Acquire complete, grid-matched traces and average in linear power."""
+
+        if type(average_count) is not int or not 1 <= average_count <= 9999:
+            raise ExecutionError("Recipe spectrum average_count must be an integer in 1..9999.")
 
         averager = LinearPowerAverager()
         first: SpectrumTrace | None = None
         latest: SpectrumTrace | None = None
+        source_indices = []
         for _index in range(average_count):
             self._raise_if_stop_requested()
             latest = self._anritsu.acquire_single_sweep(trace_name)
+            # Commit before requesting another sweep or publishing a mean.
+            # Storage failure propagates through the established runner fault
+            # path and finally/shutdown; it cannot silently lose raw sources.
+            source_index = self._writer.store_recipe_spectrum_sweep(RecipeSpectrumSweep(
+                latest.frequencies_hz, latest.powers_dbm, action.node_id, self._correlation_id,
+                role, _index, average_count, latest.acquired_at_utc.timestamp(),
+                latest.configuration_generation, latest.sweep_evidence, latest.sweep_id,
+                latest.acquisition_started_at_utc.timestamp() if latest.acquisition_started_at_utc else None,
+                latest.acquisition_completed_at_utc.timestamp() if latest.acquisition_completed_at_utc else None,
+                tuple(sorted((name, float(value)) for name, value in action.setpoints_si.items())),
+            ))
+            source_indices.append(source_index)
             if first is None:
                 first = latest
             elif not frequency_grids_match(
@@ -1538,15 +1591,18 @@ class RecipeRunner:
                     "Anritsu averaging aborted because the frequency grid changed "
                     "between complete spectra."
                 )
+            elif latest.configuration_generation != first.configuration_generation:
+                raise ExecutionError("Anritsu averaging aborted because its acquisition configuration changed.")
             averager.add(latest.powers_dbm)
         if first is None or latest is None:
             raise ExecutionError("Anritsu averaging requires at least one spectrum.")
-        return SpectrumTrace(
+        averaged = SpectrumTrace(
             frequencies_hz=first.frequencies_hz,
             powers_dbm=averager.result(),
             acquired_at_utc=latest.acquired_at_utc,
             trace_name=latest.trace_name,
         )
+        return _AcquiredSpectrum(averaged, average_count, source_sweep_indices=tuple(source_indices))
 
     def _interruptible_wait(self, duration_s: float) -> None:
         deadline = time.monotonic() + duration_s
@@ -2028,7 +2084,7 @@ class RecipeRunner:
         )
         self._last_safe_boundary_points = stored_points
 
-    def _emit(self, name: str, data: dict[str, object]) -> None:
+    def _emit(self, name: str, data: dict[str, object], *, notify=True) -> dict[str, object]:
         payload = {
             "timestamp_utc": datetime.now(timezone.utc).isoformat(),
             **data,
@@ -2048,7 +2104,9 @@ class RecipeRunner:
             else "info"
         )
         self._writer.append_event(name, payload, severity=severity)
-        self._on_event(name, payload)
+        if notify:
+            self._on_event(name, payload)
+        return payload
 
     def _emit_after_fault(self, name: str, data: dict[str, object]) -> None:
         """Best-effort diagnostics that can never stop the shutdown sequence."""

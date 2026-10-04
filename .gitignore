@@ -65,3 +65,16 @@ docs/raports/evidence/*
 scratch/moke-planning-ui-20261002/logs/lab-control_20261002T132052.699155Z_79e97d60.jsonl
 docs/raports/evidence/moke_labview_final_audit_2026-10-02.json
 scratch/
+
+# Keep the simulator-only sweep audit report and reproducible evidence reviewable.
+!docs/audits/
+docs/audits/*
+!docs/audits/2026-10-04-sweeps/
+!docs/audits/2026-10-04-sweeps/*.md
+!docs/audits/2026-10-04-sweeps/*.json
+!docs/audits/2026-10-04-sweeps/*.yml
+!docs/audits/2026-10-04-sweeps/*.log
+!docs/audits/2026-10-04-sweeps/*.xml
+!docs/audits/2026-10-04-sweeps/*.png
+!docs/audits/2026-10-04-sweeps/cartesian-simulation.h5
+!docs/audits/2026-10-04-sweeps/cartesian-simulation.csv

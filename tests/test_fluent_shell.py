@@ -14,6 +14,8 @@ from app.settings import SettingsRepository
 from app.ui.shell import FluentPageHost, StationSafetySnapshot, StationSafetyStrip
 from app.ui.shell import MainWindow
 from tests.helpers import SETTINGS_TEMPLATE
+from tests.shell_test_isolation import isolated_shell_persistence as isolated_shell_persistence
+from tests.shell_test_isolation import shell_qt_application as shell_qt_application
 
 
 class FluentDependencyTests(unittest.TestCase):
@@ -98,8 +100,6 @@ class StationSafetyStripTests(unittest.TestCase):
 
     def test_save_and_estop_never_overlap_in_responsive_layouts(self) -> None:
         strip = StationSafetyStrip()
-        strip.estop.setText("E-STOP")
-        strip.estop.setMaximumWidth(96)
         strip.show()
         for width, expected_mode in ((240, "narrow"), (700, "compact"), (1000, "wide")):
             strip.resize(width, 140)
@@ -123,6 +123,10 @@ class MainWindowFluentShellTests(unittest.TestCase):
     def test_main_window_uses_fluent_navigation_and_all_routes_exist(self) -> None:
         window = MainWindow(".config/settings.yml", simulation=True)
         try:
+            window.resize(1360, 880)
+            window.show()
+            self.application.processEvents()
+            QTest.qWait(350)
             self.assertIsInstance(window, FluentWindow)
             self.assertEqual(tuple(window.navigation_routes), (
                 "overview", "discovery", "rigol", "keithley", "keithley_characterization",

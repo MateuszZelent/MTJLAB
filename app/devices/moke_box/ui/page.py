@@ -8,6 +8,7 @@ from collections.abc import Mapping
 from datetime import datetime, timedelta, timezone
 
 import pyqtgraph as pg
+from app.ui.widgets.plot_ownership import create_plot_widget
 from PySide6.QtCore import QEvent, QTimer, Qt, Signal
 from PySide6.QtWidgets import (
     QGridLayout,
@@ -380,7 +381,7 @@ class MokeBoxPage(QWidget):
         copy.addWidget(title)
         copy.addWidget(hint)
         header.addLayout(copy, 1)
-        self.field_samples = SpinBox()
+        self.field_samples = SpinBox(self)
         self.field_samples.setRange(1, 1)
         self.field_samples.setValue(1)
         self.field_samples.setToolTip(
@@ -474,7 +475,7 @@ class MokeBoxPage(QWidget):
         self.plot_span = CaptionLabel("Last 1 min · elapsed time", page)
         plot_header.addWidget(self.plot_span)
         content.addLayout(plot_header)
-        self.history_plot = pg.PlotWidget(page)
+        self.history_plot = create_plot_widget(page)
         self.history_plot.setObjectName("mokeHallHistoryPlot")
         self.history_plot.setLabel("left", "Hall voltage", units="V")
         self.history_plot.setLabel("bottom", "Elapsed time", units="s")

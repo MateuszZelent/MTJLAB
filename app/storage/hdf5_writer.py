@@ -10,11 +10,20 @@ from pathlib import Path
 import csv
 import hashlib
 import json
-from typing import TextIO
+from typing import TYPE_CHECKING, TextIO
+
+if TYPE_CHECKING:
+    from numpy.typing import ArrayLike
 
 from app.devices.anritsu_ms2830a.adapter import SpectrumTrace
 from app.domain.errors import ExecutionError
 from app.domain.models import MeasurementPoint
+from app.domain.spectrum_correction import (
+    BackgroundProfile,
+    CorrectedSpectrumFrame,
+    SpectrumAcquisitionContext,
+    SpectrumFrameEnvelope,
+)
 from app.recipes.models import legacy_dut_limits_policy
 from app.storage.thatec_writer import ThatecHdf5Writer
 from app.version import get_full_version
@@ -26,6 +35,22 @@ def _spectrum_compression(point_count: int) -> dict[str, object]:
     if point_count >= 10_000:
         return {}
     return {"compression": "gzip", "compression_opts": 1}
+
+
+def _finite_numeric_vector(values, *, nonfinite_message: str, copy=False):
+    """Validate f8 storage values in NumPy, without per-bin Python callbacks."""
+    import numpy as np
+
+    try:
+        array = np.array(values, copy=True) if copy else np.asarray(values)
+        if array.ndim != 1 or array.dtype.kind not in "biuf":
+            raise ExecutionError("Spectrum values must be a one-dimensional real numeric vector.")
+        array = np.asarray(array, dtype="f8")
+    except (TypeError, ValueError, OverflowError) as exc:
+        raise ExecutionError("Spectrum values must be a one-dimensional real numeric vector.") from exc
+    if not np.isfinite(array).all():
+        raise ExecutionError(nonfinite_message)
+    return array
 
 
 class Hdf5RunWriter:
@@ -132,6 +157,8 @@ class Hdf5RunWriter:
             settings_source=settings_source,
         )
         self._point_count = 0
+        self._correction_contexts: dict[str, SpectrumAcquisitionContext] = {}
+        self._interference_calibrations = {}
         self._closed = False
         if self.csv_summary_path is not None:
             self._open_csv_summary()
@@ -198,6 +225,8 @@ class Hdf5RunWriter:
                 recipe_source=recipe_source,
             )
             self._point_count = checkpoint_count
+            self._correction_contexts = {}
+            self._interference_calibrations = {}
             self._closed = False
             run = self._file["run"]
             previous_status = str(run.attrs.get("status", "incomplete"))
@@ -256,7 +285,10 @@ class Hdf5RunWriter:
             raise ExecutionError("Committed private checkpoints are not contiguous.")
         if checkpoint_count > len(committed):
             raise ExecutionError("Recovery checkpoint exceeds committed point count.")
-        for _number, name in committed:
+        # Only the externally confirmed retained prefix must be complete.
+        # A process may die after moving the next pending link into /points,
+        # before setting complete; that unconfirmed tail is discarded below.
+        for _number, name in committed[:checkpoint_count]:
             if not bool(self._points[name].attrs.get("complete", False)):
                 raise ExecutionError(f"Private checkpoint {name} is not marked complete.")
         for _number, name in reversed(committed[checkpoint_count:]):
@@ -426,6 +458,7 @@ class Hdf5RunWriter:
         *,
         kind: str = "single",
         average_count: int = 1,
+        source_sweep_indices: tuple[int, ...] = (),
     ) -> int:
         """Durably append a reference and return its stable run-local index.
 
@@ -441,6 +474,23 @@ class Hdf5RunWriter:
             raise ExecutionError(f"Unsupported reference kind {kind!r}.")
         if average_count < 1:
             raise ExecutionError("Reference average_count must be positive.")
+        if (type(source_sweep_indices) is not tuple
+                or any(type(value) is not int or not 0 <= value < 2**63 for value in source_sweep_indices)
+                or source_sweep_indices and (len(source_sweep_indices) != average_count
+                    or tuple(sorted(set(source_sweep_indices))) != source_sweep_indices)):
+            raise ExecutionError("Reference source sweep identities must be an ordered immutable complete block.")
+        if any(f"recipe_raw_sweeps_v1/{value}" not in self._file for value in source_sweep_indices):
+            raise ExecutionError("Reference requires every selected raw recipe source to be committed.")
+        source_block_identity = None
+        for position, value in enumerate(source_sweep_indices):
+            source = self._file[f"recipe_raw_sweeps_v1/{value}"]
+            metadata = json.loads(source.attrs["metadata_json"])
+            identity = (metadata["execution_id"], metadata["recipe_node_id"], metadata["configuration_generation"])
+            if (not bool(source.attrs.get("complete", False)) or metadata["role"] != "reference"
+                    or metadata["average_index"] != position or metadata["average_count"] != average_count
+                    or source_block_identity is not None and source_block_identity != identity):
+                raise ExecutionError("Reference source identities do not describe one complete REF block.")
+            source_block_identity = identity
         indexes = [int(name) for name in self._references if name.isdigit()]
         index = max(indexes, default=-1) + 1
         name = str(index)
@@ -451,6 +501,8 @@ class Hdf5RunWriter:
             group.attrs["acquired_at_utc"] = trace.acquired_at_utc.isoformat()
             group.attrs["kind"] = kind
             group.attrs["average_count"] = int(average_count)
+            if source_sweep_indices:
+                group.create_dataset("source_recipe_sweep_indices", data=source_sweep_indices, dtype="u8")
             group.create_dataset(
                 "frequency_hz",
                 data=self._np.asarray(trace.frequencies_hz, dtype="f8"),
@@ -473,15 +525,167 @@ class Hdf5RunWriter:
             self._file.flush()
             raise ExecutionError(f"Could not store the reference spectrum: {exc}") from exc
 
+    def initialize_spectrum_decisions(self, context, config):
+        from .spectrum_decision_store import initialize_decisions
+
+        initialize_decisions(self, context, config)
+
+    def store_recipe_spectrum_sweep(self, record):
+        from .recipe_spectrum_store import append_recipe_sweep
+
+        return append_recipe_sweep(self, record)
+
+    def record_spectrum_decision(self, operation, parameters):
+        from .spectrum_decision_store import append_decision
+
+        return append_decision(self, operation, parameters)
+
+    def store_background_profile(
+        self, context: SpectrumAcquisitionContext, profile: BackgroundProfile
+    ) -> str:
+        """Commit an immutable private model before frames may reference it."""
+        from .spectrum_correction_codec import read_profile, safe_record_id, write_profile
+
+        if self._closed:
+            raise ExecutionError("Cannot write a background profile to a closed file.")
+        name = safe_record_id(profile.profile_id)
+        if profile.context_id != context.context_id:
+            raise ExecutionError("Background profile context mismatch.")
+        root = self._file.require_group("spectrum_processing_v1/profiles")
+        if name in root:
+            stored_context, stored_profile = read_profile(root[name])
+            if (
+                stored_profile.content_hash != profile.content_hash
+                or stored_context.configuration_fingerprint != context.configuration_fingerprint
+                or stored_context.settings_verified != context.settings_verified
+                or stored_context.independent_sweeps_qualified != context.independent_sweeps_qualified
+            ):
+                raise ExecutionError("Cannot overwrite an existing background profile identity.")
+            self._correction_contexts[context.context_id] = context
+            return name
+        pending_name = f"profile_{name}"
+        try:
+            pending = self._pending.create_group(pending_name)
+            write_profile(pending, context, profile)
+            pending.attrs["complete"] = True
+            self._file.flush()
+            self._file.move(f"_pending/{pending_name}", f"spectrum_processing_v1/profiles/{name}")
+            self._file.flush()
+        except Exception as exc:
+            if pending_name in self._pending:
+                del self._pending[pending_name]
+            self._file.flush()
+            raise ExecutionError(f"Could not commit background profile: {exc}") from exc
+        self._correction_contexts[context.context_id] = context
+        return name
+
+    def store_interference_calibration(self, calibration) -> str:
+        """Commit reference-trained calibration only after its source profiles."""
+        from app.spectrum.interference_model import calibrated_interference_model
+        from .spectrum_correction_codec import read_profile, safe_record_id
+        from .spectrum_interference_codec import read_interference_calibration, write_interference_calibration
+
+        if self._closed:
+            raise ExecutionError("Cannot write interference calibration to a closed file.")
+        name = safe_record_id(calibration.model_id)
+        calibrated_interference_model(calibration)
+        for profile_id, content_hash in calibration.source_profiles:
+            key = f"spectrum_processing_v1/profiles/{profile_id}"
+            if key not in self._file:
+                raise ExecutionError("Interference calibration requires committed source profiles.")
+            context, profile = read_profile(self._file[key])
+            if context.context_id != calibration.context.context_id or profile.content_hash != content_hash:
+                raise ExecutionError("Interference source profile identity differs from calibration.")
+        root = self._file.require_group("spectrum_processing_v1/interference_models")
+        if name in root:
+            if read_interference_calibration(root[name]).content_hash != calibration.content_hash:
+                raise ExecutionError("Cannot overwrite an interference model identity.")
+            self._interference_calibrations[name] = calibration
+            return name
+        pending_name = f"interference_{name}"
+        try:
+            pending = self._pending.create_group(pending_name)
+            write_interference_calibration(pending, calibration)
+            pending.attrs["complete"] = True
+            self._file.flush()
+            self._file.move(f"_pending/{pending_name}", f"spectrum_processing_v1/interference_models/{name}")
+            self._file.flush()
+        except Exception as exc:
+            if pending_name in self._pending:
+                del self._pending[pending_name]
+            self._file.flush()
+            raise ExecutionError(f"Could not commit interference calibration: {exc}") from exc
+        self._interference_calibrations[name] = calibration
+        return name
+
+    def store_finalized_block(self, block, source_point_indices) -> str:
+        """Commit a derived block only after all raw/profile dependencies exist."""
+        from .finalized_spectrum_codec import block_hash, write_finalized
+        from .spectrum_correction_codec import read_envelope, read_profile
+
+        if self._closed:
+            raise ExecutionError("Cannot store a final block in a closed archive.")
+        indices = tuple(source_point_indices)
+        if len(indices) != block.result.count or any(type(index) is not int or index < 0 for index in indices):
+            raise ExecutionError("Final block requires integer source checkpoint indices.")
+        if any(first >= second for first, second in zip(indices, indices[1:])):
+            raise ExecutionError("Final block source checkpoints must be strictly ordered.")
+        for index, frame_id in zip(indices, block.source_frame_ids):
+            if str(index) not in self._points or not self._points[str(index)].attrs.get("complete", False):
+                raise ExecutionError("Final block references an uncommitted raw checkpoint.")
+            if str(index) not in self._spectra:
+                raise ExecutionError("Final block source has no raw spectrum.")
+            envelope = read_envelope(self._spectra[str(index)])
+            if envelope is None or not envelope.complete or (
+                envelope.frame_id != frame_id or envelope.context_id != block.result.context_id
+                or envelope.segment_id != block.result.segment_id or envelope.role.value != "signal"
+            ):
+                raise ExecutionError("Final block source acquisition evidence does not match.")
+        for profile_id, _weight in block.result.profile_weights:
+            key = f"spectrum_processing_v1/profiles/{profile_id}"
+            if key not in self._file:
+                raise ExecutionError("Final block requires both committed reference profiles.")
+            context, _profile = read_profile(self._file[key])
+            if context.context_id != block.result.context_id:
+                raise ExecutionError("Final block reference context differs from the signal.")
+            if context.frequencies_hz.shape != block.result.values_w.shape or any(
+                not self._np.array_equal(self._spectra[str(index)]["frequency_hz"][:], context.frequencies_hz)
+                for index in indices
+            ):
+                raise ExecutionError("Final block source/profile frequency axes differ.")
+        identity = block_hash(block, indices)
+        root = self._file.require_group("spectrum_processing_v1/finalized_blocks")
+        if identity in root:
+            from .finalized_spectrum_codec import read_finalized
+
+            read_finalized(root[identity])
+            return identity
+        pending_name = f"finalized_{identity}"
+        try:
+            pending = self._pending.create_group(pending_name)
+            write_finalized(pending, block, indices)
+            pending.attrs["complete"] = True
+            self._file.flush()
+            self._file.move(f"_pending/{pending_name}", f"spectrum_processing_v1/finalized_blocks/{identity}")
+            self._file.flush()
+        except Exception as exc:
+            if pending_name in self._pending:
+                del self._pending[pending_name]
+            self._file.flush()
+            raise ExecutionError(f"Could not commit finalized spectrum block: {exc}") from exc
+        return identity
+
     def append(
         self,
         point: MeasurementPoint,
         trace: SpectrumTrace | None = None,
         *,
-        processed_values: tuple[float, ...] | None = None,
+        processed_values: ArrayLike | None = None,
         processed_unit: str | None = None,
         processing_operation: str = "none",
         device_states: dict[str, object] | None = None,
+        acquisition_envelope: SpectrumFrameEnvelope | None = None,
+        corrected_frame: CorrectedSpectrumFrame | None = None,
     ) -> int:
         if self._closed:
             raise ExecutionError("Attempted to write to a closed HDF5 file.")
@@ -490,12 +694,53 @@ class Hdf5RunWriter:
         self._validate_point(point)
         if trace is not None:
             self._validate_trace(trace)
-        self._validate_processed(
+        processed_values = self._validate_processed(
             trace,
             processed_values=processed_values,
             processed_unit=processed_unit,
             processing_operation=processing_operation,
         )
+        if acquisition_envelope is not None and trace is None:
+            raise ExecutionError("An acquisition envelope requires a raw spectrum.")
+        if corrected_frame is not None:
+            if trace is None or acquisition_envelope is None:
+                raise ExecutionError("A correction result requires raw and its acquisition envelope.")
+            if (
+                corrected_frame.frame_id != acquisition_envelope.frame_id
+                or corrected_frame.segment_id != acquisition_envelope.segment_id
+                or corrected_frame.context_id != acquisition_envelope.context_id
+                or len(corrected_frame.values_w) != len(trace.powers_dbm)
+            ):
+                raise ExecutionError("Correction result does not match its raw source frame.")
+            if corrected_frame.interference_model_id is not None:
+                identity = corrected_frame.interference_model_id
+                key = f"spectrum_processing_v1/interference_models/{identity}"
+                if identity not in self._interference_calibrations:
+                    from .spectrum_interference_codec import read_interference_calibration
+
+                    if key not in self._file:
+                        raise ExecutionError("Correction result references an uncommitted interference model.")
+                    self._interference_calibrations[identity] = read_interference_calibration(self._file[key])
+                from .spectrum_interference_codec import validate_interference_result
+
+                validate_interference_result(corrected_frame, self._interference_calibrations[identity])
+            for profile_id, _weight in corrected_frame.profile_weights:
+                key = f"spectrum_processing_v1/profiles/{profile_id}"
+                if key not in self._file or not self._file[key].attrs.get("complete", False):
+                    raise ExecutionError("Correction result references an uncommitted background profile.")
+                profile_metadata = json.loads(self._file[key].attrs["metadata_json"])
+                if profile_metadata["context_id"] != corrected_frame.context_id:
+                    raise ExecutionError("Correction result references a different acquisition context.")
+                if corrected_frame.context_id not in self._correction_contexts:
+                    from .spectrum_correction_codec import read_profile
+
+                    context, _profile = read_profile(self._file[key])
+                    self._correction_contexts[context.context_id] = context
+                context = self._correction_contexts.get(corrected_frame.context_id)
+                if context is None or not self._np.array_equal(
+                    context.frequencies_hz, trace.frequencies_hz
+                ):
+                    raise ExecutionError("Correction profile frequency axis does not match raw.")
         try:
             group = self._pending.create_group(name)
             group.attrs["complete"] = False
@@ -515,6 +760,22 @@ class Hdf5RunWriter:
                 spectrum = group.create_group("spectrum")
                 spectrum.attrs["trace_name"] = trace.trace_name
                 spectrum.attrs["acquired_at_utc"] = trace.acquired_at_utc.isoformat()
+                spectrum.attrs["sweep_evidence"] = str(trace.sweep_evidence)
+                spectrum.attrs["configuration_generation"] = trace.configuration_generation
+                if trace.sweep_id is not None:
+                    spectrum.attrs["sweep_id"] = trace.sweep_id
+                for attribute in ("acquisition_started_at_utc", "acquisition_completed_at_utc"):
+                    timestamp = getattr(trace, attribute)
+                    if timestamp is not None:
+                        spectrum.attrs[attribute] = timestamp.isoformat()
+                if acquisition_envelope is not None:
+                    from .spectrum_correction_codec import write_envelope
+
+                    write_envelope(spectrum, acquisition_envelope)
+                if corrected_frame is not None:
+                    from .spectrum_correction_codec import write_corrected
+
+                    write_corrected(spectrum.create_group("correction_v1"), corrected_frame)
                 reference_index = point.metadata.get("reference_index")
                 if reference_index is not None:
                     reference_index = int(reference_index)
@@ -598,12 +859,10 @@ class Hdf5RunWriter:
     def _validate_processed(
         trace: SpectrumTrace | None,
         *,
-        processed_values: tuple[float, ...] | None,
+        processed_values: ArrayLike | None,
         processed_unit: str | None,
         processing_operation: str,
-    ) -> None:
-        import math
-
+    ) -> ArrayLike | None:
         if processed_values is None:
             if processed_unit is not None or processing_operation != "none":
                 raise ExecutionError(
@@ -612,14 +871,18 @@ class Hdf5RunWriter:
             return
         if trace is None:
             raise ExecutionError("Processed spectrum requires its corresponding raw trace.")
-        if len(processed_values) != len(trace.powers_dbm):
+        # Capture mutable callers before validation and HDF5 mutations. The
+        # worker's immutable f8 result avoids the former per-bin tuple boxing;
+        # one contiguous vector is reused for private and public writes.
+        values = _finite_numeric_vector(processed_values,
+            nonfinite_message="The processed spectrum contains NaN or infinity.", copy=True)
+        if values.size != len(trace.powers_dbm):
             raise ExecutionError("Raw and processed spectra must have identical point counts.")
         if not processed_unit:
             raise ExecutionError("Processed spectrum requires an explicit unit.")
         if processing_operation == "none":
             raise ExecutionError("Processed spectrum requires an explicit operation.")
-        if not all(math.isfinite(value) for value in processed_values):
-            raise ExecutionError("The processed spectrum contains NaN or infinity.")
+        return values
 
     @staticmethod
     def _validate_point(point: MeasurementPoint) -> None:
@@ -637,13 +900,11 @@ class Hdf5RunWriter:
 
     @staticmethod
     def _validate_trace(trace: SpectrumTrace) -> None:
-        import math
-
         if len(trace.frequencies_hz) != len(trace.powers_dbm) or len(trace.frequencies_hz) < 2:
             raise ExecutionError("A spectrum requires at least two matching axis and amplitude points.")
-        if not all(math.isfinite(value) for value in (*trace.frequencies_hz, *trace.powers_dbm)):
-            raise ExecutionError("The spectrum contains NaN or infinity.")
-        if any(right <= left for left, right in zip(trace.frequencies_hz, trace.frequencies_hz[1:])):
+        frequency = _finite_numeric_vector(trace.frequencies_hz, nonfinite_message="The spectrum contains NaN or infinity.")
+        _finite_numeric_vector(trace.powers_dbm, nonfinite_message="The spectrum contains NaN or infinity.")
+        if not (frequency[1:] > frequency[:-1]).all():
             raise ExecutionError("The spectrum frequency axis must be strictly increasing.")
 
     def _append_csv_summary(self, index: int, point: MeasurementPoint, trace: SpectrumTrace | None) -> None:

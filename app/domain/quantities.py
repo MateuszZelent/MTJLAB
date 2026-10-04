@@ -22,6 +22,8 @@ DIMENSION_VOLTAGE: Final = "voltage"
 DIMENSION_VOLTAGE_SLEW: Final = "voltage_slew"
 DIMENSION_CURRENT: Final = "current"
 DIMENSION_POWER: Final = "power"
+DIMENSION_POWER_DENSITY: Final = "power_density"
+DIMENSION_SPECTRAL_AREA: Final = "spectral_area"
 DIMENSION_FREQUENCY: Final = "frequency"
 DIMENSION_RESISTANCE: Final = "resistance"
 DIMENSION_TIME: Final = "time"
@@ -53,6 +55,20 @@ _UNITS: Final[dict[str, UnitDefinition]] = {
     "mw": UnitDefinition(DIMENSION_POWER, 1e-3, "mW"),
     "uw": UnitDefinition(DIMENSION_POWER, 1e-6, "uW"),
     "nw": UnitDefinition(DIMENSION_POWER, 1e-9, "nW"),
+    "pw": UnitDefinition(DIMENSION_POWER, 1e-12, "pW"),
+    "fw": UnitDefinition(DIMENSION_POWER, 1e-15, "fW"),
+    "w/hz": UnitDefinition(DIMENSION_POWER_DENSITY, 1.0, "W/Hz"),
+    "mw/hz": UnitDefinition(DIMENSION_POWER_DENSITY, 1e-3, "mW/Hz"),
+    "uw/hz": UnitDefinition(DIMENSION_POWER_DENSITY, 1e-6, "uW/Hz"),
+    "nw/hz": UnitDefinition(DIMENSION_POWER_DENSITY, 1e-9, "nW/Hz"),
+    "pw/hz": UnitDefinition(DIMENSION_POWER_DENSITY, 1e-12, "pW/Hz"),
+    "fw/hz": UnitDefinition(DIMENSION_POWER_DENSITY, 1e-15, "fW/Hz"),
+    "w*hz": UnitDefinition(DIMENSION_SPECTRAL_AREA, 1.0, "W*Hz"),
+    "mw*hz": UnitDefinition(DIMENSION_SPECTRAL_AREA, 1e-3, "mW*Hz"),
+    "uw*hz": UnitDefinition(DIMENSION_SPECTRAL_AREA, 1e-6, "uW*Hz"),
+    "nw*hz": UnitDefinition(DIMENSION_SPECTRAL_AREA, 1e-9, "nW*Hz"),
+    "pw*hz": UnitDefinition(DIMENSION_SPECTRAL_AREA, 1e-12, "pW*Hz"),
+    "fw*hz": UnitDefinition(DIMENSION_SPECTRAL_AREA, 1e-15, "fW*Hz"),
     "hz": UnitDefinition(DIMENSION_FREQUENCY, 1.0, "Hz"),
     "khz": UnitDefinition(DIMENSION_FREQUENCY, 1e3, "kHz"),
     "mhz": UnitDefinition(DIMENSION_FREQUENCY, 1e6, "MHz"),
@@ -189,7 +205,9 @@ _AUTO_DISPLAY_UNITS: Final[dict[str, tuple[str, ...]]] = {
     DIMENSION_VOLTAGE: ("kV", "V", "mV", "uV"),
     DIMENSION_VOLTAGE_SLEW: ("V/s", "mV/s"),
     DIMENSION_CURRENT: ("A", "mA", "uA", "nA"),
-    DIMENSION_POWER: ("W", "mW", "uW", "nW"),
+    DIMENSION_POWER: ("W", "mW", "uW", "nW", "pW", "fW"),
+    DIMENSION_POWER_DENSITY: ("W/Hz", "mW/Hz", "uW/Hz", "nW/Hz", "pW/Hz", "fW/Hz"),
+    DIMENSION_SPECTRAL_AREA: ("W*Hz", "mW*Hz", "uW*Hz", "nW*Hz", "pW*Hz", "fW*Hz"),
     DIMENSION_FREQUENCY: ("GHz", "MHz", "kHz", "Hz"),
     DIMENSION_RESISTANCE: ("Mohm", "kohm", "ohm"),
     DIMENSION_TIME: ("s", "ms", "us", "ns"),

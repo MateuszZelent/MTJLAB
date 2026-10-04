@@ -9,6 +9,7 @@ from dataclasses import asdict
 from threading import Event
 
 import pyqtgraph as pg
+from app.ui.widgets.plot_ownership import create_plot_widget
 from PySide6.QtCore import QEvent, QObject, QThread, QTimer, Qt, Signal, Slot
 from PySide6.QtWidgets import QFormLayout, QHBoxLayout, QSizePolicy, QSplitter, QVBoxLayout, QWidget
 from qfluentwidgets import (
@@ -908,7 +909,7 @@ class MokeFieldWorkflow(QObject):
         self.activate_button = PrimaryPushButton("Activate reviewed calibration", review)
         self.activate_button.clicked.connect(self._activate)
         review_layout.addWidget(self.activate_button)
-        self.plot = pg.PlotWidget(review)
+        self.plot = create_plot_widget(review)
         self.plot.setMinimumHeight(230)
         self.plot.setLabel("bottom", "Programming voltage", units="V")
         self.plot.setLabel("left", "Reference field", units="T")

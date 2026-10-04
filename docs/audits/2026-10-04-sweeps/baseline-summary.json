@@ -1,0 +1,16 @@
+{
+  "evidence_type": "observed session result, not captured complete stdout",
+  "date": "2026-10-04",
+  "scope": "first disjoint group of existing tests; simulators only",
+  "command": ".venv/Scripts/python.exe -m pytest tests/test_sweep_points.py tests/test_sweep_provider_contract.py tests/test_recipe_compiler.py tests/test_recipe_semantic_tree.py tests/test_moke_sweep_execution.py tests/test_adapters_and_runner.py tests/test_recipe_raw_sweeps.py tests/test_hdf5_writer.py tests/test_run_recovery.py tests/test_execution_policy.py tests/test_device_run_lease.py tests/test_run_controller.py tests/test_fluent_recipe_execution_pages.py tests/test_audit_wait_in_sweep_tree.py -q --basetemp=.audit-sweeps-tmp -p no:cacheprovider",
+  "passed": 266,
+  "failed": 29,
+  "skipped": 0,
+  "subtests_passed": 15,
+  "duration_s": 149.46,
+  "failure_categories": {
+    "old_fixtures_missing_explicit_fixed_source_range": 14,
+    "ui_inventory_database_write_outside_workspace_readonly": 15
+  },
+  "note": "The isolated new rendering suite verifies shown geometry independently. Repeated runs of the same old UI tests are not included again in totals."
+}

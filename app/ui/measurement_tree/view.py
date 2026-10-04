@@ -200,7 +200,7 @@ class MeasurementTreeView(TreeView):
     def showEvent(self, event: QShowEvent) -> None:  # noqa: N802 - Qt override
         super().showEvent(event)
         if not self._user_resized_columns:
-            QTimer.singleShot(0, self._apply_column_widths)
+            QTimer.singleShot(0, self, self._apply_column_widths)
 
     def drawBranches(
         self, painter: QPainter, rect: QRect, index: QModelIndex
@@ -284,13 +284,13 @@ class MeasurementTreeView(TreeView):
         self._apply_column_widths()
         self.setTextElideMode(Qt.TextElideMode.ElideRight)
         self.expandAll()
-        QTimer.singleShot(0, self.expandAll)
+        QTimer.singleShot(0, self, self.expandAll)
 
     def _expand_all_after_reset(self) -> None:
         """Expand now and once more after Qt has recalculated model geometry."""
 
         self.expandAll()
-        QTimer.singleShot(0, self.expandAll)
+        QTimer.singleShot(0, self, self.expandAll)
 
     def set_interaction_mode(self, mode: TreeInteractionMode) -> None:
         self._interaction_mode = TreeInteractionMode(mode)

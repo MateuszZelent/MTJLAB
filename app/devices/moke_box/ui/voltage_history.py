@@ -7,6 +7,7 @@ import time
 from collections import deque
 
 import pyqtgraph as pg
+from app.ui.widgets.plot_ownership import create_plot_widget, own_viewbox_menu
 from PySide6.QtCore import QTimer, Qt
 from PySide6.QtWidgets import QHBoxLayout, QVBoxLayout, QWidget
 from qfluentwidgets import CaptionLabel, ComboBox, isDarkTheme, qconfig
@@ -39,7 +40,7 @@ class MokeVoltageHistory(QWidget):
         window_row.addWidget(self.window_selector)
         window_row.addStretch()
         layout.addLayout(window_row)
-        self.plot = pg.PlotWidget(self)
+        self.plot = create_plot_widget(self)
         self.plot.setMinimumSize(240, 240)
         self.plot.setMenuEnabled(False)
         self.plot.showGrid(x=True, y=True, alpha=0.18)
@@ -52,6 +53,7 @@ class MokeVoltageHistory(QWidget):
         self.item.showAxis("right")
         self.item.setLabel("right", "Calculated field", units="T")
         self.field_view = pg.ViewBox()
+        own_viewbox_menu(self.field_view, self.plot)
         self.item.scene().addItem(self.field_view)
         self.item.getAxis("right").linkToView(self.field_view)
         self.field_view.setXLink(self.item)

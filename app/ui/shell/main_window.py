@@ -91,7 +91,7 @@ from app.ui.settings_guidance import SettingsIssue, settings_issue_for_error
 from app.ui.dialogs import SweepDeviceReadinessDialog, StationMessageBox as QMessageBox
 from app.ui.settings_workers import KeithleyDefaultsSaveWorker
 from app.ui.run_worker import RunController, serialize_settings_snapshot
-from app.ui.dashboard import DashboardPage, DeviceConnectionPanel
+from app.ui.dashboard import StationDashboardController, DeviceConnectionPanel
 from app.ui.elab import ElabPage
 from app.ui.inventory import SampleInventoryPage
 from app.ui.execution import RunMonitorPage
@@ -245,6 +245,9 @@ class MainWindow(FluentWindow):
         self._leased_run_devices: set[str] = set()
         self._sweep_readiness_dialog: SweepDeviceReadinessDialog | None = None
         self._build()
+        from app.ui.widgets.fluent_ownership import own_fluent_helpers
+
+        own_fluent_helpers(self)
         self._apply_accessibility()
         self._connect_controllers()
         self._restore_workspace()
@@ -306,9 +309,10 @@ class MainWindow(FluentWindow):
         self.navigationInterface.setMinimumExpandWidth(self._navigation_expand_threshold)
 
         registry = self._composition.registry
-        self.dashboard = DashboardPage(
+        self.dashboard = StationDashboardController(
             self._settings,
             registry,
+            parent=self,
             discovery_enabled=not self._simulation,
         )
         self._device_pages = {
@@ -324,6 +328,8 @@ class MainWindow(FluentWindow):
             lambda: self._navigate_to("keithley_characterization")
         )
         self.anritsu_page = self._device_pages["anritsu"]
+        self.anritsu_page.set_background_output_controller(self._controllers["keithley"])
+        self.anritsu_page.correction_workspace.set_simulation_mode(self._simulation)
         self.moke_box_page = self._device_pages["moke_box"]
         self.lakeshore_gaussmeter_page = self._device_pages["lakeshore_gaussmeter"]
         self.moke_box_page.field_workflow.bind_reference(
@@ -3873,6 +3879,16 @@ class MainWindow(FluentWindow):
             critical=True,
         )
         self._save_workspace()
+        if not self.dashboard.shutdown():
+            self._log("Application close is waiting for read-only discovery workers to finish.")
+            event.ignore()
+            return
+        if self.anritsu_page._background_assistant is not None:
+            self.anritsu_page._background_assistant.reject()
+        if not self.anritsu_page.correction_workspace.shutdown():
+            self._log("Application close is waiting for spectrum correction checkpoints and processing to finish.")
+            event.ignore()
+            return
         if not self.recipe_page.cancel_preflight():
             self._audit_record(
                 "Application close blocked: recipe validation is still stopping",
@@ -3934,6 +3950,7 @@ class MainWindow(FluentWindow):
         except Exception as exc:
             self._log(f"Manual spectrum archive close warning: {exc}")
         self.anritsu_page._analysis_controller.close()
+        self.anritsu_page._background_analysis_controller.close()
         if not DeviceController.close_all(self._controllers.values()):
             self._audit_record(
                 "Application close delayed: background device threads did not terminate cleanly within timeout",

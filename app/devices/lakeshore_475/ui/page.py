@@ -9,6 +9,7 @@ from datetime import datetime, timedelta, timezone
 from typing import TYPE_CHECKING
 
 import pyqtgraph as pg
+from app.ui.widgets.plot_ownership import create_plot_widget
 from PySide6.QtCore import QEvent, QTimer, Qt, Signal
 from PySide6.QtGui import QResizeEvent, QShowEvent
 from PySide6.QtWidgets import QButtonGroup, QFormLayout, QGridLayout, QHBoxLayout, QSizePolicy, QVBoxLayout, QWidget
@@ -142,7 +143,7 @@ class LakeShoreLiveWindow(StationDialog):
         controls.addStretch(1)
         layout.addLayout(controls)
 
-        self.plot = pg.PlotWidget(surface)
+        self.plot = create_plot_widget(surface)
         self.plot.setLabel("left", "Field", units="T")
         self.plot.setLabel("bottom", "Elapsed time", units="s")
         self.plot.showGrid(x=True, y=True, alpha=0.2)
@@ -408,7 +409,7 @@ class LakeShore475Page(QWidget):
         )
         plot_header.addWidget(self.plot_span)
         plot_layout.addLayout(plot_header)
-        self.history_plot = pg.PlotWidget(self.plot_card)
+        self.history_plot = create_plot_widget(self.plot_card)
         self.history_plot.setObjectName("lakeshoreHistoryPlot")
         self.history_plot.setLabel("left", "Field", units="T")
         self.history_plot.setLabel("bottom", "Elapsed time", units="s")

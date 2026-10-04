@@ -26,6 +26,9 @@ class SpectrumAnalysisParameters:
     peak_min_prominence_db: float = 3.0
     peak_max_count: int = 20
     peak_fit_models: bool = True
+    narrow_max_width_hz: float = 6e6
+    narrow_threshold_sigma: float = 6.0
+    narrow_protected_regions_hz: tuple[tuple[float, float], ...] = ()
 
 
 @dataclass(frozen=True, slots=True)
@@ -54,6 +57,9 @@ class SpectrumCleanupResult:
     stationary_interference_indices: tuple[int, ...]
     method: str
     unit: str = "dBm"
+    modified_bin_indices: tuple[int, ...] = ()
+    removed_peak_indices: tuple[int, ...] = ()
+    notes: tuple[str, ...] = ()
 
     @property
     def values(self) -> tuple[float, ...]:
@@ -98,6 +104,36 @@ def robust_noise_sigma_db(values_dbm: Sequence[float]) -> float:
 def _odd_window(point_count: int, preferred: int) -> int:
     window = max(3, min(preferred, point_count if point_count % 2 else point_count - 1))
     return window if window % 2 else window - 1
+
+
+def _linear_noise_sigma(values: Sequence[float]) -> float:
+    """Noise in source units, without logarithmic-unit numerical floors."""
+    array = np.asarray(values, dtype=float)
+    if array.ndim != 1 or array.size < 3 or not np.all(np.isfinite(array)):
+        raise ValueError("Noise estimation requires at least three finite values.")
+    scale = max(float(np.max(np.abs(array))), np.finfo(float).tiny)
+    normalized = array / scale
+    differences = np.diff(normalized)
+    mad = float(np.median(np.abs(differences - np.median(differences))))
+    return max(1.4826 * mad / math.sqrt(2.0), 64 * np.finfo(float).eps) * scale
+
+
+def bilateral_denoise_linear(values: Sequence[float], *, window: int = 9) -> tuple[float, ...]:
+    """Scale-invariant bilateral smoothing of signed linear power."""
+    array = np.asarray(values, dtype=float)
+    if array.ndim != 1 or array.size < 5 or not np.all(np.isfinite(array)):
+        raise ValueError("Denoising requires at least five finite linear values.")
+    scale = max(float(np.max(np.abs(array))), np.finfo(float).tiny)
+    normalized = array / scale
+    width = _odd_window(array.size, int(window))
+    radius = width // 2
+    frames = np.lib.stride_tricks.sliding_window_view(np.pad(normalized, radius, mode="edge"), width)
+    spatial = np.arange(-radius, radius + 1, dtype=float)
+    spatial_weights = np.exp(-0.5 * (spatial / max(radius / 1.8, 1.0)) ** 2)
+    sigma = max(2.5 * _linear_noise_sigma(normalized), 64 * np.finfo(float).eps)
+    weights = np.exp(-0.5 * ((frames - normalized[:, None]) / sigma) ** 2) * spatial_weights
+    filtered = np.sum(weights * frames, axis=1) / np.sum(weights, axis=1)
+    return tuple(float(value) for value in filtered * scale)
 
 
 def rolling_noise_floor_dbm(values_dbm: Sequence[float], *, window: int = 51) -> np.ndarray:
@@ -199,6 +235,7 @@ def clean_spectrum_dbm(
     mode: str,
     history_dbm: Sequence[Sequence[float]] = (),
     parameters: SpectrumAnalysisParameters | None = None,
+    frequencies_hz: Sequence[float] | None = None,
 ) -> SpectrumCleanupResult:
     return clean_spectrum_values(
         values_dbm,
@@ -206,6 +243,7 @@ def clean_spectrum_dbm(
         mode=mode,
         history_dbm=history_dbm,
         parameters=parameters,
+        frequencies_hz=frequencies_hz,
     )
 
 
@@ -216,6 +254,7 @@ def clean_spectrum_values(
     mode: str,
     history_dbm: Sequence[Sequence[float]] = (),
     parameters: SpectrumAnalysisParameters | None = None,
+    frequencies_hz: Sequence[float] | None = None,
 ) -> SpectrumCleanupResult:
     """Clean the numeric values of any displayed spectrum unit.
 
@@ -225,18 +264,35 @@ def clean_spectrum_values(
 
     params = parameters or SpectrumAnalysisParameters()
     values = tuple(float(value) for value in values)
-    sigma = robust_noise_sigma_db(values)
+    if mode.lower() == "narrow_reject":
+        from .narrow_spikes import filter_narrow_spikes
+
+        if frequencies_hz is None:
+            raise ValueError("Narrow-peak filtering needs a frequency axis in Hz.")
+        result = filter_narrow_spikes(frequencies_hz, values,
+            maximum_width_hz=params.narrow_max_width_hz,
+            threshold_sigma=params.narrow_threshold_sigma,
+            protected_regions_hz=params.narrow_protected_regions_hz)
+        return SpectrumCleanupResult(result.values, result.noise_scale, (),
+            "Narrow-peak rejection (display only)", unit, result.modified_indices,
+            result.peak_indices, result.notes)
+    sigma = _linear_noise_sigma(values) if unit == "W" else robust_noise_sigma_db(values)
     mode = mode.lower()
     if mode == "raw":
         return SpectrumCleanupResult(values, sigma, (), "Raw (no processing)", unit)
-    interference = detect_stationary_interference(
-        history_dbm,
-        min_frames=params.emi_min_frames,
-        threshold_db=params.emi_threshold_db,
-        max_std_db=params.emi_max_std_db,
+    interference = (
+        detect_stationary_interference(
+            history_dbm,
+            min_frames=params.emi_min_frames,
+            threshold_db=params.emi_threshold_db,
+            max_std_db=params.emi_max_std_db,
+        )
+        if mode in {"emi_reject", "auto_clean"}
+        else ()
     )
     if mode == "denoise":
-        cleaned = bilateral_denoise_dbm(values, window=params.denoise_window)
+        cleaned = (bilateral_denoise_linear(values, window=params.denoise_window)
+                   if unit == "W" else bilateral_denoise_dbm(values, window=params.denoise_window))
         method = "Edge-preserving bilateral denoise"
     elif mode == "emi_reject":
         cleaned = suppress_stationary_lines_dbm(values, interference)
@@ -247,7 +303,81 @@ def clean_spectrum_values(
         method = "Bilateral denoise + stationary-line rejection (display only)"
     else:
         raise ValueError(f"Unsupported spectrum cleanup mode: {mode!r}.")
-    return SpectrumCleanupResult(tuple(cleaned), sigma, interference, method, unit)
+    notes: tuple[str, ...] = ()
+    if mode in {"emi_reject", "auto_clean"}:
+        if len(history_dbm) < params.emi_min_frames:
+            notes = (
+                f"Stationary-line rejection needs history: {len(history_dbm)}/{params.emi_min_frames} frames.",
+            )
+        elif not interference:
+            notes = ("No stationary-line candidates found in the current history.",)
+    return SpectrumCleanupResult(tuple(cleaned), sigma, interference, method, unit, notes=notes)
+
+
+SPECTRUM_FILTER_ORDER = ("narrow_reject", "emi_reject", "denoise")
+SPECTRUM_FILTER_LABELS = {
+    "narrow_reject": "Narrow-peak rejection",
+    "emi_reject": "Stationary-line rejection",
+    "denoise": "Edge-preserving denoise",
+}
+
+
+def clean_spectrum_pipeline(
+    values: Sequence[float],
+    *,
+    unit: str,
+    modes: Sequence[str],
+    history: Sequence[Sequence[float]] = (),
+    parameters: SpectrumAnalysisParameters | None = None,
+    frequencies_hz: Sequence[float] | None = None,
+) -> SpectrumCleanupResult:
+    """Compose display filters in a stable order, preserving units and raw input.
+
+    Reject narrow extrema before smoothing can widen them. Classify stationary
+    lines on the source history, then denoise the resulting trace. A filter
+    unavailable for this grid is reported explicitly; subsequent filters still
+    receive the last valid intermediate result. Invalid source data is rejected
+    before any stage runs.
+    """
+    selected = set(modes)
+    unknown = selected.difference(SPECTRUM_FILTER_ORDER)
+    if unknown:
+        raise ValueError(f"Unsupported spectrum filters: {sorted(unknown)!r}.")
+    original = tuple(float(value) for value in values)
+    result = clean_spectrum_values(original, unit=unit, mode="raw", parameters=parameters)
+    methods: list[str] = []
+    notes: list[str] = []
+    interference: set[int] = set()
+    removed: set[int] = set()
+    for mode in SPECTRUM_FILTER_ORDER:
+        if mode not in selected:
+            continue
+        if mode == "emi_reject" and unit not in {"dBm", "dB"}:
+            notes.append(f"Stationary-line rejection requires dB or dBm; source unit is {unit}.")
+            continue
+        try:
+            stage = clean_spectrum_values(
+                result.values, unit=unit, mode=mode, history_dbm=history,
+                parameters=parameters, frequencies_hz=frequencies_hz,
+            )
+        except ValueError as exc:
+            notes.append(f"{SPECTRUM_FILTER_LABELS[mode]} unavailable: {exc}")
+            continue
+        result = stage
+        methods.append(result.method)
+        notes.extend(result.notes)
+        interference.update(result.stationary_interference_indices)
+        removed.update(result.removed_peak_indices)
+    modified = tuple(
+        index
+        for index, (before, after) in enumerate(zip(original, result.values, strict=True))
+        if before != after
+    )
+    return SpectrumCleanupResult(
+        result.values, (_linear_noise_sigma(original) if unit == "W" else robust_noise_sigma_db(original)), tuple(sorted(interference)),
+        " → ".join(methods) if methods else result.method, unit,
+        modified, tuple(sorted(removed)), tuple(notes),
+    )
 
 
 def _crossing_frequency(

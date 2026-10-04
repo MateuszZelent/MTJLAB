@@ -23,6 +23,10 @@ def _adapter(settings: StationSettings, simulation: bool) -> DeviceAdapter:
 def _dispatch(adapter: DeviceAdapter, operation: str, payload: object) -> object:
     if not isinstance(adapter, KeithleyAdapter):
         raise TypeError("Keithley module received an incompatible adapter.")
+    if operation.startswith("background_output_readback:"):
+        # The operation suffix correlates asynchronous replies, including errors,
+        # with one assistant request. A cancelled request cannot authorize another.
+        return adapter.read_output_states()
     actions = {
         "configure": lambda: adapter.configure_source(payload),
         "read_configuration": adapter.read_configuration,

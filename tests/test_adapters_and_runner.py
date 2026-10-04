@@ -57,6 +57,11 @@ class MemoryWriter:
     points: list[object] = field(default_factory=list)
     events: list[tuple[str, dict[str, object], str]] = field(default_factory=list)
     status: str | None = None
+    recipe_sweeps: list[object] = field(default_factory=list)
+
+    def store_recipe_spectrum_sweep(self, record) -> int:
+        self.recipe_sweeps.append(record)
+        return len(self.recipe_sweeps) - 1
 
     def append(self, point: object, trace: object = None) -> int:
         self.points.append((point, trace))

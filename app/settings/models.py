@@ -449,6 +449,82 @@ class AnritsuAcquisitionSettings(StrictModel):
         return self
 
 
+class SpectrumTemporalAverageSettings(StrictModel):
+    mode: Literal["block", "window", "ema_preview"] = "ema_preview"
+    time_constant: str = "1 s"
+    window_frames: StrictInt = Field(default=32, ge=1, le=100_000)
+
+    @model_validator(mode="after")
+    def validate_time(self) -> "SpectrumTemporalAverageSettings":
+        if parse_quantity(self.time_constant, DIMENSION_TIME).si_value <= 0:
+            raise ValueError("Correction time_constant must be positive.")
+        return self
+
+
+class SpectrumReferencePolicySettings(StrictModel):
+    mode: Literal["manual_refresh", "interleaved"] = "manual_refresh"
+    maximum_age: str | None = None
+    block_duration: str = "1 s"
+    signal_duration: str = "5 s"
+    minimum_sweeps: StrictInt = Field(default=2, ge=2, le=100_000)
+    maximum_reference_blocks: StrictInt = Field(default=256, ge=2, le=256)
+
+    @model_validator(mode="after")
+    def validate_age(self) -> "SpectrumReferencePolicySettings":
+        if self.maximum_age is not None and parse_quantity(self.maximum_age, DIMENSION_TIME).si_value <= 0:
+            raise ValueError("Reference maximum_age must be positive.")
+        for value in (self.block_duration, self.signal_duration):
+            if parse_quantity(value, DIMENSION_TIME).si_value <= 0:
+                raise ValueError("Interleaved REF and SIGNAL durations must be positive.")
+        return self
+
+
+class SpectrumCorrectionSettings(StrictModel):
+    """Quantitative corrections remain opt-in and never authorize hardware output."""
+
+    enabled: bool = False
+    method: Literal["reference_subtraction"] = "reference_subtraction"
+    calibration_duration: str = "60 s"
+    calibration_min_sweeps: StrictInt = Field(default=30, ge=2, le=100_000)
+    temporal_average: SpectrumTemporalAverageSettings = Field(
+        default_factory=SpectrumTemporalAverageSettings
+    )
+    reference_policy: SpectrumReferencePolicySettings = Field(
+        default_factory=SpectrumReferencePolicySettings
+    )
+    maximum_gap: str = "5 s"
+    render_interval: str = "50 ms"
+    diagnostics_interval: str = "1 s"
+    processing_queue_frames: StrictInt = Field(default=8, ge=1, le=256)
+    working_memory_limit_mib: StrictInt = Field(default=64, ge=1, le=4096)
+    archive_raw_frames: Literal[True] = True
+
+    @model_validator(mode="after")
+    def validate_times(self) -> "SpectrumCorrectionSettings":
+        for name in ("calibration_duration", "maximum_gap", "render_interval", "diagnostics_interval"):
+            if parse_quantity(getattr(self, name), DIMENSION_TIME).si_value <= 0:
+                raise ValueError(f"Spectrum correction {name} must be positive.")
+        if parse_quantity(self.render_interval, DIMENSION_TIME).si_value < .01:
+            raise ValueError("Spectrum correction render_interval must be at least 10 ms.")
+        return self
+
+    def processor_config(self):
+        from app.domain.spectrum_correction import CorrectionConfig
+
+        return CorrectionConfig(
+            average_mode=self.temporal_average.mode,
+            time_constant_s=parse_quantity(self.temporal_average.time_constant, DIMENSION_TIME).si_value,
+            window_frames=self.temporal_average.window_frames,
+            maximum_reference_age_s=(
+                None if self.reference_policy.maximum_age is None
+                else parse_quantity(self.reference_policy.maximum_age, DIMENSION_TIME).si_value
+            ),
+            maximum_gap_s=parse_quantity(self.maximum_gap, DIMENSION_TIME).si_value,
+            minimum_reference_sweeps=self.calibration_min_sweeps,
+            working_memory_limit_bytes=self.working_memory_limit_mib * 1024 * 1024,
+        )
+
+
 class AnritsuSignalGeneratorSettings(StrictModel):
     """Fail-closed contract for the optional MS2830A vector signal generator."""
 
@@ -498,6 +574,7 @@ class AnritsuSettings(StrictModel):
     identity: IdentitySettings
     safety: AnritsuSafety
     acquisition: AnritsuAcquisitionSettings = Field(default_factory=AnritsuAcquisitionSettings)
+    spectrum_correction: SpectrumCorrectionSettings = Field(default_factory=SpectrumCorrectionSettings)
     signal_generator: AnritsuSignalGeneratorSettings = Field(
         default_factory=AnritsuSignalGeneratorSettings
     )

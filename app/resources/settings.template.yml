@@ -380,6 +380,32 @@ devices:
       operation_complete_timeout: "30 s"
       live_refresh_interval: "500 ms"
       application_average_count: 200
+    spectrum_correction:
+      # Enabling processing never grants permission to energize hardware.
+      enabled: false
+      method: "reference_subtraction"
+      calibration_duration: "60 s"
+      calibration_min_sweeps: 30
+      temporal_average:
+        mode: "ema_preview"
+        time_constant: "1 s"
+        window_frames: 32
+      reference_policy:
+        mode: "manual_refresh"
+        # Unknown TTL is reported as unqualified, not infinitely valid.
+        maximum_age: null
+        # Starting values for operator-confirmed alternating blocks, not a
+        # qualification of drift, signal absence, or physical settling.
+        block_duration: "1 s"
+        signal_duration: "5 s"
+        minimum_sweeps: 2
+        maximum_reference_blocks: 256
+      maximum_gap: "5 s"
+      render_interval: "50 ms"
+      diagnostics_interval: "1 s"
+      processing_queue_frames: 8
+      working_memory_limit_mib: 64
+      archive_raw_frames: true
     signal_generator:
       # The historical driver used INST SG, FREQ, POW and OUTP. Keep this
       # unverified until the exact option and firmware pass HIL qualification.

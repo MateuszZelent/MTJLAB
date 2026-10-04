@@ -12,7 +12,10 @@ from datetime import datetime, timezone
 import json
 import math
 import re
-from typing import Any
+from typing import TYPE_CHECKING, Any
+
+if TYPE_CHECKING:
+    from numpy.typing import ArrayLike
 
 from app.devices.anritsu_ms2830a.adapter import SpectrumTrace
 from app.domain.models import MeasurementPoint
@@ -228,7 +231,7 @@ class ThatecHdf5Writer:
         point: MeasurementPoint,
         trace: SpectrumTrace | None,
         *,
-        processed_values: tuple[float, ...] | None = None,
+        processed_values: ArrayLike | None = None,
         processed_unit: str | None = None,
         processing_operation: str = "none",
     ) -> None:
@@ -587,7 +590,7 @@ class ThatecHdf5Writer:
     def _append_processed_spectrum(
         self,
         trace: SpectrumTrace | None,
-        values: tuple[float, ...] | None,
+        values: ArrayLike | None,
     ) -> None:
         assert self._processed_spectrum_row is not None
         assert self._processed_trace_points is not None

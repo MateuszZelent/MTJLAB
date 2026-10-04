@@ -9,7 +9,8 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 import numpy as np
 from PySide6.QtCore import QEvent
-from PySide6.QtWidgets import QApplication, QGridLayout, QWidget
+from PySide6.QtTest import QTest
+from PySide6.QtWidgets import QApplication, QWidget
 from qfluentwidgets import isDarkTheme
 
 from app.devices.anritsu_ms2830a.ui.page import (
@@ -189,9 +190,7 @@ class SpectrumPlotAndFloatingFixesTests(unittest.TestCase):
             page._show_trace(raw, update_controls=False)
 
             # Set cleanup mode to denoise and analysis source to processed
-            idx_cleanup = page.cleanup_mode.findData("denoise")
-            self.assertGreaterEqual(idx_cleanup, 0)
-            page.cleanup_mode.setCurrentIndex(idx_cleanup)
+            page.cleanup_filters["denoise"].setChecked(True)
 
             idx_source = page.analysis_source.findData("processed")
             self.assertGreaterEqual(idx_source, 0)
@@ -242,14 +241,14 @@ class SpectrumPlotAndFloatingFixesTests(unittest.TestCase):
                 noise_sigma_db=0.5,
                 stationary_interference_indices=(),
             )
-            page._cleanup_result = cleanup
-
             trace2 = SpectrumTrace(
                 frequencies_hz=freqs,
                 powers_dbm=(-21.0, -14.0, -26.0),
                 trace_name="TRAC1",
                 acquired_at_utc=datetime.datetime.now(datetime.timezone.utc),
             )
+            page._show_trace(trace2, update_controls=False)
+            page._cleanup_result = cleanup
             # New frame arrives:
             page._show_trace(trace2, update_controls=False)
 
@@ -434,6 +433,10 @@ class SpectrumPlotAndFloatingFixesTests(unittest.TestCase):
         settings = SettingsRepository(SETTINGS_TEMPLATE).load().settings
         page = AnritsuPage(controller, settings, single_sweep_available=True)
         try:
+            page.auto_peak_detection.setChecked(False)
+            # This test injects worker outcomes; the real asynchronous worker
+            # is exercised by the cleanup workflow tests.
+            page._analysis_controller.submit = MagicMock()
             freqs = (1.0e9, 2.0e9, 3.0e9)
             raw = SpectrumTrace(
                 frequencies_hz=freqs,
@@ -441,8 +444,7 @@ class SpectrumPlotAndFloatingFixesTests(unittest.TestCase):
                 trace_name="TRAC1",
                 acquired_at_utc=datetime.datetime.now(datetime.timezone.utc),
             )
-            idx_cleanup = page.cleanup_mode.findData("denoise")
-            page.cleanup_mode.setCurrentIndex(idx_cleanup)
+            page.cleanup_filters["denoise"].setChecked(True)
             page._show_trace(raw, update_controls=False)
 
             gen = page._analysis_generation
@@ -583,23 +585,31 @@ class SpectrumPlotAndFloatingFixesTests(unittest.TestCase):
         settings = SettingsRepository(SETTINGS_TEMPLATE).load().settings
         page = AnritsuPage(controller, settings, single_sweep_available=True)
         try:
-            layout = page.signal_analysis_card.layout()
-            self.assertIsInstance(layout, QGridLayout)
-            occupied_cells: dict[tuple[int, int], QWidget] = {}
-            for i in range(layout.count()):
-                item = layout.itemAt(i)
-                widget = item.widget()
-                if widget is not None:
-                    row, col, row_span, col_span = layout.getItemPosition(i)
-                    for r in range(row, row + row_span):
-                        for c in range(col, col + col_span):
-                            cell = (r, c)
-                            self.assertNotIn(
-                                cell,
-                                occupied_cells,
-                                f"Grid collision at cell {cell}: {widget} overlaps with {occupied_cells.get(cell)}"
-                            )
-                            occupied_cells[cell] = widget
+            page.show()
+            for width in (1500, 800):
+                page.resize(width, 900)
+                QTest.qWait(50)
+                QApplication.processEvents()
+                controls = [*page.cleanup_filters.values(), page.configure_analysis,
+                            page.open_peak_table, page.toggle_analysis_details]
+                for index, widget in enumerate(controls):
+                    self.assertTrue(widget.isVisible())
+                    self.assertTrue(page.filter_strip.rect().contains(widget.geometry()))
+                    for other in controls[index + 1:]:
+                        self.assertFalse(widget.geometry().intersects(other.geometry()))
+            page.resize(760, 550)
+            QTest.qWait(50)
+            page.toggle_analysis_details.click()
+            QTest.qWait(50)
+            details = [page.auto_peak_detection, page.highlight_peaks, page.overlay_analysis_source,
+                       page.analyze_peaks, page.clear_spectra_plot_button, page.analysis_status,
+                       page.open_peak_table]
+            for index, widget in enumerate(details):
+                self.assertTrue(widget.isVisible())
+                self.assertTrue(page.analysis_details.rect().contains(widget.geometry()))
+                for other in details[index + 1:]:
+                    self.assertFalse(widget.geometry().intersects(other.geometry()))
+            page.analysis_details_flyout.close()
         finally:
             page.close()
 
