@@ -92,6 +92,7 @@ from app.domain.errors import AuthorizationError, ConfigurationError
 from app.domain.quantities import DIMENSION_CURRENT, DIMENSION_DBM, DIMENSION_FREQUENCY, DIMENSION_TIME, DIMENSION_VOLTAGE, format_quantity_auto, parse_quantity
 from app.engine.compiler import ExecutionPlan, RecipeCompiler
 from app.engine.estimation import PlanEstimate, PlanEstimator
+from app.recipes.spectrum_processing import REFERENCE_OPERATIONS, parse_processing
 from app.recipes import (
     RecipeNode,
     RecipeRepository,
@@ -3417,6 +3418,12 @@ class RecipePage(QWidget):
         if node.type == "configure_anritsu":
             return "Anritsu spectrum configuration", "Analyzer setting", QStyle.StandardPixmap.SP_ComputerIcon
         if node.type == "acquire_reference":
+            if node.data.get("source_file"):
+                return (
+                    f"Load {node.data.get('file_kind', 'reference')} · {Path(str(node.data['source_file'])).name}",
+                    "Verified file · must match analyzer settings",
+                    QStyle.StandardPixmap.SP_DialogOpenButton,
+                )
             return (
                 f"Acquire reference spectrum · {node.data.get('trace', 'TRAC1')} · "
                 f"average {int(node.data.get('average_count', 1))}",
@@ -3425,6 +3432,16 @@ class RecipePage(QWidget):
             )
         if node.type == "acquire_spectrum":
             operation = str(node.data.get("reference_operation", "none"))
+            modes, _parameters = parse_processing(node.data.get("processing"))
+            if modes or operation == "subtract_power_signed":
+                labels = {"narrow_reject": "Narrow peaks", "emi_reject": "EMI lines", "denoise": "Denoise"}
+                stages = ([] if operation == "none" else [{value: label for label, value in REFERENCE_OPERATIONS}.get(operation, operation)])
+                stages.extend(labels[mode] for mode in modes)
+                return (
+                    f"Acquire spectrum · average {int(node.data.get('average_count', 1))} · " + " → ".join(stages),
+                    "RAW + processed spectrum",
+                    QStyle.StandardPixmap.SP_MediaPlay,
+                )
             if operation == "difference_db":
                 return (
                     f"Acquire spectrum - {node.data.get('trace', 'TRAC1')} - "
@@ -5262,6 +5279,7 @@ class RecipePage(QWidget):
         acquisition_data = (
             managed_acquisition.data if managed_acquisition is not None else node.data
         )
+        dialog.load_acquisition_options(acquisition_data)
         trace_index = dialog.trace.findText(str(acquisition_data.get("trace", "TRAC1")))
         if trace_index >= 0:
             dialog.trace.setCurrentIndex(trace_index)
@@ -5299,6 +5317,7 @@ class RecipePage(QWidget):
                 acquisition_reference_operation=str(
                     dialog.reference_operation.currentData() or "none"
                 ),
+                acquisition_options=dialog.acquisition_options(),
             )
             source = replace_recipe_node(
                 self._builder_source(), node_id=node.id, node=replacement
@@ -6009,6 +6028,7 @@ class RecipePage(QWidget):
         post_configuration_operation: str = "configure",
         acquisition_average_count: int = 1,
         acquisition_reference_operation: str = "none",
+        acquisition_options: dict | None = None,
     ) -> dict[str, object]:
         allowed = {
             "spectrum.start_frequency",
@@ -6044,14 +6064,8 @@ class RecipePage(QWidget):
             raise ConfigurationError(
                 "Anritsu acquisition average count must be between 1 and 9999."
             )
-        allowed_reference_operations = {
-            "none",
-            "difference_db",
-            "ratio_linear",
-            "add_power",
-            "subtract_power",
-            "multiply_linear",
-        }
+
+        allowed_reference_operations = {value for _label, value in REFERENCE_OPERATIONS}
         if acquisition_reference_operation not in allowed_reference_operations:
             raise ConfigurationError(
                 "Anritsu acquisition contains an unsupported reference operation."
@@ -6070,7 +6084,11 @@ class RecipePage(QWidget):
         ]
         if role != "configure":
             managed_id = managed_id or f"anritsu-acquire-{uuid4().hex[:8]}"
+            previous = next((child for child in node.children if child.id == managed_id), None)
+            options = (acquisition_options if acquisition_options is not None else previous.data if previous else {})
+            option_keys = ("source_file", "file_kind") if role == "acquire_reference" else ("processing",)
             acquisition: dict[str, object] = {
+                **{key: options[key] for key in option_keys if key in options},
                 "id": managed_id,
                 "type": role,
                 "trace": trace,
@@ -6081,7 +6099,7 @@ class RecipePage(QWidget):
                     {
                         "reference_operation": acquisition_reference_operation,
                         "store_raw": True,
-                        "store_processed": acquisition_reference_operation != "none",
+                        "store_processed": acquisition_reference_operation != "none" or bool(parse_processing(acquisition.get("processing"))[0]),
                     }
                 )
             children.append(acquisition)
@@ -6179,20 +6197,22 @@ class RecipePage(QWidget):
                 snapshot = self._anritsu_snapshot_from_mapping(
                     configuration, fallback=snapshot
                 )
+            managed = next((child for child in node.children if child.id == node.data.get("managed_acquisition_id")), None)
+            acquisition_data = managed.data if managed is not None else {}
             replacement = self._configured_anritsu_node(
                 node,
                 snapshot=snapshot,
                 parameter_actions=actions,
                 acquire_single=bool(node.data.get("acquire_single", False)),
-                trace=str(node.data.get("trace", "TRAC1")),
+                trace=str(acquisition_data.get("trace", node.data.get("trace", "TRAC1"))),
                 post_configuration_operation=str(
                     node.data.get("post_configuration_operation", "configure")
                 ),
                 acquisition_average_count=int(
-                    node.data.get("acquisition_average_count", 1)
+                    acquisition_data.get("average_count", node.data.get("acquisition_average_count", 1))
                 ),
                 acquisition_reference_operation=str(
-                    node.data.get("acquisition_reference_operation", "none")
+                    acquisition_data.get("reference_operation", node.data.get("acquisition_reference_operation", "none"))
                 ),
             )
             source = replace_recipe_node(
@@ -6257,6 +6277,9 @@ class RecipePage(QWidget):
             "reference_operation",
             "store_raw",
             "store_processed",
+            "processing",
+            "source_file",
+            "file_kind",
         ):
             replacement.pop(field, None)
         replacement.update(dialog.node_fields())

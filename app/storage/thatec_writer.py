@@ -277,6 +277,8 @@ class ThatecHdf5Writer:
                 processing_operation,
             )
         if self._processed_spectrum_row is not None:
+            if processed_values is not None and processed_unit != self._processed_unit:
+                raise ValueError("Processed spectrum units cannot change within one run.")
             self._append_processed_spectrum(trace, processed_values)
             self._last_processed_spectrum_appended = True
 

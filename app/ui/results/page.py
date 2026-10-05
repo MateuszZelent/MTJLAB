@@ -275,6 +275,9 @@ class ResultsPage(QWidget):
         self._thatec_tree_available = False
         self._result_request_id = 0
         self._result_task: ResultReadTask | None = None
+        self._read_pool = QThreadPool(self)
+        self._read_pool.setMaxThreadCount(1)
+        self._pending_completed_result: Path | None = None
         self._selected_artifact: Path | None = None
 
         layout = QVBoxLayout(self)
@@ -463,6 +466,7 @@ class ResultsPage(QWidget):
         # so a stale wide Pivot cannot leak beyond the current viewport.
         self.result_tabs._sync_navigation_mode()
         self.result_tabs._schedule_navigation_sync()
+        self._load_pending_completed_result()
 
     # ------------------------------------------------------------------
     # Public API (backwards-compatible)
@@ -494,6 +498,20 @@ class ResultsPage(QWidget):
                 "Select a recorded result",
                 "Choose a file from the browser to inspect its immutable contents.",
             )
+
+    def offer_completed_result(self, path: Path) -> None:
+        """Defer potentially large result imports until this page is visible."""
+        self._pending_completed_result = Path(path)
+        if self.isVisible():
+            self._load_pending_completed_result()
+
+    def _load_pending_completed_result(self) -> None:
+        path = self._pending_completed_result
+        if path is None or not self.isVisible():
+            return
+        self._pending_completed_result = None
+        self.refresh()
+        self.select_result_path(path)
 
     def set_output_directory(self, output_dir: str | Path) -> None:
         """Point Results at a result folder or the global Samples catalogue."""
@@ -591,7 +609,7 @@ class ResultsPage(QWidget):
             self._result_task = task
             task.signals.loaded.connect(self._on_result_loaded)
             task.signals.failed.connect(self._on_result_failed)
-            QThreadPool.globalInstance().start(task)
+            self._read_pool.start(task)
             return
         try:
             payload = _read_result_payload(path)
@@ -675,8 +693,29 @@ class ResultsPage(QWidget):
         self.result_state.hide()
 
     def closeEvent(self, event) -> None:
-        self._cancel_result_load()
+        if not self.shutdown():
+            event.ignore()
+            return
         super().closeEvent(event)
+
+    def shutdown(self, timeout_ms: int = 5_000) -> bool:
+        """Keep native readers alive until their pools have stopped."""
+        import time
+
+        self._pending_completed_result = None
+        self._cancel_result_load()
+        self._read_pool.clear()
+        self.file_browser._cancel_refresh()
+        self.file_browser._read_pool.clear()
+        self.spectrum_tab._invalidate_pending_reads()
+        self.heatmap_tab._invalidate_pending_read()
+        deadline = time.monotonic() + timeout_ms / 1000
+        for pool in (self._read_pool, self.file_browser._read_pool,
+                     self.spectrum_tab._read_pool, self.heatmap_tab._read_pool):
+            remaining = max(0, int((deadline-time.monotonic()) * 1000))
+            if not pool.waitForDone(remaining):
+                return False
+        return True
 
     def _show_result_state(
         self,

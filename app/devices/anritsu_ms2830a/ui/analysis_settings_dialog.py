@@ -89,6 +89,7 @@ class SpectrumAnalysisSettingsDialog(StationDialog):
         current_parameters: SpectrumAnalysisParameters | None = None,
         source_unit: str = "dBm",
         section: str = "all",
+        allow_temporal_average: bool = True,
     ) -> None:
         super().__init__(
             parent,
@@ -496,7 +497,7 @@ class SpectrumAnalysisSettingsDialog(StationDialog):
             card.setVisible(section != "peaks")
         emi_card.setVisible(section != "peaks" and not linear_source)
         peak_card.setVisible(section != "filters")
-        average_card.setVisible(section != "peaks")
+        average_card.setVisible(section != "peaks" and allow_temporal_average)
         self.peak_measure_filtered = CheckBox("Filtered preview", peak_card)
         self.peak_measure_filtered.setFixedWidth(150)
         self.peak_measure_filtered.setChecked(self._initial_parameters.peak_measure_filtered)

@@ -16,7 +16,7 @@ from app.devices.anritsu_ms2830a.adapter import (
     SpectrumConfig,
 )
 from app.devices.rigol_dg1000z.adapter import RigolChannelConfig, RigolOutputConfig
-from app.domain.errors import ConfigurationError, SafetyViolation
+from app.domain.errors import ConfigurationError, ExecutionError, SafetyViolation
 from app.domain.quantities import (
     DIMENSION_CURRENT,
     DIMENSION_DB,
@@ -256,6 +256,7 @@ class RecipeCompiler:
 
     def compile(self, recipe: Recipe) -> ExecutionPlan:
         actions: list[PlanAction] = []
+        self._reference_assets = {}
         self._recipe_nodes = {}
         self._active_axis_path = ()
         self._active_axis_context = None
@@ -409,8 +410,17 @@ class RecipeCompiler:
 
     @staticmethod
     def _validate_reference_flow(actions: list[PlanAction]) -> None:
+        from app.recipes.spectrum_processing import REFERENCE_UNITS
+
         reference_available = False
+        configurations = {}
+        processed_unit = None
         for action in actions:
+            if action.kind in {"configure_anritsu", "configure_anritsu_advanced"}:
+                config = action.payload["config"]
+                if configurations.get(action.kind) != config:
+                    reference_available = False
+                configurations[action.kind] = config
             if action.kind == "acquire_reference":
                 reference_available = True
                 continue
@@ -421,8 +431,17 @@ class RecipeCompiler:
             ):
                 raise ConfigurationError(
                     f"{action.node_id}: reference processing requires an earlier "
-                    "acquire_reference action."
+                    "acquire_reference action after the last analyzer settings change."
                 )
+            if action.kind == "acquire_spectrum" and action.payload.get("store_processed"):
+                operation = action.payload.get("reference_operation", "none")
+                unit = REFERENCE_UNITS[operation]
+                if processed_unit is not None and unit != processed_unit:
+                    raise ConfigurationError(
+                        f"{action.node_id}: processed spectrum units cannot change within one run "
+                        f"({processed_unit} to {unit}); use separate recipes for different physical quantities."
+                    )
+                processed_unit = unit
 
     @staticmethod
     def _validate_device_state_flow(actions: list[PlanAction]) -> None:
@@ -2404,6 +2423,15 @@ class RecipeCompiler:
                 )
             payload = {"checkpoint": bool(data.get("checkpoint", True))}
         elif node.type in {"acquire_reference", "acquire_spectrum"}:
+            if node.type == "acquire_spectrum" and ("source_file" in data or "file_kind" in data):
+                raise ConfigurationError(f"{node.id}: load reference files in an acquire_reference step.")
+            if node.type == "acquire_reference":
+                if "processing" in data:
+                    raise ConfigurationError(f"{node.id}: reference sources must remain unfiltered; apply filters to acquire_spectrum.")
+                if ("source_file" in data or "file_kind" in data) and (
+                    not isinstance(data.get("source_file"), str) or not data["source_file"].strip()
+                ):
+                    raise ConfigurationError(f"{node.id}: choose a reference/background source_file.")
             if self._settings.anritsu.acquisition.single_sweep_mode != "standard_scpi_opc":
                 raise SafetyViolation(
                     f"{node.type} requires the qualified Anritsu standard_scpi_opc protocol."
@@ -2421,29 +2449,58 @@ class RecipeCompiler:
                     f"{node.id}: average_count must be in the range 1..9999."
                 )
             payload["average_count"] = average_count
+            if node.type == "acquire_reference" and data.get("source_file"):
+                from pathlib import Path
+
+                from app.storage.recipe_reference import file_sha256, load_recipe_reference
+
+                path = Path(str(data["source_file"])).expanduser().resolve()
+                kind = str(data.get("file_kind", "reference"))
+                try:
+                    key = (str(path), kind)
+                    if key not in self._reference_assets:
+                        digest = file_sha256(path)
+                        _trace, count, _evidence = load_recipe_reference(path, kind)
+                        if file_sha256(path) != digest:
+                            raise ValueError("Reference file changed during preflight.")
+                        self._reference_assets[key] = (digest, count)
+                    digest, count = self._reference_assets[key]
+                except (OSError, ValueError, ExecutionError) as exc:
+                    raise ConfigurationError(f"{node.id}: cannot load reference: {exc}") from exc
+                payload.update(source_file=str(path), source_sha256=digest, file_kind=kind, average_count=count)
             if node.type == "acquire_spectrum":
+                from app.recipes.spectrum_processing import (
+                    REFERENCE_OPERATIONS,
+                    parse_processing,
+                    processing_mapping,
+                )
+
                 operation = str(data.get("reference_operation", "none")).strip().lower()
-                if operation not in {
-                    "none",
-                    "difference_db",
-                    "ratio_linear",
-                    "add_power",
-                    "subtract_power",
-                    "multiply_linear",
-                }:
+                if operation not in {value for _label, value in REFERENCE_OPERATIONS}:
                     raise ConfigurationError(
                         f"{node.id}: unsupported reference_operation {operation!r}."
                     )
+                try:
+                    filters, parameters = parse_processing(data.get("processing"))
+                except ValueError as exc:
+                    raise ConfigurationError(f"{node.id}: {exc}") from exc
+                if "emi_reject" in filters and (average_count < parameters.emi_min_frames
+                        or operation in {"ratio_linear", "multiply_linear", "subtract_power_signed"}):
+                    raise ConfigurationError(f"{node.id}: EMI requires dB/dBm and at least {parameters.emi_min_frames} raw sweeps per point.")
+                if filters:
+                    payload["processing"] = processing_mapping(filters, parameters)
                 store_raw = self._optional_boolean(data, "store_raw", True, node.id)
                 store_processed = self._optional_boolean(
-                    data, "store_processed", operation != "none", node.id
+                    data, "store_processed", operation != "none" or bool(filters), node.id
                 )
                 if not store_raw:
                     raise ConfigurationError(
                         f"{node.id}: RAW spectrum storage is required for scientific "
                         "provenance and processed-spectrum grid identity."
                     )
-                if store_processed and operation == "none":
+                if filters and not store_processed:
+                    raise ConfigurationError(f"{node.id}: selected filters require processed storage alongside RAW.")
+                if store_processed and operation == "none" and not filters:
                     raise ConfigurationError(
                         f"{node.id}: store_processed requires a reference_operation."
                     )

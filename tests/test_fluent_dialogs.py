@@ -64,8 +64,8 @@ class FluentDialogTests(unittest.TestCase):
         station = StationDialog()
         recipe = FluentRecipeDialog()
         try:
-            self.assertEqual(station.property("stationSurface"), "page")
-            self.assertEqual(recipe.property("stationSurface"), "page")
+            self.assertEqual(station.property("stationSurface"), "dialogChrome")
+            self.assertEqual(recipe.property("stationSurface"), "dialogChrome")
             self.assertTrue(station.testAttribute(Qt.WidgetAttribute.WA_StyledBackground))
         finally:
             station.close()
@@ -81,7 +81,7 @@ class FluentDialogTests(unittest.TestCase):
                 dialog.modal_shell.surface.objectName(), "stationModalSurface"
             )
             self.assertEqual(
-                dialog.modal_shell.surface.property("stationSurface"), "card"
+                dialog.modal_shell.surface.property("stationSurface"), "dialog"
             )
 
             dialog.resize(520, 360)

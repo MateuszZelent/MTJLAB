@@ -240,6 +240,8 @@ class FileBrowserPanel(QWidget):
         self._state_action: Callable[[], None] = self.browse_file
         self._refresh_request_id = 0
         self._refresh_task: ResultReadTask | None = None
+        self._read_pool = QThreadPool(self)
+        self._read_pool.setMaxThreadCount(1)
 
         self._all_summaries: list[RunSummary] = []
         self._filtered_summaries: list[RunSummary] = []
@@ -477,7 +479,7 @@ class FileBrowserPanel(QWidget):
             self._refresh_task = task
             task.signals.loaded.connect(self._on_refresh_loaded)
             task.signals.failed.connect(self._on_refresh_failed)
-            QThreadPool.globalInstance().start(task)
+            self._read_pool.start(task)
             return
         self._populate_summaries(
             Hdf5RunReader.list_runs(self._output_dir, recursive=True), previous
@@ -1055,4 +1057,8 @@ class FileBrowserPanel(QWidget):
 
     def closeEvent(self, event) -> None:
         self._cancel_refresh()
+        self._read_pool.clear()
+        if not self._read_pool.waitForDone(5_000):
+            event.ignore()
+            return
         super().closeEvent(event)

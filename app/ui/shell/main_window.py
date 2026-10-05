@@ -2539,9 +2539,8 @@ class MainWindow(FluentWindow):
         result_path = None
         if isinstance(result, dict) and result.get("path"):
             result_path = Path(str(result["path"]))
-        self.results_page.refresh()
         if result_path is not None:
-            self.results_page.select_result_path(result_path)
+            self.results_page.offer_completed_result(result_path)
         run_result = result["result"]
         state = str(getattr(getattr(run_result, "state", None), "value", "unknown"))
         error = getattr(run_result, "error", None)
@@ -3955,6 +3954,10 @@ class MainWindow(FluentWindow):
                 "worker is still active. Outputs were sent an emergency-OFF request. "
                 "Wait for the stop to finish, then close the application again.",
             )
+            event.ignore()
+            return
+        if not self.results_page.shutdown():
+            self._log("Application close is waiting for result readers to finish.")
             event.ignore()
             return
         if not self.elab_page.shutdown():

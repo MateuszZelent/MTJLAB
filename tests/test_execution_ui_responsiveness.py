@@ -6,7 +6,7 @@ from pathlib import Path
 
 import pytest
 import h5py
-from PySide6.QtCore import QObject, QTimer
+from PySide6.QtCore import QEvent, QObject, QTimer
 from PySide6.QtWidgets import QApplication
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
@@ -26,6 +26,8 @@ class GuiGapProbe(QObject):
         super().__init__()
         self._last = time.monotonic()
         self.maximum_gap_s = 0.0
+        self.phase_reader = None
+        self.max_gap_context = None
         self.ticks = 0
         self.timer = QTimer(self)
         self.timer.setInterval(interval_ms)
@@ -41,6 +43,8 @@ class GuiGapProbe(QObject):
 
     def _tick(self) -> None:
         now = time.monotonic()
+        if now - self._last > self.maximum_gap_s and self.phase_reader is not None:
+            self.max_gap_context = self.phase_reader()
         self.maximum_gap_s = max(self.maximum_gap_s, now - self._last)
         self._last = now
         self.ticks += 1
@@ -76,6 +80,7 @@ root:
       mode: current
       level: 0 A
       compliance: 67 mV
+      source_range: 10 mA
     - id: current-axis
       type: sweep
       target: keithley.B.current
@@ -109,6 +114,7 @@ root:
       mode: current
       level: 0 A
       compliance: 10 mV
+      source_range: 10 mA
     - id: outer
       type: sweep
       target: keithley.B.current
@@ -252,6 +258,8 @@ def test_1000_semantic_events_coalesce_to_bounded_model_flushes() -> None:
         assert page.ui_metrics.max_tree_update_duration_s < 0.250
     finally:
         page.close()
+        page.deleteLater()
+        app.sendPostedEvents(None, QEvent.Type.DeferredDelete)
         app.processEvents()
 
 
@@ -313,6 +321,8 @@ def test_wait_semantic_projection_preserves_duration_while_running() -> None:
         assert "WAIT completed · 2 s elapsed" in page.current_operation_detail.text()
     finally:
         page.close()
+        page.deleteLater()
+        app.sendPostedEvents(None, QEvent.Type.DeferredDelete)
         app.processEvents()
 
 
@@ -346,6 +356,8 @@ def test_semantic_execution_renders_one_tree_without_legacy_overlap() -> None:
         assert page.measurement_tree.geometry().height() >= 220
     finally:
         page.close()
+        page.deleteLater()
+        app.sendPostedEvents(None, QEvent.Type.DeferredDelete)
         app.processEvents()
 
 
@@ -368,6 +380,8 @@ def test_execution_workspace_is_bounded_while_tree_keeps_internal_scroll() -> No
         assert getattr(page.measurement_tree, "scrollDelagate", None) is not None
     finally:
         page.close()
+        page.deleteLater()
+        app.sendPostedEvents(None, QEvent.Type.DeferredDelete)
         app.processEvents()
 
 
@@ -393,6 +407,8 @@ def test_large_spectrum_preview_is_decimated_before_plotting() -> None:
         assert "10001 source values" in page.spectrum_preview.plot.plotItem.titleLabel.text
     finally:
         page.close()
+        page.deleteLater()
+        app.sendPostedEvents(None, QEvent.Type.DeferredDelete)
         app.processEvents()
 
 
@@ -411,6 +427,8 @@ def test_execution_page_owns_only_the_semantic_measurement_tree() -> None:
         assert not hasattr(page, "steps")
     finally:
         page.close()
+        page.deleteLater()
+        app.sendPostedEvents(None, QEvent.Type.DeferredDelete)
         app.processEvents()
 
 
@@ -423,6 +441,8 @@ def test_execution_tree_keeps_qt_event_loop_live_for_1000_points() -> None:
         spectrum_points=10_001,
     )
     probe = GuiGapProbe()
+    probe.phase_reader = lambda: {'points': window.run_monitor._stored_points,
+                                 'worker_running': window._run_controller.running}
     try:
         window.show()
         window._navigate_to("execution")
@@ -433,6 +453,20 @@ def test_execution_tree_keeps_qt_event_loop_live_for_1000_points() -> None:
             time.sleep(0.01)
         probe.start()
         result_path = start_and_wait_for_run(window, expected_points=1000)
+        import json
+        evidence = Path('artifacts/sweeps-spectrum')
+        evidence.mkdir(parents=True, exist_ok=True)
+        metrics = window.run_monitor.ui_metrics
+        (evidence / 'stress-runtime.json').write_text(json.dumps({
+            'stored_points': window.run_monitor._stored_points,
+            'gui_timer_ticks': probe.ticks, 'maximum_gui_gap_s': probe.maximum_gap_s,
+            'maximum_gap_context': probe.max_gap_context,
+            'max_tree_update_duration_s': metrics.max_tree_update_duration_s,
+            'max_preview_update_duration_s': metrics.max_preview_update_duration_s,
+            'result_import_pending': window.results_page._pending_completed_result is not None,
+            'result_reader_active': window.results_page._result_task is not None,
+            'result_path': str(result_path),
+        }, indent=2), encoding='utf-8')
         assert probe.ticks > 20
         assert probe.maximum_gap_s < 0.350
         metrics = window.run_monitor.ui_metrics
@@ -450,5 +484,6 @@ def test_execution_tree_keeps_qt_event_loop_live_for_1000_points() -> None:
                 for index in range(1000)
             )
     finally:
+        probe.timer.stop()
         window.close()
         app.processEvents()

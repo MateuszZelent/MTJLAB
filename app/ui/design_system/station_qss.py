@@ -29,8 +29,11 @@ def dialog_qss(tokens: ThemeTokens) -> str:
     default_text = tokens.background if accent_luma > 0.55 else "#ffffff"
     return f"""
 QDialog, QMessageBox, QInputDialog, QFileDialog {{
-    background: {tokens.background};
+    background: {tokens.dialog_surface};
     color: {tokens.text_primary};
+}}
+QDialog[stationDialog="true"] {{
+    background: {tokens.dialog_chrome};
 }}
 QDialog QLabel, QMessageBox QLabel, QInputDialog QLabel, QFileDialog QLabel {{
     color: {tokens.text_primary};

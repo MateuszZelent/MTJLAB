@@ -89,6 +89,8 @@ def apply_reference_operation(
         return tuple(res.tolist()), "dBm"
     if operation == "multiply_linear":
         return tuple((sig_mw * ref_mw).tolist()), "mW²"
+    if operation == "subtract_power_signed":
+        return tuple(((sig_mw - ref_mw) * 1e-3).tolist()), "W"
     raise ValueError(f"Unsupported reference operation: {operation}.")
 
 

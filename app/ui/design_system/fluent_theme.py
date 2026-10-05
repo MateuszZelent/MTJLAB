@@ -395,9 +395,11 @@ def _apply_station_card_frame(widget: QWidget, tokens: ThemeTokens) -> None:
     if not isinstance(widget, CardWidget):
         return
     marker = "/* station-card-frame */"
+    is_dialog_surface = widget.property("stationSurface") == "dialog"
+    color = tokens.dialog_surface if is_dialog_surface else tokens.surface
     set_background = getattr(widget, "setBackgroundColor", None)
     if callable(set_background):
-        set_background(QColor(tokens.surface))
+        set_background(QColor(color))
     if marker in widget.styleSheet():
         base = widget.styleSheet().split(marker, 1)[0].rstrip()
     else:
@@ -405,7 +407,7 @@ def _apply_station_card_frame(widget: QWidget, tokens: ThemeTokens) -> None:
     widget.setStyleSheet(
         f"{base}\n{marker}\n"
         "CardWidget {"
-        "background-color: palette(base);"
+        f"background-color: {color if is_dialog_surface else 'palette(base)'};"
         "border: 1px solid palette(mid);"
         "border-radius: 8px;"
         "}"
@@ -419,7 +421,11 @@ def _apply_station_surface(widget: QWidget, tokens: ThemeTokens) -> None:
         "surface": tokens.surface,
         "raised": tokens.surface_raised,
         "card": tokens.surface,
+        "dialog": tokens.dialog_surface,
+        "dialogChrome": tokens.dialog_chrome,
     }.get(str(surface))
+    if widget.property("stationDialog"):
+        color = tokens.dialog_chrome
     if widget.objectName() in {"fluentShellContent", "fluentShellSplitter"}:
         color = tokens.background
     if color is not None:

@@ -591,7 +591,7 @@ class QuickControlTests(unittest.TestCase):
             self.assertTrue(window.titleBar.maxBtn.isVisible())
             self.assertTrue(window.titleBar.closeBtn.isVisible())
             self.assertEqual(window.property("stationSurface"), "raised")
-            self.assertEqual(window.backdrop.property("stationSurface"), "raised")
+            self.assertEqual(window.backdrop.property("stationSurface"), "dialogChrome")
             self.assertEqual(window.surface.property("stationHover"), "disabled")
             self.assertEqual(window.backdrop.property("stationHover"), "disabled")
 
@@ -603,7 +603,7 @@ class QuickControlTests(unittest.TestCase):
                     window.backdrop.palette()
                     .color(QPalette.ColorRole.Window)
                     .name(),
-                    tokens_for(theme).surface_raised,
+                    tokens_for(theme).dialog_chrome,
                 )
 
             initial_width = window.surface.width()

@@ -32,6 +32,8 @@ from app.ui.common import line_edit as _line
 from app.ui.dialogs import StationMessageBox as QMessageBox
 from app.ui.recipes.sweep_editor import SweepGeneratorDialog
 from app.ui.recipes.fluent_dialog import FluentRecipeDialog
+from app.recipes.spectrum_processing import REFERENCE_OPERATIONS, REFERENCE_UNITS
+from app.ui.recipes.spectrum_options import RecipeSpectrumOptions
 
 __all__ = [
     "ActionNodeEditorDialog",
@@ -630,14 +632,7 @@ class FixedValueDialog(FluentRecipeDialog):
 class AnritsuAcquisitionEditorDialog(FluentRecipeDialog):
     """Edit trace and reference-processing policy without touching VISA."""
 
-    operations = (
-        ("None — raw spectrum", "none"),
-        ("Difference in dB", "difference_db"),
-        ("Linear ratio", "ratio_linear"),
-        ("Add power", "add_power"),
-        ("Subtract power", "subtract_power"),
-        ("Multiply linear", "multiply_linear"),
-    )
+    operations = REFERENCE_OPERATIONS
 
     def __init__(
         self,
@@ -652,7 +647,8 @@ class AnritsuAcquisitionEditorDialog(FluentRecipeDialog):
             if self._reference_only
             else "Anritsu spectrum acquisition"
         )
-        self.setMinimumSize(480, 300)
+        self.setMinimumSize(600, 480)
+        self.resize(660, 610)
         surface = self.use_modal_shell_content().surface
         layout = self.modal_content_layout(spacing=10)
         heading = BodyLabel(
@@ -681,6 +677,7 @@ class AnritsuAcquisitionEditorDialog(FluentRecipeDialog):
             "Every complete raw sweep is archived. Spectra are averaged in linear mW, never directly in dBm."
         )
         form.addRow("Average complete spectra", self.average_count)
+        self.average_count_label = form.labelForField(self.average_count)
         self.reference_operation = ComboBox(surface)
         for label, value in self.operations:
             self.reference_operation.addItem(label, userData=value)
@@ -709,6 +706,9 @@ class AnritsuAcquisitionEditorDialog(FluentRecipeDialog):
             self.store_raw.hide()
             self.store_processed.hide()
         layout.addLayout(form)
+        self.processing_options = RecipeSpectrumOptions(surface, reference_only=self._reference_only, fields=node.data)
+        layout.addWidget(self.processing_options)
+        self.processing_options.changed.connect(self._operation_changed)
         layout.addStretch(1)
         footer = QHBoxLayout()
         footer.addStretch(1)
@@ -728,10 +728,27 @@ class AnritsuAcquisitionEditorDialog(FluentRecipeDialog):
             self._operation_changed
         )
         self._operation_changed()
+        if operation != "none" and not any(box.isChecked() for box in self.processing_options.filters.values()):
+            self.store_processed.setChecked(bool(node.data.get("store_processed", True)))
 
     def _operation_changed(self) -> None:
-        processed = self.reference_operation.currentData() != "none"
+        operation = self.reference_operation.currentData()
+        self.processing_options.source_unit = REFERENCE_UNITS[operation]
+        emi_allowed = self.processing_options.source_unit in {"dB", "dBm"}
+        emi = self.processing_options.filters["emi_reject"]
+        emi.setEnabled(emi_allowed or emi.isChecked())
+        self.processing_options.filters["emi_reject"].setToolTip("EMI lines requires dB/dBm and 3 to 24 sweeps within this point.")
+        filters = any(box.isChecked() for box in self.processing_options.filters.values())
+        processed = self.reference_operation.currentData() != "none" or filters
+        acquiring = not self._reference_only or self.processing_options.source.currentData() == "acquire"
+        self.average_count.setEnabled(acquiring)
+        self.average_count.setVisible(acquiring)
+        self.average_count_label.setVisible(acquiring)
         self.store_processed.setEnabled(processed)
+        if processed:
+            self.store_processed.setChecked(True)
+        if filters:
+            self.store_processed.setEnabled(False)
         if not processed:
             self.store_processed.setChecked(False)
 
@@ -740,7 +757,14 @@ class AnritsuAcquisitionEditorDialog(FluentRecipeDialog):
             "trace": self.trace.currentText(),
             "average_count": self.average_count.value(),
         }
+        fields.update(self.processing_options.node_fields())
         if not self._reference_only:
+            if self.processing_options.filters["emi_reject"].isChecked():
+                if self.processing_options.source_unit not in {"dB", "dBm"}:
+                    raise ValueError("EMI lines requires dB/dBm. Uncheck EMI for a linear or signed-W result.")
+                required = self.processing_options._parameters.emi_min_frames
+                if self.average_count.value() < required:
+                    raise ValueError(f"EMI lines requires at least {required} complete spectra within this point.")
             fields.update(
                 {
                     "reference_operation": str(
@@ -755,6 +779,11 @@ class AnritsuAcquisitionEditorDialog(FluentRecipeDialog):
     def accept(self) -> None:
         # RAW remains checked and disabled above; processed storage is an
         # optional derived record selected independently.
+        try:
+            self.node_fields()
+        except ValueError as exc:
+            QMessageBox.warning(self, "Spectrum acquisition", str(exc))
+            return
         super().accept()
 
 

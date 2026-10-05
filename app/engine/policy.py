@@ -69,7 +69,7 @@ class ExecutionPolicy:
         if action.kind in {"update_moke_voltage", "stop_moke_voltage"}:
             return float(action.payload["ramp_timeout_s"]) + self.watchdog_grace_s
         if action.kind in {"acquire_reference", "acquire_spectrum"}:
-            average_count = int(action.payload.get("average_count", 1))
+            average_count = 1 if action.payload.get("source_file") else int(action.payload.get("average_count", 1))
             return (
                 average_count * self.acquisition_timeout_s
                 + self.command_timeout_s

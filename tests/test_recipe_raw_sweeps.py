@@ -81,7 +81,8 @@ def execute(path, *, failure=False, monkeypatch=None, source=SOURCE, configurati
             SimpleNamespace(valid=False, errors=[SimpleNamespace(path="injected", message="validation fault")]))
     try:
         result = RecipeRunner(rigol=rigol, keithley=keithley, anritsu=anritsu, writer=writer,
-                              on_event=None if events is None else lambda *args: events.append(args)).run(plan)
+                              on_event=None if events is None else lambda *args: events.append(args),
+                              on_telemetry=None if events is None else lambda *args: events.append(args)).run(plan)
         return result, acquired
     finally:
         for adapter in (anritsu, rigol, keithley):

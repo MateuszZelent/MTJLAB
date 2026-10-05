@@ -23,6 +23,7 @@ qualification-sim*/
 tmp/
 artifacts/
 recipes/*
+!recipes/example_spectrum_background_filters.yml
 .tmp-characterization/20260903T115022.922794Z_responsiveness.csv
 *.csv
 *.h5

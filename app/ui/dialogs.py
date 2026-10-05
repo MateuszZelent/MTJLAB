@@ -5,9 +5,7 @@ from __future__ import annotations
 from PySide6.QtCore import QEvent, Qt, Signal
 from PySide6.QtGui import (
     QColor,
-    QLinearGradient,
     QPainter,
-    QPalette,
     QPen,
     QResizeEvent,
 )
@@ -28,37 +26,10 @@ from qfluentwidgets import (
     PushButton,
     SimpleCardWidget,
     SubtitleLabel,
+    isDarkTheme,
 )
 
-
-def _blend_modal_colors(first: QColor, second: QColor, weight: float) -> QColor:
-    amount = max(0.0, min(1.0, weight))
-    return QColor.fromRgb(
-        round(first.red() * (1.0 - amount) + second.red() * amount),
-        round(first.green() * (1.0 - amount) + second.green() * amount),
-        round(first.blue() * (1.0 - amount) + second.blue() * amount),
-    )
-
-
-class _StationModalBackdrop(QWidget):
-    """Shared quiet elevation layer behind station modal surfaces."""
-
-    def paintEvent(self, event) -> None:  # noqa: N802 - Qt override
-        del event
-        palette = self.palette()
-        window = palette.color(QPalette.ColorRole.Window)
-        base = palette.color(QPalette.ColorRole.Base)
-        accent = palette.color(QPalette.ColorRole.Highlight)
-        gradient = QLinearGradient(0, 0, 0, max(1, self.height()))
-        gradient.setColorAt(0.0, _blend_modal_colors(window.lighter(106), accent, 0.08))
-        gradient.setColorAt(0.52, window)
-        gradient.setColorAt(1.0, _blend_modal_colors(base.darker(104), accent, 0.04))
-
-        painter = QPainter(self)
-        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
-        painter.setBrush(gradient)
-        painter.setPen(QPen(palette.color(QPalette.ColorRole.Mid), 1))
-        painter.drawRoundedRect(self.rect().adjusted(0, 0, -1, -1), 16, 16)
+from app.ui.design_system.tokens import tokens_for
 
 
 class StationCardWidget(SimpleCardWidget):
@@ -69,11 +40,6 @@ class StationCardWidget(SimpleCardWidget):
         self.setProperty("stationHover", "disabled")
 
 
-def _add_station_modal_shadow(widget: QWidget, *, blur: float = 32, y: float = 6) -> None:
-    """Retained for API compatibility; hardware DWM provides native frameless shadow."""
-    del widget, blur, y
-
-
 class StationModalShell(QWidget):
     """Reusable raised Fluent surface for station dialogs and floating tools."""
 
@@ -81,22 +47,22 @@ class StationModalShell(QWidget):
         self,
         parent: QWidget | None = None,
         *,
-        outer_margins: tuple[int, int, int, int] = (10, 10, 10, 10),
-        backdrop_margins: tuple[int, int, int, int] = (10, 10, 10, 10),
-        surface_margins: tuple[int, int, int, int] = (16, 14, 16, 14),
+        outer_margins: tuple[int, int, int, int] = (0, 0, 0, 0),
+        backdrop_margins: tuple[int, int, int, int] = (0, 0, 0, 0),
+        surface_margins: tuple[int, int, int, int] = (24, 20, 24, 20),
     ) -> None:
         super().__init__(parent)
         self.setObjectName("stationModalShell")
-        self.setProperty("stationSurface", "raised")
+        self.setProperty("stationSurface", "dialogChrome")
         self.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
 
         self.outer_layout = QVBoxLayout(self)
         self.outer_layout.setContentsMargins(*outer_margins)
         self.outer_layout.setSpacing(0)
 
-        self.backdrop = _StationModalBackdrop(self)
+        self.backdrop = QWidget(self)
         self.backdrop.setObjectName("stationModalBackdrop")
-        self.backdrop.setProperty("stationSurface", "raised")
+        self.backdrop.setProperty("stationSurface", "dialogChrome")
         self.backdrop.setProperty("stationHover", "disabled")
         self.backdrop.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
         self.backdrop.setSizePolicy(
@@ -110,7 +76,7 @@ class StationModalShell(QWidget):
 
         self.surface = StationCardWidget(self.backdrop)
         self.surface.setObjectName("stationModalSurface")
-        self.surface.setProperty("stationSurface", "card")
+        self.surface.setProperty("stationSurface", "dialog")
         self.surface.setSizePolicy(
             QSizePolicy.Policy.Expanding,
             QSizePolicy.Policy.Expanding,
@@ -122,7 +88,6 @@ class StationModalShell(QWidget):
         # dialogs without forcing existing subclasses to change their layout.
         self.content_layout = self.surface_layout
         self.backdrop_layout.addWidget(self.surface)
-        _add_station_modal_shadow(self.surface)
 
 
 class StationDialog(FramelessDialog):
@@ -138,6 +103,7 @@ class StationDialog(FramelessDialog):
         modal_shell_surface_margins: tuple[int, int, int, int] | None = None,
     ) -> None:
         super().__init__(parent)
+        self.setProperty("stationDialog", True)
         self._is_resizable = False
         self.setTitleBar(FluentTitleBar(self))
         self.titleBar.minBtn.hide()
@@ -145,7 +111,7 @@ class StationDialog(FramelessDialog):
         self.titleBar.setDoubleClickEnabled(False)
         self.titleBar.closeBtn.clicked.disconnect()
         self.titleBar.closeBtn.clicked.connect(self.close)
-        self.setProperty("stationSurface", "page")
+        self.setProperty("stationSurface", "dialogChrome")
         self.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
         modal_shell_kwargs: dict[str, tuple[int, int, int, int]] = {}
         if modal_shell_outer_margins is not None:
@@ -221,6 +187,21 @@ class StationDialog(FramelessDialog):
         self.modal_shell.setGeometry(
             self.rect().adjusted(inset, top_inset, -inset, -inset)
         )
+        # Keep the native Fluent title bar inside the visible window outline.
+        self.titleBar.move(1, 1)
+        self.titleBar.resize(max(0, self.width() - 2), self.titleBar.height())
+
+    def paintEvent(self, event) -> None:
+        super().paintEvent(event)
+        tokens = tokens_for("dark" if isDarkTheme() else "light")
+        painter = QPainter(self)
+        # DWM supplies the shadow. This independent outline remains visible on
+        # remote desktops and platforms where compositor shadows are absent.
+        painter.setPen(QPen(QColor(tokens.dialog_border), 1))
+        painter.drawRect(self.rect().adjusted(0, 0, -1, -1))
+        painter.setPen(QPen(QColor(tokens.border), 1))
+        title_bottom = self.titleBar.geometry().bottom() + 1
+        painter.drawLine(1, title_bottom, self.width() - 2, title_bottom)
 
     def _update_modal_shell_stacking(self) -> None:
         if self._modal_shell_is_content:

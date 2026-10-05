@@ -3640,6 +3640,12 @@ root:
                 "SWE:POIN?": "101",
                 "TRAC? TRAC1": values,
                 "INIT:SWP?": "0",
+                "FREQ:CENT?": "1500000", "FREQ:SPAN?": "1000000",
+                "BAND:AUTO?": "1", "BAND?": "10000",
+                "BAND:VID:AUTO?": "1", "BAND:VID:MODE?": "VID", "BAND:VID?": "10000",
+                "SWE:TIME:AUTO?": "1", "SWE:TIME?": "0.1",
+                "POW:ATT:AUTO?": "0", "POW:ATT?": "10", "DET?": "RMS",
+                "INIT:CONT?": "0", "AVER:COUN?": "1",
             }
         )
         rigol = RigolAdapter(self.settings, session_factory=FakeVisaSessionFactory(rigol_session))

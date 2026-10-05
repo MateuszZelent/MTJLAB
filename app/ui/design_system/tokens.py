@@ -21,6 +21,9 @@ class ThemeTokens:
     surface: str
     surface_raised: str
     border: str
+    dialog_surface: str
+    dialog_chrome: str
+    dialog_border: str
     text_primary: str
     text_muted: str
     accent: str
@@ -47,6 +50,7 @@ _LIGHT = ThemeTokens(
     # canvases use white so dense measurement grids remain crisp.
     background="#e6e9ef", surface="#eff1f5", surface_raised="#dce0e8",
     border="#bcc0cc", text_primary="#4c4f69", text_muted="#6c6f85",
+    dialog_surface="#f8f9fc", dialog_chrome="#eff1f5", dialog_border="#7c8199",
     accent="#1e66f5", focus="#7287fd", success="#40a02b",
     caution="#df8e1d", danger="#d20f39", neutral="#7c7f93",
     output_active="#d20f39", compliance="#df8e1d", interlock="#df8e1d",
@@ -60,6 +64,7 @@ _DARK = ThemeTokens(
     # Catppuccin Mocha.
     background="#1e1e2e", surface="#181825", surface_raised="#313244",
     border="#45475a", text_primary="#cdd6f4", text_muted="#a6adc8",
+    dialog_surface="#292a3b", dialog_chrome="#313244", dialog_border="#7f849c",
     accent="#89b4fa", focus="#b4befe", success="#a6e3a1",
     caution="#f9e2af", danger="#f38ba8", neutral="#9399b2",
     output_active="#f38ba8", compliance="#f9e2af", interlock="#f9e2af",

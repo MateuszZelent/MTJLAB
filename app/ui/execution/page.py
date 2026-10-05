@@ -1773,7 +1773,9 @@ class RunMonitorPage(QWidget):
 
     def update_spectrum_preview(self, data: dict[str, object]) -> None:
         frequencies = data.get("frequency_hz")
-        powers = data.get("power_dbm")
+        processed = isinstance(data.get("processed_values"), (tuple, list))
+        powers = data.get("processed_values") if processed else data.get("power_dbm")
+        unit = str(data.get("processed_unit") or "dBm") if processed else "dBm"
         if not isinstance(frequencies, (tuple, list)) or not isinstance(powers, (tuple, list)):
             return
         preview_started = time.perf_counter()
@@ -1797,6 +1799,13 @@ class RunMonitorPage(QWidget):
         trace_label = (
             "Stored reference" if preview_kind == "reference" else "Stored spectrum"
         )
+        if processed:
+            trace_label = "Processed spectrum"
+        identity = (trace_label, unit)
+        if getattr(self, "_spectrum_preview_identity", None) != identity:
+            self.spectrum_preview.clear()
+            self.spectrum_preview.set_labels(x="Frequency", x_unit="Hz", y="Processed amplitude" if processed else "Amplitude", y_unit=unit)
+            self._spectrum_preview_identity = identity
         self.spectrum_preview.set_trace(
             trace_label,
             frequency_values,

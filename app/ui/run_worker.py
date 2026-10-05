@@ -443,6 +443,7 @@ class RunWorker(QObject):
                 )
                 writer = Hdf5RunWriter(
                     result_path,
+                    isolate_validation=True,
                     recipe_source=self._plan.recipe_source,
                     settings_source=settings_source,
                     plan_hash=self._plan.sha256,
@@ -461,6 +462,7 @@ class RunWorker(QObject):
             else:
                 writer = Hdf5RunWriter.resume(
                     self._recovery.path,
+                    isolate_validation=True,
                     recipe_source=self._plan.recipe_source,
                     settings_source=settings_source,
                     plan_hash=self._plan.sha256,

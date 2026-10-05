@@ -1,0 +1,40 @@
+# Analyzer-only example. Configure source operating points in explicit device
+# steps: choose the background operating point before reference, then the signal
+# operating point before measurement. This example never changes source outputs.
+schema_version: 1
+name: Spectrum background and filters
+root:
+  id: spectrum-sequence
+  type: sequence
+  children:
+    - id: analyzer-settings
+      type: configure_anritsu
+      start_frequency: "200 MHz"
+      stop_frequency: "1.2 GHz"
+      reference_level: "0 dBm"
+      points: 1001
+    - id: background
+      type: acquire_reference
+      average_count: 30
+      # To use an existing verified file, add:
+      # source_file: "measurements/background.h5"
+      # file_kind: background  # or reference for a saved reference spectrum
+      # File sweep count replaces average_count; no reference sweeps are taken.
+    - id: measurement
+      type: acquire_spectrum
+      average_count: 5
+      reference_operation: subtract_power_signed
+      store_raw: true
+      store_processed: true
+      processing:
+        filters: [narrow_reject, denoise]
+        parameters:
+          narrow_max_width: "5 MHz"
+          narrow_threshold_sigma: 6
+          denoise_window: 9
+          protected_bands: [["800 MHz", "900 MHz"]]
+# Each point has its own averaging block; frames never cross sweep setpoints.
+# EMI lines is available for dB/dBm only, with 3..24 reference-history frames
+# within the current signal point (default 5); it is not valid for signed W.
+# RAW sweeps, reference, mean spectrum and derived result are archived separately.
+# Derived filtering does not qualify signal absence or measurement uncertainty.

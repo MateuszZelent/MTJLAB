@@ -90,6 +90,14 @@ class PlanEstimator:
             elif action.kind == "configure_anritsu_advanced":
                 retryable_operations += 1
             elif action.kind in {"acquire_reference", "acquire_spectrum"}:
+                if action.payload.get("source_file"):
+                    spectrum_extra_bytes += 8 * latest_spectrum_points * 8 + 16384
+                    warnings.append(f"{action.node_id}: loads a verified file; no reference sweeps are acquired.")
+                    continue
+                if action.payload.get("source_file"):
+                    spectrum_extra_bytes += 8 * latest_spectrum_points * 8 + 16384
+                    warnings.append(f"{action.node_id}: loads a verified file; no reference sweeps are acquired.")
+                    continue
                 average_count = int(action.payload.get("average_count", 1))
                 # Each individual raw source is durable in addition to the
                 # public averaged spectrum/reference representation.

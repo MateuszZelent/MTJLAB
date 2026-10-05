@@ -26,6 +26,7 @@ from app.devices.anritsu_ms2830a.ui.page import (
 from app.domain.errors import ConfigurationError
 from app.domain.quantities import DIMENSION_DBM, DIMENSION_FREQUENCY, parse_quantity
 from app.recipes import RecipeNode
+from app.recipes.spectrum_processing import REFERENCE_OPERATIONS
 from app.settings.models import StationSettings
 from app.ui.common import line_edit as _line
 from app.ui.recipes.sweep_editor import SweepGeneratorDialog
@@ -135,21 +136,14 @@ class AnritsuNodeEditorDialog(FluentRecipeDialog):
         right_layout.addWidget(self.average_count_label, 3, 0)
         right_layout.addWidget(self.average_count, 3, 1)
         self.reference_operation = ComboBox(right)
-        for label, value in (
-            ("None — raw spectrum", "none"),
-            ("Difference in dB", "difference_db"),
-            ("Linear ratio", "ratio_linear"),
-            ("Add power", "add_power"),
-            ("Subtract power", "subtract_power"),
-            ("Multiply linear", "multiply_linear"),
-        ):
+        for label, value in REFERENCE_OPERATIONS:
             self.reference_operation.addItem(label, userData=value)
         self.reference_operation_label = BodyLabel("Reference processing")
         right_layout.addWidget(self.reference_operation_label, 4, 0)
         right_layout.addWidget(self.reference_operation, 4, 1)
         self.parameter_selectors: dict[str, ComboBox] = {}
         for row, (parameter_id, label, sweepable) in enumerate(
-            self.parameter_specs, start=5
+            self.parameter_specs, start=6
         ):
             right_layout.addWidget(BodyLabel(label), row, 0)
             selector = ComboBox(right)
@@ -160,7 +154,7 @@ class AnritsuNodeEditorDialog(FluentRecipeDialog):
             selector.currentIndexChanged.connect(self._selection_changed)
             self.parameter_selectors[parameter_id] = selector
             right_layout.addWidget(selector, row, 1)
-        operation_row = len(self.parameter_specs) + 5
+        operation_row = len(self.parameter_specs) + 6
         self.trace = ComboBox(right)
         self.trace.addItems(("TRAC1",))
         self.trace_label = BodyLabel("Trace")
@@ -181,6 +175,10 @@ class AnritsuNodeEditorDialog(FluentRecipeDialog):
         note.setObjectName("recipeHint")
         note.setWordWrap(True)
         right_layout.addWidget(note, operation_row + 3, 0, 1, 2)
+        self._acquisition_options = {}
+        self.acquisition_options_button = PushButton("Acquisition filters / reference source…", right)
+        self.acquisition_options_button.clicked.connect(self._edit_acquisition_options)
+        right_layout.addWidget(self.acquisition_options_button, 5, 0, 1, 2)
         right_layout.setRowStretch(operation_row + 4, 1)
         right_scroll = ScrollArea(surface)
         right_scroll.setWidgetResizable(True)
@@ -227,6 +225,10 @@ class AnritsuNodeEditorDialog(FluentRecipeDialog):
         role = self.selected_node_role()
         acquisition = role != "configure"
         spectrum = role == "acquire_spectrum"
+        self.acquisition_options_button.setVisible(acquisition)
+        self.acquisition_options_button.setText(
+            "Filters and reference operation…" if spectrum else "Reference / background source…"
+        )
         for widget in (
             self.acquisition_hint,
             self.average_count_label,
@@ -237,6 +239,9 @@ class AnritsuNodeEditorDialog(FluentRecipeDialog):
             widget.setVisible(acquisition)
         self.reference_operation_label.setVisible(spectrum)
         self.reference_operation.setVisible(spectrum)
+        imported = role == "acquire_reference" and bool(self._acquisition_options.get("source_file"))
+        self.average_count.setVisible(acquisition and not imported)
+        self.average_count_label.setVisible(acquisition and not imported)
         self.apply_button.setText(
             {
                 "configure": "Apply spectrum settings",
@@ -254,6 +259,27 @@ class AnritsuNodeEditorDialog(FluentRecipeDialog):
 
     def selected_node_role(self) -> str:
         return str(self.node_role.currentData() or "configure")
+
+    def load_acquisition_options(self, fields):
+        self._acquisition_options = {key: fields[key] for key in ("processing", "source_file", "file_kind") if key in fields}
+        self._role_changed()
+
+    def acquisition_options(self):
+        keys = ("source_file", "file_kind") if self.selected_node_role() == "acquire_reference" else ("processing",)
+        return {key: self._acquisition_options[key] for key in keys if key in self._acquisition_options}
+
+    def _edit_acquisition_options(self):
+        from app.ui.recipes.common_dialogs import AnritsuAcquisitionEditorDialog
+
+        fields = {**self.acquisition_options(), "trace": self.trace.currentText(),
+                  "average_count": self.average_count.value(), "reference_operation": self.reference_operation.currentData()}
+        dialog = AnritsuAcquisitionEditorDialog(RecipeNode("acquisition-options", self.selected_node_role(), fields), self)
+        if dialog.exec() == QDialog.DialogCode.Accepted:
+            values = dialog.node_fields()
+            self.load_acquisition_options(values)
+            self.average_count.setValue(values["average_count"])
+            self.reference_operation.setCurrentIndex(self.reference_operation.findData(values.get("reference_operation", "none")))
+        dialog.deleteLater()
 
     def resizeEvent(self, event: object) -> None:
         super().resizeEvent(event)  # type: ignore[arg-type]

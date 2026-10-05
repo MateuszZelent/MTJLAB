@@ -275,6 +275,10 @@ class MeasurementTreeModel(QAbstractItemModel):
         return icon
 
     def _value_text(self, ref: _NodeRef) -> str:
+        if ref.node.data.get("type") in {"acquire_spectrum", "acquire_reference"}:
+            from app.recipes.spectrum_processing import acquisition_summary
+
+            return acquisition_summary(ref.node.data, reference_only=ref.node.data["type"] == "acquire_reference")
         state = self._descendant_state(ref)
         if (
             ref.node.kind is SemanticNodeKind.ACTION
@@ -390,6 +394,8 @@ class MeasurementTreeModel(QAbstractItemModel):
                 SemanticNodeKind.GENERATED_SAFETY: "AUTO",
             }.get(node.kind, "READY")
         if role == int(Qt.ItemDataRole.ToolTipRole):
+            if node.data.get("type") in {"acquire_spectrum", "acquire_reference"}:
+                return f"{node.label}\n{self._value_text(ref)}"
             if self._outputs_forced_off and self._is_output_enable_node(ref):
                 return f"{node.semantic_id}\nDry run mode active: output forced OFF and disabled."
             if self._is_node_disabled(ref):

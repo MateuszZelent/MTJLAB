@@ -70,6 +70,7 @@ class Hdf5RunWriter:
         operator_context: dict[str, object] | None = None,
         simulation_metadata: dict[str, object] | None = None,
         run_attributes: dict[str, object] | None = None,
+        isolate_validation: bool = False,
     ) -> None:
         try:
             import h5py
@@ -81,6 +82,7 @@ class Hdf5RunWriter:
         self._h5py = h5py
         self._np = np
         self.path = Path(path)
+        self._isolate_validation = isolate_validation
         self.path.parent.mkdir(parents=True, exist_ok=True)
         self.csv_summary_path = Path(csv_summary_path) if csv_summary_path is not None else None
         self._csv_stream: TextIO | None = None
@@ -182,6 +184,7 @@ class Hdf5RunWriter:
         expected_points: int | None = None,
         csv_summary_path: str | Path | None = None,
         operator_context: dict[str, object] | None = None,
+        isolate_validation: bool = False,
     ) -> "Hdf5RunWriter":
         """Resume an existing run only after an externally verified safe boundary."""
 
@@ -197,6 +200,7 @@ class Hdf5RunWriter:
         self._h5py = h5py
         self._np = np
         self.path = target
+        self._isolate_validation = isolate_validation
         self.csv_summary_path = Path(csv_summary_path) if csv_summary_path is not None else None
         self._csv_stream = None
         self._csv_writer = None
@@ -990,9 +994,14 @@ class Hdf5RunWriter:
         self._closed = True
         from app.storage.thatec_validator import ThatecCompatibilityValidator
 
-        report = ThatecCompatibilityValidator().validate(
-            self.path, require_pythat=True
-        )
+        if self._isolate_validation:
+            from app.storage.validation_worker import validate_archive_isolated
+
+            report = validate_archive_isolated(self.path)
+        else:
+            report = ThatecCompatibilityValidator().validate(
+                self.path, require_pythat=True
+            )
         if not report.valid:
             detail = "; ".join(
                 f"{issue.path}: {issue.message}" for issue in report.errors

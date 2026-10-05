@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections import deque
 from dataclasses import asdict, dataclass, is_dataclass
 from datetime import datetime, timezone
 import math
@@ -75,6 +76,8 @@ class _AcquiredSpectrum:
     processing_operation: str = "none"
     reference_index: int | None = None
     source_sweep_indices: tuple[int, ...] = ()
+    processing_metadata: dict | None = None
+    history_dbm: tuple = ()
 
 
 class RecipeRunner:
@@ -133,6 +136,8 @@ class RecipeRunner:
         self._correlation_id = ""
         self._reference_trace: SpectrumTrace | None = None
         self._reference_index: int | None = None
+        self._reference_fingerprint = None
+        self._reference_origin = {}
         # Last engine-confirmed value for each semantic axis.  Point metadata
         # uses this snapshot so requested/applied/readback provenance remains
         # explicit even when the checkpoint action itself is an acquisition.
@@ -194,6 +199,8 @@ class RecipeRunner:
         self._moke_owns_output = False
         self._reference_trace = None
         self._reference_index = None
+        self._reference_fingerprint = None
+        self._reference_origin = {}
         self._semantic_confirmations = {}
         self._manual_step_permit.clear()
         self._correlation_id = str(uuid4())
@@ -215,6 +222,24 @@ class RecipeRunner:
                     "output_guard_devices": self._output_guard_devices(),
                 },
             )
+            # Lock external inputs before any recipe action can energize a source.
+            from app.storage.recipe_reference import file_sha256
+
+            reference_available = False
+            verified_assets = set()
+            for planned in plan.actions[start_action_index:]:
+                self._raise_if_stop_requested()
+                if planned.kind == "acquire_reference":
+                    reference_available = True
+                if (planned.kind == "acquire_spectrum"
+                        and planned.payload.get("reference_operation", "none") != "none"
+                        and not reference_available):
+                    raise ExecutionError("Resume requires a reference step before corrected acquisition; restart from a reference boundary.")
+                if planned.payload.get("source_file"):
+                    asset = (planned.payload["source_file"], planned.payload["source_sha256"])
+                    if asset not in verified_assets and file_sha256(asset[0]) != asset[1]:
+                        raise ExecutionError("Reference file changed after preflight; recompile the recipe.")
+                    verified_assets.add(asset)
             if self.outputs_forced_off:
                 self._confirm_dry_run_outputs_off()
             for action in recovery_prelude:
@@ -361,6 +386,7 @@ class RecipeRunner:
                                 if acquisition is not None
                                 else 1
                             ),
+                            "spectrum_processing_v1": acquisition.processing_metadata if acquisition is not None else None,
                             "raw_recipe_sweep_indices": (
                                 acquisition.source_sweep_indices if acquisition is not None else ()
                             ),
@@ -400,7 +426,7 @@ class RecipeRunner:
                         spectrum_points=(len(trace.powers_dbm) if trace is not None else 0),
                     )
                     if trace is not None:
-                        self._emit_spectrum_preview(trace, point.index)
+                        self._emit_spectrum_preview(trace, point.index, acquisition=acquisition)
                     point_measurements.clear()
                     self._pause_at_point_if_requested()
                 self._emit(
@@ -889,21 +915,24 @@ class RecipeRunner:
         point_index: int,
         *,
         preview_kind: str = "measurement",
+        acquisition: _AcquiredSpectrum | None = None,
     ) -> None:
-        maximum_preview_points = 1_000
-        step = max(
-            1,
-            (len(trace.powers_dbm) + maximum_preview_points - 1) // maximum_preview_points,
-        )
+        from app.spectrum.processing import peak_preserving_indices
+
+        processed = acquisition.processed_values if acquisition is not None else None
+        indices = peak_preserving_indices(processed if processed is not None else trace.powers_dbm, 1_000)
         self._emit_telemetry(
             "reference_preview" if preview_kind == "reference" else "spectrum_preview",
             {
                 "point_index": point_index,
                 "preview_kind": preview_kind,
                 "trace_name": trace.trace_name,
-                "frequency_hz": trace.frequencies_hz[::step],
-                "power_dbm": trace.powers_dbm[::step],
+                "frequency_hz": tuple(trace.frequencies_hz[index] for index in indices),
+                "power_dbm": tuple(trace.powers_dbm[index] for index in indices),
                 "source_points": len(trace.powers_dbm),
+                "processed_values": tuple(processed[index] for index in indices) if processed is not None else None,
+                "processed_unit": acquisition.processed_unit if acquisition is not None else None,
+                "processing_operation": acquisition.processing_operation if acquisition is not None else None,
             },
         )
 
@@ -1443,15 +1472,41 @@ class RecipeRunner:
             )
         elif action.kind == "acquire_reference":
             average_count = payload.get("average_count", 1)
-            block = self._acquire_averaged_spectrum(
-                payload["trace"],
-                average_count,
-                action=action, role=SpectrumFrameRole.REFERENCE,
-            )
+            self._reference_origin = {}
+            if payload.get("source_file"):
+                from app.storage.recipe_reference import (
+                    file_sha256,
+                    load_recipe_reference,
+                    verify_recipe_reference,
+                )
+
+                path = payload["source_file"]
+                if file_sha256(path) != payload["source_sha256"]:
+                    raise ExecutionError("Reference file changed after preflight; recompile the recipe.")
+                reference, average_count, evidence = load_recipe_reference(path, payload["file_kind"])
+                identity = self._read_spectrum_identity()
+                if identity is None:
+                    raise ExecutionError("Imported reference requires qualified analyzer readback.")
+                full, advanced, idn, fingerprint = identity
+                verify_recipe_reference(evidence, full, advanced, idn, fingerprint)
+                if file_sha256(path) != payload["source_sha256"]:
+                    raise ExecutionError("Reference file changed while loading.")
+                block = _AcquiredSpectrum(reference, average_count)
+                self._reference_fingerprint = fingerprint
+                self._reference_origin = {key: payload[key] for key in ("source_file", "source_sha256", "file_kind")}
+                if payload["file_kind"] == "background":
+                    context, profile = evidence
+                    self._writer.store_background_profile(context, profile)
+                    self._reference_origin.update(profile_id=profile.profile_id, profile_hash=profile.content_hash)
+            else:
+                block = self._acquire_averaged_spectrum(
+                    payload["trace"], average_count, action=action, role=SpectrumFrameRole.REFERENCE,
+                )
+                self._reference_fingerprint = (block.processing_metadata or {}).get("configuration_fingerprint")
             reference = block.raw
             stored_reference_index = self._writer.store_reference(
                 reference,
-                kind="single" if average_count == 1 else "averaged",
+                kind="loaded" if payload.get("source_file") else "single" if average_count == 1 else "averaged",
                 average_count=average_count,
                 source_sweep_indices=block.source_sweep_indices,
             )
@@ -1470,6 +1525,8 @@ class RecipeRunner:
                     "reference_index": self._reference_index,
                     "acquired_at_utc": reference.acquired_at_utc.isoformat(),
                     "raw_recipe_sweep_indices": block.source_sweep_indices,
+                    "reference_origin": self._reference_origin,
+                    "configuration_fingerprint": self._reference_fingerprint,
                 },
             )
             self._emit_spectrum_preview(
@@ -1478,6 +1535,13 @@ class RecipeRunner:
                 preview_kind="reference",
             )
         elif action.kind == "acquire_spectrum":
+            from app.recipes.spectrum_processing import parse_processing
+            from app.spectrum.analysis import clean_spectrum_pipeline
+
+            operation = str(payload.get("reference_operation", "none"))
+            filters, parameters = parse_processing(payload.get("processing"))
+            if operation != "none" and self._reference_trace is None:
+                raise ExecutionError("Acquire or load a matching reference after the last analyzer configuration.")
             average_count = payload.get("average_count", 1)
             block = self._acquire_averaged_spectrum(
                 payload["trace"],
@@ -1488,6 +1552,10 @@ class RecipeRunner:
             operation = str(payload.get("reference_operation", "none"))
             processed: tuple[float, ...] | None = None
             processed_unit: str | None = None
+            metadata = {"schema": "recipe-spectrum-processing-v1", "processing": payload.get("processing", {}),
+                        "reference_operation": operation, "reference_origin": dict(self._reference_origin) if operation != "none" else {},
+                        "configuration_fingerprint": (block.processing_metadata or {}).get("configuration_fingerprint"),
+                        "uncertainty_qualified": False}
             if operation != "none":
                 reference = self._reference_trace
                 if reference is None:
@@ -1501,11 +1569,28 @@ class RecipeRunner:
                     raise ExecutionError(
                         "The acquired spectrum frequency grid differs from the reference."
                     )
+                fingerprint = (block.processing_metadata or {}).get("configuration_fingerprint")
+                if self._reference_fingerprint is not None and fingerprint != self._reference_fingerprint:
+                    raise ExecutionError("Analyzer input path or bandwidth changed since reference acquisition.")
                 processed, processed_unit = apply_reference_operation(
                     trace.powers_dbm,
                     reference.powers_dbm,
                     operation,
                 )
+            if filters:
+                history = block.history_dbm
+                if operation != "none" and "emi_reject" in filters:
+                    history = tuple(apply_reference_operation(row, self._reference_trace.powers_dbm, operation)[0] for row in history)
+                cleaned = clean_spectrum_pipeline(processed if processed is not None else trace.powers_dbm,
+                    unit=processed_unit or "dBm", modes=filters, parameters=parameters,
+                    frequencies_hz=trace.frequencies_hz, history=history)
+                if set(cleaned.applied_modes) != set(filters):
+                    raise ExecutionError("Requested recipe filters could not be applied: " + "; ".join(cleaned.notes))
+                processed, processed_unit = cleaned.values, cleaned.unit
+                metadata.update(method=cleaned.method, notes=cleaned.notes)
+                operation = "recipe_filtered_v1"
+            if processed is not None and not all(math.isfinite(value) for value in processed):
+                raise ExecutionError("Reference subtraction produced non-positive log power. Use Remove background — signed W to retain all bins.")
             if not bool(payload.get("store_processed", operation != "none")):
                 processed = None
                 processed_unit = None
@@ -1516,8 +1601,9 @@ class RecipeRunner:
                 processed_values=processed,
                 processed_unit=processed_unit,
                 processing_operation=operation,
-                reference_index=self._reference_index,
+                reference_index=self._reference_index if payload.get("reference_operation", "none") != "none" else None,
                 source_sweep_indices=block.source_sweep_indices,
+                processing_metadata=metadata,
             )
         elif action.kind == "checkpoint":
             pass
@@ -1563,7 +1649,14 @@ class RecipeRunner:
         if type(average_count) is not int or not 1 <= average_count <= 9999:
             raise ExecutionError("Recipe spectrum average_count must be an integer in 1..9999.")
 
+        before = self._read_spectrum_identity()
+        if (role == SpectrumFrameRole.SIGNAL
+                and action.payload.get("reference_operation", "none") != "none"
+                and self._reference_fingerprint is not None
+                and (before is None or before[3] != self._reference_fingerprint)):
+            raise ExecutionError("Analyzer settings changed since reference; acquire or load a matching reference.")
         averager = LinearPowerAverager()
+        history = deque(maxlen=24)
         first: SpectrumTrace | None = None
         latest: SpectrumTrace | None = None
         source_indices = []
@@ -1594,6 +1687,7 @@ class RecipeRunner:
             elif latest.configuration_generation != first.configuration_generation:
                 raise ExecutionError("Anritsu averaging aborted because its acquisition configuration changed.")
             averager.add(latest.powers_dbm)
+            history.append(latest.powers_dbm)
         if first is None or latest is None:
             raise ExecutionError("Anritsu averaging requires at least one spectrum.")
         averaged = SpectrumTrace(
@@ -1601,8 +1695,25 @@ class RecipeRunner:
             powers_dbm=averager.result(),
             acquired_at_utc=latest.acquired_at_utc,
             trace_name=latest.trace_name,
+            configuration_generation=latest.configuration_generation,
         )
-        return _AcquiredSpectrum(averaged, average_count, source_sweep_indices=tuple(source_indices))
+        after = self._read_spectrum_identity()
+        if before is not None and (after is None or before[3] != after[3]):
+            raise ExecutionError("Analyzer settings changed during the acquisition block; RAW sources were retained.")
+        return _AcquiredSpectrum(averaged, average_count, source_sweep_indices=tuple(source_indices),
+            processing_metadata={"configuration_fingerprint": before[3] if before else None}, history_dbm=tuple(history))
+
+    def _read_spectrum_identity(self):
+        if not isinstance(self._anritsu, AnritsuAdapter):
+            return None  # Passive legacy execution doubles have no hardware readback.
+        from app.devices.anritsu_ms2830a.acquisition_context import (
+            spectrum_configuration_fingerprint,
+        )
+
+        full = self._anritsu.read_full_configuration()
+        advanced = self._anritsu.read_advanced_spectrum_configuration()
+        idn = self._anritsu.identity.idn
+        return full, advanced, idn, spectrum_configuration_fingerprint(full, advanced, idn)
 
     def _interruptible_wait(self, duration_s: float) -> None:
         deadline = time.monotonic() + duration_s
